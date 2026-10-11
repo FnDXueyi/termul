@@ -16,6 +16,7 @@ import { useAgentChatStatusSignals } from '@/components/workspace/tabs/agent-cha
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { cn } from '@/lib/utils'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
+import { findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
 import { type ChatCardData, modelLineOf } from './chat-cards'
 import type { ChatCardActions } from './use-chat-card-actions'
 
@@ -52,6 +53,14 @@ export function ChatCard({
   const { startChatDrag } = usePaneDnd()
   const signals = useAgentChatStatusSignals(entry.id)
   const unread = useAgentChatUnreadStore((s) => Boolean(s.unread[entry.id]))
+  // A pane's only tab cannot be split off that same pane, so the menu item
+  // would do nothing: disable it and say why.
+  const soleTabOfActivePane = useWorkspaceStore((s) => {
+    const pane = findPaneById(s.root, s.activePaneId)
+    if (pane?.type !== 'leaf' || pane.tabs.length !== 1) return false
+    const only = pane.tabs[0]
+    return only?.type === 'agent-chat' && only.sessionId === entry.id
+  })
 
   const liveState: ProjectChatLiveState = signals.needsAttention
     ? 'needs-you'
@@ -143,8 +152,14 @@ export function ChatCard({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent className="w-48">
-        <ContextMenuItem onSelect={() => actions.onOpenInSplit(entry)}>
+        <ContextMenuItem
+          disabled={soleTabOfActivePane}
+          onSelect={() => actions.onOpenInSplit(entry)}
+        >
           <Columns2 className="mr-2 h-4 w-4" /> Open in split
+          {soleTabOfActivePane && (
+            <span className="sr-only"> (unavailable: this is the only tab in the active pane)</span>
+          )}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem disabled={!hasCwd} onSelect={() => void actions.onOpenTerminal(entry)}>

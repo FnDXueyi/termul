@@ -360,6 +360,25 @@ describe('ChatsList interactions', () => {
     expect(mocks.addAgentChatTab).not.toHaveBeenCalled()
   })
 
+  it('disables Open in split when the chat is the only tab of the active pane', async () => {
+    useWorkspaceStore.setState({
+      activePaneId: 'pane-1',
+      root: {
+        type: 'leaf',
+        id: 'pane-1',
+        tabs: [{ id: 'tab-a', type: 'agent-chat', sessionId: 'a' }],
+        activeTabId: 'tab-a'
+      }
+    } as never)
+    render(<ChatsList project={project} />)
+    fireEvent.contextMenu(screen.getByTitle('Chat a'))
+    const item = await screen.findByRole('menuitem', { name: /Open in split/ })
+    expect(item).toHaveAttribute('aria-disabled', 'true')
+    expect(item).toHaveTextContent('only tab in the active pane')
+    fireEvent.click(item)
+    expect(mocks.openAgentChatPlaced).not.toHaveBeenCalled()
+  })
+
   it('moves focus between cards with Up and Down', () => {
     setIndex([entry('a', { lastActivityAt: 2 }), entry('b', { lastActivityAt: 1 })])
     render(<ChatsList project={project} />)
