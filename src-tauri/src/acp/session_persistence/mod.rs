@@ -48,12 +48,15 @@ const TAIL_DEEPEN_MAX_LINES: usize = 16_384;
 
 mod diff_stat;
 mod jsonl;
+mod model;
 mod normalize;
 mod types;
 mod writer;
 
 use jsonl::*;
 use writer::*;
+
+pub(crate) use model::snapshot_from_model_state;
 
 pub use normalize::*;
 pub use types::*;
@@ -347,6 +350,8 @@ impl SessionPersistence {
             discovered: false,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: registration.model.as_ref().map(|m| m.model_id.clone()),
+            model_name: registration.model.map(|m| m.model_name),
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -448,6 +453,8 @@ impl SessionPersistence {
             discovered: true,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: None,
+            model_name: None,
         };
         if let Err(error) = self.persist_metadata(&metadata) {
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
@@ -513,6 +520,8 @@ impl SessionPersistence {
             discovered: false,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: None,
+            model_name: None,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -1978,5 +1987,7 @@ pub(crate) fn last_unmatched_user_prompt(
 
 #[cfg(test)]
 mod diff_stat_tests;
+#[cfg(test)]
+mod model_tests;
 #[cfg(test)]
 mod tests;
