@@ -4,7 +4,7 @@ import { cp, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Locator, Page } from 'playwright/test'
 import { expect, request, test } from 'playwright/test'
-import { E2E_BASE_URL, E2E_TOKEN, wsRequest } from './helpers'
+import { E2E_BASE_URL, E2E_TOKEN, seedShellLayout, wsRequest } from './helpers'
 
 /**
  * Mobile Git History layout E2E (spec-mobile-git-history-layout): a phone-sized
@@ -223,6 +223,10 @@ async function bootInto(
   project: HistoryProject,
   shell: 'phone' | 'desktop' = 'phone'
 ): Promise<void> {
+  // The desktop case drives the classic shell's activity rail ("Open git
+  // history"); the code default is the revamped shell since story 30, so pin
+  // classic. The phone shell ignores the flag.
+  if (shell === 'desktop') await seedShellLayout('classic')
   const warmedUp = watchAgentWarmup(page)
   await page.goto(`${E2E_BASE_URL}/#token=${E2E_TOKEN}`)
   await page.waitForFunction(
