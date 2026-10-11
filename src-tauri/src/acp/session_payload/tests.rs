@@ -23,6 +23,8 @@ fn metadata() -> SessionMetadata {
         discovered: false,
         worktree_path: Some("/work/project/.termul/worktrees/chat/abc123".to_string()),
         worktree_branch: Some("chat/abc123".to_string()),
+        model_id: None,
+        model_name: None,
     }
 }
 

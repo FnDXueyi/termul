@@ -260,6 +260,37 @@ describe('pickedWorkingCopy', () => {
     expect(pickedWorkingCopy(project, 'e:\\p')).toMatchObject({ kind: 'project' })
   })
 
+  it('resolves a pick naming an outsideProjectRoot worktree as the project folder', () => {
+    const withDisabled: ProjectPaths = {
+      path: 'E:/p',
+      worktrees: [
+        worktree('a', 'E:/p/.termul/worktrees/a'),
+        { ...worktree('ext', 'D:/elsewhere/wt'), outsideProjectRoot: true }
+      ]
+    }
+    expect(pickedWorkingCopy(withDisabled, 'd:\\Elsewhere\\wt')).toMatchObject({
+      state: 'resolved',
+      kind: 'project',
+      path: 'E:/p',
+      worktreeId: null
+    })
+    expect(pickedWorkingCopy(withDisabled, 'E:/p/.termul/worktrees/a')).toMatchObject({
+      kind: 'worktree',
+      worktreeId: 'a'
+    })
+  })
+
+  it('does not skip a worktree whose outsideProjectRoot flag is false', () => {
+    const flagged: ProjectPaths = {
+      path: 'E:/p',
+      worktrees: [{ ...worktree('x', 'E:/p/x'), outsideProjectRoot: false }]
+    }
+    expect(pickedWorkingCopy(flagged, 'E:/p/x')).toMatchObject({
+      kind: 'worktree',
+      worktreeId: 'x'
+    })
+  })
+
   it('returns null for a project without a path and no worktrees', () => {
     expect(pickedWorkingCopy({}, 'E:/p')).toBeNull()
     expect(pickedWorkingCopy(null, null)).toBeNull()

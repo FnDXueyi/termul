@@ -42,6 +42,8 @@ pub(crate) fn host_entry_to_desktop(
         discovered: entry.discovered,
         worktree_path: entry.worktree_path,
         worktree_branch: entry.worktree_branch,
+        model_id: entry.model_id,
+        model_name: entry.model_name,
     }
 }
 

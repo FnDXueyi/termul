@@ -60,7 +60,7 @@ interface ProjectChatListProps {
  * regardless of which worktree/root cwd it runs in. A bounded `max-height`
  * container scrolls internally so a long history never pushes the next project
  * down. The terminal icon opens a terminal at the chat's cwd via
- * `openTerminalAtCwd` (no `setActiveWorktree` side effect); clicking a row
+ * `openTerminalAtCwd` (no switcher-pick side effect); clicking a row
  * opens/resumes the chat.
  */
 export function ProjectChatList({ projectId }: ProjectChatListProps): React.JSX.Element {
