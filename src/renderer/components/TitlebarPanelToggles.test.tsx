@@ -25,22 +25,22 @@ describe('TitlebarPanelToggles', () => {
     useShellLayoutStore.setState({ status: 'ready', sidePanelVisible: true })
   })
 
-  it('toggles file explorer via persistence-aware updater on click', async () => {
+  it('toggles the side panel via persistence-aware updater on click', async () => {
     render(<FileExplorerToggleButton />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Hide file explorer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hide side panel' }))
 
     await waitFor(() => {
       expect(mockUpdatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', false)
     })
   })
 
-  it('shows error toast when file explorer persistence update fails', async () => {
+  it('shows error toast when side panel persistence update fails', async () => {
     mockUpdatePanelVisibility.mockRejectedValueOnce(new Error('persist failed'))
 
     render(<FileExplorerToggleButton />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Hide file explorer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hide side panel' }))
 
     await waitFor(() => {
       expect(mockToastError).toHaveBeenCalledWith('persist failed')
@@ -52,7 +52,7 @@ describe('TitlebarPanelToggles', () => {
 
     render(<FileExplorerToggleButton />)
 
-    const explorerButton = screen.getByRole('button', { name: 'Show file explorer' })
+    const explorerButton = screen.getByRole('button', { name: 'Show side panel' })
 
     expect(explorerButton).toHaveAttribute('aria-pressed', 'false')
   })

@@ -39,9 +39,7 @@ export function FileExplorerToggleButton({
     try {
       await updatePanelVisibility('fileExplorerVisible', !isVisible)
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to update file explorer visibility'
-      )
+      toast.error(error instanceof Error ? error.message : 'Failed to update side panel visibility')
     }
   }
 
@@ -53,8 +51,8 @@ export function FileExplorerToggleButton({
         void handleClick()
       }}
       className={className}
-      title="Toggle file explorer"
-      aria-label={`${isVisible ? 'Hide' : 'Show'} file explorer`}
+      title="Show or hide side panel"
+      aria-label={`${isVisible ? 'Hide' : 'Show'} side panel`}
       aria-pressed={isVisible}
     >
       <PanelRight size={16} className={isVisible ? 'text-foreground' : 'text-muted-foreground'} />

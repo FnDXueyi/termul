@@ -877,7 +877,7 @@ describe('FileExplorer header toolbar (GH-540)', () => {
     // the menu also holds the file-explorer hide action.
     expect(screen.getByRole('button', { name: 'More explorer actions' })).toBeEnabled()
     expect(screen.getByRole('menuitem', { name: 'Refresh' })).toBeEnabled()
-    expect(screen.getByRole('menuitem', { name: 'Hide file explorer' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Hide side panel' })).toBeInTheDocument()
   })
 
   it('disables every action when no project is open', () => {
