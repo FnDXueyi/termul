@@ -24,6 +24,7 @@ import {
   type TimelineItem,
   type TurnTimelineItem
 } from './chat-timeline'
+import { opencodeStatusLine } from './opencode-status'
 import { RowReveal } from './RowReveal'
 import { SubagentDetailsDialog } from './SubagentDetailsDialog'
 import { ThoughtGroup } from './ThoughtGroup'
@@ -81,6 +82,7 @@ interface TimelineRenderProps {
   filePathContext?: FilePathResolutionContext
   onOpenSubagent: (toolCall: ToolCall) => void
   parentTurnActive: boolean
+  statusLine: string | null
   /** Whether the scroller log announces additions (off on the mobile shell). */
   live: boolean
 }
@@ -100,6 +102,7 @@ function VirtualizedTimeline({
   filePathContext,
   onOpenSubagent,
   parentTurnActive,
+  statusLine,
   live
 }: TimelineRenderProps): React.JSX.Element {
   const { viewportEl, pinned } = useMessageScroller()
@@ -181,6 +184,7 @@ function VirtualizedTimeline({
           attentionRequired={item.attentionRequired}
           hasFinalResponse={item.hasFinalResponse}
           enter={enter}
+          statusLine={item.active ? statusLine : null}
           filePathContext={filePathContext}
           onOpenSubagent={onOpenSubagent}
         />
@@ -300,6 +304,8 @@ export function ChatMessageList({
   onRetry,
   filePathContext
 }: ChatMessageListProps): React.JSX.Element {
+  const opencodeNotice = useAcpStore((s) => s.sessions[sessionId]?.opencodeNotice)
+  const statusLine = opencodeStatusLine(opencodeNotice)
   // The mobile shell announces turn events through its own live region, so the
   // log stops re-announcing rows as the virtualiser mounts them.
   const live = !useMobileWebShell()
@@ -359,6 +365,7 @@ export function ChatMessageList({
               onRetry={onRetry}
               onOpenSubagent={openSubagent}
               parentTurnActive={showRunningIndicator}
+              statusLine={statusLine}
               live={live}
             />
           </MessageScrollerViewport>

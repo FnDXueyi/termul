@@ -16,6 +16,14 @@ import { useGitHistoryStore } from '@/stores/git-history-store'
 interface GitHistoryPanelProps {
   cwd: string
   isVisible: boolean
+  /** `auto` (default) picks the phone or desktop layout from the shell. `narrow`
+      is the docked Graph of the shell Changes panel: the desktop header, wrapped,
+      over the phone rows and geometry. */
+  variant?: 'auto' | 'narrow'
+  /** `narrow` only: show the header alone. */
+  collapsed?: boolean
+  /** `narrow` only: makes the "Git History" title a button that calls this. */
+  onToggleCollapsed?: () => void
 }
 
 // Fixed row geometry so the SVG graph and the HTML rows line up exactly. One
@@ -70,7 +78,13 @@ function rowY(geometry: GraphGeometry, row: number): number {
 
 /** Parse a raw `%D` decoration into a display label + kind for chip styling. */
 
-export function GitHistoryPanel({ cwd, isVisible }: GitHistoryPanelProps): React.JSX.Element {
+export function GitHistoryPanel({
+  cwd,
+  isVisible,
+  variant = 'auto',
+  collapsed = false,
+  onToggleCollapsed
+}: GitHistoryPanelProps): React.JSX.Element {
   const commits = useGitHistoryStore((state) => state.commits[cwd])
   const isLoading = useGitHistoryStore((state) => state.loading[cwd] ?? false)
   const error = useGitHistoryStore((state) => state.error[cwd] ?? null)
@@ -111,10 +125,109 @@ export function GitHistoryPanel({ cwd, isVisible }: GitHistoryPanelProps): React
     return map
   }, [layout])
 
-  const geometry = isMobileWebShell ? MOBILE_GRAPH_GEOMETRY : DESKTOP_GRAPH_GEOMETRY
+  const isNarrow = variant === 'narrow'
+  const geometry = isMobileWebShell || isNarrow ? MOBILE_GRAPH_GEOMETRY : DESKTOP_GRAPH_GEOMETRY
   const graphWidth = geometry.padding * 2 + Math.max(1, layout.laneCount) * geometry.laneWidth
   const graphHeight = Math.max(1, layout.rows.length) * geometry.rowHeight
   const isFiltering = searchQuery.trim().length > 0
+
+  if (isNarrow) {
+    // Docked Graph (shell Changes panel): the desktop header wrapped to a
+    // narrow column, with the phone rows and geometry in a scroll area.
+    const title = (
+      <>
+        <History size={15} className="text-primary" />
+        Git History
+      </>
+    )
+    return (
+      <div className="flex h-full w-full flex-col bg-background overflow-hidden">
+        <div className="p-3 border-b border-border flex flex-col gap-2 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            {onToggleCollapsed ? (
+              <button
+                type="button"
+                aria-expanded={!collapsed}
+                onClick={onToggleCollapsed}
+                className="flex min-w-0 items-center gap-2 rounded text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+              >
+                {title}
+              </button>
+            ) : (
+              <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                {title}
+              </div>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => refreshLog(cwd)}
+              disabled={isLoading}
+              title="Refresh history"
+              aria-label="Refresh history"
+            >
+              {isLoading ? <Spinner size={16} decorative /> : <RefreshCw className="h-4 w-4" />}
+            </Button>
+          </div>
+          {!collapsed && (
+            <div className="relative">
+              <Search
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+                size={14}
+              />
+              <input
+                type="text"
+                placeholder="Filter commits..."
+                aria-label="Filter commits"
+                className="w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs focus:ring-1 focus:ring-primary outline-none"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+          )}
+        </div>
+
+        {collapsed ? null : commits === undefined && isLoading ? (
+          <LoadingState />
+        ) : (commits?.length ?? 0) === 0 ? (
+          <EmptyState error={error} />
+        ) : (
+          <ScrollArea className="flex-1">
+            <div className="relative" style={{ minHeight: isFiltering ? undefined : graphHeight }}>
+              {!isFiltering && (
+                <LaneGraph
+                  layout={layout}
+                  rowByHash={rowByHash}
+                  geometry={geometry}
+                  width={graphWidth}
+                  height={graphHeight}
+                />
+              )}
+
+              <div style={{ paddingLeft: isFiltering ? undefined : graphWidth }}>
+                {isFiltering && filteredCommits.length === 0 ? (
+                  <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+                    No commits match "{searchQuery}"
+                  </div>
+                ) : (
+                  (isFiltering ? filteredCommits : layout.rows.map((r) => r.commit)).map(
+                    (commit) => (
+                      <MobileCommitRow
+                        key={commit.hash}
+                        commit={commit}
+                        rowHeight={geometry.rowHeight}
+                      />
+                    )
+                  )
+                )}
+              </div>
+            </div>
+          </ScrollArea>
+        )}
+      </div>
+    )
+  }
 
   // Mobile web shell (phone): two-line 44px rows, a full-width 16px filter
   // field on its own row, a 44px refresh and a plain scroll container. Every

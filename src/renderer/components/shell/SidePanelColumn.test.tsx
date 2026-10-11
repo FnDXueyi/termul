@@ -22,7 +22,11 @@ vi.mock('./WorkspaceSwitcher', () => ({
   )
 }))
 
-const mocks = vi.hoisted(() => ({ showAgentLauncher: vi.fn(), addGitTab: vi.fn() }))
+vi.mock('./ChangesPanel', () => ({
+  ChangesPanel: ({ cwd }: { cwd: string }) => <div data-testid="changes-panel" data-cwd={cwd} />
+}))
+
+const mocks = vi.hoisted(() => ({ showAgentLauncher: vi.fn() }))
 
 const makeProject = (overrides: Partial<Project> = {}): Project =>
   ({
@@ -63,15 +67,13 @@ function renderPanel(project: Project, initialPath = '/') {
 
 beforeEach(() => {
   mocks.showAgentLauncher.mockReset()
-  mocks.addGitTab.mockReset()
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'ready' })
   useAcpStore.setState({ sessionIndex: [], sessions: {}, agentConfigs: [] })
   useGitStatusStore.setState({ statuses: {} })
   useWorkspaceStore.setState({
     activePaneId: 'pane-1',
-    showAgentLauncher: mocks.showAgentLauncher,
-    addGitTab: mocks.addGitTab
+    showAgentLauncher: mocks.showAgentLauncher
   })
 })
 
@@ -138,7 +140,7 @@ describe('SidePanelColumn', () => {
     expect(screen.getByRole('tab', { name: 'Explorer' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('bridges the Changes tab to the Git tab of the working copy', () => {
+  it('renders the Changes panel for the picked working copy', () => {
     useShellLayoutStore.setState({
       worktreePickByProject: { p1: '/repo/.termul/worktrees/feature' }
     })
@@ -155,15 +157,16 @@ describe('SidePanelColumn', () => {
     expect(screen.getByTestId('column-tab-changes-badge')).toHaveTextContent('2')
 
     fireEvent.click(screen.getByRole('tab', { name: /Changes/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open Git changes' }))
-    expect(mocks.addGitTab).toHaveBeenCalledWith('/repo/.termul/worktrees/feature', 'pane-1')
+    expect(screen.getByTestId('changes-panel')).toHaveAttribute(
+      'data-cwd',
+      '/repo/.termul/worktrees/feature'
+    )
   })
 
   it('uses the project path for Changes when nothing is picked', () => {
     renderPanel(makeProject())
     fireEvent.click(screen.getByRole('tab', { name: /Changes/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open Git changes' }))
-    expect(mocks.addGitTab).toHaveBeenCalledWith('/repo', 'pane-1')
+    expect(screen.getByTestId('changes-panel')).toHaveAttribute('data-cwd', '/repo')
   })
 
   it('sizes the column from the store and exposes a resize separator', () => {

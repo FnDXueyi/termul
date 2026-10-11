@@ -13,7 +13,7 @@ import {
 import { useSidebarVisible } from '@/stores/sidebar-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
-import { ChangesTabBody } from './ChangesTabBody'
+import { ChangesPanel } from './ChangesPanel'
 import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
 import { useColumnWorkingCopy } from './use-column-working-copy'
@@ -80,10 +80,6 @@ export function SidePanelColumn({
     useShellLayoutStore.getState().setLastColumnTab(projectId, tab)
   }
 
-  const handleOpenGitChanges = (path: string): void => {
-    useWorkspaceStore.getState().addGitTab(path, useWorkspaceStore.getState().activePaneId)
-  }
-
   return (
     <div
       className={cn(
@@ -123,9 +119,7 @@ export function SidePanelColumn({
             <FileExplorer side="left" embedded />
           </Suspense>
         )}
-        {selected === 'changes' && (
-          <ChangesTabBody cwd={cwd} onOpenGitChanges={handleOpenGitChanges} />
-        )}
+        {selected === 'changes' && <ChangesPanel cwd={cwd} isVisible />}
       </div>
 
       <button
