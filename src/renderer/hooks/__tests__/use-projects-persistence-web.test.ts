@@ -239,6 +239,27 @@ describe('useProjectsLoader (web/remote mode)', () => {
     expect(projects.find((p) => p.id === 'p1')?.isGitRepo).toBeUndefined()
   })
 
+  it('PRESERVES the probed gitBranch across a projects_changed refetch', async () => {
+    mockList
+      .mockResolvedValueOnce({ success: true, data: payload })
+      .mockResolvedValueOnce({ success: true, data: payload })
+
+    renderHook(() => useProjectsLoader())
+    await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(2))
+
+    useProjectStore.getState().updateProject('p1', { gitBranch: 'main' })
+
+    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
+    listener?.()
+
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      const projects = useProjectStore.getState().projects
+      expect(projects.find((p) => p.id === 'p1')?.gitBranch).toBe('main')
+      expect(projects.find((p) => p.id === 'p2')?.gitBranch).toBeUndefined()
+    })
+  })
+
   it('reconciles worktrees for every project with a path after the initial load', async () => {
     mockList.mockResolvedValue({
       success: true,

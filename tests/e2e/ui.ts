@@ -1,5 +1,5 @@
 import type { Page } from 'playwright/test'
-import { E2E_BASE_URL, E2E_TOKEN } from './helpers'
+import { E2E_BASE_URL, E2E_TOKEN, type ShellSeed, seedShellLayout } from './helpers'
 
 /**
  * Page-level helpers for the termul-server web client E2E suite.
@@ -10,11 +10,17 @@ import { E2E_BASE_URL, E2E_TOKEN } from './helpers'
  */
 
 /**
- * Bootstrap the auth token then land on the workspace root. Waits for the
+ * Bootstrap the auth token then land on the workspace root. `shell` picks
+ * the shell the client boots with (`classic` by default, `default` = the
+ * code default, the revamped shell). Waits for the
  * token to actually land in localStorage (a fixed sleep races slow boots —
  * the token gate would then show instead of the workspace).
  */
-export async function openWorkspace(page: Page): Promise<void> {
+export async function openWorkspace(page: Page, shell: ShellSeed = 'classic'): Promise<void> {
+  // The code default is the revamped shell (story 30); the pre-revamp specs
+  // and their selectors target the classic shell, so they pin it unless a
+  // spec asks for the default.
+  await seedShellLayout(shell)
   await page.goto(`${E2E_BASE_URL}/#token=${E2E_TOKEN}`)
   await page.waitForFunction(
     (token) => localStorage.getItem('termul.webAuthToken') === token,
@@ -22,7 +28,12 @@ export async function openWorkspace(page: Page): Promise<void> {
   )
   await page.goto(`${E2E_BASE_URL}/#/`)
   // Wait for the project sidebar to load (projects fetched + auth accepted).
-  await page.locator('[aria-label^="Project: proj-"]').first().waitFor({ state: 'visible' })
+  // A revamped shell restored with a collapsed Rail lists projects as icons
+  // only, so a collapsed Rail counts as loaded too.
+  await page
+    .locator('[aria-label^="Project: proj-"], nav[aria-label="Projects"][data-expanded="false"]')
+    .first()
+    .waitFor({ state: 'visible' })
 }
 
 /** Select a project in the sidebar. */

@@ -34,25 +34,25 @@ describe('ShellLayoutToggle', () => {
     useAppSettingsStore.setState({ settings: { ...DEFAULT_APP_SETTINGS }, isLoaded: false })
   })
 
-  it('is off when the flag is unset and shows no reload hint', () => {
+  it('is on when the flag is unset and shows no reload hint', () => {
     loadSettings()
     render(<ShellLayoutToggle />)
-    expect(getSwitch()).toHaveAttribute('aria-checked', 'false')
+    expect(getSwitch()).toHaveAttribute('aria-checked', 'true')
     expect(screen.queryByText('Reload to apply')).not.toBeInTheDocument()
   })
 
-  it('persists revamp when flipped on and shows "Reload to apply"', () => {
+  it('persists classic when flipped off from the default and shows "Reload to apply"', () => {
     loadSettings()
     render(<ShellLayoutToggle />)
 
     fireEvent.click(getSwitch())
 
-    expect(useAppSettingsStore.getState().settings.shellLayout).toBe('revamp')
+    expect(useAppSettingsStore.getState().settings.shellLayout).toBe('classic')
     expect(mockWriteDebounced).toHaveBeenCalledWith(
       APP_SETTINGS_KEY,
-      expect.objectContaining({ shellLayout: 'revamp' })
+      expect.objectContaining({ shellLayout: 'classic' })
     )
-    expect(getSwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(getSwitch()).toHaveAttribute('aria-checked', 'false')
     expect(screen.getByText('Reload to apply')).toBeInTheDocument()
   })
 
@@ -62,18 +62,25 @@ describe('ShellLayoutToggle', () => {
     fireEvent.click(getSwitch())
     fireEvent.click(getSwitch())
 
-    expect(useAppSettingsStore.getState().settings.shellLayout).toBe('classic')
+    expect(useAppSettingsStore.getState().settings.shellLayout).toBe('revamp')
     expect(screen.queryByText('Reload to apply')).not.toBeInTheDocument()
   })
 
-  it('reads as on without a hint after a reload that loaded revamp', () => {
+  it('reads as off without a hint when classic is stored and loaded', () => {
+    loadSettings('classic')
+    render(<ShellLayoutToggle />)
+    expect(getSwitch()).toHaveAttribute('aria-checked', 'false')
+    expect(screen.queryByText('Reload to apply')).not.toBeInTheDocument()
+
+    act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'revamp'))
+    expect(screen.getByText('Reload to apply')).toBeInTheDocument()
+  })
+
+  it('reads as on without a hint when revamp is stored and loaded', () => {
     loadSettings('revamp')
     render(<ShellLayoutToggle />)
     expect(getSwitch()).toHaveAttribute('aria-checked', 'true')
     expect(screen.queryByText('Reload to apply')).not.toBeInTheDocument()
-
-    act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'classic'))
-    expect(screen.getByText('Reload to apply')).toBeInTheDocument()
   })
 
   it('does not touch the legacy panel settings', () => {

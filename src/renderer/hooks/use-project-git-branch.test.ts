@@ -177,6 +177,33 @@ describe('useProjectGitBranch', () => {
     })
   })
 
+  it('still seeds gitBranch when another surface supersedes the hook fetch', async () => {
+    useProjectStore.setState({
+      projects: [{ id: 'p1', name: 'Repo', color: 'blue', path: '/work/repo' }],
+      activeProjectId: 'p1'
+    })
+    mockGetCommitContext.mockResolvedValue({
+      branch: 'main',
+      hasUpstream: false,
+      ahead: 0,
+      behind: 0,
+      hasHead: true,
+      lastSubject: 'init',
+      lastBody: ''
+    })
+
+    renderHook(() => useProjectGitBranch())
+    // The status bar / Changes panel fetch the same working copy right away:
+    // the store hands the earlier (hook) fetch `null` as superseded.
+    void useGitStatusStore.getState().fetchCommitContext('/work/repo')
+
+    await waitFor(() => {
+      const project = useProjectStore.getState().projects.find((p) => p.id === 'p1')
+      expect(project?.gitBranch).toBe('main')
+      expect(project?.isGitRepo).toBe(true)
+    })
+  })
+
   it('does not probe a project already known to be non-git', async () => {
     useProjectStore.setState({
       projects: [{ id: 'p1', name: 'Plain', color: 'blue', path: '/work/plain', isGitRepo: false }],
