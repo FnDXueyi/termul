@@ -9,6 +9,7 @@ import { useTerminalStore } from '@/stores/terminal-store'
 import { setManifestRestoreInProgress } from '@/stores/workspace-manifest-sync-store'
 import { findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
 import { reattachOpenAgentChats, retainVisibleAgentChats } from './editor-persistence/chat-restore'
+import { mergeNonPortableTabs } from './editor-persistence/manifest-merge'
 import {
   chatForeignToProject,
   deserializePaneTree,
@@ -214,6 +215,12 @@ export function useEditorPersistence(projectId: string): void {
             const openFilePaths = Array.from(useEditorStore.getState().openFiles.keys())
             useWorkspaceStore.getState().syncEditorTabs(openFilePaths, persisted.activeTabId)
           }
+        }
+
+        if (manifestRestored && persisted.paneLayout) {
+          // The manifest cannot carry browser/git/git-history (later diff)
+          // tabs: put them back over its topology before chats reattach.
+          mergeNonPortableTabs(persisted.paneLayout, projectId)
         }
 
         reattachOpenAgentChats(projectId, persisted.paneLayout)

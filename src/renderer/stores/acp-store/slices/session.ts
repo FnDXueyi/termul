@@ -29,7 +29,7 @@ import {
 } from '@/lib/acp-history-persistence'
 import { selectMcpServersForAgent } from '@/lib/acp-mcp-persistence'
 import { decideResume, resumeMissesSession } from '@/lib/acp-resume-policy'
-import { chatForeignToProject, sessionOwnerProjectId } from '@/lib/acp-session-ownership'
+import { chatForeignToProject } from '@/lib/acp-session-ownership'
 import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transport'
 import { classifySetupError } from '@/lib/agents/acp-spawn-errors'
 import { deleteSessionTempFiles } from '@/lib/attachment-temp-cleanup'
@@ -37,7 +37,6 @@ import { logFrontendError } from '@/lib/log-api'
 import { sanitizeDisplayText } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
-import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
 import {
   agentChatTabId,
@@ -47,6 +46,7 @@ import {
 } from '@/stores/workspace-store'
 import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestration'
 import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
+import { pruneRestoredChatTabs } from '../chat-tab-prune'
 import {
   cacheOptionsFromSession,
   captureReopenControlBaseline,
@@ -1704,28 +1704,12 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // session keeps running and is handed back to its owner's retained set
     // first, so switching to the owner reattaches it (lossless even in the
     // render gap where the owner's tabs are still mounted mid-switch).
-    const workspace = useWorkspaceStore.getState()
-    const mergedIds = new Set(merged.map((e) => e.id))
-    const activeProjectId = useProjectStore.getState().activeProjectId
-    const ownership = get()
-    for (const pane of getAllLeafPanes(workspace.root)) {
-      for (const tab of pane.tabs) {
-        if (tab.type !== 'agent-chat') continue
-        if (!liveSessionIds.has(tab.sessionId) && !mergedIds.has(tab.sessionId)) {
-          workspace.removeTab(tab.id)
-          continue
-        }
-        if (!chatForeignToProject(tab.sessionId, activeProjectId, ownership)) continue
-        const owner = sessionOwnerProjectId(tab.sessionId, ownership)
-        if (owner) useAgentChatLifetimeStore.getState().retainProjectChats(owner, [tab.sessionId])
-        workspace.removeTab(tab.id)
-        void logFrontendError({
-          level: 'warn',
-          source: 'acp-store.loadSessionIndex',
-          message: `Removed foreign-project chat tab (session ${tab.sessionId}, owner ${owner}) from project ${activeProjectId}`
-        })
-      }
-    }
+    pruneRestoredChatTabs({
+      liveSessionIds,
+      indexedSessionIds: new Set(merged.map((e) => e.id)),
+      ownership: get(),
+      activeProjectId: useProjectStore.getState().activeProjectId
+    })
     await recoverDroppedLaunchChats(merged)
   },
 
