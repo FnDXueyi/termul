@@ -1757,6 +1757,7 @@ pub fn run() {
             // Git commands
             commands::git_get_status,
             commands::git_get_diff,
+            commands::git_get_diff_stat,
             commands::git_stage,
             commands::git_unstage,
             commands::git_stage_hunk,
