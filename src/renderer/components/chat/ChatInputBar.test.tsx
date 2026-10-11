@@ -165,6 +165,12 @@ const {
 
 vi.mock('@/lib/tauri-runtime', () => ({ isTauriContext: mockIsTauri }))
 
+// The context strip's branch picker gates its write controls on the server's
+// write admission; covered in `ChatContextStrip.test.tsx`.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 // Mobile dock tests flip this; every other suite runs the desktop shell.
 const { mobileRef } = vi.hoisted(() => ({ mobileRef: { current: false } }))
 vi.mock('@/hooks/use-mobile-web-shell', async (importActual) => ({
@@ -414,7 +420,9 @@ describe('ChatInputBar config controls', () => {
     expect(contextStrip).toBeInTheDocument()
     expect(composer).not.toContainElement(contextStrip)
     expect(screen.getByText('Worktree')).toBeInTheDocument()
-    expect(screen.getByText('chat/abcd1234')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+      'chat/abcd1234'
+    )
     expect(screen.queryByText(/Shift\+Enter/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/to send|to queue|newline/i)).not.toBeInTheDocument()
   })
@@ -431,27 +439,30 @@ describe('ChatInputBar config controls', () => {
       })
     }
 
-    it('shows the project branch in Local mode', () => {
+    it('shows the project branch in the branch picker for a current-checkout chat', () => {
       seedProject({ gitBranch: 'main', isGitRepo: true })
       renderInputBar()
 
-      expect(screen.getByText('Local')).toBeInTheDocument()
-      expect(screen.getByText('main')).toBeInTheDocument()
+      expect(screen.getByText('Current checkout')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent('main')
     })
 
     it('shows Detached HEAD when a git project has no branch', () => {
       seedProject({ isGitRepo: true })
       renderInputBar()
 
-      expect(screen.getByText('Detached HEAD')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+        'Detached HEAD'
+      )
     })
 
-    it('shows no branch for a project that is not a git repo', () => {
+    it('keeps the plain read-only strip for a project that is not a git repo', () => {
       seedProject({ isGitRepo: false })
       renderInputBar()
 
-      expect(screen.getByText('Local')).toBeInTheDocument()
+      expect(screen.getByText('Current checkout')).toBeInTheDocument()
       expect(screen.queryByText('Detached HEAD')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Switch git branch' })).not.toBeInTheDocument()
     })
   })
 

@@ -10,6 +10,13 @@ import { pickedWorkingCopy } from '@/lib/working-copy'
 import type { Project, Worktree } from '@/types/project'
 
 /**
+ * Why a worktree flagged `outsideProjectRoot` cannot be picked, launched into
+ * or opened from this surface. Single source for every disabled row, tooltip
+ * and screen-reader text that explains it.
+ */
+export const OUTSIDE_PROJECT_ROOT_REASON = 'Outside the project folder; open it on the desktop app.'
+
+/**
  * The listed worktree `pickPath` names, or `undefined` when the pick resolves
  * as the project folder (no pick, pruned, disabled/outside-root) or there is
  * no project.

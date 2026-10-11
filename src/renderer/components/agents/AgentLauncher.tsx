@@ -11,7 +11,8 @@ import {
   EMPTY_MCP_SERVERS,
   EMPTY_MCP_TOOLS,
   EMPTY_PROBE_ERROR,
-  EMPTY_PROBE_STATUS
+  EMPTY_PROBE_STATUS,
+  EMPTY_WORKTREES
 } from '@/components/agents/launcher/constants'
 import { LauncherContextStrip } from '@/components/agents/launcher/context-strip'
 import { useFactoryKeyAuth } from '@/components/agents/launcher/FactoryApiKeyForm'
@@ -26,10 +27,14 @@ import {
   type LauncherExitAnim,
   LauncherOverlayChrome
 } from '@/components/agents/launcher/overlay-chrome'
-import { prepareLaunchWorktree } from '@/components/agents/launcher/prepare-launch-worktree'
+import {
+  persistedIsolationMode,
+  prepareLaunchWorktree
+} from '@/components/agents/launcher/prepare-launch-worktree'
 import { spawnAcpLoginTerminal } from '@/components/agents/launcher/spawn-acp-login-terminal'
 import { LauncherStatusBanners } from '@/components/agents/launcher/status-banners'
 import { LauncherToolbar } from '@/components/agents/launcher/toolbar'
+import { useLaunchWorkspace } from '@/components/agents/launcher/use-launch-workspace'
 import { useLauncherSelectorSource } from '@/components/agents/launcher/use-launcher-selector-source'
 import {
   emptyPendingLauncherOptions,
@@ -105,6 +110,7 @@ import {
   useAcpStore
 } from '@/stores/acp-store'
 import { useActiveProject, useProjectStore } from '@/stores/project-store'
+import { useWorktreePick } from '@/stores/shell-layout-store'
 import { agentChatTabId, findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 
@@ -317,7 +323,9 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // functional path, so a read-only server can never enter worktree mode.
   const serverAdmitsWrites = useServerAdmitsRemoteWrites()
   const canUseWorktree = projectIsGitRepo && serverAdmitsWrites
-  const [isolationMode, setIsolationMode] = useState<'current' | 'worktree'>('current')
+  // Workspace chip (Current checkout / Existing / New worktree); it only reads the pick.
+  const workspace = useLaunchWorkspace(activeProject, useWorktreePick(activeProjectId ?? ''))
+  const { isolationMode, setIsolationMode, existingWorktreeId } = workspace
   const [baseBranch, setBaseBranch] = useState<string | null>(null)
   const [baseBranchInfo, setBaseBranchInfo] = useState<BaseBranchInfo | null>(null)
   // Local branch names for the base-branch picker (CAP-2). Sourced from
@@ -435,6 +443,14 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
           } finally {
             setWorktreeCreating(false)
           }
+        } else if (isolationMode === 'existing') {
+          // A read: resolve the listed worktree (throws when it is gone).
+          ;({ launchCwd, worktreePath, worktreeBranch } = await prepareLaunchWorktree({
+            isolationMode,
+            projectRoot,
+            projectId: activeProjectId,
+            existingWorktreeId
+          }))
         }
         // Start a fresh session against the updated config. Update Application
         // detaches any process with live chats, so those chats keep running
@@ -497,7 +513,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     restartingUpdatedAgent,
     isolationMode,
     canUseWorktree,
-    baseBranch
+    baseBranch,
+    existingWorktreeId
   ])
 
   const manualInstallContext =
@@ -957,7 +974,13 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
         if (modelId || modeId || Object.keys(configValues).length > 0) {
           setPendingOptions({ modelId, modeId, configValues })
         }
-        if (saved.isolationMode === 'worktree' && canUseWorktree && saved.baseBranch) {
+        // A restored `worktree` mode applies only when the pick is the project folder.
+        if (
+          saved.isolationMode === 'worktree' &&
+          canUseWorktree &&
+          saved.baseBranch &&
+          workspace.pickIsProjectFolder
+        ) {
           setIsolationMode('worktree')
           if (
             branches.length > 0 &&
@@ -1093,7 +1116,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     if (!activeConfigId) return
     if (!canUseWorktree) return
     persistComposerOptions(activeConfigId, {
-      isolationMode,
+      isolationMode: persistedIsolationMode(isolationMode),
       baseBranch: isolationMode === 'worktree' ? baseBranch : null
     })
   }, [activeConfigId, isolationMode, baseBranch, canUseWorktree])
@@ -1272,13 +1295,13 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
       // Reset worktree isolation + base branch; the restore effect on
       // `[activeConfigId]` will re-seed them from the persisted record for
       // the new agent (or leave them at 'current'/null if no record exists).
-      setIsolationMode('current')
+      workspace.resetWorkspace()
       setBaseBranch(null)
       setSelectedConfigId(entry.configId)
       persistSelection(entry.configId)
       deferEditorFocusRef.current = true
     },
-    [persistSelection, selectedConfigId, factoryKeyAuth]
+    [persistSelection, selectedConfigId, factoryKeyAuth, workspace.resetWorkspace]
   )
 
   // Focus the composer when the selector popover finishes closing, but only
@@ -1580,6 +1603,23 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     let worktreeBranch: string | undefined
     let launchCwd = projectRootSnapshot
 
+    // Existing worktree is a read: resolve it BEFORE the placeholder exists, so
+    // a stale worktree toasts and returns with nothing to roll back.
+    if (isolationMode === 'existing') {
+      try {
+        ;({ launchCwd, worktreePath, worktreeBranch } = await prepareLaunchWorktree({
+          isolationMode,
+          projectRoot: projectRootSnapshot,
+          projectId: projectIdSnapshot,
+          existingWorktreeId
+        }))
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'That worktree is no longer available.')
+        launchInFlightRef.current = false
+        return
+      }
+    }
+
     // Sync first-turn content so the chat can paint like a normal send. The
     // optimistic syncBlocks carry the DISPLAY (token) text so the timeline
     // renders inline chips; the real send dispatches the WIRE text.
@@ -1596,7 +1636,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     // continue in the chat view.
     const store = useAcpStore.getState()
     let sessionId =
-      preparedKeySnapshot != null && isolationMode !== 'worktree'
+      preparedKeySnapshot != null && isolationMode === 'current'
         ? store.claimPreparedChat(preparedKeySnapshot, projectIdSnapshot)
         : null
     let usedPlaceholder = false
@@ -1674,7 +1714,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
             Object.keys(pendingOptions.configValues).length > 0
               ? pendingOptions.configValues
               : undefined,
-          isolationMode,
+          isolationMode: persistedIsolationMode(isolationMode),
           baseBranch: isolationMode === 'worktree' ? baseBranch : null
         })
 
@@ -1758,7 +1798,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     skillPathsRef,
     isolationMode,
     canUseWorktree,
-    baseBranch
+    baseBranch,
+    existingWorktreeId
   ])
 
   const handleKeyDown = useCallback(
@@ -1803,6 +1844,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     // covers detached HEAD (no current) and any case where the picker has
     // not settled on a value.
     !(isolationMode === 'worktree' && !baseBranch) &&
+    !(isolationMode === 'existing' && !existingWorktreeId) &&
     !worktreeCreating
   // Deduplicated base-branch options for the picker (CAP-2): current branch
   // first (marked), then the resolved default, the project's reactive branch,
@@ -2087,8 +2129,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
               />
             </div>
             <LauncherContextStrip
-              isolationMode={isolationMode}
-              setIsolationMode={setIsolationMode}
+              workspace={workspace}
+              worktrees={activeProject?.worktrees ?? EMPTY_WORKTREES}
               baseBranch={baseBranch}
               setBaseBranch={setBaseBranch}
               baseBranchInfo={baseBranchInfo}

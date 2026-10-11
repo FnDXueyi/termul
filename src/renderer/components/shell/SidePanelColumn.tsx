@@ -18,6 +18,7 @@ import { ChangesTabBody } from './ChangesTabBody'
 import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
 import { useSidePanelResize } from './use-side-panel-resize'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 
 const FileExplorer = lazy(() =>
   import('@/components/file-explorer/FileExplorer').then((m) => ({ default: m.FileExplorer }))
@@ -38,10 +39,6 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
   const pick = useWorktreePick(projectId)
   const picked = pickedWorkingCopy(activeProject, pick)
   const cwd = picked?.path ?? activeProject.path ?? ''
-  const worktreeBranch =
-    picked?.state === 'resolved' && picked.kind === 'worktree'
-      ? (activeProject.worktrees ?? []).find((w) => w.id === picked.worktreeId)?.branch
-      : undefined
 
   const selected: ShellLastColumnTab = useLastColumnTab(projectId) ?? 'chats'
   const changedCount = useGitStatusStore(selectChangedFileCount(cwd))
@@ -81,7 +78,7 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
       style={{ width }}
     >
       <div className={PANEL_HEADER_CLASS}>
-        <span className="label-panel truncate">{worktreeBranch || 'Workspace'}</span>
+        <WorkspaceSwitcher project={activeProject} />
         <button
           type="button"
           onClick={handleNewChat}
