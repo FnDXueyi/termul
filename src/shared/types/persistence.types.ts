@@ -92,7 +92,11 @@ export const PersistenceKeys = {
   // a reload returns to the project the user switched to, not the first one.
   // Web/remote only: the desktop already persists `activeProjectId` inside
   // the `projects` snapshot (plugin-store), so it never reads this key.
-  webActiveProject: 'web-active-project'
+  webActiveProject: 'web-active-project',
+  // Shell-revamp layout record (versioned): rail/side-panel/SSH/graph sizes and
+  // visibility plus per-project last column tab and worktree pick. Owned by
+  // `stores/shell-layout-store.ts`; written on both desktop and web.
+  shellLayout: 'shell-layout'
 } as const
 
 // GH-289: persisted launcher selection — the chosen agent plus its call mode.

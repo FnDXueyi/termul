@@ -5,7 +5,7 @@ import * as appSettingsHooks from '@/hooks/use-app-settings'
 import { useGitStatusStore } from '@/stores/git-status-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
-import { useSSHPanelStore } from '@/stores/ssh-panel-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { ActivityRail } from './ActivityRail'
 
 const { mockUpdatePanelVisibility, mockToastError, mockNavigate, platformState } = vi.hoisted(
@@ -62,7 +62,8 @@ describe('ActivityRail', () => {
     vi.spyOn(appSettingsHooks, 'useUpdatePanelVisibility').mockReturnValue(
       mockUpdatePanelVisibility
     )
-    useSSHPanelStore.setState({ isVisible: true })
+    resetShellLayoutStoreForTests()
+    useShellLayoutStore.setState({ status: 'ready', sshSectionVisible: true })
     useSettingsModalStore.setState({ view: null })
   })
 
