@@ -272,6 +272,7 @@ fn browser_frame_round_trip_serializes_payload_fields() {
         kind: FrameKind::Browser,
         todos: Vec::new(),
         title: None,
+        branch: None,
         browser_action: Some("click".into()),
         browser_args: Some(serde_json::json!({"ref": "@e3"})),
         browser_element: Some("the save button".into()),
@@ -578,6 +579,7 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
         kind: FrameKind::Browser,
         todos: Vec::new(),
         title: None,
+        branch: None,
         browser_action: Some(input.action),
         browser_args: Some(input.args),
         browser_element: input.element,
@@ -799,5 +801,292 @@ fn title_per_session_flag_survives_a_new_turn() {
         );
         persistence.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
+    });
+}
+
+// -- story 16 (CAP-5): worktree branch auto rename on the first title call --
+
+#[derive(Default)]
+struct RenamedSink {
+    renamed: StdMutex<Vec<serde_json::Value>>,
+}
+
+impl EventSink for RenamedSink {
+    fn emit(&self, event: &crate::web::sink::AcpEvent) {
+        if event.type_ == crate::acp::events::EVENT_WORKTREE_BRANCH_RENAMED {
+            assert!(event.sid.is_none(), "rename event must be agent-level");
+            self.renamed.lock().unwrap().push(event.payload.clone());
+        }
+    }
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+struct WorktreeFixture {
+    _project: tempfile::TempDir,
+    _store: tempfile::TempDir,
+    worktree: std::path::PathBuf,
+    persistence: Arc<SessionPersistence>,
+}
+
+impl WorktreeFixture {
+    fn branch(&self) -> String {
+        git_in(&self.worktree, &["symbolic-ref", "--short", "HEAD"])
+    }
+}
+
+/// Real repo + `chat/ab12cd34` worktree + a CREATOR session `sess-real`.
+async fn worktree_fixture() -> WorktreeFixture {
+    let project = tempfile::tempdir().unwrap();
+    let p = project.path();
+    git_in(p, &["init", "--quiet"]);
+    git_in(p, &["config", "user.email", "t@t.test"]);
+    git_in(p, &["config", "user.name", "t"]);
+    git_in(p, &["config", "commit.gpgsign", "false"]);
+    git_in(p, &["checkout", "-q", "-b", "main"]);
+    std::fs::write(p.join("a.txt"), "a\n").unwrap();
+    git_in(p, &["add", "a.txt"]);
+    git_in(p, &["commit", "-q", "-m", "init"]);
+    let entry = crate::worktree::WorktreeManager::create(
+        p.to_str().unwrap(),
+        "ab12cd34",
+        "chat/ab12cd34",
+        true,
+        Some("main"),
+        None,
+        None,
+    )
+    .expect("create worktree");
+    let worktree = std::path::PathBuf::from(entry.path.trim_end_matches('/'));
+    let store = tempfile::tempdir().unwrap();
+    let persistence = SessionPersistence::open(store.path().join("store"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(crate::acp::SessionRegistration {
+            session_id: "sess-real".into(),
+            stable_agent_namespace: Some("config:test".into()),
+            runtime_agent_id: Some("agent-1".into()),
+            project_id: None,
+            cwd: worktree.clone(),
+            worktree_path: Some(entry.path),
+            worktree_branch: Some("chat/ab12cd34".into()),
+            worktree_created: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    WorktreeFixture {
+        _project: project,
+        _store: store,
+        worktree,
+        persistence,
+    }
+}
+
+fn title_frame(
+    token: &str,
+    provisional: &str,
+    title: &str,
+    branch: Option<&str>,
+) -> serde_json::Value {
+    let mut frame = serde_json::json!({
+        "token": token,
+        "session_id": provisional,
+        "kind": "set_title",
+        "title": title,
+    });
+    if let Some(branch) = branch {
+        frame["branch"] = serde_json::json!(branch);
+    }
+    frame
+}
+
+#[test]
+fn first_title_call_with_branch_renames_the_worktree_branch() {
+    if !git_available() {
+        return;
+    }
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let fx = worktree_fixture().await;
+        let sink = Arc::new(RenamedSink::default());
+        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+
+        let reply = connect_and_send(
+            port,
+            &title_frame(&token, &provisional, "Fix login", Some("fix-login")),
+        )
+        .await;
+        assert_eq!(reply["ok"], true);
+        assert_eq!(fx.branch(), "chat/fix-login");
+        assert_eq!(
+            fx.persistence
+                .metadata("sess-real")
+                .unwrap()
+                .worktree_branch
+                .as_deref(),
+            Some("chat/fix-login")
+        );
+        assert_eq!(sink.renamed.lock().unwrap().len(), 1);
+        fx.persistence.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn branch_rename_runs_even_when_the_title_call_fails() {
+    if !git_available() {
+        return;
+    }
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let fx = worktree_fixture().await;
+        let sink = Arc::new(RenamedSink::default());
+        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+
+        // A blank title is rejected by `record_local_title`; the reply is the
+        // title result, but the branch is still renamed.
+        let reply = connect_and_send(
+            port,
+            &title_frame(&token, &provisional, "   ", Some("still-renamed")),
+        )
+        .await;
+        assert_eq!(reply["ok"], false, "title failure is the reply");
+        assert_eq!(fx.branch(), "chat/still-renamed");
+        assert_eq!(sink.renamed.lock().unwrap().len(), 1);
+        fx.persistence.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn branch_is_processed_on_the_first_title_call_only() {
+    if !git_available() {
+        return;
+    }
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let fx = worktree_fixture().await;
+        let sink = Arc::new(RenamedSink::default());
+        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+
+        // First call carries no slug: it consumes the one branch attempt.
+        let first = connect_and_send(port, &title_frame(&token, &provisional, "Title", None)).await;
+        assert_eq!(first["ok"], true);
+        assert_eq!(fx.branch(), "chat/ab12cd34");
+
+        // A later call with a slug is a silent no-op: no branch attempt.
+        let second = connect_and_send(
+            port,
+            &title_frame(&token, &provisional, "Other", Some("too-late")),
+        )
+        .await;
+        assert_eq!(second["ok"], true);
+        assert_eq!(fx.branch(), "chat/ab12cd34");
+        assert!(sink.renamed.lock().unwrap().is_empty());
+        fx.persistence.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn unregister_session_clears_the_branch_attempt_flag() {
+    if !git_available() {
+        return;
+    }
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let fx = worktree_fixture().await;
+        let sink = Arc::new(RenamedSink::default());
+        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+        let first = connect_and_send(port, &title_frame(&token, &provisional, "Title", None)).await;
+        assert_eq!(first["ok"], true);
+        assert!(server
+            .branch_attempted_for_session
+            .lock()
+            .contains("sess-real"));
+
+        server.unregister_session("sess-real");
+        assert!(!server
+            .branch_attempted_for_session
+            .lock()
+            .contains("sess-real"));
+
+        // A resumed session (fresh token, empty in-memory set) may attempt
+        // again; the persisted guard still allows it because the worktree is
+        // on its launch branch.
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+        let reply = connect_and_send(
+            port,
+            &title_frame(&token, &provisional, "Title", Some("after-resume")),
+        )
+        .await;
+        assert_eq!(reply["ok"], true);
+        assert_eq!(fx.branch(), "chat/after-resume");
+        fx.persistence.shutdown().await.unwrap();
+    });
+}
+
+#[test]
+fn invalid_branch_slug_keeps_the_branch_and_the_title_still_lands() {
+    if !git_available() {
+        return;
+    }
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let fx = worktree_fixture().await;
+        let sink = Arc::new(RenamedSink::default());
+        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let (port, token, provisional) = server.register_session("agent-1");
+        server.bind_session(&token, "sess-real");
+        server.begin_turn("agent-1", "sess-real");
+        let reply = connect_and_send(
+            port,
+            &title_frame(&token, &provisional, "Fix login", Some("Fix Login")),
+        )
+        .await;
+        assert_eq!(reply["ok"], true);
+        assert_eq!(fx.branch(), "chat/ab12cd34");
+        assert!(sink.renamed.lock().unwrap().is_empty());
+        assert_eq!(
+            fx.persistence
+                .metadata("sess-real")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Fix login")
+        );
+        fx.persistence.shutdown().await.unwrap();
     });
 }

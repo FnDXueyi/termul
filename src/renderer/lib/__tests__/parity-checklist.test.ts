@@ -1363,9 +1363,13 @@ describe('Parity Checklist Automation', () => {
           new RegExp(`\\b${method}\\s*\\(`)
         )
       }
-      // The 7 launch-flow methods must reference `webServerWorktree` (the web branch).
+      // The 7 launch-flow methods + `renameBranch` (story 16) reference
+      // `webServerWorktree` (the web branch).
       const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(launchFlowRefs, '7 launch-flow methods should reference webServerWorktree').toBe(7)
+      expect(
+        launchFlowRefs,
+        '7 launch-flow methods + renameBranch should reference webServerWorktree'
+      ).toBe(8)
     })
 
     it('facade keeps the 8 advanced methods as WEB_UNSUPPORTED (no webServerWorktree ref)', () => {
@@ -1375,9 +1379,10 @@ describe('Parity Checklist Automation', () => {
           new RegExp(`\\b${method}\\s*:`)
         )
       }
-      // Exactly 7 webServerWorktree refs (not 8) — the advanced methods do NOT branch.
+      // Exactly 8 webServerWorktree refs (7 launch-flow + story 16 `renameBranch`) —
+      // the advanced methods do NOT branch.
       const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(launchFlowRefs).toBe(7)
+      expect(launchFlowRefs).toBe(8)
     })
 
     it('router.rs registers the 7 /worktree/* routes ahead of the static fallback', () => {
@@ -2052,5 +2057,81 @@ describe('Git diff stat parity (shell revamp story 8)', () => {
     const content = readFileSync(ServiceRust, 'utf-8')
     expect(content).toMatch(/pub fn git_get_diff_stat/)
     expect(content).toMatch(/GIT_DIFF_STAT_ERROR/)
+  })
+})
+
+describe('Worktree branch rename parity (shell revamp story 16)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const WorktreeFacade = join(LIB_DIR, 'worktree-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'worktree_rename_api.rs')
+  const ManagerRust = join(SRC_TAURI, 'acp', 'manager', 'worktree_branch.rs')
+  const CommandsWorktreeRust = join(SRC_TAURI, 'commands', 'worktree.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+  const ProtocolTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
+  const SinkRust = join(SRC_TAURI, 'web', 'sink.rs')
+
+  it('worktree-api.ts branches renameBranch on isTauriContext() between invoke and webServerWorktree', () => {
+    const content = readFileSync(WorktreeFacade, 'utf-8')
+    expect(content).toMatch(/renameBranch: \(/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    expect(content).toMatch(/invoke<IpcResult<void>>\('worktree_rename_branch'/)
+    expect(content).toMatch(/webServerWorktree\.renameBranch\(/)
+    // Write route: the facade documents the S19 gating contract for callers.
+    expect(content).toMatch(/useServerAdmitsRemoteWrites/)
+  })
+
+  it('web-server-api.ts exposes webServerWorktree.renameBranch hitting /worktree/rename-branch', () => {
+    const content = readFileSync(WebAdapter, 'utf-8')
+    expect(content).toMatch(/async renameBranch\(/)
+    expect(content).toMatch(/\/worktree\/rename-branch/)
+  })
+
+  it('router.rs registers /worktree/rename-branch in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = (content.match(/"\/worktree\/rename-branch"/g) ?? []).length
+    expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+  })
+
+  it('worktree_rename_api.rs is a WRITE route through resolve_project_path and the shared manager op', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/pub async fn rename_branch/)
+    // Write path: loopback / --allow-remote-writes / shared-live guard + containment.
+    expect(content).toMatch(
+      /resolve_project_path::<\(\)>\(&req\.worktree_path, &state, Some\(peer\), true\)/
+    )
+    expect(content).toMatch(/rename_worktree_branch/)
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/tracing/)
+  })
+
+  it('the shared host function renames, records and fans out (no transport git logic)', () => {
+    const content = readFileSync(ManagerRust, 'utf-8')
+    expect(content).toMatch(/pub\(crate\) async fn rename_and_record/)
+    expect(content).toMatch(/WorktreeManager::rename_branch/)
+    expect(content).toMatch(/EVENT_WORKTREE_BRANCH_RENAMED/)
+    expect(readFileSync(RouteRust, 'utf-8')).not.toMatch(/Command::new|run_git/)
+  })
+
+  it('the Tauri command is defined and registered in lib.rs over the same manager op', () => {
+    const command = readFileSync(CommandsWorktreeRust, 'utf-8')
+    expect(command).toMatch(/pub async fn worktree_rename_branch/)
+    expect(command).toMatch(/rename_worktree_branch/)
+    expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::worktree_rename_branch,/)
+  })
+
+  it('the worktree_branch_renamed event is in the protocol registry and the history refetch list', () => {
+    const protocol = readFileSync(ProtocolTypes, 'utf-8')
+    expect(protocol).toMatch(/'worktree_branch_renamed'/)
+    expect(protocol).toMatch(/worktree_branch_renamed: WS_RELAY_TIERS\.RELIABLE/)
+    expect(readFileSync(SinkRust, 'utf-8')).toMatch(/"worktree_branch_renamed"/)
+  })
+
+  it('both renderer roots mount useWorktreeBranchRenamed next to useAcpHistory', () => {
+    for (const root of ['TauriApp.tsx', 'App.tsx']) {
+      const content = readFileSync(join(LIB_DIR, '..', root), 'utf-8')
+      expect(content, root).toMatch(/useWorktreeBranchRenamed\(\)/)
+    }
   })
 })

@@ -165,6 +165,13 @@ impl WorktreeManager {
         }
         git_result?;
 
+        // Story 16 (CAP-5): remember that THIS call created a launcher
+        // `chat/*` worktree so the next session registration on `target` can
+        // be recognised as its creator (consume-once).
+        if is_new_branch {
+            note_launch_created(&target, branch);
+        }
+
         // Auto-add .termul/ to .gitignore if not already present
         let gitignore_path = Path::new(project_path).join(".gitignore");
         if gitignore_path.exists() {

@@ -1,10 +1,12 @@
 use super::{validate_project_path, IpcResult};
+use crate::acp::AcpManager;
 use crate::worktree::{
     BaseBranchInfo, BranchEntry, DirtyStatus, GitWorktreeEntry, IncludeCopyResult, RemoveResult,
     WorktreeManager,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
 
 // ==================== Worktree Commands ====================
 
@@ -126,6 +128,35 @@ pub async fn worktree_create(
             // can legitimately start with `error:` mid-run and must not be
             // parsed as the error terminator by the progress store.
             emit_progress(&format!("termul:error: {}", e));
+            Ok(IpcResult::error(e.to_string(), e.error_code()))
+        }
+    }
+}
+
+/// Rename a worktree's branch by hand (story 16, CAP-5): `git branch -m`,
+/// rewrite every session on the worktree (branch source becomes `user`) and
+/// fan out `acp:worktree_branch_renamed`. Host-side logic lives in
+/// `AcpManager::rename_worktree_branch`; the web twin is
+/// `POST /worktree/rename-branch`. Outcome log: code only (branch names come
+/// from user/agent text and stay at `debug`).
+#[tauri::command]
+pub async fn worktree_rename_branch(
+    manager: State<'_, Arc<AcpManager>>,
+    worktree_path: String,
+    old_branch: String,
+    new_branch: String,
+) -> Result<IpcResult<()>, String> {
+    let validated_path = validate_and_stringify!(&worktree_path);
+    match manager
+        .rename_worktree_branch(&validated_path, &old_branch, &new_branch)
+        .await
+    {
+        Ok(()) => Ok(IpcResult::success(())),
+        Err(e) => {
+            log::warn!(
+                "[worktree-rename] by-hand rename failed code={}",
+                e.error_code()
+            );
             Ok(IpcResult::error(e.to_string(), e.error_code()))
         }
     }

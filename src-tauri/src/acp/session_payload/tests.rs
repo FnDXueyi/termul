@@ -25,6 +25,8 @@ fn metadata() -> SessionMetadata {
         worktree_branch: Some("chat/abc123".to_string()),
         model_id: None,
         model_name: None,
+        worktree_branch_source: None,
+        worktree_launch_branch: None,
     }
 }
 

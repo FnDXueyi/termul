@@ -69,6 +69,7 @@ import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
 import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
 import { useVisibilityState } from './hooks/use-visibility-state'
+import { useWorktreeBranchRenamed } from './hooks/use-worktree-branch-renamed'
 
 // Hook to prevent Alt key from showing the default browser menu bar.
 // Only needed on Windows — on macOS, Alt/Option is used for typing special characters.
@@ -163,6 +164,8 @@ function AppEffects(): null {
   useAcpAgents()
   useAgentIdleShutdown()
   useAcpHistory()
+  // Story 16: host worktree branch renames reconcile + refresh (both roots).
+  useWorktreeBranchRenamed()
   useAcpSessionResume()
   // #853: chat notifications (turn finished / permission waiting / question
   // waiting), gated on the user not already watching the chat. Mounted on

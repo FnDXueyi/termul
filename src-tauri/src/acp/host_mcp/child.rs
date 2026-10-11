@@ -124,6 +124,7 @@ impl TermulPlanServer {
             kind: FrameKind::Plan,
             todos: input.todos,
             title: None,
+            branch: None,
             browser_action: None,
             browser_args: None,
             browser_element: None,
@@ -145,6 +146,7 @@ impl TermulPlanServer {
             kind: FrameKind::Browser,
             todos: Vec::new(),
             title: None,
+            branch: None,
             browser_action: Some(input.action),
             browser_args: Some(input.args),
             browser_element: input.element,
@@ -170,7 +172,7 @@ impl TermulPlanServer {
 
     #[tool(
         name = "set_session_title",
-        description = "Set a concise title for the current Termul chat session. Call this EXACTLY ONCE per session, during the first turn, as soon as the user's intent is clear. Do not call it again for the same session — subsequent calls are ignored."
+        description = "Set a concise title for the current Termul chat session. Call this EXACTLY ONCE per session, during the first turn, as soon as the user's intent is clear. Do not call it again for the same session — subsequent calls are ignored. Also pass `branch`: a short kebab-case slug for this chat's git branch (lowercase letters, digits and single hyphens, at most 48 characters, for example `fix-login-redirect`); Termul uses it to name the chat's worktree branch."
     )]
     async fn set_session_title(
         &self,
@@ -182,6 +184,7 @@ impl TermulPlanServer {
             kind: FrameKind::SetTitle,
             todos: Vec::new(),
             title: Some(input.title),
+            branch: input.branch,
             browser_action: None,
             browser_args: None,
             browser_element: None,
