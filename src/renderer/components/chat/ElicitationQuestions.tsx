@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ElicitationField } from '@/lib/acp-api'
 import type { PendingElicitation } from '@/stores/acp-store'
+import { questionShape } from './elicitation-shape'
 import { QuestionStepper } from './QuestionStepper'
 
 interface ElicitationQuestionsProps {
@@ -51,9 +52,12 @@ export function ElicitationQuestions({
   const [multi, setMulti] = useState<Record<string, Set<string>>>({})
   const [otherText, setOtherText] = useState<Record<string, string>>({})
 
-  const field = pending.fields[index]
+  const shape = questionShape(pending.fields)
+  const questions = shape?.questions ?? pending.fields
+  const customFor = shape?.customFor ?? {}
+  const field = questions[index]
   if (!field) return null
-  const total = pending.fields.length
+  const total = questions.length
   const isLast = index === total - 1
   const isMulti = field.kind === 'multi-enum'
   const title = field.title?.trim() ? field.title : field.name
@@ -124,9 +128,21 @@ export function ElicitationQuestions({
    */
   const buildAnswers = (skipName?: string): Record<string, string | string[]> => {
     const answers: Record<string, string | string[]> = {}
-    for (const f of pending.fields) {
+    for (const f of questions) {
       if (f.name === skipName) continue
       const other = trimmedOther(otherText, f.name)
+      const customName = customFor[f.name]
+      if (customName) {
+        // The agent reads the free text from its own companion field (it folds
+        // it into a multi-select, or notes it beside a single pick) — send the
+        // pick and the text separately instead of merging them.
+        if (other) answers[customName] = other
+        if (f.kind === 'multi-enum') {
+          const values = Array.from(multi[f.name] ?? [])
+          if (values.length > 0) answers[f.name] = values
+        } else if (f.name in single) answers[f.name] = single[f.name]
+        continue
+      }
       if (f.kind === 'multi-enum') {
         const values = Array.from(multi[f.name] ?? [])
         if (other && !values.includes(other)) values.push(other)
@@ -179,7 +195,7 @@ export function ElicitationQuestions({
       multi={isMulti}
       selected={selected}
       onToggle={(value) => selectOption(field, value)}
-      allowOther={pending.allowOther}
+      allowOther={pending.allowOther || customFor[field.name] !== undefined}
       otherText={otherText[field.name] ?? ''}
       otherLabel={`Other answer for ${title}`}
       otherTestId={`elicitation-other-${field.name}`}
