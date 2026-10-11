@@ -9,6 +9,15 @@ import {
 } from '@/lib/browser-api'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useBrowserWebview } from './use-browser-webview'
+import {
+  resetNativeWebviewOcclusionForTests,
+  useNativeWebviewOcclusion
+} from './use-native-webview-occlusion'
+
+vi.mock('@/lib/tauri-runtime', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/tauri-runtime')>('@/lib/tauri-runtime')
+  return { ...actual, isTauriContext: () => true }
+})
 
 vi.mock('@/lib/browser-api', () => ({
   browserTabCreate: vi.fn(),
@@ -196,5 +205,48 @@ describe('useBrowserWebview bounds updates', () => {
     expect(browserTabResize).not.toHaveBeenCalled()
     expect(browserTabShow).not.toHaveBeenCalled()
     expect(browserTabDestroy).toHaveBeenCalled()
+  })
+
+  it('hides while a shell popover occludes and reveals only a visible pane afterwards', async () => {
+    const OccluderHarness = ({ open }: { open: boolean }): null => {
+      useNativeWebviewOcclusion(open)
+      return null
+    }
+    const visible = render(<BrowserWebviewHarness />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalled())
+    vi.mocked(browserTabShow).mockClear()
+    vi.mocked(browserTabHide).mockClear()
+
+    const occluder = render(<OccluderHarness open />)
+    await waitFor(() => expect(browserTabHide).toHaveBeenCalledWith('browser-1'))
+    expect(browserTabShow).not.toHaveBeenCalled()
+
+    occluder.rerender(<OccluderHarness open={false} />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalledWith('browser-1'))
+
+    occluder.unmount()
+    visible.unmount()
+    resetNativeWebviewOcclusionForTests()
+  })
+
+  it('keeps a pane-hidden webview hidden after the occluder closes', async () => {
+    const OccluderHarness = ({ open }: { open: boolean }): null => {
+      useNativeWebviewOcclusion(open)
+      return null
+    }
+    const view = render(<BrowserWebviewHarness visible={false} />)
+    await waitFor(() => expect(browserTabCreate).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(browserTabResize).toHaveBeenCalledTimes(1))
+
+    const occluder = render(<OccluderHarness open />)
+    occluder.rerender(<OccluderHarness open={false} />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(browserTabShow).not.toHaveBeenCalled()
+
+    occluder.unmount()
+    view.unmount()
+    resetNativeWebviewOcclusionForTests()
   })
 })

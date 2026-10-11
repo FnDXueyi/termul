@@ -197,6 +197,10 @@ vi.mock('@/stores/browser-session-store', () => ({
   )
 }))
 
+// The shell unread tracker reads the real pane tree and acp store; this suite
+// mocks the workspace store wholesale and does not exercise it.
+vi.mock('@/hooks/use-shell-unread-tracker', () => ({ useShellUnreadTracker: () => {} }))
+
 vi.mock('@/stores/workspace-store', () => {
   const useWorkspaceStore = (selector?: (s: typeof mockWorkspaceStoreState) => unknown) =>
     selector ? selector(mockWorkspaceStoreState) : mockWorkspaceStoreState
@@ -242,6 +246,8 @@ vi.mock('@/stores/keyboard-shortcuts-store', () => ({
 }))
 
 vi.mock('@/stores/app-settings-store', () => ({
+  useAppSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({ settings: {}, isLoaded: true }),
   useTerminalFontSize: () => 14,
   useUiZoomLevel: () => 1,
   useDefaultShell: () => 'bash',

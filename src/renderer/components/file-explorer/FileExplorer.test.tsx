@@ -821,6 +821,28 @@ describe('FileExplorer', () => {
   })
 })
 
+describe('FileExplorer embedded', () => {
+  it('keeps its own width, fill and resize handle by default', () => {
+    mockExplorerState.rootPath = '/project'
+    const { container } = render(<FileExplorer />)
+    const panel = container.querySelector<HTMLElement>('#file-explorer-panel')
+    expect(panel).toHaveClass('rounded-xl', 'bg-background', 'flex-shrink-0')
+    expect(panel?.style.width).not.toBe('')
+    expect(screen.getByRole('separator', { name: 'Resize file explorer' })).toBeInTheDocument()
+  })
+
+  it('fills the host column without width, fill or resize handle when embedded', () => {
+    mockExplorerState.rootPath = '/project'
+    const { container } = render(<FileExplorer embedded />)
+    const panel = container.querySelector<HTMLElement>('#file-explorer-panel')
+    expect(panel).toHaveClass('flex-1')
+    expect(panel).not.toHaveClass('rounded-xl')
+    expect(panel).not.toHaveClass('bg-background')
+    expect(panel?.style.width).toBe('')
+    expect(screen.queryByRole('separator', { name: 'Resize file explorer' })).toBeNull()
+  })
+})
+
 describe('FileExplorer header toolbar (GH-540)', () => {
   function setExpandedDirs(expandedDirs: Set<string>): void {
     mockStoreGetState.expandedDirs = expandedDirs
