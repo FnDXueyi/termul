@@ -81,7 +81,7 @@ export function RailGroupRow({
                 }}
                 onBlur={onCommitRename}
                 aria-label={`Rename group ${group.name}`}
-                className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none"
+                className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs pointer-coarse:text-base text-foreground outline-none"
                 // biome-ignore lint/a11y/noAutofocus: the inline rename input appears on request and must take focus
                 autoFocus
               />
