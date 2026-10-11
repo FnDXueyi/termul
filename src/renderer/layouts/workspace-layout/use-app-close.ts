@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { waitForPendingAppSettingsPersistence } from '@/hooks/use-app-settings'
 import { flushSessionHistory, waitForPendingSessionIndexWrite } from '@/lib/acp-history-persistence'
 import { persistenceApi, windowApi } from '@/lib/api'
 import { listen, type UnlistenFn } from '@/lib/tauri-event'
@@ -13,24 +12,12 @@ export function useAppClose() {
 
   const closeAppWithPersistenceFlush = useCallback(async () => {
     try {
-      const [
-        pendingAppSettingsResult,
-        pendingPersistenceResult,
-        pendingSessionIndexResult,
-        historyFlushResult
-      ] = await Promise.allSettled([
-        waitForPendingAppSettingsPersistence(),
-        persistenceApi.flushPendingWrites(),
-        waitForPendingSessionIndexWrite(),
-        flushSessionHistory()
-      ])
-
-      if (pendingAppSettingsResult.status === 'rejected') {
-        console.error(
-          'Failed to wait for app settings persistence before close:',
-          pendingAppSettingsResult.reason
-        )
-      }
+      const [pendingPersistenceResult, pendingSessionIndexResult, historyFlushResult] =
+        await Promise.allSettled([
+          persistenceApi.flushPendingWrites(),
+          waitForPendingSessionIndexWrite(),
+          flushSessionHistory()
+        ])
 
       // Note: waitForPendingSessionIndexWrite swallows rejections internally
       // (trackPendingIndexWrite catches and logs them), so this branch is
