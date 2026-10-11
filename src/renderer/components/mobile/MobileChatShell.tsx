@@ -104,7 +104,7 @@ interface MobileChatShellProps {
  * full-screen drawer that switches between Chats, Terminals and Editors and
  * lists the chosen section (the hidden WorkspaceTabBar's job on mobile). No
  * bottom bar: the main screen is the header and the content.
- * Desktop IDE chrome (Rail, top row, Side panel, tab strip)
+ * Desktop IDE chrome (ActivityRail, TitleBar, persistent sidebar, tab strip)
  * stays outside this component and must be gated by `useMobileWebShell`.
  */
 export function MobileChatShell({

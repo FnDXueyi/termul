@@ -30,7 +30,7 @@ describe('WindowControls', () => {
     expect(mockWindowApi.onMaximizeChange).not.toHaveBeenCalled()
   })
 
-  it('renders the three controls with the window control names and no drag attribute', () => {
+  it('renders the three controls with the TitleBar names and no drag attribute', () => {
     render(<WindowControls windowControls />)
     const wrapper = screen.getByTestId('window-controls')
     expect(wrapper).not.toHaveAttribute('data-tauri-drag-region')
