@@ -92,15 +92,21 @@ pub fn git_get_diff_stat(cwd: &str) -> Result<GitDiffStat, DiffStatError> {
 
 fn compute_diff_stat(cwd: &str) -> Result<GitDiffStat, DiffStatError> {
     // Also the "is this a repository" check: fails for a non-repo cwd.
-    let toplevel = git_stdout(cwd, "rev-parse", &["rev-parse", "--show-toplevel"])?;
+    let toplevel = git_stdout(
+        cwd,
+        "rev-parse",
+        StdoutCap::Unbounded,
+        &["rev-parse", "--show-toplevel"],
+    )?;
     let toplevel = String::from_utf8_lossy(&toplevel).trim().to_string();
 
-    let base = if super::commands::repo_has_head(cwd) {
-        "HEAD"
-    } else {
-        EMPTY_TREE
-    };
-    let numstat = git_stdout(cwd, "diff", &["diff", "--numstat", base])?;
+    let base = if probe_head(cwd)? { "HEAD" } else { EMPTY_TREE };
+    let numstat = git_stdout(
+        cwd,
+        "diff",
+        StdoutCap::Unbounded,
+        &["diff", "--numstat", base],
+    )?;
     let (added, removed) = parse_numstat(&String::from_utf8_lossy(&numstat));
 
     // `--full-name` + the `:/` pathspec make the listing repo-wide, matching
@@ -108,6 +114,7 @@ fn compute_diff_stat(cwd: &str) -> Result<GitDiffStat, DiffStatError> {
     let untracked = git_stdout(
         cwd,
         "ls-files",
+        StdoutCap::NulPaths(MAX_UNTRACKED_FILES),
         &[
             "ls-files",
             "--others",
@@ -126,10 +133,38 @@ fn compute_diff_stat(cwd: &str) -> Result<GitDiffStat, DiffStatError> {
     })
 }
 
+/// Does the repository have a HEAD commit? Status-preserving: only git's
+/// documented "not a valid ref" result (exit 1 under `--verify --quiet`) means
+/// no HEAD (an unborn branch) and selects the empty-tree base. A spawn failure
+/// or timeout is [`DiffStatError::GitUnavailable`] and any other non-zero exit
+/// is [`DiffStatError::GitFailed`], so a failed probe never turns existing
+/// content into additions.
+pub(super) fn probe_head(cwd: &str) -> Result<bool, DiffStatError> {
+    let output = run_git_capture(
+        cwd,
+        StdoutCap::Unbounded,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        DIFF_STAT_GIT_TIMEOUT_MS,
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(DiffStatError::GitFailed {
+            command: "rev-parse HEAD",
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
+}
+
 /// Run git and return stdout, mapping spawn failure / timeout / non-zero exit
 /// to a [`DiffStatError`].
-fn git_stdout(cwd: &str, label: &'static str, args: &[&str]) -> Result<Vec<u8>, DiffStatError> {
-    let output = run_git_capture(cwd, args, DIFF_STAT_GIT_TIMEOUT_MS)?;
+fn git_stdout(
+    cwd: &str,
+    label: &'static str,
+    cap: StdoutCap,
+    args: &[&str],
+) -> Result<Vec<u8>, DiffStatError> {
+    let output = run_git_capture(cwd, cap, args, DIFF_STAT_GIT_TIMEOUT_MS)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -144,6 +179,7 @@ fn git_stdout(cwd: &str, label: &'static str, args: &[&str]) -> Result<Vec<u8>, 
 /// fill the pipe and stall the child), and kill it after `timeout_ms`.
 fn run_git_capture(
     cwd: &str,
+    cap: StdoutCap,
     args: &[&str],
     timeout_ms: u64,
 ) -> Result<std::process::Output, DiffStatError> {
@@ -160,8 +196,8 @@ fn run_git_capture(
         .spawn()
         .map_err(|e| DiffStatError::GitUnavailable(e.to_string()))?;
 
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let stdout = drain_capped(child.stdout.take(), cap);
+    let stderr = drain_capped(child.stderr.take(), StdoutCap::Unbounded);
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let status = loop {
@@ -187,13 +223,56 @@ fn run_git_capture(
     })
 }
 
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+/// How much of a child's stdout to retain while it is drained.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum StdoutCap {
+    /// Keep everything.
+    Unbounded,
+    /// Keep only the first N NUL-terminated paths (`-z` listings); the rest is
+    /// read and discarded so the child never blocks on a full pipe.
+    NulPaths(usize),
+}
+
+/// Drain `pipe` to EOF on a helper thread, retaining output per `cap`.
+pub(super) fn drain_capped<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    cap: StdoutCap,
+) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf);
+        let mut kept = Vec::new();
+        let Some(mut pipe) = pipe else {
+            return kept;
+        };
+        let mut chunk = [0u8; 8192];
+        let mut paths = 0usize;
+        let mut full = false;
+        loop {
+            let n = match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if full {
+                continue;
+            }
+            match cap {
+                StdoutCap::Unbounded => kept.extend_from_slice(&chunk[..n]),
+                StdoutCap::NulPaths(max) => {
+                    let mut end = n;
+                    for (idx, byte) in chunk[..n].iter().enumerate() {
+                        if *byte == 0 {
+                            paths += 1;
+                            if paths >= max {
+                                end = idx + 1;
+                                full = true;
+                                break;
+                            }
+                        }
+                    }
+                    kept.extend_from_slice(&chunk[..end]);
+                }
+            }
         }
-        buf
+        kept
     })
 }
 
