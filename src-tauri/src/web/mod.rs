@@ -27,6 +27,7 @@ pub mod config;
 pub mod fs_api;
 pub mod fs_watcher;
 pub mod git_api;
+pub mod git_hunk_api;
 pub mod install_api;
 pub mod log_api;
 pub mod mcp_oauth_api;
