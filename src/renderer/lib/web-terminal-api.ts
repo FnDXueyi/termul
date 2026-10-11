@@ -16,16 +16,19 @@ import type {
   TerminalSpawnOptions,
   TerminalStateSnapshot
 } from '@shared/types/ipc.types'
-import type {
-  WebTerminalEventPayload,
-  WebTerminalFrame,
-  WebTerminalReply,
-  WebTerminalRequestType
+import {
+  WEB_TERMINAL_ERROR_CODES,
+  type WebTerminalEventPayload,
+  type WebTerminalFrame,
+  type WebTerminalReply,
+  type WebTerminalRequestType
 } from '@shared/types/web-terminal-protocol.types'
 import type { AcpConnectionState } from './acp-transport'
 import { logFrontendError } from './log-api'
 
 import { getWebAuthToken } from './web-auth-token'
+import { buildAuthenticatePayload } from './web-client-identity'
+import { clearProtocolMismatchLatch, handleProtocolVersionMismatch } from './web-protocol-reload'
 
 const REQUEST_TIMEOUT_MS = 15_000
 /** Bound on the WS handshake (socket create → `onopen`). The 15s request
@@ -108,6 +111,14 @@ export class WebTerminalClient {
   /** Latched when the retry budget exhausts; cleared by user re-arm or a
    *  successful connection (finishConnect). */
   private reconnectExhausted = false
+  /**
+   * AD-15: the host refused `authenticate` with `PROTOCOL_VERSION_MISMATCH`
+   * or `INVALID_CLIENT_IDENTITY`. Neither can succeed on retry, so the
+   * reconnect loop stays dormant and `connect()` keeps refusing for the rest
+   * of the page (a version mismatch reloads the page once via the shared
+   * helper, which replaces this client). Cleared by a successful handshake.
+   */
+  private handshakeHalted: Error | null = null
   /** Story 10 (F9): handshake bound for the in-flight `connect()` — torn
    * down socket's timer is cleared on open/error/close/forceReconnect. */
   private connectTimer: ReturnType<typeof setTimeout> | null = null
@@ -254,6 +265,7 @@ export class WebTerminalClient {
 
   connect(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('Terminal client disposed'))
+    if (this.handshakeHalted) return Promise.reject(this.handshakeHalted)
     this.attachVisibilityListeners()
     // The in-flight handshake promise FIRST: while the socket is OPEN but the
     // `authenticate` reply is still pending, the OPEN fast path below would
@@ -308,43 +320,49 @@ export class WebTerminalClient {
       }, CONNECT_TIMEOUT_MS)
       socket.onopen = () => {
         this.clearConnectTimer()
-        // CAP-1 interim gate: when a web auth token is known, authenticate the
-        // connection BEFORE any terminal op (a gated server refuses every
-        // pre-auth request with UNAUTHORIZED and spawns no PTY). The
+        // Versioned handshake (AD-15): ALWAYS authenticate before any
+        // terminal op — the host no longer treats an ungated connection as
+        // implicitly authed. The payload carries the protocol version and
+        // client identity; the token is added only when one is known. The
         // authenticate frame goes out via its OWN pending entry — never
         // request(), which awaits connect() (this very in-flight promise) and
         // would deadlock, same as WsAcpTransport's auth_required handling.
-        const token = getWebAuthToken()
-        if (token) {
-          const authId = `terminal-${++this.nextId}`
-          const authTimer = setTimeout(() => {
-            this.pending.delete(authId)
-            this.failConnect(socket, reject, new Error('Terminal authenticate timed out'))
-          }, REQUEST_TIMEOUT_MS)
-          this.pending.set(authId, {
-            timer: authTimer,
-            resolve: (reply) => {
-              if (reply.success || reply.code === 'NOT_IMPLEMENTED') {
-                // success: the gate accepted the token. NOT_IMPLEMENTED: a
-                // pre-gate server without the authenticate arm — proceed with
-                // legacy behavior.
-                this.finishConnect(socket, resolve)
-                return
-              }
-              // UNAUTHORIZED (or any other refusal): connect() rejects, so
-              // request() maps it to NETWORK_ERROR; the re-attach loop never
-              // runs on a refused connection.
-              this.failConnect(
-                socket,
-                reject,
-                new Error(reply.error || 'Terminal authenticate failed')
-              )
+        const authId = `terminal-${++this.nextId}`
+        const authTimer = setTimeout(() => {
+          this.pending.delete(authId)
+          this.failConnect(socket, reject, new Error('Terminal authenticate timed out'))
+        }, REQUEST_TIMEOUT_MS)
+        this.pending.set(authId, {
+          timer: authTimer,
+          resolve: (reply) => {
+            if (reply.success) {
+              this.finishConnect(socket, resolve)
+              return
             }
+            if (
+              reply.code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH ||
+              reply.code === WEB_TERMINAL_ERROR_CODES.INVALID_CLIENT_IDENTITY
+            ) {
+              this.haltHandshake(socket, reject, reply.code, reply.error)
+              return
+            }
+            // UNAUTHORIZED (or any other refusal): connect() rejects, so
+            // request() maps it to NETWORK_ERROR; the re-attach loop never
+            // runs on a refused connection.
+            this.failConnect(
+              socket,
+              reject,
+              new Error(reply.error || 'Terminal authenticate failed')
+            )
+          }
+        })
+        socket.send(
+          JSON.stringify({
+            id: authId,
+            type: 'authenticate',
+            payload: buildAuthenticatePayload(getWebAuthToken())
           })
-          socket.send(JSON.stringify({ id: authId, type: 'authenticate', payload: { token } }))
-          return
-        }
-        this.finishConnect(socket, resolve)
+        )
       }
       socket.onmessage = (event) => this.handleFrame(String(event.data))
       socket.onerror = () => {
@@ -378,6 +396,8 @@ export class WebTerminalClient {
     // forever, never reaching RECONNECT_MAX_ATTEMPTS.
     this.reconnectAttempt = 0
     this.reconnectExhausted = false
+    this.handshakeHalted = null
+    clearProtocolMismatchLatch()
     this.connecting = null
     this.connectingReject = null
     this.emitConnectionState('connected')
@@ -448,6 +468,35 @@ export class WebTerminalClient {
       })
     }
     resolve()
+  }
+
+  /**
+   * AD-15: the host refused the handshake in a way no retry can fix. Latch
+   * the halt (no reconnect, `connect()` refuses), surface 'disconnected'
+   * through the connection-status path, and — for a version mismatch — hand
+   * off to the shared reload-once helper (its loop latch logs the clear
+   * terminal error when a reload already happened). Never logs the token.
+   */
+  private haltHandshake(
+    socket: WebSocket,
+    reject: (error: Error) => void,
+    code: string,
+    message: string
+  ): void {
+    const error = new Error(message || `Terminal authenticate refused (${code})`)
+    this.handshakeHalted = error
+    this.reconnectAttempt = 0
+    this.failConnect(socket, reject, error)
+    this.emitConnectionState('disconnected')
+    if (code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH) {
+      handleProtocolVersionMismatch('WebTerminalClient')
+    } else {
+      void logFrontendError({
+        level: 'error',
+        source: 'WebTerminalClient.handshake',
+        message: `terminal authenticate refused (${code}); reconnecting is stopped`
+      })
+    }
   }
 
   /**
@@ -907,6 +956,8 @@ export class WebTerminalClient {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer) return
+    // AD-15: a protocol/identity refusal never recovers by retrying.
+    if (this.handshakeHalted) return
     // An exhausted budget stays latched off until the user re-arms (a
     // keystroke via ensureReconnectArmed, or a fresh user-driven connect) —
     // otherwise the refused socket's own close event would restart the loop
