@@ -378,7 +378,8 @@ export function ProjectSidebar({
       : groups.find((g) => g.id === colorPicker?.targetId)
 
   // The search box only renders once the list is long enough to be worth filtering.
-  const showSearch = shouldShowProjectSearch(projects.length)
+  // The Rail has none: its top Search covers projects.
+  const showSearch = !isRail && shouldShowProjectSearch(projects.length)
 
   // Apply the search query to each group. Filtering is gated on `showSearch` so a
   // lingering query can never keep the list filtered after the search box unmounts

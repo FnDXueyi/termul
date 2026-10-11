@@ -25,6 +25,7 @@ import { type AgentAuthPolicy, agentPolicyForConfigId } from '@/lib/agents/acp-r
 import { classifySetupError, isAgentAuthRequiredError } from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import {
+  isFolderTokenPath,
   parseFileSegments,
   replaceFileTokensInline,
   SKILL_PAD_END,
@@ -286,7 +287,11 @@ export function canonicalTwinText(message: ChatMessage): string {
 export function twinFileEvidence(message: ChatMessage): string[] {
   const evidence: string[] = []
   for (const seg of parseFileSegments(transcriptText(message))) {
-    if (seg.kind === 'file') evidence.push(`file:${seg.display}`)
+    // Folder tokens send as plain text with no block, so they leave no
+    // persisted-side evidence to match.
+    if (seg.kind === 'file' && !isFolderTokenPath(seg.absPath)) {
+      evidence.push(`file:${seg.display}`)
+    }
   }
   for (const block of message.blocks) {
     if (block.type === 'resource_link' || block.type === 'resource') {

@@ -2,7 +2,7 @@ import { act, render, waitFor } from '@testing-library/react'
 import type { Editor } from '@tiptap/core'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { displayOffsetToDocOffset, SKILL_PAD_DEFAULT } from '@/lib/composer/doc-to-prompt'
-import { skillToken } from '@/lib/skill-tokens'
+import { fileToken, skillToken } from '@/lib/skill-tokens'
 import { ChatComposerEditor } from '../ChatComposerEditor'
 import { getComposerValue, setComposerValue } from '../chat-composer-test-helpers'
 
@@ -224,6 +224,32 @@ describe('ChatComposerEditor Escape contract (mobile back stack L-32)', () => {
     expect(hostSawPrevented).toHaveBeenCalledTimes(1)
     expect(hostSawPrevented).toHaveBeenCalledWith(false)
     expect(escapeKey.defaultPrevented).toBe(true)
+  })
+})
+
+describe('file pill icon (gh-896)', () => {
+  it('renders a Folder icon for a folder token (trailing-slash absPath) and not File', async () => {
+    const { getByEditor } = mountEditor()
+    await waitFor(() => expect(getByEditor()).toBeTruthy())
+
+    setComposerValue(`see ${fileToken('src/x/', '/work/src/x/')} `)
+
+    await waitFor(() => expect(document.querySelector('[data-file-pill="true"]')).toBeTruthy())
+    const pill = document.querySelector('[data-file-pill="true"]') as HTMLElement
+    expect(pill.querySelector('svg[data-termul-icon="Folder"]')).not.toBeNull()
+    expect(pill.querySelector('svg[data-termul-icon="File"]')).toBeNull()
+  })
+
+  it('still renders the File icon for a file token', async () => {
+    const { getByEditor } = mountEditor()
+    await waitFor(() => expect(getByEditor()).toBeTruthy())
+
+    setComposerValue(`see ${fileToken('a.ts', '/work/src/a.ts')} `)
+
+    await waitFor(() => expect(document.querySelector('[data-file-pill="true"]')).toBeTruthy())
+    const pill = document.querySelector('[data-file-pill="true"]') as HTMLElement
+    expect(pill.querySelector('svg[data-termul-icon="File"]')).not.toBeNull()
+    expect(pill.querySelector('svg[data-termul-icon="Folder"]')).toBeNull()
   })
 })
 

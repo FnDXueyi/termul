@@ -533,13 +533,13 @@ export const webServerSearch = {
     query: string,
     includeIgnored?: boolean
   ): Promise<{
-    files: Array<{ path: string; ignored: boolean }>
+    files: Array<{ path: string; ignored: boolean; kind?: 'file' | 'dir' }>
     truncated: boolean
   }> {
     const params = new URLSearchParams({ root, query })
     if (includeIgnored) params.set('includeIgnored', 'true')
     const res = await getJson<{
-      files: Array<{ path: string; ignored: boolean }>
+      files: Array<{ path: string; ignored: boolean; kind?: 'file' | 'dir' }>
       truncated: boolean
     }>(`/search/file-names?${params.toString()}`)
     if (!res.success) throw new Error(res.error)

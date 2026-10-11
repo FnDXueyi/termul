@@ -182,8 +182,10 @@ function ensureFileNameStreamSubscription(
     const activeId = `search-${state.searchRequestId}`
     if (event.searchId !== activeId) return
 
+    // Folder hits (`kind: 'dir'`) exist for the composer @-picker only; the
+    // explorer lists files, so drop them to keep its results unchanged.
     set({
-      searchFileNameMatches: event.files.map((f) => f.path),
+      searchFileNameMatches: event.files.filter((f) => f.kind !== 'dir').map((f) => f.path),
       searchTruncated: event.truncated || state.searchTruncated
     })
   })

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { AlertCircle, Check, Clock3, FolderGit2, Home, Plus } from '@/components/icons'
+import { AlertCircle, Check, Clock3, FolderGit2, Home, Plus, Settings } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { Button } from '@/components/ui/button'
 import {
@@ -23,6 +23,8 @@ interface ProjectSwitcherDrawerProps {
   onOpenChange: (open: boolean) => void
   /** Opens the existing New project flow. Omitted when that action is not available. */
   onAddProject?: () => void
+  /** Opens Project settings for the active project. Omitted when that action is not available. */
+  onOpenProjectSettings?: () => void
   /** Edge the sheet opens from. `left` (default) is the desktop-style side drawer. */
   side?: 'left' | 'bottom'
   /** DOM id for the sheet content, so a trigger can point `aria-controls` at it. */
@@ -57,6 +59,7 @@ export function ProjectSwitcherDrawer({
   open,
   onOpenChange,
   onAddProject,
+  onOpenProjectSettings,
   side = 'left',
   id,
   onCloseAutoFocus
@@ -136,7 +139,7 @@ export function ProjectSwitcherDrawer({
             <SheetTitle className="text-base">Projects</SheetTitle>
           </div>
           <SheetDescription className="sr-only">
-            Switch the session to another project
+            Switch the session to another project or open the current project's settings
           </SheetDescription>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-auto p-2">
@@ -212,6 +215,31 @@ export function ProjectSwitcherDrawer({
                         <Check size={14} className="shrink-0 text-primary" />
                       ) : null}
                     </button>
+                    {/* Project settings act on the active project only, so the
+                     * gear sits on the Current row: on another row it would
+                     * first have to switch the session. Disabled while a switch
+                     * is in flight or queued: the modal follows the active
+                     * project and would change under the user when it lands. */}
+                    {isActive && onOpenProjectSettings && (
+                      <button
+                        type="button"
+                        disabled={switchBusy}
+                        aria-label={`"${project.name}" project settings`}
+                        title="Project settings"
+                        onClick={() => {
+                          onOpenChange(false)
+                          onOpenProjectSettings()
+                        }}
+                        className={[
+                          'inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors',
+                          switchBusy
+                            ? 'cursor-not-allowed text-disabled-foreground'
+                            : 'hover:bg-foreground/[0.03] hover:text-foreground'
+                        ].join(' ')}
+                      >
+                        <Settings size={14} />
+                      </button>
+                    )}
                     {/* Set as host default (Epic 7) — distinct from the
                      * per-connection switch. Hidden when already the host
                      * default (no-op), archived, or pathless (P5: a

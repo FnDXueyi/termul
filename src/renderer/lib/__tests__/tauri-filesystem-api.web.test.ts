@@ -352,6 +352,35 @@ describe('tauriFilesystemApi (web branch)', () => {
     unsubDone()
   })
 
+  it('searchFileNamesStreamStart passes kind:dir hits through the web batch unchanged', async () => {
+    const batches: Array<{ files: unknown[] }> = []
+    const unsubBatch = tauriFilesystemApi.onSearchFileNamesBatch((event) => {
+      batches.push(event)
+    })
+    const files = [
+      { path: 'src/components.ts', ignored: false },
+      { path: 'src/renderer/components', ignored: false, kind: 'dir' },
+      { path: 'node_modules/components', ignored: true, kind: 'dir' }
+    ]
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: true, data: { files, truncated: false } })
+    )
+
+    await tauriFilesystemApi.searchFileNamesStreamStart(
+      'web-search-dir',
+      '/work/proj',
+      '/work/proj',
+      'components',
+      true
+    )
+
+    await vi.waitFor(() => {
+      expect(batches).toHaveLength(1)
+    })
+    expect(batches[0].files).toEqual(files)
+    unsubBatch()
+  })
+
   it('searchFileNamesStreamStart surfaces a transport failure as a done error event (web)', async () => {
     const doneEvents: Array<Record<string, unknown>> = []
     const unsubDone = tauriFilesystemApi.onSearchFileNamesDone((event) => {

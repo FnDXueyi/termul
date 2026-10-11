@@ -331,6 +331,7 @@ fn search_file_names_batch_event_omits_truncated_when_none() {
         files: vec![SearchFileHit {
             path: "a".to_string(),
             ignored: false,
+            kind: None,
         }],
         truncated: None,
     };
@@ -342,6 +343,7 @@ fn search_file_names_batch_event_omits_truncated_when_none() {
         files: vec![SearchFileHit {
             path: "a".to_string(),
             ignored: false,
+            kind: None,
         }],
         truncated: Some(true),
     };
@@ -386,24 +388,29 @@ fn rank_search_hits_puts_non_ignored_first_and_caps_total() {
         SearchFileHit {
             path: "a".to_string(),
             ignored: false,
+            kind: None,
         },
         SearchFileHit {
             path: "b".to_string(),
             ignored: false,
+            kind: None,
         },
     ];
     let ignored = vec![
         SearchFileHit {
             path: "c".to_string(),
             ignored: true,
+            kind: None,
         },
         SearchFileHit {
             path: "d".to_string(),
             ignored: true,
+            kind: None,
         },
         SearchFileHit {
             path: "e".to_string(),
             ignored: true,
+            kind: None,
         },
     ];
     // cap=3 → all non-ignored (2) + one ignored.
@@ -430,10 +437,12 @@ fn rank_search_hits_puts_non_ignored_first_and_caps_total() {
             SearchFileHit {
                 path: "a".to_string(),
                 ignored: false,
+                kind: None,
             },
             SearchFileHit {
                 path: "b".to_string(),
                 ignored: false,
+                kind: None,
             },
         ],
         vec![],
