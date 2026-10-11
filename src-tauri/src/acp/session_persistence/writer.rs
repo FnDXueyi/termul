@@ -315,6 +315,16 @@ pub(super) fn append_record(
             current.title_source = Some(TitleSource::AgentSupplied);
         }
     }
+    if let Some(snapshot) = super::model::snapshot_from_record(&record) {
+        // CAP-3: every model change source (host set_model / set_config_option,
+        // agent-initiated updates) reaches here as a durable
+        // `config_options_update`. Unparseable options keep the old value.
+        let changed = super::model::apply_snapshot(&mut current, snapshot);
+        log::debug!(
+            "[acp-history] model derived from config_options_update changed={changed} session={}",
+            crate::logging::redact_session_id(&record.session_id)
+        );
+    }
     Ok(())
 }
 
