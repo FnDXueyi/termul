@@ -4,112 +4,27 @@ import { logFrontendError } from '@/lib/log-api'
 import { captureShellLayoutAtLoad } from '@/lib/shell-layout-mode'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
-import { useSidebarStore } from '@/stores/sidebar-store'
-import { useSSHPanelStore } from '@/stores/ssh-panel-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
+import { setSidebarVisible } from '@/stores/sidebar-store'
+import { setSSHPanelVisible } from '@/stores/ssh-panel-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import type { AppPanelVisibilitySettingKey, AppSettings, AppSettingsUpdate } from '@/types/settings'
 import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
 
 type PanelSettingKey = AppPanelVisibilitySettingKey
 
-type PanelWriteRequest = {
-  panel: PanelSettingKey
-  visible: boolean
-  requestId: number
-  revision: number
-}
-
-let panelWriteChain: Promise<void> = Promise.resolve()
-const panelWriteRequestIds: Record<PanelSettingKey, number> = {
-  sidebarVisible: 0,
-  fileExplorerVisible: 0,
-  sshPanelVisible: 0
-}
-let panelWriteRevision = 0
-let lastSuccessfulPanelWriteRevision = 0
-let persistedPanelSettingsSnapshot: AppSettings = { ...DEFAULT_APP_SETTINGS }
-let pendingPanelWriteCount = 0
-let pendingPanelWriteWaiters: Array<() => void> = []
-
-function notifyPanelWriteSettled(): void {
-  if (pendingPanelWriteCount === 0 && pendingPanelWriteWaiters.length > 0) {
-    const waiters = pendingPanelWriteWaiters
-    pendingPanelWriteWaiters = []
-    waiters.forEach((resolve) => {
-      resolve()
-    })
+function applyPanelVisibility(panel: PanelSettingKey, visible: boolean): void {
+  if (panel === 'sidebarVisible') {
+    setSidebarVisible(visible)
+  } else if (panel === 'sshPanelVisible') {
+    setSSHPanelVisible(visible)
+  } else {
+    useShellLayoutStore.getState().setSidePanelVisible(visible)
   }
 }
 
-function syncPersistedPanelSettingsSnapshot(settings: AppSettings): void {
-  persistedPanelSettingsSnapshot = { ...settings }
-}
-
-function buildPanelWriteSnapshot(request: PanelWriteRequest): AppSettings {
-  const currentSettings = useAppSettingsStore.getState().settings
-
-  return {
-    ...currentSettings,
-    sidebarVisible: persistedPanelSettingsSnapshot.sidebarVisible,
-    fileExplorerVisible: persistedPanelSettingsSnapshot.fileExplorerVisible,
-    sshPanelVisible: persistedPanelSettingsSnapshot.sshPanelVisible,
-    [request.panel]: request.visible
-  }
-}
-
-function enqueuePanelWrite(request: PanelWriteRequest): Promise<void> {
-  pendingPanelWriteCount += 1
-  const run = panelWriteChain.then(async () => {
-    const settingsSnapshot = buildPanelWriteSnapshot(request)
-    const result = await persistenceApi.write(APP_SETTINGS_KEY, settingsSnapshot)
-
-    if (!result.success) {
-      const isLatestPanelRequest = panelWriteRequestIds[request.panel] === request.requestId
-      const canRollbackToLastPersistedValue = request.revision > lastSuccessfulPanelWriteRevision
-
-      if (isLatestPanelRequest && canRollbackToLastPersistedValue) {
-        const rollbackValue = persistedPanelSettingsSnapshot[request.panel]
-        useAppSettingsStore.getState().updateSetting(request.panel, rollbackValue)
-        applyPanelVisibilityToUi(request.panel, rollbackValue)
-      }
-
-      throw new Error(result.error || `Failed to persist ${request.panel}`)
-    }
-
-    syncPersistedPanelSettingsSnapshot(settingsSnapshot)
-    lastSuccessfulPanelWriteRevision = request.revision
-  })
-  panelWriteChain = run.catch(() => undefined)
-
-  return run.finally(() => {
-    pendingPanelWriteCount = Math.max(0, pendingPanelWriteCount - 1)
-    notifyPanelWriteSettled()
-  })
-}
-
-export async function waitForPendingAppSettingsPersistence(): Promise<void> {
-  await panelWriteChain.catch(() => undefined)
-
-  if (pendingPanelWriteCount === 0) {
-    return
-  }
-
-  await new Promise<void>((resolve) => {
-    pendingPanelWriteWaiters.push(resolve)
-  })
-}
-
+/** @internal Test-only: legacy name kept for existing suites; disarms the orphan retry. */
 export function resetAppSettingsPersistenceQueueForTests(): void {
-  panelWriteChain = Promise.resolve()
-  panelWriteRequestIds.sidebarVisible = 0
-  panelWriteRequestIds.fileExplorerVisible = 0
-  panelWriteRequestIds.sshPanelVisible = 0
-  panelWriteRevision = 0
-  lastSuccessfulPanelWriteRevision = 0
-  persistedPanelSettingsSnapshot = { ...DEFAULT_APP_SETTINGS }
-  pendingPanelWriteCount = 0
-  pendingPanelWriteWaiters = []
   disposeOrphanDetectionRetryForTests()
 }
 
@@ -118,20 +33,6 @@ export function disposeOrphanDetectionRetryForTests(): void {
   orphanDetectionRetryArmed = false
   orphanDetectionRetryUnsubscribe?.()
   orphanDetectionRetryUnsubscribe = undefined
-}
-
-function applyPanelVisibilityToUi(panel: PanelSettingKey, visible: boolean): void {
-  if (panel === 'sidebarVisible') {
-    useSidebarStore.getState().setVisible(visible)
-    return
-  }
-
-  if (panel === 'sshPanelVisible') {
-    useSSHPanelStore.getState().setVisible(visible)
-    return
-  }
-
-  useFileExplorerStore.getState().setVisible(visible)
 }
 
 /** Whether the one-shot post-attach orphan-detection retry is armed. */
@@ -255,12 +156,6 @@ export function useAppSettingsLoader(): void {
         captureShellLayoutAtLoad(settings.shellLayout)
       }
 
-      syncPersistedPanelSettingsSnapshot(settings)
-
-      useSidebarStore.getState().setVisible(settings.sidebarVisible)
-      useFileExplorerStore.getState().setVisible(settings.fileExplorerVisible)
-      useSSHPanelStore.getState().setVisible(settings.sshPanelVisible)
-
       // Apply orphan detection settings to PtyManager after settings load.
       // QA round 2 / spec story 5: the server now ACCEPTS this push on any
       // authed connection (even with zero terminals attached), so the
@@ -341,29 +236,18 @@ export function useUpdateAppSettings(): (updates: AppSettingsUpdate) => Promise<
   )
 }
 
+/**
+ * Panel visibility lives in the shell-layout store (single owner); this hook
+ * only dispatches to its actions, which keep their own hydration gate and
+ * persistence. It never reads or writes `AppSettings`.
+ */
 export function useUpdatePanelVisibility(): (
   panel: PanelSettingKey,
   visible: boolean
 ) => Promise<void> {
-  const updateSetting = useAppSettingsStore((state) => state.updateSetting)
-
-  return useCallback(
-    async (panel: PanelSettingKey, visible: boolean) => {
-      const requestId = ++panelWriteRequestIds[panel]
-      const request: PanelWriteRequest = {
-        panel,
-        visible,
-        requestId,
-        revision: ++panelWriteRevision
-      }
-
-      updateSetting(panel, visible)
-      applyPanelVisibilityToUi(panel, visible)
-
-      return enqueuePanelWrite(request)
-    },
-    [updateSetting]
-  )
+  return useCallback(async (panel: PanelSettingKey, visible: boolean) => {
+    applyPanelVisibility(panel, visible)
+  }, [])
 }
 
 export function useResetAppSettings(): () => Promise<void> {
@@ -371,14 +255,12 @@ export function useResetAppSettings(): () => Promise<void> {
 
   return useCallback(async () => {
     resetToDefaults()
-    useSidebarStore.getState().setVisible(DEFAULT_APP_SETTINGS.sidebarVisible)
-    useFileExplorerStore.getState().setVisible(DEFAULT_APP_SETTINGS.fileExplorerVisible)
-    useSSHPanelStore.getState().setVisible(DEFAULT_APP_SETTINGS.sshPanelVisible)
+    // Reset reopens all three panels, through the shell-layout actions.
+    applyPanelVisibility('sidebarVisible', DEFAULT_APP_SETTINGS.sidebarVisible)
+    applyPanelVisibility('fileExplorerVisible', DEFAULT_APP_SETTINGS.fileExplorerVisible)
+    applyPanelVisibility('sshPanelVisible', DEFAULT_APP_SETTINGS.sshPanelVisible)
 
-    const result = await persistenceApi.write(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
-    if (result.success) {
-      syncPersistedPanelSettingsSnapshot(DEFAULT_APP_SETTINGS)
-    }
+    await persistenceApi.write(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
     // Clear the in-process ACP timeout overrides too (mirrors the load
     // hook's push, so a reset doesn't leave stale overrides in the Rust core).
     try {
