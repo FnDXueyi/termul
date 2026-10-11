@@ -80,6 +80,7 @@ import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
 import { checkWebAuthGate, getWebAuthGateState, useWebAuthGate } from '@/lib/web-auth-gate'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { getDefaultCwdForProject } from '@/lib/worktree-context'
 import { useAcpStore } from '@/stores/acp-store'
 import {
@@ -575,27 +576,40 @@ export default function WorkspaceLayout(): React.JSX.Element {
   /** Close the active tab (reused by keyboard shortcut and native menu event). */
   const closeActiveTab = useCallback(() => {
     if (!activeTab) return
-    if (activeTab.type === 'editor') {
-      const fileState = useEditorStore.getState().openFiles.get(activeTab.filePath)
-      if (fileState?.isDirty) {
-        setDirtyCloseFilePath(activeTab.filePath)
-      } else {
-        const didClose = useEditorStore.getState().closeFileIfIdle(activeTab.filePath)
-        if (didClose) {
-          useWorkspaceStore.getState().removeTab(activeTab.id)
+    switch (activeTab.type) {
+      case 'editor': {
+        const fileState = useEditorStore.getState().openFiles.get(activeTab.filePath)
+        if (fileState?.isDirty) {
+          setDirtyCloseFilePath(activeTab.filePath)
+        } else {
+          const didClose = useEditorStore.getState().closeFileIfIdle(activeTab.filePath)
+          if (didClose) {
+            useWorkspaceStore.getState().removeTab(activeTab.id)
+          }
         }
+        break
       }
-    } else if (activeTab.type === 'git' || activeTab.type === 'git-history') {
-      useWorkspaceStore.getState().removeTab(activeTab.id)
-    } else if (activeTab.type === 'terminal') {
-      handleCloseTerminalRef.current?.(activeTab.terminalId, activeTab.id)
-    } else if (activeTab.type === 'browser') {
-      useBrowserSessionStore.getState().removeTab(activeTab.browserTabId)
-      useWorkspaceStore.getState().removeTab(activeTab.id)
-    } else if (activeTab.type === 'agent-chat') {
-      requestCloseAgentChat(activeTab.sessionId, () => {
+      case 'git':
+      case 'git-history':
         useWorkspaceStore.getState().removeTab(activeTab.id)
-      })
+        break
+      case 'terminal':
+        handleCloseTerminalRef.current?.(activeTab.terminalId, activeTab.id)
+        break
+      case 'browser':
+        useBrowserSessionStore.getState().removeTab(activeTab.browserTabId)
+        useWorkspaceStore.getState().removeTab(activeTab.id)
+        break
+      case 'agent-chat':
+        requestCloseAgentChat(activeTab.sessionId, () => {
+          useWorkspaceStore.getState().removeTab(activeTab.id)
+        })
+        break
+      case 'canvas':
+        // Unchanged: canvas has no keyboard/menu close path here.
+        break
+      default:
+        reportUnknownTabKind(activeTab, 'WorkspaceLayout.closeActiveTab', 'not closed')
     }
   }, [activeTab])
 

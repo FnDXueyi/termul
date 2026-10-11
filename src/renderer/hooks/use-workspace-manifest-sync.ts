@@ -37,6 +37,7 @@ import { isTerminalRestoreInProgress } from '@/hooks/useTerminalAutoSave'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import { workspaceManifestApi } from '@/lib/workspace-manifest-api'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAcpStore } from '@/stores/acp-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useTerminalStore } from '@/stores/terminal-store'
@@ -129,20 +130,32 @@ export function buildPortableManifest(projectId: string): WorkspaceManifest {
 }
 
 /** Serialize the workspace tree into the manifest's portable PaneNode shape. */
-function serializeTopologyForManifest(node: PaneNode): PortablePaneNode {
+export function serializeTopologyForManifest(node: PaneNode): PortablePaneNode {
   if (node.type === 'leaf') {
     const terminalIds: string[] = []
     const editorIds: string[] = []
     for (const tab of node.tabs) {
-      if (tab.type === 'terminal') {
-        terminalIds.push(tab.terminalId)
-      } else if (tab.type === 'editor') {
-        editorIds.push(tab.id)
+      switch (tab.type) {
+        case 'terminal':
+          terminalIds.push(tab.terminalId)
+          break
+        case 'editor':
+          editorIds.push(tab.id)
+          break
+        case 'browser':
+        case 'git':
+        case 'agent-chat':
+        case 'git-history':
+          // Non-portable: dropped (see WORKSPACE_TAB_KIND_TRAITS).
+          break
+        case 'canvas':
+          // Dropped too — the daemon's `.op` doc + the canvas tab are
+          // host-local runtime state, never a portable manifest projection
+          // (the canvas re-opens user-initiated, never auto-restored).
+          break
+        default:
+          reportUnknownTabKind(tab, 'useWorkspaceManifestSync.serializeTopology', 'not synced')
       }
-      // browser / git / agent-chat / git-history: dropped (non-portable).
-      // canvas: dropped too — the daemon's `.op` doc + the canvas tab are
-      // host-local runtime state, never a portable manifest projection
-      // (the canvas re-opens user-initiated, never auto-restored).
     }
     return {
       type: 'leaf',
