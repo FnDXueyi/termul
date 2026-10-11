@@ -1,3 +1,4 @@
+import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { Kbd } from '@/components/ui/kbd'
 import { QUIET_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -44,7 +45,8 @@ export function RailRow({
       }}
       className={cn(
         QUIET_ICON_BUTTON_CLASS,
-        'flex h-8 w-full shrink-0 justify-start gap-2 rounded-lg px-2 text-xs font-medium disabled:pointer-events-none disabled:opacity-40',
+        RAIL_ROW_INSET_CLASS,
+        'flex h-8 w-full shrink-0 justify-start rounded-lg text-xs font-medium disabled:pointer-events-none disabled:opacity-40',
         pressed && 'keycap text-foreground'
       )}
       aria-label={accessibleName}
@@ -52,7 +54,9 @@ export function RailRow({
       aria-disabled={disabled || undefined}
       disabled={disabled}
     >
-      <span className="inline-flex size-4 shrink-0 items-center justify-center">{icon}</span>
+      <span data-rail-icon-column className={RAIL_ICON_BOX_CLASS}>
+        {icon}
+      </span>
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
       {chip && <Kbd className="inline-flex h-4.5 shrink-0 items-center px-1">{chip}</Kbd>}
     </button>

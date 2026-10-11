@@ -10,6 +10,7 @@ import type { Project, ProjectGroup } from '@/types/project'
 import { ArchivedProjectItem } from './archived-project-item'
 import type { ProjectRowStatus } from './indicators'
 import { ProjectItem } from './project-item'
+import { RailGroupRow } from './rail-group-row'
 import { RailProjectItem } from './rail-project-item'
 
 export interface ProjectListProps {
@@ -113,7 +114,8 @@ export function ProjectList({
   // One draggable active-project row, shared by grouped and ungrouped lists.
   // Dropping on a folder header or group container moves the project there.
   // The rail row also watches git for its diff stat; the classic row never does.
-  const Item = variant === 'rail' ? RailProjectItem : ProjectItem
+  const isRail = variant === 'rail'
+  const Item = isRail ? RailProjectItem : ProjectItem
   const renderProjectRow = (project: Project): React.JSX.Element => {
     const shortcutIndex = activeIndexById.get(project.id) ?? -1
     return (
@@ -232,79 +234,113 @@ export function ProjectList({
                     layout="position"
                     className="list-none"
                   >
-                    <div className="flex flex-col gap-0.5">
+                    <div
+                      className={cn(
+                        'flex flex-col gap-0.5',
+                        // Rail: an expanded group and its projects share one
+                        // soft surface; the rows keep the shared icon column.
+                        isRail && !isCollapsed && '-mx-1 rounded-lg bg-foreground/[0.03] px-1 pb-1'
+                      )}
+                      data-testid={isRail ? `rail-group-${group.id}` : undefined}
+                    >
                       {/* Folder Header */}
-                      <ContextMenu>
-                        <ContextMenuTrigger asChild>
-                          <div
-                            onClick={() => toggleGroupCollapse(group.id)}
-                            onContextMenu={onRowContextMenu}
-                            role="button"
-                            tabIndex={0}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault()
-                                toggleGroupCollapse(group.id)
-                              }
-                            }}
-                            className={cn(
-                              'flex h-8 w-full cursor-pointer select-none items-center gap-1.5 rounded-md pl-1 pr-1.5 text-left text-xs',
-                              'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                              activeDragOverGroupId === group.id
-                                ? 'bg-primary/10 ring-1 ring-inset ring-primary/60'
-                                : 'hover:bg-foreground/[0.03]'
-                            )}
-                            data-group-id={group.id}
-                          >
-                            <span className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
-                              {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                            </span>
-                            <span
+                      {isRail ? (
+                        <RailGroupRow
+                          group={group}
+                          leadProject={gpProjects[0]}
+                          isCollapsed={Boolean(isCollapsed)}
+                          isDragOver={activeDragOverGroupId === group.id}
+                          isEditing={editingGroupId === group.id}
+                          editName={editGroupName}
+                          onEditNameChange={setEditGroupName}
+                          onCommitRename={() => {
+                            if (editGroupName.trim()) {
+                              renameGroup(group.id, editGroupName.trim())
+                            }
+                            setEditingGroupId(null)
+                          }}
+                          onCancelRename={() => setEditingGroupId(null)}
+                          onToggle={() => toggleGroupCollapse(group.id)}
+                          onContextMenu={onRowContextMenu}
+                          menu={renderGroupContextMenu(group)}
+                        />
+                      ) : (
+                        <ContextMenu>
+                          <ContextMenuTrigger asChild>
+                            <div
+                              onClick={() => toggleGroupCollapse(group.id)}
+                              onContextMenu={onRowContextMenu}
+                              role="button"
+                              tabIndex={0}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  toggleGroupCollapse(group.id)
+                                }
+                              }}
                               className={cn(
-                                'inline-flex size-4 shrink-0 items-center justify-center',
-                                group.color
-                                  ? getColorClasses(group.color).text
-                                  : 'text-muted-foreground'
+                                'flex h-8 w-full cursor-pointer select-none items-center gap-1.5 rounded-md pl-1 pr-1.5 text-left text-xs',
+                                'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                                activeDragOverGroupId === group.id
+                                  ? 'bg-primary/10 ring-1 ring-inset ring-primary/60'
+                                  : 'hover:bg-foreground/[0.03]'
                               )}
+                              data-group-id={group.id}
                             >
-                              {isCollapsed ? <Folder size={14} /> : <FolderOpen size={14} />}
-                            </span>
-                            {editingGroupId === group.id ? (
-                              <input
-                                type="text"
-                                value={editGroupName}
-                                onChange={(e) => setEditGroupName(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
+                              <span className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
+                                {isCollapsed ? (
+                                  <ChevronRight size={12} />
+                                ) : (
+                                  <ChevronDown size={12} />
+                                )}
+                              </span>
+                              <span
+                                className={cn(
+                                  'inline-flex size-4 shrink-0 items-center justify-center',
+                                  group.color
+                                    ? getColorClasses(group.color).text
+                                    : 'text-muted-foreground'
+                                )}
+                              >
+                                {isCollapsed ? <Folder size={14} /> : <FolderOpen size={14} />}
+                              </span>
+                              {editingGroupId === group.id ? (
+                                <input
+                                  type="text"
+                                  value={editGroupName}
+                                  onChange={(e) => setEditGroupName(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      if (editGroupName.trim()) {
+                                        renameGroup(group.id, editGroupName.trim())
+                                      }
+                                      setEditingGroupId(null)
+                                    } else if (e.key === 'Escape') {
+                                      setEditingGroupId(null)
+                                    }
+                                  }}
+                                  onBlur={() => {
                                     if (editGroupName.trim()) {
                                       renameGroup(group.id, editGroupName.trim())
                                     }
                                     setEditingGroupId(null)
-                                  } else if (e.key === 'Escape') {
-                                    setEditingGroupId(null)
-                                  }
-                                }}
-                                onBlur={() => {
-                                  if (editGroupName.trim()) {
-                                    renameGroup(group.id, editGroupName.trim())
-                                  }
-                                  setEditingGroupId(null)
-                                }}
-                                className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none"
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            ) : (
-                              <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                                {group.name}
+                                  }}
+                                  className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none"
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              ) : (
+                                <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                                  {group.name}
+                                </span>
+                              )}
+                              <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
+                                {gpProjects.length}
                               </span>
-                            )}
-                            <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-                              {gpProjects.length}
-                            </span>
-                          </div>
-                        </ContextMenuTrigger>
-                        {renderGroupContextMenu(group)}
-                      </ContextMenu>
+                            </div>
+                          </ContextMenuTrigger>
+                          {renderGroupContextMenu(group)}
+                        </ContextMenu>
+                      )}
 
                       {/* Projects in Group */}
                       <CollapseExpandMotion
@@ -320,7 +356,7 @@ export function ProjectList({
                               reordered.map((p) => p.id)
                             )
                           }}
-                          className="flex flex-col gap-0.5 pl-4"
+                          className={cn('flex flex-col gap-0.5', !isRail && 'pl-4')}
                           data-group-container-id={group.id}
                         >
                           {gpProjects.map(renderProjectRow)}
