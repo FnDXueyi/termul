@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { isGitWriteBlocked } from '@/lib/active-working-copy'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
 import { normalizePath } from '@/lib/working-copy'
 import { useAcpStore } from '@/stores/acp-store'
 import { useGitStatusStore } from '@/stores/git-status-store'
+import { useProjectStore } from '@/stores/project-store'
 
 const MAX_COMMIT_MESSAGE_DIFF_CHARS = 120_000
 
@@ -48,7 +50,12 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
 
   const commitContext = commitContexts[normalizePath(cwd)] ?? null
 
-  const [isMutating, setIsMutating] = useState(false)
+  const [mutationInFlight, setIsMutating] = useState(false)
+  // A cwd that is unresolved for its project (a worktree no longer listed)
+  // refuses git writes in the store; surface it as the busy/disabled state.
+  const projects = useProjectStore((state) => state.projects)
+  const writesBlocked = isGitWriteBlocked(cwd, projects)
+  const isMutating = mutationInFlight || writesBlocked
 
   // Discard is confirmed through the app dialog; remember what it targets.
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false)
@@ -275,6 +282,7 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
     agentConfigs.some((config) => config.id === selectedAgentConfigId)
   const canGenerate = stagedCount > 0 && !isGenerating && !isCommitting && !isPushing && !isMutating
   const canCommit =
+    !writesBlocked &&
     summary.trim().length > 0 &&
     !isCommitting &&
     !isGenerating &&

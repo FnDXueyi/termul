@@ -12,7 +12,8 @@
  * - worktreeSwitchRoot: Switch to project root
  * - worktreeMergeToMain: Open merge preview
  * - worktreeArchive: Archive active worktree
- * - worktreeOpenTerminal: Open terminal in worktree CWD
+ * - worktreeOpenTerminal: Dispatch `OPEN_TERMINAL`; `useTabOpeners` handles it by opening a
+ *   terminal at the active working copy (it never writes the switcher pick)
  * - worktreeSyncMain: Sync main into worktree (future)
  */
 
@@ -152,7 +153,7 @@ export function useWorktreeShortcuts(): void {
         return
       }
 
-      // Open terminal in worktree CWD
+      // Open a terminal at the active working copy (handled by useTabOpeners)
       if (matchesShortcut(e, getActiveKey('worktreeOpenTerminal'))) {
         e.preventDefault()
         dispatchWorktreeEvent(WORKTREE_EVENTS.OPEN_TERMINAL, { projectId: activeProjectId })

@@ -87,6 +87,10 @@ vi.mock('@/lib/platform', async () => {
   }
 })
 
+// The shell resolves its working copy through the (heavily mocked) stores;
+// these suites exercise layout behaviour, so resolve to the project folder.
+vi.mock('@/hooks/use-active-working-copy', () => ({ useActiveWorkingCopy: () => null }))
+
 vi.mock('@/stores/project-store', () => ({
   useProjectsLoaded: () => true,
   useProjects: () => [projectRef.current],
@@ -101,17 +105,22 @@ vi.mock('@/stores/project-store', () => ({
     restoreProject: vi.fn(),
     reorderProjects: vi.fn()
   }),
-  useProjectStore: Object.assign(vi.fn(), {
-    getState: () => ({
-      // Story 6: `getDefaultCwdForProject` reads `useProjectStore.getState()`
-      // to resolve the main project root for git-history tabs — return the
-      // same project the hooks see so the drawer repro creates a real tab.
-      projects: [projectRef.current],
-      activeProjectId: 'p1',
-      isLoaded: true,
-      isWorktreeOperationLocked: false
-    })
-  })
+  useProjectStore: Object.assign(
+    vi.fn((selector?: (s: unknown) => unknown) =>
+      selector ? selector({ projects: [projectRef.current], activeProjectId: 'p1' }) : undefined
+    ),
+    {
+      getState: () => ({
+        // Story 6: `getDefaultCwdForProject` reads `useProjectStore.getState()`
+        // to resolve the main project root for git-history tabs — return the
+        // same project the hooks see so the drawer repro creates a real tab.
+        projects: [projectRef.current],
+        activeProjectId: 'p1',
+        isLoaded: true,
+        isWorktreeOperationLocked: false
+      })
+    }
+  )
 }))
 
 vi.mock('@/stores/terminal-store', () => ({
@@ -310,6 +319,7 @@ const { gitState } = vi.hoisted(() => ({
     selectedFile: null,
     setSelectedFile: vi.fn(),
     refreshStatus: vi.fn(),
+    refreshWorkingCopy: vi.fn(),
     fetchDiff: vi.fn(),
     stageFiles: vi.fn(),
     unstageFiles: vi.fn(),
@@ -332,6 +342,8 @@ const { gitState } = vi.hoisted(() => ({
 }))
 vi.mock('@/stores/git-status-store', () => ({
   diffKey: (cwd: string, path: string, staged: boolean) => `${cwd}:${path}:${staged}`,
+  selectGitBranch: () => () => null,
+  countGitStatuses: () => ({ modified: 0, staged: 0, untracked: 0, hasChanges: false }),
   useGitStatusStore: (selector: (s: Record<string, unknown>) => unknown) => selector(gitState)
 }))
 

@@ -1,9 +1,12 @@
 /**
- * Worktree context utilities for terminal and file explorer integration.
+ * Worktree context utilities.
  *
- * `getDefaultCwdForProject` resolves the main project root for new terminals
- * and ACP sessions; worktree-isolated chats override their cwd explicitly.
- * The remaining helpers power the worktree indicator and file-explorer root.
+ * `getProjectRootPath` / `getDefaultCwdForProject` resolve the main project
+ * root for ACP sessions, skills and terminal restore; worktree-isolated chats
+ * override their cwd explicitly. The Explorer root, git tab, Status bar and
+ * new-terminal cwd follow the active working copy instead
+ * (`lib/active-working-copy.ts`). The remaining helpers power the worktree
+ * indicator and symlink setup.
  */
 
 import { activeWorktreeOf } from '@/lib/active-worktree'
@@ -71,15 +74,6 @@ export function getWorktreeContextLabel(project: Project): string {
 export function getWorktreeTabContext(projectId: string): string | null {
   const worktree = getActiveWorktreeForProject(projectId)
   return worktree?.name ?? null
-}
-
-/**
- * Get the active worktree root path for a project, if any.
- * Returns the worktree path if an active worktree is set, or null if on project root.
- * This is useful for the file explorer to root at the worktree path.
- */
-export function getActiveWorktreeRoot(projectId: string): string | null {
-  return getActiveWorktreeForProject(projectId)?.path ?? null
 }
 
 /**
