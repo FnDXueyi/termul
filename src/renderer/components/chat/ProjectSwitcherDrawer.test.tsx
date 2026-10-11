@@ -86,8 +86,7 @@ const projects = [
     isArchived: false,
     isActive: true,
     envVars: [],
-    worktrees: [],
-    activeWorktreeId: null
+    worktrees: []
   },
   {
     id: 'p2',
@@ -97,8 +96,7 @@ const projects = [
     isArchived: true,
     isActive: false,
     envVars: [],
-    worktrees: [],
-    activeWorktreeId: null
+    worktrees: []
   },
   {
     id: 'p3',
@@ -108,8 +106,7 @@ const projects = [
     isArchived: false,
     isActive: false,
     envVars: [],
-    worktrees: [],
-    activeWorktreeId: null
+    worktrees: []
   }
 ]
 
@@ -497,8 +494,7 @@ describe('ProjectSwitcherDrawer', () => {
       isArchived: false,
       isActive: false,
       envVars: [],
-      worktrees: [],
-      activeWorktreeId: null
+      worktrees: []
     }
     const sheetProjects = [
       { ...base, id: 'p1', name: 'Alpha', path: '/a', isActive: true, isDefault: true },

@@ -1,6 +1,10 @@
 import type { IpcResult } from '@shared/types/ipc.types'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  getShellLayoutActiveAtLoad,
+  resetShellLayoutActiveAtLoadForTests
+} from '@/lib/shell-layout-mode'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useFileExplorerStore } from '@/stores/file-explorer-store'
 import { useSidebarStore } from '@/stores/sidebar-store'
@@ -369,6 +373,51 @@ describe('use-app-settings', () => {
       APP_SETTINGS_KEY,
       expect.objectContaining({ terminalFontSize: 16 })
     )
+  })
+
+  describe('shell layout flag (story 12)', () => {
+    beforeEach(() => {
+      resetShellLayoutActiveAtLoadForTests()
+    })
+
+    it('keeps shellLayout out of the defaults and captures the mode active at load', async () => {
+      expect('shellLayout' in DEFAULT_APP_SETTINGS).toBe(false)
+      mockPersistenceRead.mockResolvedValueOnce({
+        success: true,
+        data: { ...DEFAULT_APP_SETTINGS, shellLayout: 'revamp' }
+      })
+
+      renderHook(() => useAppSettingsLoader())
+
+      await waitFor(() => {
+        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
+      })
+      expect(useAppSettingsStore.getState().settings.shellLayout).toBe('revamp')
+      expect(getShellLayoutActiveAtLoad()).toBe('revamp')
+    })
+
+    it('captures the code default when no record exists', async () => {
+      mockPersistenceRead.mockResolvedValueOnce({ success: false, code: 'KEY_NOT_FOUND' })
+
+      renderHook(() => useAppSettingsLoader())
+
+      await waitFor(() => {
+        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
+      })
+      expect(useAppSettingsStore.getState().settings.shellLayout).toBeUndefined()
+      expect(getShellLayoutActiveAtLoad()).toBe('classic')
+    })
+
+    it('persists the flag through the debounced settings write', async () => {
+      const { result } = renderHook(() => useUpdateAppSetting())
+
+      await result.current('shellLayout', 'revamp')
+
+      expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
+        APP_SETTINGS_KEY,
+        expect.objectContaining({ shellLayout: 'revamp' })
+      )
+    })
   })
 
   describe('terminal screen reader mode (L-28)', () => {

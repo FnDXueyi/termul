@@ -131,8 +131,7 @@ beforeEach(() => {
         path: '/work',
         gitBranch: 'main',
         isGitRepo: true,
-        worktrees: [],
-        activeWorktreeId: null
+        worktrees: []
       }
     ],
     activeProjectId: 'p1'

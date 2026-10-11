@@ -19,10 +19,11 @@
  * `list` calls.
  */
 
-import { normalizeCwdForScope } from '@/lib/acp-history-persistence'
 import { logFrontendError } from '@/lib/log-api'
+import { normalizePath } from '@/lib/working-copy'
 import { worktreeApi } from '@/lib/worktree-api'
 import { useProjectStore } from '@/stores/project-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project, Worktree } from '@/types/project'
 
 export type ReconcileOutcome = 'updated' | 'unchanged' | 'skipped' | 'failed'
@@ -42,19 +43,13 @@ export interface ListedWorktree {
 
 const LOG_PREFIX = '[worktree-reconcile]'
 
-const WINDOWS_DRIVE_RE = /^[a-zA-Z]:/
-
 /**
- * Canonical comparison key for a filesystem path: separator/verbatim-prefix/
- * trailing-slash normalized, and lower-cased for Windows drive/UNC paths
- * (case-insensitive file systems). Kept in ONE place so it can later be swapped
- * for the shared working-copy `normalizePath`.
+ * Canonical comparison key for a filesystem path: the shared working-copy
+ * `normalizePath` (separator/verbatim-prefix/trailing-slash normalized, dot
+ * segments resolved, lower-cased for Windows drive/UNC paths). Also the form
+ * the Workspace-switcher pick is stored in.
  */
-export function worktreeKey(path: string): string {
-  const normalized = normalizeCwdForScope(path)
-  const isWindowsPath = WINDOWS_DRIVE_RE.test(normalized) || normalized.startsWith('//')
-  return isWindowsPath ? normalized.toLowerCase() : normalized
-}
+export const worktreeKey = normalizePath
 
 /** cyrb53 string hash: stable, dependency-free, 53 bits. */
 function hashString(input: string, seed = 0): number {
@@ -218,17 +213,24 @@ async function runOnce(projectId: string): Promise<ReconcileOutcome> {
     if (listChanged && !(current.worktrees === undefined && merged.worktrees.length === 0)) {
       patch.worktrees = merged.worktrees
     }
-    const activeId = current.activeWorktreeId
-    if (activeId && !merged.worktrees.some((w) => w.id === activeId)) {
-      patch.activeWorktreeId = null
-    }
     if (current.isGitRepo !== true) patch.isGitRepo = true
 
-    if (Object.keys(patch).length === 0) {
+    // The switcher pick (shell-layout store) is cleared when the successful
+    // listing no longer names it. A listed-but-disabled worktree keeps its pick.
+    const shell = useShellLayoutStore.getState()
+    const pick = shell.worktreePickByProject[projectId]
+    const pickPruned =
+      pick !== undefined && !merged.worktrees.some((w) => worktreeKey(w.path) === pick)
+
+    if (Object.keys(patch).length === 0 && !pickPruned) {
       console.debug(`${LOG_PREFIX} unchanged project=${projectId} count=${merged.worktrees.length}`)
       return 'unchanged'
     }
-    useProjectStore.getState().updateProject(projectId, patch)
+    if (Object.keys(patch).length > 0) useProjectStore.getState().updateProject(projectId, patch)
+    if (pickPruned) {
+      shell.setWorktreePick(projectId, null)
+      console.debug(`${LOG_PREFIX} cleared pruned pick project=${projectId}`)
+    }
     console.debug(
       `${LOG_PREFIX} ok project=${projectId} added=${merged.added} updated=${merged.updated} removed=${merged.removed}`
     )

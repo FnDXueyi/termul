@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi, terminalApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
+import { captureShellLayoutAtLoad } from '@/lib/shell-layout-mode'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useFileExplorerStore } from '@/stores/file-explorer-store'
@@ -244,12 +245,14 @@ export function useAppSettingsLoader(): void {
         }
 
         setSettings(settings)
+        captureShellLayoutAtLoad(settings.shellLayout)
         if (shouldPersistSettings) {
           void persistenceApi.writeDebounced(APP_SETTINGS_KEY, settings)
         }
       } else {
         settings = DEFAULT_APP_SETTINGS
         setSettings(settings)
+        captureShellLayoutAtLoad(settings.shellLayout)
       }
 
       syncPersistedPanelSettingsSnapshot(settings)
