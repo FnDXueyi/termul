@@ -5,6 +5,7 @@ import * as gitApiModule from '@/lib/git-api'
 import { resetProjectStore, resetTerminalStore } from '@/lib/test-utils/store'
 import { mockTerminal } from '@/lib/test-utils/terminal'
 import {
+  countGitStatuses,
   deepestTrackedKey,
   diffKey,
   resetGitStatusStoreControlForTests,
@@ -28,6 +29,8 @@ vi.mock('@/lib/git-api', () => ({
     stage: vi.fn(),
     unstage: vi.fn(),
     discard: vi.fn(),
+    stageHunk: vi.fn(),
+    unstageHunk: vi.fn(),
     commit: vi.fn(),
     push: vi.fn(),
     getCommitContext: vi.fn(),
@@ -603,5 +606,94 @@ describe('git-status-store refreshTracked', () => {
     gitApi.getStatus.mockRejectedValue(new Error('boom'))
     await expect(useGitStatusStore.getState().refreshTracked()).resolves.toBeUndefined()
     expect(useGitStatusStore.getState().errors['/a']?.status).toBe('boom')
+  })
+})
+
+describe('countGitStatuses', () => {
+  it('buckets modified, staged and untracked, counting a file once per bucket', () => {
+    const counts = countGitStatuses([
+      { path: 'a.ts', status: 'modified', staged: true },
+      { path: 'a.ts', status: 'modified', staged: false },
+      { path: 'a.ts', status: 'modified', staged: false },
+      { path: 'b.ts', status: 'added', staged: true },
+      { path: 'c.ts', status: 'deleted', staged: false },
+      { path: 'u.ts', status: 'untracked', staged: false }
+    ])
+    expect(counts).toEqual({ modified: 2, staged: 2, untracked: 1, hasChanges: true })
+  })
+
+  it('has no changes for an empty or missing list', () => {
+    expect(countGitStatuses([])).toEqual({
+      modified: 0,
+      staged: 0,
+      untracked: 0,
+      hasChanges: false
+    })
+    expect(countGitStatuses(undefined).hasChanges).toBe(false)
+  })
+})
+
+describe('git-status-store write block for unresolved working copies', () => {
+  const GONE = '/proj/.termul/worktrees/gone'
+
+  beforeEach(() => {
+    useProjectStore.setState({
+      projects: [{ id: 'p1', name: 'P', color: 'blue', path: '/proj', worktrees: [] } as any],
+      activeProjectId: 'p1'
+    })
+  })
+
+  afterEach(() => {
+    resetProjectStore()
+  })
+
+  it.each([
+    ['stageFile', (s: any) => s.stageFile(GONE, 'a.ts'), 'stage'],
+    ['unstageFile', (s: any) => s.unstageFile(GONE, 'a.ts'), 'unstage'],
+    ['discardFile', (s: any) => s.discardFile(GONE, 'a.ts'), 'discard'],
+    ['stageFiles', (s: any) => s.stageFiles(GONE, ['a.ts']), 'stage'],
+    ['unstageFiles', (s: any) => s.unstageFiles(GONE, ['a.ts']), 'unstage'],
+    ['discardFiles', (s: any) => s.discardFiles(GONE, ['a.ts']), 'discard'],
+    ['stageHunk', (s: any) => s.stageHunk(GONE, 'a.ts', 'patch'), 'stageHunk'],
+    ['unstageHunk', (s: any) => s.unstageHunk(GONE, 'a.ts', 'patch'), 'unstageHunk'],
+    ['commit', (s: any) => s.commit(GONE, 'msg', '', false), 'commit'],
+    ['push', (s: any) => s.push(GONE), 'push'],
+    ['stashSave', (s: any) => s.stashSave(GONE, 'm'), 'stashSave'],
+    ['stashApply', (s: any) => s.stashApply(GONE, 0), 'stashApply'],
+    ['stashPop', (s: any) => s.stashPop(GONE, 0), 'stashPop'],
+    ['stashDrop', (s: any) => s.stashDrop(GONE, 0), 'stashDrop'],
+    ['branchSwitch', (s: any) => s.branchSwitch(GONE, 'x'), 'branchSwitch'],
+    ['branchCreate', (s: any) => s.branchCreate(GONE, 'x'), 'branchCreate']
+  ])('%s throws and makes no git call', async (_name, run, apiCall) => {
+    await expect(run(useGitStatusStore.getState())).rejects.toThrow(/no longer available/)
+    expect((gitApi as Record<string, ReturnType<typeof vi.fn>>)[apiCall]).not.toHaveBeenCalled()
+    expect(gitApi.getStatus).not.toHaveBeenCalled()
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('write blocked') })
+    )
+  })
+
+  it('still writes in the project folder and in explicit paths', async () => {
+    gitApi.stage.mockResolvedValue(undefined)
+    await useGitStatusStore.getState().stageFiles('/proj', ['a.ts'])
+    await useGitStatusStore.getState().stageFiles('/somewhere/else', ['b.ts'])
+    expect(gitApi.stage).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops blocking once the worktree is listed', async () => {
+    gitApi.stage.mockResolvedValue(undefined)
+    useProjectStore.setState({
+      projects: [
+        {
+          id: 'p1',
+          name: 'P',
+          color: 'blue',
+          path: '/proj',
+          worktrees: [{ id: 'w', name: 'gone', branch: 'b', path: GONE, createdAt: '' }]
+        } as any
+      ]
+    })
+    await useGitStatusStore.getState().stageFiles(GONE, ['a.ts'])
+    expect(gitApi.stage).toHaveBeenCalledWith(GONE, 'a.ts')
   })
 })

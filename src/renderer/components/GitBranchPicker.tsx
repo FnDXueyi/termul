@@ -62,6 +62,12 @@ interface GitBranchPickerProps {
   projectId: string
   ahead?: number
   behind?: number
+  /**
+   * Called with the new branch after a successful checkout/create. When given,
+   * it replaces the default bookkeeping (`project.gitBranch` + active terminal
+   * branch), so a caller on a worktree can refresh its own cache instead.
+   */
+  onBranchChanged?: (branch: string) => void
 }
 
 export function GitBranchPicker({
@@ -69,7 +75,8 @@ export function GitBranchPicker({
   currentBranch,
   projectId,
   ahead = 0,
-  behind = 0
+  behind = 0,
+  onBranchChanged
 }: GitBranchPickerProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [branches, setBranches] = useState<BranchInfo[]>([])
@@ -203,6 +210,10 @@ export function GitBranchPicker({
   }
 
   const handleBranchChanged = (branchName: string): void => {
+    if (onBranchChanged) {
+      onBranchChanged(branchName)
+      return
+    }
     updateProject(projectId, { gitBranch: branchName })
     if (activeTerminalId) {
       updateTerminalGitBranch(activeTerminalId, branchName)

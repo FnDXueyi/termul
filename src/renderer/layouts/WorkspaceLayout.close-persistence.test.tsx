@@ -76,6 +76,7 @@ const {
   },
   mockFileExplorerStoreState: {
     setRootPath: vi.fn(),
+    setWorktreeRoot: vi.fn(),
     setRootLoadError: vi.fn(),
     toggleVisibility: vi.fn()
   },
@@ -99,6 +100,10 @@ vi.mock('@/stores/connection-status-store', async (importOriginal) => {
   const actual = await importOriginal<typeof connectionStatusStoreModule>()
   return { ...actual, wireConnectionStatusTracking: mockWireConnectionStatusTracking }
 })
+
+// The shell resolves its working copy through the (heavily mocked) stores;
+// these suites exercise layout behaviour, so resolve to the project folder.
+vi.mock('@/hooks/use-active-working-copy', () => ({ useActiveWorkingCopy: () => null }))
 
 vi.mock('@/stores/project-store', () => ({
   useProjectsLoaded: () => true,
