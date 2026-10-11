@@ -461,6 +461,12 @@ export function ProjectSidebar({
   const hasNoSearchResults =
     isSearching && filteredActiveProjects.length === 0 && filteredArchivedProjects.length === 0
 
+  // Rail with groups: "Groups" and "Projects" headers sit inside the list, so
+  // the sidebar's own Projects header steps aside. With no group (or nothing to
+  // list) it stays, and so does its + menu, the path to the first group.
+  const railSections =
+    isRail && visibleGroups.length > 0 && projects.length > 0 && !hasNoSearchResults
+
   const Root = isRail ? 'div' : 'aside'
 
   return (
@@ -475,39 +481,41 @@ export function ProjectSidebar({
       {!isRail && <WorktreeReconciler projectId={activeProjectId} />}
 
       {/* Header with inline + button */}
-      <div className={PANEL_HEADER_CLASS}>
-        <span className="label-panel">Projects</span>
-        <div className="flex items-center">
-          {isRail ? (
-            <AddProjectMenu
-              onNewProject={onNewProject}
-              onNewGroup={() => setNewGroupModal({})}
-              buttonClassName={HEADER_ICON_BUTTON}
-            />
-          ) : (
-            <>
-              {!isTauriContext() && <SidebarToggleButton className={HEADER_ICON_BUTTON} />}
-              <button
-                onClick={() => setNewGroupModal({})}
-                className={HEADER_ICON_BUTTON}
-                title="New Group Folder"
-                aria-label="Create new group folder"
-              >
-                <FolderPlus size={14} />
-              </button>
-              <button
-                onClick={onNewProject}
-                className={HEADER_ICON_BUTTON}
-                title="New Project"
-                aria-label="Create new project from header"
-                data-testid="header-new-project"
-              >
-                <Plus size={14} />
-              </button>
-            </>
-          )}
+      {!railSections && (
+        <div className={PANEL_HEADER_CLASS}>
+          <span className="label-panel">Projects</span>
+          <div className="flex items-center">
+            {isRail ? (
+              <AddProjectMenu
+                onNewProject={onNewProject}
+                onNewGroup={() => setNewGroupModal({})}
+                buttonClassName={HEADER_ICON_BUTTON}
+              />
+            ) : (
+              <>
+                {!isTauriContext() && <SidebarToggleButton className={HEADER_ICON_BUTTON} />}
+                <button
+                  onClick={() => setNewGroupModal({})}
+                  className={HEADER_ICON_BUTTON}
+                  title="New Group Folder"
+                  aria-label="Create new group folder"
+                >
+                  <FolderPlus size={14} />
+                </button>
+                <button
+                  onClick={onNewProject}
+                  className={HEADER_ICON_BUTTON}
+                  title="New Project"
+                  aria-label="Create new project from header"
+                  data-testid="header-new-project"
+                >
+                  <Plus size={14} />
+                </button>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Project search — shared sidebar field */}
       {showSearch && (
@@ -567,6 +575,9 @@ export function ProjectSidebar({
         setShowArchived={setShowArchived}
         renderArchivedProjectContextMenu={renderArchivedProjectContextMenu}
         variant={variant}
+        railSections={railSections}
+        onNewProject={onNewProject}
+        onNewGroup={() => setNewGroupModal({})}
       />
 
       {/* SSH Connections - Resizable */}
