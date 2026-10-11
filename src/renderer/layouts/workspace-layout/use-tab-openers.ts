@@ -2,11 +2,13 @@ import type { ShellInfo } from '@shared/types/ipc.types'
 import { useCallback, useEffect } from 'react'
 import type { NavigateFunction } from 'react-router-dom'
 import { toast } from 'sonner'
+import { WORKTREE_EVENTS } from '@/hooks/use-worktree-shortcuts'
+import { getActiveWorkingCopy, reportUnresolvedWorkingCopy } from '@/lib/active-working-copy'
 import { launchAgentInPane } from '@/lib/agent-launch'
 import { BUILT_IN_AGENTS } from '@/lib/agents/agent-registry'
 import { filesystemApi } from '@/lib/api'
 import { pickCanvasDoc } from '@/lib/canvas-doc'
-import { spawnTerminalInPane } from '@/lib/terminal-spawn'
+import { openTerminalAtCwd, spawnTerminalInPane } from '@/lib/terminal-spawn'
 import { randomUUID } from '@/lib/uuid'
 import { getDefaultCwdForProject } from '@/lib/worktree-context'
 import { useDefaultShell, useMaxTerminalsPerProject } from '@/stores/app-settings-store'
@@ -24,6 +26,24 @@ interface UseTabOpenersOptions {
   gitSheetOpen: boolean
   gitSheetProjectId: string | null
   closeGitSheet: () => void
+}
+
+/**
+ * The cwd a new terminal / git tab opens at: the active working copy (active
+ * tab, else the switcher pick, else the project folder), or `null` after a
+ * toast when it is unresolved (a worktree no longer listed). Unresolved never
+ * falls back to the project folder; it triggers one worktree reconcile.
+ */
+function resolveWorkingCopyCwd(projectId: string, action: string): string | null {
+  const wc = getActiveWorkingCopy(projectId)
+  if (wc?.state === 'unresolved') {
+    reportUnresolvedWorkingCopy(projectId, wc)
+    toast.error('This worktree is no longer available', {
+      description: `${action} is blocked while Termul refreshes the worktree list.`
+    })
+    return null
+  }
+  return wc?.path ?? getDefaultCwdForProject(projectId)
 }
 
 /** Handlers that open terminals, agents, browser/git/canvas tabs, plus the git-sheet close effects. */
@@ -70,8 +90,9 @@ export function useTabOpeners({
 
   // Terminal creation callbacks - defined before keyboard shortcut useEffect
   const handleCreateTerminalInPane = useCallback(
-    async (paneId: string, shellName?: string) => {
-      const cwd = getDefaultCwdForProject(activeProjectId)
+    async (paneId: string, shellName?: string, explicitCwd?: string) => {
+      const cwd = explicitCwd ?? resolveWorkingCopyCwd(activeProjectId, 'Opening a terminal')
+      if (cwd === null) return
 
       const result = await spawnTerminalInPane(paneId, activeProjectId, cwd, {
         shell: shellName || activeProject?.defaultShell || appDefaultShell || undefined,
@@ -156,13 +177,40 @@ export function useTabOpeners({
     (paneId?: string) => {
       const resolvedPaneId = paneId ?? useWorkspaceStore.getState().activePaneId
       if (resolvedPaneId && activeProject?.path) {
+        const cwd = resolveWorkingCopyCwd(activeProjectId, 'Opening Git')
+        if (!cwd) return
         // Reuse-by-(type, cwd): activating the existing tab instead of
         // minting `git-${randomUUID()}` per click (QA: 4 clicks → 4 tabs).
-        useWorkspaceStore.getState().addGitTab(activeProject.path, resolvedPaneId)
+        useWorkspaceStore.getState().addGitTab(cwd, resolvedPaneId)
       }
     },
-    [activeProject?.path]
+    [activeProject?.path, activeProjectId]
   )
+
+  // Ctrl+Shift+Alt+T: open a default-shell terminal in the active pane at the
+  // active working copy. It never writes the switcher pick.
+  useEffect(() => {
+    if (!activeProjectId) return
+    const onOpenTerminal = (event: Event): void => {
+      const detail = (event as CustomEvent<{ projectId?: string } | undefined>).detail
+      if (detail?.projectId && detail.projectId !== activeProjectId) return
+      const cwd = resolveWorkingCopyCwd(activeProjectId, 'Opening a terminal')
+      if (!cwd) return
+      void openTerminalAtCwd(activeProjectId, cwd).then((outcome) => {
+        if (outcome.status === 'no-pane') {
+          toast.error('No active pane', {
+            description: 'Cannot open terminal without an active workspace pane.'
+          })
+        } else if (outcome.status === 'spawn-failed') {
+          toast.error('Failed to open terminal', {
+            description: outcome.error || 'Could not create a terminal.'
+          })
+        }
+      })
+    }
+    window.addEventListener(WORKTREE_EVENTS.OPEN_TERMINAL, onOpenTerminal)
+    return () => window.removeEventListener(WORKTREE_EVENTS.OPEN_TERMINAL, onOpenTerminal)
+  }, [activeProjectId])
 
   // Close the mobile Git Changes sheet if the active project loses its path
   // or changes from the one it opened on (its cwd is a snapshot); also on
