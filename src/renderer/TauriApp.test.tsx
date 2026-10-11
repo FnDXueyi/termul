@@ -85,6 +85,10 @@ vi.mock('./hooks/use-git-status', () => ({
   useGitStatus: () => undefined
 }))
 
+vi.mock('./hooks/use-git-status-refresh', () => ({
+  useGitStatusRefresh: () => undefined
+}))
+
 vi.mock('./hooks/use-exit-code', () => ({
   useExitCode: () => undefined
 }))
