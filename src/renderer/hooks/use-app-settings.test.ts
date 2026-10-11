@@ -1,4 +1,3 @@
-import type { IpcResult } from '@shared/types/ipc.types'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -6,8 +5,7 @@ import {
   resetShellLayoutActiveAtLoadForTests
 } from '@/lib/shell-layout-mode'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
-import { useSidebarStore } from '@/stores/sidebar-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
 import {
   resetAppSettingsPersistenceQueueForTests,
@@ -15,8 +13,7 @@ import {
   useResetAppSettings,
   useUpdateAppSetting,
   useUpdateAppSettings,
-  useUpdatePanelVisibility,
-  waitForPendingAppSettingsPersistence
+  useUpdatePanelVisibility
 } from './use-app-settings'
 
 const {
@@ -97,8 +94,8 @@ describe('use-app-settings', () => {
       settings: { ...DEFAULT_APP_SETTINGS },
       isLoaded: false
     })
-    useSidebarStore.setState({ isVisible: true })
-    useFileExplorerStore.setState({ isVisible: true })
+    resetShellLayoutStoreForTests()
+    useShellLayoutStore.setState({ status: 'ready' })
 
     mockPersistenceRead.mockResolvedValue({ success: true, data: null })
     mockPersistenceWrite.mockResolvedValue({ success: true, data: undefined })
@@ -112,23 +109,33 @@ describe('use-app-settings', () => {
     mockSetSessionReopenTimeout.mockResolvedValue(undefined)
   })
 
-  it('hydrates sidebar and file explorer visibility from persisted app settings', async () => {
+  it('does not push legacy AppSettings panel visibility into the shell layout on load', async () => {
     mockPersistenceRead.mockResolvedValueOnce({
       success: true,
       data: {
         ...DEFAULT_APP_SETTINGS,
-        sidebarVisible: false,
-        fileExplorerVisible: true
+        sidebarVisible: true,
+        fileExplorerVisible: true,
+        sshPanelVisible: true
       }
+    })
+    // An upgraded user: the shell-layout migration already collapsed the rail.
+    useShellLayoutStore.setState({
+      status: 'ready',
+      railExpanded: false,
+      sidePanelVisible: false,
+      sshSectionVisible: false
     })
 
     renderHook(() => useAppSettingsLoader())
 
     await waitFor(() => {
       expect(useAppSettingsStore.getState().isLoaded).toBe(true)
-      expect(useSidebarStore.getState().isVisible).toBe(false)
-      expect(useFileExplorerStore.getState().isVisible).toBe(true)
     })
+    const layout = useShellLayoutStore.getState()
+    expect(layout.railExpanded).toBe(false)
+    expect(layout.sidePanelVisible).toBe(false)
+    expect(layout.sshSectionVisible).toBe(false)
   })
 
   it('pushes the ACP timeout overrides to the backend on load', async () => {
@@ -250,117 +257,51 @@ describe('use-app-settings', () => {
     })
   })
 
-  it('updates panel visibility with immediate persistence write', async () => {
+  it('dispatches panel visibility to the shell-layout actions without touching AppSettings', async () => {
     const { result } = renderHook(() => useUpdatePanelVisibility())
 
     await result.current('sidebarVisible', false)
+    await result.current('fileExplorerVisible', false)
+    await result.current('sshPanelVisible', false)
 
-    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(false)
-    expect(useSidebarStore.getState().isVisible).toBe(false)
-    expect(mockPersistenceWrite).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
-      expect.objectContaining({ sidebarVisible: false })
+    const layout = useShellLayoutStore.getState()
+    expect(layout.railExpanded).toBe(false)
+    expect(layout.sidePanelVisible).toBe(false)
+    expect(layout.sshSectionVisible).toBe(false)
+    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(
+      DEFAULT_APP_SETTINGS.sidebarVisible
     )
+    expect(mockPersistenceWrite).not.toHaveBeenCalledWith(APP_SETTINGS_KEY, expect.anything())
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalledWith(
+      APP_SETTINGS_KEY,
+      expect.anything()
+    )
+    // The shell-layout store persists through its own key (debounced).
+    expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
+      'shell-layout',
+      expect.objectContaining({ railExpanded: false, sidePanelVisible: false })
+    )
+  })
+
+  it('ignores panel visibility changes until the shell layout is hydrated', async () => {
+    resetShellLayoutStoreForTests()
+    const { result } = renderHook(() => useUpdatePanelVisibility())
+
+    await expect(result.current('sidebarVisible', false)).resolves.toBeUndefined()
+
+    expect(useShellLayoutStore.getState().railExpanded).toBe(true)
     expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
   })
 
-  it('serializes rapid panel writes and persists each queued request payload', async () => {
-    const deferredResolvers: Array<(result: IpcResult<void>) => void> = []
-    mockPersistenceWrite.mockImplementation(
-      () =>
-        new Promise<IpcResult<void>>((resolve) => {
-          deferredResolvers.push(resolve)
-        })
-    )
-
+  it('applies panel visibility in memory only when the shell layout is unavailable', async () => {
+    useShellLayoutStore.setState({ status: 'unavailable' })
     const { result } = renderHook(() => useUpdatePanelVisibility())
 
-    const first = result.current('sidebarVisible', false)
-    const second = result.current('sidebarVisible', true)
+    await result.current('fileExplorerVisible', false)
 
-    await waitFor(() => {
-      expect(mockPersistenceWrite).toHaveBeenCalledTimes(1)
-    })
-
-    expect(mockPersistenceWrite).toHaveBeenNthCalledWith(
-      1,
-      APP_SETTINGS_KEY,
-      expect.objectContaining({ sidebarVisible: false })
-    )
-
-    deferredResolvers[0]?.({ success: true, data: undefined })
-    await first
-
-    await waitFor(() => {
-      expect(mockPersistenceWrite).toHaveBeenCalledTimes(2)
-    })
-
-    expect(mockPersistenceWrite).toHaveBeenNthCalledWith(
-      2,
-      APP_SETTINGS_KEY,
-      expect.objectContaining({ sidebarVisible: true })
-    )
-
-    deferredResolvers[1]?.({ success: true, data: undefined })
-    await second
-
-    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(true)
-    expect(useSidebarStore.getState().isVisible).toBe(true)
-  })
-
-  it('reverts panel visibility in stores when immediate persistence fails', async () => {
-    mockPersistenceWrite.mockResolvedValueOnce({
-      success: false,
-      error: 'write failed',
-      code: 'WRITE_FAILED'
-    })
-
-    const { result } = renderHook(() => useUpdatePanelVisibility())
-
-    let thrown: unknown
-    try {
-      await result.current('sidebarVisible', false)
-    } catch (error) {
-      thrown = error
-    }
-
-    expect(thrown).toBeInstanceOf(Error)
-    expect((thrown as Error).message).toBe('write failed')
-    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(true)
-    expect(useSidebarStore.getState().isVisible).toBe(true)
-  })
-
-  it('keeps newer panel value when older queued write fails', async () => {
-    mockPersistenceWrite
-      .mockResolvedValueOnce({ success: false, error: 'first failed', code: 'WRITE_FAILED' })
-      .mockResolvedValueOnce({ success: true, data: undefined })
-
-    const { result } = renderHook(() => useUpdatePanelVisibility())
-
-    let firstError: unknown
-    const first = result.current('fileExplorerVisible', false).catch((error) => {
-      firstError = error
-    })
-    const second = result.current('fileExplorerVisible', true)
-
-    await first
-    await second
-
-    expect(firstError).toBeInstanceOf(Error)
-    expect((firstError as Error).message).toBe('first failed')
-
-    expect(mockPersistenceWrite).toHaveBeenNthCalledWith(
-      1,
-      APP_SETTINGS_KEY,
-      expect.objectContaining({ fileExplorerVisible: false })
-    )
-    expect(mockPersistenceWrite).toHaveBeenNthCalledWith(
-      2,
-      APP_SETTINGS_KEY,
-      expect.objectContaining({ fileExplorerVisible: true })
-    )
-    expect(useAppSettingsStore.getState().settings.fileExplorerVisible).toBe(true)
-    expect(useFileExplorerStore.getState().isVisible).toBe(true)
+    expect(useShellLayoutStore.getState().sidePanelVisible).toBe(false)
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
+    expect(mockPersistenceWrite).not.toHaveBeenCalled()
   })
 
   it('keeps debounced writes for non-panel app settings', async () => {
@@ -494,16 +435,21 @@ describe('use-app-settings', () => {
     )
   })
 
-  it('resets panel stores when app settings are reset', async () => {
-    useSidebarStore.setState({ isVisible: false })
-    useFileExplorerStore.setState({ isVisible: false })
+  it('reopens all panels through the shell-layout actions when app settings are reset', async () => {
+    useShellLayoutStore.setState({
+      railExpanded: false,
+      sidePanelVisible: false,
+      sshSectionVisible: false
+    })
 
     const { result } = renderHook(() => useResetAppSettings())
 
     await result.current()
 
-    expect(useSidebarStore.getState().isVisible).toBe(DEFAULT_APP_SETTINGS.sidebarVisible)
-    expect(useFileExplorerStore.getState().isVisible).toBe(DEFAULT_APP_SETTINGS.fileExplorerVisible)
+    const layout = useShellLayoutStore.getState()
+    expect(layout.railExpanded).toBe(DEFAULT_APP_SETTINGS.sidebarVisible)
+    expect(layout.sidePanelVisible).toBe(DEFAULT_APP_SETTINGS.fileExplorerVisible)
+    expect(layout.sshSectionVisible).toBe(DEFAULT_APP_SETTINGS.sshPanelVisible)
     expect(mockPersistenceWrite).toHaveBeenCalledWith(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
   })
 
@@ -529,66 +475,6 @@ describe('use-app-settings', () => {
     expect(mockSetSessionReopenTimeout).toHaveBeenCalledWith(null)
   })
 
-  it('waits for queued panel writes before close-flow synchronization', async () => {
-    let resolveWrite: ((result: IpcResult<void>) => void) | undefined
-    mockPersistenceWrite.mockImplementationOnce(
-      () =>
-        new Promise<IpcResult<void>>((resolve) => {
-          resolveWrite = resolve
-        })
-    )
-
-    const { result } = renderHook(() => useUpdatePanelVisibility())
-    const pendingWrite = result.current('sidebarVisible', false)
-
-    const waiter = waitForPendingAppSettingsPersistence()
-
-    let waiterResolved = false
-    void waiter.then(() => {
-      waiterResolved = true
-    })
-
-    await Promise.resolve()
-    expect(waiterResolved).toBe(false)
-
-    resolveWrite?.({ success: true, data: undefined })
-    await pendingWrite
-    await waiter
-
-    expect(waiterResolved).toBe(true)
-  })
-
-  it('does not let an older failed revision roll back a newer successful state', async () => {
-    const deferredResolvers: Array<(result: IpcResult<void>) => void> = []
-    mockPersistenceWrite.mockImplementation(
-      () =>
-        new Promise<IpcResult<void>>((resolve) => {
-          deferredResolvers.push(resolve)
-        })
-    )
-
-    const { result } = renderHook(() => useUpdatePanelVisibility())
-
-    const first = result.current('sidebarVisible', false).catch((error) => error)
-    const second = result.current('sidebarVisible', true)
-
-    await waitFor(() => {
-      expect(mockPersistenceWrite).toHaveBeenCalledTimes(1)
-    })
-
-    deferredResolvers[0]?.({ success: false, error: 'first failed', code: 'WRITE_FAILED' })
-    await first
-
-    await waitFor(() => {
-      expect(mockPersistenceWrite).toHaveBeenCalledTimes(2)
-    })
-
-    deferredResolvers[1]?.({ success: true, data: undefined })
-    await second
-
-    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(true)
-    expect(useSidebarStore.getState().isVisible).toBe(true)
-  })
   // Story 5 (preserved-PTY reattach): the immediate orphan-detection push
   // now succeeds on authed connections, and an UNAUTHORIZED rejection
   // (push raced the auth handshake) arms a ONE-SHOT post-attach retry.
