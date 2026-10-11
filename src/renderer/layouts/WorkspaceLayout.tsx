@@ -6,6 +6,7 @@ import { useEditorPersistence } from '@/hooks/use-editor-persistence'
 import { useFileWatcher } from '@/hooks/use-file-watcher'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useProjectSwitch } from '@/hooks/use-project-switch'
+import { useShellUnreadTracker } from '@/hooks/use-shell-unread-tracker'
 import { useWorkspaceManifestSync } from '@/hooks/use-workspace-manifest-sync'
 import { useWorktreeShortcuts } from '@/hooks/use-worktree-shortcuts'
 import { useWorkspaceOverlayBackStack } from '@/layouts/use-workspace-overlay-back-stack'
@@ -78,6 +79,8 @@ export default function WorkspaceLayout(): React.JSX.Element {
   const terminals = useTerminals()
 
   const isMobileWebShell = useMobileWebShell()
+  // The one agent-chat "Done" tracker for this renderer (AD-12).
+  useShellUnreadTracker()
   const { switchTo: switchProjectFromPalette } = useProjectSwitch('CommandPalette')
 
   const ssh = useSSHWorkspace()
