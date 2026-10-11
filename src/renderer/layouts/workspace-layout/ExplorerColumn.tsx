@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { lazy, Suspense } from 'react'
+import { lazy, type ReactNode, Suspense } from 'react'
 import {
   FileExplorerToggleButton,
   panelEdgeToggleButtonClass
@@ -24,6 +24,12 @@ interface ExplorerColumnProps {
   ssh: SSHWorkspaceState
   /** Which edge of the window the explorer sits against. */
   side?: 'left' | 'right'
+  /**
+   * Shell Side panel that replaces the File Explorer block (flagged shell
+   * only). Not rendered while an SSH profile is active: the SSH block then
+   * stands alone. Without it the column is unchanged.
+   */
+  sidePanel?: ReactNode
 }
 
 /**
@@ -35,7 +41,8 @@ interface ExplorerColumnProps {
 export function ExplorerColumn({
   activeProject,
   ssh,
-  side = 'right'
+  side = 'right',
+  sidePanel
 }: ExplorerColumnProps): React.JSX.Element {
   const reducedMotion = useReducedMotion() ?? false
   const isExplorerVisible = useFileExplorerVisible()
@@ -47,10 +54,13 @@ export function ExplorerColumn({
     handleSSHDelete,
     handleSSHRename
   } = ssh
+  const showFileColumn = Boolean(
+    isExplorerVisible && activeProject?.path && !(sidePanel && activeSSHProfile)
+  )
 
   return (
     <AnimatePresence initial={false}>
-      {(isExplorerVisible && activeProject?.path) || activeSSHProfile ? (
+      {showFileColumn || activeSSHProfile ? (
         <motion.div
           key="explorer-column"
           className="flex-shrink-0 h-full overflow-hidden"
@@ -58,14 +68,14 @@ export function ExplorerColumn({
         >
           <div className="flex h-full flex-col gap-2">
             <AnimatePresence initial={false}>
-              {isExplorerVisible && activeProject?.path && (
+              {showFileColumn && (
                 <motion.div
                   key="file-explorer-panel"
                   className={cn('overflow-hidden', activeSSHProfile ? 'flex-1 min-h-0' : 'h-full')}
                   {...panelRevealMotion(reducedMotion)}
                 >
                   <Suspense fallback={<ShellSkeleton />}>
-                    <FileExplorer side={side} />
+                    {sidePanel ?? <FileExplorer side={side} />}
                   </Suspense>
                 </motion.div>
               )}
@@ -80,7 +90,7 @@ export function ExplorerColumn({
                   <div
                     className={cn(
                       'h-full bg-background rounded-xl overflow-hidden flex flex-col border border-border',
-                      !(isExplorerVisible && activeProject?.path) && 'w-64'
+                      !showFileColumn && 'w-64'
                     )}
                   >
                     <Suspense fallback={<ShellSkeleton />}>

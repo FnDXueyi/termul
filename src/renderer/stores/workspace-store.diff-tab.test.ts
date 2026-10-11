@@ -33,7 +33,7 @@ describe('workspace-store addDiffTab', () => {
     const tabs = diffTabs()
     expect(tabs).toHaveLength(1)
     expect(tabs[0].id).toMatch(/^diff:/)
-    expect(tabs[0]).toMatchObject({ cwd: 'E:\\p', path: 'a\\b.ts', staged: false })
+    expect(tabs[0]).toMatchObject({ cwd: 'E:\\p', path: 'a/b.ts', staged: false })
     expect((useWorkspaceStore.getState().root as LeafNode).activeTabId).toBe(tabs[0].id)
   })
 
@@ -73,5 +73,48 @@ describe('workspace-store addDiffTab', () => {
   it('adds a new tab to the active pane when no target is given', () => {
     useWorkspaceStore.getState().addDiffTab('/repo', 'a.ts', false)
     expect((useWorkspaceStore.getState().root as LeafNode).tabs).toHaveLength(1)
+  })
+
+  it('stores the normalized repo-relative path for a backslash input', () => {
+    useWorkspaceStore.getState().addDiffTab('/repo', '.\\src\\a.ts', false, 'pane-root')
+    expect(diffTabs()[0]).toMatchObject({ cwd: '/repo', path: 'src/a.ts' })
+  })
+
+  it('leaves fullscreen when focusing an existing tab held by another pane', () => {
+    const store = useWorkspaceStore.getState()
+    store.addDiffTab('/repo', 'a.ts', true, 'pane-root')
+    store.splitPane(
+      'pane-root',
+      'horizontal',
+      { type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' },
+      'right'
+    )
+    const split = useWorkspaceStore.getState().root as SplitNode
+    const leftPaneId = (split.children[0] as LeafNode).id
+    const rightPaneId = (split.children[1] as LeafNode).id
+    store.setActivePane(rightPaneId)
+    store.togglePaneFullscreen(rightPaneId)
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe(rightPaneId)
+
+    store.addDiffTab('/repo', 'a.ts', true, rightPaneId)
+
+    const state = useWorkspaceStore.getState()
+    expect(state.fullscreenPaneId).toBeNull()
+    expect(state.activePaneId).toBe(leftPaneId)
+  })
+
+  it('keeps fullscreen when the existing tab lives in the fullscreen pane', () => {
+    const store = useWorkspaceStore.getState()
+    store.addDiffTab('/repo', 'a.ts', true, 'pane-root')
+    store.splitPane(
+      'pane-root',
+      'horizontal',
+      { type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' },
+      'right'
+    )
+    store.togglePaneFullscreen('pane-root')
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe('pane-root')
+    store.addDiffTab('/repo', 'a.ts', true, 'pane-root')
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe('pane-root')
   })
 })

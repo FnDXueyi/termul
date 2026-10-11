@@ -297,6 +297,10 @@ vi.mock('@/hooks/useTerminalAutoSave', () => ({
 vi.mock('@/components/file-explorer/FileExplorer', () => ({
   FileExplorer: () => <div data-testid="file-explorer" />
 }))
+// The flagged shell's Side panel (Column tabs) takes the explorer's place.
+vi.mock('@/components/shell/SidePanelColumn', () => ({
+  SidePanelColumn: () => <div data-testid="side-panel-column" />
+}))
 
 // Mock the active Tauri API seam used by WorkspaceLayout and nested components.
 const { mockApi } = vi.hoisted(() => ({
@@ -1380,10 +1384,13 @@ describe('WorkspaceLayout - shellLayout flag', () => {
 
     renderWithRouter()
 
-    const rail = document.querySelector('aside.w-64') as Element
-    const explorer = screen.getByTestId('file-explorer')
+    const rail = screen.getByRole('navigation', { name: 'Projects' })
+    const explorer = screen.getByTestId('side-panel-column')
     const main = document.querySelector('main') as Element
     expect(rail).toBeInTheDocument()
+    // The Rail replaces the classic activity rail and sidebar.
+    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
+    expect(document.querySelector('aside.w-64')).toBeNull()
     expect(precedes(rail, explorer)).toBe(true)
     expect(precedes(explorer, main)).toBe(true)
   })
@@ -1400,7 +1407,7 @@ describe('WorkspaceLayout - shellLayout flag', () => {
     rerenderTree(rerender)
 
     expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
-    const explorer = screen.getByTestId('file-explorer')
+    const explorer = screen.getByTestId('side-panel-column')
     expect(precedes(explorer, document.querySelector('main') as Element)).toBe(true)
   })
 
@@ -1410,13 +1417,13 @@ describe('WorkspaceLayout - shellLayout flag', () => {
 
     const { rerender } = renderWithRouter()
     const main = document.querySelector('main') as Element
-    expect(precedes(screen.getByTestId('file-explorer'), main)).toBe(true)
+    expect(precedes(screen.getByTestId('side-panel-column'), main)).toBe(true)
 
     appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
     rerenderTree(rerender)
 
     expect(document.querySelector('main')).toBe(main)
-    expect(precedes(screen.getByTestId('file-explorer'), main)).toBe(true)
+    expect(precedes(screen.getByTestId('side-panel-column'), main)).toBe(true)
   })
 
   it('does not remount main when the Side panel or Rail toggles in the flagged frame', async () => {
@@ -1428,15 +1435,24 @@ describe('WorkspaceLayout - shellLayout flag', () => {
     const main = document.querySelector('main') as Element
 
     act(() => useShellLayoutStore.setState({ sidePanelVisible: false }))
-    await waitFor(() => expect(screen.queryByTestId('file-explorer')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByTestId('side-panel-column')).not.toBeInTheDocument())
     expect(document.querySelector('main')).toBe(main)
 
     act(() => useShellLayoutStore.setState({ railExpanded: false }))
-    await waitFor(() => expect(document.querySelector('aside.w-64')).toBeNull())
+    await waitFor(() =>
+      expect(screen.getByRole('navigation', { name: 'Projects' })).toHaveAttribute(
+        'data-expanded',
+        'false'
+      )
+    )
     expect(document.querySelector('main')).toBe(main)
 
     act(() => useShellLayoutStore.setState({ sidePanelVisible: true, railExpanded: true }))
-    expect(await screen.findByTestId('file-explorer')).toBeInTheDocument()
+    expect(await screen.findByTestId('side-panel-column')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Projects' })).toHaveAttribute(
+      'data-expanded',
+      'true'
+    )
     expect(document.querySelector('main')).toBe(main)
   })
 })
