@@ -1,15 +1,18 @@
 ﻿// Context bar visibility settings
 export interface ContextBarSettings {
+  showProjectName: boolean
   showGitBranch: boolean
   showGitStatus: boolean
   showWorkingDirectory: boolean
   showExitCode: boolean
 }
 
-// Default settings with all elements visible
+// Default settings for users with no saved blob: project name and file counts
+// (`showGitStatus`) are hidden; branch, directory and exit code are shown.
 export const DEFAULT_CONTEXT_BAR_SETTINGS: ContextBarSettings = {
+  showProjectName: false,
   showGitBranch: true,
-  showGitStatus: true,
+  showGitStatus: false,
   showWorkingDirectory: true,
   showExitCode: true
 }
@@ -471,6 +474,12 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
     label: 'Change Color Theme',
     description: 'Open the color theme picker with live preview',
     defaultKey: 'ctrl+alt+t'
+  },
+  settings: {
+    id: 'settings',
+    label: 'Settings',
+    description: 'Open app settings',
+    defaultKey: 'ctrl+,'
   }
 }
 
@@ -496,7 +505,8 @@ const WEB_DEFAULT_KEY_OVERRIDES: Record<string, string> = {
   commandHistory: '',
   zoomIn: 'alt+=',
   zoomOut: 'alt+-',
-  zoomReset: 'alt+0'
+  zoomReset: 'alt+0',
+  settings: 'alt+,'
 }
 
 /** Platform-aware default bindings. See `WEB_DEFAULT_KEY_OVERRIDES`. */

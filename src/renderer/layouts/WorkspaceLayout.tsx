@@ -184,6 +184,7 @@ export default function WorkspaceLayout(): React.JSX.Element {
     getActiveKey: shortcutLabels.getActiveKey,
     handleNewBrowserTab,
     handleOpenThemePicker,
+    handleOpenAppPreferences: overlayActions.handleOpenAppPreferences,
     setIsCommandPaletteOpen,
     setIsCommandHistoryOpen,
     setIsNewProjectModalOpen
