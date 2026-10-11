@@ -3,6 +3,11 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GitBranchPicker } from './GitBranchPicker'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 const mockBranches = vi.fn()
 const mockCheckout = vi.fn()
 const mockCreateBranch = vi.fn()
