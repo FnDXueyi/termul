@@ -297,8 +297,7 @@ describe('ProjectChatList chat row interactions', () => {
       expect(mockOpenHistorySession).toHaveBeenCalledWith('c1')
       expect(mockAddAgentChatTab).toHaveBeenCalledWith('c1')
     })
-    // Row click must not route through the worktree spawn path (which syncs
-    // activeWorktreeId).
+    // Row click must not route through the terminal spawn path.
     expect(mockOpenTerminalAtCwd).not.toHaveBeenCalled()
   })
 

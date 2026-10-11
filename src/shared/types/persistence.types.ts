@@ -169,6 +169,11 @@ export interface PersistedProject {
   envVars?: PersistedEnvVariable[]
   // Worktree fields (added by worktree feature)
   worktrees?: PersistedWorktree[]
+  /**
+   * Legacy: no longer written. Records saved before the switcher pick moved to
+   * the shell-layout store (`worktreePickByProject`, keyed by path) may still
+   * carry it; only the shell-layout migration reads it.
+   */
   activeWorktreeId?: string | null
   // Git detection (cached)
   isGitRepo?: boolean

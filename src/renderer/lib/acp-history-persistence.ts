@@ -382,7 +382,7 @@ export function scopeSessionIndex(
   // exact-cwd match, a session whose cwd is one of the active project's
   // registered worktree paths stays listed. This keeps a worktree chat
   // reachable from the project root view and across restarts where
-  // `activeWorktreeId` is null (the sidebar would otherwise hide it because
+  // no worktree is picked (the sidebar would otherwise hide it because
   // its cwd differs from the root). Falls back to projectId-only matching when
   // the scoped set is empty, preserving the prior drift-tolerant behavior.
   //

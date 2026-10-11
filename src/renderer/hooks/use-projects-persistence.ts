@@ -251,7 +251,6 @@ async function toPersistedProject(
     defaultShell: project.defaultShell,
     envVars: redactedEnvVars,
     worktrees: project.worktrees?.map(toPersistedWorktree),
-    activeWorktreeId: project.activeWorktreeId,
     isGitRepo: project.isGitRepo,
     icon: project.icon
   }
@@ -298,7 +297,6 @@ async function fromPersistedProject(persisted: PersistedProject): Promise<Projec
     defaultShell: persisted.defaultShell,
     envVars: loadedEnvVars,
     worktrees: persisted.worktrees?.map(fromPersistedWorktree),
-    activeWorktreeId: persisted.activeWorktreeId,
     isGitRepo: persisted.isGitRepo,
     icon: persisted.icon
   }
@@ -364,8 +362,7 @@ function summaryToProject(summary: ProjectSummary): Project {
     isArchived: summary.isArchived,
     isDefault: summary.isDefault,
     envVars: [],
-    worktrees: [],
-    activeWorktreeId: null
+    worktrees: []
   }
 }
 
@@ -434,7 +431,8 @@ export function useProjectsLoader(): void {
             .projects.filter((p) => p.isGitRepo)
             .map((p) => [p.id, p.isGitRepo] as const)
         )
-        // Worktrees (and the active pick) are reconciler-owned, also not on the wire.
+        // Worktrees are reconciler-owned, also not on the wire (the switcher pick lives in
+        // the shell-layout store, keyed by path).
         const prevById = new Map(useProjectStore.getState().projects.map((p) => [p.id, p] as const))
         const projects = result.data.projects.map((summary) => {
           const project = summaryToProject(summary)
@@ -445,8 +443,7 @@ export function useProjectsLoader(): void {
             ...project,
             ...(icon ? { icon } : {}),
             ...(isGitRepo ? { isGitRepo } : {}),
-            ...(prev?.worktrees ? { worktrees: prev.worktrees } : {}),
-            ...(prev?.activeWorktreeId ? { activeWorktreeId: prev.activeWorktreeId } : {})
+            ...(prev?.worktrees ? { worktrees: prev.worktrees } : {})
           }
         })
         const defaultId = result.data.defaultProjectId

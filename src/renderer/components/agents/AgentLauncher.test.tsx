@@ -477,7 +477,7 @@ const {
   mockWorktreeResolveBaseBranch,
   mockReconcileWorktrees,
   mockStoredWorktrees,
-  mockSetActiveWorktree
+  mockSetWorktreePick
 } = vi.hoisted(() => ({
   mockWorktreeCreate: vi.fn(),
   mockWorktreeCopyInclude: vi.fn(),
@@ -486,8 +486,15 @@ const {
   // writer): tests make it "store" worktrees by pushing into the project's list.
   mockReconcileWorktrees: vi.fn(),
   mockStoredWorktrees: [] as { id: string; name: string; branch: string; path: string }[],
-  mockSetActiveWorktree: vi.fn()
+  // Launching must never write the Workspace-switcher pick.
+  mockSetWorktreePick: vi.fn()
 }))
+
+vi.mock('@/stores/shell-layout-store', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/shell-layout-store')>()
+  actual.useShellLayoutStore.setState({ setWorktreePick: mockSetWorktreePick })
+  return actual
+})
 
 vi.mock('@/lib/worktree-reconciler', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/worktree-reconciler')>()),
@@ -524,8 +531,7 @@ vi.mock('@/stores/project-store', () => {
   }
   const state = {
     activeProjectId: 'p1',
-    projects: [baseProject],
-    setActiveWorktree: mockSetActiveWorktree
+    projects: [baseProject]
   }
   const withOverride = () => ({
     ...state,
@@ -2629,7 +2635,7 @@ describe('AgentLauncher worktree isolation', () => {
       })
       return 'updated'
     })
-    mockSetActiveWorktree.mockReset()
+    mockSetWorktreePick.mockReset()
     // "Clean repo on feat/x, base auto" — no origin/HEAD, so the fallback
     // chain resolves to the current branch (feat/x).
     mockWorktreeResolveBaseBranch.mockResolvedValue({
@@ -2843,10 +2849,9 @@ describe('AgentLauncher worktree isolation', () => {
   })
 
   // Fix: worktree chat hidden from Chats sidebar — the launcher must register
-  // the just-created worktree in the project store and activate it so the
-  // sidebar scopes to it immediately (no 60s reconciler wait) and the worktree
-  // is a first-class project citizen across restarts.
-  it('registers the created worktree via the reconciler and activates the stored id on launch', async () => {
+  // the just-created worktree through the reconciler (no 60s wait). It never
+  // changes the Workspace-switcher pick.
+  it('registers the created worktree via the reconciler and never writes the pick on launch', async () => {
     renderLauncher()
     await chooseWorktreeBaseBranch('feat/x')
 
@@ -2856,10 +2861,8 @@ describe('AgentLauncher worktree isolation', () => {
     await waitFor(() => expect(mockWorktreeCreate).toHaveBeenCalledTimes(1))
     // Awaited reconcile for the launching project (no direct addWorktree).
     await waitFor(() => expect(mockReconcileWorktrees).toHaveBeenCalledWith('p1'))
-    // The id the reconciler stored for the created path is activated so the
-    // sidebar scopes to the new worktree.
-    await waitFor(() => expect(mockSetActiveWorktree).toHaveBeenCalledTimes(1))
-    expect(mockSetActiveWorktree).toHaveBeenCalledWith('p1', 'wt-stored-1')
+    await waitFor(() => expect(mockFinalizeChatLaunch).toHaveBeenCalledTimes(1))
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
   })
 
   it('still opens the chat when worktree registration throws (best-effort)', async () => {
@@ -2875,7 +2878,7 @@ describe('AgentLauncher worktree isolation', () => {
     // The best-effort step threw and was swallowed; the chat still opens.
     await waitFor(() => expect(mockWorktreeCreate).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(mockFinalizeChatLaunch).toHaveBeenCalledTimes(1))
-    expect(mockSetActiveWorktree).not.toHaveBeenCalled()
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
   })
 
   it('still opens the chat when the reconciler does not store the created worktree', async () => {
@@ -2888,7 +2891,7 @@ describe('AgentLauncher worktree isolation', () => {
 
     await waitFor(() => expect(mockReconcileWorktrees).toHaveBeenCalledWith('p1'))
     await waitFor(() => expect(mockFinalizeChatLaunch).toHaveBeenCalledTimes(1))
-    expect(mockSetActiveWorktree).not.toHaveBeenCalled()
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
   })
 
   // CAP-4: relaunch of a persisted-worktree session does NOT call worktreeApi.create
@@ -2954,9 +2957,9 @@ describe('AgentLauncher worktree isolation', () => {
     }
     expect(finalizeArgs.worktreeBranch).toBe(`${firstBranch}-2`)
 
-    // The retry's path (not the stale original) is what gets looked up in the
-    // store after the reconcile, so the activated worktree is the retry one.
-    await waitFor(() => expect(mockSetActiveWorktree).toHaveBeenCalledWith('p1', 'wt-retry'))
+    // The retry registers through the reconciler too; the pick stays untouched.
+    await waitFor(() => expect(mockReconcileWorktrees).toHaveBeenCalledWith('p1'))
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
   })
 
   // Non-collision git failures (WORKTREE_CREATE_FAILED covers GitError/IoError

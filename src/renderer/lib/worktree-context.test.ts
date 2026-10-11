@@ -23,7 +23,15 @@ vi.mock('@/stores/project-store', () => ({
   useProjectStore: projectStoreMock
 }))
 
-import { getDefaultCwdForProject, getProjectRootPath } from './worktree-context'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
+import {
+  getActiveWorktreeForProject,
+  getActiveWorktreeRoot,
+  getDefaultCwdForProject,
+  getProjectRootPath,
+  getWorktreeContextLabel,
+  getWorktreeTabContext
+} from './worktree-context'
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -35,6 +43,19 @@ function makeProject(overrides: Partial<Project> = {}): Project {
   } as Project
 }
 
+const WT_PATH = '/projects/main/.termul/worktrees/abc'
+const WORKTREE = {
+  id: 'wt-1',
+  name: 'chat/abc',
+  branch: 'chat/abc',
+  path: WT_PATH,
+  createdAt: '2026-01-01'
+}
+
+function setPick(path: string | null): void {
+  useShellLayoutStore.setState({ worktreePickByProject: path === null ? {} : { p1: path } })
+}
+
 function setState(projects: Project[]): void {
   projectStoreMock.getState.mockReturnValue({ projects })
 }
@@ -42,6 +63,7 @@ function setState(projects: Project[]): void {
 describe('worktree-context', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    setPick(null)
   })
 
   describe('getDefaultCwdForProject', () => {
@@ -53,23 +75,15 @@ describe('worktree-context', () => {
     it('returns the project root even when an active worktree is set', () => {
       setState([
         makeProject({
-          activeWorktreeId: 'wt-1',
-          worktrees: [
-            {
-              id: 'wt-1',
-              name: 'chat/abc',
-              branch: 'chat/abc',
-              path: '/projects/main/.termul/worktrees/abc',
-              createdAt: '2026-01-01'
-            }
-          ]
+          worktrees: [WORKTREE]
         })
       ])
+      setPick(WT_PATH)
       expect(getDefaultCwdForProject('p1')).toBe('/projects/main')
     })
 
-    it('returns the project root when activeWorktreeId is null', () => {
-      setState([makeProject({ activeWorktreeId: null })])
+    it('returns the project root when there is no pick', () => {
+      setState([makeProject()])
       expect(getDefaultCwdForProject('p1')).toBe('/projects/main')
     })
 
@@ -93,19 +107,61 @@ describe('worktree-context', () => {
     it('returns the main project root path regardless of active worktree', () => {
       setState([
         makeProject({
-          activeWorktreeId: 'wt-1',
-          worktrees: [
-            {
-              id: 'wt-1',
-              name: 'chat/abc',
-              branch: 'chat/abc',
-              path: '/projects/main/.termul/worktrees/abc',
-              createdAt: '2026-01-01'
-            }
-          ]
+          worktrees: [WORKTREE]
         })
       ])
+      setPick(WT_PATH)
       expect(getProjectRootPath('p1')).toBe('/projects/main')
+    })
+  })
+
+  describe('active worktree derived from the shell-layout pick', () => {
+    it('sees the picked worktree in any path form', () => {
+      const project = makeProject({ worktrees: [WORKTREE] })
+      setState([project])
+      setPick(`${WT_PATH}/`)
+      expect(getActiveWorktreeForProject('p1')).toEqual(WORKTREE)
+      expect(getActiveWorktreeRoot('p1')).toBe(WT_PATH)
+      expect(getWorktreeTabContext('p1')).toBe('chat/abc')
+      expect(getWorktreeContextLabel(project)).toBe('Test / chat/abc')
+    })
+
+    it('sees the project folder with no pick', () => {
+      const project = makeProject({ worktrees: [WORKTREE] })
+      setState([project])
+      expect(getActiveWorktreeForProject('p1')).toBeUndefined()
+      expect(getActiveWorktreeRoot('p1')).toBeNull()
+      expect(getWorktreeTabContext('p1')).toBeNull()
+      expect(getWorktreeContextLabel(project)).toBe('Test / Root')
+    })
+
+    it('sees the project folder when the pick equals the project path', () => {
+      setState([makeProject({ worktrees: [WORKTREE] })])
+      setPick('/projects/main')
+      expect(getActiveWorktreeRoot('p1')).toBeNull()
+    })
+
+    it('sees the project folder for a pruned pick', () => {
+      const project = makeProject({ worktrees: [WORKTREE] })
+      setState([project])
+      setPick('/projects/main/.termul/worktrees/gone')
+      expect(getActiveWorktreeForProject('p1')).toBeUndefined()
+      expect(getActiveWorktreeRoot('p1')).toBeNull()
+      expect(getWorktreeContextLabel(project)).toBe('Test / Root')
+    })
+
+    it('sees the project folder for a pick naming an outside-root worktree', () => {
+      const project = makeProject({ worktrees: [{ ...WORKTREE, outsideProjectRoot: true }] })
+      setState([project])
+      setPick(WT_PATH)
+      expect(getActiveWorktreeForProject('p1')).toBeUndefined()
+      expect(getActiveWorktreeRoot('p1')).toBeNull()
+    })
+
+    it('sees nothing for a missing project', () => {
+      setState([])
+      setPick(WT_PATH)
+      expect(getActiveWorktreeForProject('p1')).toBeUndefined()
     })
   })
 })
