@@ -1442,6 +1442,70 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
+  // Git hunk staging parity: per-hunk stage/unstage ships on THREE transports
+  // (Tauri `git_stage_hunk`/`git_unstage_hunk`, HTTP `/git/stage-hunk` |
+  // `/git/unstage-hunk`, and the `gitApi` facade branching on
+  // `isTauriContext()`), all reusing the same `git_tracker` functions.
+  describe('Git hunk staging parity', () => {
+    const SrcTauri = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+    const Facade = join(LIB_DIR, 'git-api.ts')
+    const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+    const RouterRust = join(SrcTauri, 'web', 'router.rs')
+    const HunkApiRust = join(SrcTauri, 'web', 'git_hunk_api.rs')
+    const CommandsGitRust = join(SrcTauri, 'commands', 'git.rs')
+    const LibRust = join(SrcTauri, 'lib.rs')
+
+    const ROUTES = ['/git/stage-hunk', '/git/unstage-hunk'] as const
+
+    it('gitApi.stageHunk/unstageHunk branch on isTauriContext() between invoke and webServerGit', () => {
+      const content = readFileSync(Facade, 'utf-8')
+      expect(content).toMatch(
+        /stageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_stage_hunk'[\s\S]*?webServerGit\.stageHunk\(/
+      )
+      expect(content).toMatch(
+        /unstageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_unstage_hunk'[\s\S]*?webServerGit\.unstageHunk\(/
+      )
+      expect(content).not.toMatch(/desktop-only/i)
+    })
+
+    it('webServerGit hits both hunk routes with { cwd, path, hunkPatch }', () => {
+      const content = readFileSync(WebAdapter, 'utf-8')
+      for (const route of ROUTES) {
+        expect(content, `webServerGit should hit ${route}`).toContain(`'${route}'`)
+      }
+      expect(content).toMatch(/async stageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+      expect(content).toMatch(/async unstageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+    })
+
+    it('router.rs registers both hunk routes in BOTH router tables', () => {
+      const content = readFileSync(RouterRust, 'utf-8')
+      for (const route of ROUTES) {
+        const matches = content.match(new RegExp(`"${route}"`, 'g')) ?? []
+        expect(matches.length, `${route} should be registered in both router tables`).toBe(2)
+      }
+    })
+
+    it('git_hunk_api.rs defines both handlers behind the resolve_cwd write guard', () => {
+      expect(existsSync(HunkApiRust), 'git_hunk_api.rs should exist').toBe(true)
+      const content = readFileSync(HunkApiRust, 'utf-8')
+      expect(content).toMatch(/pub async fn stage_hunk\b/)
+      expect(content).toMatch(/pub async fn unstage_hunk\b/)
+      expect(content).toMatch(/resolve_cwd::<\(\)>\([^)]*Some\(peer\),\s*true\)/)
+      expect(content).toMatch(/git_tracker::git_stage_hunk/)
+      expect(content).toMatch(/git_tracker::git_unstage_hunk/)
+      expect(content).toMatch(/classify_hunk_error/)
+    })
+
+    it('desktop Tauri commands exist and stay registered', () => {
+      const commands = readFileSync(CommandsGitRust, 'utf-8')
+      const lib = readFileSync(LibRust, 'utf-8')
+      for (const cmd of ['git_stage_hunk', 'git_unstage_hunk']) {
+        expect(commands).toMatch(new RegExp(`\\bfn ${cmd}\\b`))
+        expect(lib).toMatch(new RegExp(`commands::${cmd}\\b`))
+      }
+    })
+  })
+
   // Filename-search transport parity (issue #848): the @-mention picker's
   // `search_file_names_stream` desktop command gains a web transport — the
   // one-shot `GET /search/file-names` HTTP route reusing the same rg walk.
