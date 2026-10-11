@@ -1,5 +1,6 @@
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { useEffect } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   resetNativeWebviewOcclusionForTests,
@@ -11,9 +12,20 @@ import { useThemePickerStore } from '@/stores/theme-picker-store'
 import { ShellFrame, type ShellFrameProps } from './ShellFrame'
 import type { ShellRailProps } from './ShellRail'
 
+const platformRef = vi.hoisted(() => ({ tauri: true, mac: false }))
+
 vi.mock('@/lib/tauri-runtime', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri-runtime')>('@/lib/tauri-runtime')
-  return { ...actual, isTauriContext: () => true }
+  return { ...actual, isTauriContext: () => platformRef.tauri }
+})
+vi.mock('@/lib/platform', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/platform')>('@/lib/platform')
+  return {
+    ...actual,
+    get isMac() {
+      return platformRef.mac
+    }
+  }
 })
 
 vi.mock('@/components/ActivityRail', () => ({
@@ -22,7 +34,7 @@ vi.mock('@/components/ActivityRail', () => ({
 vi.mock('@/components/ResizeEdges', () => ({ ResizeEdges: () => null }))
 vi.mock('@/components/TitleBar', () => ({ TitleBar: () => <div data-testid="title-bar" /> }))
 vi.mock('@/layouts/workspace-layout/MacOsTitlebarStrip', () => ({
-  MacOsTitlebarStrip: () => null
+  MacOsTitlebarStrip: () => <div data-testid="macos-titlebar-strip" />
 }))
 vi.mock('@/components/workspace/WorkspaceConflictBanner', () => ({
   WorkspaceConflictBanner: () => <div data-testid="conflict-banner" />
@@ -34,6 +46,7 @@ vi.mock('@/hooks/use-pane-dnd', () => ({
 }))
 const railProps: { current: ShellRailProps | null } = { current: null }
 vi.mock('@/components/shell/ShellRail', () => ({
+  COLLAPSED_WIDTH: 48,
   ShellRail: (props: ShellRailProps) => {
     railProps.current = props
     return <div data-testid="rail" />
@@ -56,9 +69,17 @@ function WorkspaceMainProbe(): React.JSX.Element {
 
 const ssh = {
   activeSSHProfileId: null,
+  activeSSHProfile: null,
   handleSSHConnect: vi.fn(),
   handleSelectSSHProfile: vi.fn()
 } as unknown as SSHWorkspaceState
+
+const oneProject = { id: 'p1', name: 'One', color: 'blue', path: '/repo/one' } as const
+const withProject: Partial<ShellFrameProps> = {
+  projects: [oneProject],
+  activeProject: oneProject,
+  activeProjectId: 'p1'
+}
 
 function buildProps(overrides: Partial<ShellFrameProps> = {}): ShellFrameProps {
   return {
@@ -82,6 +103,19 @@ function buildProps(overrides: Partial<ShellFrameProps> = {}): ShellFrameProps {
   }
 }
 
+function renderFrame(overrides: Partial<ShellFrameProps> = {}, path = '/') {
+  const view = (next: Partial<ShellFrameProps>) => (
+    <MemoryRouter initialEntries={[path]}>
+      <ShellFrame {...buildProps(next)} />
+    </MemoryRouter>
+  )
+  const result = render(view(overrides))
+  return {
+    ...result,
+    rerenderFrame: (next: Partial<ShellFrameProps>) => result.rerender(view(next))
+  }
+}
+
 describe('ShellFrame', () => {
   beforeEach(() => {
     mountSpy.mockClear()
@@ -91,6 +125,8 @@ describe('ShellFrame', () => {
     useShellLayoutStore.setState({ status: 'unavailable' })
     useThemePickerStore.getState().close()
     railProps.current = null
+    platformRef.tauri = true
+    platformRef.mac = false
   })
 
   afterEach(() => {
@@ -99,7 +135,7 @@ describe('ShellFrame', () => {
   })
 
   it('renders the Rail, then the Side panel on the left of the main area', () => {
-    render(<ShellFrame {...buildProps()} />)
+    renderFrame()
 
     const rail = screen.getByTestId('rail')
     const sidePanel = screen.getByTestId('side-panel')
@@ -116,9 +152,10 @@ describe('ShellFrame', () => {
     expect(dnd).toContainElement(sidePanel)
     expect(dnd).toContainElement(main)
     expect(dnd).not.toContainElement(rail)
-    // The Rail replaces the classic activity rail.
+    // The Rail replaces the classic activity rail, and there is no title strip.
     expect(screen.queryByTestId('activity-rail')).not.toBeInTheDocument()
-    expect(screen.getByTestId('title-bar')).toBeInTheDocument()
+    expect(screen.queryByTestId('title-bar')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('macos-titlebar-strip')).not.toBeInTheDocument()
     expect(screen.getByTestId('conflict-banner')).toBeInTheDocument()
     expect(screen.getByTestId('app-modals')).toBeInTheDocument()
   })
@@ -129,26 +166,19 @@ describe('ShellFrame', () => {
     const handleOpenCanvas = vi.fn()
     const handleToggleThemePicker = vi.fn()
     const onSelectProject = vi.fn()
-    const activeProject = { id: 'p1', name: 'One', color: 'blue', path: '/repo/one' } as const
-    render(
-      <ShellFrame
-        {...buildProps({
-          projects: [activeProject],
-          activeProject,
-          activeProjectId: 'p1',
-          isShortcutMenuOpen: true,
-          setIsCommandPaletteOpen,
-          setIsShortcutMenuOpen,
-          handleOpenCanvas,
-          handleToggleThemePicker,
-          onSelectProject
-        })}
-      />
-    )
+    renderFrame({
+      ...withProject,
+      isShortcutMenuOpen: true,
+      setIsCommandPaletteOpen,
+      setIsShortcutMenuOpen,
+      handleOpenCanvas,
+      handleToggleThemePicker,
+      onSelectProject
+    })
 
     const props = railProps.current as ShellRailProps
-    expect(props.projects).toEqual([activeProject])
-    expect(props.activeProject).toBe(activeProject)
+    expect(props.projects).toEqual([oneProject])
+    expect(props.activeProject).toBe(oneProject)
     expect(props.activeProjectId).toBe('p1')
     expect(props.canOpenCanvas).toBe(true)
     expect(props.isShortcutsOpen).toBe(true)
@@ -167,12 +197,12 @@ describe('ShellFrame', () => {
   })
 
   it('cannot open the canvas without a project path', () => {
-    render(<ShellFrame {...buildProps()} />)
+    renderFrame()
     expect((railProps.current as ShellRailProps).canOpenCanvas).toBe(false)
   })
 
   it('does not remount workspaceMain when the Rail flips between expanded and collapsed', () => {
-    render(<ShellFrame {...buildProps()} />)
+    renderFrame()
     expect(mountSpy).toHaveBeenCalledTimes(1)
 
     act(() => useShellLayoutStore.setState({ railExpanded: false }))
@@ -184,11 +214,11 @@ describe('ShellFrame', () => {
   })
 
   it('does not remount workspaceMain when the frame re-renders', () => {
-    const { rerender } = render(<ShellFrame {...buildProps()} />)
+    const { rerenderFrame } = renderFrame()
     expect(mountSpy).toHaveBeenCalledTimes(1)
 
-    rerender(<ShellFrame {...buildProps({ isShortcutMenuOpen: true })} />)
-    rerender(<ShellFrame {...buildProps({ isShortcutMenuOpen: false })} />)
+    rerenderFrame({ isShortcutMenuOpen: true })
+    rerenderFrame({ isShortcutMenuOpen: false })
 
     expect(mountSpy).toHaveBeenCalledTimes(1)
     expect(unmountSpy).not.toHaveBeenCalled()
@@ -196,28 +226,107 @@ describe('ShellFrame', () => {
 
   it('occludes native webviews while the shortcuts menu is open', () => {
     const observer = renderHook(() => useNativeWebviewOccluded())
-    const { rerender } = render(<ShellFrame {...buildProps()} />)
+    const { rerenderFrame } = renderFrame()
     expect(observer.result.current).toBe(false)
 
-    rerender(<ShellFrame {...buildProps({ isShortcutMenuOpen: true })} />)
+    rerenderFrame({ isShortcutMenuOpen: true })
     expect(observer.result.current).toBe(true)
 
-    rerender(<ShellFrame {...buildProps({ isShortcutMenuOpen: false })} />)
+    rerenderFrame({ isShortcutMenuOpen: false })
     expect(observer.result.current).toBe(false)
   })
 
   it('occludes native webviews while the theme picker is open, until both occluders close', () => {
     const observer = renderHook(() => useNativeWebviewOccluded())
-    const { rerender } = render(<ShellFrame {...buildProps({ isShortcutMenuOpen: true })} />)
+    const { rerenderFrame } = renderFrame({ isShortcutMenuOpen: true })
 
     act(() => useThemePickerStore.getState().open('termul'))
     expect(observer.result.current).toBe(true)
 
     // Shortcuts closes first: the theme picker still occludes.
-    rerender(<ShellFrame {...buildProps({ isShortcutMenuOpen: false })} />)
+    rerenderFrame({ isShortcutMenuOpen: false })
     expect(observer.result.current).toBe(true)
 
     act(() => useThemePickerStore.getState().close())
     expect(observer.result.current).toBe(false)
+  })
+
+  describe('top row', () => {
+    const dragRegions = (): Element[] => [...document.querySelectorAll('[data-tauri-drag-region]')]
+
+    it('tops the shell with an 8px drag gutter on desktop and none on web', () => {
+      const { unmount } = renderFrame(withProject)
+      const gutter = screen.getByTestId('top-gutter')
+      expect(gutter).toHaveClass('h-2')
+      expect(gutter).toHaveAttribute('data-tauri-drag-region')
+      unmount()
+
+      platformRef.tauri = false
+      renderFrame(withProject)
+      expect(screen.getByTestId('top-gutter')).not.toHaveAttribute('data-tauri-drag-region')
+      expect(dragRegions()).toHaveLength(0)
+    })
+
+    it('renders the fallback bar with the controls when there is no project', () => {
+      renderFrame()
+      const bar = screen.getByTestId('top-row-fallback-bar')
+      expect(bar).toHaveAttribute('data-tauri-drag-region')
+      expect(screen.getAllByTestId('window-controls')).toHaveLength(1)
+      expect(bar).toContainElement(screen.getByTestId('window-controls'))
+      // Inside the main card, above workspaceMain.
+      const main = screen.getByTestId('workspace-main').closest('main') as HTMLElement
+      expect(main).toContainElement(bar)
+      expect(
+        bar.compareDocumentPosition(screen.getByTestId('workspace-main')) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+    })
+
+    it('renders the fallback bar on a routed page, not on a workspace route', () => {
+      const { unmount } = renderFrame(withProject, '/snapshots')
+      expect(screen.getByTestId('top-row-fallback-bar')).toBeInTheDocument()
+      expect(screen.getAllByTestId('window-controls')).toHaveLength(1)
+      unmount()
+
+      renderFrame(withProject, '/c/chat-1')
+      expect(screen.queryByTestId('top-row-fallback-bar')).not.toBeInTheDocument()
+    })
+
+    it('leaves the controls to the pane tab bars in panes mode', () => {
+      renderFrame(withProject)
+      expect(screen.queryByTestId('top-row-fallback-bar')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument()
+    })
+
+    it('does not render the fallback bar in SSH mode (the SSH header owns the controls)', () => {
+      renderFrame({
+        ...withProject,
+        ssh: { ...ssh, activeSSHProfile: { id: 's1' } } as unknown as SSHWorkspaceState
+      })
+      expect(screen.queryByTestId('top-row-fallback-bar')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument()
+    })
+
+    it('renders no controls on macOS or web, even in the fallback bar', () => {
+      platformRef.mac = true
+      const { unmount } = renderFrame()
+      expect(screen.getByTestId('top-row-fallback-bar')).toBeInTheDocument()
+      expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument()
+      unmount()
+
+      platformRef.mac = false
+      platformRef.tauri = false
+      renderFrame()
+      expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument()
+      expect(dragRegions()).toHaveLength(0)
+    })
+
+    it('keeps workspaceMain mounted when the mode flips between fallback and panes', () => {
+      const { rerenderFrame } = renderFrame()
+      rerenderFrame(withProject)
+      rerenderFrame({})
+      expect(mountSpy).toHaveBeenCalledTimes(1)
+      expect(unmountSpy).not.toHaveBeenCalled()
+    })
   })
 })

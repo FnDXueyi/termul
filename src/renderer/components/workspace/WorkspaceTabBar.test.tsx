@@ -221,6 +221,12 @@ vi.mock('@/lib/api', async () => {
     },
     clipboardApi: {
       writeText: vi.fn()
+    },
+    windowApi: {
+      onMaximizeChange: () => () => {},
+      minimize: vi.fn(),
+      toggleMaximize: vi.fn().mockResolvedValue({ success: true, data: false }),
+      close: vi.fn()
     }
   }
 })
@@ -1571,6 +1577,96 @@ describe('WorkspaceTabBar', () => {
         expect(exit.opacity).toBe(0)
         expect(exit.transition.duration).toBe(0)
       }
+    })
+  })
+
+  describe('top row (flagged shell)', () => {
+    const mountTabs: WorkspaceTab[] = [
+      { type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' },
+      { type: 'terminal', id: 'tab-1', terminalId: 'term-1' }
+    ]
+
+    const dragged = (container: HTMLElement): HTMLElement[] => [
+      ...container.querySelectorAll<HTMLElement>('[data-tauri-drag-region]')
+    ]
+
+    it('is the classic bar without topRow: no drag region, no window controls', async () => {
+      const { container } = render(
+        <WorkspaceTabBar
+          paneId="pane-a"
+          tabs={mountTabs}
+          activeTabId="edit-/a.ts"
+          onAddTerminal={vi.fn()}
+        />
+      )
+      await flushShellEffect()
+      expect(dragged(container)).toHaveLength(0)
+      expect(screen.queryByTestId('window-controls')).toBeNull()
+    })
+
+    it('marks the bar root, tabs wrapper, scroller, tablist and trailing wrapper, never a tab or button', async () => {
+      const { container } = render(
+        <WorkspaceTabBar
+          paneId="pane-a"
+          tabs={mountTabs}
+          activeTabId="edit-/a.ts"
+          onAddTerminal={vi.fn()}
+          topRow={{ dragRegion: true, windowControls: false }}
+        />
+      )
+      await flushShellEffect()
+
+      const marked = dragged(container)
+      expect(marked).toHaveLength(5)
+      expect(marked).toContain(container.querySelector('[role="tablist"]'))
+      expect(marked).toContain(container.firstElementChild as HTMLElement)
+      for (const element of marked) {
+        expect(element.tagName).toBe('DIV')
+        expect(element.getAttribute('role')).not.toBe('tab')
+      }
+      for (const button of screen.getAllByRole('button')) {
+        expect(button).not.toHaveAttribute('data-tauri-drag-region')
+      }
+      expect(container.querySelector('[role="tab"][data-tauri-drag-region]')).toBeNull()
+      expect(screen.queryByTestId('window-controls')).toBeNull()
+    })
+
+    it('renders the window controls flush at the right end, after the trailing buttons', async () => {
+      const { container } = render(
+        <WorkspaceTabBar
+          paneId="pane-a"
+          tabs={mountTabs}
+          activeTabId="edit-/a.ts"
+          onAddTerminal={vi.fn()}
+          topRow={{ dragRegion: true, windowControls: true }}
+        />
+      )
+      await flushShellEffect()
+
+      const controls = screen.getByTestId('window-controls')
+      const bar = container.firstElementChild as HTMLElement
+      expect(bar.lastElementChild).toBe(controls)
+      expect(controls).not.toHaveAttribute('data-tauri-drag-region')
+      expect(screen.getAllByRole('button', { name: /window$/ })).toHaveLength(3)
+      // The terminal menu button comes before the controls.
+      expect(
+        screen.getByTitle('Open terminal menu').compareDocumentPosition(controls) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+    })
+
+    it('renders the controls without drag attributes on a bar without drag (web-like)', async () => {
+      const { container } = render(
+        <WorkspaceTabBar
+          paneId="pane-a"
+          tabs={[]}
+          activeTabId={null}
+          topRow={{ dragRegion: false, windowControls: true }}
+        />
+      )
+      await flushShellEffect()
+      expect(dragged(container)).toHaveLength(0)
+      expect(screen.getByTestId('window-controls')).toBeInTheDocument()
     })
   })
 })

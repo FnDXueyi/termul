@@ -73,6 +73,7 @@ import {
   KeySquareIcon,
   Layers01Icon,
   Layout2ColumnIcon,
+  Layout3ColumnIcon,
   Link01Icon,
   ListChecksIcon,
   ListIcon,
@@ -222,6 +223,7 @@ export const ClipboardPaste = hugeIcon('ClipboardPaste', ClipboardPasteIcon)
 export const Clock = hugeIcon('Clock', Clock01Icon)
 export const Code2 = hugeIcon('Code2', CodeIcon)
 export const Columns2 = hugeIcon('Columns2', Layout2ColumnIcon)
+export const Columns3 = hugeIcon('Columns3', Layout3ColumnIcon)
 export const Copy = hugeIcon('Copy', CopyIcon)
 export const CopyX = hugeIcon('CopyX', CopyXIcon)
 export const Cpu = hugeIcon('Cpu', CpuIcon)

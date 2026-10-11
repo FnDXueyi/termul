@@ -1,6 +1,7 @@
 import { Edit2, FolderKanban } from '@/components/icons'
 import { ProjectSidebar } from '@/components/ProjectSidebar'
 import { RailFooter } from '@/components/shell/RailFooter'
+import { RailHeader } from '@/components/shell/RailHeader'
 import { RailRow } from '@/components/shell/RailRow'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
 import { useProjectActions } from '@/stores/project-store'
@@ -26,7 +27,7 @@ interface RailExpandedProps {
 const NEED_PROJECT = 'Open a project first'
 
 /**
- * Expanded Rail body, top to bottom: Search, Canvas, the Projects section
+ * Expanded Rail body, top to bottom: the header (top row part), Search, Canvas, the Projects section
  * (with the SSH section on desktop), and the footer. Fills the width its
  * container gives it.
  */
@@ -52,6 +53,8 @@ export function RailExpanded({
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-background">
+      <RailHeader />
+
       <div className="flex shrink-0 flex-col gap-0.5 px-2 pt-2">
         <RailRow
           label="Search"

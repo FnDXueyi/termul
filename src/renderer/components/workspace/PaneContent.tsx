@@ -9,6 +9,7 @@ import {
   LAUNCHER_EXIT_REDUCED_MS,
   LAUNCHER_EXIT_WINDOW_MS
 } from '@/components/agents/launcher/launcher-motion'
+import { usePaneTopRow } from '@/components/shell/top-row-context'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
@@ -99,6 +100,9 @@ export function PaneContent({
       setActivePane: state.setActivePane
     }))
   )
+
+  // Flagged shell only: this pane's part of the window top row (null otherwise).
+  const topRow = usePaneTopRow(pane.id)
 
   const hasMultiplePanes = useWorkspaceStore((state) => getAllLeafPanes(state.root).length > 1)
 
@@ -252,6 +256,7 @@ export function PaneContent({
           onCloseEditorTab={onCloseEditorTab}
           onCloseTabs={onCloseTabs}
           defaultShell={defaultShell}
+          topRow={topRow ?? undefined}
         />
       )}
 
@@ -543,7 +548,12 @@ export function PaneContent({
         {agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
           <motion.div
             key={`agent-launcher-overlay-${pane.id}`}
-            className="pointer-events-none absolute inset-0 z-30 flex flex-col"
+            className={cn(
+              'pointer-events-none absolute z-30 flex flex-col',
+              // A top-edge pane keeps its whole top row (tabs, drag space,
+              // window controls) uncovered.
+              topRow?.topEdge ? 'inset-x-0 bottom-0 top-10' : 'inset-0'
+            )}
             role="dialog"
             aria-modal="true"
             aria-label="Agent launcher"
