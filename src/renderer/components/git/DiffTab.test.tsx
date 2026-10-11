@@ -18,7 +18,7 @@ const { gitApi, toastError, mockLogFrontendError, capability } = vi.hoisted(() =
 vi.mock('@/lib/git-api', () => ({ gitApi }))
 vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn() } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: mockLogFrontendError }))
-vi.mock('@/components/agents/launcher/use-server-admits-remote-writes', () => ({
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
   useServerAdmitsRemoteWrites: () => capability.admitted
 }))
 
@@ -176,7 +176,9 @@ describe('DiffTab', () => {
 
     const button = await screen.findByRole('button', { name: 'Stage hunk' })
     expect(button).toBeDisabled()
-    expect(screen.getByText('This server is read-only for remote clients.')).toBeInTheDocument()
+    expect(
+      screen.getAllByText('This server is read-only for remote clients.').length
+    ).toBeGreaterThan(0)
 
     fireEvent.click(button)
     expect(gitApi.stageHunk).not.toHaveBeenCalled()

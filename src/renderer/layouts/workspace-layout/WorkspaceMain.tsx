@@ -5,6 +5,7 @@ import { Outlet } from 'react-router-dom'
 import { ChatRoute } from '@/components/ChatRoute'
 import { FolderKanban } from '@/components/icons'
 import { StatusBar } from '@/components/StatusBar'
+import { useTopRow } from '@/components/shell/top-row-context'
 import { Button } from '@/components/ui/button'
 import { PaneRenderer } from '@/components/workspace/PaneRenderer'
 import { useMobileActiveLeaf } from '@/hooks/use-mobile-active-leaf'
@@ -58,6 +59,16 @@ export function WorkspaceMain({
   const { renameTerminal } = useTerminalActions()
   const appDefaultShell = useDefaultShell()
   const paneRoot = usePaneRoot()
+  // Flagged shell only: the SSH header is the top row when it owns the window
+  // controls (no provider on the classic and mobile shells = unchanged).
+  const topRowValue = useTopRow()
+  const sshTopRow =
+    topRowValue?.roles.controlsOwner === 'ssh-header'
+      ? {
+          dragRegion: topRowValue.platform.dragRegions,
+          windowControls: topRowValue.platform.windowControls
+        }
+      : undefined
   const fullscreenPaneId = useFullscreenPaneId()
   const fullscreenPane = useMemo(() => {
     if (!fullscreenPaneId) return null
@@ -72,7 +83,7 @@ export function WorkspaceMain({
     <>
       {activeSSHProfile ? (
         <Suspense fallback={<ShellSkeleton />}>
-          <SSHWorkspace profile={sshProfileWithPassword!} conn={sshConn} />
+          <SSHWorkspace profile={sshProfileWithPassword!} conn={sshConn} topRow={sshTopRow} />
         </Suspense>
       ) : projects.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center bg-background px-6 rounded-xl">

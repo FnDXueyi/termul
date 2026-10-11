@@ -11,7 +11,7 @@ import { useSidebarVisible } from '@/stores/sidebar-store'
 import type { Project } from '@/types/project'
 
 /** Width of the collapsed Rail (`w-12`). */
-const COLLAPSED_WIDTH = 48
+export const COLLAPSED_WIDTH = 48
 
 export interface ShellRailProps {
   projects: Project[]

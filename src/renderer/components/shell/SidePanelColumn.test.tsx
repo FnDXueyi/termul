@@ -14,7 +14,11 @@ vi.mock('@/components/file-explorer/FileExplorer', () => ({
   )
 }))
 
-const mocks = vi.hoisted(() => ({ showAgentLauncher: vi.fn(), addGitTab: vi.fn() }))
+vi.mock('./ChangesPanel', () => ({
+  ChangesPanel: ({ cwd }: { cwd: string }) => <div data-testid="changes-panel" data-cwd={cwd} />
+}))
+
+const mocks = vi.hoisted(() => ({ showAgentLauncher: vi.fn() }))
 
 const makeProject = (overrides: Partial<Project> = {}): Project =>
   ({
@@ -55,15 +59,13 @@ function renderPanel(project: Project, initialPath = '/') {
 
 beforeEach(() => {
   mocks.showAgentLauncher.mockReset()
-  mocks.addGitTab.mockReset()
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'ready' })
   useAcpStore.setState({ sessionIndex: [], sessions: {}, agentConfigs: [] })
   useGitStatusStore.setState({ statuses: {} })
   useWorkspaceStore.setState({
     activePaneId: 'pane-1',
-    showAgentLauncher: mocks.showAgentLauncher,
-    addGitTab: mocks.addGitTab
+    showAgentLauncher: mocks.showAgentLauncher
   })
 })
 
@@ -126,7 +128,7 @@ describe('SidePanelColumn', () => {
     expect(screen.getByRole('tab', { name: 'Explorer' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('bridges the Changes tab to the Git tab of the working copy', () => {
+  it('renders the Changes panel for the picked working copy', () => {
     useShellLayoutStore.setState({
       worktreePickByProject: { p1: '/repo/.termul/worktrees/feature' }
     })
@@ -143,15 +145,16 @@ describe('SidePanelColumn', () => {
     expect(screen.getByTestId('column-tab-changes-badge')).toHaveTextContent('2')
 
     fireEvent.click(screen.getByRole('tab', { name: /Changes/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open Git changes' }))
-    expect(mocks.addGitTab).toHaveBeenCalledWith('/repo/.termul/worktrees/feature', 'pane-1')
+    expect(screen.getByTestId('changes-panel')).toHaveAttribute(
+      'data-cwd',
+      '/repo/.termul/worktrees/feature'
+    )
   })
 
   it('uses the project path for Changes when nothing is picked', () => {
     renderPanel(makeProject())
     fireEvent.click(screen.getByRole('tab', { name: /Changes/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open Git changes' }))
-    expect(mocks.addGitTab).toHaveBeenCalledWith('/repo', 'pane-1')
+    expect(screen.getByTestId('changes-panel')).toHaveAttribute('data-cwd', '/repo')
   })
 
   it('sizes the column from the store and exposes a resize separator', () => {
@@ -162,5 +165,51 @@ describe('SidePanelColumn', () => {
     expect(separator).toHaveAttribute('aria-valuenow', '300')
     fireEvent.keyDown(separator, { key: 'ArrowRight' })
     expect(useShellLayoutStore.getState().sidePanelWidth).toBe(316)
+  })
+
+  describe('top row', () => {
+    const renderWithDrag = (dragRegion?: boolean) =>
+      render(
+        <MemoryRouter>
+          <SidePanelColumn activeProject={makeProject()} dragRegion={dragRegion} />
+        </MemoryRouter>
+      )
+
+    it('is not a drag region by default', () => {
+      renderWithDrag()
+      expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
+    })
+
+    it('marks the header root and its label, never the New chat button', () => {
+      renderWithDrag(true)
+      const label = screen.getByText('Workspace')
+      const header = label.parentElement as HTMLElement
+      expect(header).toHaveAttribute('data-tauri-drag-region')
+      expect(label).toHaveAttribute('data-tauri-drag-region')
+      expect(label).toHaveClass('pointer-events-none')
+      expect(screen.getByRole('button', { name: 'New chat' })).not.toHaveAttribute(
+        'data-tauri-drag-region'
+      )
+      expect(document.querySelectorAll('[data-tauri-drag-region]')).toHaveLength(2)
+    })
+
+    it('hides the Column tabs while the Rail is collapsed and labels the tabpanel by name', () => {
+      useShellLayoutStore.setState({ railExpanded: false })
+      renderWithDrag()
+      expect(screen.queryByRole('tablist')).toBeNull()
+      const panel = screen.getByRole('tabpanel')
+      expect(panel).toHaveAttribute('aria-label', 'Chats')
+      expect(panel).not.toHaveAttribute('aria-labelledby')
+
+      act(() => useShellLayoutStore.getState().setLastColumnTab('p1', 'changes'))
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-label', 'Changes')
+    })
+
+    it('keeps aria-labelledby on the tabpanel while the Rail is expanded', () => {
+      renderWithDrag()
+      const panel = screen.getByRole('tabpanel')
+      expect(panel).toHaveAttribute('aria-labelledby', 'side-panel-tab-chats')
+      expect(panel).not.toHaveAttribute('aria-label')
+    })
   })
 })

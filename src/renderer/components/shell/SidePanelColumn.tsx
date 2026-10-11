@@ -4,19 +4,19 @@ import { Plus } from '@/components/icons'
 import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
 import { ShellSkeleton } from '@/layouts/workspace-layout/ShellSkeleton'
 import { cn } from '@/lib/utils'
-import { pickedWorkingCopy } from '@/lib/working-copy'
 import { selectChangedFileCount, useGitStatusStore } from '@/stores/git-status-store'
 import {
   type ShellLastColumnTab,
   useLastColumnTab,
-  useShellLayoutStore,
-  useWorktreePick
+  useShellLayoutStore
 } from '@/stores/shell-layout-store'
+import { useSidebarVisible } from '@/stores/sidebar-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
-import { ChangesTabBody } from './ChangesTabBody'
+import { ChangesPanel } from './ChangesPanel'
 import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
+import { useColumnWorkingCopy } from './use-column-working-copy'
 import { useSidePanelResize } from './use-side-panel-resize'
 
 const FileExplorer = lazy(() =>
@@ -25,23 +25,34 @@ const FileExplorer = lazy(() =>
 
 interface SidePanelColumnProps {
   activeProject: Project
+  /**
+   * The header is part of the window top row (expanded Rail on desktop): it
+   * becomes a drag region. Defaults to the classic, non-draggable header.
+   */
+  dragRegion?: boolean
+}
+
+const TAB_LABELS: Record<ShellLastColumnTab, string> = {
+  chats: 'Chats',
+  explorer: 'Explorer',
+  changes: 'Changes'
 }
 
 /**
  * Shell Side panel (flagged shell only): a header with the New chat button,
  * the Chats / Explorer / Changes Column tabs and the selected tab's body. The
- * last tab is remembered per project. Mounted through `ExplorerColumn`'s
- * `sidePanel` slot, never in SSH mode.
+ * last tab is remembered per project. The tabs render only while the Rail is
+ * expanded; collapsed, the Rail's own icons select the tab. Mounted through
+ * `ExplorerColumn`'s `sidePanel` slot, never in SSH mode.
  */
-export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.JSX.Element {
+export function SidePanelColumn({
+  activeProject,
+  dragRegion = false
+}: SidePanelColumnProps): React.JSX.Element {
   const projectId = activeProject.id
-  const pick = useWorktreePick(projectId)
-  const picked = pickedWorkingCopy(activeProject, pick)
-  const cwd = picked?.path ?? activeProject.path ?? ''
-  const worktreeBranch =
-    picked?.state === 'resolved' && picked.kind === 'worktree'
-      ? (activeProject.worktrees ?? []).find((w) => w.id === picked.worktreeId)?.branch
-      : undefined
+  const { cwd, worktreeBranch } = useColumnWorkingCopy(activeProject)
+  const railExpanded = useSidebarVisible()
+  const dragAttr = dragRegion ? true : undefined
 
   const selected: ShellLastColumnTab = useLastColumnTab(projectId) ?? 'chats'
   const changedCount = useGitStatusStore(selectChangedFileCount(cwd))
@@ -68,10 +79,6 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
     useShellLayoutStore.getState().setLastColumnTab(projectId, tab)
   }
 
-  const handleOpenGitChanges = (path: string): void => {
-    useWorkspaceStore.getState().addGitTab(path, useWorkspaceStore.getState().activePaneId)
-  }
-
   return (
     <div
       className={cn(
@@ -80,8 +87,13 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
       )}
       style={{ width }}
     >
-      <div className={PANEL_HEADER_CLASS}>
-        <span className="label-panel truncate">{worktreeBranch || 'Workspace'}</span>
+      <div className={PANEL_HEADER_CLASS} data-tauri-drag-region={dragAttr}>
+        <span
+          className={cn('label-panel truncate', dragRegion && 'pointer-events-none')}
+          data-tauri-drag-region={dragAttr}
+        >
+          {worktreeBranch || 'Workspace'}
+        </span>
         <button
           type="button"
           onClick={handleNewChat}
@@ -93,12 +105,16 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
         </button>
       </div>
 
-      <ColumnTabs selected={selected} onSelect={handleSelectTab} changedCount={changedCount} />
+      {railExpanded && (
+        <ColumnTabs selected={selected} onSelect={handleSelectTab} changedCount={changedCount} />
+      )}
 
       <div
         role="tabpanel"
         id={columnPanelId(selected)}
-        aria-labelledby={columnTabId(selected)}
+        {...(railExpanded
+          ? { 'aria-labelledby': columnTabId(selected) }
+          : { 'aria-label': TAB_LABELS[selected] })}
         className="flex min-h-0 flex-1 flex-col"
       >
         {selected === 'chats' && <ChatsList project={activeProject} />}
@@ -107,9 +123,7 @@ export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.
             <FileExplorer side="left" embedded />
           </Suspense>
         )}
-        {selected === 'changes' && (
-          <ChangesTabBody cwd={cwd} onOpenGitChanges={handleOpenGitChanges} />
-        )}
+        {selected === 'changes' && <ChangesPanel cwd={cwd} isVisible />}
       </div>
 
       <button

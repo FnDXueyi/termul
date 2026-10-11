@@ -2,7 +2,6 @@ import type { DetectedShells } from '@shared/types/ipc.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { FolderPlus, Plus } from '@/components/icons'
-import { RailHeaderToggle } from '@/components/shell/RailHeaderToggle'
 import { SidebarToggleButton } from '@/components/TitlebarPanelToggles'
 import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
@@ -479,14 +478,11 @@ export function ProjectSidebar({
         <span className="label-panel">Projects</span>
         <div className="flex items-center">
           {isRail ? (
-            <>
-              {!isTauriContext() && <RailHeaderToggle className={HEADER_ICON_BUTTON} />}
-              <AddProjectMenu
-                onNewProject={onNewProject}
-                onNewGroup={() => setNewGroupModal({})}
-                buttonClassName={HEADER_ICON_BUTTON}
-              />
-            </>
+            <AddProjectMenu
+              onNewProject={onNewProject}
+              onNewGroup={() => setNewGroupModal({})}
+              buttonClassName={HEADER_ICON_BUTTON}
+            />
           ) : (
             <>
               {!isTauriContext() && <SidebarToggleButton className={HEADER_ICON_BUTTON} />}

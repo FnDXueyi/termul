@@ -1288,6 +1288,14 @@ describe('ProjectSidebar rail variant', () => {
     expect(screen.getByText('Projects')).toBeInTheDocument()
   })
 
+  it('has no panel toggle in the Projects header (the Rail header owns them)', () => {
+    // jsdom is web: the old web-only Rail toggle used to render here.
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(screen.queryByRole('button', { name: 'Expand or collapse projects' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hide sidebar' })).toBeNull()
+  })
+
   it('keeps the classic sidebar unchanged by default', () => {
     renderWithRouter({ projects: gitProjects })
 

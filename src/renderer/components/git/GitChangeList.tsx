@@ -6,9 +6,12 @@ import type { GitActions } from '@/components/git/use-git-actions'
 import type { GitSelectionSection } from '@/components/git/use-git-selection'
 import { Minus, Plus, RotateCcw } from '@/components/icons'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 
 interface GitChangeListProps {
-  variant: 'desktop' | 'mobile'
+  /** `column` is the desktop look at full width without its own scroll area:
+      the shell Changes panel scrolls the whole upper region instead. */
+  variant: 'desktop' | 'mobile' | 'column'
   stagedFiles: GitStatusDetail[]
   unstagedFiles: GitStatusDetail[]
   stashes: GitStashInfo[]
@@ -58,123 +61,137 @@ export function GitChangeList({
   onPopStash,
   onDropStash
 }: GitChangeListProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   const isMobile = variant === 'mobile'
   const rowIconSize = isMobile ? 16 : 13
   const fileItemVariant = isMobile ? 'mobile' : undefined
   const rowActionTouch = isMobile ? true : undefined
 
-  return (
-    <ScrollArea className="flex-1 w-full">
-      <div className={isMobile ? 'p-2 pr-3 space-y-4 w-full' : 'p-2 pr-3 space-y-4 w-[303px]'}>
-        {stagedFiles.length > 0 && (
-          <div className="space-y-1">
-            <SectionHeader
-              label="Staged Changes"
-              count={stagedFiles.length}
-              selectionCount={stagedSelectionCount}
-            >
-              <SectionAction
-                icon={<Minus size={13} />}
-                label="Unstage all changes"
-                disabled={isMutating || isGenerating}
-                onClick={() => runUnstage(stagedFiles.map((f) => f.path))}
-              />
-            </SectionHeader>
-            {stagedFiles.map((file: GitStatusDetail) => {
-              const inSelection = selectionSection === 'staged' && selectedPaths.has(file.path)
-              return (
-                <FileItem
-                  key={file.path}
-                  file={file}
-                  variant={fileItemVariant}
-                  isActive={selectedFile === file.path && selectedStaged}
-                  isSelected={inSelection}
-                  onClick={(e) => onFileClick(e, file.path, true, stagedFiles)}
-                >
-                  <RowAction
-                    icon={<Minus size={rowIconSize} />}
-                    label="Unstage changes"
-                    touch={rowActionTouch}
-                    disabled={isMutating || isGenerating}
-                    onClick={() => runUnstage(targetsFor(file.path, 'staged'))}
-                  />
-                </FileItem>
-              )
-            })}
-          </div>
-        )}
+  const isColumn = variant === 'column'
 
+  const body = (
+    <div
+      className={
+        isMobile || isColumn ? 'p-2 pr-3 space-y-4 w-full' : 'p-2 pr-3 space-y-4 w-[303px]'
+      }
+    >
+      {stagedFiles.length > 0 && (
         <div className="space-y-1">
           <SectionHeader
-            label="Changes"
-            count={unstagedFiles.length}
-            selectionCount={unstagedSelectionCount}
+            label="Staged Changes"
+            count={stagedFiles.length}
+            selectionCount={stagedSelectionCount}
           >
-            {unstagedFiles.length > 0 && (
-              <>
-                <SectionAction
-                  icon={<RotateCcw size={13} />}
-                  label="Discard all changes"
+            <SectionAction
+              icon={<Minus size={13} />}
+              label="Unstage all changes"
+              disabled={isMutating || isGenerating}
+              gated={!admitted}
+              onClick={() => runUnstage(stagedFiles.map((f) => f.path))}
+            />
+          </SectionHeader>
+          {stagedFiles.map((file: GitStatusDetail) => {
+            const inSelection = selectionSection === 'staged' && selectedPaths.has(file.path)
+            return (
+              <FileItem
+                key={file.path}
+                file={file}
+                variant={fileItemVariant}
+                isActive={selectedFile === file.path && selectedStaged}
+                isSelected={inSelection}
+                onClick={(e) => onFileClick(e, file.path, true, stagedFiles)}
+              >
+                <RowAction
+                  icon={<Minus size={rowIconSize} />}
+                  label="Unstage changes"
+                  touch={rowActionTouch}
+                  disabled={isMutating || isGenerating}
+                  gated={!admitted}
+                  onClick={() => runUnstage(targetsFor(file.path, 'staged'))}
+                />
+              </FileItem>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="space-y-1">
+        <SectionHeader
+          label="Changes"
+          count={unstagedFiles.length}
+          selectionCount={unstagedSelectionCount}
+        >
+          {unstagedFiles.length > 0 && (
+            <>
+              <SectionAction
+                icon={<RotateCcw size={13} />}
+                label="Discard all changes"
+                variant="danger"
+                disabled={isMutating || isGenerating}
+                gated={!admitted}
+                onClick={() => requestDiscard(unstagedFiles.map((f) => f.path))}
+              />
+              <SectionAction
+                icon={<Plus size={13} />}
+                label="Stage all changes"
+                disabled={isMutating || isGenerating}
+                gated={!admitted}
+                onClick={() => runStage(unstagedFiles.map((f) => f.path))}
+              />
+            </>
+          )}
+        </SectionHeader>
+        {unstagedFiles.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <p className="text-xs text-muted-foreground">No changes detected</p>
+          </div>
+        ) : (
+          unstagedFiles.map((file: GitStatusDetail) => {
+            const inSelection = selectionSection === 'unstaged' && selectedPaths.has(file.path)
+            return (
+              <FileItem
+                key={file.path}
+                file={file}
+                variant={fileItemVariant}
+                isActive={selectedFile === file.path && !selectedStaged}
+                isSelected={inSelection}
+                onClick={(e) => onFileClick(e, file.path, false, unstagedFiles)}
+              >
+                <RowAction
+                  icon={<RotateCcw size={rowIconSize} />}
+                  label="Discard changes"
+                  touch={rowActionTouch}
                   variant="danger"
                   disabled={isMutating || isGenerating}
-                  onClick={() => requestDiscard(unstagedFiles.map((f) => f.path))}
+                  gated={!admitted}
+                  onClick={() => requestDiscard(targetsFor(file.path, 'unstaged'))}
                 />
-                <SectionAction
-                  icon={<Plus size={13} />}
-                  label="Stage all changes"
+                <RowAction
+                  icon={<Plus size={rowIconSize} />}
+                  label="Stage changes"
+                  touch={rowActionTouch}
                   disabled={isMutating || isGenerating}
-                  onClick={() => runStage(unstagedFiles.map((f) => f.path))}
+                  gated={!admitted}
+                  onClick={() => runStage(targetsFor(file.path, 'unstaged'))}
                 />
-              </>
-            )}
-          </SectionHeader>
-          {unstagedFiles.length === 0 ? (
-            <div className="px-4 py-8 text-center">
-              <p className="text-xs text-muted-foreground">No changes detected</p>
-            </div>
-          ) : (
-            unstagedFiles.map((file: GitStatusDetail) => {
-              const inSelection = selectionSection === 'unstaged' && selectedPaths.has(file.path)
-              return (
-                <FileItem
-                  key={file.path}
-                  file={file}
-                  variant={fileItemVariant}
-                  isActive={selectedFile === file.path && !selectedStaged}
-                  isSelected={inSelection}
-                  onClick={(e) => onFileClick(e, file.path, false, unstagedFiles)}
-                >
-                  <RowAction
-                    icon={<RotateCcw size={rowIconSize} />}
-                    label="Discard changes"
-                    touch={rowActionTouch}
-                    variant="danger"
-                    disabled={isMutating || isGenerating}
-                    onClick={() => requestDiscard(targetsFor(file.path, 'unstaged'))}
-                  />
-                  <RowAction
-                    icon={<Plus size={rowIconSize} />}
-                    label="Stage changes"
-                    touch={rowActionTouch}
-                    disabled={isMutating || isGenerating}
-                    onClick={() => runStage(targetsFor(file.path, 'unstaged'))}
-                  />
-                </FileItem>
-              )
-            })
-          )}
-        </div>
-
-        <StashSection
-          variant={fileItemVariant}
-          stashes={stashes}
-          isMutating={isMutating}
-          isGenerating={isGenerating}
-          onApply={onApplyStash}
-          onPop={onPopStash}
-          onDrop={onDropStash}
-        />
+              </FileItem>
+            )
+          })
+        )}
       </div>
-    </ScrollArea>
+
+      <StashSection
+        variant={fileItemVariant}
+        stashes={stashes}
+        isMutating={isMutating}
+        isGenerating={isGenerating}
+        onApply={onApplyStash}
+        onPop={onPopStash}
+        onDrop={onDropStash}
+      />
+    </div>
   )
+
+  if (isColumn) return body
+  return <ScrollArea className="flex-1 w-full">{body}</ScrollArea>
 }
