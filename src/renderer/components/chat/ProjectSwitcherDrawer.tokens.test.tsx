@@ -86,7 +86,9 @@ describe('ProjectSwitcherDrawer token sweep (story 12)', () => {
     const srOnly = Array.from(document.querySelectorAll('.sr-only')).find((el) =>
       el.textContent?.toLowerCase().includes('project')
     )
-    expect(srOnly?.textContent).toBe('Switch the session to another project')
+    expect(srOnly?.textContent).toBe(
+      "Switch the session to another project or open the current project's settings"
+    )
     expect(srOnly?.textContent?.toLowerCase()).not.toContain('desktop')
   })
 })

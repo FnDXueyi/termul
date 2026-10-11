@@ -415,6 +415,59 @@ describe('ProjectSwitcherDrawer', () => {
     })
   })
 
+  describe('Project settings', () => {
+    it('shows only on the Current row and closes the sheet before opening settings', async () => {
+      const calls: string[] = []
+      const onOpenChange = vi.fn((open: boolean) => calls.push(`open:${open}`))
+      const onOpenProjectSettings = vi.fn(() => calls.push('settings'))
+      render(
+        <ProjectSwitcherDrawer
+          open
+          onOpenChange={onOpenChange}
+          onOpenProjectSettings={onOpenProjectSettings}
+        />
+      )
+
+      const gear = await screen.findByRole('button', { name: '"Alpha" project settings' })
+      expect(gear.className).toContain('size-11')
+      expect(screen.getAllByRole('button', { name: /project settings/ })).toHaveLength(1)
+      // It shares the active project's row.
+      expect(gear.closest('li')).toContainElement(screen.getByText('Alpha'))
+
+      fireEvent.click(gear)
+      expect(calls).toEqual(['open:false', 'settings'])
+    })
+
+    it('is disabled while a switch is in flight or queued', async () => {
+      const onOpenProjectSettings = vi.fn()
+      render(
+        <ProjectSwitcherDrawer
+          open
+          onOpenChange={vi.fn()}
+          onOpenProjectSettings={onOpenProjectSettings}
+        />
+      )
+      const gear = await screen.findByRole('button', { name: '"Alpha" project settings' })
+
+      setSwitchMarkers({ switchingProjectId: 'p3' })
+      expect(gear).toBeDisabled()
+      setSwitchMarkers({ switchingProjectId: null, queuedProjectSwitchId: 'p3' })
+      expect(gear).toBeDisabled()
+      fireEvent.click(gear)
+      expect(onOpenProjectSettings).not.toHaveBeenCalled()
+
+      setSwitchMarkers({ queuedProjectSwitchId: null })
+      expect(gear).toBeEnabled()
+    })
+
+    it('is omitted when no settings handler is available', async () => {
+      render(<ProjectSwitcherDrawer open onOpenChange={vi.fn()} />)
+
+      await screen.findByText('Alpha')
+      expect(screen.queryByRole('button', { name: /project settings/ })).not.toBeInTheDocument()
+    })
+  })
+
   describe('bottom sheet', () => {
     it('opens from the bottom with the sheet id, height cap and safe-area padding', async () => {
       render(

@@ -366,6 +366,9 @@ describe('MobileShellDrawer shell', () => {
     expect(topRow).toContainElement(projectRow)
     // The row leaves room for the close × in the corner.
     expect(topRow).toHaveClass('pr-10', 'min-h-11')
+    // A 44px row 2px from the top centres the chevron on the close ×'s 24px line.
+    expect(topRow?.parentElement).toHaveClass('pt-0.5')
+    expect(projectRow).toHaveClass('min-h-11', 'py-1')
     expect(
       projectRow.compareDocumentPosition(
         within(dialog).getByRole('navigation', { name: 'Sections' })

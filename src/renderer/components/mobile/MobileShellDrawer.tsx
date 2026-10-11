@@ -169,7 +169,7 @@ function DrawerProjectRow({
     <Button
       type="button"
       variant="ghost"
-      className="h-auto min-h-11 w-full justify-start gap-2 px-3 py-1.5"
+      className="h-auto min-h-11 w-full justify-start gap-2 px-3 py-1"
       aria-haspopup="dialog"
       onClick={onOpen}
     >
@@ -305,8 +305,11 @@ export function MobileShellDrawer({
         onCloseAutoFocus={drawerCloseAutoFocus}
       >
         {/* Top row: the project (web) beside the built-in close. The title stays
-            the dialog's name; it is visible only where there is no project row. */}
-        <SheetHeader className="space-y-0 px-2 pb-2 pt-2 text-left">
+            the dialog's name; it is visible only where there is no project row.
+            The 44px row sits 2px below the top, like the close's 44px
+            coarse-pointer box (the 28px fine-pointer box sits 10px down), so
+            the chevron and the X both centre 24px below the safe-area inset. */}
+        <SheetHeader className="space-y-0 px-2 pb-2 pt-0.5 text-left">
           <div className="flex min-h-11 items-center gap-2 pr-10">
             {isTauriContext() ? (
               <>

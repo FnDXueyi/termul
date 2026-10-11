@@ -441,6 +441,7 @@ export function MobileChatShell({
           open={projectsOpen}
           onOpenChange={setProjectsOpen}
           onAddProject={onNewProject}
+          onOpenProjectSettings={openProjectSettings}
           side="bottom"
           id="mobile-project-sheet"
           onCloseAutoFocus={projectSheetCloseAutoFocus}
