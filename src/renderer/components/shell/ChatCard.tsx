@@ -16,7 +16,7 @@ import { useAgentChatStatusSignals } from '@/components/workspace/tabs/agent-cha
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { cn } from '@/lib/utils'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
-import type { ChatCardData } from './chat-cards'
+import { type ChatCardData, modelLineOf } from './chat-cards'
 import type { ChatCardActions } from './use-chat-card-actions'
 
 const STATUS_WORD: Record<ProjectChatLiveState, string | null> = {
@@ -48,7 +48,7 @@ export function ChatCard({
   actions,
   onRequestDelete
 }: ChatCardProps): React.JSX.Element {
-  const { entry, agentName, indexModel, branch } = card
+  const { entry, branch } = card
   const { startChatDrag } = usePaneDnd()
   const signals = useAgentChatStatusSignals(entry.id)
   const unread = useAgentChatUnreadStore((s) => Boolean(s.unread[entry.id]))
@@ -67,7 +67,7 @@ export function ChatCard({
     ? (liveModels.availableModels.find((m) => m.modelId === liveModels.currentModelId)?.name ??
       liveModels.currentModelId)
     : null
-  const modelLine = liveModel || indexModel || agentName || 'Agent'
+  const modelLine = liveModel || modelLineOf(card)
 
   const hasCwd = Boolean(entry.cwd)
   return (
