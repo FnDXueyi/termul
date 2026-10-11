@@ -2,6 +2,7 @@ import type { GitDiffStat } from '@shared/types/ipc.types'
 import { type KeyboardEvent, memo, useEffect, useRef } from 'react'
 import { Settings } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
+import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
@@ -84,15 +85,18 @@ export const ProjectItem = memo(function ProjectItem({
               }
             }}
             className={cn(
-              'group flex h-8 w-full cursor-pointer select-none items-center gap-1.5 rounded-md pr-1.5 text-left text-xs',
-              'pl-2',
+              'group flex h-8 w-full cursor-pointer select-none items-center pr-1.5 text-left text-xs',
+              'rounded-lg',
+              RAIL_ROW_INSET_CLASS,
               'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
               isActive ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]'
             )}
             aria-current={isActive ? 'page' : undefined}
             aria-label={`Project: ${project.name}${isActive ? ' (active)' : ''}`}
           >
-            <ProjectIcon project={project} size={16} />
+            <span data-rail-icon-column className={RAIL_ICON_BOX_CLASS}>
+              <ProjectIcon project={project} size={16} />
+            </span>
 
             {isEditing ? (
               <input

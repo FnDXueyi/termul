@@ -5,7 +5,6 @@ import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/pan
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { toast } from '@/hooks/use-toast'
 import { dialogApi, shellApi } from '@/lib/api'
-import { filterProjects, shouldShowProjectSearch } from '@/lib/project-filter'
 import { useProjectsWithActiveAgentChat } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
@@ -25,7 +24,6 @@ import {
 } from './sidebar/project-context-menu'
 import { ProjectList } from './sidebar/project-list'
 import { ProjectSettingsDialog } from './sidebar/project-settings-dialog'
-import { SidebarSearchField } from './sidebar/sidebar-search-field'
 import { SSHResizableSection } from './sidebar/ssh-section'
 import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
 
@@ -89,9 +87,6 @@ export function ProjectSidebar({
 
   const [activeDragOverGroupId, setActiveDragOverGroupId] = useState<string | null>(null)
   const activeDragOverGroupIdRef = useRef<string | null>(null)
-
-  // Project search/filter query
-  const [searchQuery, setSearchQuery] = useState('')
 
   // Inline editing state
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -350,24 +345,6 @@ export function ProjectSidebar({
       ? projects.find((p) => p.id === colorPicker.targetId)
       : groups.find((g) => g.id === colorPicker?.targetId)
 
-  // The search box only renders once the list is long enough to be worth filtering.
-  const showSearch = shouldShowProjectSearch(projects.length)
-
-  // Apply the search query to each group. Filtering is gated on `showSearch` so a
-  // lingering query can never keep the list filtered after the search box unmounts
-  // (e.g. project count drops below the threshold). The unfiltered `activeProjects`
-  // is kept for shortcut-index math below.
-  const trimmedQuery = showSearch ? searchQuery.trim() : ''
-  const isSearching = trimmedQuery.length > 0
-  const filteredActiveProjects = useMemo(
-    () => filterProjects(activeProjects, { searchQuery: trimmedQuery }),
-    [activeProjects, trimmedQuery]
-  )
-  const filteredArchivedProjects = useMemo(
-    () => filterProjects(archivedProjects, { searchQuery: trimmedQuery }),
-    [archivedProjects, trimmedQuery]
-  )
-
   // Map each active project id to its position in the UNFILTERED active list.
   // The badge reflects this position (not the filtered render index) so the
   // number a user sees doesn't shift around as they type a search query.
@@ -393,45 +370,20 @@ export function ProjectSidebar({
   const groupProjectsMap = useMemo(() => {
     return groups.map((g) => {
       const projectsInGroup = g.projectIds
-        .map((pid) => filteredActiveProjects.find((p) => p.id === pid))
+        .map((pid) => activeProjects.find((p) => p.id === pid))
         .filter((p): p is Project => p !== undefined)
       return {
         group: g,
         projects: projectsInGroup
       }
     })
-  }, [groups, filteredActiveProjects])
+  }, [groups, activeProjects])
 
   const ungroupedActiveProjects = useMemo(() => {
-    return filteredActiveProjects.filter((p) => !groupedProjectIds.has(p.id))
-  }, [filteredActiveProjects, groupedProjectIds])
+    return activeProjects.filter((p) => !groupedProjectIds.has(p.id))
+  }, [activeProjects, groupedProjectIds])
 
-  const visibleGroups = useMemo(() => {
-    return groupProjectsMap.filter((gp) => gp.projects.length > 0 || !isSearching)
-  }, [groupProjectsMap, isSearching])
-
-  // Reset a lingering query if the search box is no longer shown.
-  useEffect(() => {
-    if (!showSearch && searchQuery) setSearchQuery('')
-  }, [showSearch, searchQuery])
-
-  // When the active project CHANGES to one that the current query hides (e.g. a
-  // project was just created, or a Ctrl+1..9 shortcut selected a hidden project),
-  // clear the search so the now-active project becomes visible instead of silently
-  // vanishing. Keyed on a change of `activeProjectId` only — searching for OTHER
-  // projects while the active one stays put must NOT wipe the query.
-  const prevActiveProjectId = useRef(activeProjectId)
-  useEffect(() => {
-    const changed = prevActiveProjectId.current !== activeProjectId
-    prevActiveProjectId.current = activeProjectId
-    if (!changed || !isSearching || !activeProjectId) return
-    const visible =
-      filteredActiveProjects.some((p) => p.id === activeProjectId) ||
-      filteredArchivedProjects.some((p) => p.id === activeProjectId)
-    if (!visible) setSearchQuery('')
-  }, [activeProjectId, isSearching, filteredActiveProjects, filteredArchivedProjects])
-  const hasNoSearchResults =
-    isSearching && filteredActiveProjects.length === 0 && filteredArchivedProjects.length === 0
+  const visibleGroups = groupProjectsMap
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col bg-background">
@@ -447,28 +399,10 @@ export function ProjectSidebar({
         </div>
       </div>
 
-      {/* Project search — shared sidebar field */}
-      {showSearch && (
-        <div className="shrink-0 px-2 pb-2">
-          <SidebarSearchField
-            size="md"
-            value={searchQuery}
-            onChange={setSearchQuery}
-            placeholder="Search projects…"
-            ariaLabel="Search projects"
-            clearLabel="Clear project search"
-            testIdPrefix="project-search"
-          />
-        </div>
-      )}
-
       {/* Project List */}
       <ProjectList
         projects={projects}
         activeProjectId={activeProjectId}
-        isSearching={isSearching}
-        trimmedQuery={trimmedQuery}
-        hasNoSearchResults={hasNoSearchResults}
         groups={groups}
         visibleGroups={visibleGroups}
         activeDragOverGroupId={activeDragOverGroupId}
@@ -498,7 +432,7 @@ export function ProjectSidebar({
         openProject={openProject}
         selectProject={selectProject}
         onReorderProjects={onReorderProjects}
-        filteredArchivedProjects={filteredArchivedProjects}
+        archivedProjects={archivedProjects}
         showArchived={showArchived}
         setShowArchived={setShowArchived}
         renderArchivedProjectContextMenu={renderArchivedProjectContextMenu}

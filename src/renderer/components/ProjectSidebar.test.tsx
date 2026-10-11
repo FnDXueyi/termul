@@ -512,7 +512,7 @@ describe('ProjectSidebar', () => {
 
     const activeRow = screen.getByTestId('project-item-1').querySelector('[role="button"]')
     const idleRow = screen.getByTestId('project-item-2').querySelector('[role="button"]')
-    expect(activeRow).toHaveClass('keycap', 'h-8', 'rounded-md')
+    expect(activeRow).toHaveClass('keycap', 'h-8', 'rounded-lg')
     expect(activeRow).not.toHaveClass('bg-sidebar-accent')
     expect(idleRow).not.toHaveClass('keycap')
     expect(idleRow).toHaveClass('hover:bg-foreground/[0.03]')
@@ -828,166 +828,6 @@ describe('ProjectSidebar Project Context Menu actions', () => {
   })
 })
 
-describe('ProjectSidebar Project Search', () => {
-  // 8 projects crosses the PROJECT_SEARCH_THRESHOLD so the search UI renders.
-  const manyProjects: Project[] = Array.from({ length: 8 }, (_, i) => ({
-    id: String(i + 1),
-    name: `Project ${i + 1}`,
-    color: 'blue' as const,
-    gitBranch: i === 7 ? 'feature/special' : 'main'
-  }))
-
-  const fewProjects: Project[] = [
-    { id: '1', name: 'Alpha', color: 'blue', gitBranch: 'main' },
-    { id: '2', name: 'Beta', color: 'green', gitBranch: 'main' }
-  ]
-
-  it('hides the search box when the project count is below the threshold', () => {
-    renderWithRouter({ projects: fewProjects, activeProjectId: '1' })
-    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
-  })
-
-  it('shows the search box once the project count reaches the threshold', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-    expect(screen.getByTestId('project-search-input')).toBeInTheDocument()
-  })
-
-  it('filters the visible projects by name', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-
-    expect(screen.getByText('Project 8')).toBeInTheDocument()
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-    expect(screen.queryByText('Project 2')).not.toBeInTheDocument()
-  })
-
-  it('matches on git branch as well as name', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'feature/special' }
-    })
-
-    expect(screen.getByText('Project 8')).toBeInTheDocument()
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-  })
-
-  it('shows an empty state when nothing matches', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'no-such-project' }
-    })
-
-    expect(screen.getByTestId('project-search-empty')).toBeInTheDocument()
-    expect(screen.getByText('No projects found')).toBeInTheDocument()
-  })
-
-  it('clears the query when the clear button is clicked', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    const input = screen.getByTestId('project-search-input') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'Project 8' } })
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByTestId('project-search-clear'))
-
-    expect(input.value).toBe('')
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-  })
-
-  it('clears the query when Escape is pressed in the search box', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    const input = screen.getByTestId('project-search-input') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'Project 8' } })
-    fireEvent.keyDown(input, { key: 'Escape' })
-
-    expect(input.value).toBe('')
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-  })
-
-  it('keeps the Ctrl+1 shortcut badge tied to the unfiltered position while searching', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    // Project 1 is index 0 -> Ctrl+1. Search for it; the badge must stay Ctrl+1.
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 1' }
-    })
-
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-    expect(screen.getByText('Ctrl+1')).toBeInTheDocument()
-  })
-
-  it('clears a lingering query when the search box drops below the threshold', () => {
-    const { rerender } = render(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-
-    // Drop below the threshold so the search box unmounts.
-    rerender(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={fewProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    // No stuck filter: the search box is gone and the remaining projects are visible.
-    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
-    expect(screen.getByText('Alpha')).toBeInTheDocument()
-    expect(screen.getByText('Beta')).toBeInTheDocument()
-  })
-
-  it('clears the search when the active project is not in the filtered results', () => {
-    const { rerender } = render(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    // Filter to a single project that is NOT the active one.
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-    expect(screen.queryByText('Project 2')).not.toBeInTheDocument()
-
-    // Active project switches to one hidden by the query (e.g. Ctrl+2 or a new project).
-    rerender(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="2" />
-      </MemoryRouter>
-    )
-
-    // Search self-clears so the now-active project is visible again.
-    expect((screen.getByTestId('project-search-input') as HTMLInputElement).value).toBe('')
-    expect(screen.getByText('Project 2')).toBeInTheDocument()
-  })
-
-  it('disables the archived toggle while searching', () => {
-    const withArchived: Project[] = [
-      ...manyProjects,
-      { id: '99', name: 'Old Project', color: 'gray', gitBranch: 'main', isArchived: true }
-    ]
-    renderWithRouter({ projects: withArchived, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project' }
-    })
-
-    const toggle = screen.getByLabelText(/Archived projects/)
-    expect(toggle).toBeDisabled()
-  })
-})
-
 describe('ProjectSidebar Folder Grouping', () => {
   beforeEach(() => {
     // Reset groups in the store before each test
@@ -1039,8 +879,8 @@ describe('ProjectSidebar Folder Grouping', () => {
         {
           id: 'group-1',
           name: 'My Folder',
-          projectIds: ['1'],
-          isCollapsed: false,
+          projectIds: [],
+          isCollapsed: true,
           color: 'purple'
         }
       ]
@@ -1048,8 +888,9 @@ describe('ProjectSidebar Folder Grouping', () => {
 
     renderWithRouter()
 
-    const folderHeader = screen.getByRole('button', { name: /My Folder/i })
-    const iconContainer = folderHeader.querySelector('.text-project-purple')
+    const iconContainer = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('.text-project-purple')
     expect(iconContainer).toBeInTheDocument()
   })
 })
@@ -1199,5 +1040,159 @@ describe('ProjectSidebar rail rows', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+})
+
+describe('ProjectSidebar: Mono-style alignment and groups', () => {
+  const railProjects: Project[] = Array.from({ length: 10 }, (_, i) => ({
+    id: String(i + 1),
+    name: `Rail Project ${i + 1}`,
+    color: 'blue' as const,
+    path: `/repo/rail-${i + 1}`,
+    isGitRepo: false
+  }))
+  const group = (isCollapsed: boolean, ids = ['1', '2']) => ({
+    id: 'group-1',
+    name: 'My Folder',
+    projectIds: ids,
+    isCollapsed
+  })
+
+  beforeEach(() => {
+    useProjectStore.setState({ groups: [] })
+  })
+
+  it('has no project search in the Rail, however many projects there are', () => {
+    renderWithRouter({ projects: railProjects })
+    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Search projects')).not.toBeInTheDocument()
+  })
+
+  it('puts project rows and their icons on the shared Rail column', () => {
+    renderWithRouter({ projects: railProjects.slice(0, 2) })
+
+    const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(row).toHaveClass('gap-2', 'px-2', 'rounded-lg')
+    const iconColumn = row.querySelector('[data-rail-icon-column]')
+    expect(iconColumn).toHaveClass('size-4', 'shrink-0')
+  })
+
+  it('shows the first project icon at rest and a chevron on hover or focus', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    expect(row).toHaveClass('group')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    // The first child project's monogram stands for the group.
+    expect(icon?.querySelector('[data-project-color]')).toHaveTextContent('R')
+    expect(icon).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
+    expect(chevron).toHaveClass(
+      'hidden',
+      'group-hover:inline-flex',
+      'group-focus-within:inline-flex'
+    )
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronRight"]')).toBeInTheDocument()
+    // The row is one button that toggles the group.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    // The shared inset must not override the right padding that keeps the label
+    // clear of the absolute-positioned actions button.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveClass('px-2', 'pr-8')
+  })
+
+  it('falls back to a neutral folder icon for an empty group', () => {
+    useProjectStore.setState({ groups: [group(true, [])] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const icon = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('[data-rail-group-icon]')
+    expect(icon?.querySelector('svg[data-termul-icon="Folder"]')).toBeInTheDocument()
+  })
+
+  it('keeps the chevron-down visible when expanded and wraps the group in one surface', () => {
+    useProjectStore.setState({ groups: [group(false)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    expect(icon).toHaveClass('hidden')
+    expect(icon).not.toHaveClass('group-hover:hidden')
+    expect(chevron).toHaveClass('inline-flex')
+    expect(chevron).not.toHaveClass('hidden')
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronDown"]')).toBeInTheDocument()
+
+    const container = screen.getByTestId('rail-group-group-1')
+    expect(container).toHaveClass('rounded-lg', 'bg-foreground/[0.03]')
+    // Children sit in the same icon column; the container gives the grouping, not indentation.
+    const groupList = container.querySelector('[data-group-container-id="group-1"]')
+    expect(groupList).not.toHaveClass('pl-4')
+    const childRow = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(childRow).toHaveClass('gap-2', 'px-2')
+  })
+
+  it('has no container surface on a collapsed group', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    expect(screen.getByTestId('rail-group-group-1')).not.toHaveClass('bg-foreground/[0.03]')
+  })
+
+  it('toggles the group from the row button', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'My Folder' }))
+
+    expect(useProjectStore.getState().groups?.[0].isCollapsed).toBe(false)
+  })
+
+  it('reveals a Tab-reachable more button that opens the group menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const more = screen.getByRole('button', { name: 'Group actions for My Folder' })
+    expect(more).toHaveClass(
+      'opacity-0',
+      'group-hover:opacity-100',
+      'group-focus-within:opacity-100'
+    )
+    expect(more).not.toHaveAttribute('tabindex', '-1')
+
+    fireEvent.click(more)
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+    expect(screen.getByText('Delete Group (Keep Projects)')).toBeInTheDocument()
+  })
+
+  it('opens the same group menu on right-click', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.contextMenu(screen.getByText('My Folder'))
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+  })
+
+  it('renames a group inline from the menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group actions for My Folder' }))
+    fireEvent.click(screen.getByText('Rename Group'))
+    const input = screen.getByRole('textbox', { name: 'Rename group My Folder' })
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(useProjectStore.getState().groups?.[0].name).toBe('Renamed')
   })
 })
