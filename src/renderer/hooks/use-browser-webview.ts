@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { useNativeWebviewOccluded } from '@/hooks/use-native-webview-occlusion'
 import {
   browserTabCreate,
   browserTabDestroy,
@@ -29,7 +30,10 @@ function getElementBounds(el: HTMLElement): BrowserBounds {
   }
 }
 
-export function useBrowserWebview(browserTabId: string, isVisible: boolean, url: string) {
+export function useBrowserWebview(browserTabId: string, paneVisible: boolean, url: string) {
+  // An occluded webview (a shell popover is open) behaves as not visible.
+  const occluded = useNativeWebviewOccluded()
+  const isVisible = paneVisible && !occluded
   const containerRef = useRef<HTMLDivElement>(null)
   const createdRef = useRef(false)
   const mountedRef = useRef(true)

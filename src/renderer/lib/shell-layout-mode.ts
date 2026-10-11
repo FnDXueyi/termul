@@ -6,8 +6,8 @@
  * active when the app loaded is captured once (first wins); the Preferences
  * toggle compares the saved setting with it to show "Reload to apply".
  *
- * Nothing reads the resolved mode to change a layout yet: the frame that
- * consumes it lands in a later story, and the phone shell ignores it.
+ * `WorkspaceLayout` reads the captured mode once per load to pick the desktop
+ * shell (`useShellLayoutForRender`); the phone shell ignores it.
  */
 
 import { useAppSettingsStore } from '@/stores/app-settings-store'
@@ -45,4 +45,16 @@ export function useShellLayoutReloadPending(): boolean {
   const isLoaded = useAppSettingsStore((state) => state.isLoaded)
   if (!isLoaded || activeAtLoad === null) return false
   return resolveShellLayout(saved) !== activeAtLoad
+}
+
+/**
+ * The mode the desktop shell renders with: `null` while settings are still
+ * loading (show the loading screen), then the mode captured at load. Later
+ * changes to the saved setting never change it until a reload.
+ */
+export function useShellLayoutForRender(): ShellLayoutMode | null {
+  const saved = useAppSettingsStore((state) => state.settings.shellLayout)
+  const isLoaded = useAppSettingsStore((state) => state.isLoaded)
+  if (isLoaded === false) return null
+  return captureShellLayoutAtLoad(saved)
 }
