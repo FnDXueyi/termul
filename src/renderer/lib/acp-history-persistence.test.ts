@@ -54,6 +54,7 @@ import {
   deleteSessionPayload,
   deriveTitle,
   flushSessionHistory,
+  fromPersistedSessionSummary,
   getCachedSessionPayload,
   groupSessionsByRecency,
   INACTIVE_PAYLOAD_CACHE_BUDGET,
@@ -551,6 +552,75 @@ describe('provider routing', () => {
       legacyImportComplete: true
     })
     await expect(loadSessionIndex()).resolves.toEqual([entry('stored')])
+  })
+
+  it('reads the host-recorded model identically via the desktop and WS readers', async () => {
+    const hostFields = { modelId: 'claude-opus', modelName: 'Claude Opus' }
+    const wireSummary = {
+      storageKey: 'opaque',
+      sessionId: 'host-1',
+      stableAgentNamespace: 'config:cfg-1',
+      runtimeAgentId: 'runtime-1',
+      projectId: 'project-1',
+      cwd: '/project',
+      title: 'Host chat',
+      createdAt: 1,
+      lastActivityAt: 2,
+      status: 'closed' as const,
+      messageCount: 3,
+      toolCount: 1,
+      lastSeq: 7,
+      resumeEligible: true
+    }
+
+    // Desktop: the Rust reader maps the same host fields onto the renderer
+    // `SessionIndexEntry` and `acpHistoryApi.list()` is read verbatim.
+    mockHistoryApi.list.mockResolvedValueOnce({
+      sessions: [entry('host-1', hostFields)],
+      legacyImportComplete: true
+    })
+    const [desktop] = await loadSessionIndex()
+
+    // Web: the WS reader converts the host `PersistedSessionSummary`.
+    const web = fromPersistedSessionSummary({ ...wireSummary, ...hostFields })
+
+    expect(desktop.modelId).toBe('claude-opus')
+    expect(desktop.modelName).toBe('Claude Opus')
+    expect({ id: web.id, modelId: web.modelId, modelName: web.modelName }).toEqual({
+      id: desktop.id,
+      modelId: desktop.modelId,
+      modelName: desktop.modelName
+    })
+
+    // Round-trip back to the wire shape keeps the fields.
+    expect(toPersistedSessionSummaries([web])[0]).toEqual(expect.objectContaining(hostFields))
+  })
+
+  it('leaves the model absent on both readers when the host recorded none', async () => {
+    mockHistoryApi.list.mockResolvedValueOnce({
+      sessions: [entry('no-model')],
+      legacyImportComplete: true
+    })
+    const [desktop] = await loadSessionIndex()
+    const web = fromPersistedSessionSummary({
+      storageKey: 'opaque',
+      sessionId: 'no-model',
+      stableAgentNamespace: null,
+      cwd: '/project',
+      title: null,
+      createdAt: 1,
+      lastActivityAt: 2,
+      status: 'closed',
+      messageCount: 0,
+      toolCount: 0,
+      lastSeq: 0,
+      resumeEligible: false
+    })
+    for (const read of [desktop, web]) {
+      expect(read.modelId).toBeUndefined()
+      expect(read.modelName).toBeUndefined()
+    }
+    expect(toPersistedSessionSummaries([web])[0].modelId).toBeUndefined()
   })
 
   it('keeps standalone server and live-only behavior unchanged', async () => {
