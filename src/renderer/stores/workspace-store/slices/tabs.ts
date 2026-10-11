@@ -9,6 +9,7 @@ import {
   AGENT_BROWSER_SPLIT_SIZES,
   agentChatTabId,
   canvasTabId,
+  diffTabId,
   editorTabId,
   findPaneById,
   findPaneContainingTab,
@@ -33,6 +34,7 @@ type TabsSliceState = Pick<
   | 'insertAgentChatTab'
   | 'addGitTab'
   | 'addGitHistoryTab'
+  | 'addDiffTab'
   | 'addCanvasTab'
   | 'remapAgentChatSession'
   | 'removeTab'
@@ -297,6 +299,30 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
     }
 
     const tab: WorkspaceTab = { type: 'git-history', id, cwd }
+    get().addTabToPane(paneId, tab)
+  },
+
+  // Diff tab (CAP-9): the id hashes the canonical (cwd, path, side) identity, so
+  // two opens with different path forms collapse onto one tab, focused in
+  // whichever pane holds it (the addGitTab pattern). The tab stores the cwd and
+  // path as given; identity, not the stored strings, decides reuse.
+  addDiffTab: (cwd: string, path: string, staged: boolean, targetPaneId?: string): void => {
+    const id = diffTabId(cwd, path, staged)
+    const { root, activePaneId, agentLauncherPaneId } = get()
+    const paneId = targetPaneId ?? activePaneId
+
+    const existing = findPaneContainingTab(root, id)
+    if (existing) {
+      const { fullscreenPaneId } = get()
+      set({
+        root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
+        activePaneId: resolveActivePaneId(fullscreenPaneId, existing.id),
+        agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
+      })
+      return
+    }
+
+    const tab: WorkspaceTab = { type: 'diff', id, cwd, path, staged }
     get().addTabToPane(paneId, tab)
   },
 

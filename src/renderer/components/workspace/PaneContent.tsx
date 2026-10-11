@@ -39,6 +39,7 @@ const ConnectedTerminal = lazy(() =>
 const EditorPanel = lazy(() =>
   import('@/components/editor/EditorPanel').then((m) => ({ default: m.EditorPanel }))
 )
+const DiffTab = lazy(() => import('@/components/git/DiffTab').then((m) => ({ default: m.DiffTab })))
 const GitHistoryPanel = lazy(() =>
   import('@/components/git/GitHistoryPanel').then((m) => ({ default: m.GitHistoryPanel }))
 )
@@ -467,6 +468,27 @@ export function PaneContent({
                   >
                     <Suspense fallback={<PaneSkeleton />}>
                       <GitHistoryPanel cwd={tab.cwd} isVisible={isVisible} />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'diff' } => t.type === 'diff')
+              .map((tab) => {
+                const isVisible = activeTab?.id === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <DiffTab
+                        cwd={tab.cwd}
+                        path={tab.path}
+                        staged={tab.staged}
+                        isVisible={isVisible}
+                      />
                     </Suspense>
                   </div>
                 )

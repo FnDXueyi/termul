@@ -16,6 +16,7 @@ const SAMPLE_TABS: Record<WorkspaceTab['type'], WorkspaceTab> = {
   git: { type: 'git', id: 'git-1', cwd: '/repo' },
   'agent-chat': { type: 'agent-chat', id: 'chat-s1', sessionId: 's1' },
   'git-history': { type: 'git-history', id: 'gh-1', cwd: '/repo' },
+  diff: { type: 'diff', id: 'diff:abc', cwd: '/repo', path: 'src/a.ts', staged: false },
   canvas: { type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }
 }
 
@@ -48,6 +49,10 @@ describe('WORKSPACE_TAB_KIND_TRAITS', () => {
     expect(portable).toBe(WORKSPACE_TAB_KIND_TRAITS[kind].manifestPortable)
   })
 
+  it('declares diff as persisted but not manifest-portable', () => {
+    expect(WORKSPACE_TAB_KIND_TRAITS.diff).toEqual({ persisted: true, manifestPortable: false })
+  })
+
   it('declares canvas as neither persisted nor portable', () => {
     expect(WORKSPACE_TAB_KIND_TRAITS.canvas).toEqual({ persisted: false, manifestPortable: false })
   })
@@ -58,7 +63,7 @@ describe('isWorkspaceTabKind', () => {
     expect(isWorkspaceTabKind(kind)).toBe(true)
   })
 
-  it.each(['diff', '', 'toString', '__proto__', undefined, null, 42, {}])('rejects %j', (value) => {
+  it.each(['', 'toString', '__proto__', undefined, null, 42, {}])('rejects %j', (value) => {
     expect(isWorkspaceTabKind(value)).toBe(false)
   })
 })

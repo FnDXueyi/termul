@@ -31,6 +31,7 @@ export * from './selectors'
 export {
   agentChatTabId,
   canvasTabId,
+  diffTabId,
   findPaneById,
   findPaneContainingTab,
   findParentSplit,

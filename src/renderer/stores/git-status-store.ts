@@ -70,6 +70,11 @@ export function deepestTrackedKey(path: string, keys: Iterable<string>): string 
   return best
 }
 
+export interface FetchDiffOptions {
+  /** Default `true`. `false` skips the empty sentinel and the toast. */
+  notify?: boolean
+}
+
 /** Failure messages per facade call; set on failure, cleared on success. */
 export interface GitStatusErrors {
   status?: string
@@ -85,6 +90,9 @@ export interface GitStatusState {
   statuses: Record<string, GitStatusDetail[]>
   // diffs["key:path:staged"] = string
   diffs: Record<string, string>
+  // diffErrors["key:path:staged"] = last `fetchDiff` failure message; cleared when
+  // the fetch starts or succeeds and when the file's diffs are invalidated
+  diffErrors: Record<string, string>
   // commitContexts[key] = GitCommitContext
   commitContexts: Record<string, GitCommitContext>
   // diffStats[key] = added/removed line totals (watched keys only)
@@ -111,7 +119,16 @@ export interface GitStatusState {
   refreshWorkingCopy: (cwd: string) => Promise<void>
   /** `refreshWorkingCopy` for every tracked key. Never rejects. */
   refreshTracked: () => Promise<void>
-  fetchDiff: (cwd: string, path: string, staged: boolean) => Promise<void>
+  /** Fetches one file side's diff. A failure always lands in `diffErrors`; by
+   * default it also writes the empty sentinel and toasts (the Git panel's
+   * behaviour). `{ notify: false }` keeps the cache empty and stays silent
+   * (one warn log only) for surfaces that render their own failure state. */
+  fetchDiff: (
+    cwd: string,
+    path: string,
+    staged: boolean,
+    options?: FetchDiffOptions
+  ) => Promise<void>
   fetchCommitContext: (cwd: string) => Promise<GitCommitContext | null>
   fetchStashes: (cwd: string) => Promise<void>
   fetchBranches: (cwd: string) => Promise<void>
@@ -137,6 +154,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   paths: {},
   statuses: {},
   diffs: {},
+  diffErrors: {},
   commitContexts: {},
   diffStats: {},
   errors: {},
@@ -283,8 +301,10 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     }
   },
 
-  fetchDiff: async (cwd, path, staged) => {
+  fetchDiff: async (cwd, path, staged, options) => {
+    const notify = options?.notify !== false
     const key = diffKey(cwd, path, staged)
+    clearDiffError(key)
     // Capture the request token before awaiting so a mutation that invalidates
     // this key while the fetch is in flight causes the late response to be
     // discarded instead of overwriting the cache with a stale diff.
@@ -296,9 +316,17 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       set((state) => ({
         diffs: { ...state.diffs, [key]: diff }
       }))
+      clearDiffError(key)
     } catch (error) {
-      console.error('Failed to fetch diff:', error)
       if (!isCurrent()) return
+      useGitStatusStore.setState((state) => ({
+        diffErrors: { ...state.diffErrors, [key]: errorMessage(error) }
+      }))
+      if (!notify) {
+        logFailure('diff fetch', normalizePath(cwd), error)
+        return
+      }
+      console.error('Failed to fetch diff:', error)
       // Write an empty sentinel so the panel stops retrying on every render and
       // shows the "no diff available" state instead of an infinite spinner.
       set((state) => ({
@@ -516,7 +544,8 @@ const diffRequestVersions: Record<string, number> = {}
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
 
-/** Monotonic request token per working-copy key for efreshStatus (same idea). */
+/** Monotonic request token per working-copy key for 
+efreshStatus (same idea). */
 const statusRequests: Record<string, number> = {}
 
 const DIFF_STAT_MIN_INTERVAL_MS = 30_000
@@ -603,6 +632,20 @@ function invalidateFileDiffs(
     const diffs = { ...state.diffs }
     delete diffs[stagedKey]
     delete diffs[unstagedKey]
-    return { diffs }
+    if (!(stagedKey in state.diffErrors) && !(unstagedKey in state.diffErrors)) return { diffs }
+    const diffErrors = { ...state.diffErrors }
+    delete diffErrors[stagedKey]
+    delete diffErrors[unstagedKey]
+    return { diffs, diffErrors }
+  })
+}
+
+/** Drop one diff key's recorded failure (no-op when none). */
+function clearDiffError(key: string) {
+  if (!(key in useGitStatusStore.getState().diffErrors)) return
+  useGitStatusStore.setState((state) => {
+    const diffErrors = { ...state.diffErrors }
+    delete diffErrors[key]
+    return { diffErrors }
   })
 }
