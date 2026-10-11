@@ -419,6 +419,71 @@ describe('shell-layout-store', () => {
       )
     })
 
+    it('drops a project removed while hydrating from the loaded record and persists', async () => {
+      let release: (value: unknown) => void = () => undefined
+      mockRead.mockReturnValueOnce(new Promise((resolve) => (release = resolve)))
+      const pending = state().hydrate()
+
+      await state().removeProject('p1')
+      expect(mockDelete).toHaveBeenCalledWith('editor-state/p1')
+
+      release({
+        success: true,
+        data: {
+          version: 1,
+          lastColumnTabByProject: { p1: 'chats', p2: 'explorer' },
+          worktreePickByProject: { p1: 'c:/a', p2: 'c:/b' }
+        }
+      })
+      await pending
+
+      expect(state().status).toBe('ready')
+      expect(state().lastColumnTabByProject).toEqual({ p2: 'explorer' })
+      expect(state().worktreePickByProject).toEqual({ p2: 'c:/b' })
+      expect(mockWriteDebounced).toHaveBeenCalledTimes(1)
+      expect(mockWriteDebounced.mock.calls[0][1]).toMatchObject({
+        worktreePickByProject: { p2: 'c:/b' }
+      })
+    })
+
+    it('never records a removed project legacy pick in the migrated record', async () => {
+      let release: (value: unknown) => void = () => undefined
+      mockRead.mockReturnValueOnce(new Promise((resolve) => (release = resolve)))
+      mockLegacy.mockResolvedValueOnce({
+        appSettings: null,
+        explorerWidth: null,
+        sshHeight: null,
+        projects: {
+          projects: [
+            { id: 'p1', activeWorktreeId: 'w1', worktrees: [{ id: 'w1', path: 'C:/r/wt1' }] },
+            { id: 'p2', activeWorktreeId: 'w2', worktrees: [{ id: 'w2', path: 'C:/r/wt2' }] }
+          ]
+        }
+      })
+      const pending = state().hydrate()
+
+      await state().removeProject('p1')
+      release(NOT_FOUND)
+      await pending
+
+      expect(state().status).toBe('ready')
+      expect(state().worktreePickByProject).toEqual({ p2: 'c:/r/wt2' })
+      expect(mockWrite).toHaveBeenCalledTimes(1)
+      expect(mockWrite.mock.calls[0][1]).toMatchObject({
+        worktreePickByProject: { p2: 'c:/r/wt2' }
+      })
+    })
+
+    it('queues a removal made before hydration starts and applies it once unavailable, without writing', async () => {
+      await state().removeProject('p1')
+      mockRead.mockResolvedValueOnce({ success: false, code: 'READ_ERROR' })
+      await state().hydrate()
+
+      expect(state().status).toBe('unavailable')
+      expect(mockWrite).not.toHaveBeenCalled()
+      expect(mockWriteDebounced).not.toHaveBeenCalled()
+    })
+
     it('still cleans editor state and chats when the layout is unavailable, without writing', async () => {
       mockRead.mockResolvedValueOnce({ success: false, code: 'READ_ERROR' })
       await state().hydrate()

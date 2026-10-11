@@ -129,6 +129,32 @@ function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
 
 let hydration: Promise<void> | null = null
 
+/** Projects removed before hydration finished; their entries are dropped as
+ * soon as the store can apply it, so a legacy pick never outlives them. */
+const pendingRemovedProjects = new Set<string>()
+
+function withoutPendingRemovals(record: ShellLayoutRecord): ShellLayoutRecord {
+  if (pendingRemovedProjects.size === 0) return record
+  const lastColumnTabByProject = { ...record.lastColumnTabByProject }
+  const worktreePickByProject = { ...record.worktreePickByProject }
+  for (const projectId of pendingRemovedProjects) {
+    delete lastColumnTabByProject[projectId]
+    delete worktreePickByProject[projectId]
+  }
+  return { ...record, lastColumnTabByProject, worktreePickByProject }
+}
+
+/** Applies queued removals to the live state once hydration has settled. */
+function flushPendingRemovals(): void {
+  if (pendingRemovedProjects.size === 0) return
+  const { lastColumnTabByProject, worktreePickByProject } = withoutPendingRemovals(
+    snapshotOf(useShellLayoutStore.getState())
+  )
+  pendingRemovedProjects.clear()
+  useShellLayoutStore.setState({ lastColumnTabByProject, worktreePickByProject })
+  persistSnapshot()
+}
+
 async function runHydration(): Promise<void> {
   const set = useShellLayoutStore.setState
   set({ status: 'hydrating' })
@@ -140,23 +166,29 @@ async function runHydration(): Promise<void> {
       const version = (result.data as { version?: unknown } | null | undefined)?.version
       if (typeof version === 'number' && version > SHELL_LAYOUT_VERSION) {
         set({ status: 'unavailable' })
+        flushPendingRemovals()
         log('warn', `[shell] unsupported shell-layout version ${version}; layout is not saved`)
         return
       }
       set({ ...sanitizeShellLayout(result.data), status: 'ready' })
+      flushPendingRemovals()
       log('info', '[shell] shell layout hydrated')
       return
     }
 
     if (result.code !== 'KEY_NOT_FOUND') {
       set({ status: 'unavailable' })
+      flushPendingRemovals()
       log('warn', `[shell] shell layout read failed (${result.code ?? 'UNKNOWN'}); not saved`)
       return
     }
 
     // No record yet: one-time carry-over from the legacy sources.
     const legacy = await readLegacyShellLayoutSources()
-    const migrated = buildMigratedShellLayout(legacy)
+    // Dropped before the first write so a removed project's legacy pick is
+    // never recorded.
+    const migrated = withoutPendingRemovals(buildMigratedShellLayout(legacy))
+    pendingRemovedProjects.clear()
     const counts = countLegacyShellLayoutSources(legacy)
     set({ ...migrated, status: 'ready' })
 
@@ -179,6 +211,7 @@ async function runHydration(): Promise<void> {
     if (useShellLayoutStore.getState().status !== 'ready') {
       set({ status: 'unavailable' })
     }
+    flushPendingRemovals()
     log(
       'warn',
       `[shell] shell layout hydration failed: ${error instanceof Error ? error.message : 'unknown error'}`
@@ -265,7 +298,12 @@ export const useShellLayoutStore = create<ShellLayoutState>((_set, get) => ({
     // runs whatever the status, each step on its own so one failure cannot
     // stop the others.
     const state = get()
-    if (projectId in state.lastColumnTabByProject || projectId in state.worktreePickByProject) {
+    if (state.status === 'idle' || state.status === 'hydrating') {
+      pendingRemovedProjects.add(projectId)
+    } else if (
+      projectId in state.lastColumnTabByProject ||
+      projectId in state.worktreePickByProject
+    ) {
       mutate('removeProject', (current) => ({
         lastColumnTabByProject: withoutKey(current.lastColumnTabByProject, projectId),
         worktreePickByProject: withoutKey(current.worktreePickByProject, projectId)
@@ -292,6 +330,7 @@ export const useShellLayoutStore = create<ShellLayoutState>((_set, get) => ({
 /** @internal Test-only: back to the pre-hydration state. */
 export function resetShellLayoutStoreForTests(): void {
   hydration = null
+  pendingRemovedProjects.clear()
   useShellLayoutStore.setState({ ...defaultShellLayoutRecord(), status: 'idle', graphOpen: true })
 }
 
