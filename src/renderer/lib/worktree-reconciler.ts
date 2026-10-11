@@ -19,11 +19,11 @@
  * `list` calls.
  */
 
-import { normalizeCwdForScope } from '@/lib/acp-history-persistence'
 import { logFrontendError } from '@/lib/log-api'
-import { isTauriContext } from '@/lib/tauri-runtime'
+import { normalizePath } from '@/lib/working-copy'
 import { worktreeApi } from '@/lib/worktree-api'
 import { useProjectStore } from '@/stores/project-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project, Worktree } from '@/types/project'
 
 export type ReconcileOutcome = 'updated' | 'unchanged' | 'skipped' | 'failed'
@@ -33,23 +33,23 @@ export interface ListedWorktree {
   name: string
   branch: string
   path: string
+  /**
+   * Host-set flag (web `/worktree/list`, AD-9): the worktree is outside the
+   * registered project folder. The host is authoritative; the renderer never
+   * recomputes it.
+   */
+  outsideProjectRoot?: boolean
 }
 
 const LOG_PREFIX = '[worktree-reconcile]'
 
-const WINDOWS_DRIVE_RE = /^[a-zA-Z]:/
-
 /**
- * Canonical comparison key for a filesystem path: separator/verbatim-prefix/
- * trailing-slash normalized, and lower-cased for Windows drive/UNC paths
- * (case-insensitive file systems). Kept in ONE place so it can later be swapped
- * for the shared working-copy `normalizePath`.
+ * Canonical comparison key for a filesystem path: the shared working-copy
+ * `normalizePath` (separator/verbatim-prefix/trailing-slash normalized, dot
+ * segments resolved, lower-cased for Windows drive/UNC paths). Also the form
+ * the Workspace-switcher pick is stored in.
  */
-export function worktreeKey(path: string): string {
-  const normalized = normalizeCwdForScope(path)
-  const isWindowsPath = WINDOWS_DRIVE_RE.test(normalized) || normalized.startsWith('//')
-  return isWindowsPath ? normalized.toLowerCase() : normalized
-}
+export const worktreeKey = normalizePath
 
 /** cyrb53 string hash: stable, dependency-free, 53 bits. */
 function hashString(input: string, seed = 0): number {
@@ -75,19 +75,10 @@ export function worktreeIdForPath(path: string, attempt = 0): string {
   return `wt-${hashString(salted).toString(16).padStart(14, '0')}`
 }
 
-/** Segment-bounded containment test on canonical keys (`root` itself counts as inside). */
-export function isPathInsideRoot(path: string, root: string): boolean {
-  const key = worktreeKey(path)
-  const rootKey = worktreeKey(root)
-  return key === rootKey || key.startsWith(`${rootKey}/`)
-}
-
 export interface MergeWorktreesInput {
   stored: readonly Worktree[]
   listed: readonly ListedWorktree[]
   projectPath: string
-  /** Flag listed paths outside the project folder (web only). */
-  flagOutsideRoot: boolean
   now?: string
 }
 
@@ -112,7 +103,7 @@ function withOutsideFlag(worktree: Worktree, outside: boolean): Worktree {
  * cheaply. The project root is never kept as a worktree.
  */
 export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult {
-  const { stored, listed, projectPath, flagOutsideRoot } = input
+  const { stored, listed, projectPath } = input
   const now = input.now ?? new Date().toISOString()
   const rootKey = worktreeKey(projectPath)
 
@@ -140,7 +131,7 @@ export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult
     if (worktree.branch !== entry.branch || worktree.name !== entry.name) {
       next = { ...worktree, branch: entry.branch, name: entry.name }
     }
-    if (flagOutsideRoot) next = withOutsideFlag(next, !isPathInsideRoot(entry.path, projectPath))
+    next = withOutsideFlag(next, entry.outsideProjectRoot === true)
     if (next !== worktree) updated++
     result.push(next)
   }
@@ -160,11 +151,7 @@ export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult
       path: entry.path,
       createdAt: now
     }
-    result.push(
-      flagOutsideRoot
-        ? withOutsideFlag(created, !isPathInsideRoot(entry.path, projectPath))
-        : created
-    )
+    result.push(withOutsideFlag(created, entry.outsideProjectRoot === true))
     added++
   }
 
@@ -218,8 +205,7 @@ async function runOnce(projectId: string): Promise<ReconcileOutcome> {
     const merged = mergeWorktrees({
       stored: storedList,
       listed: listing.data,
-      projectPath: current.path,
-      flagOutsideRoot: !isTauriContext()
+      projectPath: current.path
     })
 
     const patch: Partial<Project> = {}
@@ -227,17 +213,24 @@ async function runOnce(projectId: string): Promise<ReconcileOutcome> {
     if (listChanged && !(current.worktrees === undefined && merged.worktrees.length === 0)) {
       patch.worktrees = merged.worktrees
     }
-    const activeId = current.activeWorktreeId
-    if (activeId && !merged.worktrees.some((w) => w.id === activeId)) {
-      patch.activeWorktreeId = null
-    }
     if (current.isGitRepo !== true) patch.isGitRepo = true
 
-    if (Object.keys(patch).length === 0) {
+    // The switcher pick (shell-layout store) is cleared when the successful
+    // listing no longer names it. A listed-but-disabled worktree keeps its pick.
+    const shell = useShellLayoutStore.getState()
+    const pick = shell.worktreePickByProject[projectId]
+    const pickPruned =
+      pick !== undefined && !merged.worktrees.some((w) => worktreeKey(w.path) === pick)
+
+    if (Object.keys(patch).length === 0 && !pickPruned) {
       console.debug(`${LOG_PREFIX} unchanged project=${projectId} count=${merged.worktrees.length}`)
       return 'unchanged'
     }
-    useProjectStore.getState().updateProject(projectId, patch)
+    if (Object.keys(patch).length > 0) useProjectStore.getState().updateProject(projectId, patch)
+    if (pickPruned) {
+      shell.setWorktreePick(projectId, null)
+      console.debug(`${LOG_PREFIX} cleared pruned pick project=${projectId}`)
+    }
     console.debug(
       `${LOG_PREFIX} ok project=${projectId} added=${merged.added} updated=${merged.updated} removed=${merged.removed}`
     )

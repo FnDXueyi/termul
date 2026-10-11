@@ -413,6 +413,11 @@ export interface WorktreeInfo {
   branch: string
   path: string
   headCommit: string
+  /**
+   * Web `/worktree/list` only: the worktree is outside the registered project
+   * folder (listed but not actionable, AD-9). Absent on desktop.
+   */
+  outsideProjectRoot?: boolean
 }
 
 export interface BranchInfo {

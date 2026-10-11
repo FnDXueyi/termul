@@ -20,6 +20,7 @@ import { useEditorStore } from '@/stores/editor-store'
 import { useGitSheetStore } from '@/stores/git-sheet-store'
 import { readOverlaySentinelDepth, useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
 import type { LeafNode, SplitNode } from '@/types/workspace.types'
 
@@ -34,7 +35,6 @@ const { tauriRef, mobileRef, projectRef } = vi.hoisted(() => ({
       path?: string
       name?: string
       id?: string
-      activeWorktreeId?: string | null
       worktrees?: Array<{ id: string; name: string; path: string }>
     }
   }
@@ -88,8 +88,6 @@ vi.mock('@/lib/platform', async () => {
 })
 
 vi.mock('@/stores/project-store', () => ({
-  // The drawer's project row reads the active worktree (none in this fixture).
-  getActiveWorktreeFromStore: () => undefined,
   useProjectsLoaded: () => true,
   useProjects: () => [projectRef.current],
   useActiveProject: () => projectRef.current,
@@ -543,6 +541,7 @@ describe('WorkspaceLayout mobile branch', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useGitSheetStore.setState({ open: false, cwd: '', projectId: '' })
+    useShellLayoutStore.setState({ worktreePickByProject: {} })
     // Clear any sentinel a previous test left on the current history entry.
     window.history.replaceState(null, '', '#/')
     tauriRef.current = false
@@ -973,7 +972,6 @@ describe('WorkspaceLayout mobile branch', () => {
       path: '/demo',
       color: 'blue',
       gitBranch: 'main',
-      activeWorktreeId: 'w1',
       worktrees: [{ id: 'w1', name: 'a', path: '/demo/.worktrees/a' }]
     }
 
@@ -993,6 +991,7 @@ describe('WorkspaceLayout mobile branch', () => {
 
     it("opens the header Git sheet on the project's active worktree, not the project path", async () => {
       projectRef.current = worktreeProject
+      useShellLayoutStore.setState({ worktreePickByProject: { p1: '/demo/.worktrees/a' } })
       renderLayout()
 
       await chooseMoreItem('Git changes')

@@ -7,10 +7,10 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { toast } from '@/hooks/use-toast'
 import { worktreeApi } from '@/lib/api'
-import { activateAndOpenTerminal, openTerminalAtCwd } from '@/lib/terminal-spawn'
+import { openTerminalAtCwd } from '@/lib/terminal-spawn'
 import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
-import { reconcileProjectWorktrees, worktreeKey } from '@/lib/worktree-reconciler'
+import { reconcileProjectWorktrees } from '@/lib/worktree-reconciler'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 import type { Worktree } from '@/types/project'
@@ -245,13 +245,8 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
 
       if (result.success && result.data) {
         // Register through the single-flight reconciler (the only writer of
-        // `project.worktrees`), then look the created worktree up by path.
+        // `project.worktrees`). The switcher pick is not touched.
         await reconcileProjectWorktrees(projectId)
-        const createdKey = worktreeKey(result.data.path)
-        const storedWorktree = useProjectStore
-          .getState()
-          .projects.find((p) => p.id === projectId)
-          ?.worktrees?.find((w) => worktreeKey(w.path) === createdKey)
 
         // Create symlinks for enabled directories
         const enabledDirs = Array.from(enabledSymlinkDirs)
@@ -298,11 +293,9 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
           })
         }
 
-        // Land the user inside the new worktree: activate it and open a terminal there.
+        // Open a terminal in the new worktree (the switcher pick is unchanged).
         // Best-effort — a spawn failure must not block the (already successful) creation.
-        const outcome = storedWorktree
-          ? await activateAndOpenTerminal(projectId, storedWorktree.id, result.data.path)
-          : await openTerminalAtCwd(projectId, result.data.path)
+        const outcome = await openTerminalAtCwd(projectId, result.data.path)
         if (outcome.status === 'no-pane') {
           toast({
             title: 'Worktree ready — terminal not opened',

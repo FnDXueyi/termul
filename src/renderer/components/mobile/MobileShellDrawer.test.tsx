@@ -17,6 +17,7 @@ import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useSettingsModalStore, useSettingsModalView } from '@/stores/settings-modal-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project } from '@/types/project'
 import { MobileShellDrawer } from './MobileShellDrawer'
 import { MobileShellHeader } from './MobileShellHeader'
@@ -277,7 +278,6 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     gitBranch: 'main',
     isGitRepo: true,
     worktrees: [],
-    activeWorktreeId: null,
     ...overrides
   }
 }
@@ -343,6 +343,7 @@ beforeEach(async () => {
   _resetEphemeralSessionIdsForTesting()
   useAgentChatLifetimeStore.setState({ closingSessionIds: {} })
   useAgentChatUnreadStore.setState({ unread: {} })
+  useShellLayoutStore.setState({ worktreePickByProject: {} })
   useConnectionStatusStore.setState({ controlChannel: 'connected', terminalChannel: 'connected' })
   useSettingsModalStore.setState({ view: null })
   seedProject(makeProject())
@@ -1038,12 +1039,12 @@ describe('MobileShellDrawer project row', () => {
   it('reads the worktree branch and Worktree for an active worktree', async () => {
     seedProject(
       makeProject({
-        activeWorktreeId: 'wt1',
         worktrees: [
           { id: 'wt1', name: 'wt', branch: 'chat/fix-auth', path: '/work-wt', createdAt: '' }
         ]
       })
     )
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/work-wt' } })
     const row = await projectRow()
 
     expect(within(row).getByText('chat/fix-auth · Worktree')).toBeInTheDocument()
@@ -1077,10 +1078,10 @@ describe('MobileShellDrawer project row', () => {
       makeProject({
         gitBranch: 'develop',
         // An active worktree must NOT leak into a Local chat's row.
-        activeWorktreeId: 'wt1',
         worktrees: [{ id: 'wt1', name: 'wt', branch: 'other', path: '/wt', createdAt: '' }]
       })
     )
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/wt' } })
     seedOptionsSession('s1', 'agent-1', { title: 'Chat one' })
     const row = await projectRow({ activeTabId: 'tab-1', activeSessionId: 's1' })
 

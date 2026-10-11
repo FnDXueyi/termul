@@ -235,7 +235,11 @@ export function tabPath(
   return value?.trim() ? value : null
 }
 
-/** The listed worktree the pick names, else the project folder, else `null`. */
+/**
+ * The listed worktree the pick names, else the project folder, else `null`. A
+ * worktree flagged `outsideProjectRoot` (disabled on this surface) is skipped,
+ * so a pick naming it resolves as the project folder.
+ */
 export function pickedWorkingCopy(
   project: ProjectPaths | null | undefined,
   pickedPath: string | null | undefined
@@ -244,7 +248,17 @@ export function pickedWorkingCopy(
   const candidates = candidatesOf(project)
   if (pickedPath) {
     const key = normalizePath(pickedPath)
-    const hit = key ? candidates.find((c) => c.kind === 'worktree' && c.key === key) : undefined
+    const disabled = new Set(
+      (project.worktrees ?? []).filter((w) => w.outsideProjectRoot === true).map((w) => w.id)
+    )
+    const hit = key
+      ? candidates.find(
+          (c) =>
+            c.kind === 'worktree' &&
+            c.key === key &&
+            !(c.worktreeId !== null && disabled.has(c.worktreeId))
+        )
+      : undefined
     if (hit) return resolved(hit)
   }
   const projectFolder = candidates.find((c) => c.kind === 'project')

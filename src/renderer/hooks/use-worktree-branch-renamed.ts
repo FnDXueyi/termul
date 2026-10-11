@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { logFrontendError } from '@/lib/log-api'
-import { isPathInsideRoot, reconcileProjectWorktrees, worktreeKey } from '@/lib/worktree-reconciler'
+import { reconcileProjectWorktrees, worktreeKey } from '@/lib/worktree-reconciler'
 import { useAcpStore } from '@/stores/acp-store'
 import { useProjectStore } from '@/stores/project-store'
 
@@ -57,7 +57,7 @@ export function handleWorktreeBranchRenamed(payload: unknown): void {
 
   for (const project of useProjectStore.getState().projects) {
     const listsWorktree = (project.worktrees ?? []).some((w) => worktreeKey(w.path) === key)
-    const containsWorktree = !!project.path && isPathInsideRoot(worktreePath, project.path)
+    const containsWorktree = !!project.path && isUnderKey(worktreeKey(project.path), key)
     if (!listsWorktree && !containsWorktree) continue
     void reconcileProjectWorktrees(project.id).catch((err: unknown) => {
       void logFrontendError({
@@ -96,4 +96,10 @@ export function useWorktreeBranchRenamed(): void {
       unsubscribe()
     }
   }, [])
+}
+
+/** Segment-bounded containment of normalized path keys. */
+function isUnderKey(rootKey: string, key: string): boolean {
+  if (key === rootKey) return true
+  return key.startsWith(rootKey.endsWith('/') ? rootKey : `${rootKey}/`)
 }

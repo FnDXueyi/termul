@@ -188,7 +188,7 @@ describe('pure history helpers', () => {
   })
 
   it('scopes with worktree-inclusive reachability from the root view', () => {
-    // Root view (activeWorktreeId=null): activeCwd is the project root. The
+    // Root view (no worktree picked): activeCwd is the project root. The
     // sidebar must list root-cwd sessions AND the project's worktree-cwd
     // sessions so a worktree chat stays reachable without a restart.
     const root = entry('root', { cwd: '/project' })

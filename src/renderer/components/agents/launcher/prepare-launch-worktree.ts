@@ -154,10 +154,9 @@ export async function prepareLaunchWorktree(
   }
 
   // Register the just-created worktree through the single-flight reconciler
-  // (the only writer of `project.worktrees`) and activate it so the Chats
-  // sidebar scopes to it immediately (no 60s reconciler wait) and the worktree
-  // survives across restarts. Best-effort: a failure logs a warn and the chat
-  // still opens below.
+  // (the only writer of `project.worktrees`) so it is listed immediately (no
+  // 60s reconciler wait). Launching never changes the Workspace-switcher pick.
+  // Best-effort: a failure logs a warn and the chat still opens below.
   try {
     await reconcileProjectWorktrees(projectId)
     const projectStore = useProjectStore.getState()
@@ -166,24 +165,22 @@ export async function prepareLaunchWorktree(
       .find((p) => p.id === projectId)
       ?.worktrees?.find((w) => worktreeKey(w.path) === resultKey)
     if (stored) {
-      projectStore.setActiveWorktree(projectId, stored.id)
-      // Boundary log (info-level): not an error, so console.info is
-      // appropriate (logFrontendError is error/warn only).
-      console.info(
-        `[agentLauncher.worktreeRegister] activated branch=${worktreeBranchResult} path=${worktreePathResult}`
+      // Branch names are logged at debug level only.
+      console.debug(
+        `[agentLauncher.worktreeRegister] registered branch=${worktreeBranchResult} path=${worktreePathResult}`
       )
     } else {
       void logFrontendError({
         level: 'warn',
         source: 'agentLauncher.worktreeRegister',
-        message: `created worktree not found after reconcile branch=${worktreeBranchResult} path=${worktreePathResult}`
+        message: `created worktree not found after reconcile path=${worktreePathResult}`
       })
     }
   } catch (registerErr) {
     void logFrontendError({
       level: 'warn',
       source: 'agentLauncher.worktreeRegister',
-      message: `register/activate failed: ${registerErr instanceof Error ? registerErr.message : String(registerErr)}`
+      message: `register failed: ${registerErr instanceof Error ? registerErr.message : String(registerErr)}`
     })
   }
 
