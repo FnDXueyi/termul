@@ -172,9 +172,14 @@ describe('SidePanelColumn', () => {
   it('sizes the column from the store and exposes a resize separator', () => {
     useShellLayoutStore.setState({ sidePanelWidth: 300 })
     const { container } = renderPanel(makeProject())
-    expect((container.firstElementChild as HTMLElement).style.width).toBe('300px')
+    // 300px panel + the 8px gutter the column owns before the main container.
+    expect((container.firstElementChild as HTMLElement).style.width).toBe('308px')
+    expect(container.firstElementChild).toHaveClass('pr-2')
     const separator = screen.getByRole('separator', { name: 'Resize side panel' })
     expect(separator).toHaveAttribute('aria-valuenow', '300')
+    // The handle covers the gutter, ending on the main container's border.
+    expect(separator).toHaveClass('right-0', 'w-2')
+    expect(separator.parentElement).toBe(container.firstElementChild)
     fireEvent.keyDown(separator, { key: 'ArrowRight' })
     expect(useShellLayoutStore.getState().sidePanelWidth).toBe(316)
   })
