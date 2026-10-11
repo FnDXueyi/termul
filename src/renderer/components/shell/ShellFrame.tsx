@@ -1,5 +1,4 @@
 import type { ComponentProps } from 'react'
-import { ActivityRail } from '@/components/ActivityRail'
 import { ResizeEdges } from '@/components/ResizeEdges'
 import { ShellRail } from '@/components/shell/ShellRail'
 import { ShellSidePanel } from '@/components/shell/ShellSidePanel'
@@ -15,8 +14,8 @@ export type ShellFrameProps = ComponentProps<typeof DesktopWorkspaceShell>
 
 /**
  * Opted-in desktop frame (`shellLayout=revamp`): Rail | Side panel | main area.
- * Composes the same components as the classic shell; only the order differs
- * (the explorer column moves to the left of the main area).
+ * The Rail replaces both the classic activity rail and the project sidebar;
+ * the explorer column moves to the left of the main area.
  */
 export function ShellFrame({
   projects,
@@ -28,10 +27,7 @@ export function ShellFrame({
   setIsCommandPaletteOpen,
   setIsNewProjectModalOpen,
   onSelectProject,
-  handleAddGitTab,
-  handleAddGitHistoryTab,
   handleToggleThemePicker,
-  handleOpenAgentChat,
   handleOpenCanvas,
   workspaceMain,
   appModals
@@ -50,21 +46,6 @@ export function ShellFrame({
       <div className="flex-1 flex flex-col overflow-hidden min-h-0 h-full">
         <MacOsTitlebarStrip />
         <div className="flex-1 flex overflow-hidden min-h-0">
-          <ActivityRail
-            isShortcutsOpen={isShortcutMenuOpen}
-            onShortcutsOpenChange={setIsShortcutMenuOpen}
-            onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-            onOpenGitChanges={() => handleAddGitTab()}
-            canOpenGitChanges={Boolean(activeProject?.path)}
-            onOpenGitHistory={() => handleAddGitHistoryTab()}
-            canOpenGitHistory={Boolean(activeProject?.path)}
-            isThemePickerOpen={isThemePickerOpen}
-            onToggleThemePicker={handleToggleThemePicker}
-            onOpenAgentChat={handleOpenAgentChat}
-            canOpenAgentChat={Boolean(activeProject?.path)}
-            onOpenCanvas={handleOpenCanvas}
-            canOpenCanvas={Boolean(activeProject?.path)}
-          />
           <div className="flex-1 flex flex-col min-w-0">
             <TitleBar />
 
@@ -73,12 +54,20 @@ export function ShellFrame({
             <div className="flex-1 flex gap-2 overflow-hidden min-h-0 h-full py-2 pr-2">
               <ShellRail
                 projects={projects}
+                activeProject={activeProject}
                 activeProjectId={activeProjectId}
                 onSelectProject={onSelectProject}
                 onNewProject={() => setIsNewProjectModalOpen(true)}
                 onSSHConnect={handleSSHConnect}
                 onSelectSSHProfile={handleSelectSSHProfile}
                 activeSSHProfileId={activeSSHProfileId}
+                onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+                onOpenCanvas={handleOpenCanvas}
+                canOpenCanvas={Boolean(activeProject?.path)}
+                isShortcutsOpen={isShortcutMenuOpen}
+                onShortcutsOpenChange={setIsShortcutMenuOpen}
+                isThemePickerOpen={isThemePickerOpen}
+                onToggleThemePicker={handleToggleThemePicker}
               />
 
               <PaneDndProvider>

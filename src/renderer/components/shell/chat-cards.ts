@@ -87,7 +87,15 @@ export function buildChatCards({
     }))
 }
 
-/** Case-insensitive substring over title, agent name and branch line. */
+/**
+ * The text the card's first line shows when there is no live session model:
+ * the host-recorded model, else the agent name, else the generic fallback.
+ */
+export function modelLineOf(card: Pick<ChatCardData, 'indexModel' | 'agentName'>): string {
+  return card.indexModel || card.agentName || 'Agent'
+}
+
+/** Case-insensitive substring over title, agent name, branch line and the visible model line. */
 export function filterChatCards(cards: ChatCardData[], query: string): ChatCardData[] {
   const q = query.trim().toLowerCase()
   if (q === '') return cards
@@ -95,6 +103,7 @@ export function filterChatCards(cards: ChatCardData[], query: string): ChatCardD
     (card) =>
       card.entry.title.toLowerCase().includes(q) ||
       (card.agentName?.toLowerCase().includes(q) ?? false) ||
-      card.branch.toLowerCase().includes(q)
+      card.branch.toLowerCase().includes(q) ||
+      modelLineOf(card).toLowerCase().includes(q)
   )
 }
