@@ -1384,10 +1384,13 @@ describe('WorkspaceLayout - shellLayout flag', () => {
 
     renderWithRouter()
 
-    const rail = document.querySelector('aside.w-64') as Element
+    const rail = screen.getByRole('navigation', { name: 'Projects' })
     const explorer = screen.getByTestId('side-panel-column')
     const main = document.querySelector('main') as Element
     expect(rail).toBeInTheDocument()
+    // The Rail replaces the classic activity rail and sidebar.
+    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
+    expect(document.querySelector('aside.w-64')).toBeNull()
     expect(precedes(rail, explorer)).toBe(true)
     expect(precedes(explorer, main)).toBe(true)
   })
@@ -1436,11 +1439,20 @@ describe('WorkspaceLayout - shellLayout flag', () => {
     expect(document.querySelector('main')).toBe(main)
 
     act(() => useShellLayoutStore.setState({ railExpanded: false }))
-    await waitFor(() => expect(document.querySelector('aside.w-64')).toBeNull())
+    await waitFor(() =>
+      expect(screen.getByRole('navigation', { name: 'Projects' })).toHaveAttribute(
+        'data-expanded',
+        'false'
+      )
+    )
     expect(document.querySelector('main')).toBe(main)
 
     act(() => useShellLayoutStore.setState({ sidePanelVisible: true, railExpanded: true }))
     expect(await screen.findByTestId('side-panel-column')).toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Projects' })).toHaveAttribute(
+      'data-expanded',
+      'true'
+    )
     expect(document.querySelector('main')).toBe(main)
   })
 })

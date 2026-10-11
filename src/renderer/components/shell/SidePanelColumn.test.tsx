@@ -175,4 +175,49 @@ describe('SidePanelColumn', () => {
     fireEvent.keyDown(separator, { key: 'ArrowRight' })
     expect(useShellLayoutStore.getState().sidePanelWidth).toBe(316)
   })
+
+  describe('top row', () => {
+    const renderWithDrag = (dragRegion?: boolean) =>
+      render(
+        <MemoryRouter>
+          <SidePanelColumn activeProject={makeProject()} dragRegion={dragRegion} />
+        </MemoryRouter>
+      )
+
+    it('is not a drag region by default', () => {
+      renderWithDrag()
+      expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
+    })
+
+    it('marks the header root, never the switcher or the New chat button', () => {
+      renderWithDrag(true)
+      const switcher = screen.getByTestId('workspace-switcher')
+      const header = switcher.parentElement as HTMLElement
+      expect(header).toHaveAttribute('data-tauri-drag-region')
+      expect(switcher).not.toHaveAttribute('data-tauri-drag-region')
+      expect(screen.getByRole('button', { name: 'New chat' })).not.toHaveAttribute(
+        'data-tauri-drag-region'
+      )
+      expect(document.querySelectorAll('[data-tauri-drag-region]')).toHaveLength(1)
+    })
+
+    it('hides the Column tabs while the Rail is collapsed and labels the tabpanel by name', () => {
+      useShellLayoutStore.setState({ railExpanded: false })
+      renderWithDrag()
+      expect(screen.queryByRole('tablist')).toBeNull()
+      const panel = screen.getByRole('tabpanel')
+      expect(panel).toHaveAttribute('aria-label', 'Chats')
+      expect(panel).not.toHaveAttribute('aria-labelledby')
+
+      act(() => useShellLayoutStore.getState().setLastColumnTab('p1', 'changes'))
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-label', 'Changes')
+    })
+
+    it('keeps aria-labelledby on the tabpanel while the Rail is expanded', () => {
+      renderWithDrag()
+      const panel = screen.getByRole('tabpanel')
+      expect(panel).toHaveAttribute('aria-labelledby', 'side-panel-tab-chats')
+      expect(panel).not.toHaveAttribute('aria-label')
+    })
+  })
 })

@@ -1,22 +1,38 @@
-import type { ComponentProps } from 'react'
-import { ActivityRail } from '@/components/ActivityRail'
+import { type ComponentProps, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import { ResizeEdges } from '@/components/ResizeEdges'
 import { ShellRail } from '@/components/shell/ShellRail'
 import { ShellSidePanel } from '@/components/shell/ShellSidePanel'
-import { TitleBar } from '@/components/TitleBar'
+import { TopRowFallbackBar } from '@/components/shell/TopRowFallbackBar'
+import { TopRowProvider } from '@/components/shell/top-row-context'
 import { WorkspaceConflictBanner } from '@/components/workspace/WorkspaceConflictBanner'
 import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
 import type { DesktopWorkspaceShell } from '@/layouts/workspace-layout/DesktopWorkspaceShell'
-import { MacOsTitlebarStrip } from '@/layouts/workspace-layout/MacOsTitlebarStrip'
+import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
+import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
+import { useFullscreenPaneId, usePaneRoot } from '@/stores/workspace-store'
 
 export type ShellFrameProps = ComponentProps<typeof DesktopWorkspaceShell>
 
+/** 8px drag gutter above the shell row (the row has no title strip). */
+function TopGutter({ dragRegion }: { dragRegion: boolean }): React.JSX.Element {
+  return (
+    <div
+      className="h-2 shrink-0"
+      data-testid="top-gutter"
+      data-tauri-drag-region={dragRegion ? true : undefined}
+    />
+  )
+}
+
 /**
  * Opted-in desktop frame (`shellLayout=revamp`): Rail | Side panel | main area.
- * Composes the same components as the classic shell; only the order differs
- * (the explorer column moves to the left of the main area).
+ * The Rail replaces both the classic activity rail and the project sidebar;
+ * the explorer column moves to the left of the main area. The window has no
+ * title strip: the Rail header, the Side panel header and the top-edge pane tab
+ * bars share one top row (roles come from `selectTopRowRoles`).
  */
 export function ShellFrame({
   projects,
@@ -28,10 +44,7 @@ export function ShellFrame({
   setIsCommandPaletteOpen,
   setIsNewProjectModalOpen,
   onSelectProject,
-  handleAddGitTab,
-  handleAddGitHistoryTab,
   handleToggleThemePicker,
-  handleOpenAgentChat,
   handleOpenCanvas,
   workspaceMain,
   appModals
@@ -39,65 +52,70 @@ export function ShellFrame({
   const isThemePickerOpen = useThemePickerOpen()
   const { activeSSHProfileId, handleSSHConnect, handleSelectSSHProfile } = ssh
 
+  const paneRoot = usePaneRoot()
+  const fullscreenPaneId = useFullscreenPaneId()
+  const pathname = useLocation().pathname
+  const mode: TopRowMode = ssh.activeSSHProfile
+    ? 'ssh'
+    : projects.length === 0 || !isWorkspaceRoutePath(pathname)
+      ? 'fallback'
+      : 'panes'
+  const roles = useMemo(
+    () => selectTopRowRoles({ root: paneRoot, fullscreenPaneId, mode }),
+    [paneRoot, fullscreenPaneId, mode]
+  )
+  const platform = useMemo(() => getTopRowPlatform(), [])
+
   // Native browser webviews paint above the DOM: hide them while a shell
   // popover is open so it is never drawn underneath.
   useNativeWebviewOcclusion(isShortcutMenuOpen)
   useNativeWebviewOcclusion(isThemePickerOpen)
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-background">
-      <ResizeEdges />
-      <div className="flex-1 flex flex-col overflow-hidden min-h-0 h-full">
-        <MacOsTitlebarStrip />
-        <div className="flex-1 flex overflow-hidden min-h-0">
-          <ActivityRail
-            isShortcutsOpen={isShortcutMenuOpen}
-            onShortcutsOpenChange={setIsShortcutMenuOpen}
-            onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-            onOpenGitChanges={() => handleAddGitTab()}
-            canOpenGitChanges={Boolean(activeProject?.path)}
-            onOpenGitHistory={() => handleAddGitHistoryTab()}
-            canOpenGitHistory={Boolean(activeProject?.path)}
-            isThemePickerOpen={isThemePickerOpen}
-            onToggleThemePicker={handleToggleThemePicker}
-            onOpenAgentChat={handleOpenAgentChat}
-            canOpenAgentChat={Boolean(activeProject?.path)}
-            onOpenCanvas={handleOpenCanvas}
-            canOpenCanvas={Boolean(activeProject?.path)}
-          />
-          <div className="flex-1 flex flex-col min-w-0">
-            <TitleBar />
+    <TopRowProvider roles={roles} platform={platform}>
+      <div className="h-screen flex flex-col overflow-hidden bg-background">
+        <ResizeEdges />
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0 h-full">
+          <TopGutter dragRegion={platform.dragRegions} />
 
-            {/* Shell row: Rail | Side panel | main card. Same gaps and
-                padding as the classic row; the columns set their own surface. */}
-            <div className="flex-1 flex gap-2 overflow-hidden min-h-0 h-full py-2 pr-2">
-              <ShellRail
-                projects={projects}
-                activeProjectId={activeProjectId}
-                onSelectProject={onSelectProject}
-                onNewProject={() => setIsNewProjectModalOpen(true)}
-                onSSHConnect={handleSSHConnect}
-                onSelectSSHProfile={handleSelectSSHProfile}
-                activeSSHProfileId={activeSSHProfileId}
-              />
+          {/* Shell row: Rail | Side panel | main card. The columns set their
+              own surface; the 8px gutter above replaces the top padding. */}
+          <div className="flex-1 flex gap-2 overflow-hidden min-h-0 h-full pb-2 pr-2">
+            <ShellRail
+              projects={projects}
+              activeProject={activeProject}
+              activeProjectId={activeProjectId}
+              onSelectProject={onSelectProject}
+              onNewProject={() => setIsNewProjectModalOpen(true)}
+              onSSHConnect={handleSSHConnect}
+              onSelectSSHProfile={handleSelectSSHProfile}
+              activeSSHProfileId={activeSSHProfileId}
+              onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+              onOpenCanvas={handleOpenCanvas}
+              canOpenCanvas={Boolean(activeProject?.path)}
+              isShortcutsOpen={isShortcutMenuOpen}
+              onShortcutsOpenChange={setIsShortcutMenuOpen}
+              isThemePickerOpen={isThemePickerOpen}
+              onToggleThemePicker={handleToggleThemePicker}
+            />
 
-              <PaneDndProvider>
-                <div className="flex-1 flex gap-2 min-h-0 h-full overflow-hidden min-w-0">
-                  <ShellSidePanel activeProject={activeProject} ssh={ssh} />
+            <PaneDndProvider>
+              <div className="flex-1 flex gap-2 min-h-0 h-full overflow-hidden min-w-0">
+                <ShellSidePanel activeProject={activeProject} ssh={ssh} />
 
-                  <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
-                    <WorkspaceConflictBanner />
-                    {workspaceMain}
-                  </main>
-                </div>
-              </PaneDndProvider>
-            </div>
+                <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
+                  <WorkspaceConflictBanner />
+                  {roles.controlsOwner === 'fallback-bar' && <TopRowFallbackBar />}
+                  {workspaceMain}
+                </main>
+              </div>
+            </PaneDndProvider>
           </div>
         </div>
-      </div>
 
-      {/* Modals */}
-      {appModals}
-    </div>
+        {/* Modals */}
+        {appModals}
+      </div>
+    </TopRowProvider>
   )
 }

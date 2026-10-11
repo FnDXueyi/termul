@@ -5,7 +5,7 @@ import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAcpStore } from '@/stores/acp-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
-import { browserTabId, editorTabId, terminalTabId } from '@/stores/workspace-store'
+import { browserTabId, diffTabId, editorTabId, terminalTabId } from '@/stores/workspace-store'
 import type { Terminal } from '@/types/project'
 import type { PaneNode, SplitNode } from '@/types/workspace.types'
 import type { PersistedTerminalLayout } from '../../../shared/types/persistence.types'
@@ -48,6 +48,8 @@ export function serializePaneTree(
           return [{ type: 'agent-chat', id: tab.id, sessionId: tab.sessionId }]
         case 'git-history':
           return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
+        case 'diff':
+          return [{ type: 'diff', id: tab.id, cwd: tab.cwd, path: tab.path, staged: tab.staged }]
         case 'canvas':
           // Not persisted (see WORKSPACE_TAB_KIND_TRAITS): the canvas re-opens
           // user-initiated.
@@ -218,6 +220,7 @@ export function reconcileTerminalTabs(
           case 'git':
           case 'agent-chat':
           case 'git-history':
+          case 'diff':
             return [tab]
           case 'canvas':
             // Canvas tabs: the daemon/iframe runtime is host-local state, never
@@ -355,6 +358,31 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput, projectId
                 cwd: tab.cwd
               }
             ]
+          case 'diff': {
+            // Never coerce a malformed diff ref: drop it with one warn.
+            if (
+              typeof tab.cwd !== 'string' ||
+              typeof tab.path !== 'string' ||
+              typeof tab.staged !== 'boolean'
+            ) {
+              void logFrontendError({
+                level: 'warn',
+                source: 'useEditorPersistence.deserializePaneTree',
+                message:
+                  'Dropped malformed diff tab (cwd/path/staged invalid) during workspace restore'
+              })
+              return []
+            }
+            return [
+              {
+                type: 'diff',
+                id: typeof tab.id === 'string' ? tab.id : diffTabId(tab.cwd, tab.path, tab.staged),
+                cwd: tab.cwd,
+                path: tab.path,
+                staged: tab.staged
+              }
+            ]
+          }
           case 'terminal':
             return [
               {

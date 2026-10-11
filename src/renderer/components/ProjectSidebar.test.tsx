@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionIndexEntry } from '@/lib/acp-history-persistence'
 import { useAcpStore } from '@/stores/acp-store'
+import { useGitStatusStore } from '@/stores/git-status-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
@@ -1242,5 +1243,163 @@ describe('ProjectSidebar Folder Grouping', () => {
     const folderHeader = screen.getByRole('button', { name: /My Folder/i })
     const iconContainer = folderHeader.querySelector('.text-project-purple')
     expect(iconContainer).toBeInTheDocument()
+  })
+})
+
+describe('ProjectSidebar rail variant', () => {
+  const gitProjects: Project[] = [
+    { id: '1', name: 'Project One', color: 'blue', path: '/repo/one', isGitRepo: true },
+    { id: '2', name: 'Project Two', color: 'green', path: '/repo/two', isGitRepo: true },
+    { id: '3', name: 'Plain Folder', color: 'red', path: '/repo/plain', isGitRepo: false }
+  ]
+  const unwatch = vi.fn()
+  const watchDiffStat = vi.fn(() => unwatch)
+  const refreshDiffStat = vi.fn(() => Promise.resolve())
+  const originalGitState = useGitStatusStore.getState()
+
+  beforeEach(() => {
+    unwatch.mockClear()
+    watchDiffStat.mockClear()
+    refreshDiffStat.mockClear()
+    useGitStatusStore.setState({
+      diffStats: {},
+      watchDiffStat,
+      refreshDiffStat
+    })
+  })
+
+  afterEach(() => {
+    useGitStatusStore.setState({
+      diffStats: originalGitState.diffStats,
+      watchDiffStat: originalGitState.watchDiffStat,
+      refreshDiffStat: originalGitState.refreshDiffStat
+    })
+  })
+
+  it('has no chat chevrons, chat lists or version footer, and one + menu', () => {
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(screen.queryByLabelText('Expand chats')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Collapse chats')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sidebar-footer')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    expect(screen.queryByLabelText('Create new group folder')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Create new project from header')).not.toBeInTheDocument()
+    expect(screen.getByText('Projects')).toBeInTheDocument()
+  })
+
+  it('has no panel toggle in the Projects header (the Rail header owns them)', () => {
+    // jsdom is web: the old web-only Rail toggle used to render here.
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(screen.queryByRole('button', { name: 'Expand or collapse projects' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hide sidebar' })).toBeNull()
+  })
+
+  it('keeps the classic sidebar unchanged by default', () => {
+    renderWithRouter({ projects: gitProjects })
+
+    expect(screen.getAllByLabelText('Expand chats')).toHaveLength(gitProjects.length)
+    expect(screen.getByTestId('sidebar-footer')).toBeInTheDocument()
+    expect(screen.getByLabelText('Create new project from header')).toBeInTheDocument()
+    expect(screen.getByLabelText('Create new group folder')).toBeInTheDocument()
+    expect(watchDiffStat).not.toHaveBeenCalled()
+  })
+
+  it('the + menu offers New project and New folder group', async () => {
+    const onNewProject = vi.fn()
+    renderWithRouter({ variant: 'rail', projects: gitProjects, onNewProject })
+
+    const trigger = screen.getByRole('button', { name: 'Add project or folder group' })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'New project' }))
+    expect(onNewProject).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'New folder group' }))
+    expect(await screen.findByText('Create New Group')).toBeInTheDocument()
+  })
+
+  it('shows +N −M from the git-status store at rest, and gear + chip on hover', () => {
+    useGitStatusStore.setState({ diffStats: { '/repo/two': { added: 3, removed: 1 } } })
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    const row = screen.getByTestId('project-item-2')
+    const stat = within(row).getByTestId('project-diff-stat')
+    expect(stat).toHaveTextContent('+3 −1')
+    // The stat gives way to the settings gear on hover or focus.
+    expect(stat.parentElement).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
+    const gear = within(row).getByLabelText('Settings for Project Two')
+    expect(gear.parentElement).toHaveClass('hidden', 'group-hover:flex', 'group-focus-within:flex')
+  })
+
+  it('shows one side only for a one-sided stat and nothing for a clean tree', () => {
+    useGitStatusStore.setState({
+      diffStats: { '/repo/one': { added: 2, removed: 0 }, '/repo/two': { added: 0, removed: 0 } }
+    })
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(
+      within(screen.getByTestId('project-item-1')).getByTestId('project-diff-stat')
+    ).toHaveTextContent(/^\+2$/)
+    expect(
+      within(screen.getByTestId('project-item-2')).queryByTestId('project-diff-stat')
+    ).not.toBeInTheDocument()
+  })
+
+  it('keeps the always-visible gear and chip on an active row with no stat', () => {
+    renderWithRouter({ variant: 'rail', projects: gitProjects, activeProjectId: '1' })
+
+    const gear = within(screen.getByTestId('project-item-1')).getByLabelText(
+      'Settings for Project One'
+    )
+    expect(gear.parentElement).toHaveClass('flex', 'opacity-100')
+    expect(gear.parentElement).not.toHaveClass('hidden')
+  })
+
+  it('watches each git project, refreshes right after, and unwatches on unmount', () => {
+    const { unmount } = renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(watchDiffStat).toHaveBeenCalledTimes(2)
+    expect(watchDiffStat).toHaveBeenCalledWith('/repo/one')
+    expect(watchDiffStat).toHaveBeenCalledWith('/repo/two')
+    expect(refreshDiffStat).toHaveBeenCalledWith('/repo/one')
+    expect(refreshDiffStat).toHaveBeenCalledWith('/repo/two')
+    expect(watchDiffStat.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshDiffStat.mock.invocationCallOrder[0]
+    )
+
+    unmount()
+    expect(unwatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not watch a non-git project and shows no stat for it', () => {
+    useGitStatusStore.setState({ diffStats: { '/repo/plain': { added: 9, removed: 9 } } })
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(watchDiffStat).not.toHaveBeenCalledWith('/repo/plain')
+    expect(
+      within(screen.getByTestId('project-item-3')).queryByTestId('project-diff-stat')
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows nothing and keeps the row when the stat is missing (failed refresh)', () => {
+    renderWithRouter({ variant: 'rail', projects: gitProjects })
+
+    expect(screen.queryByTestId('project-diff-stat')).not.toBeInTheDocument()
+    expect(screen.getByText('Project One')).toBeInTheDocument()
+  })
+
+  it('does not run the worktree reconciler (the Rail container owns it)', async () => {
+    const reconciler = await import('@/lib/worktree-reconciler')
+    const spy = vi
+      .spyOn(reconciler, 'reconcileProjectWorktrees')
+      .mockResolvedValue(undefined as never)
+    try {
+      renderWithRouter({ variant: 'rail', projects: gitProjects })
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
