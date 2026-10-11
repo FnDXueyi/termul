@@ -135,8 +135,14 @@ vi.mock('@/stores/terminal-store', () => ({
 
 vi.mock('@/stores/app-settings-store', () => ({
   useAppSettingsStore: vi.fn(
-    (selector?: (state: { settings: { remoteBindMode: 'localhost' } }) => unknown) => {
-      const state = { settings: { remoteBindMode: 'localhost' as const } }
+    (
+      selector?: (state: {
+        settings: { remoteBindMode: 'localhost'; shellLayout: 'classic' }
+      }) => unknown
+    ) => {
+      const state = {
+        settings: { remoteBindMode: 'localhost' as const, shellLayout: 'classic' as const }
+      }
       return selector ? selector(state) : state
     }
   ),

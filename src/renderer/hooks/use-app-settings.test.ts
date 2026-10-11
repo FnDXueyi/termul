@@ -337,6 +337,21 @@ describe('use-app-settings', () => {
       expect(getShellLayoutActiveAtLoad()).toBe('revamp')
     })
 
+    it('keeps a stored classic choice over the revamp default', async () => {
+      mockPersistenceRead.mockResolvedValueOnce({
+        success: true,
+        data: { ...DEFAULT_APP_SETTINGS, shellLayout: 'classic' }
+      })
+
+      renderHook(() => useAppSettingsLoader())
+
+      await waitFor(() => {
+        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
+      })
+      expect(useAppSettingsStore.getState().settings.shellLayout).toBe('classic')
+      expect(getShellLayoutActiveAtLoad()).toBe('classic')
+    })
+
     it('captures the code default when no record exists', async () => {
       mockPersistenceRead.mockResolvedValueOnce({ success: false, code: 'KEY_NOT_FOUND' })
 
@@ -346,7 +361,7 @@ describe('use-app-settings', () => {
         expect(useAppSettingsStore.getState().isLoaded).toBe(true)
       })
       expect(useAppSettingsStore.getState().settings.shellLayout).toBeUndefined()
-      expect(getShellLayoutActiveAtLoad()).toBe('classic')
+      expect(getShellLayoutActiveAtLoad()).toBe('revamp')
     })
 
     it('persists the flag through the debounced settings write', async () => {

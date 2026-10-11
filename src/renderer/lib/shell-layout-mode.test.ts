@@ -18,23 +18,23 @@ describe('shell-layout-mode', () => {
     useAppSettingsStore.setState({ settings: { ...DEFAULT_APP_SETTINGS }, isLoaded: false })
   })
 
-  it('defaults to classic and is not part of DEFAULT_APP_SETTINGS', () => {
-    expect(SHELL_LAYOUT_DEFAULT).toBe('classic')
+  it('defaults to revamp and is not part of DEFAULT_APP_SETTINGS', () => {
+    expect(SHELL_LAYOUT_DEFAULT).toBe('revamp')
     expect('shellLayout' in DEFAULT_APP_SETTINGS).toBe(false)
   })
 
   it('resolves unset and unknown values to the default', () => {
-    expect(resolveShellLayout(undefined)).toBe('classic')
-    expect(resolveShellLayout('nonsense')).toBe('classic')
+    expect(resolveShellLayout(undefined)).toBe('revamp')
+    expect(resolveShellLayout('nonsense')).toBe('revamp')
     expect(resolveShellLayout('classic')).toBe('classic')
     expect(resolveShellLayout('revamp')).toBe('revamp')
   })
 
   it('captures the mode active at load once (first wins)', () => {
     expect(getShellLayoutActiveAtLoad()).toBeNull()
-    expect(captureShellLayoutAtLoad(undefined)).toBe('classic')
-    expect(captureShellLayoutAtLoad('revamp')).toBe('classic')
-    expect(getShellLayoutActiveAtLoad()).toBe('classic')
+    expect(captureShellLayoutAtLoad(undefined)).toBe('revamp')
+    expect(captureShellLayoutAtLoad('classic')).toBe('revamp')
+    expect(getShellLayoutActiveAtLoad()).toBe('revamp')
   })
 
   describe('useShellLayoutReloadPending', () => {
@@ -49,16 +49,18 @@ describe('shell-layout-mode', () => {
       const { result } = renderHook(() => useShellLayoutReloadPending())
       expect(result.current).toBe(false)
 
-      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'revamp'))
+      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'classic'))
       expect(result.current).toBe(true)
 
-      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'classic'))
+      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'revamp'))
       expect(result.current).toBe(false)
     })
 
-    it('reads as settled after a reload that loaded revamp', () => {
-      captureShellLayoutAtLoad('revamp')
-      useAppSettingsStore.getState().setSettings({ ...DEFAULT_APP_SETTINGS, shellLayout: 'revamp' })
+    it('reads as settled after a reload that loaded classic', () => {
+      captureShellLayoutAtLoad('classic')
+      useAppSettingsStore
+        .getState()
+        .setSettings({ ...DEFAULT_APP_SETTINGS, shellLayout: 'classic' })
       const { result } = renderHook(() => useShellLayoutReloadPending())
       expect(result.current).toBe(false)
     })
@@ -72,24 +74,26 @@ describe('shell-layout-mode', () => {
     })
 
     it('resolves to the mode loaded settings carry', () => {
-      useAppSettingsStore.getState().setSettings({ ...DEFAULT_APP_SETTINGS, shellLayout: 'revamp' })
-      const { result } = renderHook(() => useShellLayoutForRender())
-      expect(result.current).toBe('revamp')
-    })
-
-    it('resolves to classic when the flag is absent', () => {
-      useAppSettingsStore.getState().setSettings({ ...DEFAULT_APP_SETTINGS })
+      useAppSettingsStore
+        .getState()
+        .setSettings({ ...DEFAULT_APP_SETTINGS, shellLayout: 'classic' })
       const { result } = renderHook(() => useShellLayoutForRender())
       expect(result.current).toBe('classic')
+    })
+
+    it('resolves to revamp when the flag is absent', () => {
+      useAppSettingsStore.getState().setSettings({ ...DEFAULT_APP_SETTINGS })
+      const { result } = renderHook(() => useShellLayoutForRender())
+      expect(result.current).toBe('revamp')
     })
 
     it('ignores setting changes after load', () => {
       useAppSettingsStore.getState().setSettings({ ...DEFAULT_APP_SETTINGS })
       const { result } = renderHook(() => useShellLayoutForRender())
-      expect(result.current).toBe('classic')
+      expect(result.current).toBe('revamp')
 
-      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'revamp'))
-      expect(result.current).toBe('classic')
+      act(() => useAppSettingsStore.getState().updateSetting('shellLayout', 'classic'))
+      expect(result.current).toBe('revamp')
     })
   })
 })
