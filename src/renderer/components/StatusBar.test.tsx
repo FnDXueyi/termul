@@ -317,6 +317,10 @@ describe('StatusBar', () => {
   })
 
   describe('working copy (CAP-7)', () => {
+    beforeEach(() => {
+      showSettings()
+    })
+
     const projectFolder = (): WorkingCopy => ({
       state: 'resolved',
       kind: 'project',
