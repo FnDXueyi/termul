@@ -146,6 +146,7 @@ export function serializeTopologyForManifest(node: PaneNode): PortablePaneNode {
         case 'git':
         case 'agent-chat':
         case 'git-history':
+        case 'diff':
           // Non-portable: dropped (see WORKSPACE_TAB_KIND_TRAITS).
           break
         case 'canvas':

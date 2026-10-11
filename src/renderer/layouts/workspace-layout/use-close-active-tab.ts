@@ -45,6 +45,7 @@ export function useCloseActiveTab({
       }
       case 'git':
       case 'git-history':
+      case 'diff':
         useWorkspaceStore.getState().removeTab(activeTab.id)
         break
       case 'terminal':

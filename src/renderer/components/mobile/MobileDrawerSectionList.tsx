@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Edit2, GitBranch, Globe, Pencil, TerminalSquare, X } from '@/components/icons'
+import { Edit2, FileDiff, GitBranch, Globe, Pencil, TerminalSquare, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { sectionForTab } from '@/hooks/use-mobile-section'
 import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
@@ -68,7 +68,10 @@ function findByDataValue(
 }
 
 /** Every tab the Editors list shows (a stray canvas tab included, for exhaustiveness). */
-type EditorKindTab = Extract<WorkspaceTab, { type: 'editor' | 'git' | 'browser' | 'canvas' }>
+type EditorKindTab = Extract<
+  WorkspaceTab,
+  { type: 'editor' | 'git' | 'diff' | 'browser' | 'canvas' }
+>
 
 /** An Editors row's label (also the name of its close button). */
 function editorTabLabel(
@@ -80,6 +83,8 @@ function editorTabLabel(
       return basename(tab.filePath) || 'editor tab'
     case 'git':
       return 'Git Changes'
+    case 'diff':
+      return `${basename(tab.path)}${tab.staged ? ' (staged)' : ''}`
     case 'browser':
       return browserLabel(tab.browserTabId)
     case 'canvas':
@@ -369,6 +374,7 @@ export function MobileDrawerSectionList({
                 >
                   {tab.type === 'editor' && <Pencil size={16} />}
                   {tab.type === 'git' && <GitBranch size={16} />}
+                  {tab.type === 'diff' && <FileDiff size={16} />}
                   {tab.type === 'browser' && <Globe size={16} />}
                   {tab.type === 'canvas' && <Edit2 size={16} />}
                   <span className="min-w-0 flex-1 truncate text-left">{rowLabel}</span>

@@ -18,6 +18,16 @@ export type WorkspaceTab =
     }
   | { type: 'git-history'; id: string; cwd: string }
   | {
+      /** One file's staged or working-tree diff (CAP-9). The id is a stable hash of
+       * the canonical identity (cwd, path, side); the tab keeps its stored `cwd`
+       * and never resolves a working copy. */
+      type: 'diff'
+      id: string
+      cwd: string
+      path: string
+      staged: boolean
+    }
+  | {
       /** OpenPencil canvas tab (singleton per project — AD-7): the id is a
        * deterministic function of the projectId, so repeat opens focus the
        * existing tab and a doc switch re-binds `docPath` in place. */
@@ -125,6 +135,13 @@ export interface WorkspaceState {
    * Open (or activate) the Git History tab for `cwd`, same reuse semantics.
    */
   addGitHistoryTab: (cwd: string, targetPaneId?: string) => void
+  /**
+   * Open (or focus) the Diff tab for one file side. Identity is the canonical
+   * `(cwd, path, staged)` triple (`diffTabId`); a repeat open focuses the
+   * existing tab in whichever pane holds it, else the tab joins the target (or
+   * active) pane. No UI caller yet: the Changes-panel opener is a later story.
+   */
+  addDiffTab: (cwd: string, path: string, staged: boolean, targetPaneId?: string) => void
   /**
    * Open (or activate) the project's canvas tab (OpenPencil canvas mode,
    * AD-7 singleton-per-project): the tab id is a deterministic function of

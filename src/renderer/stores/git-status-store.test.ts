@@ -1,5 +1,6 @@
 ﻿import type { GitCommitContext, GitStatusDetail } from '@shared/types/ipc.types'
 import { platform } from '@tauri-apps/plugin-os'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as gitApiModule from '@/lib/git-api'
 import { resetProjectStore, resetTerminalStore } from '@/lib/test-utils/store'
@@ -25,6 +26,8 @@ vi.mock('@/lib/git-api', () => ({
   gitApi: {
     getStatus: vi.fn(),
     getDiff: vi.fn(),
+    stageHunk: vi.fn(),
+    unstageHunk: vi.fn(),
     stage: vi.fn(),
     unstage: vi.fn(),
     discard: vi.fn(),
@@ -57,6 +60,8 @@ const { gitApi } = gitApiModule as unknown as {
   gitApi: {
     getStatus: ReturnType<typeof vi.fn>
     getDiff: ReturnType<typeof vi.fn>
+    stageHunk: ReturnType<typeof vi.fn>
+    unstageHunk: ReturnType<typeof vi.fn>
     stage: ReturnType<typeof vi.fn>
     unstage: ReturnType<typeof vi.fn>
     discard: ReturnType<typeof vi.fn>
@@ -96,6 +101,7 @@ beforeEach(() => {
     paths: {},
     statuses: {},
     diffs: {},
+    diffErrors: {},
     commitContexts: {},
     diffStats: {},
     errors: {},
@@ -637,5 +643,51 @@ describe('git-status-store refreshTracked', () => {
     gitApi.getStatus.mockRejectedValue(new Error('boom'))
     await expect(useGitStatusStore.getState().refreshTracked()).resolves.toBeUndefined()
     expect(useGitStatusStore.getState().errors['/a']?.status).toBe('boom')
+  })
+})
+
+describe('git-status-store diffErrors', () => {
+  const key = diffKey(CWD, 'a.ts', false)
+
+  it('records a failed fetch and keeps the legacy sentinel and toast by default', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false)
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBe('boom')
+    expect(state.diffs[key]).toBe('')
+    expect(toast.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('notify:false keeps the cache empty, skips the toast and logs one warn', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBe('boom')
+    expect(key in state.diffs).toBe(false)
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'warn', source: 'git-status-store' })
+    )
+  })
+
+  it('clears the error when a later fetch succeeds', async () => {
+    gitApi.getDiff.mockRejectedValueOnce(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    expect(useGitStatusStore.getState().diffErrors[key]).toBe('boom')
+
+    gitApi.getDiff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts')
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBeUndefined()
+    expect(state.diffs[key]).toBe('diff --git a/a.ts b/a.ts')
+  })
+
+  it('clears a file error when its diffs are invalidated by a hunk write', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    gitApi.stageHunk.mockResolvedValue(undefined)
+    await useGitStatusStore.getState().stageHunk(CWD, 'a.ts', 'patch')
+    expect(useGitStatusStore.getState().diffErrors[key]).toBeUndefined()
   })
 })
