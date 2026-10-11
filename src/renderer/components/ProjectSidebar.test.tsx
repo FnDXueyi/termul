@@ -1440,7 +1440,7 @@ describe('ProjectSidebar rail variant: Mono-style alignment and groups', () => {
     const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
       name: /Project: Rail Project 1/
     })
-    expect(row).toHaveClass('gap-2', 'px-2')
+    expect(row).toHaveClass('gap-2', 'px-2', 'rounded-lg')
     const iconColumn = row.querySelector('[data-rail-icon-column]')
     expect(iconColumn).toHaveClass('size-4', 'shrink-0')
   })
@@ -1451,7 +1451,8 @@ describe('ProjectSidebar rail variant: Mono-style alignment and groups', () => {
     const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
       name: /Project: Rail Project 1/
     })
-    expect(row).toHaveClass('gap-1.5', 'pl-1')
+    expect(row).toHaveClass('gap-1.5', 'pl-1', 'rounded-md')
+    expect(row).not.toHaveClass('rounded-lg')
     expect(row.querySelector('[data-rail-icon-column]')).toBeNull()
   })
 
@@ -1477,6 +1478,9 @@ describe('ProjectSidebar rail variant: Mono-style alignment and groups', () => {
       'aria-expanded',
       'false'
     )
+    // The shared inset must not override the right padding that keeps the label
+    // clear of the absolute-positioned actions button.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveClass('px-2', 'pr-8')
   })
 
   it('falls back to a neutral folder icon for an empty group', () => {

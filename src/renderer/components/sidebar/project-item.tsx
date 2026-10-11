@@ -98,7 +98,8 @@ export const ProjectItem = memo(function ProjectItem({
               }
             }}
             className={cn(
-              'group flex h-8 w-full cursor-pointer select-none items-center rounded-md pr-1.5 text-left text-xs',
+              'group flex h-8 w-full cursor-pointer select-none items-center pr-1.5 text-left text-xs',
+              isRail ? 'rounded-lg' : 'rounded-md',
               isRail ? RAIL_ROW_INSET_CLASS : 'gap-1.5 pl-1',
               'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
               isActive ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]'

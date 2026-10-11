@@ -92,8 +92,8 @@ export function RailGroupRow({
               onClick={onToggle}
               aria-expanded={!isCollapsed}
               className={cn(
-                'flex h-full min-w-0 flex-1 cursor-pointer items-center rounded-lg pr-8 text-left',
                 RAIL_ROW_INSET_CLASS,
+                'flex h-full min-w-0 flex-1 cursor-pointer items-center rounded-lg pr-8 text-left',
                 FOCUS_RING_CLASS
               )}
             >
