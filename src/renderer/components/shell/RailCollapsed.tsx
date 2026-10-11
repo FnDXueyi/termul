@@ -2,6 +2,7 @@ import { RailButton } from '@/components/ActivityRail'
 import { Edit2, FolderKanban, PanelLeft, SlidersHorizontal } from '@/components/icons'
 import { ProjectSwitcher } from '@/components/shell/ProjectSwitcher'
 import { RailColumnIcons } from '@/components/shell/RailColumnIcons'
+import { SSHPopover } from '@/components/shell/SSHPopover'
 import { useTopRowPlatform } from '@/components/shell/top-row-context'
 import { RAIL_TOGGLE_LABEL, useRailToggle } from '@/components/shell/use-rail-toggle'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
@@ -16,6 +17,9 @@ interface RailCollapsedProps {
   onOpenCommandPalette: () => void
   onOpenCanvas: () => void
   canOpenCanvas: boolean
+  onSSHConnect: (profileId: string) => void
+  onSelectSSHProfile: (profileId: string) => void
+  activeSSHProfileId: string | null
 }
 
 const NEED_PROJECT = 'Open a project first'
@@ -33,7 +37,10 @@ export function RailCollapsed({
   onNewProject,
   onOpenCommandPalette,
   onOpenCanvas,
-  canOpenCanvas
+  canOpenCanvas,
+  onSSHConnect,
+  onSelectSSHProfile,
+  activeSSHProfileId
 }: RailCollapsedProps): React.JSX.Element {
   const { expanded, toggle } = useRailToggle()
   const settingsView = useSettingsModalView()
@@ -87,6 +94,13 @@ export function RailCollapsed({
       >
         <Edit2 size={16} />
       </RailButton>
+
+      {/* Desktop only: renders nothing on web. */}
+      <SSHPopover
+        onSSHConnect={onSSHConnect}
+        onSelectProfile={onSelectSSHProfile}
+        activeProfileId={activeSSHProfileId}
+      />
 
       <div className="mt-auto">
         <RailButton
