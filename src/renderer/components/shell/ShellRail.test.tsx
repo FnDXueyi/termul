@@ -224,20 +224,47 @@ describe('ShellRail', () => {
       expect(props.onShortcutsOpenChange).toHaveBeenCalledWith(true)
     })
 
-    it('has the Rail toggle in the Projects header on web only', () => {
-      tauriRef.current = false
+    it('has the Rail and Side panel toggles in the Rail header on desktop and web', () => {
+      for (const tauri of [true, false]) {
+        tauriRef.current = tauri
+        const { unmount } = renderRail()
+        const header = screen.getByTestId('rail-header')
+        const rail = within(header).getByRole('button', { name: 'Expand or collapse projects' })
+        const side = within(header).getByRole('button', { name: 'Show or hide side panel' })
+        expect(rail).toHaveAttribute('aria-pressed', 'true')
+        expect(side).toHaveAttribute('aria-pressed', 'true')
+        // Header is above Search; the Projects header row has no toggle.
+        const nav = screen.getByRole('navigation', { name: 'Projects' })
+        expect(
+          header.compareDocumentPosition(within(nav).getByRole('button', { name: 'Search' })) &
+            Node.DOCUMENT_POSITION_FOLLOWING
+        ).toBeTruthy()
+        expect(screen.getAllByRole('button', { name: 'Expand or collapse projects' })).toHaveLength(
+          1
+        )
+        unmount()
+      }
+    })
+
+    it('marks only the header root as a drag region on desktop, never on web', () => {
+      tauriRef.current = true
       const { unmount } = renderRail()
-      const toggle = screen.getByRole('button', { name: 'Expand or collapse projects' })
-      expect(toggle).toHaveAttribute('aria-pressed', 'true')
-      // First control of the header row.
-      expect(toggle.parentElement?.firstElementChild).toBe(toggle)
+      const header = screen.getByTestId('rail-header')
+      expect(header).toHaveAttribute('data-tauri-drag-region')
+      for (const button of within(header).getAllByRole('button')) {
+        expect(button).not.toHaveAttribute('data-tauri-drag-region')
+      }
       unmount()
 
-      tauriRef.current = true
+      tauriRef.current = false
       renderRail()
-      expect(
-        screen.queryByRole('button', { name: 'Expand or collapse projects' })
-      ).not.toBeInTheDocument()
+      expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
+    })
+
+    it('persists the Side panel toggle through the panel visibility path', () => {
+      renderRail()
+      fireEvent.click(screen.getByRole('button', { name: 'Show or hide side panel' }))
+      expect(updatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', false)
     })
 
     it('occludes native webviews while the + menu is open', async () => {
@@ -318,7 +345,7 @@ describe('ShellRail', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('shows only the icons: toggle, project switcher, Search, Canvas, SSH, Settings', () => {
+    it('shows only the icons: toggle, project switcher, Column tabs, Search, Canvas, SSH, Settings', () => {
       renderRail()
 
       const nav = screen.getByRole('navigation', { name: 'Projects' })
@@ -328,6 +355,9 @@ describe('ShellRail', () => {
       expect(names).toEqual([
         'Expand or collapse projects',
         'Switch project (Alpha)',
+        'Chats',
+        'Explorer',
+        'Changes',
         'Search',
         'Open canvas',
         'SSH hosts',
@@ -339,6 +369,11 @@ describe('ShellRail', () => {
       expect(within(nav).queryByText('Projects')).not.toBeInTheDocument()
       expect(within(nav).queryByTestId('ssh-section')).not.toBeInTheDocument()
       expect(screen.getByTestId('shell-rail')).toHaveStyle({ width: '48px' })
+      // The top 40px is an empty band, drag space on desktop.
+      const band = screen.getByTestId('rail-top-band')
+      expect(band).toHaveClass('h-10')
+      expect(band).toBeEmptyDOMElement()
+      expect(band).toHaveAttribute('data-tauri-drag-region')
       // Settings is pinned at the bottom.
       expect(screen.getByRole('button', { name: 'Settings' }).parentElement).toHaveClass('mt-auto')
     })

@@ -1,6 +1,8 @@
 import { BranchSection } from '@/components/git/BranchSection'
 import { Archive, Search } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 
 interface GitPanelHeaderProps {
   variant: 'desktop' | 'mobile'
@@ -28,6 +30,7 @@ export function GitPanelHeader({
   onSwitchBranch,
   onOpenStash
 }: GitPanelHeaderProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   if (variant === 'mobile') {
     return (
       // pr-14 reserves the sheet close target so it does not overlap the
@@ -42,16 +45,18 @@ export function GitPanelHeader({
             onSwitchBranch={onSwitchBranch}
           />
 
-          <Button
-            variant="ghost"
-            size="touch"
-            className="w-11 text-muted-foreground hover:text-foreground hover:bg-secondary"
-            title="Stash changes"
-            onClick={onOpenStash}
-            disabled={!hasUncommittedChanges || isGenerating}
-          >
-            <Archive size={16} />
-          </Button>
+          <WriteGate gated={!admitted}>
+            <Button
+              variant="ghost"
+              size="touch"
+              className="w-11 text-muted-foreground hover:text-foreground hover:bg-secondary"
+              title="Stash changes"
+              onClick={onOpenStash}
+              disabled={!hasUncommittedChanges || isGenerating || !admitted}
+            >
+              <Archive size={16} />
+            </Button>
+          </WriteGate>
         </div>
 
         <div className="relative">
@@ -81,16 +86,18 @@ export function GitPanelHeader({
           onSwitchBranch={onSwitchBranch}
         />
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
-          title="Stash changes"
-          onClick={onOpenStash}
-          disabled={!hasUncommittedChanges || isGenerating}
-        >
-          <Archive size={14} />
-        </Button>
+        <WriteGate gated={!admitted}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
+            title="Stash changes"
+            onClick={onOpenStash}
+            disabled={!hasUncommittedChanges || isGenerating || !admitted}
+          >
+            <Archive size={14} />
+          </Button>
+        </WriteGate>
       </div>
 
       <div className="relative">

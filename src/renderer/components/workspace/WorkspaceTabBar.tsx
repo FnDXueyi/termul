@@ -3,6 +3,7 @@ import { AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { Globe, Maximize2, Minimize2 } from '@/components/icons'
+import { WindowControls } from '@/components/shell/TopRowChrome'
 import { requestCloseAgentChat } from '@/hooks/use-agent-idle-shutdown'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { clipboardApi } from '@/lib/api'
@@ -51,6 +52,12 @@ interface WorkspaceTabBarProps {
    */
   onCloseTabs?: (tabs: WorkspaceTab[]) => void
   defaultShell?: string
+  /**
+   * Flagged shell only: this bar is part of the window top row. `dragRegion`
+   * marks the empty space of the bar as a window drag region; `windowControls`
+   * renders the window controls flush at its right end. Unset = classic bar.
+   */
+  topRow?: { dragRegion: boolean; windowControls: boolean }
 }
 
 export function WorkspaceTabBar({
@@ -64,7 +71,8 @@ export function WorkspaceTabBar({
   onRenameTerminal,
   onCloseEditorTab,
   onCloseTabs,
-  defaultShell
+  defaultShell,
+  topRow
 }: WorkspaceTabBarProps): React.JSX.Element {
   const { setActiveTab, setActivePane, fullscreenPaneId, togglePaneFullscreen } = useWorkspaceStore(
     useShallow((state) => ({
@@ -85,6 +93,8 @@ export function WorkspaceTabBar({
   } = usePaneDnd()
   // FLIP reorder feedback — instant under prefers-reduced-motion.
   const reducedMotion = useReducedMotion() ?? false
+
+  const dragAttr = topRow?.dragRegion ? true : undefined
 
   const [hasOverflow, setHasOverflow] = useState(false)
   const tabsContainerRef = useRef<HTMLDivElement>(null)
@@ -405,19 +415,28 @@ export function WorkspaceTabBar({
     <TabPaneProvider paneId={paneId}>
       <div
         className="flex h-10 items-center bg-card"
+        data-tauri-drag-region={dragAttr}
         onDragOver={(e) => {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'move'
         }}
       >
-        <div className="relative flex items-center h-full min-w-0 flex-1 overflow-hidden">
+        <div
+          className="relative flex items-center h-full min-w-0 flex-1 overflow-hidden"
+          data-tauri-drag-region={dragAttr}
+        >
           <div
             ref={tabsContainerRef}
+            data-tauri-drag-region={dragAttr}
             onWheel={handleWheel}
             onDragLeave={handleContainerDragLeave}
             className="overflow-x-auto scrollbar-hide flex items-center h-full min-w-0 flex-1"
           >
-            <div role="tablist" className="flex h-full min-w-max items-center gap-0.5 px-1">
+            <div
+              role="tablist"
+              className="flex h-full min-w-max items-center gap-0.5 px-1"
+              data-tauri-drag-region={dragAttr}
+            >
               {/* Tab mount/unmount motion: arrivals (center drops, opened
                 files, new terminals) grow width 0→auto with a fade,
                 departures shrink back — the same push feel as a pane grow.
@@ -612,7 +631,10 @@ export function WorkspaceTabBar({
           )}
         </div>
 
-        <div className="ml-auto flex h-full shrink-0 items-center gap-1 px-2">
+        <div
+          className="ml-auto flex h-full shrink-0 items-center gap-1 px-2"
+          data-tauri-drag-region={dragAttr}
+        >
           {(isRevampShell ||
             leafCount > 1 ||
             onAddTerminal ||
@@ -658,6 +680,8 @@ export function WorkspaceTabBar({
             </>
           )}
         </div>
+
+        {topRow?.windowControls && <WindowControls windowControls />}
       </div>
     </TabPaneProvider>
   )
