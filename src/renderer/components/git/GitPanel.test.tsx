@@ -79,6 +79,11 @@ vi.mock('@/stores/git-status-store', () => ({
 
 import { GitPanel } from './GitPanel'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 describe('GitPanel commit message generation', () => {
   beforeEach(() => {
     vi.clearAllMocks()

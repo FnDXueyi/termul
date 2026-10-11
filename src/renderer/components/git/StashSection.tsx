@@ -9,6 +9,8 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 
 interface StashSectionProps {
   /** Story 10 (QA F4/F7): `mobile` renders always-visible `touch` buttons
@@ -31,6 +33,7 @@ export function StashSection({
   onPop,
   onDrop
 }: StashSectionProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   if (stashes.length === 0) {
     return null
   }
@@ -59,42 +62,48 @@ export function StashSection({
                   block renders always-visible `touch` buttons
                   (44px floor via hit-slop). Drop is destructive. */}
               <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="touch"
-                  className="w-11 text-muted-foreground"
-                  aria-label="Apply stash (keeps stash entry)"
-                  title="Apply stash (keeps stash entry)"
-                  disabled={isMutating || isGenerating}
-                  onClick={() => onApply(s.index)}
-                >
-                  <ClipboardPaste size={16} />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="touch"
-                  className="w-11 text-muted-foreground"
-                  aria-label="Pop stash (applies and drops)"
-                  title="Pop stash (applies and drops)"
-                  disabled={isMutating || isGenerating}
-                  onClick={() => onPop(s.index)}
-                >
-                  <ArchiveRestore size={16} />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="touch"
-                  className="w-11 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                  aria-label="Drop stash"
-                  title="Drop stash"
-                  disabled={isMutating || isGenerating}
-                  onClick={() => onDrop(s.index)}
-                >
-                  <Trash2 size={16} />
-                </Button>
+                <WriteGate gated={!admitted}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="touch"
+                    className="w-11 text-muted-foreground"
+                    aria-label="Apply stash (keeps stash entry)"
+                    title="Apply stash (keeps stash entry)"
+                    disabled={isMutating || isGenerating || !admitted}
+                    onClick={() => onApply(s.index)}
+                  >
+                    <ClipboardPaste size={16} />
+                  </Button>
+                </WriteGate>
+                <WriteGate gated={!admitted}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="touch"
+                    className="w-11 text-muted-foreground"
+                    aria-label="Pop stash (applies and drops)"
+                    title="Pop stash (applies and drops)"
+                    disabled={isMutating || isGenerating || !admitted}
+                    onClick={() => onPop(s.index)}
+                  >
+                    <ArchiveRestore size={16} />
+                  </Button>
+                </WriteGate>
+                <WriteGate gated={!admitted}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="touch"
+                    className="w-11 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                    aria-label="Drop stash"
+                    title="Drop stash"
+                    disabled={isMutating || isGenerating || !admitted}
+                    onClick={() => onDrop(s.index)}
+                  >
+                    <Trash2 size={16} />
+                  </Button>
+                </WriteGate>
               </div>
             </div>
           ) : (
@@ -112,30 +121,42 @@ export function StashSection({
                 </span>
               </div>
               <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                <button
-                  type="button"
-                  title="Apply stash (keeps stash entry)"
-                  onClick={() => onApply(s.index)}
-                  className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground"
-                >
-                  <ClipboardPaste size={11} />
-                </button>
-                <button
-                  type="button"
-                  title="Pop stash (applies and drops)"
-                  onClick={() => onPop(s.index)}
-                  className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground"
-                >
-                  <ArchiveRestore size={11} />
-                </button>
-                <button
-                  type="button"
-                  title="Drop stash"
-                  onClick={() => onDrop(s.index)}
-                  className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                >
-                  <Trash2 size={11} />
-                </button>
+                <WriteGate gated={!admitted}>
+                  <button
+                    type="button"
+                    title="Apply stash (keeps stash entry)"
+                    aria-label="Apply stash (keeps stash entry)"
+                    disabled={!admitted}
+                    onClick={() => onApply(s.index)}
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ClipboardPaste size={11} />
+                  </button>
+                </WriteGate>
+                <WriteGate gated={!admitted}>
+                  <button
+                    type="button"
+                    title="Pop stash (applies and drops)"
+                    aria-label="Pop stash (applies and drops)"
+                    disabled={!admitted}
+                    onClick={() => onPop(s.index)}
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ArchiveRestore size={11} />
+                  </button>
+                </WriteGate>
+                <WriteGate gated={!admitted}>
+                  <button
+                    type="button"
+                    title="Drop stash"
+                    aria-label="Drop stash"
+                    disabled={!admitted}
+                    onClick={() => onDrop(s.index)}
+                    className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </WriteGate>
               </div>
             </div>
           )
