@@ -27,7 +27,6 @@ import {
   SheetHeader,
   SheetTitle
 } from '@/components/ui/sheet'
-import { useAgentChatUnreadTracker } from '@/hooks/use-agent-chat-unread-tracker'
 import {
   describeIsolationDetail,
   useChatIsolationContext
@@ -243,11 +242,6 @@ export function MobileShellDrawer({
     setWasOpen(open)
     if (open) setListSection(section ?? 'chats')
   }
-
-  // Mounted here (not in a row) because Recents rows are unmounted while the
-  // drawer is closed, and a turn that finishes behind it must still bank
-  // "New activity".
-  useAgentChatUnreadTracker(activeSessionId)
 
   // The search is scoped to this open drawer: a new visit starts unfiltered.
   useEffect(() => {

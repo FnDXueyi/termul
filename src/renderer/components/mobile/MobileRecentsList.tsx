@@ -192,7 +192,8 @@ interface OpenRecentsRowProps {
 
 /**
  * An open chat in Recents: live title and status glyphs (the signals the
- * desktop `agent-chat-tab` uses; "New activity" from the unread store). Status
+ * desktop `agent-chat-tab` uses; "New activity" from the same unread store the
+ * tab reads). Status
  * is glyphs with sr-only text, never a text chip beside the title.
  */
 function OpenRecentsRow({
