@@ -1,6 +1,7 @@
 import type {
   GitCommit,
   GitCommitContext,
+  GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
   ProjectIcon
@@ -33,15 +34,18 @@ export const gitApi = {
   unstage: (cwd: string, path: string) =>
     isTauriContext() ? invoke<void>('git_unstage', { cwd, path }) : webServerGit.unstage(cwd, path),
 
-  // Per-hunk stage/unstage (#257). Desktop-only for now; web parity
-  // (webServerGit.stageHunk) is a follow-up once the web GitPanel renders
-  // the hunk actions. `hunkPatch` is a single-hunk unified-diff fragment;
-  // the backend applies it via `git apply --cached [--reverse]`.
+  // Per-hunk stage/unstage (#257). `hunkPatch` is a single-hunk unified-diff
+  // fragment; the backend applies it via `git apply --cached [--reverse]`.
+  // Web/remote posts `/git/stage-hunk` | `/git/unstage-hunk`.
   stageHunk: (cwd: string, path: string, hunkPatch: string) =>
-    invoke<void>('git_stage_hunk', { cwd, path, hunkPatch }),
+    isTauriContext()
+      ? invoke<void>('git_stage_hunk', { cwd, path, hunkPatch })
+      : webServerGit.stageHunk(cwd, path, hunkPatch),
 
   unstageHunk: (cwd: string, path: string, hunkPatch: string) =>
-    invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch }),
+    isTauriContext()
+      ? invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch })
+      : webServerGit.unstageHunk(cwd, path, hunkPatch),
 
   discard: (cwd: string, path: string) =>
     isTauriContext() ? invoke<void>('git_discard', { cwd, path }) : webServerGit.discard(cwd, path),
@@ -79,6 +83,20 @@ export const gitApi = {
       return res.data
     }
     return webServerGit.getProjectIcon(cwd)
+  },
+
+  /**
+   * Working-tree `+added -removed` stat (tracked vs HEAD plus untracked files).
+   * Desktop returns an `IpcResult` envelope; unwrap and throw on failure so
+   * callers see the same error shape as the web branch.
+   */
+  getDiffStat: async (cwd: string): Promise<GitDiffStat> => {
+    if (isTauriContext()) {
+      const res = await invokeIpc<GitDiffStat>('git_get_diff_stat', { cwd })
+      if (!res.success) throw new Error(res.error)
+      return res.data
+    }
+    return webServerGit.getDiffStat(cwd)
   },
 
   // Web/remote mode: route through the same-origin server (Story: Web/remote

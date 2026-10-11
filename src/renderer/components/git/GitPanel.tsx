@@ -10,6 +10,7 @@ import { useGitSelection } from '@/components/git/use-git-selection'
 import { GitBranch } from '@/components/icons'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { type GitDiffViewMode, loadGitDiffViewMode } from '@/lib/parse-unified-diff'
+import { normalizePath } from '@/lib/working-copy'
 import { diffKey, useGitStatusStore } from '@/stores/git-status-store'
 
 interface GitPanelProps {
@@ -31,8 +32,10 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
   const fetchStashes = useGitStatusStore((state) => state.fetchStashes)
   const fetchBranches = useGitStatusStore((state) => state.fetchBranches)
 
-  const stashes = stashesState[cwd] ?? []
-  const branches = branchesState[cwd] ?? []
+  // The store keys every working copy by its canonical path.
+  const key = normalizePath(cwd)
+  const stashes = stashesState[key] ?? []
+  const branches = branchesState[key] ?? []
 
   const [searchQuery, setSearchQuery] = useState('')
   // Multi-selection model (selected rows, section scope, anchor, and which side
@@ -72,12 +75,12 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
   }, [isVisible, selectedFile, selectedStaged, cwd, diffs, fetchDiff])
 
   const filteredStatuses = useMemo(() => {
-    const currentStatuses = statuses[cwd] || []
+    const currentStatuses = statuses[key] || []
     if (!searchQuery) return currentStatuses
     return currentStatuses.filter((s: GitStatusDetail) =>
       s.path.toLowerCase().includes(searchQuery.toLowerCase())
     )
-  }, [statuses, cwd, searchQuery])
+  }, [statuses, key, searchQuery])
 
   const { stagedFiles, unstagedFiles } = useMemo(() => {
     const staged = filteredStatuses.filter((s: GitStatusDetail) => s.staged)

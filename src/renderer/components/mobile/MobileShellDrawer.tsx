@@ -32,6 +32,7 @@ import {
   useChatIsolationContext
 } from '@/hooks/use-chat-isolation-context'
 import type { MobileSection } from '@/hooks/use-mobile-section'
+import { activeWorktreeOf } from '@/lib/active-worktree'
 import { returnFocusAfterConfirm } from '@/lib/confirm-focus-return'
 import {
   holdSheetReturnTargets,
@@ -41,8 +42,9 @@ import {
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { useAcpStore } from '@/stores/acp-store'
-import { getActiveWorktreeFromStore, useActiveProject } from '@/stores/project-store'
+import { useActiveProject } from '@/stores/project-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
+import { useWorktreePick } from '@/stores/shell-layout-store'
 import { MobileDrawerSectionList } from './MobileDrawerSectionList'
 import { MobileRecentsList } from './MobileRecentsList'
 
@@ -155,8 +157,10 @@ function DrawerProjectRow({
     activeSessionId ? s.sessions?.[activeSessionId]?.worktreeBranch : undefined
   )
   const chatSessionLoaded = Boolean(sessionProjectId)
-  const activeWorktree =
-    !chatSessionLoaded && activeProject ? getActiveWorktreeFromStore(activeProject.id) : undefined
+  const worktreePick = useWorktreePick(activeProject?.id ?? '')
+  const activeWorktree = chatSessionLoaded
+    ? undefined
+    : activeWorktreeOf(activeProject, worktreePick)
   const isolation = useChatIsolationContext({
     projectId: chatSessionLoaded ? sessionProjectId : activeProject?.id,
     worktreePath: chatSessionLoaded ? sessionWorktreePath : activeWorktree?.path,

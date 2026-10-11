@@ -2,17 +2,21 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { resetShellLayoutActiveAtLoadForTests } from '@/lib/shell-layout-mode'
 import { mockTerminal } from '@/lib/test-utils/terminal'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
-import { useSidebarStore } from '@/stores/sidebar-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
 import { framerMotionTestState, resetFramerMotionTestState } from '@/test-utils/mock-framer-motion'
 import type { Project, ProjectColor, Terminal } from '@/types/project'
 import WorkspaceLayout from './WorkspaceLayout'
 
-const { platformState, tauriRef, webAuthGateRef } = vi.hoisted(() => ({
+const { platformState, tauriRef, webAuthGateRef, appSettingsRef } = vi.hoisted(() => ({
   platformState: { isMac: false },
+  // Story 22: switchable settings state for the shell-layout flag tests.
+  appSettingsRef: {
+    current: { shellLayout: undefined as string | undefined, isLoaded: true as boolean }
+  },
   tauriRef: { current: true as boolean },
   // #907: switchable gate state for the mid-session token-screen tests.
   webAuthGateRef: { current: { status: 'ok' as string, submitting: false } }
@@ -139,12 +143,16 @@ vi.mock('@/stores/terminal-store', () => ({
 }))
 
 vi.mock('@/stores/app-settings-store', () => ({
-  useAppSettingsStore: vi.fn(
-    (selector?: (state: { settings: { remoteBindMode: 'localhost' } }) => unknown) => {
-      const state = { settings: { remoteBindMode: 'localhost' as const } }
-      return selector ? selector(state) : state
+  useAppSettingsStore: vi.fn((selector?: (state: Record<string, unknown>) => unknown) => {
+    const state = {
+      settings: {
+        remoteBindMode: 'localhost' as const,
+        shellLayout: appSettingsRef.current.shellLayout
+      },
+      isLoaded: appSettingsRef.current.isLoaded
     }
-  ),
+    return selector ? selector(state) : state
+  }),
   useTerminalFontSize: vi.fn(() => 14),
   useUiZoomLevel: vi.fn(() => 1),
   useTerminalFontFamily: vi.fn(() => 'monospace'),
@@ -242,16 +250,14 @@ vi.mock('@/hooks/use-command-history', () => ({
   useAllCommandHistory: vi.fn(() => [])
 }))
 
-const { mockUpdatePanelVisibility, mockWaitForPendingAppSettingsPersistence } = vi.hoisted(() => ({
-  mockUpdatePanelVisibility: vi.fn(() => Promise.resolve()),
-  mockWaitForPendingAppSettingsPersistence: vi.fn(() => Promise.resolve())
+const { mockUpdatePanelVisibility } = vi.hoisted(() => ({
+  mockUpdatePanelVisibility: vi.fn(() => Promise.resolve())
 }))
 
 vi.mock('@/hooks/use-app-settings', () => ({
   useUpdateAppSetting: vi.fn(() => vi.fn()),
   useUpdateAppSettings: vi.fn(() => vi.fn()),
-  useUpdatePanelVisibility: vi.fn(() => mockUpdatePanelVisibility),
-  waitForPendingAppSettingsPersistence: mockWaitForPendingAppSettingsPersistence
+  useUpdatePanelVisibility: vi.fn(() => mockUpdatePanelVisibility)
 }))
 
 vi.mock('@/hooks/use-file-watcher', () => ({
@@ -459,9 +465,10 @@ beforeEach(() => {
   mockUseActiveTerminal.mockReturnValue(null)
   mockUseActiveTerminalId.mockReturnValue('')
   mockUpdatePanelVisibility.mockReset()
-  mockWaitForPendingAppSettingsPersistence.mockReset()
-  useFileExplorerStore.setState({ isVisible: true })
-  useSidebarStore.setState({ isVisible: true })
+  appSettingsRef.current = { shellLayout: undefined, isLoaded: true }
+  resetShellLayoutActiveAtLoadForTests()
+  resetShellLayoutStoreForTests()
+  useShellLayoutStore.setState({ status: 'ready', sidePanelVisible: true, railExpanded: true })
   useThemePickerStore.getState().close()
   mockApi.filesystem.watchDirectory.mockReset()
   mockApi.filesystem.unwatchDirectory.mockReset()
@@ -890,8 +897,8 @@ describe('WorkspaceLayout - Empty States', () => {
       fireEvent.keyDown(input, { key: 'b', ctrlKey: true })
       fireEvent.keyDown(input, { key: 'B', ctrlKey: true, shiftKey: true })
 
-      expect(useFileExplorerStore.getState().isVisible).toBe(true)
-      expect(useSidebarStore.getState().isVisible).toBe(true)
+      expect(useShellLayoutStore.getState().sidePanelVisible).toBe(true)
+      expect(useShellLayoutStore.getState().railExpanded).toBe(true)
       expect(mockUpdatePanelVisibility).not.toHaveBeenCalled()
 
       document.body.removeChild(input)
@@ -1002,141 +1009,6 @@ describe('WorkspaceLayout - Empty States', () => {
       // The two sequential waits above can exceed the 15s global
       // testTimeout, which would kill the test before the second one resolves.
     }, 90000)
-  })
-
-  describe('Close flow persistence coordination', () => {
-    it.skip('waits for pending app-settings persistence before responding to close with no dirty files', async () => {
-      let closeRequestedCallback: (() => Promise<boolean>) | undefined
-      mockApi.window.onCloseRequested.mockImplementation((callback: () => Promise<boolean>) => {
-        closeRequestedCallback = callback
-        return vi.fn()
-      })
-
-      const project = createProject('a', '/workspace/a', 'blue')
-      mockUseProjects.mockReturnValue([project])
-      mockUseActiveProject.mockReturnValue(project)
-      mockUseActiveProjectId.mockReturnValue('a')
-
-      const deferred = new Promise<void>((resolve) => {
-        mockWaitForPendingAppSettingsPersistence.mockImplementationOnce(async () => {
-          await new Promise<void>((r) => setTimeout(r, 0))
-          resolve()
-        })
-      })
-
-      renderWithRouter()
-      expect(closeRequestedCallback).toBeDefined()
-      if (!closeRequestedCallback) throw new Error('close callback missing')
-
-      await expect(closeRequestedCallback()).resolves.toBe(false)
-
-      expect(mockApi.window.respondToClose).not.toHaveBeenCalled()
-      await deferred
-      await waitFor(() => {
-        expect(mockApi.window.respondToClose).toHaveBeenCalledWith('close')
-      })
-    })
-
-    it.skip('waits for pending app-settings persistence before confirm-dialog discard close', async () => {
-      let closeRequestedCallback: (() => Promise<boolean>) | undefined
-      mockApi.window.onCloseRequested.mockImplementation((callback: () => Promise<boolean>) => {
-        closeRequestedCallback = callback
-        return vi.fn()
-      })
-
-      const project = createProject('a', '/workspace/a', 'blue')
-      mockUseProjects.mockReturnValue([project])
-      mockUseActiveProject.mockReturnValue(project)
-      mockUseActiveProjectId.mockReturnValue('a')
-
-      const dirtyEditorState = {
-        activeFilePath: '/workspace/a/src/file.ts',
-        openFiles: new Map([
-          [
-            '/workspace/a/src/file.ts',
-            {
-              filePath: '/workspace/a/src/file.ts',
-              isDirty: true
-            }
-          ]
-        ]),
-        getDirtyFileCount: vi.fn(() => 1),
-        saveAllDirty: vi.fn().mockResolvedValue(undefined),
-        closeFile: vi.fn(),
-        saveFile: vi.fn().mockResolvedValue(true)
-      }
-
-      const useEditorStoreModule = await import('@/stores/editor-store')
-      const getStateSpy = vi
-        .spyOn(useEditorStoreModule.useEditorStore, 'getState')
-        .mockReturnValue(
-          dirtyEditorState as unknown as ReturnType<
-            typeof useEditorStoreModule.useEditorStore.getState
-          >
-        )
-
-      renderWithRouter()
-      expect(closeRequestedCallback).toBeDefined()
-      if (!closeRequestedCallback) throw new Error('close callback missing')
-
-      await expect(closeRequestedCallback()).resolves.toBe(false)
-
-      const dontSaveButton = await screen.findByRole('button', { name: "Don't Save" })
-
-      let resolveWait: (() => void) | undefined
-      mockWaitForPendingAppSettingsPersistence.mockImplementationOnce(
-        () =>
-          new Promise<void>((resolve) => {
-            resolveWait = resolve
-          })
-      )
-
-      await act(async () => {
-        fireEvent.click(dontSaveButton)
-      })
-
-      expect(mockApi.window.respondToClose).not.toHaveBeenCalled()
-      resolveWait?.()
-      await waitFor(() => {
-        expect(mockApi.window.respondToClose).toHaveBeenCalledWith('close')
-      })
-
-      getStateSpy.mockRestore()
-    })
-
-    it.skip('still closes when waiting for app-settings persistence rejects', async () => {
-      let closeRequestedCallback: (() => Promise<boolean>) | undefined
-      mockApi.window.onCloseRequested.mockImplementation((callback: () => Promise<boolean>) => {
-        closeRequestedCallback = callback
-        return vi.fn()
-      })
-
-      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-      const project = createProject('a', '/workspace/a', 'blue')
-      mockUseProjects.mockReturnValue([project])
-      mockUseActiveProject.mockReturnValue(project)
-      mockUseActiveProjectId.mockReturnValue('a')
-
-      mockWaitForPendingAppSettingsPersistence.mockRejectedValueOnce(
-        new Error('settings flush failed')
-      )
-
-      renderWithRouter()
-      expect(closeRequestedCallback).toBeDefined()
-      if (!closeRequestedCallback) throw new Error('close callback missing')
-
-      await expect(closeRequestedCallback()).resolves.toBe(false)
-
-      await waitFor(() => {
-        expect(mockApi.window.respondToClose).toHaveBeenCalledWith('close')
-      })
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Failed to wait for app settings persistence before close:',
-        expect.any(Error)
-      )
-
-      consoleErrorSpy.mockRestore()
-    })
   })
 
   describe('Project switch watcher orchestration', () => {
@@ -1420,7 +1292,7 @@ describe('WorkspaceLayout - sidebar & explorer width-reveal', () => {
   })
 
   it('unmounts ProjectSidebar when the sidebar is hidden', () => {
-    useSidebarStore.setState({ isVisible: false })
+    useShellLayoutStore.setState({ railExpanded: false })
 
     renderWithRouter()
 
@@ -1442,7 +1314,7 @@ describe('WorkspaceLayout - sidebar & explorer width-reveal', () => {
 
   it('unmounts the explorer column when hidden and no SSH profile is active', () => {
     mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-    useFileExplorerStore.setState({ isVisible: false })
+    useShellLayoutStore.setState({ sidePanelVisible: false })
 
     renderWithRouter()
 
@@ -1466,5 +1338,105 @@ describe('WorkspaceLayout - sidebar & explorer width-reveal', () => {
     // Content still mounts — instant, not skipped.
     expect(document.querySelector('aside.w-64')).toBeInTheDocument()
     expect(screen.getByTestId('file-explorer')).toBeInTheDocument()
+  })
+})
+
+describe('WorkspaceLayout - shellLayout flag', () => {
+  const rerenderTree = (rerender: (ui: React.ReactElement) => void): void =>
+    rerender(
+      <TooltipProvider>
+        <MemoryRouter initialEntries={['/']}>
+          <WorkspaceLayout />
+        </MemoryRouter>
+      </TooltipProvider>
+    )
+
+  function precedes(a: Element, b: Element): boolean {
+    return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+  }
+
+  it('renders the classic shell with the explorer right of main when the flag is absent', () => {
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+
+    const main = document.querySelector('main') as Element
+    expect(precedes(main, screen.getByTestId('file-explorer'))).toBe(true)
+  })
+
+  it('renders the classic shell when the flag is classic', () => {
+    appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+
+    const main = document.querySelector('main') as Element
+    expect(precedes(main, screen.getByTestId('file-explorer'))).toBe(true)
+  })
+
+  it('renders Rail, Side panel and main in order when the flag is revamp', () => {
+    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+
+    const rail = document.querySelector('aside.w-64') as Element
+    const explorer = screen.getByTestId('file-explorer')
+    const main = document.querySelector('main') as Element
+    expect(rail).toBeInTheDocument()
+    expect(precedes(rail, explorer)).toBe(true)
+    expect(precedes(explorer, main)).toBe(true)
+  })
+
+  it('shows the loading screen while settings are pending, then the captured shell', () => {
+    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: false }
+
+    const { rerender } = renderWithRouter()
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(document.querySelector('main')).toBeNull()
+
+    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+    rerenderTree(rerender)
+
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+    const explorer = screen.getByTestId('file-explorer')
+    expect(precedes(explorer, document.querySelector('main') as Element)).toBe(true)
+  })
+
+  it('keeps the shell it loaded with when the setting changes without a reload', () => {
+    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    const { rerender } = renderWithRouter()
+    const main = document.querySelector('main') as Element
+    expect(precedes(screen.getByTestId('file-explorer'), main)).toBe(true)
+
+    appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
+    rerenderTree(rerender)
+
+    expect(document.querySelector('main')).toBe(main)
+    expect(precedes(screen.getByTestId('file-explorer'), main)).toBe(true)
+  })
+
+  it('does not remount main when the Side panel or Rail toggles in the flagged frame', async () => {
+    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
+    framerMotionTestState.reducedMotion.current = true
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+    const main = document.querySelector('main') as Element
+
+    act(() => useShellLayoutStore.setState({ sidePanelVisible: false }))
+    await waitFor(() => expect(screen.queryByTestId('file-explorer')).not.toBeInTheDocument())
+    expect(document.querySelector('main')).toBe(main)
+
+    act(() => useShellLayoutStore.setState({ railExpanded: false }))
+    await waitFor(() => expect(document.querySelector('aside.w-64')).toBeNull())
+    expect(document.querySelector('main')).toBe(main)
+
+    act(() => useShellLayoutStore.setState({ sidePanelVisible: true, railExpanded: true }))
+    expect(await screen.findByTestId('file-explorer')).toBeInTheDocument()
+    expect(document.querySelector('main')).toBe(main)
   })
 })

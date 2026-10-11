@@ -2,6 +2,7 @@ import type { GitStatusDetail } from '@shared/types/ipc.types'
 import { createContext, useContext, useEffect, useMemo } from 'react'
 import type { GitDisplayStatus } from '@/lib/git-status-display'
 import { logFrontendError } from '@/lib/log-api'
+import { normalizePath } from '@/lib/working-copy'
 import { useGitStatusStore } from '@/stores/git-status-store'
 import { joinTreePath, normalizeTreePath, parentTreePath } from './tree-paths'
 
@@ -118,7 +119,9 @@ export function useExplorerGitDecorationsContext(): ExplorerGitDecorations {
  * the Git panel and mutations keep the store current after that.
  */
 export function useExplorerGitDecorations(rootPath: string | null): ExplorerGitDecorations {
-  const statuses = useGitStatusStore((state) => (rootPath ? state.statuses[rootPath] : undefined))
+  const statuses = useGitStatusStore((state) =>
+    rootPath ? state.statuses[normalizePath(rootPath)] : undefined
+  )
 
   useEffect(() => {
     if (!rootPath) return
