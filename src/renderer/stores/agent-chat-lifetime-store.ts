@@ -16,6 +16,8 @@ interface AgentChatLifetimeState {
   releaseChat: (sessionId: string) => void
   markClosing: (sessionId: string) => void
   clearClosing: (sessionId: string) => void
+  /** Drops every per-project entry for a Project that no longer exists. */
+  forgetProject: (projectId: string) => void
 }
 
 export const useAgentChatLifetimeStore = create<AgentChatLifetimeState>((set, get) => ({
@@ -91,6 +93,28 @@ export const useAgentChatLifetimeStore = create<AgentChatLifetimeState>((set, ge
       const closingSessionIds = { ...state.closingSessionIds }
       delete closingSessionIds[sessionId]
       return { closingSessionIds }
+    })
+  },
+  forgetProject: (projectId) => {
+    if (!projectId) return
+    set((state) => {
+      if (
+        !(projectId in state.retainedByProject) &&
+        !(projectId in state.activeSessionByProject) &&
+        !(projectId in state.focusSessionByProject)
+      ) {
+        return state
+      }
+      const without = <T>(map: Record<string, T>): Record<string, T> => {
+        const next = { ...map }
+        delete next[projectId]
+        return next
+      }
+      return {
+        retainedByProject: without(state.retainedByProject),
+        activeSessionByProject: without(state.activeSessionByProject),
+        focusSessionByProject: without(state.focusSessionByProject)
+      }
     })
   }
 }))
