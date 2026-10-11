@@ -1403,3 +1403,182 @@ describe('ProjectSidebar rail variant', () => {
     }
   })
 })
+
+describe('ProjectSidebar rail variant: Mono-style alignment and groups', () => {
+  const railProjects: Project[] = Array.from({ length: 10 }, (_, i) => ({
+    id: String(i + 1),
+    name: `Rail Project ${i + 1}`,
+    color: 'blue' as const,
+    path: `/repo/rail-${i + 1}`,
+    isGitRepo: false
+  }))
+  const group = (isCollapsed: boolean, ids = ['1', '2']) => ({
+    id: 'group-1',
+    name: 'My Folder',
+    projectIds: ids,
+    isCollapsed
+  })
+
+  beforeEach(() => {
+    useProjectStore.setState({ groups: [] })
+  })
+
+  it('has no project search in the Rail, however many projects there are', () => {
+    renderWithRouter({ variant: 'rail', projects: railProjects })
+    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Search projects')).not.toBeInTheDocument()
+  })
+
+  it('keeps the classic project search for a long list', () => {
+    renderWithRouter({ projects: railProjects })
+    expect(screen.getByTestId('project-search-input')).toBeInTheDocument()
+  })
+
+  it('puts project rows and their icons on the shared Rail column', () => {
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 2) })
+
+    const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(row).toHaveClass('gap-2', 'px-2', 'rounded-lg')
+    const iconColumn = row.querySelector('[data-rail-icon-column]')
+    expect(iconColumn).toHaveClass('size-4', 'shrink-0')
+  })
+
+  it('keeps the classic row geometry unchanged', () => {
+    renderWithRouter({ projects: railProjects.slice(0, 2) })
+
+    const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(row).toHaveClass('gap-1.5', 'pl-1', 'rounded-md')
+    expect(row).not.toHaveClass('rounded-lg')
+    expect(row.querySelector('[data-rail-icon-column]')).toBeNull()
+  })
+
+  it('shows the first project icon at rest and a chevron on hover or focus', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    expect(row).toHaveClass('group')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    // The first child project's monogram stands for the group.
+    expect(icon?.querySelector('[data-project-color]')).toHaveTextContent('R')
+    expect(icon).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
+    expect(chevron).toHaveClass(
+      'hidden',
+      'group-hover:inline-flex',
+      'group-focus-within:inline-flex'
+    )
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronRight"]')).toBeInTheDocument()
+    // The row is one button that toggles the group.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    // The shared inset must not override the right padding that keeps the label
+    // clear of the absolute-positioned actions button.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveClass('px-2', 'pr-8')
+  })
+
+  it('falls back to a neutral folder icon for an empty group', () => {
+    useProjectStore.setState({ groups: [group(true, [])] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    const icon = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('[data-rail-group-icon]')
+    expect(icon?.querySelector('svg[data-termul-icon="Folder"]')).toBeInTheDocument()
+  })
+
+  it('keeps the chevron-down visible when expanded and wraps the group in one surface', () => {
+    useProjectStore.setState({ groups: [group(false)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    expect(icon).toHaveClass('hidden')
+    expect(icon).not.toHaveClass('group-hover:hidden')
+    expect(chevron).toHaveClass('inline-flex')
+    expect(chevron).not.toHaveClass('hidden')
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronDown"]')).toBeInTheDocument()
+
+    const container = screen.getByTestId('rail-group-group-1')
+    expect(container).toHaveClass('rounded-lg', 'bg-foreground/[0.03]')
+    // Children sit in the same icon column; the container gives the grouping, not indentation.
+    const groupList = container.querySelector('[data-group-container-id="group-1"]')
+    expect(groupList).not.toHaveClass('pl-4')
+    const childRow = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(childRow).toHaveClass('gap-2', 'px-2')
+  })
+
+  it('has no container surface on a collapsed group', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    expect(screen.getByTestId('rail-group-group-1')).not.toHaveClass('bg-foreground/[0.03]')
+  })
+
+  it('toggles the group from the row button', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'My Folder' }))
+
+    expect(useProjectStore.getState().groups?.[0].isCollapsed).toBe(false)
+  })
+
+  it('reveals a Tab-reachable more button that opens the group menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    const more = screen.getByRole('button', { name: 'Group actions for My Folder' })
+    expect(more).toHaveClass(
+      'opacity-0',
+      'group-hover:opacity-100',
+      'group-focus-within:opacity-100'
+    )
+    expect(more).not.toHaveAttribute('tabindex', '-1')
+
+    fireEvent.click(more)
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+    expect(screen.getByText('Delete Group (Keep Projects)')).toBeInTheDocument()
+  })
+
+  it('opens the same group menu on right-click', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    fireEvent.contextMenu(screen.getByText('My Folder'))
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+  })
+
+  it('renames a group inline from the menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ variant: 'rail', projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group actions for My Folder' }))
+    fireEvent.click(screen.getByText('Rename Group'))
+    const input = screen.getByRole('textbox', { name: 'Rename group My Folder' })
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(useProjectStore.getState().groups?.[0].name).toBe('Renamed')
+  })
+
+  it('keeps the classic group header unchanged', () => {
+    useProjectStore.setState({ groups: [group(false)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    expect(screen.queryByTestId('rail-group-row-group-1')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Group actions for My Folder')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /My Folder/i })).toHaveClass('pl-1')
+  })
+})
