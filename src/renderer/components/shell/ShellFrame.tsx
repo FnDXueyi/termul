@@ -120,7 +120,9 @@ export function ShellFrame({
             />
 
             <PaneDndProvider>
-              <div className="flex-1 flex gap-2 min-h-0 h-full overflow-hidden min-w-0">
+              {/* No gap here: the Side panel owns its 8px gutter so its resize handle
+                  sits on the main container border. */}
+              <div className="flex-1 flex min-h-0 h-full overflow-hidden min-w-0">
                 <ShellSidePanel activeProject={activeProject} ssh={ssh} />
 
                 <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
