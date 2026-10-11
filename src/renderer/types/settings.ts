@@ -42,6 +42,9 @@ export type TerminalUrlOpenMode = 'system' | 'termul'
 /** Which interface the remote terminal HTTP server binds to when started. */
 export type RemoteBindMode = 'localhost' | 'all'
 
+/** Shell layout the app opens with: the existing shell or the opt-in revamp. */
+export type ShellLayoutMode = 'classic' | 'revamp'
+
 // Application-wide settings
 export interface AppSettings {
   terminalFontFamily: string
@@ -59,6 +62,12 @@ export interface AppSettings {
   sidebarVisible: boolean
   fileExplorerVisible: boolean
   sshPanelVisible: boolean
+  /**
+   * Opt-in shell layout. Optional and deliberately absent from
+   * `DEFAULT_APP_SETTINGS`: absent means the code default in
+   * `lib/shell-layout-mode.ts`. Read at load; changes apply after a reload.
+   */
+  shellLayout?: ShellLayoutMode
   /** Remote server bind: localhost (127.0.0.1) or all interfaces (0.0.0.0). */
   remoteBindMode: RemoteBindMode
   /** App-wide color theme family id (without `-light` suffix). */
