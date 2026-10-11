@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Project, Worktree } from '@/types/project'
-import { activeWorktreeOf } from './active-worktree'
+import { activeWorktreeOf, OUTSIDE_PROJECT_ROOT_REASON } from './active-worktree'
 
 function worktree(id: string, path: string, extra: Partial<Worktree> = {}): Worktree {
   return {
@@ -40,5 +40,13 @@ describe('activeWorktreeOf', () => {
   it('returns undefined without a project', () => {
     expect(activeWorktreeOf(undefined, 'e:/p/.termul/worktrees/a')).toBeUndefined()
     expect(activeWorktreeOf(null, null)).toBeUndefined()
+  })
+})
+
+describe('OUTSIDE_PROJECT_ROOT_REASON', () => {
+  it('is the one user-facing reason for a worktree outside the project folder', () => {
+    expect(OUTSIDE_PROJECT_ROOT_REASON).toBe(
+      'Outside the project folder; open it on the desktop app.'
+    )
   })
 })

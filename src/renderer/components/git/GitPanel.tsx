@@ -1,16 +1,15 @@
-import type { GitStatusDetail } from '@shared/types/ipc.types'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { CommitComposer } from '@/components/git/CommitComposer'
 import { GitChangeList } from '@/components/git/GitChangeList'
 import { GitDiffPane } from '@/components/git/GitDiffPane'
 import { GitPanelDialogs } from '@/components/git/GitPanelDialogs'
 import { GitPanelHeader } from '@/components/git/GitPanelHeader'
 import { useGitActions } from '@/components/git/use-git-actions'
+import { useGitPanelModel } from '@/components/git/use-git-panel-model'
 import { useGitSelection } from '@/components/git/use-git-selection'
 import { GitBranch } from '@/components/icons'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { type GitDiffViewMode, loadGitDiffViewMode } from '@/lib/parse-unified-diff'
-import { normalizePath } from '@/lib/working-copy'
 import { diffKey, useGitStatusStore } from '@/stores/git-status-store'
 
 interface GitPanelProps {
@@ -19,25 +18,22 @@ interface GitPanelProps {
 }
 
 export function GitPanel({ cwd, isVisible }: GitPanelProps) {
-  const statuses = useGitStatusStore((state) => state.statuses)
   const diffs = useGitStatusStore((state) => state.diffs)
-  const selectedFile = useGitStatusStore((state) => state.selectedFile)
   const setSelectedFile = useGitStatusStore((state) => state.setSelectedFile)
-  const refreshStatus = useGitStatusStore((state) => state.refreshStatus)
   const fetchDiff = useGitStatusStore((state) => state.fetchDiff)
-  const fetchCommitContext = useGitStatusStore((state) => state.fetchCommitContext)
 
-  const stashesState = useGitStatusStore((state) => state.stashes)
-  const branchesState = useGitStatusStore((state) => state.branches)
-  const fetchStashes = useGitStatusStore((state) => state.fetchStashes)
-  const fetchBranches = useGitStatusStore((state) => state.fetchBranches)
+  // Store wiring (refresh while visible, branches, stashes, filter query and
+  // the filtered staged / unstaged lists) is shared with the shell Changes panel.
+  const {
+    selectedFile,
+    stashes,
+    branches,
+    searchQuery,
+    setSearchQuery,
+    stagedFiles,
+    unstagedFiles
+  } = useGitPanelModel({ cwd, isVisible })
 
-  // The store keys every working copy by its canonical path.
-  const key = normalizePath(cwd)
-  const stashes = stashesState[key] ?? []
-  const branches = branchesState[key] ?? []
-
-  const [searchQuery, setSearchQuery] = useState('')
   // Multi-selection model (selected rows, section scope, anchor, and which side
   // — staged vs unstaged — of the selected path is shown).
   const {
@@ -55,15 +51,6 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
   const currentDiff = selectedFile ? diffs[diffKey(cwd, selectedFile, selectedStaged)] : null
 
   useEffect(() => {
-    if (isVisible) {
-      refreshStatus(cwd)
-      fetchCommitContext(cwd)
-      fetchStashes(cwd)
-      fetchBranches(cwd)
-    }
-  }, [isVisible, cwd, refreshStatus, fetchCommitContext, fetchStashes, fetchBranches])
-
-  useEffect(() => {
     if (!isVisible || !selectedFile) {
       return
     }
@@ -73,20 +60,6 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
       fetchDiff(cwd, selectedFile, selectedStaged)
     }
   }, [isVisible, selectedFile, selectedStaged, cwd, diffs, fetchDiff])
-
-  const filteredStatuses = useMemo(() => {
-    const currentStatuses = statuses[key] || []
-    if (!searchQuery) return currentStatuses
-    return currentStatuses.filter((s: GitStatusDetail) =>
-      s.path.toLowerCase().includes(searchQuery.toLowerCase())
-    )
-  }, [statuses, key, searchQuery])
-
-  const { stagedFiles, unstagedFiles } = useMemo(() => {
-    const staged = filteredStatuses.filter((s: GitStatusDetail) => s.staged)
-    const unstaged = filteredStatuses.filter((s: GitStatusDetail) => !s.staged)
-    return { stagedFiles: staged, unstagedFiles: unstaged }
-  }, [filteredStatuses])
 
   // Git mutations (stage/unstage/discard, per-hunk apply, commit + AI message
   // generation, push, stash and branch ops) live in the useGitActions hook; it

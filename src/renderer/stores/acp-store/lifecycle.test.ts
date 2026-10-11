@@ -644,7 +644,11 @@ describe('failed session lifecycle (story 5)', () => {
     await useAcpStore.getState().loadSessionIndex()
 
     expect(workspaceStateRef.current.removeTab).not.toHaveBeenCalled()
-    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({})
+    // Deferred hand-off: retained for the owners so the open chats survive a switch.
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({
+      p2: ['s-archived'],
+      px: ['s-gone']
+    })
   })
 
   it('RELOAD_PRUNE: no active project judges nothing foreign', async () => {

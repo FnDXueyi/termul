@@ -227,4 +227,39 @@ describe('#903 folder-group chat tab isolation', () => {
     expect(writtenChatIds('editor-state/p2')).not.toEqual(expect.arrayContaining(P1_CHATS))
     hook.unmount()
   })
+
+  it('keeps a foreign chat whose owner is archived, and hands it over once the owner is unarchived', async () => {
+    const archived = { ...project('p2'), isArchived: true }
+    useProjectStore.setState({
+      projects: [project('p1'), archived, project('p3')],
+      activeProjectId: 'p1'
+    })
+    const hook = renderHook(({ id }) => useEditorPersistence(id), { initialProps: { id: 'p1' } })
+    await restored('p1')
+    // s9 belongs to the archived p2 but sat in p1's tree before ownership was known.
+    useWorkspaceStore.getState().addAgentChatTab('s1')
+    useWorkspaceStore.getState().addAgentChatTab('s9')
+
+    loadSessionIndexMock.mockResolvedValueOnce([indexEntry('s1', 'p1'), indexEntry('s9', 'p2')])
+    await act(async () => {
+      await useAcpStore.getState().loadSessionIndex()
+    })
+    // Kept where it is (owner cannot restore it), not closed.
+    expect(treeChatIds()).toEqual(['s1', 's9'])
+
+    // Leaving the project drops the kept tab from the tree; the deferred hand-off keeps it.
+    await switchTo(hook, 'p3')
+    expect(treeChatIds()).toEqual([])
+    expect(useAgentChatLifetimeStore.getState().retainedByProject.p2).toEqual(['s9'])
+
+    // Owner unarchived and selected: the chat reattaches there.
+    useProjectStore.setState({ projects: [project('p1'), project('p2'), project('p3')] })
+    await switchTo(hook, 'p2')
+    expect(treeChatIds()).toEqual(['s9'])
+
+    await new Promise((resolve) => setTimeout(resolve, 650))
+    expect(writtenChatIds('editor-state/p3')).toEqual([])
+    expect(writtenChatIds('editor-state/p1')).not.toContain('s9')
+    hook.unmount()
+  })
 })

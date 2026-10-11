@@ -1,3 +1,4 @@
+import { useEffect, useMemo } from 'react'
 import { ConnectionStatusIndicator } from '@/components/ConnectionStatusIndicator'
 import { ContextBarSettingsPopover } from '@/components/ContextBarSettingsPopover'
 import { GitBranchPicker } from '@/components/GitBranchPicker'
@@ -7,6 +8,7 @@ import { RemoteAccessPopover } from '@/components/RemoteAccessPopover'
 import { STATUS_BAR_HOVER_CLASS, STATUS_BAR_ITEM_CLASS } from '@/components/status-bar-hit'
 import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useActiveWorkingCopy } from '@/hooks/use-active-working-copy'
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { formatPath, useHomeDirectory } from '@/hooks/use-cwd'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
@@ -14,6 +16,7 @@ import { needsYouLabel } from '@/lib/agent-chat-attention'
 import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
+import { normalizePath } from '@/lib/working-copy'
 import { useAcpStore, useSessionIndexTitle } from '@/stores/acp-store'
 import {
   useShowExitCode,
@@ -21,7 +24,9 @@ import {
   useShowGitStatus,
   useShowWorkingDirectory
 } from '@/stores/context-bar-settings-store'
-import { useActiveTerminal } from '@/stores/terminal-store'
+import { countGitStatuses, useGitStatusStore } from '@/stores/git-status-store'
+import { useProjectStore } from '@/stores/project-store'
+import { useActiveTerminal, useTerminalStore } from '@/stores/terminal-store'
 import { useUpdateDownloaded, useUpdateVersion } from '@/stores/updater-store'
 import type { Project } from '@/types/project'
 
@@ -44,15 +49,62 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
   const updateDownloaded = useUpdateDownloaded()
   const updateVersion = useUpdateVersion()
 
-  // Display terminal CWD if available, otherwise fall back to project path
-  const displayPath = activeTerminal?.cwd || project?.path
+  // The working copy the active tab / switcher pick / project folder resolve
+  // to. Unresolved (a worktree no longer listed) shows no git data at all and
+  // never falls back to the project folder.
+  const workingCopy = useActiveWorkingCopy()
+  const unresolved = workingCopy?.state === 'unresolved'
+  // An unresolved working copy shows its own (managed worktree) path, never the project folder.
+  const displayPath = workingCopy ? workingCopy.path : project?.path
+  const gitPath = unresolved ? undefined : displayPath
+  const isProjectFolder =
+    !workingCopy || (workingCopy.state === 'resolved' && workingCopy.kind === 'project')
   const formattedPath = displayPath ? formatPath(displayPath, homeDir) : undefined
 
-  // Display terminal git branch if available, otherwise fall back to project gitBranch
-  const gitBranch = activeTerminal?.gitBranch ?? project?.gitBranch
+  // Git data comes from the single git cache, keyed by the working copy.
+  const refreshWorkingCopy = useGitStatusStore((state) => state.refreshWorkingCopy)
+  const commitContext = useGitStatusStore((state) =>
+    gitPath ? state.commitContexts[normalizePath(gitPath)] : undefined
+  )
+  const statusList = useGitStatusStore((state) =>
+    gitPath ? state.statuses[normalizePath(gitPath)] : undefined
+  )
+  const updateProject = useProjectStore((state) => state.updateProject)
+  const activeTerminalId = useTerminalStore((state) => state.activeTerminalId)
+  const updateTerminalGitBranch = useTerminalStore((state) => state.updateTerminalGitBranch)
 
-  // Git status from active terminal
-  const gitStatus = activeTerminal?.gitStatus
+  const trackedPath = project?.isGitRepo === false ? undefined : gitPath
+  useEffect(() => {
+    if (trackedPath) void refreshWorkingCopy(trackedPath)
+  }, [trackedPath, refreshWorkingCopy])
+
+  // A commit-context result is authoritative (a null branch is a detached HEAD).
+  // The stored project branch only stands in before any result exists, and only
+  // for the project folder.
+  const gitBranch = commitContext
+    ? commitContext.branch
+    : isProjectFolder
+      ? project?.gitBranch
+      : null
+  const gitStatus = useMemo(() => countGitStatuses(statusList), [statusList])
+
+  // A worktree checkout refreshes its own cache entry and never writes
+  // `project.gitBranch`, which belongs to the project folder.
+  const handleBranchChanged = (branch: string): void => {
+    if (gitPath) void refreshWorkingCopy(gitPath)
+    if (!project || !isProjectFolder) return
+    updateProject(project.id, { gitBranch: branch })
+    // Only a terminal of this project sitting in this very working copy.
+    if (
+      activeTerminalId &&
+      gitPath &&
+      activeTerminal?.projectId === project.id &&
+      activeTerminal.cwd &&
+      normalizePath(activeTerminal.cwd) === normalizePath(gitPath)
+    ) {
+      updateTerminalGitBranch(activeTerminalId, branch)
+    }
+  }
 
   // Last command exit code from active terminal
   const lastExitCode = activeTerminal?.lastExitCode
@@ -78,17 +130,18 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
               </span>
             </StatusItem>
 
-            {showGitBranch && displayPath && (
+            {showGitBranch && trackedPath && (
               <GitBranchPicker
-                repoPath={displayPath}
+                repoPath={trackedPath}
                 currentBranch={gitBranch}
                 projectId={project.id}
-                ahead={gitStatus?.ahead}
-                behind={gitStatus?.behind}
+                ahead={commitContext?.ahead}
+                behind={commitContext?.behind}
+                onBranchChanged={handleBranchChanged}
               />
             )}
 
-            {showGitStatus && gitStatus?.hasChanges && (
+            {showGitStatus && trackedPath && gitStatus.hasChanges && (
               <GitStatusIndicator
                 modified={gitStatus.modified}
                 staged={gitStatus.staged}

@@ -972,7 +972,8 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
           ...s.sessions,
           [e.sessionId]: {
             ...session,
-            lastError: note ?? session.lastError
+            lastError: note ?? session.lastError,
+            opencodeNotice: undefined
           }
         }
       }

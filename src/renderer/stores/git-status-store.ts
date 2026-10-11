@@ -6,6 +6,7 @@
 } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
+import { isGitWriteBlocked } from '@/lib/active-working-copy'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
 import { platform } from '@/lib/tauri-os'
@@ -36,6 +37,39 @@ export const selectChangedFileCount =
     if (!statuses || statuses.length === 0) return 0
     return new Set(statuses.map((status) => status.path)).size
   }
+
+/** Per-state changed-file counts for the Status bar. */
+export interface GitStatusCounts {
+  modified: number
+  staged: number
+  untracked: number
+  hasChanges: boolean
+}
+
+/**
+ * Status bar counts from one working copy's cached status list: `modified` =
+ * tracked entries that are not staged, `staged` = staged entries, `untracked`
+ * = untracked entries. A file counts once per bucket (porcelain `MM` is one
+ * staged plus one modified file, never two of either).
+ */
+export function countGitStatuses(
+  statuses: ReadonlyArray<GitStatusDetail> | null | undefined
+): GitStatusCounts {
+  const modified = new Set<string>()
+  const staged = new Set<string>()
+  const untracked = new Set<string>()
+  for (const entry of statuses ?? []) {
+    if (entry.staged) staged.add(entry.path)
+    if (entry.status === 'untracked') untracked.add(entry.path)
+    else if (!entry.staged) modified.add(entry.path)
+  }
+  return {
+    modified: modified.size,
+    staged: staged.size,
+    untracked: untracked.size,
+    hasChanges: modified.size + staged.size + untracked.size > 0
+  }
+}
 
 /** Current branch of the cached commit context (`null` on a detached HEAD or
  * when nothing is cached). There is no second branch cache. */
@@ -70,6 +104,11 @@ export function deepestTrackedKey(path: string, keys: Iterable<string>): string 
   return best
 }
 
+export interface FetchDiffOptions {
+  /** Default `true`. `false` skips the empty sentinel and the toast. */
+  notify?: boolean
+}
+
 /** Failure messages per facade call; set on failure, cleared on success. */
 export interface GitStatusErrors {
   status?: string
@@ -85,6 +124,9 @@ export interface GitStatusState {
   statuses: Record<string, GitStatusDetail[]>
   // diffs["key:path:staged"] = string
   diffs: Record<string, string>
+  // diffErrors["key:path:staged"] = last `fetchDiff` failure message; cleared when
+  // the fetch starts or succeeds and when the file's diffs are invalidated
+  diffErrors: Record<string, string>
   // commitContexts[key] = GitCommitContext
   commitContexts: Record<string, GitCommitContext>
   // diffStats[key] = added/removed line totals (watched keys only)
@@ -111,7 +153,16 @@ export interface GitStatusState {
   refreshWorkingCopy: (cwd: string) => Promise<void>
   /** `refreshWorkingCopy` for every tracked key. Never rejects. */
   refreshTracked: () => Promise<void>
-  fetchDiff: (cwd: string, path: string, staged: boolean) => Promise<void>
+  /** Fetches one file side's diff. A failure always lands in `diffErrors`; by
+   * default it also writes the empty sentinel and toasts (the Git panel's
+   * behaviour). `{ notify: false }` keeps the cache empty and stays silent
+   * (one warn log only) for surfaces that render their own failure state. */
+  fetchDiff: (
+    cwd: string,
+    path: string,
+    staged: boolean,
+    options?: FetchDiffOptions
+  ) => Promise<void>
   fetchCommitContext: (cwd: string) => Promise<GitCommitContext | null>
   fetchStashes: (cwd: string) => Promise<void>
   fetchBranches: (cwd: string) => Promise<void>
@@ -137,6 +188,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   paths: {},
   statuses: {},
   diffs: {},
+  diffErrors: {},
   commitContexts: {},
   diffStats: {},
   errors: {},
@@ -283,8 +335,10 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     }
   },
 
-  fetchDiff: async (cwd, path, staged) => {
+  fetchDiff: async (cwd, path, staged, options) => {
+    const notify = options?.notify !== false
     const key = diffKey(cwd, path, staged)
+    clearDiffError(key)
     // Capture the request token before awaiting so a mutation that invalidates
     // this key while the fetch is in flight causes the late response to be
     // discarded instead of overwriting the cache with a stale diff.
@@ -296,9 +350,17 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       set((state) => ({
         diffs: { ...state.diffs, [key]: diff }
       }))
+      clearDiffError(key)
     } catch (error) {
-      console.error('Failed to fetch diff:', error)
       if (!isCurrent()) return
+      useGitStatusStore.setState((state) => ({
+        diffErrors: { ...state.diffErrors, [key]: errorMessage(error) }
+      }))
+      if (!notify) {
+        logFailure('diff fetch', normalizePath(cwd), error)
+        return
+      }
+      console.error('Failed to fetch diff:', error)
       // Write an empty sentinel so the panel stops retrying on every render and
       // shows the "no diff available" state instead of an infinite spinner.
       set((state) => ({
@@ -322,6 +384,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   // file. The first failing path aborts the run (subsequent files are left
   // untouched) but a refresh still runs so the UI reflects what did change.
   stageFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -334,6 +397,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   unstageFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -349,6 +413,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   // mutations above: invalidate the cached diff for the file, then refresh
   // status + commit context so the panel reflects the partial stage.
   stageHunk: async (cwd, path, hunkPatch) => {
+    assertWritable(cwd)
     try {
       await gitApi.stageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
@@ -358,6 +423,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   unstageHunk: async (cwd, path, hunkPatch) => {
+    assertWritable(cwd)
     try {
       await gitApi.unstageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
@@ -367,6 +433,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   discardFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -379,6 +446,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   commit: async (cwd, summary, description, amend) => {
+    assertWritable(cwd)
     await gitApi.commit(cwd, summary, description, amend)
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
@@ -387,6 +455,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   push: async (cwd) => {
+    assertWritable(cwd)
     await gitApi.push(cwd)
     await refreshAfterMutation(get, cwd)
   },
@@ -416,26 +485,31 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   stashSave: async (cwd, message, includeUntracked) => {
+    assertWritable(cwd)
     await gitApi.stashSave(cwd, message, includeUntracked)
     await refreshAfterMutation(get, cwd)
   },
 
   stashApply: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashApply(cwd, index)
     await refreshAfterMutation(get, cwd)
   },
 
   stashPop: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashPop(cwd, index)
     await refreshAfterMutation(get, cwd)
   },
 
   stashDrop: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashDrop(cwd, index)
     await get().fetchStashes(cwd)
   },
 
   branchSwitch: async (cwd, name) => {
+    assertWritable(cwd)
     await gitApi.branchSwitch(cwd, name)
     set({ selectedFile: null })
     await refreshAfterMutation(get, cwd)
@@ -443,12 +517,28 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   branchCreate: async (cwd, name) => {
+    assertWritable(cwd)
     await gitApi.branchCreate(cwd, name)
     set({ selectedFile: null })
     await refreshAfterMutation(get, cwd)
     await updateStoresWithBranch(cwd, name)
   }
 }))
+
+/** Refuses a git write in a path that is unresolved for a project (a managed
+ * worktree directory no listed worktree contains): throws before any git call. */
+function assertWritable(cwd: string): void {
+  if (!isGitWriteBlocked(cwd, useProjectStore.getState().projects)) return
+  const key = normalizePath(cwd)
+  void logFrontendError({
+    level: 'warn',
+    message: `[git-status] write blocked for unresolved working copy ${key}`,
+    source: 'git-status-store'
+  })
+  throw new Error(
+    'This worktree is no longer available. Git changes are blocked until it resolves.'
+  )
+}
 
 async function updateStoresWithBranch(cwd: string, branchName: string) {
   try {
@@ -516,7 +606,8 @@ const diffRequestVersions: Record<string, number> = {}
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
 
-/** Monotonic request token per working-copy key for efreshStatus (same idea). */
+/** Monotonic request token per working-copy key for 
+efreshStatus (same idea). */
 const statusRequests: Record<string, number> = {}
 
 const DIFF_STAT_MIN_INTERVAL_MS = 30_000
@@ -603,6 +694,20 @@ function invalidateFileDiffs(
     const diffs = { ...state.diffs }
     delete diffs[stagedKey]
     delete diffs[unstagedKey]
-    return { diffs }
+    if (!(stagedKey in state.diffErrors) && !(unstagedKey in state.diffErrors)) return { diffs }
+    const diffErrors = { ...state.diffErrors }
+    delete diffErrors[stagedKey]
+    delete diffErrors[unstagedKey]
+    return { diffs, diffErrors }
+  })
+}
+
+/** Drop one diff key's recorded failure (no-op when none). */
+function clearDiffError(key: string) {
+  if (!(key in useGitStatusStore.getState().diffErrors)) return
+  useGitStatusStore.setState((state) => {
+    const diffErrors = { ...state.diffErrors }
+    delete diffErrors[key]
+    return { diffErrors }
   })
 }

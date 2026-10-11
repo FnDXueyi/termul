@@ -1,6 +1,13 @@
 import { GitDiffView } from '@/components/git/GitDiffView'
 import type { GitActions } from '@/components/git/use-git-actions'
-import { AlignLeft, ChevronLeft, Columns2, FileCode, FileText } from '@/components/icons'
+import {
+  AlertTriangle,
+  AlignLeft,
+  ChevronLeft,
+  Columns2,
+  FileCode,
+  FileText
+} from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Spinner } from '@/components/ui/spinner'
@@ -18,6 +25,12 @@ interface GitDiffPaneProps {
   onUnstageHunk: GitActions['runUnstageHunk']
   /** Mobile only: returns to the file list. */
   onBack?: () => void
+  /** A failed load: shown instead of the loading / empty states, with a Retry. */
+  failure?: { detail: string; onRetry: () => void }
+  /** Disables the hunk and selected-line controls (read-only server, write in flight). */
+  controlsDisabled?: boolean
+  /** Why the controls are disabled; shown under the header when set. */
+  disabledReason?: string | null
 }
 
 /** Diff header (file name, view-mode toggle, side label) and diff body. */
@@ -30,7 +43,10 @@ export function GitDiffPane({
   onDiffViewModeChange,
   onStageHunk,
   onUnstageHunk,
-  onBack
+  onBack,
+  failure,
+  controlsDisabled = false,
+  disabledReason = null
 }: GitDiffPaneProps) {
   const isMobile = variant === 'mobile'
   const iconSize = isMobile ? 16 : 14
@@ -104,21 +120,43 @@ export function GitDiffPane({
           </span>
         </div>
       </div>
+      {disabledReason && (
+        <p className="border-b border-border bg-background px-3 py-1.5 text-xs text-muted-foreground">
+          {disabledReason}
+        </p>
+      )}
       <ScrollArea className="flex-1 font-mono text-xs">
-        {currentDiff === undefined || currentDiff === null ? (
+        {failure ? (
+          <div className="h-full flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
+            <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center mb-3 text-muted-foreground/60">
+              <AlertTriangle size={18} />
+            </div>
+            <h3 className="text-sm font-medium text-foreground mb-1">Couldn't load this diff.</h3>
+            <p className="text-xs max-w-[320px] break-words mb-3">{failure.detail}</p>
+            <Button type="button" variant="secondary" size="sm" onClick={failure.onRetry}>
+              Retry
+            </Button>
+          </div>
+        ) : currentDiff === undefined || currentDiff === null ? (
           <div className="h-full flex items-center justify-center text-muted-foreground">
             <Spinner size={16} decorative className="mr-2" />
             Loading diff...
           </div>
         ) : currentDiff.trim().length > 0 ? (
-          <GitDiffView
-            diff={currentDiff}
-            mode={diffViewMode}
-            filePath={selectedFile}
-            diffSide={selectedStaged ? 'staged' : 'unstaged'}
-            onStageHunk={onStageHunk}
-            onUnstageHunk={onUnstageHunk}
-          />
+          <fieldset
+            disabled={controlsDisabled}
+            aria-disabled={controlsDisabled || undefined}
+            className="contents"
+          >
+            <GitDiffView
+              diff={currentDiff}
+              mode={diffViewMode}
+              filePath={selectedFile}
+              diffSide={selectedStaged ? 'staged' : 'unstaged'}
+              onStageHunk={onStageHunk}
+              onUnstageHunk={onUnstageHunk}
+            />
+          </fieldset>
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
             <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center mb-3 text-muted-foreground/60">

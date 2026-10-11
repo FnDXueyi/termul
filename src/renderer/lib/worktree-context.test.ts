@@ -26,7 +26,6 @@ vi.mock('@/stores/project-store', () => ({
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import {
   getActiveWorktreeForProject,
-  getActiveWorktreeRoot,
   getDefaultCwdForProject,
   getProjectRootPath,
   getWorktreeContextLabel,
@@ -121,7 +120,6 @@ describe('worktree-context', () => {
       setState([project])
       setPick(`${WT_PATH}/`)
       expect(getActiveWorktreeForProject('p1')).toEqual(WORKTREE)
-      expect(getActiveWorktreeRoot('p1')).toBe(WT_PATH)
       expect(getWorktreeTabContext('p1')).toBe('chat/abc')
       expect(getWorktreeContextLabel(project)).toBe('Test / chat/abc')
     })
@@ -130,7 +128,6 @@ describe('worktree-context', () => {
       const project = makeProject({ worktrees: [WORKTREE] })
       setState([project])
       expect(getActiveWorktreeForProject('p1')).toBeUndefined()
-      expect(getActiveWorktreeRoot('p1')).toBeNull()
       expect(getWorktreeTabContext('p1')).toBeNull()
       expect(getWorktreeContextLabel(project)).toBe('Test / Root')
     })
@@ -138,7 +135,7 @@ describe('worktree-context', () => {
     it('sees the project folder when the pick equals the project path', () => {
       setState([makeProject({ worktrees: [WORKTREE] })])
       setPick('/projects/main')
-      expect(getActiveWorktreeRoot('p1')).toBeNull()
+      expect(getActiveWorktreeForProject('p1')).toBeUndefined()
     })
 
     it('sees the project folder for a pruned pick', () => {
@@ -146,7 +143,6 @@ describe('worktree-context', () => {
       setState([project])
       setPick('/projects/main/.termul/worktrees/gone')
       expect(getActiveWorktreeForProject('p1')).toBeUndefined()
-      expect(getActiveWorktreeRoot('p1')).toBeNull()
       expect(getWorktreeContextLabel(project)).toBe('Test / Root')
     })
 
@@ -155,7 +151,6 @@ describe('worktree-context', () => {
       setState([project])
       setPick(WT_PATH)
       expect(getActiveWorktreeForProject('p1')).toBeUndefined()
-      expect(getActiveWorktreeRoot('p1')).toBeNull()
     })
 
     it('sees nothing for a missing project', () => {
