@@ -9,11 +9,12 @@ const tabs = [
   { type: 'editor', id: 'edit-1', filePath: '/a.ts' },
   { type: 'git', id: 'git-1', cwd: '/p' },
   { type: 'browser', id: 'browser-1', browserTabId: 'b1' },
-  { type: 'git-history', id: 'gh-1', cwd: '/p' }
+  { type: 'git-history', id: 'gh-1', cwd: '/p' },
+  { type: 'diff', id: 'diff:1', cwd: '/p', path: 'a.ts', staged: false }
 ] as WorkspaceTab[]
 
 describe('sectionForTab', () => {
-  it('maps every tab kind; Git History belongs to no section', () => {
+  it('maps every tab kind; Git History belongs to no section, Diff to Editors', () => {
     expect(tabs.map(sectionForTab)).toEqual([
       'chats',
       'terminals',
@@ -21,7 +22,8 @@ describe('sectionForTab', () => {
       'editors',
       'editors',
       'editors',
-      null
+      null,
+      'editors'
     ])
     expect(sectionForTab(null)).toBeNull()
   })
