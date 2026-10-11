@@ -504,6 +504,13 @@ export interface PersistedSessionSummary {
    */
   worktreePath?: string
   worktreeBranch?: string
+  /**
+   * Host-recorded current model (CAP-3): id plus a display-name snapshot taken
+   * when it was recorded. Additive: absent on old entries and on
+   * discovered/imported sessions; never written by a client.
+   */
+  modelId?: string
+  modelName?: string
 }
 
 export interface UserPromptEvent {

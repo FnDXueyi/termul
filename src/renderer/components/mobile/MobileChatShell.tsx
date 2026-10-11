@@ -19,6 +19,7 @@ import {
 } from '@/lib/sheet-focus-return'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { returnToWorkspaceRoute } from '@/lib/workspace-route'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAcpStore } from '@/stores/acp-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useOverlayRegistration } from '@/stores/overlay-stack-store'
@@ -227,6 +228,9 @@ export function MobileChatShell({
         return browserTabLabel(activeBrowserTab)
       case 'canvas':
         return fileBasename(activeTab.docPath)
+      default:
+        reportUnknownTabKind(activeTab, 'MobileChatShell.headerTitle', 'using default title')
+        return 'Termul'
     }
   })()
 

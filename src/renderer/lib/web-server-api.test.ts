@@ -241,6 +241,31 @@ describe('web-server-api (fetch client)', () => {
     })
   })
 
+  describe('webServerGit.getDiffStat', () => {
+    it('POSTs /git/diff-stat with { cwd } and returns the unwrapped stat', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ success: true, data: { added: 3, removed: 1 } })
+      )
+
+      await expect(webServerGit.getDiffStat('/proj')).resolves.toEqual({ added: 3, removed: 1 })
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${window.location.origin}/git/diff-stat`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ cwd: '/proj' })
+        })
+      )
+    })
+
+    it('throws the host error message on OUTSIDE_PROJECT_ROOT', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ success: false, error: 'outside root', code: 'OUTSIDE_PROJECT_ROOT' })
+      )
+
+      await expect(webServerGit.getDiffStat('/elsewhere')).rejects.toThrow('outside root')
+    })
+  })
+
   describe('webServerShell.getAvailableShells', () => {
     it('GETs /shells and returns DetectedShells', async () => {
       const shells = {

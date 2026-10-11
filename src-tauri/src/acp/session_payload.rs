@@ -74,6 +74,11 @@ pub struct SessionPayloadMetadata {
     pub worktree_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Host-recorded model (CAP-3), mirrors the session index entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 /// The renderer `ChatMessage` shape. camelCase keys; `seq` always present
@@ -217,6 +222,8 @@ pub fn materialize_session_payload(
             && open_turn_from_records(records).is_some(),
         worktree_path: metadata.worktree_path.clone(),
         worktree_branch: metadata.worktree_branch.clone(),
+        model_id: metadata.model_id.clone(),
+        model_name: metadata.model_name.clone(),
     };
     MaterializedSessionPayload {
         metadata: payload_metadata,

@@ -11,6 +11,7 @@ import { browserTabHide, browserTabShow } from '@/lib/browser-api'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useCanvasStore } from '@/stores/canvas-store'
@@ -635,7 +636,7 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
-                      ) : (
+                      ) : tab.type === 'browser' ? (
                         <BrowserTabInline
                           tab={tab as { type: 'browser'; id: string; browserTabId: string }}
                           isActive={tab.id === activeTabId}
@@ -653,6 +654,11 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
+                      ) : (
+                        (() => {
+                          reportUnknownTabKind(tab, 'WorkspaceTabBar', 'rendered nothing')
+                          return null
+                        })()
                       )}
                     </TabListItem>
                   )

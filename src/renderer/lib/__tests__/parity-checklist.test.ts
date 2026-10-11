@@ -1932,3 +1932,61 @@ describe('Web FS watcher parity (#856)', () => {
     expect(content).toMatch(/isTauriContext\(\)\) \{\s*$/m)
   })
 })
+
+// Diff stat host operation (CAP-1 project-row +N -M). Source-grep checks pin that
+// one shared Rust function backs the Tauri command AND the web read route, and
+// that the renderer facade reaches both.
+describe('Git diff stat parity (shell revamp story 8)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const GitApiFacade = join(LIB_DIR, 'git-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'git_diff_stat_api.rs')
+  const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'diff_stat.rs')
+  const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+
+  it('git-api.ts branches getDiffStat on isTauriContext() between invoke and webServerGit', () => {
+    const content = readFileSync(GitApiFacade, 'utf-8')
+    expect(content).toMatch(/getDiffStat: async/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    expect(content).toMatch(/invokeIpc<GitDiffStat>\('git_get_diff_stat'/)
+    expect(content).toMatch(/webServerGit\.getDiffStat\(/)
+  })
+
+  it('web-server-api.ts exposes webServerGit.getDiffStat hitting /git/diff-stat', () => {
+    const content = readFileSync(WebAdapter, 'utf-8')
+    expect(content).toMatch(/async getDiffStat\(/)
+    expect(content).toMatch(/\/git\/diff-stat/)
+  })
+
+  it('router.rs registers /git/diff-stat in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = (content.match(/"\/git\/diff-stat"/g) ?? []).length
+    expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+  })
+
+  it('git_diff_stat_api.rs is a READ route through resolve_cwd and the shared service', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/pub async fn get_diff_stat/)
+    // Read path: containment only, no remote-write gate.
+    expect(content).toMatch(/resolve_cwd::<GitDiffStat>\(&req\.cwd, &state, None, false\)/)
+    expect(content).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/spawn_blocking/)
+    expect(content).toMatch(/tracing/)
+  })
+
+  it('the Tauri command is defined and registered in lib.rs over the same shared service', () => {
+    const command = readFileSync(CommandsGitRust, 'utf-8')
+    expect(command).toMatch(/pub async fn git_get_diff_stat/)
+    expect(command).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::git_get_diff_stat,/)
+  })
+
+  it('the shared service returns DiffStatError with a stable code', () => {
+    const content = readFileSync(ServiceRust, 'utf-8')
+    expect(content).toMatch(/pub fn git_get_diff_stat/)
+    expect(content).toMatch(/GIT_DIFF_STAT_ERROR/)
+  })
+})

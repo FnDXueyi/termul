@@ -15,6 +15,7 @@ use super::cwd_tracker::CwdTracker;
 use super::{TerminalEvent, TerminalEventHub};
 
 mod commands;
+mod diff_stat;
 mod polling;
 mod resolve;
 mod types;
@@ -38,6 +39,7 @@ pub use commands::{
     git_get_commit_context, git_get_diff, git_get_log, git_get_status_detail, git_push_current,
     git_stage_file, git_stage_hunk, git_unstage_file, git_unstage_hunk,
 };
+pub use diff_stat::{git_get_diff_stat, DiffStatError, GitDiffStat};
 pub use resolve::{resolve_executable, resolve_git_binary};
 pub use types::{GitCommit, GitCommitContext, GitStatus, GitStatusDetail};
 
@@ -554,5 +556,7 @@ impl GitTracker {
     }
 }
 
+#[cfg(test)]
+mod diff_stat_tests;
 #[cfg(test)]
 mod tests;

@@ -460,6 +460,45 @@ describe('gitApi (web vs desktop branch)', () => {
     await expect(gitApi.getProjectIcon(CWD)).resolves.toBeNull()
   })
 
+  // ---- getDiffStat ----
+  it('getDiffStat: web → POST /git/diff-stat, returns the unwrapped stat', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: { added: 4, removed: 2 } }))
+    const result = await gitApi.getDiffStat(CWD)
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${window.location.origin}/git/diff-stat`,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ cwd: CWD }) })
+    )
+    expect(mockInvoke).not.toHaveBeenCalled()
+    expect(result).toEqual({ added: 4, removed: 2 })
+  })
+  it('getDiffStat: desktop → invoke("git_get_diff_stat"), unwraps IpcResult', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({ success: true, data: { added: 3, removed: 1 } })
+    const result = await gitApi.getDiffStat(CWD)
+    expect(mockInvoke).toHaveBeenCalledWith('git_get_diff_stat', { cwd: CWD })
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(result).toEqual({ added: 3, removed: 1 })
+  })
+  it('getDiffStat: desktop → error envelope throws the host message', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({
+      success: false,
+      error: 'git diff failed: not a repository',
+      code: 'GIT_DIFF_STAT_ERROR'
+    })
+    await expect(gitApi.getDiffStat(CWD)).rejects.toThrow('git diff failed: not a repository')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+  it('getDiffStat: web → error envelope throws the host message', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: false, error: 'outside root', code: 'OUTSIDE_PROJECT_ROOT' })
+    )
+    await expect(gitApi.getDiffStat(CWD)).rejects.toThrow('outside root')
+    expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
   it('web branch throws on IpcBody error (status method)', async () => {
     mockIsTauriContext.mockReturnValue(false)
     mockFetch.mockResolvedValueOnce(
