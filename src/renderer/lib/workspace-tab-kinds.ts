@@ -18,6 +18,7 @@ export const WORKSPACE_TAB_KIND_TRAITS = {
   git: { persisted: true, manifestPortable: false },
   'agent-chat': { persisted: true, manifestPortable: false },
   'git-history': { persisted: true, manifestPortable: false },
+  diff: { persisted: true, manifestPortable: false },
   canvas: { persisted: false, manifestPortable: false }
 } as const satisfies Record<WorkspaceTabKind, { persisted: boolean; manifestPortable: boolean }>
 

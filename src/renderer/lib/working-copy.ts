@@ -228,6 +228,10 @@ export function tabPath(
     case 'editor':
       value = tab.filePath
       break
+    case 'diff':
+      // The tab's stored cwd plus its repo-relative path; no working copy is resolved.
+      value = tab.cwd.trim() && tab.path ? `${tab.cwd.replace(/[/\\]+$/, '')}/${tab.path}` : null
+      break
     default:
       // browser, canvas, git, git-history and any future kind carry no path.
       return null

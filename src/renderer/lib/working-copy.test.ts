@@ -215,6 +215,18 @@ describe('tabPath', () => {
     expect(tabPath({ type: 'editor', id: 'x', filePath: 'E:/p/a.ts' }, sources)).toBe('E:/p/a.ts')
   })
 
+  it('maps a diff tab to its stored cwd plus repo-relative path', () => {
+    expect(
+      tabPath({ type: 'diff', id: 'x', cwd: '/repo', path: 'a.ts', staged: false }, sources)
+    ).toBe('/repo/a.ts')
+    expect(
+      tabPath({ type: 'diff', id: 'x', cwd: 'E:/p/', path: 'src/a.ts', staged: true }, sources)
+    ).toBe('E:/p/src/a.ts')
+    expect(
+      tabPath({ type: 'diff', id: 'x', cwd: '', path: 'a.ts', staged: false }, sources)
+    ).toBeNull()
+  })
+
   it('returns null for empty or missing values', () => {
     expect(tabPath({ type: 'agent-chat', id: 'x', sessionId: 'empty' }, sources)).toBeNull()
     expect(tabPath({ type: 'agent-chat', id: 'x', sessionId: 'nope' }, sources)).toBeNull()
