@@ -29,8 +29,7 @@ vi.mock('@/lib/platform', () => ({
   isWindows: false,
   isLinux: false,
   getPlatformModifier: () => (isMacRef.current ? 'cmd' : 'ctrl'),
-  isSecondaryModifier: (e: KeyboardEvent) => (isMacRef.current ? e.ctrlKey : e.metaKey),
-  macOsTitlebarStripClass: 'h-8 shrink-0 bg-background flex items-center relative'
+  isSecondaryModifier: (e: KeyboardEvent) => (isMacRef.current ? e.ctrlKey : e.metaKey)
 }))
 
 // Inline (always-visible) context-menu stub so the shortcut text is queryable

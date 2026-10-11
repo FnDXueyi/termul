@@ -1,5 +1,13 @@
 import { expect, test } from 'playwright/test'
-import { chatTab, launchChat, openWorkspace, selectProject, visibleChunkCount } from './ui'
+import {
+  chatCard,
+  chatTab,
+  launchChat,
+  openWorkspace,
+  selectColumnTab,
+  selectProject,
+  visibleChunkCount
+} from './ui'
 
 /**
  * Survival E2E: long-running agent chats keep running and stay visible
@@ -46,14 +54,10 @@ test('closing a chat mid-turn defers to "Closing": the agent keeps working visib
 
   // Reopen from the project's history index (the session is still recorded
   // server-side) — the chat reattaches with its full transcript.
-  await page.locator('[aria-label^="Expand chats"]').first().click()
-  // Scope to the sidebar's project chat list — body-first matching could hit
-  // the tab bar's title span instead of the history row.
-  const historyRow = page
-    .locator('nav, aside, [aria-label*="Projects"]')
-    .getByText(PROMPT_A)
-    .first()
-  await historyRow.click()
+  await selectColumnTab(page, 'Chats')
+  // Use the Side panel's Chats card — body-first matching could hit the tab
+  // bar's title span instead of the history card.
+  await chatCard(page, PROMPT_A).click()
   await expect(chatTab(page, PROMPT_A)).toBeVisible()
 
   // The transcript includes the chunks that streamed while closed

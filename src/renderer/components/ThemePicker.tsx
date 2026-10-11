@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Palette, Search, X } from '@/components/icons'
 import { useUpdateAppSettings } from '@/hooks/use-app-settings'
 import { useEffectiveColorThemeId } from '@/hooks/use-color-theme'
-import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import {
   COLOR_THEME_FAMILIES,
   getColorThemeDefinition,
@@ -43,11 +42,9 @@ export function ThemePicker(): React.JSX.Element | null {
   const cancel = useThemePickerStore((state) => state.cancel)
   const close = useThemePickerStore((state) => state.close)
 
-  // The revamp shell opens the picker beside its Rail (which is wider than
-  // the 48px classic rail and can be resized or collapsed).
+  // The picker opens beside the Rail, which can be resized or collapsed.
   const railExpanded = useRailExpanded()
   const railWidth = useRailWidth()
-  const isRevampShell = getShellLayoutActiveAtLoad() === 'revamp'
 
   const effectiveThemeId = useEffectiveColorThemeId()
   const updateSettings = useUpdateAppSettings()
@@ -215,15 +212,8 @@ export function ThemePicker(): React.JSX.Element | null {
         role="dialog"
         aria-modal="true"
         aria-label="Color theme picker"
-        className={cn(
-          'pointer-events-auto absolute top-4 bottom-4 w-[min(20rem,calc(100vw-2rem))] flex flex-col rounded-xl border border-border bg-popover/95 shadow-2xl backdrop-blur-sm',
-          !isRevampShell && 'left-14'
-        )}
-        style={
-          isRevampShell
-            ? { left: (railExpanded ? railWidth : COLLAPSED_RAIL_WIDTH) + RAIL_GUTTER }
-            : undefined
-        }
+        className="pointer-events-auto absolute top-4 bottom-4 w-[min(20rem,calc(100vw-2rem))] flex flex-col rounded-xl border border-border bg-popover/95 shadow-2xl backdrop-blur-sm"
+        style={{ left: (railExpanded ? railWidth : COLLAPSED_RAIL_WIDTH) + RAIL_GUTTER }}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-2 border-b border-border px-3 py-2.5">

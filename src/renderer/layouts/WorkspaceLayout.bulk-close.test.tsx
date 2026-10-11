@@ -316,8 +316,21 @@ vi.mock('@/components/workspace/WorkspaceConflictBanner', () => ({
   WorkspaceConflictBanner: () => <div data-testid="workspace-conflict-banner" />
 }))
 
-vi.mock('@/components/ProjectSidebar', () => ({
-  ProjectSidebar: () => <div data-testid="project-sidebar" />
+// The desktop frame is stubbed to its two slots: these suites exercise the
+// close flows wired in WorkspaceLayout, not the Rail / Side panel chrome.
+vi.mock('@/components/shell/ShellFrame', () => ({
+  ShellFrame: ({
+    workspaceMain,
+    appModals
+  }: {
+    workspaceMain: React.ReactNode
+    appModals: React.ReactNode
+  }) => (
+    <div data-testid="shell-frame">
+      {workspaceMain}
+      {appModals}
+    </div>
+  )
 }))
 
 vi.mock('@/components/workspace/PaneRenderer', () => ({
@@ -330,20 +343,8 @@ vi.mock('@/components/workspace/PaneRenderer', () => ({
   }
 }))
 
-vi.mock('@/components/file-explorer/FileExplorer', () => ({
-  FileExplorer: () => <div data-testid="file-explorer" />
-}))
-
 vi.mock('@/components/StatusBar', () => ({
   StatusBar: () => <div data-testid="status-bar" />
-}))
-
-vi.mock('@/components/TitleBar', () => ({
-  TitleBar: () => <div data-testid="title-bar" />
-}))
-
-vi.mock('@/components/ActivityRail', () => ({
-  ActivityRail: () => <div data-testid="activity-rail" />
 }))
 
 vi.mock('@/components/NewProjectModal', () => ({

@@ -1,7 +1,7 @@
-import { RailButton } from '@/components/ActivityRail'
 import { Edit2, FolderKanban, PanelLeft, SlidersHorizontal } from '@/components/icons'
 import { ProjectSwitcher } from '@/components/shell/ProjectSwitcher'
 import { RailColumnIcons } from '@/components/shell/RailColumnIcons'
+import { RailButton } from '@/components/shell/rail-button'
 import { SSHPopover } from '@/components/shell/SSHPopover'
 import { useTopRowPlatform } from '@/components/shell/top-row-context'
 import { RAIL_TOGGLE_LABEL, useRailToggle } from '@/components/shell/use-rail-toggle'

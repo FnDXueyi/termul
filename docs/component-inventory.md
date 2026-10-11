@@ -17,10 +17,10 @@ Supporting these are shared layout, navigation, modal, and design-system compone
 
 ### Layout and Shell
 
-- `TitleBar.tsx` — custom desktop title bar with sidebar/file explorer toggles, settings navigation, and native window controls
+- `shell/ShellFrame.tsx` — the desktop frame: Rail, Side panel and main area, with one top row carrying the Rail and Side panel toggles and the native window controls
 - `StatusBar.tsx` — active project/terminal context bar showing git branch, git status, working directory, exit code, and updater state; rendered on the desktop layout only (the desktop app and the desktop-width web client), not on the mobile web shell, where connection health lives in the `MobileShellDrawer` footer
 - `ProjectSidebar.tsx` — project switcher, reorderable workspace list, archive/restore flows, rename/color operations, shell discovery hooks
-- `WorkspaceLayout.tsx` — top-level application shell coordinating sidebar, pane area, file explorer, modals, keyboard shortcuts, and close workflows
+- `WorkspaceLayout.tsx` — top-level application shell coordinating the Rail, Side panel, pane area, modals, keyboard shortcuts, and close workflows
 
 ### Workspace / Pane System
 

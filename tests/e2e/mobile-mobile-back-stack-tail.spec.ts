@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Locator, Page, WebSocket, WebSocketRoute } from 'playwright/test'
 import { expect, request, test } from 'playwright/test'
 import { E2E_BASE_URL, E2E_TOKEN, wsRequest } from './helpers'
-import { launchChat, openWorkspace } from './ui'
+import { launchChat, openRailNewProjectModal, openWorkspace } from './ui'
 
 /**
  * Mobile back-stack tail E2E (spec-mobile-back-stack-tail, G11, L-31 to L-34):
@@ -928,7 +928,7 @@ test.describe('desktop shell', () => {
     const modal = page.getByRole('heading', { name: 'Create New Project' })
     const picker = page.getByRole('heading', { name: 'Select Project Folder' })
 
-    await page.getByRole('button', { name: 'Create new project from header' }).click()
+    await openRailNewProjectModal(page)
     await expect(modal).toBeVisible()
     await page.getByRole('button', { name: 'Browse', exact: true }).click()
     await expect(picker).toBeVisible()
@@ -952,7 +952,7 @@ test.describe('desktop shell', () => {
     const launcher = page.getByRole('dialog', { name: 'Agent launcher' })
     const panel = page.getByTestId('agent-model-selector-panel')
 
-    await page.getByRole('button', { name: 'New agent chat' }).first().click()
+    await page.getByRole('button', { name: 'New chat', exact: true }).first().click()
     await expect(launcher).toBeVisible()
     await page.getByRole('button', { name: AGENT_SELECTOR_PILL }).click()
     await expect(panel).toBeVisible()

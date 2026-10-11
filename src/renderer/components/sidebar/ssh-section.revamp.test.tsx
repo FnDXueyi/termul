@@ -1,9 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  captureShellLayoutAtLoad,
-  resetShellLayoutActiveAtLoadForTests
-} from '@/lib/shell-layout-mode'
 import { SSHResizableSection } from './ssh-section'
 
 const { tauriRef, visibleRef, updateMock, toastError } = vi.hoisted(() => ({
@@ -23,7 +19,7 @@ vi.mock('../ssh/SSHPanel', () => ({
   )
 }))
 
-describe('SSHResizableSection collapse (shell revamp)', () => {
+describe('SSHResizableSection collapse', () => {
   beforeEach(() => {
     tauriRef.current = true
     visibleRef.current = true
@@ -34,20 +30,9 @@ describe('SSHResizableSection collapse (shell revamp)', () => {
 
   afterEach(() => {
     cleanup()
-    resetShellLayoutActiveAtLoadForTests()
   })
 
-  it('classic: no chevron, and nothing when hidden', () => {
-    captureShellLayoutAtLoad('classic')
-    const { container, rerender } = render(<SSHResizableSection />)
-    expect(screen.queryByRole('button', { name: 'Collapse SSH section' })).toBeNull()
-    visibleRef.current = false
-    rerender(<SSHResizableSection />)
-    expect(container.innerHTML).toBe('')
-  })
-
-  it('revamp expanded: the chevron collapses and persists sshPanelVisible=false', async () => {
-    captureShellLayoutAtLoad('revamp')
+  it('expanded: the chevron collapses and persists sshPanelVisible=false', async () => {
     render(<SSHResizableSection />)
     const chevron = screen.getByRole('button', { name: 'Collapse SSH section' })
     expect(chevron).toHaveAttribute('aria-expanded', 'true')
@@ -55,8 +40,7 @@ describe('SSHResizableSection collapse (shell revamp)', () => {
     await waitFor(() => expect(updateMock).toHaveBeenCalledWith('sshPanelVisible', false))
   })
 
-  it('revamp collapsed: a header-only row whose chevron expands the section', async () => {
-    captureShellLayoutAtLoad('revamp')
+  it('collapsed: a header-only row whose chevron expands the section', async () => {
     visibleRef.current = false
     render(<SSHResizableSection />)
     expect(screen.queryByTestId('ssh-panel')).toBeNull()
@@ -68,15 +52,13 @@ describe('SSHResizableSection collapse (shell revamp)', () => {
   })
 
   it('toasts when persisting fails', async () => {
-    captureShellLayoutAtLoad('revamp')
     updateMock.mockRejectedValue(new Error('disk full'))
     render(<SSHResizableSection />)
     fireEvent.click(screen.getByRole('button', { name: 'Collapse SSH section' }))
     await waitFor(() => expect(toastError).toHaveBeenCalledWith('disk full'))
   })
 
-  it('renders nothing on web even in revamp', () => {
-    captureShellLayoutAtLoad('revamp')
+  it('renders nothing on web', () => {
     tauriRef.current = false
     visibleRef.current = false
     const { container } = render(<SSHResizableSection />)

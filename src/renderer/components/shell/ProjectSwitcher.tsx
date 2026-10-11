@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { railButtonClass } from '@/components/ActivityRail'
 import { Check, Plus } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
+import { railButtonClass } from '@/components/shell/rail-button'
 import {
   Command,
   CommandGroup,

@@ -2,23 +2,18 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { resetShellLayoutActiveAtLoadForTests } from '@/lib/shell-layout-mode'
 import { mockTerminal } from '@/lib/test-utils/terminal'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
-import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
 import { framerMotionTestState, resetFramerMotionTestState } from '@/test-utils/mock-framer-motion'
 import type { Project, ProjectColor, Terminal } from '@/types/project'
 import WorkspaceLayout from './WorkspaceLayout'
 
 const { platformState, tauriRef, webAuthGateRef, appSettingsRef } = vi.hoisted(() => ({
   platformState: { isMac: false },
-  // Story 22: switchable settings state for the shell-layout flag tests.
-  appSettingsRef: {
-    current: { shellLayout: 'classic' as string | undefined, isLoaded: true as boolean }
-  },
+  // A stored legacy `shellLayout` value must be ignored by the desktop shell.
+  appSettingsRef: { current: { shellLayout: undefined as string | undefined } },
   tauriRef: { current: true as boolean },
   // #907: switchable gate state for the mid-session token-screen tests.
   webAuthGateRef: { current: { status: 'ok' as string, submitting: false } }
@@ -151,7 +146,7 @@ vi.mock('@/stores/app-settings-store', () => ({
         remoteBindMode: 'localhost' as const,
         shellLayout: appSettingsRef.current.shellLayout
       },
-      isLoaded: appSettingsRef.current.isLoaded
+      isLoaded: true
     }
     return selector ? selector(state) : state
   }),
@@ -440,7 +435,7 @@ vi.mock('@/lib/api', () => ({
 // Matrix audit (sidebar/explorer toggle rows): the shared framer-motion
 // mock records every motion.div's props so the panelRevealMotion wrapper's
 // shape — and its reduced-motion "instant" variant — is assertable
-// structurally without pixels/timing. The rest of the tree (TitleBar,
+// structurally without pixels/timing. The rest of the tree (ShellFrame,
 // ProjectSidebar internals, etc.) is unaffected.
 vi.mock('framer-motion', async (importOriginal) => {
   const { installFramerMotionMock } = await import('@/test-utils/mock-framer-motion')
@@ -477,8 +472,7 @@ beforeEach(() => {
   mockUseActiveTerminal.mockReturnValue(null)
   mockUseActiveTerminalId.mockReturnValue('')
   mockUpdatePanelVisibility.mockReset()
-  appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
-  resetShellLayoutActiveAtLoadForTests()
+  appSettingsRef.current = { shellLayout: undefined }
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'ready', sidePanelVisible: true, railExpanded: true })
   useThemePickerStore.getState().close()
@@ -511,38 +505,11 @@ const renderWithRouter = (initialEntries = ['/']) => {
 }
 
 describe('WorkspaceLayout - Empty States', () => {
-  it('renders a full-width macOS titlebar zone above workspace chrome', () => {
-    platformState.isMac = true
-
+  it('mounts the workspace conflict banner at the workspace root', () => {
     renderWithRouter()
 
-    const strip = document.querySelector('[data-testid="macos-titlebar-strip"]')
-    expect(strip).not.toBeNull()
-    expect(strip?.className).toContain('h-8')
-    // Panel-visibility toggles were relocated into the macOS titlebar strip.
-    expect(strip?.querySelector('button[title="Toggle sidebar"]')).not.toBeNull()
-    expect(strip?.querySelector('button[title="Toggle file explorer"]')).not.toBeNull()
     // Patch 18: the Story 6 conflict banner is mounted at the workspace root.
     expect(screen.getByTestId('workspace-conflict-banner')).toBeInTheDocument()
-  })
-
-  it('renders active project name in macOS titlebar strip when a project is active', () => {
-    platformState.isMac = true
-    mockUseActiveProject.mockReturnValue(createProject('my-app', '/workspace/my-app', 'blue'))
-
-    renderWithRouter()
-
-    expect(screen.getByText('MY-APP')).toBeInTheDocument()
-  })
-
-  it('does not render project name in macOS titlebar strip when no project is active', () => {
-    platformState.isMac = true
-
-    renderWithRouter()
-
-    const strip = document.querySelector('[data-testid="macos-titlebar-strip"]')
-    expect(strip).not.toBeNull()
-    expect(strip?.querySelector('span')).not.toBeTruthy()
   })
 
   it('persists terminal layout before unload when a project is active', async () => {
@@ -704,7 +671,7 @@ describe('WorkspaceLayout - Empty States', () => {
     it.skip('should show pane-level new terminal action', () => {
       renderWithRouter()
 
-      expect(screen.getByTitle('Open terminal menu')).toBeInTheDocument()
+      expect(screen.getByTitle('New tab')).toBeInTheDocument()
     })
 
     it('should not show legacy terminal empty-state CTA', () => {
@@ -1251,263 +1218,66 @@ describe('WorkspaceLayout - Empty States', () => {
       }
     }, 30000)
   })
-
-  describe('Story 6: rail git buttons reuse tabs by (type, cwd)', () => {
-    it('4 clicks on the ActivityRail "Open git changes" button yield exactly one activated Git tab', async () => {
-      const project = createProject('git-proj', '/workspace/git-proj', 'blue')
-      mockUseProjects.mockReturnValue([project])
-      mockUseActiveProject.mockReturnValue(project)
-      mockUseActiveProjectId.mockReturnValue('git-proj')
-      mockUseTerminals.mockReturnValue([])
-      mockUseAllTerminals.mockReturnValue([])
-      mockUseActiveTerminal.mockReturnValue(null)
-      mockUseActiveTerminalId.mockReturnValue('')
-      projectStoreStateRef.current = { projects: [project], activeProjectId: 'git-proj' }
-
-      renderWithRouter()
-
-      // The rail needs an active project path to enable the git button.
-      const gitBtn = await screen.findByRole('button', { name: 'Open git changes' })
-      expect(gitBtn).not.toBeDisabled()
-
-      for (let i = 0; i < 4; i++) {
-        fireEvent.click(gitBtn)
-      }
-
-      // The real workspace store holds the tabs: exactly one git tab for the
-      // project cwd, and it is the pane's active tab (activated, not minted).
-      const root = useWorkspaceStore.getState().root
-      const leaves = getAllLeafPanes(root)
-      const gitTabs = leaves.flatMap((leaf) => leaf.tabs.filter((t) => t.type === 'git'))
-      expect(gitTabs).toHaveLength(1)
-      expect(gitTabs[0].id).toBe('git-/workspace/git-proj')
-      const containingPane = leaves.find((leaf) => leaf.tabs.some((t) => t.id === gitTabs[0].id))
-      expect(containingPane?.activeTabId).toBe(gitTabs[0].id)
-
-      // Cleanup: reset the shared real store for later suites.
-      useWorkspaceStore.getState().resetLayout()
-    })
-
-    it('4 clicks on the ActivityRail "Open git history" button yield exactly one activated git-history tab', async () => {
-      const project = createProject('git-proj', '/workspace/git-proj', 'blue')
-      mockUseProjects.mockReturnValue([project])
-      mockUseActiveProject.mockReturnValue(project)
-      mockUseActiveProjectId.mockReturnValue('git-proj')
-      mockUseTerminals.mockReturnValue([])
-      mockUseAllTerminals.mockReturnValue([])
-      mockUseActiveTerminal.mockReturnValue(null)
-      mockUseActiveTerminalId.mockReturnValue('')
-      projectStoreStateRef.current = { projects: [project], activeProjectId: 'git-proj' }
-
-      renderWithRouter()
-
-      const historyBtn = await screen.findByRole('button', { name: 'Open git history' })
-      expect(historyBtn).not.toBeDisabled()
-
-      for (let i = 0; i < 4; i++) {
-        fireEvent.click(historyBtn)
-      }
-
-      const root = useWorkspaceStore.getState().root
-      const leaves = getAllLeafPanes(root)
-      const historyTabs = leaves.flatMap((leaf) =>
-        leaf.tabs.filter((t) => t.type === 'git-history')
-      )
-      expect(historyTabs).toHaveLength(1)
-      expect(historyTabs[0].id).toBe('git-history-/workspace/git-proj')
-      const containingPane = leaves.find((leaf) =>
-        leaf.tabs.some((t) => t.id === historyTabs[0].id)
-      )
-      expect(containingPane?.activeTabId).toBe(historyTabs[0].id)
-
-      useWorkspaceStore.getState().resetLayout()
-    })
-  })
 })
 
-// Spec I/O matrix — "Sidebar toggle" / "Explorer toggle" rows: the panels
-// mount inside the panelRevealMotion width-reveal wrappers and unmount when
-// hidden; under prefers-reduced-motion the wrapper applies instantly
-// (initial={false}, zero-duration transitions). Assertions are structural —
-// the motion.div props recorder captures what WorkspaceLayout passes down.
-describe('WorkspaceLayout - sidebar & explorer width-reveal', () => {
-  function revealWrappers(): Array<Record<string, unknown>> {
-    // panelRevealMotion is the only motion.div whose animate tweens width
-    // to 'auto' — other motion.divs in the tree animate different props.
-    return framerMotionTestState.motionDivPropsLog.filter(
-      (props) => (props.animate as { width?: unknown } | undefined)?.width === 'auto'
-    )
+// Desktop always renders the revamped shell (ShellFrame): Rail | Side panel |
+// main. A stored legacy `shellLayout` value is ignored.
+describe('WorkspaceLayout - desktop shell', () => {
+  function precedes(a: Element, b: Element): boolean {
+    return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
   }
 
-  it('mounts ProjectSidebar inside the overflow-hidden reveal wrapper when visible', () => {
-    renderWithRouter()
-
-    // aside -> inner height wrapper -> motion.div reveal wrapper.
-    const aside = document.querySelector('aside.w-64')
-    expect(aside).toBeInTheDocument()
-    const inner = aside?.parentElement
-    expect(inner?.className).toContain('h-full')
-    expect(inner?.className).not.toContain('mr-2')
-    expect(inner?.parentElement?.className).toContain('overflow-hidden')
-
-    // The wrapper is a motion.div with a <=250ms ease-out reveal.
-    const wrapper = revealWrappers().find((props) =>
-      (props.className as string | undefined)?.includes('flex-shrink-0')
-    )
-    expect(wrapper).toBeTruthy()
-    expect(
-      (wrapper?.animate as { transition: { duration: number } }).transition.duration
-    ).toBeLessThanOrEqual(0.25)
-  })
-
-  it('unmounts ProjectSidebar when the sidebar is hidden', () => {
-    useShellLayoutStore.setState({ railExpanded: false })
-
-    renderWithRouter()
-
+  function expectShellFrame(): void {
+    const rail = screen.getByRole('navigation', { name: 'Projects' })
+    const sidePanel = screen.getByTestId('side-panel-column')
+    const main = document.querySelector('main') as Element
+    expect(precedes(rail, sidePanel)).toBe(true)
+    expect(precedes(sidePanel, main)).toBe(true)
+    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
     expect(document.querySelector('aside.w-64')).toBeNull()
-  })
+  }
 
-  it('mounts the file explorer inside the reveal column when visible', () => {
+  it('renders ShellFrame on desktop: Rail, Side panel and main in order', () => {
     mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
 
     renderWithRouter()
 
-    // Suspense adds no DOM — the explorer sits directly inside the inner
-    // panel reveal wrapper, which sits inside the overflow-hidden column.
-    const explorer = screen.getByTestId('file-explorer')
-    expect(explorer.parentElement?.className).toContain('overflow-hidden')
-    const column = explorer.parentElement?.parentElement?.parentElement
-    expect(column?.className).toContain('overflow-hidden')
+    expectShellFrame()
   })
 
-  it('unmounts the explorer column when hidden and no SSH profile is active', () => {
+  it.each([
+    'classic',
+    'revamp',
+    'nonsense'
+  ])('renders ShellFrame and ignores a stored shellLayout of %s', (stored) => {
+    appSettingsRef.current = { shellLayout: stored }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+
+    expectShellFrame()
+  })
+
+  it('shows only a centered Loading... while projects load, without any shell chrome', () => {
+    mockUseProjectsLoaded.mockReturnValue(false)
+
+    renderWithRouter()
+
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+    expect(document.querySelector('main')).toBeNull()
+  })
+
+  it('unmounts the Side panel when it is hidden', () => {
     mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
     useShellLayoutStore.setState({ sidePanelVisible: false })
 
     renderWithRouter()
 
-    expect(screen.queryByTestId('file-explorer')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('side-panel-column')).not.toBeInTheDocument()
   })
 
-  it('applies instantly under prefers-reduced-motion (initial=false, zero durations)', () => {
-    framerMotionTestState.reducedMotion.current = true
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    renderWithRouter()
-
-    // Sidebar reveal + explorer column + inner explorer panel.
-    const wrappers = revealWrappers()
-    expect(wrappers.length).toBeGreaterThanOrEqual(3)
-    for (const props of wrappers) {
-      expect(props.initial).toBe(false)
-      expect((props.animate as { transition: { duration: number } }).transition.duration).toBe(0)
-      expect((props.exit as { transition: { duration: number } }).transition.duration).toBe(0)
-    }
-    // Content still mounts — instant, not skipped.
-    expect(document.querySelector('aside.w-64')).toBeInTheDocument()
-    expect(screen.getByTestId('file-explorer')).toBeInTheDocument()
-  })
-})
-
-describe('WorkspaceLayout - shellLayout flag', () => {
-  const rerenderTree = (rerender: (ui: React.ReactElement) => void): void =>
-    rerender(
-      <TooltipProvider>
-        <MemoryRouter initialEntries={['/']}>
-          <WorkspaceLayout />
-        </MemoryRouter>
-      </TooltipProvider>
-    )
-
-  function precedes(a: Element, b: Element): boolean {
-    return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
-  }
-
-  it('renders the revamped shell (ShellFrame) when the flag is absent', () => {
-    appSettingsRef.current = { shellLayout: undefined, isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    renderWithRouter()
-
-    const rail = screen.getByRole('navigation', { name: 'Projects' })
-    const explorer = screen.getByTestId('side-panel-column')
-    const main = document.querySelector('main') as Element
-    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
-    expect(precedes(rail, explorer)).toBe(true)
-    expect(precedes(explorer, main)).toBe(true)
-  })
-
-  it('renders the revamped shell when the flag is an unknown value', () => {
-    appSettingsRef.current = { shellLayout: 'nonsense', isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    renderWithRouter()
-
-    expect(screen.getByTestId('side-panel-column')).toBeInTheDocument()
-    expect(document.querySelector('aside.w-64')).toBeNull()
-  })
-
-  it('renders the classic shell when the flag is classic', () => {
-    appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    renderWithRouter()
-
-    const main = document.querySelector('main') as Element
-    expect(precedes(main, screen.getByTestId('file-explorer'))).toBe(true)
-  })
-
-  it('renders Rail, Side panel and main in order when the flag is revamp', () => {
-    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    renderWithRouter()
-
-    const rail = screen.getByRole('navigation', { name: 'Projects' })
-    const explorer = screen.getByTestId('side-panel-column')
-    const main = document.querySelector('main') as Element
-    expect(rail).toBeInTheDocument()
-    // The Rail replaces the classic activity rail and sidebar.
-    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
-    expect(document.querySelector('aside.w-64')).toBeNull()
-    expect(precedes(rail, explorer)).toBe(true)
-    expect(precedes(explorer, main)).toBe(true)
-  })
-
-  it('shows the loading screen while settings are pending, then the captured shell', () => {
-    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: false }
-
-    const { rerender } = renderWithRouter()
-    expect(screen.getByText('Loading...')).toBeInTheDocument()
-    expect(document.querySelector('main')).toBeNull()
-
-    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-    rerenderTree(rerender)
-
-    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
-    const explorer = screen.getByTestId('side-panel-column')
-    expect(precedes(explorer, document.querySelector('main') as Element)).toBe(true)
-  })
-
-  it('keeps the shell it loaded with when the setting changes without a reload', () => {
-    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
-    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
-
-    const { rerender } = renderWithRouter()
-    const main = document.querySelector('main') as Element
-    expect(precedes(screen.getByTestId('side-panel-column'), main)).toBe(true)
-
-    appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
-    rerenderTree(rerender)
-
-    expect(document.querySelector('main')).toBe(main)
-    expect(precedes(screen.getByTestId('side-panel-column'), main)).toBe(true)
-  })
-
-  it('does not remount main when the Side panel or Rail toggles in the flagged frame', async () => {
-    appSettingsRef.current = { shellLayout: 'revamp', isLoaded: true }
+  it('does not remount main when the Side panel or Rail toggles', async () => {
     framerMotionTestState.reducedMotion.current = true
     mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
 

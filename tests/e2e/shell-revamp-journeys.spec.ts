@@ -6,10 +6,9 @@ import { chatTab, openWorkspace, selectProject } from './ui'
  * Shell-revamp journeys E2E on termul-server (story 30, CAP-18 / AD-15 / E6).
  *
  * These two specs walk Journey 1 and Journey 2 of EXPERIENCE.md
- * (ux-termul-2026-10-10) on the DEFAULT shell: `openWorkspace(page, 'default')`
- * removes any stored `shellLayout`, so the client boots with the code default.
- * The suite passing is therefore also the proof that an absent setting renders
- * the revamped shell (Rail | Side panel | main, no classic "Global actions").
+ * (ux-termul-2026-10-10) on the only desktop shell: Rail | Side panel | main.
+ * The suite passing is also the proof that the classic shell is gone (no
+ * "Global actions" navigation).
  *
  * Fixtures: `proj-w` (`e2e-proj-w`) is a git repo whose `global-setup` leaves
  * two uncommitted files behind (`notes.txt` modified, `scratch.txt` untracked:
@@ -98,9 +97,9 @@ const columnTab = (page: Page, name: RegExp): Locator => page.getByRole('tab', {
 const workspaceSwitcherTrigger = (page: Page): Locator =>
   page.locator('button[aria-haspopup="dialog"][title]:has(> span.label-panel)')
 
-/** Boot the default shell and wait for the Rail + the registered projects. */
+/** Boot the shell and wait for the Rail + the registered projects. */
 async function openRevampWorkspace(page: Page): Promise<void> {
-  await openWorkspace(page, 'default')
+  await openWorkspace(page)
   await expect(railNav(page)).toBeVisible()
   // The Rail state is persisted: a collapsed Rail would hide the project rows.
   if ((await railNav(page).getAttribute('data-expanded')) === 'false') {
@@ -108,7 +107,7 @@ async function openRevampWorkspace(page: Page): Promise<void> {
   }
   await expect(railNav(page)).toHaveAttribute('data-expanded', 'true')
   await page.locator('[aria-label^="Project: proj-"]').first().waitFor({ state: 'visible' })
-  // Default = revamp: the classic activity rail is not rendered.
+  // The classic activity rail is gone.
   await expect(page.getByRole('navigation', { name: 'Global actions' })).toHaveCount(0)
 }
 

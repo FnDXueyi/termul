@@ -1,4 +1,4 @@
-import { type ComponentProps, useMemo } from 'react'
+import { type ReactNode, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { ResizeEdges } from '@/components/ResizeEdges'
 import { ShellRail } from '@/components/shell/ShellRail'
@@ -8,13 +8,33 @@ import { TopRowProvider } from '@/components/shell/top-row-context'
 import { WorkspaceConflictBanner } from '@/components/workspace/WorkspaceConflictBanner'
 import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
-import type { DesktopWorkspaceShell } from '@/layouts/workspace-layout/DesktopWorkspaceShell'
+import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
 import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useFullscreenPaneId, usePaneRoot } from '@/stores/workspace-store'
+import type { Project } from '@/types/project'
 
-export type ShellFrameProps = ComponentProps<typeof DesktopWorkspaceShell>
+export interface ShellFrameProps {
+  projects: Project[]
+  activeProject: Project | undefined
+  activeProjectId: string
+  ssh: SSHWorkspaceState
+  isShortcutMenuOpen: boolean
+  setIsShortcutMenuOpen: (open: boolean) => void
+  setIsCommandPaletteOpen: (open: boolean) => void
+  setIsNewProjectModalOpen: (open: boolean) => void
+  onSelectProject: (id: string) => void
+  handleAddGitTab: (paneId?: string) => void
+  handleAddGitHistoryTab: (paneId?: string) => void
+  handleToggleThemePicker: () => void
+  handleOpenAgentChat: () => void
+  handleOpenCanvas: () => void
+  /** The `workspaceMain` element, rendered inside the main card. */
+  workspaceMain: ReactNode
+  /** The `appModals` element, rendered after the shell. */
+  appModals: ReactNode
+}
 
 /** 8px drag gutter above the shell row (the row has no title strip). */
 function TopGutter({ dragRegion }: { dragRegion: boolean }): React.JSX.Element {
@@ -28,11 +48,11 @@ function TopGutter({ dragRegion }: { dragRegion: boolean }): React.JSX.Element {
 }
 
 /**
- * Opted-in desktop frame (`shellLayout=revamp`): Rail | Side panel | main area.
- * The Rail replaces both the classic activity rail and the project sidebar;
- * the explorer column moves to the left of the main area. The window has no
- * title strip: the Rail header, the Side panel header and the top-edge pane tab
- * bars share one top row (roles come from `selectTopRowRoles`).
+ * Desktop frame: Rail | Side panel | main area. The Rail holds the project
+ * list and the workspace actions; the explorer column sits to the left of the
+ * main area. The window has no title strip: the Rail header, the Side panel
+ * header and the top-edge pane tab bars share one top row (roles come from
+ * `selectTopRowRoles`).
  */
 export function ShellFrame({
   projects,

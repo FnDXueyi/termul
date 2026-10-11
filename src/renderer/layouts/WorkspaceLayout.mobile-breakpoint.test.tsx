@@ -135,13 +135,9 @@ vi.mock('@/stores/terminal-store', () => ({
 
 vi.mock('@/stores/app-settings-store', () => ({
   useAppSettingsStore: vi.fn(
-    (
-      selector?: (state: {
-        settings: { remoteBindMode: 'localhost'; shellLayout: 'classic' }
-      }) => unknown
-    ) => {
+    (selector?: (state: { settings: { remoteBindMode: 'localhost' } }) => unknown) => {
       const state = {
-        settings: { remoteBindMode: 'localhost' as const, shellLayout: 'classic' as const }
+        settings: { remoteBindMode: 'localhost' as const }
       }
       return selector ? selector(state) : state
     }
@@ -184,6 +180,31 @@ vi.mock('@/stores/keyboard-shortcuts-store', () => ({
     }
   ),
   matchesShortcut: () => false
+}))
+
+// The desktop frame is stubbed to its two slots: this suite pins which shell
+// WorkspaceLayout picks, not the Rail / Side panel chrome (ShellFrame.test.tsx).
+vi.mock('@/components/shell/ShellFrame', () => ({
+  ShellFrame: ({
+    workspaceMain,
+    appModals,
+    setIsCommandPaletteOpen
+  }: {
+    workspaceMain: React.ReactNode
+    appModals: React.ReactNode
+    setIsCommandPaletteOpen: (open: boolean) => void
+  }) => (
+    <div data-testid="shell-frame">
+      {/* Stands in for the Rail's Search button, which opens the palette. */}
+      <button
+        type="button"
+        aria-label="Open projects"
+        onClick={() => setIsCommandPaletteOpen(true)}
+      />
+      {workspaceMain}
+      {appModals}
+    </div>
+  )
 }))
 
 vi.mock('@/hooks/use-snapshots', () => ({
@@ -369,7 +390,7 @@ vi.mock('@/components/mobile/MobileTerminalControls', () => ({
 vi.mock('@/stores/ssh-store', () => ({
   useActiveSSHProfile: () => null,
   useActiveSSHProfileId: () => null,
-  // Desktop branch only: SSHPanel (inside ActivityRail) lists connections.
+  // Desktop branch only: SSHPanel (inside the Rail) lists connections.
   useSSHConnections: () => [],
   useSSHActions: () => ({
     loadProfiles: vi.fn(),
@@ -520,10 +541,9 @@ describe('WorkspaceLayout mobile breakpoint (real useMobileWebShell hook)', () =
       timeout: 5000
     })
 
-    // Desktop chrome must be absent: ActivityRail nav, ProjectSidebar,
+    // Desktop chrome must be absent: the desktop frame and the
     // StatusBar (which renders the lowercased project name, "demo").
-    expect(screen.queryByLabelText('Global actions')).toBeNull()
-    expect(screen.queryByTestId('header-new-project')).toBeNull()
+    expect(screen.queryByTestId('shell-frame')).toBeNull()
     expect(screen.queryByText('demo')).toBeNull()
     expect(document.querySelector('[data-status-bar]')).toBeNull()
 
@@ -593,15 +613,14 @@ describe('WorkspaceLayout mobile breakpoint (real useMobileWebShell hook)', () =
     )
 
     // Desktop branch renders synchronously (only FileExplorer is lazy, and
-    // it is stubbed) — wait for effects to flush via the ActivityRail nav.
-    await waitFor(() => expect(screen.getByLabelText('Global actions')).toBeInTheDocument())
+    // it is stubbed) — wait for effects to flush via the desktop frame.
+    await waitFor(() => expect(screen.getByTestId('shell-frame')).toBeInTheDocument())
 
     // The mobile shell must be absent.
     expect(document.querySelector('[data-mobile-chat-shell]')).toBeNull()
     expect(screen.queryByRole('navigation', { name: 'Sections' })).toBeNull()
 
-    // Desktop chrome present: ProjectSidebar + StatusBar ("demo").
-    expect(screen.getByTestId('header-new-project')).toBeInTheDocument()
+    // Desktop chrome present: the desktop frame + StatusBar ("demo").
     expect(screen.getByText('demo')).toBeInTheDocument()
     expect(document.querySelector('[data-status-bar]')).toBeTruthy()
   })
@@ -626,9 +645,9 @@ describe('WorkspaceLayout mobile breakpoint (real useMobileWebShell hook)', () =
 
     if (expectMobile) {
       await waitFor(() => expect(document.querySelector('[data-mobile-chat-shell]')).toBeTruthy())
-      expect(screen.queryByLabelText('Global actions')).toBeNull()
+      expect(screen.queryByTestId('shell-frame')).toBeNull()
     } else {
-      await waitFor(() => expect(screen.getByLabelText('Global actions')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByTestId('shell-frame')).toBeInTheDocument())
       expect(document.querySelector('[data-mobile-chat-shell]')).toBeNull()
     }
   })

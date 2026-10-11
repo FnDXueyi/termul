@@ -31,7 +31,7 @@ test('launcher shows the worktree isolation picker for a git-repo project (web p
 }) => {
   await selectProject(page, 'proj-w')
 
-  await page.locator('[aria-label="New agent chat"]').first().click()
+  await page.getByRole('button', { name: 'New chat', exact: true }).first().click()
   const composer = page.locator('[data-composer-editor="true"][aria-label="Agent prompt"]').first()
   await composer.waitFor({ state: 'visible', timeout: 10_000 })
   // The context strip mounts once `canUseWorktree` flips true — the git-branch
@@ -50,7 +50,7 @@ test('launcher shows the worktree isolation picker for a git-repo project (web p
 test('launcher shows only the read-only strip for a non-git project', async ({ page }) => {
   await selectProject(page, 'proj-b')
 
-  await page.locator('[aria-label="New agent chat"]').first().click()
+  await page.getByRole('button', { name: 'New chat', exact: true }).first().click()
   const composer = page.locator('[data-composer-editor="true"][aria-label="Agent prompt"]').first()
   await composer.waitFor({ state: 'visible', timeout: 10_000 })
   // Give the (absent) git probe a beat to settle before asserting absence.
@@ -66,7 +66,7 @@ test('launching a chat in New worktree mode creates the worktree and opens the c
 }) => {
   await selectProject(page, 'proj-w')
 
-  await page.locator('[aria-label="New agent chat"]').first().click()
+  await page.getByRole('button', { name: 'New chat', exact: true }).first().click()
   const composer = page.locator('[data-composer-editor="true"][aria-label="Agent prompt"]').first()
   await composer.waitFor({ state: 'visible', timeout: 10_000 })
   await page

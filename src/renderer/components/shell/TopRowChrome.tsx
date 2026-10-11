@@ -9,7 +9,7 @@ const windowControlClass =
 /**
  * Windows/Linux window controls (minimize, maximize or restore, close): the
  * only place the shell renders them, in whichever top row surface owns them.
- * Same look and calls as `TitleBar`. Renders nothing unless `windowControls`.
+ * Renders nothing unless `windowControls`.
  */
 export function WindowControls({
   windowControls

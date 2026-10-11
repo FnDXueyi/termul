@@ -1,9 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  captureShellLayoutAtLoad,
-  resetShellLayoutActiveAtLoadForTests
-} from '@/lib/shell-layout-mode'
 import { WorkspaceTabBar } from './WorkspaceTabBar'
 
 const { tauriRef, getShells } = vi.hoisted(() => ({
@@ -30,7 +26,7 @@ function renderBar(props: Partial<React.ComponentProps<typeof WorkspaceTabBar>> 
   )
 }
 
-describe('WorkspaceTabBar shell flag', () => {
+describe('WorkspaceTabBar New tab menu', () => {
   beforeEach(() => {
     tauriRef.current = true
     getShells.mockResolvedValue({
@@ -41,27 +37,16 @@ describe('WorkspaceTabBar shell flag', () => {
 
   afterEach(() => {
     cleanup()
-    resetShellLayoutActiveAtLoadForTests()
   })
 
-  it('classic keeps the terminal menu and browser buttons and no New tab trigger', () => {
-    captureShellLayoutAtLoad('classic')
-    renderBar()
-    expect(screen.getByRole('button', { name: 'Open terminal menu' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'New browser tab' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'New tab' })).toBeNull()
-  })
-
-  it('revamp renders exactly one New tab trigger and no separate terminal or browser button', () => {
-    captureShellLayoutAtLoad('revamp')
+  it('renders exactly one New tab trigger and no separate terminal or browser button', () => {
     renderBar()
     expect(screen.getAllByRole('button', { name: 'New tab' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'Open terminal menu' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'New browser tab' })).toBeNull()
   })
 
-  it('revamp menu adds a terminal through onAddTerminal', async () => {
-    captureShellLayoutAtLoad('revamp')
+  it('menu adds a terminal through onAddTerminal', async () => {
     const onAddTerminal = vi.fn()
     renderBar({ onAddTerminal })
     fireEvent.pointerDown(screen.getByRole('button', { name: 'New tab' }), {

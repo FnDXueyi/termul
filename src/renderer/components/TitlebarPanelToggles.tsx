@@ -3,9 +3,7 @@ import { PanelLeft, PanelRight } from '@/components/icons'
 import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { useUpdatePanelVisibility } from '@/hooks/use-app-settings'
 import { useFileExplorerVisible } from '@/stores/file-explorer-store'
-import { useActiveProject } from '@/stores/project-store'
 import { useSidebarVisible } from '@/stores/sidebar-store'
-import { useActiveTab } from '@/stores/workspace-store'
 
 /** Hover wash, neutral inset focus ring and pointer shared by both toggle looks. */
 const toggleButtonBaseClass = `inline-flex items-center cursor-pointer transition-colors duration-150 ease-out hover:bg-foreground/[0.03] ${FOCUS_RING_CLASS} focus-visible:ring-inset`
@@ -25,35 +23,9 @@ const titlebarToggleButtonClass = `h-full px-3 ${toggleButtonBaseClass}`
  */
 export const panelEdgeToggleButtonClass = `h-8 w-8 justify-center rounded-md ${toggleButtonBaseClass}`
 
-function fileBaseName(filePath: string): string {
-  const parts = filePath.split(/[\\/]/)
-  return parts[parts.length - 1] || filePath
-}
-
-/**
- * Centered title of the title strip: "project · file". The file part shows
- * only when the active workspace tab is an editor tab, in a lighter ink.
- */
-export function TitleStripTitle(): React.JSX.Element | null {
-  const activeProject = useActiveProject()
-  const activeTab = useActiveTab()
-  if (!activeProject) return null
-  const fileName = activeTab?.type === 'editor' ? fileBaseName(activeTab.filePath) : null
-  return (
-    <span
-      data-testid="title-strip-title"
-      className="absolute left-1/2 max-w-[50%] -translate-x-1/2 truncate text-sm text-muted-foreground pointer-events-none select-none"
-    >
-      {activeProject.name}
-      {fileName && <span className="text-muted-foreground/60"> · {fileName}</span>}
-    </span>
-  )
-}
-
 /**
  * Marks an element non-draggable so buttons stay clickable inside a
- * `data-tauri-drag-region` titlebar strip. Shared by the Windows/Linux
- * `TitleBar` and the macOS `MacOsTitlebarStrip`.
+ * `data-tauri-drag-region` strip. Shared by the shell Rail header and top row.
  */
 export const titlebarNoDragStyle = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 

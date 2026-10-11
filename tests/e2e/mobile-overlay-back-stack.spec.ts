@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Locator, Page, WebSocket } from 'playwright/test'
 import { expect, request, test } from 'playwright/test'
 import { E2E_BASE_URL, E2E_TOKEN, wsRequest } from './helpers'
-import { launchChat, openWorkspace } from './ui'
+import { launchChat, openRailNewProjectModal, openWorkspace } from './ui'
 
 /**
  * Mobile overlay back stack E2E (spec-mobile-overlay-back-stack): a phone-sized
@@ -1065,7 +1065,7 @@ test.describe('desktop shell', () => {
 
     await expectInertOverlay(
       page,
-      () => page.getByRole('button', { name: 'Create new project from header' }).click(),
+      () => openRailNewProjectModal(page),
       page.getByRole('heading', { name: 'Create New Project' })
     )
     await expectInertOverlay(

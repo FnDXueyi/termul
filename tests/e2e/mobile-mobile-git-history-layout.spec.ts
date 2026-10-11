@@ -4,7 +4,7 @@ import { cp, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Locator, Page } from 'playwright/test'
 import { expect, request, test } from 'playwright/test'
-import { E2E_BASE_URL, E2E_TOKEN, seedShellLayout, wsRequest } from './helpers'
+import { E2E_BASE_URL, E2E_TOKEN, wsRequest } from './helpers'
 
 /**
  * Mobile Git History layout E2E (spec-mobile-git-history-layout): a phone-sized
@@ -12,8 +12,8 @@ import { E2E_BASE_URL, E2E_TOKEN, seedShellLayout, wsRequest } from './helpers'
  * client's mobile shell and checks what jsdom cannot compute: the measured
  * 44px two-line rows, single-line truncation through the flex chain, the lane
  * graph lined up with the rows in real layout, the 44px controls, the 16px
- * filter and the plain vertical scroller. The desktop shell gets one
- * regression test (30px single-line rows, `w-44` filter, 32px refresh).
+ * filter and the plain vertical scroller. The desktop wide layout is covered by
+ * unit tests; the revamped shell only docks the narrow variant under Changes.
  *
  * Fixture: a throwaway repository with a merge (two lanes), tags, a branch
  * with a very long name, a very long subject and a very long author name.
@@ -218,15 +218,7 @@ function watchAgentWarmup(page: Page): Promise<void> {
 }
 
 /** Land on the workspace of the freshly registered project, agent warmed up. */
-async function bootInto(
-  page: Page,
-  project: HistoryProject,
-  shell: 'phone' | 'desktop' = 'phone'
-): Promise<void> {
-  // The desktop case drives the classic shell's activity rail ("Open git
-  // history"); the code default is the revamped shell since story 30, so pin
-  // classic. The phone shell ignores the flag.
-  if (shell === 'desktop') await seedShellLayout('classic')
+async function bootInto(page: Page, project: HistoryProject): Promise<void> {
   const warmedUp = watchAgentWarmup(page)
   await page.goto(`${E2E_BASE_URL}/#token=${E2E_TOKEN}`)
   await page.waitForFunction(
@@ -234,15 +226,11 @@ async function bootInto(
     E2E_TOKEN
   )
   await page.goto(`${E2E_BASE_URL}/#/`)
-  // The phone shell names the active project in its header; the desktop shell
-  // lists it in the project sidebar. Seeing it proves we booted into our project.
-  if (shell === 'phone') {
-    await expect(
-      page.getByRole('button', { name: new RegExp(`^${project.name}.*switch project$`) })
-    ).toBeVisible()
-  } else {
-    await expect(page.getByLabel(`Project: ${project.name}`).first()).toBeVisible()
-  }
+  // The phone shell names the active project in its header; seeing it proves
+  // we booted into our project.
+  await expect(
+    page.getByRole('button', { name: new RegExp(`^${project.name}.*switch project$`) })
+  ).toBeVisible()
   await warmedUp
 }
 
@@ -851,78 +839,4 @@ test('a failed log request keeps the unchanged error empty state and raises the 
   await expect(page.getByText(/^Failed to load git history: .*boom \(e2e\)/)).toBeVisible()
   await expect(panel.rows).toHaveCount(0)
   await expect(panel.refresh).toBeEnabled()
-})
-
-// ---------------------------------------------------------------------------
-// Desktop shell regression (the matrix's "Desktop shell" row on the real surface)
-// ---------------------------------------------------------------------------
-
-test.describe('desktop shell', () => {
-  test.use({
-    viewport: { width: 1440, height: 900 },
-    isMobile: false,
-    hasTouch: false,
-    deviceScaleFactor: 1,
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-  })
-
-  test('keeps 30px single-line rows, the w-44 filter, the 32px refresh, the 16px-lane graph and ScrollArea', async ({
-    page
-  }) => {
-    const project = await registerActiveProject({ withHistory: true })
-    await bootInto(page, project, 'desktop')
-    await page.getByRole('button', { name: 'Open git history' }).click()
-    const panel = panelFor(page, project)
-    await expectFullHistory(panel)
-
-    // Rows: 30px, the original single-line column order (refs, subject, author, time, hash).
-    const heights = await panel.rows.evaluateAll((els) =>
-      els.map((el) => el.getBoundingClientRect().height)
-    )
-    expect(heights).toEqual(oracle.map(() => 30))
-    const merge = panel.row(SUBJECT.merge)
-    const cells = merge.locator(':scope > *')
-    await expect(cells).toHaveCount(5)
-    const texts = await cells.evaluateAll((els) => els.map((el) => el.textContent?.trim()))
-    expect(texts).toEqual([
-      'main',
-      SUBJECT.merge,
-      'Ada Lovelace',
-      TIME_LABEL[SUBJECT.merge],
-      shortHashOf(SUBJECT.merge)
-    ])
-    const boxes = await cells.evaluateAll((els) =>
-      els.map((el) => {
-        const r = el.getBoundingClientRect()
-        return { x: r.x, y: r.y, height: r.height }
-      })
-    )
-    const rowBox = await boxOf(merge)
-    for (const box of boxes) {
-      // One line: every cell sits inside the 30px row, left to right.
-      expect(box.y).toBeGreaterThanOrEqual(rowBox.y - 0.5)
-      expect(box.y + box.height).toBeLessThanOrEqual(rowBox.y + rowBox.height + 0.5)
-    }
-    expect(boxes.map((box) => box.x)).toEqual([...boxes.map((box) => box.x)].sort((a, b) => a - b))
-
-    // Header: the w-44 (176px) filter and the 32px icon refresh on one row.
-    expect((await boxOf(panel.filter)).width).toBeCloseTo(176, 1)
-    const refreshBox = await boxOf(panel.refresh)
-    expect(refreshBox.width).toBeCloseTo(32, 1)
-    expect(refreshBox.height).toBeCloseTo(32, 1)
-    expect(await panel.filter.evaluate((el) => getComputedStyle(el).fontSize)).toBe('12px')
-
-    // Graph: 20 + 16 * lanes (two) by 30 * rows, inside the Radix ScrollArea.
-    const scroller = merge.locator('xpath=ancestor::*[@data-radix-scroll-area-viewport][1]')
-    await expect(scroller).toHaveCount(1)
-    const graph = graphOf(scroller)
-    await expect(graph).toHaveAttribute('width', '52')
-    await expect(graph).toHaveAttribute('height', String(30 * oracle.length))
-    const nodes = await graph
-      .locator('circle')
-      .evaluateAll((els) => els.map((el) => [el.getAttribute('cx'), el.getAttribute('cy')]))
-    expect(nodes[0]).toEqual(['10', '15'])
-    expect(new Set(nodes.map(([cx]) => cx))).toEqual(new Set(['10', '26']))
-  })
 })
