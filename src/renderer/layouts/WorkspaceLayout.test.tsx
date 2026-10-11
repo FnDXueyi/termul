@@ -4,6 +4,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { resetShellLayoutActiveAtLoadForTests } from '@/lib/shell-layout-mode'
 import { mockTerminal } from '@/lib/test-utils/terminal'
+import { useFileExplorerStore } from '@/stores/file-explorer-store'
+import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
@@ -210,17 +212,23 @@ vi.mock('@/stores/keyboard-shortcuts-store', async () => {
     saveFile: { customKey: 'ctrl+s', defaultKey: 'ctrl+s' },
     toggleFileExplorer: { customKey: 'ctrl+b', defaultKey: 'ctrl+b' },
     newBrowserTab: { customKey: 'ctrl+shift+n', defaultKey: 'ctrl+shift+n' },
-    colorThemePicker: { customKey: 'ctrl+alt+t', defaultKey: 'ctrl+alt+t' }
+    colorThemePicker: { customKey: 'ctrl+alt+t', defaultKey: 'ctrl+alt+t' },
+    settings: { customKey: 'ctrl+,', defaultKey: 'ctrl+,' }
   }
+
+  // `getState` backs non-React readers such as `isSaveFileShortcut`, which the
+  // global keydown handler calls first.
+  const useKeyboardShortcutsStore = Object.assign(
+    vi.fn((selector?: (state: { shortcuts: typeof shortcuts }) => unknown) => {
+      const state = { shortcuts }
+      return selector ? selector(state) : state
+    }),
+    { getState: () => ({ shortcuts }) }
+  )
 
   return {
     ...actual,
-    useKeyboardShortcutsStore: vi.fn(
-      (selector?: (state: { shortcuts: typeof shortcuts }) => unknown) => {
-        const state = { shortcuts }
-        return selector ? selector(state) : state
-      }
-    ),
+    useKeyboardShortcutsStore,
     matchesShortcut: actual.matchesShortcut
   }
 })
@@ -1013,6 +1021,63 @@ describe('WorkspaceLayout - Empty States', () => {
       // The two sequential waits above can exceed the 15s global
       // testTimeout, which would kill the test before the second one resolves.
     }, 90000)
+  })
+
+  describe('Settings shortcut', () => {
+    beforeEach(() => {
+      const project = createProject('a', '/workspace/a', 'blue')
+      mockUseProjects.mockReturnValue([project])
+      mockUseActiveProject.mockReturnValue(project)
+      mockUseActiveProjectId.mockReturnValue('a')
+      mockUseTerminals.mockReturnValue([])
+      mockUseAllTerminals.mockReturnValue([])
+      mockUseActiveTerminal.mockReturnValue(null)
+      mockUseActiveTerminalId.mockReturnValue('')
+      useSettingsModalStore.setState({ view: null })
+    })
+
+    afterEach(() => {
+      useSettingsModalStore.setState({ view: null })
+      webAuthGateRef.current = { status: 'ok', submitting: false }
+    })
+
+    it('opens the app Settings modal on Ctrl+,', () => {
+      renderWithRouter()
+
+      fireEvent.keyDown(window, { key: ',', ctrlKey: true })
+
+      expect(useSettingsModalStore.getState().view).toBe('app')
+    })
+
+    it('opens the app Settings modal while an input has focus', () => {
+      renderWithRouter()
+
+      const input = document.createElement('input')
+      document.body.appendChild(input)
+      input.focus()
+
+      fireEvent.keyDown(input, { key: ',', ctrlKey: true })
+
+      expect(useSettingsModalStore.getState().view).toBe('app')
+      document.body.removeChild(input)
+    })
+
+    it('does not open Settings for Alt+, when the binding is Ctrl+,', () => {
+      renderWithRouter()
+
+      fireEvent.keyDown(window, { key: ',', altKey: true })
+
+      expect(useSettingsModalStore.getState().view).toBeNull()
+    })
+
+    it('stays inert while the web auth gate is unauthorized', () => {
+      webAuthGateRef.current = { status: 'unauthorized', submitting: false }
+      renderWithRouter()
+
+      fireEvent.keyDown(window, { key: ',', ctrlKey: true })
+
+      expect(useSettingsModalStore.getState().view).toBeNull()
+    })
   })
 
   describe('Project switch watcher orchestration', () => {

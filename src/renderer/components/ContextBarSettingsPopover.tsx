@@ -47,6 +47,11 @@ export function ContextBarSettingsPopover(): React.JSX.Element {
         <div className="space-y-1">
           <h4 className="font-medium text-sm mb-2">Show in Context Bar</h4>
           <SettingToggle
+            label="Project Name"
+            checked={settings.showProjectName}
+            onCheckedChange={() => handleToggle('showProjectName')}
+          />
+          <SettingToggle
             label="Git Branch"
             checked={settings.showGitBranch}
             onCheckedChange={() => handleToggle('showGitBranch')}

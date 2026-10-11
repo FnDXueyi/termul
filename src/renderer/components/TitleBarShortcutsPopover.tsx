@@ -18,6 +18,7 @@ const QUICK_SHORTCUT_IDS = [
   'newBrowserTab',
   'toggleFileExplorer',
   'sidebarToggle',
+  'settings',
   'zoomIn',
   'zoomOut',
   'zoomReset'

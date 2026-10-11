@@ -24,6 +24,7 @@ import {
   useShowExitCode,
   useShowGitBranch,
   useShowGitStatus,
+  useShowProjectName,
   useShowWorkingDirectory
 } from '@/stores/context-bar-settings-store'
 import { countGitStatuses, useGitStatusStore } from '@/stores/git-status-store'
@@ -42,6 +43,7 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
   const homeDir = useHomeDirectory()
 
   // Context bar visibility settings
+  const showProjectName = useShowProjectName()
   const showGitBranch = useShowGitBranch()
   const showGitStatus = useShowGitStatus()
   const showWorkingDirectory = useShowWorkingDirectory()
@@ -122,15 +124,17 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
       <div className="flex items-center gap-0.5 min-w-0">
         {project && !isMobileWebShell && (
           <>
-            <StatusItem
-              icon={<ProjectIcon project={project} size={14} />}
-              interactive={false}
-              className="max-w-40 font-medium text-secondary-foreground"
-            >
-              <span className="truncate leading-none">
-                {project.name.toLowerCase().replace(/\s+/g, '-')}
-              </span>
-            </StatusItem>
+            {showProjectName && (
+              <StatusItem
+                icon={<ProjectIcon project={project} size={14} />}
+                interactive={false}
+                className="max-w-40 font-medium text-secondary-foreground"
+              >
+                <span className="truncate leading-none">
+                  {project.name.toLowerCase().replace(/\s+/g, '-')}
+                </span>
+              </StatusItem>
+            )}
 
             {showGitBranch && trackedPath && (
               <GitBranchPicker
