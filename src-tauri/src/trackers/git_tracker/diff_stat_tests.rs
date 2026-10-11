@@ -1,13 +1,30 @@
 use super::diff_stat::{
-    count_lines, count_untracked_lines, parse_numstat, MAX_UNTRACKED_FILES,
-    MAX_UNTRACKED_FILE_BYTES,
+    count_lines, count_untracked_lines, drain_capped, parse_numstat, probe_head, StdoutCap,
+    MAX_UNTRACKED_FILES, MAX_UNTRACKED_FILE_BYTES,
 };
 use super::*;
 use std::sync::atomic::AtomicU32;
 
 static NEXT_DIR: AtomicU32 = AtomicU32::new(0);
 
-fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+/// Temp directory removed on drop, so tests never leak repos (or the 2 MiB
+/// oversize fixture) even when an assertion fails.
+struct TestDir(std::path::PathBuf);
+
+impl std::ops::Deref for TestDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn unique_temp_dir(tag: &str) -> TestDir {
     let n = NEXT_DIR.fetch_add(1, Ordering::SeqCst);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -18,7 +35,7 @@ fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    TestDir(dir)
 }
 
 fn git(cwd: &std::path::Path, args: &[&str]) {
@@ -32,7 +49,7 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
     );
 }
 
-fn init_repo(tag: &str) -> std::path::PathBuf {
+fn init_repo(tag: &str) -> TestDir {
     let dir = unique_temp_dir(tag);
     git(&dir, &["init", "-q"]);
     git(&dir, &["config", "user.email", "t@example.com"]);
@@ -317,7 +334,89 @@ fn it_not_a_repo_is_a_diff_stat_error() {
 
 #[test]
 fn it_missing_cwd_is_a_diff_stat_error() {
-    let dir = unique_temp_dir("missing-parent").join("does-not-exist");
+    let parent = unique_temp_dir("missing-parent");
+    let dir = parent.join("does-not-exist");
     let err = git_get_diff_stat(dir.to_str().unwrap()).expect_err("missing cwd must fail");
     assert_eq!(err.code(), "GIT_DIFF_STAT_ERROR");
+}
+
+// ---- HEAD probe: only "no HEAD" selects the empty tree ----
+
+#[test]
+fn probe_head_reports_unborn_and_born_heads() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("probe-head");
+    assert!(!probe_head(repo.to_str().unwrap()).expect("probe on unborn HEAD"));
+    write(&repo, "a.txt", b"one\n");
+    commit_all(&repo);
+    assert!(probe_head(repo.to_str().unwrap()).expect("probe on born HEAD"));
+}
+
+#[test]
+fn probe_head_non_repo_is_git_failed_not_no_head() {
+    if git_missing() {
+        return;
+    }
+    let dir = unique_temp_dir("probe-not-a-repo");
+    let err = probe_head(dir.to_str().unwrap()).expect_err("non-repo probe must fail");
+    assert!(matches!(err, DiffStatError::GitFailed { .. }), "{err:?}");
+}
+
+#[test]
+fn probe_head_spawn_failure_is_git_unavailable() {
+    let parent = unique_temp_dir("probe-missing");
+    let dir = parent.join("does-not-exist");
+    let err = probe_head(dir.to_str().unwrap()).expect_err("missing cwd must fail");
+    assert!(matches!(err, DiffStatError::GitUnavailable(_)), "{err:?}");
+}
+
+#[test]
+fn it_broken_object_store_is_an_error_not_an_empty_tree_stat() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("broken-head");
+    write(&repo, "a.txt", b"one\ntwo\n");
+    commit_all(&repo);
+    // Corrupt the object store so the probe and diff cannot succeed: the stat
+    // must fail instead of silently counting existing content as additions.
+    std::fs::remove_dir_all(repo.join(".git").join("objects")).expect("remove objects");
+    assert!(git_get_diff_stat(repo.to_str().unwrap()).is_err());
+}
+
+// ---- stdout cap while draining ----
+
+#[test]
+fn drain_capped_keeps_first_n_nul_paths_and_drains_the_rest() {
+    let data: Vec<u8> = b"a\0b\0c\0d\0e\0".to_vec();
+    let kept = drain_capped(
+        Some(std::io::Cursor::new(data.clone())),
+        StdoutCap::NulPaths(3),
+    )
+    .join()
+    .unwrap();
+    assert_eq!(kept, b"a\0b\0c\0");
+    let all = drain_capped(
+        Some(std::io::Cursor::new(data.clone())),
+        StdoutCap::Unbounded,
+    )
+    .join()
+    .unwrap();
+    assert_eq!(all, data);
+}
+
+#[test]
+fn drain_capped_reads_past_the_cap_across_chunk_boundaries() {
+    // More than one read chunk of paths, so the cap lands mid-stream and the
+    // reader must still reach EOF.
+    let mut data = Vec::new();
+    for i in 0..5000 {
+        data.extend_from_slice(format!("dir/file-{i}.txt\0").as_bytes());
+    }
+    let kept = drain_capped(Some(std::io::Cursor::new(data)), StdoutCap::NulPaths(1000))
+        .join()
+        .unwrap();
+    assert_eq!(kept.iter().filter(|b| **b == 0).count(), 1000);
 }
