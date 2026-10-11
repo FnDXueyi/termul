@@ -40,6 +40,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 const CWD = '/web/proj'
+const HUNK_PATCH = '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-one\n+two\n'
 
 describe('gitApi (web vs desktop branch)', () => {
   beforeEach(() => {
@@ -159,6 +160,47 @@ describe('gitApi (web vs desktop branch)', () => {
       cwd: CWD,
       path: 'a.txt'
     })
+  })
+
+  // ---- stageHunk / unstageHunk ----
+  it('stageHunk: web → POST /git/stage-hunk', async () => {
+    await expectWebCall(
+      () => gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH),
+      '/git/stage-hunk',
+      'POST',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH },
+      { success: true }
+    )
+  })
+  it('stageHunk: desktop → invoke("git_stage_hunk")', async () => {
+    await expectDesktopCall(() => gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH), 'git_stage_hunk', {
+      cwd: CWD,
+      path: 'a.txt',
+      hunkPatch: HUNK_PATCH
+    })
+  })
+  it('stageHunk: web surfaces a failure body as a thrown error', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: false, error: 'patch does not apply', code: 'HUNK_DOES_NOT_APPLY' })
+    )
+    await expect(gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH)).rejects.toThrow('patch does not apply')
+  })
+  it('unstageHunk: web → POST /git/unstage-hunk', async () => {
+    await expectWebCall(
+      () => gitApi.unstageHunk(CWD, 'a.txt', HUNK_PATCH),
+      '/git/unstage-hunk',
+      'POST',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH },
+      { success: true }
+    )
+  })
+  it('unstageHunk: desktop → invoke("git_unstage_hunk")', async () => {
+    await expectDesktopCall(
+      () => gitApi.unstageHunk(CWD, 'a.txt', HUNK_PATCH),
+      'git_unstage_hunk',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH }
+    )
   })
 
   // ---- discard ----
