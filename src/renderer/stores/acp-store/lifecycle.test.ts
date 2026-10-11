@@ -561,7 +561,13 @@ describe('failed session lifecycle (story 5)', () => {
   it('RELOAD_PRUNE: removes tabs the index proves foreign to the active project and hands them back to the owner', async () => {
     // Inserted fail-open before the index loaded: s-foreign belongs to p2 but
     // sits in p1's tree. s-own (p1) and s-unattributed ('' stub) stay.
-    useProjectStore.setState({ activeProjectId: 'p1' })
+    useProjectStore.setState({
+      activeProjectId: 'p1',
+      projects: [
+        { id: 'p1', name: 'p1', color: 'blue' },
+        { id: 'p2', name: 'p2', color: 'blue' }
+      ]
+    })
     useAgentChatLifetimeStore.setState({ retainedByProject: {} })
     workspaceStateRef.current.root = {
       type: 'leaf',
@@ -599,6 +605,50 @@ describe('failed session lifecycle (story 5)', () => {
     expect(logFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({ source: 'acp-store.loadSessionIndex', level: 'warn' })
     )
+  })
+
+  it('RELOAD_PRUNE: keeps a foreign tab whose owner project is missing or archived', async () => {
+    useProjectStore.setState({
+      activeProjectId: 'p1',
+      projects: [
+        { id: 'p1', name: 'p1', color: 'blue' },
+        { id: 'p2', name: 'p2', color: 'blue', isArchived: true }
+      ]
+    })
+    useAgentChatLifetimeStore.setState({ retainedByProject: {} })
+    workspaceStateRef.current.root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [
+        { type: 'agent-chat', id: 'chat-s-archived', sessionId: 's-archived' },
+        { type: 'agent-chat', id: 'chat-s-gone', sessionId: 's-gone' }
+      ]
+    }
+    const entry = (id: string, projectId: string) => ({
+      id,
+      agentId: 'agent-1',
+      title: id,
+      cwd: '/work',
+      projectId,
+      createdAt: 1,
+      lastActivityAt: 2,
+      messageCount: 1,
+      status: 'closed' as const
+    })
+    vi.mocked(loadSessionIndex).mockResolvedValueOnce([
+      entry('s-archived', 'p2'),
+      entry('s-gone', 'px')
+    ])
+
+    await useAcpStore.getState().loadSessionIndex()
+
+    expect(workspaceStateRef.current.removeTab).not.toHaveBeenCalled()
+    // Deferred hand-off: retained for the owners so the open chats survive a switch.
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({
+      p2: ['s-archived'],
+      px: ['s-gone']
+    })
   })
 
   it('RELOAD_PRUNE: no active project judges nothing foreign', async () => {
