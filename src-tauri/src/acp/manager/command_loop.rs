@@ -166,10 +166,9 @@ pub(super) async fn run_command_loop(
                                 cwd: PathBuf::from(&cwd),
                                 worktree_path,
                                 worktree_branch,
-                                model: resolved
-                                    .models
-                                    .as_ref()
-                                    .map(crate::acp::session_persistence::snapshot_from_model_state),
+                                model: resolved.models.as_ref().map(
+                                    crate::acp::session_persistence::snapshot_from_model_state,
+                                ),
                             };
                             if !ephemeral {
                                 if let Some(persistence) = req_persistence {
