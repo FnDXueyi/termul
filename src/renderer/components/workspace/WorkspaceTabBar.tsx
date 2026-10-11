@@ -89,7 +89,8 @@ export function WorkspaceTabBar({
     reorderPreview,
     setReorderPreview,
     clearReorderPreview,
-    handleTabReorder
+    handleTabReorder,
+    handleDrop
   } = usePaneDnd()
   // FLIP reorder feedback — instant under prefers-reduced-motion.
   const reducedMotion = useReducedMotion() ?? false
@@ -419,6 +420,14 @@ export function WorkspaceTabBar({
         onDragOver={(e) => {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'move'
+        }}
+        onDrop={(e) => {
+          // Only chat drags land on the bar itself; tab and file drops keep
+          // their existing handling.
+          if (dragPayload?.type !== 'chat') return
+          e.preventDefault()
+          e.stopPropagation()
+          handleDrop(paneId, 'center', e)
         }}
       >
         <div
