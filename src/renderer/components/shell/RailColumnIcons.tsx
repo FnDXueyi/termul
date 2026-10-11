@@ -1,6 +1,6 @@
 import { toast } from 'sonner'
-import { RailButton } from '@/components/ActivityRail'
 import { FolderTree, GitBranch, MessageSquare } from '@/components/icons'
+import { RailButton } from '@/components/shell/rail-button'
 import { useColumnWorkingCopy } from '@/components/shell/use-column-working-copy'
 import { CountBadge } from '@/components/ui/count-badge'
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'

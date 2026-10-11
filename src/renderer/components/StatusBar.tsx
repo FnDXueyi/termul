@@ -15,7 +15,6 @@ import { formatPath, useHomeDirectory } from '@/hooks/use-cwd'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { needsYouLabel } from '@/lib/agent-chat-attention'
 import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
-import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/working-copy'
@@ -216,8 +215,8 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
           </StatusTooltip>
         )}
 
-        {/* Revamp shell only: opens a terminal at the resolved working copy. */}
-        {getShellLayoutActiveAtLoad() === 'revamp' && <StatusBarTerminalButton project={project} />}
+        {/* Opens a terminal at the resolved working copy. */}
+        <StatusBarTerminalButton project={project} />
 
         {/* Divider before the trailing icon controls. */}
         <span aria-hidden="true" className="mx-1 h-3 w-px shrink-0 bg-border" />

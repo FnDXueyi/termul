@@ -2,10 +2,6 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
-import {
-  captureShellLayoutAtLoad,
-  resetShellLayoutActiveAtLoadForTests
-} from '@/lib/shell-layout-mode'
 import { normalizePath, type WorkingCopy } from '@/lib/working-copy'
 import { useAcpStore } from '@/stores/acp-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
@@ -595,25 +591,13 @@ describe('StatusBar', () => {
     })
   })
 
-  describe('Terminal button (shell revamp)', () => {
-    afterEach(() => {
-      resetShellLayoutActiveAtLoadForTests()
-    })
-
-    it('is absent in the classic shell', () => {
-      captureShellLayoutAtLoad('classic')
-      renderWithProviders(<StatusBar project={mockProject} />)
-      expect(screen.queryByRole('button', { name: /Open terminal at/ })).toBeNull()
-    })
-
-    it('is shown in the revamp shell for an open project', () => {
-      captureShellLayoutAtLoad('revamp')
+  describe('Terminal button', () => {
+    it('is shown for an open project', () => {
       renderWithProviders(<StatusBar project={mockProject} />)
       expect(screen.getByRole('button', { name: `Open terminal at ${WT_PATH}` })).toBeTruthy()
     })
 
-    it('is absent in the revamp shell without a project', () => {
-      captureShellLayoutAtLoad('revamp')
+    it('is absent without a project', () => {
       renderWithProviders(<StatusBar project={undefined} />)
       expect(screen.queryByRole('button', { name: /Open terminal at/ })).toBeNull()
     })

@@ -384,13 +384,21 @@ async function flushShellEffect(): Promise<void> {
   })
 }
 
+async function openNewTabMenu(): Promise<void> {
+  fireEvent.pointerDown(screen.getByRole('button', { name: 'New tab' }), {
+    button: 0,
+    ctrlKey: false
+  })
+  await screen.findByRole('menu')
+}
+
 describe('WorkspaceTabBar', () => {
   it('shows pane plus action and no pane-close side control', async () => {
     render(<WorkspaceTabBar paneId="pane-a" tabs={[]} activeTabId={null} onAddTerminal={vi.fn()} />)
 
     await flushShellEffect()
 
-    expect(screen.getByTitle('Open terminal menu')).toBeInTheDocument()
+    expect(screen.getByTitle('New tab')).toBeInTheDocument()
 
     await waitFor(() => {
       expect(screen.queryByTitle('Close pane')).not.toBeInTheDocument()
@@ -406,8 +414,8 @@ describe('WorkspaceTabBar', () => {
 
     await flushShellEffect()
 
-    fireEvent.click(screen.getByTitle('Open terminal menu'))
-    fireEvent.click(screen.getByText('Bash'))
+    await openNewTabMenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Bash/ }))
 
     expect(onAddTerminal).toHaveBeenCalledTimes(1)
     expect(onAddTerminal).toHaveBeenCalledWith(
@@ -429,15 +437,16 @@ describe('WorkspaceTabBar', () => {
 
     await flushShellEffect()
 
-    fireEvent.click(screen.getByTitle('New Browser Tab'))
+    await openNewTabMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New browser tab' }))
 
     expect(onAddBrowserTab).toHaveBeenCalledTimes(1)
   })
 
-  // Story 8 (web honesty): the New Browser Tab globe button is desktop-only —
-  // on the web client it must be absent (browser tabs are native child
-  // webviews), while the terminal menu stays available.
-  it('hides the New Browser Tab globe button on web', async () => {
+  // Story 8 (web honesty): the New browser tab item is desktop-only — on the
+  // web client it must be absent (browser tabs are native child webviews),
+  // while the terminal shells stay available.
+  it('omits the New browser tab item on web', async () => {
     const onAddBrowserTab = vi.fn()
     const prev = tauriRef.current
     tauriRef.current = false
@@ -454,8 +463,9 @@ describe('WorkspaceTabBar', () => {
 
       await flushShellEffect()
 
-      expect(screen.queryByTitle('New Browser Tab')).not.toBeInTheDocument()
-      expect(screen.getByTitle('Open terminal menu')).toBeInTheDocument()
+      await openNewTabMenu()
+      expect(screen.queryByRole('menuitem', { name: 'New browser tab' })).not.toBeInTheDocument()
+      expect(await screen.findByRole('menuitem', { name: /Bash/ })).toBeInTheDocument()
       expect(onAddBrowserTab).not.toHaveBeenCalled()
     } finally {
       tauriRef.current = prev
@@ -1664,7 +1674,7 @@ describe('WorkspaceTabBar', () => {
       ...container.querySelectorAll<HTMLElement>('[data-tauri-drag-region]')
     ]
 
-    it('is the classic bar without topRow: no drag region, no window controls', async () => {
+    it('has no drag region and no window controls without topRow', async () => {
       const { container } = render(
         <WorkspaceTabBar
           paneId="pane-a"
@@ -1722,9 +1732,9 @@ describe('WorkspaceTabBar', () => {
       expect(bar.lastElementChild).toBe(controls)
       expect(controls).not.toHaveAttribute('data-tauri-drag-region')
       expect(screen.getAllByRole('button', { name: /window$/ })).toHaveLength(3)
-      // The terminal menu button comes before the controls.
+      // The New tab button comes before the controls.
       expect(
-        screen.getByTitle('Open terminal menu').compareDocumentPosition(controls) &
+        screen.getByTitle('New tab').compareDocumentPosition(controls) &
           Node.DOCUMENT_POSITION_FOLLOWING
       ).toBeTruthy()
     })

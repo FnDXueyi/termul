@@ -2,14 +2,12 @@ import type { ShellInfo } from '@shared/types/ipc.types'
 import { AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
-import { Globe, Maximize2, Minimize2 } from '@/components/icons'
+import { Maximize2, Minimize2 } from '@/components/icons'
 import { WindowControls } from '@/components/shell/TopRowChrome'
 import { requestCloseAgentChat } from '@/hooks/use-agent-idle-shutdown'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { clipboardApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
-import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
-import { isTauriContext } from '@/lib/tauri-runtime'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
@@ -22,7 +20,6 @@ import type { Terminal } from '@/types/project'
 import type { TabReorderPosition } from '@/types/workspace.types'
 import { EditorTab } from './EditorTab'
 import { NewTabMenu } from './NewTabMenu'
-import { TerminalMenuButton } from './TerminalMenuButton'
 import type { TabBulkMenuProps } from './tab-context-menu'
 import { AgentChatTabInline } from './tabs/agent-chat-tab'
 import { BrowserTabInline } from './tabs/browser-tab'
@@ -214,8 +211,6 @@ export function WorkspaceTabBar({
   )
   const terminalStoreTerminals = paneTerminals
   const isFullscreenPane = fullscreenPaneId === paneId
-  // Revamp shell: one `+` New tab menu replaces the terminal and browser buttons.
-  const isRevampShell = getShellLayoutActiveAtLoad() === 'revamp'
 
   // Close guards mirrored at the tab-bar level so menu enablement and bulk
   // target lists agree with what WorkspaceLayout's dispatch will actually
@@ -644,12 +639,7 @@ export function WorkspaceTabBar({
           className="ml-auto flex h-full shrink-0 items-center gap-1 px-2"
           data-tauri-drag-region={dragAttr}
         >
-          {(isRevampShell ||
-            leafCount > 1 ||
-            onAddTerminal ||
-            (onAddBrowserTab && isTauriContext())) && (
-            <span aria-hidden className="mr-1 h-5 w-px shrink-0 bg-border/60" />
-          )}
+          <span aria-hidden className="mr-1 h-5 w-px shrink-0 bg-border/60" />
           {leafCount > 1 && (
             <button
               onClick={() => togglePaneFullscreen(paneId)}
@@ -660,34 +650,13 @@ export function WorkspaceTabBar({
               {isFullscreenPane ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
             </button>
           )}
-          {isRevampShell ? (
-            <NewTabMenu
-              paneId={paneId}
-              onAddTerminal={onAddTerminal}
-              onAddBrowserTab={onAddBrowserTab}
-              defaultShell={defaultShell}
-            />
-          ) : (
-            <>
-              <TerminalMenuButton
-                tabs={tabs}
-                activeTabId={activeTabId}
-                onAddTerminal={onAddTerminal}
-                defaultShell={defaultShell}
-              />
-
-              {onAddBrowserTab && isTauriContext() && (
-                <button
-                  onClick={onAddBrowserTab}
-                  className="h-7 w-7 flex items-center justify-center rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors duration-150 ease-out"
-                  title="New Browser Tab"
-                  aria-label="New browser tab"
-                >
-                  <Globe size={12} />
-                </button>
-              )}
-            </>
-          )}
+          {/* One `+` New tab menu covers terminals and browser tabs. */}
+          <NewTabMenu
+            paneId={paneId}
+            onAddTerminal={onAddTerminal}
+            onAddBrowserTab={onAddBrowserTab}
+            defaultShell={defaultShell}
+          />
         </div>
 
         {topRow?.windowControls && <WindowControls windowControls />}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { railButtonClass } from '@/components/ActivityRail'
 import { Network } from '@/components/icons'
+import { railButtonClass } from '@/components/shell/rail-button'
 import { SSHPanel } from '@/components/ssh/SSHPanel'
 import {
   SSHPanelDialogs,

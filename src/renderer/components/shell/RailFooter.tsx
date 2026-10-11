@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { RailButton, railButtonClass } from '@/components/ActivityRail'
 import { Palette, SlidersHorizontal } from '@/components/icons'
 import { RailRow } from '@/components/shell/RailRow'
+import { RailButton, railButtonClass } from '@/components/shell/rail-button'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
 import { TitleBarShortcutsPopover } from '@/components/TitleBarShortcutsPopover'
 import { useSettingsModalStore, useSettingsModalView } from '@/stores/settings-modal-store'

@@ -10,7 +10,6 @@ import { useShellUnreadTracker } from '@/hooks/use-shell-unread-tracker'
 import { useWorkspaceManifestSync } from '@/hooks/use-workspace-manifest-sync'
 import { useWorktreeShortcuts } from '@/hooks/use-worktree-shortcuts'
 import { useWorkspaceOverlayBackStack } from '@/layouts/use-workspace-overlay-back-stack'
-import { DesktopWorkspaceShell } from '@/layouts/workspace-layout/DesktopWorkspaceShell'
 import { MobileWorkspaceShell } from '@/layouts/workspace-layout/MobileWorkspaceShell'
 import { useAppClose } from '@/layouts/workspace-layout/use-app-close'
 import { useBulkTabClose } from '@/layouts/workspace-layout/use-bulk-tab-close'
@@ -30,7 +29,6 @@ import { useWorkspaceKeyboard } from '@/layouts/workspace-layout/use-workspace-k
 import { WorkspaceLoadingScreen } from '@/layouts/workspace-layout/WorkspaceLoadingScreen'
 import { WorkspaceMain } from '@/layouts/workspace-layout/WorkspaceMain'
 import { WorkspaceModals } from '@/layouts/workspace-layout/WorkspaceModals'
-import { useShellLayoutForRender } from '@/lib/shell-layout-mode'
 import { useWebAuthGate } from '@/lib/web-auth-gate'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useGitSheetStore } from '@/stores/git-sheet-store'
@@ -65,9 +63,6 @@ export default function WorkspaceLayout(): React.JSX.Element {
   const isLoaded = useProjectsLoaded()
 
   const webAuthGate = useWebAuthGate()
-
-  // Decided once per renderer load: null while settings are still loading.
-  const shellLayout = useShellLayoutForRender()
 
   const projects = useProjects()
   const activeProject = useActiveProject()
@@ -199,23 +194,15 @@ export default function WorkspaceLayout(): React.JSX.Element {
     closeTerminalTabByTabId: terminalClose.closeTerminalTabByTabId
   })
 
-  // Show loading state while projects (or, on desktop, settings) are loading.
-  // The phone shell ignores the shell-layout flag, so it never waits for it.
-  if (!isLoaded || (shellLayout === null && !isMobileWebShell)) {
+  // Show loading state while projects are loading.
+  if (!isLoaded) {
     // #854: a token-gated server refusing our (absent/rotated) token shows
     // the token-entry screen INSTEAD of the Loading state — the missing UX
     // that made the web client hang forever on an installed PWA.
     if (webAuthGate.status === 'unauthorized') {
       return <WebTokenGateScreen />
     }
-    return (
-      <WorkspaceLoadingScreen
-        isMobileWebShell={isMobileWebShell}
-        isShortcutMenuOpen={isShortcutMenuOpen}
-        setIsShortcutMenuOpen={setIsShortcutMenuOpen}
-        setIsCommandPaletteOpen={setIsCommandPaletteOpen}
-      />
-    )
+    return <WorkspaceLoadingScreen isMobileWebShell={isMobileWebShell} />
   }
 
   const workspaceMain = (
@@ -304,28 +291,24 @@ export default function WorkspaceLayout(): React.JSX.Element {
     )
   }
 
-  const desktopShellProps = {
-    projects,
-    activeProject,
-    activeProjectId,
-    ssh,
-    isShortcutMenuOpen,
-    setIsShortcutMenuOpen,
-    setIsCommandPaletteOpen,
-    setIsNewProjectModalOpen,
-    onSelectProject: handleSelectProject,
-    handleAddGitTab: tabOpeners.handleAddGitTab,
-    handleAddGitHistoryTab: tabOpeners.handleAddGitHistoryTab,
-    handleToggleThemePicker,
-    handleOpenAgentChat: tabOpeners.handleOpenAgentChat,
-    handleOpenCanvas: tabOpeners.handleOpenCanvas,
-    workspaceMain,
-    appModals
-  }
-
-  return shellLayout === 'revamp' ? (
-    <ShellFrame {...desktopShellProps} />
-  ) : (
-    <DesktopWorkspaceShell {...desktopShellProps} />
+  return (
+    <ShellFrame
+      projects={projects}
+      activeProject={activeProject}
+      activeProjectId={activeProjectId}
+      ssh={ssh}
+      isShortcutMenuOpen={isShortcutMenuOpen}
+      setIsShortcutMenuOpen={setIsShortcutMenuOpen}
+      setIsCommandPaletteOpen={setIsCommandPaletteOpen}
+      setIsNewProjectModalOpen={setIsNewProjectModalOpen}
+      onSelectProject={handleSelectProject}
+      handleAddGitTab={tabOpeners.handleAddGitTab}
+      handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
+      handleToggleThemePicker={handleToggleThemePicker}
+      handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
+      handleOpenCanvas={tabOpeners.handleOpenCanvas}
+      workspaceMain={workspaceMain}
+      appModals={appModals}
+    />
   )
 }

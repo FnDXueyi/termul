@@ -1,27 +1,11 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
-import {
-  FileExplorerToggleButton,
-  SidebarToggleButton,
-  TitleStripTitle
-} from './TitlebarPanelToggles'
+import { FileExplorerToggleButton, SidebarToggleButton } from './TitlebarPanelToggles'
 
-const { mockUpdatePanelVisibility, mockToastError, titleState } = vi.hoisted(() => ({
+const { mockUpdatePanelVisibility, mockToastError } = vi.hoisted(() => ({
   mockUpdatePanelVisibility: vi.fn(() => Promise.resolve()),
-  mockToastError: vi.fn(),
-  titleState: {
-    activeProject: null as null | { name: string },
-    activeTab: undefined as undefined | { type: string; filePath?: string }
-  }
-}))
-
-vi.mock('@/stores/project-store', () => ({
-  useActiveProject: () => titleState.activeProject
-}))
-
-vi.mock('@/stores/workspace-store', () => ({
-  useActiveTab: () => titleState.activeTab
+  mockToastError: vi.fn()
 }))
 
 vi.mock('sonner', () => ({
@@ -100,36 +84,5 @@ describe('TitlebarPanelToggles', () => {
 
     expect(sidebarButton).toHaveAttribute('aria-pressed', 'false')
     expect(explorerButton).toHaveAttribute('aria-pressed', 'false')
-  })
-})
-
-describe('TitleStripTitle', () => {
-  beforeEach(() => {
-    titleState.activeProject = { name: 'termul' }
-    titleState.activeTab = undefined
-  })
-
-  it('renders nothing without an active project', () => {
-    titleState.activeProject = null
-    render(<TitleStripTitle />)
-    expect(screen.queryByTestId('title-strip-title')).toBeNull()
-  })
-
-  it('renders only the project name when the active tab is not an editor', () => {
-    titleState.activeTab = { type: 'terminal' }
-    render(<TitleStripTitle />)
-    expect(screen.getByTestId('title-strip-title')).toHaveTextContent(/^termul$/)
-  })
-
-  it('appends the editor file base name', () => {
-    titleState.activeTab = { type: 'editor', filePath: '/repo/src/StatusBar.tsx' }
-    render(<TitleStripTitle />)
-    expect(screen.getByTestId('title-strip-title')).toHaveTextContent('termul · StatusBar.tsx')
-  })
-
-  it('handles Windows separators', () => {
-    titleState.activeTab = { type: 'editor', filePath: 'C:\\repo\\README.md' }
-    render(<TitleStripTitle />)
-    expect(screen.getByTestId('title-strip-title')).toHaveTextContent('termul · README.md')
   })
 })

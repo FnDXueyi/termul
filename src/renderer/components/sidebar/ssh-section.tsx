@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { PANEL_HEADER_CLASS } from '@/components/ui/panel-styles'
-import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { useSSHPanelVisible } from '@/stores/ssh-panel-store'
@@ -142,10 +141,8 @@ export function SSHResizableSection({
   // rendering profiles with disabled Connect actions.
   if (!isTauriContext()) return null
 
-  // Revamp (X5): the section collapses to a header-only row instead of
-  // disappearing, so it can be expanded again from the same place.
-  const isRevamp = getShellLayoutActiveAtLoad() === 'revamp'
-  if (!isVisible && !isRevamp) return null
+  // The section collapses to a header-only row instead of disappearing, so it
+  // can be expanded again from the same place.
   if (!isVisible) {
     return (
       <div className="flex-shrink-0 border-t border-border">
@@ -173,7 +170,7 @@ export function SSHResizableSection({
           onConnect={onSSHConnect}
           onSelectProfile={onSelectProfile}
           activeProfileId={activeProfileId}
-          headerLead={isRevamp ? <SSHSectionChevron expanded /> : undefined}
+          headerLead={<SSHSectionChevron expanded />}
         />
       </div>
     </div>

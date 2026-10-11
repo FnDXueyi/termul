@@ -49,7 +49,9 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: vi.fn((selector: (s: { activeProjectId: string }) => unknown) =>
     selector({ activeProjectId: 'proj-1' })
-  )
+  ),
+  // NewTabMenu (the tab bar `+` menu) reads the active project.
+  useActiveProject: () => undefined
 }))
 
 vi.mock('@/stores/terminal-store', () => ({

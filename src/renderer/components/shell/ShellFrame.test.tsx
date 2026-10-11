@@ -28,14 +28,7 @@ vi.mock('@/lib/platform', async () => {
   }
 })
 
-vi.mock('@/components/ActivityRail', () => ({
-  ActivityRail: () => <div data-testid="activity-rail" />
-}))
 vi.mock('@/components/ResizeEdges', () => ({ ResizeEdges: () => null }))
-vi.mock('@/components/TitleBar', () => ({ TitleBar: () => <div data-testid="title-bar" /> }))
-vi.mock('@/layouts/workspace-layout/MacOsTitlebarStrip', () => ({
-  MacOsTitlebarStrip: () => <div data-testid="macos-titlebar-strip" />
-}))
 vi.mock('@/components/workspace/WorkspaceConflictBanner', () => ({
   WorkspaceConflictBanner: () => <div data-testid="conflict-banner" />
 }))
@@ -152,10 +145,6 @@ describe('ShellFrame', () => {
     expect(dnd).toContainElement(sidePanel)
     expect(dnd).toContainElement(main)
     expect(dnd).not.toContainElement(rail)
-    // The Rail replaces the classic activity rail, and there is no title strip.
-    expect(screen.queryByTestId('activity-rail')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('title-bar')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('macos-titlebar-strip')).not.toBeInTheDocument()
     expect(screen.getByTestId('conflict-banner')).toBeInTheDocument()
     expect(screen.getByTestId('app-modals')).toBeInTheDocument()
   })
