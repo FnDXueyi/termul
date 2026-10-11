@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useProjectStore } from '@/stores/project-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project, Worktree } from '@/types/project'
 import {
   mergeWorktrees,
@@ -41,12 +42,26 @@ function seed(overrides: Partial<Project> = {}, path: string | undefined = ROOT)
         path,
         isGitRepo: true,
         worktrees: [],
-        activeWorktreeId: null,
         ...overrides
       } as Project
     ],
     isLoaded: true
   })
+}
+
+/**
+ * Seeds the switcher pick. `unavailable` is the in-memory-only usable state, so
+ * the real action runs without touching persistence.
+ */
+function seedPick(path: string | null, status: 'ready' | 'unavailable' = 'unavailable') {
+  useShellLayoutStore.setState({
+    status,
+    worktreePickByProject: path === null ? {} : { p1: path }
+  })
+}
+
+function pick(): string | undefined {
+  return useShellLayoutStore.getState().worktreePickByProject.p1
 }
 
 function project(): Project {
@@ -67,6 +82,8 @@ function deferredList() {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.list.mockReset()
+  resetShellLayoutStoreForTests()
+  seedPick(null)
   vi.spyOn(console, 'debug').mockImplementation(() => {})
 })
 
@@ -177,28 +194,62 @@ describe('reconcileProjectWorktrees', () => {
     })
   })
 
-  it('prunes entries absent from a successful listing and resets a matching active id', async () => {
+  it('prunes entries absent from a successful listing and clears a pick naming one', async () => {
     seed({
       worktrees: [
         wt({ id: 'wt-1', path: WT_A }),
         wt({ id: 'wt-2', path: '/repo/.termul/worktrees/b' })
-      ],
-      activeWorktreeId: 'wt-2'
+      ]
     })
+    seedPick('/repo/.termul/worktrees/b')
     mocks.list.mockResolvedValue(ok(info(WT_A)))
 
     expect(await reconcileProjectWorktrees('p1')).toBe('updated')
 
     expect(project().worktrees?.map((w) => w.id)).toEqual(['wt-1'])
-    expect(project().activeWorktreeId).toBeNull()
+    expect(pick()).toBeUndefined()
   })
 
-  it('keeps an active id that survives the merge', async () => {
-    seed({ worktrees: [wt({ id: 'wt-1', path: WT_A })], activeWorktreeId: 'wt-1' })
+  it('returns updated when only the pick was cleared', async () => {
+    seed({ worktrees: [wt({ id: 'wt-1', path: WT_A })] })
+    seedPick('/repo/.termul/worktrees/gone')
+    mocks.list.mockResolvedValue(ok(info(WT_A)))
+    const before = useProjectStore.getState().projects
+
+    expect(await reconcileProjectWorktrees('p1')).toBe('updated')
+
+    expect(pick()).toBeUndefined()
+    expect(useProjectStore.getState().projects).toBe(before)
+  })
+
+  it('keeps a pick that survives the merge, in any path form', async () => {
+    seed({ worktrees: [wt({ id: 'wt-1', path: WT_A })] })
+    seedPick(WT_A)
     mocks.list.mockResolvedValue(ok(info(WT_A)))
 
     expect(await reconcileProjectWorktrees('p1')).toBe('unchanged')
-    expect(project().activeWorktreeId).toBe('wt-1')
+    expect(pick()).toBe(WT_A)
+  })
+
+  it('keeps the pick of a listed worktree flagged outside the project root', async () => {
+    seed({ worktrees: [wt({ id: 'wt-ext', path: '/elsewhere/wt' })] })
+    seedPick('/elsewhere/wt')
+    mocks.list.mockResolvedValue(ok({ ...info('/elsewhere/wt'), outsideProjectRoot: true }))
+
+    await reconcileProjectWorktrees('p1')
+
+    expect(project().worktrees?.[0].outsideProjectRoot).toBe(true)
+    expect(pick()).toBe('/elsewhere/wt')
+  })
+
+  it('does not write the pick when there is none', async () => {
+    seed({ worktrees: [wt({ id: 'wt-1', path: WT_A })] })
+    const setPick = vi.spyOn(useShellLayoutStore.getState(), 'setWorktreePick')
+    mocks.list.mockResolvedValue(ok(info(WT_A)))
+
+    await reconcileProjectWorktrees('p1')
+
+    expect(setPick).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -214,13 +265,14 @@ describe('reconcileProjectWorktrees', () => {
     ['success without data', async () => ({ success: true })]
   ])('leaves worktrees untouched on a failed listing (%s)', async (_label, impl) => {
     const stored = [wt({ id: 'wt-1', path: WT_A })]
-    seed({ worktrees: stored, activeWorktreeId: 'wt-1' })
+    seed({ worktrees: stored })
+    seedPick('/repo/.termul/worktrees/gone')
     mocks.list.mockImplementation(impl)
 
     expect(await reconcileProjectWorktrees('p1')).toBe('failed')
 
     expect(project().worktrees).toBe(stored)
-    expect(project().activeWorktreeId).toBe('wt-1')
+    expect(pick()).toBe('/repo/.termul/worktrees/gone')
     expect(project().isGitRepo).toBe(true)
   })
 
@@ -257,12 +309,12 @@ describe('reconcileProjectWorktrees', () => {
     expect(useProjectStore.getState().projects).toBe(before)
   })
 
-  it('commits worktrees + activeWorktreeId + isGitRepo with one updateProject call', async () => {
+  it('commits worktrees + isGitRepo with one updateProject call and clears the pruned pick', async () => {
     seed({
       isGitRepo: false,
-      worktrees: [wt({ id: 'wt-gone', path: '/repo/.termul/worktrees/gone' })],
-      activeWorktreeId: 'wt-gone'
+      worktrees: [wt({ id: 'wt-gone', path: '/repo/.termul/worktrees/gone' })]
     })
+    seedPick('/repo/.termul/worktrees/gone')
     mocks.list.mockResolvedValue(ok(info(WT_A)))
     const listener = vi.fn()
     const unsub = useProjectStore.subscribe(listener)
@@ -271,7 +323,8 @@ describe('reconcileProjectWorktrees', () => {
 
     unsub()
     expect(listener).toHaveBeenCalledTimes(1)
-    expect(project()).toMatchObject({ isGitRepo: true, activeWorktreeId: null })
+    expect(project().isGitRepo).toBe(true)
+    expect(pick()).toBeUndefined()
   })
 
   it('skips a project without a path or one that does not exist', async () => {
@@ -315,15 +368,15 @@ describe('reconcileProjectWorktrees', () => {
 
     const run = reconcileProjectWorktrees('p1')
     useProjectStore.getState().updateProject('p1', {
-      worktrees: [wt({ id: 'wt-concurrent', path: WT_A, branch: 'old' })],
-      activeWorktreeId: 'wt-concurrent'
+      worktrees: [wt({ id: 'wt-concurrent', path: WT_A, branch: 'old' })]
     })
+    seedPick(WT_A)
     pending.resolve(ok(info(WT_A, 'fresh')))
     await run
 
     expect(project().worktrees).toHaveLength(1)
     expect(project().worktrees?.[0]).toMatchObject({ id: 'wt-concurrent', branch: 'fresh' })
-    expect(project().activeWorktreeId).toBe('wt-concurrent')
+    expect(pick()).toBe(WT_A)
   })
 
   describe('single-flight', () => {

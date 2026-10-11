@@ -1,10 +1,21 @@
-import type { GitCommitContext, GitStatusDetail } from '@shared/types/ipc.types'
+﻿import type { GitCommitContext, GitStatusDetail } from '@shared/types/ipc.types'
 import { platform } from '@tauri-apps/plugin-os'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as gitApiModule from '@/lib/git-api'
 import { resetProjectStore, resetTerminalStore } from '@/lib/test-utils/store'
 import { mockTerminal } from '@/lib/test-utils/terminal'
-import { diffKey, selectChangedFileCount, useGitStatusStore } from './git-status-store'
+import {
+  countGitStatuses,
+  deepestTrackedKey,
+  diffKey,
+  resetGitStatusStoreControlForTests,
+  selectChangedFileCount,
+  selectGitBranch,
+  selectGitDiffStat,
+  selectGitErrors,
+  useGitStatusStore
+} from './git-status-store'
 import { useProjectStore } from './project-store'
 import { useTerminalStore } from './terminal-store'
 
@@ -19,9 +30,12 @@ vi.mock('@/lib/git-api', () => ({
     stage: vi.fn(),
     unstage: vi.fn(),
     discard: vi.fn(),
+    stageHunk: vi.fn(),
+    unstageHunk: vi.fn(),
     commit: vi.fn(),
     push: vi.fn(),
     getCommitContext: vi.fn(),
+    getDiffStat: vi.fn(),
     stashSave: vi.fn(),
     stashList: vi.fn(),
     stashApply: vi.fn(),
@@ -31,6 +45,12 @@ vi.mock('@/lib/git-api', () => ({
     branchSwitch: vi.fn(),
     branchCreate: vi.fn()
   }
+}))
+
+const { mockLogFrontendError } = vi.hoisted(() => ({ mockLogFrontendError: vi.fn() }))
+
+vi.mock('@/lib/log-api', () => ({
+  logFrontendError: mockLogFrontendError
 }))
 
 vi.mock('sonner', () => ({
@@ -47,6 +67,7 @@ const { gitApi } = gitApiModule as unknown as {
     commit: ReturnType<typeof vi.fn>
     push: ReturnType<typeof vi.fn>
     getCommitContext: ReturnType<typeof vi.fn>
+    getDiffStat: ReturnType<typeof vi.fn>
     stashSave: ReturnType<typeof vi.fn>
     stashList: ReturnType<typeof vi.fn>
     stashApply: ReturnType<typeof vi.fn>
@@ -74,10 +95,15 @@ const makeContext = (over: Partial<GitCommitContext> = {}): GitCommitContext => 
 
 beforeEach(() => {
   vi.clearAllMocks()
+  resetGitStatusStoreControlForTests()
   useGitStatusStore.setState({
+    paths: {},
     statuses: {},
     diffs: {},
+    diffErrors: {},
     commitContexts: {},
+    diffStats: {},
+    errors: {},
     stashes: {},
     branches: {},
     selectedFile: null,
@@ -86,6 +112,7 @@ beforeEach(() => {
   })
   gitApi.getStatus.mockResolvedValue([] as GitStatusDetail[])
   gitApi.getCommitContext.mockResolvedValue(makeContext())
+  gitApi.getDiffStat.mockResolvedValue({ added: 3, removed: 1 })
   gitApi.stashList.mockResolvedValue([])
   gitApi.branchList.mockResolvedValue([])
 })
@@ -97,9 +124,12 @@ describe('git-status-store commit footer', () => {
     expect(useGitStatusStore.getState().commitContexts[CWD].ahead).toBe(3)
   })
 
-  it('fetchCommitContext swallows errors (no throw)', async () => {
+  it('fetchCommitContext returns the context, or null on failure (no throw)', async () => {
+    await expect(useGitStatusStore.getState().fetchCommitContext(CWD)).resolves.toMatchObject({
+      branch: 'main'
+    })
     gitApi.getCommitContext.mockRejectedValue(new Error('boom'))
-    await expect(useGitStatusStore.getState().fetchCommitContext(CWD)).resolves.toBeUndefined()
+    await expect(useGitStatusStore.getState().fetchCommitContext(CWD)).resolves.toBeNull()
     expect(useGitStatusStore.getState().commitContexts[CWD]).toBeUndefined()
   })
 
@@ -121,6 +151,40 @@ describe('git-status-store commit footer', () => {
     await first
 
     expect(useGitStatusStore.getState().commitContexts[CWD].ahead).toBe(9)
+  })
+
+  it('fetchCommitContext returns null for a superseded response', async () => {
+    let resolveSlow: (v: GitCommitContext) => void = () => {}
+    const slow = new Promise<GitCommitContext>((r) => {
+      resolveSlow = r
+    })
+    gitApi.getCommitContext.mockReturnValueOnce(slow)
+    gitApi.getCommitContext.mockResolvedValueOnce(makeContext({ branch: 'new' }))
+
+    const first = useGitStatusStore.getState().fetchCommitContext(CWD)
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    resolveSlow(makeContext({ branch: 'old' }))
+
+    await expect(first).resolves.toBeNull()
+    expect(useGitStatusStore.getState().commitContexts[CWD].branch).toBe('new')
+  })
+
+  it('refreshStatus ignores a stale (out-of-order) response', async () => {
+    let resolveSlow: (v: GitStatusDetail[]) => void = () => {}
+    const slow = new Promise<GitStatusDetail[]>((r) => {
+      resolveSlow = r
+    })
+    const fresh: GitStatusDetail[] = [{ path: 'new.ts', staged: true, status: 'modified' }]
+    gitApi.getStatus.mockReturnValueOnce(slow)
+    gitApi.getStatus.mockResolvedValueOnce(fresh)
+
+    const first = useGitStatusStore.getState().refreshStatus(CWD)
+    await useGitStatusStore.getState().refreshStatus(CWD)
+    resolveSlow([{ path: 'old.ts', staged: false, status: 'modified' }])
+    await first
+
+    expect(useGitStatusStore.getState().statuses[CWD]).toEqual(fresh)
+    expect(useGitStatusStore.getState().isFetchingStatus).toBe(false)
   })
 
   it('fetchCommitContext drops stale context when the fetch fails', async () => {
@@ -363,7 +427,355 @@ describe('selectChangedFileCount', () => {
     ]
     const statuses = { '/repo': repo }
     expect(selectChangedFileCount('/repo')({ statuses })).toBe(2)
+    expect(selectChangedFileCount('/repo/')({ statuses })).toBe(2)
     expect(selectChangedFileCount('/other')({ statuses })).toBe(0)
     expect(selectChangedFileCount(null)({ statuses })).toBe(0)
+  })
+})
+
+describe('git-status-store canonical keys', () => {
+  it('shares one entry between two spellings of a Windows path', async () => {
+    gitApi.getStatus.mockResolvedValue([{ path: 'a.ts', status: 'modified', staged: false }])
+
+    await useGitStatusStore.getState().refreshStatus('E:\\Proj')
+    await useGitStatusStore.getState().refreshStatus('e:/proj/')
+    await useGitStatusStore.getState().fetchCommitContext('e:/proj/')
+
+    const state = useGitStatusStore.getState()
+    expect(Object.keys(state.statuses)).toEqual(['e:/proj'])
+    expect(Object.keys(state.commitContexts)).toEqual(['e:/proj'])
+    // The first display path stays usable as a cwd.
+    expect(state.paths).toEqual({ 'e:/proj': 'E:\\Proj' })
+    expect(selectChangedFileCount('E:\\Proj')(state)).toBe(1)
+    expect(selectChangedFileCount('e:/proj/')(state)).toBe(1)
+    expect(selectGitBranch('E:\\Proj')(state)).toBe('main')
+  })
+
+  it('keeps the diff cache key canonical', () => {
+    expect(diffKey('E:\\Proj', 'a.txt', true)).toBe(diffKey('e:/proj/', 'a.txt', true))
+  })
+
+  it('stores branches under the canonical key', async () => {
+    gitApi.branchList.mockResolvedValue(['main'])
+    await useGitStatusStore.getState().fetchBranches('E:\\Proj')
+    expect(useGitStatusStore.getState().branches['e:/proj']).toEqual(['main'])
+  })
+
+  it('selectGitBranch is null for a missing or detached context', async () => {
+    expect(selectGitBranch('/repo')(useGitStatusStore.getState())).toBeNull()
+    expect(selectGitBranch(null)(useGitStatusStore.getState())).toBeNull()
+    gitApi.getCommitContext.mockResolvedValue(makeContext({ branch: null }))
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    expect(selectGitBranch(CWD)(useGitStatusStore.getState())).toBeNull()
+  })
+
+  it('deepestTrackedKey picks the deepest segment-bounded containing key', () => {
+    const keys = ['c:/proj', 'c:/proj/.termul/worktrees/feat', 'c:/pro']
+    expect(deepestTrackedKey('C:\\proj\\.termul\\worktrees\\feat\\src', keys)).toBe(
+      'c:/proj/.termul/worktrees/feat'
+    )
+    expect(deepestTrackedKey('C:/proj/src/a.ts', keys)).toBe('c:/proj')
+    expect(deepestTrackedKey('C:/project/a.ts', keys)).toBeNull()
+    expect(deepestTrackedKey('D:/other', keys)).toBeNull()
+  })
+})
+
+describe('git-status-store error states', () => {
+  it('stores a status failure, keeps the previous status, rejects, and clears on success', async () => {
+    const previous: GitStatusDetail[] = [{ path: 'a.ts', status: 'modified', staged: false }]
+    gitApi.getStatus.mockResolvedValueOnce(previous)
+    await useGitStatusStore.getState().refreshStatus(CWD)
+
+    gitApi.getStatus.mockRejectedValueOnce(new Error('index locked'))
+    await expect(useGitStatusStore.getState().refreshStatus(CWD)).rejects.toThrow('index locked')
+    expect(useGitStatusStore.getState().errors[CWD]?.status).toBe('index locked')
+    expect(useGitStatusStore.getState().statuses[CWD]).toEqual(previous)
+    expect(selectGitErrors(CWD)(useGitStatusStore.getState()).status).toBe('index locked')
+    expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+    expect(mockLogFrontendError.mock.calls[0][0].message).toContain('[git-status]')
+
+    await useGitStatusStore.getState().refreshStatus(CWD)
+    expect(useGitStatusStore.getState().errors[CWD]).toBeUndefined()
+    expect(selectGitErrors(CWD)(useGitStatusStore.getState())).toEqual({})
+  })
+
+  it('drops the context, stores the failure and returns null, then clears on success', async () => {
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    gitApi.getCommitContext.mockRejectedValueOnce(new Error('locked'))
+
+    await expect(useGitStatusStore.getState().fetchCommitContext(CWD)).resolves.toBeNull()
+    expect(useGitStatusStore.getState().commitContexts[CWD]).toBeUndefined()
+    expect(useGitStatusStore.getState().errors[CWD]?.commitContext).toBe('locked')
+    expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    expect(useGitStatusStore.getState().errors[CWD]).toBeUndefined()
+  })
+
+  it('does not log anything for a successful fetch', async () => {
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    expect(mockLogFrontendError).not.toHaveBeenCalled()
+  })
+})
+
+describe('git-status-store diff stat', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    resetGitStatusStoreControlForTests()
+    vi.useRealTimers()
+  })
+
+  it('never fetches for an unwatched key', async () => {
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    expect(gitApi.getDiffStat).not.toHaveBeenCalled()
+    expect(selectGitDiffStat(CWD)(useGitStatusStore.getState())).toBeNull()
+  })
+
+  it('fetches a watched key and tracks it', async () => {
+    const unwatch = useGitStatusStore.getState().watchDiffStat('E:\\Proj')
+    await useGitStatusStore.getState().refreshDiffStat('e:/proj/')
+
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(1)
+    expect(selectGitDiffStat('E:\\Proj')(useGitStatusStore.getState())).toEqual({
+      added: 3,
+      removed: 1
+    })
+    expect(useGitStatusStore.getState().paths['e:/proj']).toBe('E:\\Proj')
+    unwatch()
+  })
+
+  it('throttles to once per 30 s with one trailing refresh', async () => {
+    const unwatch = useGitStatusStore.getState().watchDiffStat(CWD)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    await vi.advanceTimersByTimeAsync(5_000)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(24_999)
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(2)
+    unwatch()
+  })
+
+  it('ref-counts watchers and cancels the trailing refresh with the last one', async () => {
+    const unwatchA = useGitStatusStore.getState().watchDiffStat(CWD)
+    const unwatchB = useGitStatusStore.getState().watchDiffStat(CWD)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+
+    unwatchA()
+    unwatchA() // idempotent: must not release B's watch
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(2)
+
+    await useGitStatusStore.getState().refreshDiffStat(CWD) // throttled: trailing scheduled
+    unwatchB()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await useGitStatusStore.getState().refreshDiffStat(CWD) // unwatched: no-op
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(2)
+  })
+
+  it('stores a diff stat failure and clears it on the next success', async () => {
+    const unwatch = useGitStatusStore.getState().watchDiffStat(CWD)
+    gitApi.getDiffStat.mockRejectedValueOnce(new Error('bad repo'))
+
+    await expect(useGitStatusStore.getState().refreshDiffStat(CWD)).resolves.toBeUndefined()
+    expect(useGitStatusStore.getState().errors[CWD]?.diffStat).toBe('bad repo')
+    expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await useGitStatusStore.getState().refreshDiffStat(CWD)
+    expect(useGitStatusStore.getState().errors[CWD]).toBeUndefined()
+    unwatch()
+  })
+
+  it('an own write refreshes status, context and the watched diff stat', async () => {
+    const unwatch = useGitStatusStore.getState().watchDiffStat(CWD)
+    await useGitStatusStore.getState().stageFiles(CWD, ['a.txt'])
+
+    expect(gitApi.getStatus).toHaveBeenCalledWith(CWD)
+    expect(gitApi.getCommitContext).toHaveBeenCalledWith(CWD)
+    expect(gitApi.getDiffStat).toHaveBeenCalledWith(CWD)
+    unwatch()
+  })
+
+  it('an own write propagates its error and stores the refresh failure', async () => {
+    gitApi.stage.mockRejectedValue(new Error('add failed'))
+    gitApi.getStatus.mockRejectedValue(new Error('status failed'))
+
+    await expect(useGitStatusStore.getState().stageFiles(CWD, ['a.txt'])).rejects.toThrow(
+      'add failed'
+    )
+    expect(useGitStatusStore.getState().errors[CWD]?.status).toBe('status failed')
+  })
+})
+
+describe('git-status-store refreshTracked', () => {
+  afterEach(() => {
+    resetGitStatusStoreControlForTests()
+  })
+
+  it('refreshes status and context of every tracked key, and watched diff stats only', async () => {
+    await useGitStatusStore.getState().refreshStatus('/a')
+    await useGitStatusStore.getState().refreshStatus('/b')
+    const unwatch = useGitStatusStore.getState().watchDiffStat('/a')
+    gitApi.getStatus.mockClear()
+    gitApi.getCommitContext.mockClear()
+
+    await useGitStatusStore.getState().refreshTracked()
+
+    expect(gitApi.getStatus).toHaveBeenCalledTimes(2)
+    expect(gitApi.getCommitContext).toHaveBeenCalledTimes(2)
+    expect(gitApi.getDiffStat).toHaveBeenCalledTimes(1)
+    expect(gitApi.getDiffStat).toHaveBeenCalledWith('/a')
+    unwatch()
+  })
+
+  it('never rejects when a facade fails', async () => {
+    await useGitStatusStore.getState().refreshStatus('/a')
+    gitApi.getStatus.mockRejectedValue(new Error('boom'))
+    await expect(useGitStatusStore.getState().refreshTracked()).resolves.toBeUndefined()
+    expect(useGitStatusStore.getState().errors['/a']?.status).toBe('boom')
+  })
+})
+
+describe('countGitStatuses', () => {
+  it('buckets modified, staged and untracked, counting a file once per bucket', () => {
+    const counts = countGitStatuses([
+      { path: 'a.ts', status: 'modified', staged: true },
+      { path: 'a.ts', status: 'modified', staged: false },
+      { path: 'a.ts', status: 'modified', staged: false },
+      { path: 'b.ts', status: 'added', staged: true },
+      { path: 'c.ts', status: 'deleted', staged: false },
+      { path: 'u.ts', status: 'untracked', staged: false }
+    ])
+    expect(counts).toEqual({ modified: 2, staged: 2, untracked: 1, hasChanges: true })
+  })
+
+  it('has no changes for an empty or missing list', () => {
+    expect(countGitStatuses([])).toEqual({
+      modified: 0,
+      staged: 0,
+      untracked: 0,
+      hasChanges: false
+    })
+    expect(countGitStatuses(undefined).hasChanges).toBe(false)
+  })
+})
+
+describe('git-status-store write block for unresolved working copies', () => {
+  const GONE = '/proj/.termul/worktrees/gone'
+
+  beforeEach(() => {
+    useProjectStore.setState({
+      projects: [{ id: 'p1', name: 'P', color: 'blue', path: '/proj', worktrees: [] } as any],
+      activeProjectId: 'p1'
+    })
+  })
+
+  afterEach(() => {
+    resetProjectStore()
+  })
+
+  it.each([
+    ['stageFile', (s: any) => s.stageFile(GONE, 'a.ts'), 'stage'],
+    ['unstageFile', (s: any) => s.unstageFile(GONE, 'a.ts'), 'unstage'],
+    ['discardFile', (s: any) => s.discardFile(GONE, 'a.ts'), 'discard'],
+    ['stageFiles', (s: any) => s.stageFiles(GONE, ['a.ts']), 'stage'],
+    ['unstageFiles', (s: any) => s.unstageFiles(GONE, ['a.ts']), 'unstage'],
+    ['discardFiles', (s: any) => s.discardFiles(GONE, ['a.ts']), 'discard'],
+    ['stageHunk', (s: any) => s.stageHunk(GONE, 'a.ts', 'patch'), 'stageHunk'],
+    ['unstageHunk', (s: any) => s.unstageHunk(GONE, 'a.ts', 'patch'), 'unstageHunk'],
+    ['commit', (s: any) => s.commit(GONE, 'msg', '', false), 'commit'],
+    ['push', (s: any) => s.push(GONE), 'push'],
+    ['stashSave', (s: any) => s.stashSave(GONE, 'm'), 'stashSave'],
+    ['stashApply', (s: any) => s.stashApply(GONE, 0), 'stashApply'],
+    ['stashPop', (s: any) => s.stashPop(GONE, 0), 'stashPop'],
+    ['stashDrop', (s: any) => s.stashDrop(GONE, 0), 'stashDrop'],
+    ['branchSwitch', (s: any) => s.branchSwitch(GONE, 'x'), 'branchSwitch'],
+    ['branchCreate', (s: any) => s.branchCreate(GONE, 'x'), 'branchCreate']
+  ])('%s throws and makes no git call', async (_name, run, apiCall) => {
+    await expect(run(useGitStatusStore.getState())).rejects.toThrow(/no longer available/)
+    expect((gitApi as Record<string, ReturnType<typeof vi.fn>>)[apiCall]).not.toHaveBeenCalled()
+    expect(gitApi.getStatus).not.toHaveBeenCalled()
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('write blocked') })
+    )
+  })
+
+  it('still writes in the project folder and in explicit paths', async () => {
+    gitApi.stage.mockResolvedValue(undefined)
+    await useGitStatusStore.getState().stageFiles('/proj', ['a.ts'])
+    await useGitStatusStore.getState().stageFiles('/somewhere/else', ['b.ts'])
+    expect(gitApi.stage).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops blocking once the worktree is listed', async () => {
+    gitApi.stage.mockResolvedValue(undefined)
+    useProjectStore.setState({
+      projects: [
+        {
+          id: 'p1',
+          name: 'P',
+          color: 'blue',
+          path: '/proj',
+          worktrees: [{ id: 'w', name: 'gone', branch: 'b', path: GONE, createdAt: '' }]
+        } as any
+      ]
+    })
+    await useGitStatusStore.getState().stageFiles(GONE, ['a.ts'])
+    expect(gitApi.stage).toHaveBeenCalledWith(GONE, 'a.ts')
+  })
+})
+
+describe('git-status-store diffErrors', () => {
+  const key = diffKey(CWD, 'a.ts', false)
+
+  it('records a failed fetch and keeps the legacy sentinel and toast by default', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false)
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBe('boom')
+    expect(state.diffs[key]).toBe('')
+    expect(toast.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('notify:false keeps the cache empty, skips the toast and logs one warn', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBe('boom')
+    expect(key in state.diffs).toBe(false)
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'warn', source: 'git-status-store' })
+    )
+  })
+
+  it('clears the error when a later fetch succeeds', async () => {
+    gitApi.getDiff.mockRejectedValueOnce(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    expect(useGitStatusStore.getState().diffErrors[key]).toBe('boom')
+
+    gitApi.getDiff.mockResolvedValueOnce('diff --git a/a.ts b/a.ts')
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    const state = useGitStatusStore.getState()
+    expect(state.diffErrors[key]).toBeUndefined()
+    expect(state.diffs[key]).toBe('diff --git a/a.ts b/a.ts')
+  })
+
+  it('clears a file error when its diffs are invalidated by a hunk write', async () => {
+    gitApi.getDiff.mockRejectedValue(new Error('boom'))
+    await useGitStatusStore.getState().fetchDiff(CWD, 'a.ts', false, { notify: false })
+    gitApi.stageHunk.mockResolvedValue(undefined)
+    await useGitStatusStore.getState().stageHunk(CWD, 'a.ts', 'patch')
+    expect(useGitStatusStore.getState().diffErrors[key]).toBeUndefined()
   })
 })

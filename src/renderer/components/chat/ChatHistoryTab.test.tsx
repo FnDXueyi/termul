@@ -7,6 +7,7 @@ import {
   ANNOUNCE_DELAY_MS,
   useShellAnnouncerStore
 } from '@/stores/shell-announcer-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 
 const {
   mockOpen,
@@ -45,7 +46,6 @@ const {
     current: null as {
       id: string
       path: string
-      activeWorktreeId: string | null
       worktrees: Array<{
         id: string
         name: string
@@ -106,12 +106,7 @@ vi.mock('./AgentGlyph', () => ({
 vi.mock('@/stores/project-store', () => ({
   // Subscribe-style hook: returns the current project record so a re-render
   // reflects worktree changes.
-  useActiveProject: () => projectRef.current,
-  getActiveWorktreeFromStore: (projectId: string) => {
-    const p = projectRef.current
-    if (!p || p.id !== projectId || !p.activeWorktreeId) return undefined
-    return p.worktrees.find((w) => w.id === p.activeWorktreeId)
-  }
+  useActiveProject: () => projectRef.current
 }))
 
 import { ChatHistoryTab } from './ChatHistoryTab'
@@ -143,10 +138,10 @@ describe('ChatHistoryTab scoping', () => {
     agentStatusRef.current = {}
     configToLiveAgentRef.current = {}
     activeSessionIdRef.current = null
+    useShellLayoutStore.setState({ worktreePickByProject: {} })
     projectRef.current = {
       id: 'p1',
       path: '/work',
-      activeWorktreeId: null,
       worktrees: [{ id: 'wt1', name: 'wt', branch: 'b', path: '/work-wt', createdAt: '' }]
     }
   })
@@ -173,19 +168,17 @@ describe('ChatHistoryTab scoping', () => {
       entry('mine-wt', { projectId: 'p1', cwd: '/work-wt', title: 'mine-wt' })
     ]
     const { rerender } = render(<ChatHistoryTab />)
-    // Root view (activeWorktreeId=null): worktree-inclusive scoping lists both
+    // Root view (no worktree picked): worktree-inclusive scoping lists both
     // the root chat and the project's registered worktree chat.
     expect(screen.getByText('mine-main')).toBeInTheDocument()
     expect(screen.getByText('mine-wt')).toBeInTheDocument()
     // The project store creates a new record on update; mirror that so the
     // subscription notices the change.
     const prev = projectRef.current
-    projectRef.current = {
-      id: prev!.id,
-      path: prev!.path,
-      activeWorktreeId: 'wt1',
-      worktrees: prev!.worktrees
-    }
+    projectRef.current = { id: prev!.id, path: prev!.path, worktrees: prev!.worktrees }
+    act(() => {
+      useShellLayoutStore.setState({ worktreePickByProject: { p1: '/work-wt' } })
+    })
     rerender(<ChatHistoryTab />)
     // Active worktree view: scoped to the worktree cwd, the root chat is
     // hidden while the active worktree's chat stays visible.
@@ -487,7 +480,7 @@ describe('ChatHistoryTab search count announcement', () => {
     ]
     discoveredSessionsRef.current = {}
     activeSessionIdRef.current = null
-    projectRef.current = { id: 'p1', path: '/work', activeWorktreeId: null, worktrees: [] }
+    projectRef.current = { id: 'p1', path: '/work', worktrees: [] }
   })
 
   afterEach(() => {
@@ -626,7 +619,6 @@ describe('ChatHistoryTab as the drawer History body', () => {
     projectRef.current = {
       id: 'p1',
       path: '/work',
-      activeWorktreeId: null,
       worktrees: []
     }
   })

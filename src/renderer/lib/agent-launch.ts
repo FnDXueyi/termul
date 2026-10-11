@@ -190,7 +190,7 @@ export async function launchAgentInPane(
 }
 
 /**
- * Convenience wrapper mirroring `activateAndOpenTerminal`: reads the active pane
+ * Convenience wrapper: reads the active pane
  * and per-project limit from stores, then launches the agent. Used by the
  * launcher UI and command bar.
  */

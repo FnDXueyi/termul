@@ -63,8 +63,9 @@ export function useAgentChatStatusSignals(sessionId: string): AgentChatStatusSig
       })
     : false
   // The old lamp slot is now a turn-lifecycle cue: a live turn spins, and a
-  // turn that finishes while this tab is not the pane's active tab leaves an
-  // unread dot until the tab becomes active.
+  // turn that finishes while this chat is not any pane's active tab leaves an
+  // unread dot (owned by `useAgentChatUnreadStore`) until the chat becomes an
+  // active tab.
   const liveSession =
     session != null && !ephemeral && session.status !== 'closed' && session.status !== 'error'
   const turnBusy = liveSession && sessionTurnBusy(session)

@@ -1,9 +1,9 @@
-import { useLayoutEffect, useRef, useState } from 'react'
 import { AgentBadge } from '@/components/chat/AgentBadge'
 import { CircleDot } from '@/components/icons'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
 import { useAgentIdentity, useSessionIndexTitle } from '@/stores/acp-store'
+import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { TabContextMenu } from '../tab-context-menu'
 import { useAgentChatStatusSignals } from './agent-chat-status'
 import { TabChrome } from './tab-chrome'
@@ -36,28 +36,13 @@ export function AgentChatTabInline({
   // until an event sets it, so fall through to the index entry for the label.
   const indexTitle = useSessionIndexTitle(tab.sessionId)
   // The trailing slot is a turn-lifecycle cue: a live turn spins (with the
-  // live edge), and a turn that finishes while this tab is not the pane's
-  // active tab leaves an unread dot until the tab becomes active. The
+  // live edge), and a turn that finishes while this chat is not any pane's
+  // active tab leaves an unread dot until the chat becomes an active tab. The
+  // flag is owned by `useAgentChatUnreadStore` (driven by the shell-level
+  // tracker), so this tab and the mobile Recents row always agree. The
   // live-session gate (closed/error sessions carry stale turn flags, warm-pool
   // sessions are not chats) lives in `useAgentChatStatusSignals`.
-  const [unread, setUnread] = useState(false)
-  const wasTurnBusy = useRef(false)
-
-  // Unread is ephemeral by design — component-local, no store, no
-  // persistence. The chip is keyed by tab.id and remounts on session remap,
-  // pane moves, and project switches, so unread resetting on remount is the
-  // intended scope. useLayoutEffect banks the dot before paint so the finish
-  // commit swaps spinner → dot with no one-frame gap. `closing` wins the
-  // slot, so a turn that ends during a close never banks a dot.
-  useLayoutEffect(() => {
-    const turnFinished = wasTurnBusy.current && !turnBusy
-    wasTurnBusy.current = turnBusy
-    if (isActive || !liveSession) {
-      setUnread(false)
-    } else if (turnFinished && !closing) {
-      setUnread(true)
-    }
-  }, [isActive, turnBusy, closing, liveSession])
+  const unread = useAgentChatUnreadStore((state) => Boolean(state.unread[tab.sessionId]))
 
   const isClosed = session?.status === 'closed'
   const tabLabel = session?.title ?? indexTitle ?? agentName ?? 'Agent Chat'

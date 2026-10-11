@@ -224,6 +224,8 @@ export function MobileChatShell({
         return 'Git Changes'
       case 'git-history':
         return 'Git History'
+      case 'diff':
+        return fileBasename(activeTab.path)
       case 'browser':
         return browserTabLabel(activeBrowserTab)
       case 'canvas':

@@ -17,6 +17,7 @@ import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useSettingsModalStore, useSettingsModalView } from '@/stores/settings-modal-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project } from '@/types/project'
 import { MobileShellDrawer } from './MobileShellDrawer'
 import { MobileShellHeader } from './MobileShellHeader'
@@ -277,7 +278,6 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     gitBranch: 'main',
     isGitRepo: true,
     worktrees: [],
-    activeWorktreeId: null,
     ...overrides
   }
 }
@@ -343,6 +343,7 @@ beforeEach(async () => {
   _resetEphemeralSessionIdsForTesting()
   useAgentChatLifetimeStore.setState({ closingSessionIds: {} })
   useAgentChatUnreadStore.setState({ unread: {} })
+  useShellLayoutStore.setState({ worktreePickByProject: {} })
   useConnectionStatusStore.setState({ controlChannel: 'connected', terminalChannel: 'connected' })
   useSettingsModalStore.setState({ view: null })
   seedProject(makeProject())
@@ -1038,12 +1039,12 @@ describe('MobileShellDrawer project row', () => {
   it('reads the worktree branch and Worktree for an active worktree', async () => {
     seedProject(
       makeProject({
-        activeWorktreeId: 'wt1',
         worktrees: [
           { id: 'wt1', name: 'wt', branch: 'chat/fix-auth', path: '/work-wt', createdAt: '' }
         ]
       })
     )
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/work-wt' } })
     const row = await projectRow()
 
     expect(within(row).getByText('chat/fix-auth · Worktree')).toBeInTheDocument()
@@ -1077,10 +1078,10 @@ describe('MobileShellDrawer project row', () => {
       makeProject({
         gitBranch: 'develop',
         // An active worktree must NOT leak into a Local chat's row.
-        activeWorktreeId: 'wt1',
         worktrees: [{ id: 'wt1', name: 'wt', branch: 'other', path: '/wt', createdAt: '' }]
       })
     )
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/wt' } })
     seedOptionsSession('s1', 'agent-1', { title: 'Chat one' })
     const row = await projectRow({ activeTabId: 'tab-1', activeSessionId: 's1' })
 
@@ -1105,15 +1106,30 @@ describe('MobileShellDrawer project row', () => {
   })
 })
 
-describe('MobileShellDrawer unread tracker', () => {
-  it('banks New activity for a chat that finishes while the drawer is closed', async () => {
+describe('MobileShellDrawer unread rows', () => {
+  it('renders a chat with a banked unread entry as New activity (the shell tracker owns the flag)', async () => {
+    seedTabs([CHAT_TAB, { type: 'agent-chat', id: 'tab-2', sessionId: 's2' }], 'tab-1')
+    seedOptionsSession('s1', 'agent-1', { title: 'Chat one' })
+    seedOptionsSession('s2', 'agent-1', { title: 'Chat two' })
+    // The drawer no longer mounts a tracker: Done is banked by the shell-level
+    // tracker in WorkspaceLayout, so the drawer only reads the store.
+    act(() => useAgentChatUnreadStore.getState().markUnread('s2'))
+    render(<Harness activeTabId="tab-1" activeSessionId="s1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Termul' })
+    expect(
+      within(dialog).getByRole('button', { name: 'Chat two, New activity' })
+    ).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Chat one' })).toBeInTheDocument()
+  })
+
+  it('does not bank New activity itself when a turn finishes (no drawer-mounted tracker)', () => {
     seedTabs([CHAT_TAB, { type: 'agent-chat', id: 'tab-2', sessionId: 's2' }], 'tab-1')
     seedOptionsSession('s1', 'agent-1', { title: 'Chat one' })
     seedOptionsSession('s2', 'agent-1', { title: 'Chat two', activeTurn: true, openTurnId: 't1' })
     render(<Harness activeTabId="tab-1" activeSessionId="s1" />)
-    const menu = screen.getByRole('button', { name: 'Open menu' })
 
-    // The turn ends behind the closed drawer (its rows are not mounted).
     act(() => {
       const state = useAcpStore.getState()
       useAcpStore.setState({
@@ -1123,14 +1139,7 @@ describe('MobileShellDrawer unread tracker', () => {
         }
       })
     })
-    expect(useAgentChatUnreadStore.getState().unread).toEqual({ s2: true })
-
-    fireEvent.click(menu)
-    const dialog = await screen.findByRole('dialog', { name: 'Termul' })
-    expect(
-      within(dialog).getByRole('button', { name: 'Chat two, New activity' })
-    ).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Chat one' })).toBeInTheDocument()
+    expect(useAgentChatUnreadStore.getState().unread).toEqual({})
   })
 })
 

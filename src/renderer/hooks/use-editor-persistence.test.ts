@@ -1266,7 +1266,7 @@ describe('deserializePaneTree agent-chat restore (story 5)', () => {
 
 describe('unrecognised persisted tab kinds (E4a)', () => {
   const unknownTab = (extra: Record<string, unknown> = {}) =>
-    ({ type: 'diff', id: 'diff-1', secretPayload: 'do-not-log', ...extra }) as never
+    ({ type: 'future-kind', id: 'future-1', secretPayload: 'do-not-log', ...extra }) as never
 
   const warnMessages = () =>
     mockLogFrontendError.mock.calls
@@ -1286,7 +1286,7 @@ describe('unrecognised persisted tab kinds (E4a)', () => {
     expect(tree.tabs.some((tab) => tab.type === 'terminal')).toBe(false)
     const warns = warnMessages()
     expect(warns).toHaveLength(1)
-    expect(warns[0].message).toContain('"diff"')
+    expect(warns[0].message).toContain('"future-kind"')
     expect(warns[0].message).not.toContain('do-not-log')
   })
 
@@ -1294,7 +1294,7 @@ describe('unrecognised persisted tab kinds (E4a)', () => {
     const tree = deserializePaneTree({
       type: 'leaf',
       id: 'pane-1',
-      activeTabId: 'diff-1',
+      activeTabId: 'future-1',
       tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
     })
     if (tree.type !== 'leaf') throw new Error('expected leaf')
@@ -1306,7 +1306,7 @@ describe('unrecognised persisted tab kinds (E4a)', () => {
     const tree = deserializePaneTree({
       type: 'leaf',
       id: 'pane-1',
-      activeTabId: 'diff-1',
+      activeTabId: 'future-1',
       tabs: [unknownTab()]
     })
     if (tree.type !== 'leaf') throw new Error('expected leaf')
@@ -1343,7 +1343,7 @@ describe('unrecognised persisted tab kinds (E4a)', () => {
     const root = {
       type: 'leaf',
       id: 'pane-1',
-      activeTabId: 'diff-1',
+      activeTabId: 'future-1',
       tabs: [unknownTab(), { type: 'git', id: 'git-1', cwd: '/repo' }]
     } as unknown as PaneNode
     const result = reconcileTerminalTabs(root, new Set(), [], null)

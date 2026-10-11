@@ -32,7 +32,6 @@ export interface ProjectState {
   addWorktree: (projectId: string, worktree: Worktree) => void
   /** Reconciler only (AD-3): other writers go through `reconcileProjectWorktrees`. */
   removeWorktree: (projectId: string, worktreeId: string) => void
-  setActiveWorktree: (projectId: string, worktreeId: string | null) => void
   setWorktreeOperationLock: (locked: boolean) => void
 
   // Group Actions
@@ -191,18 +190,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         p.id === projectId
           ? {
               ...p,
-              worktrees: (p.worktrees ?? []).filter((w) => w.id !== worktreeId),
-              activeWorktreeId: p.activeWorktreeId === worktreeId ? null : p.activeWorktreeId
+              worktrees: (p.worktrees ?? []).filter((w) => w.id !== worktreeId)
             }
           : p
-      )
-    }))
-  },
-
-  setActiveWorktree: (projectId: string, worktreeId: string | null): void => {
-    set((state) => ({
-      projects: state.projects.map((p) =>
-        p.id === projectId ? { ...p, activeWorktreeId: worktreeId } : p
       )
     }))
   },
@@ -335,12 +325,6 @@ export function useProjectsLoaded(): boolean {
   return useProjectStore((state) => state.isLoaded)
 }
 
-export function getActiveWorktreeFromStore(projectId: string): Worktree | undefined {
-  const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
-  if (!project?.activeWorktreeId) return undefined
-  return project.worktrees?.find((w) => w.id === project.activeWorktreeId)
-}
-
 export function useProjectActions(): Pick<
   ProjectState,
   | 'selectProject'
@@ -352,7 +336,6 @@ export function useProjectActions(): Pick<
   | 'reorderProjects'
   | 'addWorktree'
   | 'removeWorktree'
-  | 'setActiveWorktree'
   | 'setWorktreeOperationLock'
   | 'addGroup'
   | 'removeGroup'
@@ -374,7 +357,6 @@ export function useProjectActions(): Pick<
       reorderProjects: state.reorderProjects,
       addWorktree: state.addWorktree,
       removeWorktree: state.removeWorktree,
-      setActiveWorktree: state.setActiveWorktree,
       setWorktreeOperationLock: state.setWorktreeOperationLock,
       addGroup: state.addGroup,
       removeGroup: state.removeGroup,

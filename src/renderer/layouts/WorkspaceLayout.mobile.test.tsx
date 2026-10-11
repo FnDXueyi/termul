@@ -20,6 +20,7 @@ import { useEditorStore } from '@/stores/editor-store'
 import { useGitSheetStore } from '@/stores/git-sheet-store'
 import { readOverlaySentinelDepth, useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
 import type { LeafNode, SplitNode } from '@/types/workspace.types'
 
@@ -34,7 +35,6 @@ const { tauriRef, mobileRef, projectRef } = vi.hoisted(() => ({
       path?: string
       name?: string
       id?: string
-      activeWorktreeId?: string | null
       worktrees?: Array<{ id: string; name: string; path: string }>
     }
   }
@@ -87,9 +87,11 @@ vi.mock('@/lib/platform', async () => {
   }
 })
 
+// The shell resolves its working copy through the (heavily mocked) stores;
+// these suites exercise layout behaviour, so resolve to the project folder.
+vi.mock('@/hooks/use-active-working-copy', () => ({ useActiveWorkingCopy: () => null }))
+
 vi.mock('@/stores/project-store', () => ({
-  // The drawer's project row reads the active worktree (none in this fixture).
-  getActiveWorktreeFromStore: () => undefined,
   useProjectsLoaded: () => true,
   useProjects: () => [projectRef.current],
   useActiveProject: () => projectRef.current,
@@ -103,17 +105,22 @@ vi.mock('@/stores/project-store', () => ({
     restoreProject: vi.fn(),
     reorderProjects: vi.fn()
   }),
-  useProjectStore: Object.assign(vi.fn(), {
-    getState: () => ({
-      // Story 6: `getDefaultCwdForProject` reads `useProjectStore.getState()`
-      // to resolve the main project root for git-history tabs — return the
-      // same project the hooks see so the drawer repro creates a real tab.
-      projects: [projectRef.current],
-      activeProjectId: 'p1',
-      isLoaded: true,
-      isWorktreeOperationLocked: false
-    })
-  })
+  useProjectStore: Object.assign(
+    vi.fn((selector?: (s: unknown) => unknown) =>
+      selector ? selector({ projects: [projectRef.current], activeProjectId: 'p1' }) : undefined
+    ),
+    {
+      getState: () => ({
+        // Story 6: `getDefaultCwdForProject` reads `useProjectStore.getState()`
+        // to resolve the main project root for git-history tabs — return the
+        // same project the hooks see so the drawer repro creates a real tab.
+        projects: [projectRef.current],
+        activeProjectId: 'p1',
+        isLoaded: true,
+        isWorktreeOperationLocked: false
+      })
+    }
+  )
 }))
 
 vi.mock('@/stores/terminal-store', () => ({
@@ -312,6 +319,7 @@ const { gitState } = vi.hoisted(() => ({
     selectedFile: null,
     setSelectedFile: vi.fn(),
     refreshStatus: vi.fn(),
+    refreshWorkingCopy: vi.fn(),
     fetchDiff: vi.fn(),
     stageFiles: vi.fn(),
     unstageFiles: vi.fn(),
@@ -334,6 +342,8 @@ const { gitState } = vi.hoisted(() => ({
 }))
 vi.mock('@/stores/git-status-store', () => ({
   diffKey: (cwd: string, path: string, staged: boolean) => `${cwd}:${path}:${staged}`,
+  selectGitBranch: () => () => null,
+  countGitStatuses: () => ({ modified: 0, staged: 0, untracked: 0, hasChanges: false }),
   useGitStatusStore: (selector: (s: Record<string, unknown>) => unknown) => selector(gitState)
 }))
 
@@ -543,6 +553,7 @@ describe('WorkspaceLayout mobile branch', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useGitSheetStore.setState({ open: false, cwd: '', projectId: '' })
+    useShellLayoutStore.setState({ worktreePickByProject: {} })
     // Clear any sentinel a previous test left on the current history entry.
     window.history.replaceState(null, '', '#/')
     tauriRef.current = false
@@ -973,7 +984,6 @@ describe('WorkspaceLayout mobile branch', () => {
       path: '/demo',
       color: 'blue',
       gitBranch: 'main',
-      activeWorktreeId: 'w1',
       worktrees: [{ id: 'w1', name: 'a', path: '/demo/.worktrees/a' }]
     }
 
@@ -993,6 +1003,7 @@ describe('WorkspaceLayout mobile branch', () => {
 
     it("opens the header Git sheet on the project's active worktree, not the project path", async () => {
       projectRef.current = worktreeProject
+      useShellLayoutStore.setState({ worktreePickByProject: { p1: '/demo/.worktrees/a' } })
       renderLayout()
 
       await chooseMoreItem('Git changes')

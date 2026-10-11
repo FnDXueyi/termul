@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resetReconciledUnresolvedForTests } from '@/lib/active-working-copy'
 import {
   _resetSheetFocusReturnForTests,
   recordSheetOpener,
@@ -10,6 +11,12 @@ import type { Project } from '@/types/project'
 const { logFrontendError } = vi.hoisted(() => ({ logFrontendError: vi.fn(async () => {}) }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError }))
 
+const { reconcile } = vi.hoisted(() => ({ reconcile: vi.fn(async () => 'unchanged') }))
+vi.mock('@/lib/worktree-reconciler', () => ({ reconcileProjectWorktrees: reconcile }))
+
+const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }))
+vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn() } }))
+
 const { sessionsRef } = vi.hoisted(() => ({
   sessionsRef: { current: {} as Record<string, { cwd: string }> }
 }))
@@ -17,8 +24,9 @@ vi.mock('@/stores/acp-store', () => ({
   useAcpStore: { getState: () => ({ sessions: sessionsRef.current }) }
 }))
 
-import { resolveGitSheetCwd, useGitSheetStore } from './git-sheet-store'
+import { useGitSheetStore } from './git-sheet-store'
 import { useProjectStore } from './project-store'
+import { useShellLayoutStore } from './shell-layout-store'
 import { useWorkspaceStore, type WorkspaceTab } from './workspace-store'
 
 function project(overrides: Partial<Project> = {}): Project {
@@ -35,75 +43,17 @@ function seedActiveTab(tab: WorkspaceTab): void {
 const CHAT_TAB: WorkspaceTab = { type: 'agent-chat', id: 'chat-s1', sessionId: 's1' }
 const TERMINAL_TAB: WorkspaceTab = { type: 'terminal', id: 'term-1', terminalId: 't1' }
 
-describe('resolveGitSheetCwd', () => {
-  it('prefers an explicit cwd over everything else', () => {
-    expect(
-      resolveGitSheetCwd({
-        explicitCwd: '/repo/.worktrees/a',
-        activeTab: { type: 'agent-chat' },
-        sessionCwd: '/other',
-        activeWorktreeRoot: '/wt',
-        projectPath: '/repo'
-      })
-    ).toEqual({ cwd: '/repo/.worktrees/a', source: 'explicit' })
-  })
-
-  it('ignores a blank explicit cwd', () => {
-    expect(resolveGitSheetCwd({ explicitCwd: '  ', projectPath: '/repo' })).toEqual({
-      cwd: '/repo',
-      source: 'project'
-    })
-  })
-
-  it("uses the active chat's session cwd when the active tab is a chat", () => {
-    expect(
-      resolveGitSheetCwd({
-        activeTab: { type: 'agent-chat' },
-        sessionCwd: '/repo/.worktrees/b',
-        activeWorktreeRoot: '/wt',
-        projectPath: '/repo'
-      })
-    ).toEqual({ cwd: '/repo/.worktrees/b', source: 'active-chat' })
-  })
-
-  it('ignores the session cwd when the active tab is not a chat', () => {
-    expect(
-      resolveGitSheetCwd({
-        activeTab: { type: 'terminal' },
-        sessionCwd: '/repo/.worktrees/b',
-        activeWorktreeRoot: '/wt',
-        projectPath: '/repo'
-      })
-    ).toEqual({ cwd: '/wt', source: 'active-worktree' })
-  })
-
-  it('falls through a chat with no cwd to the worktree root, then the project path', () => {
-    expect(
-      resolveGitSheetCwd({
-        activeTab: { type: 'agent-chat' },
-        sessionCwd: '',
-        activeWorktreeRoot: '/wt',
-        projectPath: '/repo'
-      })
-    ).toEqual({ cwd: '/wt', source: 'active-worktree' })
-    expect(
-      resolveGitSheetCwd({ activeTab: null, activeWorktreeRoot: null, projectPath: '/repo' })
-    ).toEqual({ cwd: '/repo', source: 'project' })
-  })
-
-  it('returns null when nothing resolves', () => {
-    expect(resolveGitSheetCwd({})).toBeNull()
-    expect(resolveGitSheetCwd({ explicitCwd: null, projectPath: '' })).toBeNull()
-  })
-})
-
 describe('useGitSheetStore', () => {
   beforeEach(() => {
     logFrontendError.mockClear()
+    reconcile.mockClear()
+    toastError.mockClear()
+    resetReconciledUnresolvedForTests()
     _resetSheetFocusReturnForTests()
     sessionsRef.current = {}
     useGitSheetStore.setState({ open: false, cwd: '', projectId: '' })
     useProjectStore.setState({ projects: [project()], activeProjectId: 'p1' })
+    useShellLayoutStore.setState({ worktreePickByProject: {} })
     useWorkspaceStore.setState({
       root: { type: 'leaf', id: 'pane-1', tabs: [], activeTabId: null },
       activePaneId: 'pane-1'
@@ -131,24 +81,44 @@ describe('useGitSheetStore', () => {
 
   it("opens on the active chat's session cwd", () => {
     seedActiveTab(CHAT_TAB)
-    sessionsRef.current = { s1: mockAcpSession({ id: 's1', cwd: '/repo/.worktrees/chat' }) }
+    useProjectStore.setState({
+      projects: [
+        project({
+          worktrees: [{ id: 'w2', name: 'chat', path: '/repo/.worktrees/chat' }] as never
+        })
+      ]
+    })
+    sessionsRef.current = { s1: mockAcpSession({ id: 's1', cwd: '/repo/.worktrees/chat/src' }) }
     useGitSheetStore.getState().openGitSheet()
     expect(useGitSheetStore.getState()).toMatchObject({ open: true, cwd: '/repo/.worktrees/chat' })
     expect(logFrontendError).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'info', message: expect.stringContaining('active-chat') })
+      expect.objectContaining({ level: 'info', message: expect.stringContaining('working-copy') })
     )
   })
 
-  it('opens on the active worktree root from any other tab', () => {
+  it('stays closed, toasts and reconciles once when the active chat sits in an unlisted worktree', () => {
+    seedActiveTab(CHAT_TAB)
+    sessionsRef.current = {
+      s1: mockAcpSession({ id: 's1', cwd: '/repo/.termul/worktrees/gone/src' })
+    }
+    useGitSheetStore.getState().openGitSheet()
+    useGitSheetStore.getState().openGitSheet()
+    expect(useGitSheetStore.getState().open).toBe(false)
+    expect(toastError).toHaveBeenCalledTimes(2)
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(reconcile).toHaveBeenCalledWith('p1')
+  })
+
+  it('opens on the picked worktree from a tab with no path', () => {
     seedActiveTab(TERMINAL_TAB)
     useProjectStore.setState({
       projects: [
         project({
-          activeWorktreeId: 'w1',
           worktrees: [{ id: 'w1', name: 'feat', path: '/repo/.worktrees/feat' }] as never
         })
       ]
     })
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/repo/.worktrees/feat' } })
     useGitSheetStore.getState().openGitSheet()
     expect(useGitSheetStore.getState()).toMatchObject({
       open: true,
@@ -156,10 +126,7 @@ describe('useGitSheetStore', () => {
       projectId: 'p1'
     })
     expect(logFrontendError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        level: 'info',
-        message: expect.stringContaining('active-worktree')
-      })
+      expect.objectContaining({ level: 'info', message: expect.stringContaining('working-copy') })
     )
   })
 
@@ -167,7 +134,7 @@ describe('useGitSheetStore', () => {
     useGitSheetStore.getState().openGitSheet()
     expect(useGitSheetStore.getState()).toMatchObject({ open: true, cwd: '/repo' })
     expect(logFrontendError).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'info', message: expect.stringContaining('project') })
+      expect.objectContaining({ level: 'info', message: expect.stringContaining('working-copy') })
     )
   })
 

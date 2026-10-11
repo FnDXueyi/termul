@@ -116,7 +116,8 @@ describe('useMobileTabActions closePaneTab', () => {
 
   it.each([
     { type: 'git', id: 'git-/p', cwd: '/p' },
-    { type: 'git-history', id: 'gh-/p', cwd: '/p' }
+    { type: 'git-history', id: 'gh-/p', cwd: '/p' },
+    { type: 'diff', id: 'diff:1', cwd: '/p', path: 'a.ts', staged: false }
   ] as WorkspaceTab[])('removes a $type tab directly', (tab) => {
     expect(actions().closePaneTab(tab)).toBe(false)
     expect(workspaceRef.current.removeTab).toHaveBeenCalledWith(tab.id)

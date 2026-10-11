@@ -255,7 +255,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     expect(mockReconcile).toHaveBeenCalledWith('p2')
   })
 
-  it('PRESERVES worktrees and activeWorktreeId across a projects_changed refetch', async () => {
+  it('PRESERVES worktrees (and carries no activeWorktreeId) across a projects_changed refetch', async () => {
     mockList
       .mockResolvedValueOnce({ success: true, data: payload })
       .mockResolvedValueOnce({ success: true, data: payload })
@@ -266,7 +266,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     const worktrees = [
       { id: 'wt-1', name: 'a', branch: 'a', path: '/a/wt', createdAt: '2026-01-01T00:00:00.000Z' }
     ]
-    useProjectStore.getState().updateProject('p1', { worktrees, activeWorktreeId: 'wt-1' })
+    useProjectStore.getState().updateProject('p1', { worktrees })
 
     const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
     listener?.()
@@ -275,7 +275,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     await waitFor(() => {
       const p1 = useProjectStore.getState().projects.find((p) => p.id === 'p1')
       expect(p1?.worktrees).toEqual(worktrees)
-      expect(p1?.activeWorktreeId).toBe('wt-1')
+      expect(p1).not.toHaveProperty('activeWorktreeId')
     })
   })
 

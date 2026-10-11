@@ -37,6 +37,7 @@ import { logFrontendError } from '@/lib/log-api'
 import { sanitizeDisplayText } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
+import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { useProjectStore } from '@/stores/project-store'
 import {
   agentChatTabId,
@@ -2226,6 +2227,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       // otherwise) so deleting a chat — e.g. an open failed launch — fully
       // discards it instead of leaving a locked-composer pane behind.
       useWorkspaceStore.getState().removeTab(agentChatTabId(id))
+      // A deleted chat can never be viewed again, so its Done flag goes with it.
+      useAgentChatUnreadStore.getState().clearUnread(id)
       // Reclaim any app-owned temp files staged for this session.
       void deleteSessionTempFiles(id)
     } catch {
