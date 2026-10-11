@@ -81,52 +81,60 @@ export function SidePanelColumn({
   }
 
   return (
-    <div
-      className={cn(
-        'relative flex h-full min-w-0 flex-shrink-0 flex-col overflow-hidden rounded-xl',
-        'bg-background text-foreground'
-      )}
-      style={{ width }}
-    >
-      <div className={PANEL_HEADER_CLASS} data-tauri-drag-region={dragAttr}>
-        <WorkspaceSwitcher project={activeProject} />
-        <button
-          type="button"
-          onClick={handleNewChat}
-          className={PANEL_ICON_BUTTON_CLASS}
-          title="New chat"
-          aria-label="New chat"
-        >
-          <Plus size={14} aria-hidden="true" />
-        </button>
-      </div>
-
-      {railExpanded && (
-        <ColumnTabs selected={selected} onSelect={handleSelectTab} changedCount={changedCount} />
-      )}
-
+    // The wrapper owns the 8px gutter to the main container (pr-2) and the resize
+    // handle that covers it, so the handle sits on the main container's border
+    // instead of leaving a gap at the panel edge. The panel inside keeps `width`.
+    <div className="relative h-full min-w-0 flex-shrink-0 pr-2" style={{ width: width + 8 }}>
       <div
-        role="tabpanel"
-        id={columnPanelId(selected)}
-        {...(railExpanded
-          ? { 'aria-labelledby': columnTabId(selected) }
-          : { 'aria-label': TAB_LABELS[selected] })}
-        className="flex min-h-0 flex-1 flex-col"
-      >
-        {selected === 'chats' && <ChatsList project={activeProject} />}
-        {selected === 'explorer' && (
-          <Suspense fallback={<ShellSkeleton />}>
-            <FileExplorer />
-          </Suspense>
+        className={cn(
+          'flex h-full w-full min-w-0 flex-col overflow-hidden rounded-xl',
+          'bg-background text-foreground'
         )}
-        {selected === 'changes' && <ChangesPanel cwd={cwd} isVisible />}
-      </div>
+      >
+        <div className={PANEL_HEADER_CLASS} data-tauri-drag-region={dragAttr}>
+          <WorkspaceSwitcher project={activeProject} />
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className={PANEL_ICON_BUTTON_CLASS}
+            title="New chat"
+            aria-label="New chat"
+          >
+            <Plus size={14} aria-hidden="true" />
+          </button>
+        </div>
 
+        {railExpanded && (
+          <ColumnTabs selected={selected} onSelect={handleSelectTab} changedCount={changedCount} />
+        )}
+
+        <div
+          role="tabpanel"
+          id={columnPanelId(selected)}
+          {...(railExpanded
+            ? { 'aria-labelledby': columnTabId(selected) }
+            : { 'aria-label': TAB_LABELS[selected] })}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          {selected === 'chats' && <ChatsList project={activeProject} />}
+          {selected === 'explorer' && (
+            <Suspense fallback={<ShellSkeleton />}>
+              <FileExplorer />
+            </Suspense>
+          )}
+          {selected === 'changes' && <ChangesPanel cwd={cwd} isVisible />}
+        </div>
+      </div>
       <button
         type="button"
         onMouseDown={onResizeMouseDown}
         onKeyDown={onResizeKeyDown}
-        className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent transition-colors duration-150 ease-out hover:bg-border focus-visible:bg-muted-foreground/40 focus-visible:outline-none active:bg-muted-foreground/40"
+        className={cn(
+          'absolute right-0 top-0 h-full w-2 cursor-col-resize bg-transparent focus-visible:outline-none',
+          // 1px indicator flush against the main container's left border.
+          'after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-transparent after:transition-colors after:duration-150 after:ease-out',
+          'hover:after:bg-muted-foreground/40 focus-visible:after:bg-muted-foreground/60 active:after:bg-muted-foreground/60'
+        )}
         title="Drag to resize side panel"
         aria-label="Resize side panel"
         role="separator"

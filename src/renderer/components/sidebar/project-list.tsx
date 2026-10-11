@@ -1,16 +1,16 @@
 import { LayoutGroup, Reorder } from 'framer-motion'
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react'
-import { ChevronDown, ChevronRight, Folder, FolderOpen } from '@/components/icons'
+import { ChevronDown, ChevronRight, FolderPlus } from '@/components/icons'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
-import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
-import { getColorClasses } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import type { Project, ProjectGroup } from '@/types/project'
+import { AddProjectMenu } from './add-project-menu'
 import { ArchivedProjectItem } from './archived-project-item'
 import type { ProjectRowStatus } from './indicators'
 import { RailGroupRow } from './rail-group-row'
 import { RailProjectItem } from './rail-project-item'
+import { RAIL_SECTION_BUTTON_CLASS, RailSectionHeader } from './rail-section-header'
 
 export interface ProjectListProps {
   projects: Project[]
@@ -57,6 +57,15 @@ export interface ProjectListProps {
   showArchived: boolean
   setShowArchived: Dispatch<SetStateAction<boolean>>
   renderArchivedProjectContextMenu: (project: Project) => React.ReactNode
+
+  /**
+   * Label the grouped rows "Groups" and the ungrouped ones "Projects", each
+   * with a `+`. Off when there is no group (the sidebar then keeps its own
+   * Projects header above the list).
+   */
+  railSections?: boolean
+  onNewProject?: () => void
+  onNewGroup?: () => void
 }
 
 export function ProjectList({
@@ -94,11 +103,15 @@ export function ProjectList({
   archivedProjects,
   showArchived,
   setShowArchived,
-  renderArchivedProjectContextMenu
+  renderArchivedProjectContextMenu,
+  railSections = false,
+  onNewProject,
+  onNewGroup
 }: ProjectListProps): React.JSX.Element {
   // One draggable active-project row, shared by grouped and ungrouped lists.
   // Dropping on a folder header or group container moves the project there.
   // The row also watches git for its diff stat.
+  const showSections = railSections
   const renderProjectRow = (project: Project): React.JSX.Element => {
     const shortcutIndex = activeIndexById.get(project.id) ?? -1
     return (
@@ -181,6 +194,21 @@ export function ProjectList({
           chevron). Without it, the group caches stale item boxes after a
           height change and drag-to-reorder stops working. */}
           <LayoutGroup>
+            {showSections && (
+              <RailSectionHeader label="Groups">
+                <button
+                  type="button"
+                  onClick={onNewGroup}
+                  className={RAIL_SECTION_BUTTON_CLASS}
+                  title="New group"
+                  aria-label="New group"
+                  data-testid="rail-new-group"
+                >
+                  <FolderPlus size={14} />
+                </button>
+              </RailSectionHeader>
+            )}
+
             {/* Grouped Projects */}
             <Reorder.Group
               axis="y"
@@ -214,7 +242,6 @@ export function ProjectList({
                       {/* Folder Header */}
                       <RailGroupRow
                         group={group}
-                        leadProject={gpProjects[0]}
                         isCollapsed={Boolean(isCollapsed)}
                         isDragOver={activeDragOverGroupId === group.id}
                         isEditing={editingGroupId === group.id}
@@ -243,7 +270,7 @@ export function ProjectList({
                               reordered.map((p) => p.id)
                             )
                           }}
-                          className={cn('flex flex-col gap-0.5')}
+                          className="flex flex-col gap-0.5"
                           data-group-container-id={group.id}
                         >
                           {gpProjects.map(renderProjectRow)}
@@ -255,7 +282,17 @@ export function ProjectList({
               })}
             </Reorder.Group>
 
-            {/* Ungrouped Projects */}
+            {/* Ungrouped Projects. The header stays even when every project is
+                grouped: its + is how the next project gets added. */}
+            {showSections && (
+              <RailSectionHeader label="Projects" className="mt-1">
+                <AddProjectMenu
+                  onNewProject={() => onNewProject?.()}
+                  onNewGroup={() => onNewGroup?.()}
+                  buttonClassName={RAIL_SECTION_BUTTON_CLASS}
+                />
+              </RailSectionHeader>
+            )}
             {ungroupedActiveProjects.length > 0 && (
               <Reorder.Group
                 axis="y"

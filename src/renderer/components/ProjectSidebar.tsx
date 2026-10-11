@@ -385,19 +385,26 @@ export function ProjectSidebar({
 
   const visibleGroups = groupProjectsMap
 
+  // With groups, "Groups" and "Projects" headers sit inside the list, so the
+  // sidebar's own Projects header steps aside. With no group (or nothing to
+  // list) it stays, and so does its + menu, the path to the first group.
+  const railSections = visibleGroups.length > 0 && projects.length > 0
+
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col bg-background">
       {/* Header with inline + button */}
-      <div className={PANEL_HEADER_CLASS}>
-        <span className="label-panel">Projects</span>
-        <div className="flex items-center">
-          <AddProjectMenu
-            onNewProject={onNewProject}
-            onNewGroup={() => setNewGroupModal({})}
-            buttonClassName={HEADER_ICON_BUTTON}
-          />
+      {!railSections && (
+        <div className={PANEL_HEADER_CLASS}>
+          <span className="label-panel">Projects</span>
+          <div className="flex items-center">
+            <AddProjectMenu
+              onNewProject={onNewProject}
+              onNewGroup={() => setNewGroupModal({})}
+              buttonClassName={HEADER_ICON_BUTTON}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Project List */}
       <ProjectList
@@ -436,6 +443,9 @@ export function ProjectSidebar({
         showArchived={showArchived}
         setShowArchived={setShowArchived}
         renderArchivedProjectContextMenu={renderArchivedProjectContextMenu}
+        railSections={railSections}
+        onNewProject={onNewProject}
+        onNewGroup={() => setNewGroupModal({})}
       />
 
       {/* SSH Connections - Resizable */}

@@ -1079,7 +1079,7 @@ describe('ProjectSidebar: Mono-style alignment and groups', () => {
     expect(iconColumn).toHaveClass('size-4', 'shrink-0')
   })
 
-  it('shows the first project icon at rest and a chevron on hover or focus', () => {
+  it('shows the folder icon at rest and a chevron on hover or focus', () => {
     useProjectStore.setState({ groups: [group(true)] })
     renderWithRouter({ projects: railProjects.slice(0, 3) })
 
@@ -1087,8 +1087,9 @@ describe('ProjectSidebar: Mono-style alignment and groups', () => {
     expect(row).toHaveClass('group')
     const icon = row.querySelector('[data-rail-group-icon]')
     const chevron = row.querySelector('[data-rail-group-chevron]')
-    // The first child project's monogram stands for the group.
-    expect(icon?.querySelector('[data-project-color]')).toHaveTextContent('R')
+    // The group's folder icon stands for it, not a child project's icon.
+    expect(icon?.querySelector('svg[data-termul-icon="Folder"]')).toBeInTheDocument()
+    expect(icon?.querySelector('[data-project-color]')).toBeNull()
     expect(icon).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
     expect(chevron).toHaveClass(
       'hidden',
@@ -1106,7 +1107,7 @@ describe('ProjectSidebar: Mono-style alignment and groups', () => {
     expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveClass('px-2', 'pr-8')
   })
 
-  it('falls back to a neutral folder icon for an empty group', () => {
+  it('shows a neutral folder icon for an empty group', () => {
     useProjectStore.setState({ groups: [group(true, [])] })
     renderWithRouter({ projects: railProjects.slice(0, 3) })
 
@@ -1194,5 +1195,103 @@ describe('ProjectSidebar: Mono-style alignment and groups', () => {
     fireEvent.keyDown(input, { key: 'Enter' })
 
     expect(useProjectStore.getState().groups?.[0].name).toBe('Renamed')
+  })
+
+  it('colours the folder icon with the group colour', () => {
+    useProjectStore.setState({ groups: [{ ...group(true), color: 'green' }] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const folder = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('[data-rail-group-icon] svg[data-termul-icon="Folder"]')
+    expect(folder).toHaveClass('text-project-green')
+  })
+
+  describe('section headers', () => {
+    it('shows only the Projects header, with its + menu, when there is no group', () => {
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByText('Projects')).toBeInTheDocument()
+      expect(screen.queryByText('Groups')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('rail-section-groups')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'New group' })).not.toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    })
+
+    it('shows Groups and Projects headers once a group exists', () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByRole('heading', { name: 'Groups' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Projects' })).toBeInTheDocument()
+      // One Projects header: the sidebar's own steps aside.
+      expect(screen.getAllByText('Projects')).toHaveLength(1)
+      expect(screen.getByRole('button', { name: 'New group' })).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    })
+
+    it('puts grouped projects under Groups and ungrouped ones under Projects', () => {
+      useProjectStore.setState({ groups: [group(false)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      const precedes = (a: Node, b: Node): boolean =>
+        Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+      const groupsHeader = screen.getByTestId('rail-section-groups')
+      const projectsHeader = screen.getByTestId('rail-section-projects')
+      const grouped = screen.getByTestId('grouped-projects-container')
+      const ungrouped = screen.getByTestId('ungrouped-projects-container')
+
+      expect(precedes(groupsHeader, grouped)).toBe(true)
+      expect(precedes(grouped, projectsHeader)).toBe(true)
+      expect(precedes(projectsHeader, ungrouped)).toBe(true)
+      expect(within(grouped).getByTestId('project-item-1')).toBeInTheDocument()
+      expect(within(grouped).getByTestId('project-item-2')).toBeInTheDocument()
+      expect(within(grouped).queryByTestId('project-item-3')).not.toBeInTheDocument()
+      expect(within(ungrouped).getByTestId('project-item-3')).toBeInTheDocument()
+    })
+
+    it('keeps the Projects header when every project is grouped', () => {
+      useProjectStore.setState({ groups: [group(false, ['1', '2', '3'])] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByTestId('rail-section-projects')).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'Add project or folder group' })
+      ).toBeInTheDocument()
+    })
+
+    it('opens the New group dialog from the Groups +', async () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      fireEvent.click(screen.getByRole('button', { name: 'New group' }))
+
+      expect(await screen.findByText('Create New Group')).toBeInTheDocument()
+    })
+
+    it('adds a project from the Projects +', async () => {
+      const onNewProject = vi.fn()
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3), onNewProject })
+
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Add project or folder group' }), {
+        key: 'Enter'
+      })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'New project' }))
+
+      expect(onNewProject).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps both header buttons Tab-reachable and the headers out of the tab order', () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      for (const id of ['rail-section-groups', 'rail-section-projects']) {
+        const header = screen.getByTestId(id)
+        expect(header).not.toHaveAttribute('tabindex')
+        const button = within(header).getByRole('button')
+        expect(button).not.toHaveAttribute('tabindex', '-1')
+      }
+    })
   })
 })

@@ -81,7 +81,9 @@ export function ExplorerColumn({
                   <div
                     className={cn(
                       'h-full bg-background rounded-xl overflow-hidden flex flex-col border border-border',
-                      !showFileColumn && 'w-64'
+                      !showFileColumn && 'w-64',
+                      // Revamped frame: no gap before the main card, so keep the gutter here.
+                      sidePanel && !showFileColumn && 'mr-2'
                     )}
                   >
                     <Suspense fallback={<ShellSkeleton />}>
@@ -122,7 +124,7 @@ export function ExplorerColumn({
           // collapse exits (edgeToggleMotion).
           <motion.div
             key="explorer-edge-toggle"
-            className="flex-shrink-0 flex items-start overflow-hidden"
+            className={cn('flex-shrink-0 flex items-start overflow-hidden', sidePanel && 'mr-2')}
             {...edgeToggleMotion(reducedMotion)}
           >
             <FileExplorerToggleButton className={panelEdgeToggleButtonClass} />
