@@ -18,6 +18,7 @@ import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
 import { useColumnWorkingCopy } from './use-column-working-copy'
 import { useSidePanelResize } from './use-side-panel-resize'
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 
 const FileExplorer = lazy(() =>
   import('@/components/file-explorer/FileExplorer').then((m) => ({ default: m.FileExplorer }))
@@ -50,7 +51,7 @@ export function SidePanelColumn({
   dragRegion = false
 }: SidePanelColumnProps): React.JSX.Element {
   const projectId = activeProject.id
-  const { cwd, worktreeBranch } = useColumnWorkingCopy(activeProject)
+  const { cwd } = useColumnWorkingCopy(activeProject)
   const railExpanded = useSidebarVisible()
   const dragAttr = dragRegion ? true : undefined
 
@@ -88,12 +89,7 @@ export function SidePanelColumn({
       style={{ width }}
     >
       <div className={PANEL_HEADER_CLASS} data-tauri-drag-region={dragAttr}>
-        <span
-          className={cn('label-panel truncate', dragRegion && 'pointer-events-none')}
-          data-tauri-drag-region={dragAttr}
-        >
-          {worktreeBranch || 'Workspace'}
-        </span>
+        <WorkspaceSwitcher project={activeProject} />
         <button
           type="button"
           onClick={handleNewChat}

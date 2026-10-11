@@ -327,4 +327,34 @@ describe('GitBranchPicker', () => {
     expect(trigger).toHaveAttribute('data-state', 'open')
     expect(trigger.className).toContain('data-[state=open]:bg-foreground/[0.06]')
   })
+
+  describe('strip variant', () => {
+    it('renders the strip trigger look without ahead/behind and keeps the same popover', async () => {
+      mockBranches.mockResolvedValue({
+        success: true,
+        data: [{ name: 'dev', isRemote: false, isCurrent: true, hasOtherWorktree: false }]
+      })
+      render(<GitBranchPicker {...defaultProps} ahead={2} behind={1} variant="strip" />)
+      const trigger = screen.getByLabelText('Switch git branch')
+      expect(trigger.className).toContain('h-7')
+      expect(trigger.className).toContain('text-muted-foreground')
+      expect(trigger).toHaveTextContent('dev')
+      expect(trigger).not.toHaveTextContent('2')
+      await openPicker()
+      expect(screen.getByLabelText('Search branches')).toBeDefined()
+      expect(screen.getByRole('button', { name: /Create branch from/ })).toBeDefined()
+    })
+
+    it('labels a detached HEAD on the strip and leaves the default variant unchanged', () => {
+      const { rerender } = render(
+        <GitBranchPicker {...defaultProps} currentBranch={null} variant="strip" />
+      )
+      expect(screen.getByLabelText('Switch git branch')).toHaveTextContent('Detached HEAD')
+      rerender(<GitBranchPicker {...defaultProps} currentBranch={null} ahead={3} />)
+      const trigger = screen.getByLabelText('Switch git branch')
+      expect(trigger).toHaveTextContent('detached')
+      expect(trigger).toHaveTextContent('↑3')
+      expect(trigger.className).not.toContain('h-7')
+    })
+  })
 })

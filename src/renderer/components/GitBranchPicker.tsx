@@ -1,6 +1,7 @@
 import type { BranchInfo } from '@shared/types/ipc.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { STRIP_TRIGGER_CLASS } from '@/components/agents/launcher/launcher-classes'
 import {
   AlertCircle,
   Check,
@@ -70,6 +71,13 @@ interface GitBranchPickerProps {
    * branch), so a caller on a worktree can refresh its own cache instead.
    */
   onBranchChanged?: (branch: string) => void
+  /**
+   * Trigger look. `status-bar` (default) is the quiet status-bar item with
+   * ahead/behind; `strip` is the composer context strip's trigger (14px
+   * glyph, truncating branch, chevron, no ahead/behind). The popover is the
+   * same in both.
+   */
+  variant?: 'status-bar' | 'strip'
 }
 
 export function GitBranchPicker({
@@ -78,7 +86,8 @@ export function GitBranchPicker({
   projectId,
   ahead = 0,
   behind = 0,
-  onBranchChanged
+  onBranchChanged,
+  variant = 'status-bar'
 }: GitBranchPickerProps): React.JSX.Element {
   const admitted = useServerAdmitsRemoteWrites()
   const [open, setOpen] = useState(false)
@@ -270,7 +279,8 @@ export function GitBranchPicker({
     }
   }
 
-  const displayLabel = currentBranch ?? 'detached'
+  const isStrip = variant === 'strip'
+  const displayLabel = currentBranch ?? (isStrip ? 'Detached HEAD' : 'detached')
 
   const renderBranchRow = (branch: BranchInfo): React.JSX.Element => {
     const BranchIcon = branch.isRemote ? Globe : GitBranch
@@ -311,15 +321,23 @@ export function GitBranchPicker({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={statusBarTriggerClass}
+          className={
+            isStrip ? cn(STRIP_TRIGGER_CLASS, 'inline-flex items-center') : statusBarTriggerClass
+          }
           aria-label="Switch git branch"
           disabled={isSwitching}
         >
-          <GitBranch size={12} className="shrink-0" />
-          <span className="min-w-0 max-w-32 truncate leading-none text-secondary-foreground">
+          <GitBranch size={isStrip ? 14 : 12} className="shrink-0" />
+          <span
+            className={
+              isStrip
+                ? 'min-w-0 max-w-48 truncate leading-none'
+                : 'min-w-0 max-w-32 truncate leading-none text-secondary-foreground'
+            }
+          >
             {displayLabel}
           </span>
-          {(ahead > 0 || behind > 0) && (
+          {!isStrip && (ahead > 0 || behind > 0) && (
             <span className="flex shrink-0 items-center gap-1 tabular-nums text-muted-foreground/70">
               {ahead > 0 && <span className="leading-none">↑{ahead}</span>}
               {behind > 0 && <span className="leading-none">↓{behind}</span>}

@@ -2,10 +2,9 @@ import type { Editor } from '@tiptap/core'
 import { useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Folder, FolderGit2, GitBranch, Paperclip } from '@/components/icons'
+import { Paperclip } from '@/components/icons'
 import { useAgentSkills } from '@/hooks/use-agent-skills'
 import { useAttachmentDropZone } from '@/hooks/use-attachment-drop-zone'
-import { useChatIsolationContext } from '@/hooks/use-chat-isolation-context'
 import { useMentionRecents } from '@/hooks/use-mention-recents'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
@@ -31,6 +30,7 @@ import { AttachFilesButton } from './AttachFilesButton'
 import { AttachmentPreviewGroup } from './AttachmentPreviewGroup'
 import { AgentModelSelector } from './agent-model-selector/AgentModelSelector'
 import { useCurrentAgentConfigId } from './agent-model-selector/use-agent-switch'
+import { ChatContextStrip } from './ChatContextStrip'
 import { ComposerBeamShell } from './ComposerBeamShell'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { attachmentToBlock, dedupeAttachmentBlocks } from './chat-attachments'
@@ -140,13 +140,6 @@ export function ChatInputBar({
   const usableConfigOptions = configOptions.filter(
     (option) => option.type === 'boolean' || (option.options?.length ?? 0) > 0
   )
-  // CAP-6: worktree/branch indicator, shared with the mobile shell subtitle.
-  const { isWorktree, isolationModeLabel, isolationModeTitle, isolationBranch, isDetachedHead } =
-    useChatIsolationContext({
-      projectId: session.projectId,
-      worktreePath: session.worktreePath,
-      worktreeBranch: session.worktreeBranch
-    })
   const {
     model,
     thoughtLevel,
@@ -765,35 +758,7 @@ export function ChatInputBar({
             </div>
           </div>
         </ComposerBeamShell>
-        {!isMobileShell && (
-          <div
-            data-chat-composer-context-strip="true"
-            className="relative z-0 mx-auto -mt-4 flex w-[calc(100%-2.75rem)] min-w-0 items-center gap-2 rounded-2xl border border-t-0 border-border/60 bg-card/60 px-2 pb-1 pt-5 text-xs text-muted-foreground"
-          >
-            <span
-              className="inline-flex shrink-0 items-center gap-1.5 px-2.5"
-              title={isolationModeTitle}
-            >
-              {isWorktree ? (
-                <FolderGit2 size={13} className="shrink-0" aria-hidden="true" />
-              ) : (
-                <Folder size={13} className="shrink-0" aria-hidden="true" />
-              )}
-              <span className="sr-only">Workspace: </span>
-              {isolationModeLabel}
-            </span>
-            {(isolationBranch || isDetachedHead) && (
-              <span
-                className="ml-auto inline-flex min-w-0 items-center justify-end gap-1.5 px-2.5"
-                title={isolationBranch ?? 'HEAD is not on a branch'}
-              >
-                <GitBranch size={13} className="shrink-0" aria-hidden="true" />
-                <span className="sr-only">Branch: </span>
-                <span className="truncate">{isolationBranch ?? 'Detached HEAD'}</span>
-              </span>
-            )}
-          </div>
-        )}
+        {!isMobileShell && <ChatContextStrip session={session} />}
       </div>
     </div>
   )

@@ -5,15 +5,27 @@ import { reconcileProjectWorktrees, worktreeKey } from '@/lib/worktree-reconcile
 import { useProjectStore } from '@/stores/project-store'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 
-/** Isolation mode selected in the launcher context strip. */
-export type LaunchIsolationMode = 'current' | 'worktree'
+/**
+ * Workspace chip mode selected in the launcher context strip: the current
+ * checkout, an already-listed worktree, or a new chat worktree.
+ */
+export type LaunchIsolationMode = 'current' | 'existing' | 'worktree'
+
+/** What the composer persists: an existing-worktree launch is a read, so it
+ * persists as the current checkout and never pins a worktree preference. */
+export function persistedIsolationMode(mode: LaunchIsolationMode): 'current' | 'worktree' {
+  return mode === 'worktree' ? 'worktree' : 'current'
+}
 
 export interface PrepareLaunchWorktreeInput {
   isolationMode: LaunchIsolationMode
-  canUseWorktree: boolean
-  baseBranch: string | null
+  /** Needed for `'worktree'`; an `'existing'` launch is a read and ignores it. */
+  canUseWorktree?: boolean
+  baseBranch?: string | null
   projectRoot: string
   projectId: string
+  /** `Worktree.id` of the listed worktree an `'existing'` launch runs in. */
+  existingWorktreeId?: string | null
   /**
    * Correlation id for the in-timeline worktree-creation progress card. When
    * set, git's `worktree add` stderr lines stream into
@@ -30,8 +42,31 @@ export interface PrepareLaunchWorktreeResult {
 }
 
 /**
- * Create and register a launch worktree when New worktree is selected.
- * Local mode returns the project root unchanged.
+ * The listed worktree an Existing-worktree launch runs in. A read: no network,
+ * no reconcile, no progress card and no Workspace-switcher pick write.
+ */
+function resolveExistingWorktree(
+  projectId: string,
+  worktreeId: string | null | undefined
+): PrepareLaunchWorktreeResult {
+  const worktree = useProjectStore
+    .getState()
+    .projects.find((p) => p.id === projectId)
+    ?.worktrees?.find((w) => w.id === worktreeId)
+  if (!worktree || worktree.outsideProjectRoot === true) {
+    throw new Error('That worktree is no longer available.')
+  }
+  return {
+    launchCwd: worktree.path,
+    worktreePath: worktree.path,
+    worktreeBranch: worktree.branch
+  }
+}
+
+/**
+ * Create and register a launch worktree when New worktree is selected, or
+ * resolve the listed worktree when Existing worktree is selected. Current
+ * checkout mode returns the project root unchanged.
  *
  * CAP-3: the isolated worktree exists before the chat opens so the agent cwd
  * is the worktree path from the first turn. Branch is `chat/{id}`
@@ -41,6 +76,9 @@ export async function prepareLaunchWorktree(
   input: PrepareLaunchWorktreeInput
 ): Promise<PrepareLaunchWorktreeResult> {
   const { isolationMode, canUseWorktree, baseBranch, projectRoot, projectId } = input
+  if (isolationMode === 'existing') {
+    return resolveExistingWorktree(projectId, input.existingWorktreeId)
+  }
   if (isolationMode !== 'worktree' || !canUseWorktree) {
     return { launchCwd: projectRoot }
   }
