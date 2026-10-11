@@ -147,3 +147,35 @@ describe('useWorktreeShortcuts: switcher pick', () => {
     expect(pick()).toBeUndefined()
   })
 })
+
+describe('useWorktreeShortcuts: default bindings', () => {
+  beforeEach(() => {
+    // Defaults only: no custom keys, so the shipped key strings are what fire.
+    useKeyboardShortcutsStore.getState().resetAllShortcuts()
+  })
+
+  it('Ctrl+Shift+Down / Up / Home drive the pick with the default bindings', () => {
+    renderHook(() => useWorktreeShortcuts())
+    setPick(null)
+
+    next()
+    expect(pick()).toBe('e:/p/.termul/worktrees/a')
+    next()
+    expect(pick()).toBe('e:/p/.termul/worktrees/b')
+    prev()
+    expect(pick()).toBe('e:/p/.termul/worktrees/a')
+    root()
+    expect(pick()).toBeUndefined()
+  })
+
+  it('a binding saved in the legacy downarrow spelling still fires', () => {
+    useKeyboardShortcutsStore
+      .getState()
+      .updateShortcut('worktreeSwitchNext', 'ctrl+shift+downarrow')
+    renderHook(() => useWorktreeShortcuts())
+    setPick(null)
+
+    next()
+    expect(pick()).toBe('e:/p/.termul/worktrees/a')
+  })
+})
