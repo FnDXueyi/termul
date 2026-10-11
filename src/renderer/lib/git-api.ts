@@ -34,15 +34,18 @@ export const gitApi = {
   unstage: (cwd: string, path: string) =>
     isTauriContext() ? invoke<void>('git_unstage', { cwd, path }) : webServerGit.unstage(cwd, path),
 
-  // Per-hunk stage/unstage (#257). Desktop-only for now; web parity
-  // (webServerGit.stageHunk) is a follow-up once the web GitPanel renders
-  // the hunk actions. `hunkPatch` is a single-hunk unified-diff fragment;
-  // the backend applies it via `git apply --cached [--reverse]`.
+  // Per-hunk stage/unstage (#257). `hunkPatch` is a single-hunk unified-diff
+  // fragment; the backend applies it via `git apply --cached [--reverse]`.
+  // Web/remote posts `/git/stage-hunk` | `/git/unstage-hunk`.
   stageHunk: (cwd: string, path: string, hunkPatch: string) =>
-    invoke<void>('git_stage_hunk', { cwd, path, hunkPatch }),
+    isTauriContext()
+      ? invoke<void>('git_stage_hunk', { cwd, path, hunkPatch })
+      : webServerGit.stageHunk(cwd, path, hunkPatch),
 
   unstageHunk: (cwd: string, path: string, hunkPatch: string) =>
-    invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch }),
+    isTauriContext()
+      ? invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch })
+      : webServerGit.unstageHunk(cwd, path, hunkPatch),
 
   discard: (cwd: string, path: string) =>
     isTauriContext() ? invoke<void>('git_discard', { cwd, path }) : webServerGit.discard(cwd, path),
