@@ -1,16 +1,13 @@
 import { ChevronDown, ChevronRight, Folder, MoreHorizontal } from '@/components/icons'
-import { ProjectIcon } from '@/components/ProjectIcon'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { getColorClasses } from '@/lib/colors'
 import { cn } from '@/lib/utils'
-import type { Project, ProjectGroup } from '@/types/project'
+import type { ProjectGroup } from '@/types/project'
 
 export interface RailGroupRowProps {
   group: ProjectGroup
-  /** First project of the group: its icon stands for the group at rest. */
-  leadProject?: Project
   isCollapsed: boolean
   isDragOver: boolean
   isEditing: boolean
@@ -27,15 +24,14 @@ export interface RailGroupRowProps {
 const HOVER_REVEAL = 'group-hover:inline-flex group-focus-within:inline-flex'
 
 /**
- * Group row of the shell Rail. At rest the icon column shows the group's first
- * project icon (else a folder); on hover or focus it becomes a chevron and a
+ * Group row of the shell Rail. At rest the icon column shows the group's folder
+ * icon (in the group colour); on hover or focus it becomes a chevron and a
  * `…` button appears at the end. An expanded group keeps its chevron. The row
  * is a button that toggles the group; the `…` button opens the same menu as a
  * right-click, so nothing is hover-only.
  */
 export function RailGroupRow({
   group,
-  leadProject,
   isCollapsed,
   isDragOver,
   isEditing,
@@ -107,16 +103,12 @@ export function RailGroupRow({
                     isCollapsed ? 'group-hover:hidden group-focus-within:hidden' : 'hidden'
                   )}
                 >
-                  {leadProject ? (
-                    <ProjectIcon project={leadProject} size={16} />
-                  ) : (
-                    <Folder
-                      size={16}
-                      className={
-                        group.color ? getColorClasses(group.color).text : 'text-muted-foreground'
-                      }
-                    />
-                  )}
+                  <Folder
+                    size={16}
+                    className={
+                      group.color ? getColorClasses(group.color).text : 'text-muted-foreground'
+                    }
+                  />
                 </span>
                 <span
                   data-rail-group-chevron
