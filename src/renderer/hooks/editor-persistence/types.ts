@@ -1,3 +1,4 @@
+import type { PersistedWorkspaceTabKind } from '@/lib/workspace-tab-kinds'
 import type { PaneDirection } from '@/types/workspace.types'
 
 export interface PersistedEditorFile {
@@ -52,6 +53,15 @@ export type PersistedTabRef =
   | PersistedGitTabRef
   | PersistedAgentChatTabRef
   | PersistedGitHistoryTabRef
+
+// Compile-time check: the persisted ref union must cover exactly the kinds the
+// traits table declares as persisted (a mismatch makes this assignment error).
+type AssertTypesEqual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never
+const _persistedTabRefKindsMatchTraits: AssertTypesEqual<
+  PersistedTabRef['type'],
+  PersistedWorkspaceTabKind
+> = true
+void _persistedTabRefKindsMatchTraits
 
 interface PersistedLeafNode {
   type: 'leaf'

@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { requestCloseAgentChat } from '@/hooks/use-agent-idle-shutdown'
 import { returnToWorkspaceRoute } from '@/lib/workspace-route'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useCanvasStore } from '@/stores/canvas-store'
 import { getAllLeafPanes, useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace-store'
@@ -133,7 +134,14 @@ export function useMobileTabActions({
         useWorkspaceStore.getState().removeTab(tab.id)
         return false
       }
-      useWorkspaceStore.getState().removeTab(tab.id)
+      if (tab.type === 'git' || tab.type === 'git-history') {
+        useWorkspaceStore.getState().removeTab(tab.id)
+        return false
+      }
+      // Exhaustiveness guard: `tab` is `never` here. An unrecognised kind is
+      // still removed so a close never leaves a stuck tab behind.
+      reportUnknownTabKind(tab, 'useMobileTabActions.closePaneTab', 'closed without teardown')
+      useWorkspaceStore.getState().removeTab((tab as WorkspaceTab).id)
       return false
     },
     [onCloseTerminal, onCloseEditorTab]
