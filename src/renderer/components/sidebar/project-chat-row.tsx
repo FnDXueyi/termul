@@ -13,8 +13,12 @@ import { cn } from '@/lib/utils'
 
 export type ProjectChatEntry = ChatHistorySidebarEntry
 
-/** Live state of one chat row: a turn is in progress, the chat waits on you, or neither. */
-export type ProjectChatLiveState = 'running' | 'needs-you' | 'idle'
+/**
+ * Live state of one chat row: a turn is in progress, the chat waits on you, or
+ * neither. `done` (a turn finished unseen) is passed only by the shell Chats
+ * list; the classic row never does.
+ */
+export type ProjectChatLiveState = 'running' | 'needs-you' | 'done' | 'idle'
 
 export interface ProjectChatRowProps {
   entry: ProjectChatEntry
@@ -27,8 +31,8 @@ export interface ProjectChatRowProps {
   onDelete: (entry: ProjectChatEntry) => void
 }
 
-/** Right slot of a chat row: running spinner, needs-you, or relative last-activity time. */
-function ChatRowTrail({
+/** Right slot of a chat row: running spinner, needs-you, done dot, or relative last-activity time. */
+export function ChatRowTrail({
   liveState,
   lastActivityAt
 }: {
@@ -47,6 +51,13 @@ function ChatRowTrail({
         <span className="flex shrink-0 items-center gap-1 text-3xs font-medium text-warning">
           <span aria-hidden="true" className="size-1.5 rounded-full bg-warning" />
           Needs you
+        </span>
+      )
+    case 'done':
+      return (
+        <span className="flex shrink-0 items-center">
+          <span aria-hidden="true" className="size-2 rounded-full bg-primary-fill" />
+          <span className="sr-only">New activity</span>
         </span>
       )
     case 'idle':
