@@ -1,11 +1,13 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mockPersistedTerminal, mockTerminal } from '@/lib/test-utils/terminal'
+import { useAcpStore } from '@/stores/acp-store'
 import {
   _resetDroppedLaunchPlaceholdersForTesting,
   setLiveLaunchSessionLookup,
   takeAllDroppedLaunchPlaceholders
 } from '@/stores/acp-store/live-turn'
+import { seedSession } from '@/stores/acp-store/testkit'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'
 import {
@@ -1019,6 +1021,62 @@ describe('useEditorPersistence', () => {
     expect(takeAllDroppedLaunchPlaceholders()).toEqual([])
   })
 
+  it('judges chat ownership with the session index that lands during the terminal-layout read', async () => {
+    const initialIndex = useAcpStore.getState().sessionIndex
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        openFiles: [],
+        activeFilePath: null,
+        expandedDirs: [],
+        activeTabId: null,
+        paneLayout: {
+          type: 'leaf',
+          id: 'legacy-leaf',
+          tabs: [
+            { type: 'agent-chat', id: 'chat-s-foreign', sessionId: 's-foreign' },
+            { type: 'agent-chat', id: 'chat-s-unknown', sessionId: 's-unknown' }
+          ],
+          activeTabId: 'chat-s-foreign'
+        }
+      }
+    })
+    mockGetManifest.mockResolvedValue({ success: true, data: null })
+    // The index (proving s-foreign belongs to project-b) loads mid-restore.
+    mockLoadPersistedTerminals.mockImplementation(async () => {
+      useAcpStore.setState({
+        sessionIndex: [
+          {
+            id: 's-foreign',
+            agentId: 'agent-1',
+            title: 's-foreign',
+            cwd: '/work',
+            projectId: 'project-b',
+            createdAt: 1,
+            lastActivityAt: 2,
+            messageCount: 1,
+            status: 'closed'
+          }
+        ]
+      })
+      return null
+    })
+
+    try {
+      renderHook(() => useEditorPersistence('project-a'))
+
+      await waitFor(() => {
+        expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      })
+      const tree = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]?.[0] as PaneNode
+      if (tree.type !== 'leaf') throw new Error('expected leaf')
+      expect(tree.tabs.map((tab) => tab.id)).toEqual(['chat-s-unknown'])
+      expect(tree.activeTabId).toBe('chat-s-unknown')
+    } finally {
+      useAcpStore.setState({ sessionIndex: initialIndex })
+    }
+  })
+
   // P9: the restore flow sets setManifestRestoreInProgress(projectId, true)
   // before the manifest load and (projectId, false) in the finally.
   it('sets manifestRestoreInProgress true on entry and false in finally', async () => {
@@ -1093,6 +1151,102 @@ describe('deserializePaneTree agent-chat restore (story 5)', () => {
     expect(tree.activeTabId).toBe('chat-sess-1')
   })
 
+  describe('project ownership', () => {
+    const indexEntry = (id: string, projectId: string) => ({
+      id,
+      agentId: 'agent-1',
+      title: id,
+      cwd: '/work',
+      projectId,
+      createdAt: 1,
+      lastActivityAt: 2,
+      messageCount: 1,
+      status: 'closed' as const
+    })
+    const initialAcp = useAcpStore.getState()
+    afterEach(() => {
+      useAcpStore.setState({
+        sessions: initialAcp.sessions,
+        messages: initialAcp.messages,
+        sessionIndex: initialAcp.sessionIndex
+      })
+    })
+
+    it('drops chat tabs known to belong to another project (incl. nested splits) and repairs activeTabId', () => {
+      useAcpStore.setState({
+        sessionIndex: [indexEntry('s-own', 'p1'), indexEntry('s-foreign', 'p2')]
+      })
+      const tree = deserializePaneTree(
+        {
+          type: 'split',
+          id: 'split-1',
+          direction: 'horizontal',
+          sizes: [50, 50],
+          children: [
+            {
+              type: 'leaf',
+              id: 'pane-1',
+              activeTabId: 'chat-s-foreign',
+              tabs: [
+                { type: 'agent-chat', id: 'chat-s-foreign', sessionId: 's-foreign' },
+                { type: 'agent-chat', id: 'chat-s-own', sessionId: 's-own' }
+              ]
+            },
+            {
+              type: 'leaf',
+              id: 'pane-2',
+              activeTabId: 'chat-s-foreign-2',
+              tabs: [{ type: 'agent-chat', id: 'chat-s-foreign-2', sessionId: 's-foreign' }]
+            }
+          ]
+        },
+        'p1'
+      )
+      expect(tree.type).toBe('split')
+      if (tree.type !== 'split') return
+      const [left, right] = tree.children
+      if (left.type !== 'leaf' || right.type !== 'leaf') throw new Error('expected leaves')
+      expect(left.tabs).toEqual([{ type: 'agent-chat', id: 'chat-s-own', sessionId: 's-own' }])
+      expect(left.activeTabId).toBe('chat-s-own')
+      expect(right.tabs).toEqual([])
+      expect(mockLogFrontendError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warn',
+          source: 'useEditorPersistence.deserializePaneTree',
+          message: expect.stringContaining('foreign-project chat tab (session s-foreign)')
+        })
+      )
+    })
+
+    it('keeps chat tabs with unknown ownership, empty-owner stubs, and when no projectId is given', () => {
+      // `session_created` stub: live record not yet attributed to a project.
+      seedSession('s-stub', 'agent-1', false)
+      useAcpStore.setState((s) => ({
+        sessions: { 's-stub': { ...s.sessions['s-stub'], projectId: '' } },
+        sessionIndex: [indexEntry('s-stub', ''), indexEntry('s-foreign', 'p2')]
+      }))
+      const layout = {
+        type: 'leaf' as const,
+        id: 'pane-1',
+        activeTabId: null,
+        tabs: [
+          { type: 'agent-chat' as const, id: 'chat-s-unknown', sessionId: 's-unknown' },
+          { type: 'agent-chat' as const, id: 'chat-s-stub', sessionId: 's-stub' }
+        ]
+      }
+      const tree = deserializePaneTree(layout, 'p1')
+      if (tree.type !== 'leaf') throw new Error('expected leaf')
+      expect(tree.tabs.map((t) => t.id)).toEqual(['chat-s-unknown', 'chat-s-stub'])
+
+      const unscoped = deserializePaneTree({
+        ...layout,
+        tabs: [{ type: 'agent-chat', id: 'chat-s-foreign', sessionId: 's-foreign' }]
+      })
+      if (unscoped.type !== 'leaf') throw new Error('expected leaf')
+      expect(unscoped.tabs.map((t) => t.id)).toEqual(['chat-s-foreign'])
+    })
+  })
+
   it('repairs a dangling activeTabId when the active tab was a dropped launch-* corpse', () => {
     const tree = deserializePaneTree({
       type: 'leaf',
@@ -1107,5 +1261,108 @@ describe('deserializePaneTree agent-chat restore (story 5)', () => {
     if (tree.type !== 'leaf') return
     expect(tree.tabs).toHaveLength(1)
     expect(tree.activeTabId).toBe('chat-sess-1')
+  })
+})
+
+describe('unrecognised persisted tab kinds (E4a)', () => {
+  const unknownTab = (extra: Record<string, unknown> = {}) =>
+    ({ type: 'future-kind', id: 'future-1', secretPayload: 'do-not-log', ...extra }) as never
+
+  const warnMessages = () =>
+    mockLogFrontendError.mock.calls
+      .map((call) => call[0] as { level?: string; message: string })
+      .filter((payload) => payload.level === 'warn')
+
+  it('drops an unknown kind on restore without coercing it into a terminal tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'edit-/a.ts',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    expect(tree.tabs).toEqual([{ type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' }])
+    expect(tree.tabs.some((tab) => tab.type === 'terminal')).toBe(false)
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('"future-kind"')
+    expect(warns[0].message).not.toContain('do-not-log')
+  })
+
+  it('repairs activeTabId when it pointed at the dropped unknown tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.activeTabId).toBe('edit-/a.ts')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('falls activeTabId to null when the unknown tab was the only one', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab()]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    expect(tree.activeTabId).toBeNull()
+  })
+
+  it('drops a ref with a missing type and reports the kind as undefined', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{} as never]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('undefined')
+  })
+
+  it('truncates an overlong kind in the log', () => {
+    deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{ type: 'x'.repeat(500) } as never]
+    })
+    const [warn] = warnMessages()
+    expect(warn.message.length).toBeLessThan(200)
+  })
+
+  it('reconcileTerminalTabs drops an unknown kind with one warn and repairs activeTabId', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'git', id: 'git-1', cwd: '/repo' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([{ type: 'git', id: 'git-1', cwd: '/repo' }])
+    expect(result.activeTabId).toBe('git-1')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('reconcileTerminalTabs drops canvas tabs silently', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'canvas-1',
+      tabs: [{ type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([])
+    expect(warnMessages()).toHaveLength(0)
   })
 })

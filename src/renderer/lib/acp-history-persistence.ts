@@ -66,6 +66,13 @@ export interface SessionIndexEntry {
   worktreePath?: string
   worktreeBranch?: string
   /**
+   * Host-recorded current model id + display-name snapshot (CAP-3). Additive:
+   * absent on old entries and on discovered/imported sessions. Read-only on the
+   * renderer — the host (`SessionPersistence`) is the sole writer.
+   */
+  modelId?: string
+  modelName?: string
+  /**
    * Ordered agent-config ids this conversation ran with (story 3 /
    * spec-in-chat-agent-switch): first = original, last = current. Additive
    * derived cache — absent on unswitched chats (readers fall back to
@@ -316,7 +323,9 @@ export function toPersistedSessionSummaries(
     lastSeq: entry.lastSeq ?? 0,
     resumeEligible: Boolean(entry.agentConfigId || entry.agentId),
     worktreePath: entry.worktreePath,
-    worktreeBranch: entry.worktreeBranch
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
   }))
 }
 
@@ -373,7 +382,7 @@ export function scopeSessionIndex(
   // exact-cwd match, a session whose cwd is one of the active project's
   // registered worktree paths stays listed. This keeps a worktree chat
   // reachable from the project root view and across restarts where
-  // `activeWorktreeId` is null (the sidebar would otherwise hide it because
+  // no worktree is picked (the sidebar would otherwise hide it because
   // its cwd differs from the root). Falls back to projectId-only matching when
   // the scoped set is empty, preserving the prior drift-tolerant behavior.
   //
@@ -442,7 +451,9 @@ export function fromPersistedSessionSummary(entry: PersistedSessionSummary): Ses
       entry.discovered ??
       (entry.messageCount === 0 && entry.toolCount === 0 && entry.lastSeq === 0),
     worktreePath: entry.worktreePath,
-    worktreeBranch: entry.worktreeBranch
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
   }
 }
 
@@ -740,9 +751,13 @@ export async function loadSessionPayloadTail(
     return {
       ...cached,
       messages: cached.messages.slice(tailStart),
+      // Restored file-change summaries are whole-session (the host keeps
+      // them all in tail payloads too) — never window them out.
       toolCalls: cached.toolCalls?.filter(
         (tc) =>
-          typeof tc.seq !== 'number' || tc.seq >= (cached.messages[tailStart]?.seq ?? Infinity)
+          tc.restoredSummary === true ||
+          typeof tc.seq !== 'number' ||
+          tc.seq >= (cached.messages[tailStart]?.seq ?? Infinity)
       ),
       // CAP-2: retain switches inside the tail window (mirrors the
       // toolCalls rule) — a switch older than the window belongs to

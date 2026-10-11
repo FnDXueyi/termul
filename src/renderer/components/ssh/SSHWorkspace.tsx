@@ -1,17 +1,25 @@
 import type { SSHProfile } from '@shared/types/ssh.types'
 import { Terminal, WifiOff } from '@/components/icons'
+import { WindowControls } from '@/components/shell/TopRowChrome'
 import { ConnectedTerminal } from '@/components/terminal/ConnectedTerminal'
 import { Button } from '@/components/ui/button'
 import type { useSSHConnection } from '@/hooks/use-ssh-connection'
+import { cn } from '@/lib/utils'
 import { useSSHEditorFile } from '@/stores/ssh-store'
 import { SSHFileEditor } from './SSHFileEditor'
 
 interface SSHWorkspaceProps {
   profile: SSHProfile
   conn: ReturnType<typeof useSSHConnection>
+  /**
+   * Flagged shell only: the header is the window top row. `dragRegion` marks
+   * its empty space as a window drag region; `windowControls` renders the
+   * window controls flush at its right end. Unset = classic header.
+   */
+  topRow?: { dragRegion: boolean; windowControls: boolean }
 }
 
-export function SSHWorkspace({ profile, conn }: SSHWorkspaceProps): React.JSX.Element {
+export function SSHWorkspace({ profile, conn, topRow }: SSHWorkspaceProps): React.JSX.Element {
   const editingFile = useSSHEditorFile()
 
   return (
@@ -19,7 +27,13 @@ export function SSHWorkspace({ profile, conn }: SSHWorkspaceProps): React.JSX.El
       {/* Right: Terminal + Editor area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <div className="h-9 flex items-center justify-between px-3 border-b border-border">
+        <div
+          className={cn(
+            'flex items-center border-b border-border',
+            topRow ? 'h-10 pl-3' : 'h-9 justify-between px-3'
+          )}
+          data-tauri-drag-region={topRow?.dragRegion ? true : undefined}
+        >
           <div className="flex items-center gap-2">
             <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-xs font-medium">SSH: {profile.name}</span>
@@ -40,7 +54,13 @@ export function SSHWorkspace({ profile, conn }: SSHWorkspaceProps): React.JSX.El
               </span>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          {topRow && (
+            <div
+              className="h-full min-w-0 flex-1"
+              data-tauri-drag-region={topRow.dragRegion ? true : undefined}
+            />
+          )}
+          <div className={cn('flex items-center gap-1', topRow && 'pr-3')}>
             {conn.isConnected || conn.localTerminalPtyId ? (
               <Button
                 type="button"
@@ -64,6 +84,7 @@ export function SSHWorkspace({ profile, conn }: SSHWorkspaceProps): React.JSX.El
               </Button>
             )}
           </div>
+          {topRow?.windowControls && <WindowControls windowControls />}
         </div>
 
         {/* Content area */}

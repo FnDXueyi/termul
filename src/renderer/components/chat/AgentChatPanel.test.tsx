@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { commandToken } from '@/lib/skill-tokens'
@@ -40,7 +40,19 @@ const {
   timelineCallCountRef,
   chatMessageListPropsRef,
   pendingBrowserConsentsRef,
-  browserConsentCardPropsRef
+  browserConsentCardPropsRef,
+  mobileRef,
+  pendingPermissionsRef,
+  pendingQuestionsRef,
+  pendingElicitationsRef,
+  plansRef,
+  planPanelPropsRef,
+  askQuestionPropsRef,
+  elicitationPropsRef,
+  openGitSheetRef,
+  denialNoticesRef,
+  errorNoticeCallsRef,
+  permissionPromptPropsRef
 } = vi.hoisted(() => ({
   mockOpen: vi.fn(),
   mockOpenDiscovered: vi.fn(),
@@ -98,7 +110,14 @@ const {
   // Story 5.3 (AC1/AC3): test seams for OSK + reconnect overlay.
   oskRef: { current: { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 } },
   transportReconnectingRef: { current: false },
-  changedFilesPanelPropsRef: { current: [] as Array<{ cwd: string; toolCalls: unknown[] }> },
+  changedFilesPanelPropsRef: {
+    current: [] as Array<{
+      cwd: string
+      toolCalls: unknown[]
+      forceCollapsed?: boolean
+      onOpenGitChanges?: (opener: HTMLElement) => void
+    }>
+  },
   discoveredContextRef: {
     current: {} as Record<string, { agentId: string; cwd: string; projectId: string }>
   },
@@ -122,9 +141,14 @@ const {
   // so tests can assert hidden panels skip per-flush work.
   timelineCallCountRef: { current: { build: 0, consolidate: 0 } },
   // Latest ChatMessageList props per render (onRetry drives the live-turn
-  // retry wire rebuild; items asserts the worktree-row injection).
+  // retry wire rebuild; items asserts the worktree-row injection;
+  // filePathContext asserts the web/desktop open-in-editor parity).
   chatMessageListPropsRef: {
-    current: null as { onRetry?: () => void; items?: unknown[] } | null
+    current: null as {
+      onRetry?: () => void
+      items?: unknown[]
+      filePathContext?: { cwd?: string; projectRoot?: string }
+    } | null
   },
   // CAP-5: seedable browser-consent map so the panel's per-session filter can
   // be asserted (the pending card belongs to THIS panel's session only).
@@ -134,6 +158,34 @@ const {
   // CAP-5: latest BrowserConsentCard props per render.
   browserConsentCardPropsRef: {
     current: null as { consent?: { requestId: string; sessionId: string } } | null
+  },
+  // Mobile dock: `useMobileWebShell()` answer (default true, as before) and
+  // seedable approval / plan state + captured child props for the wiring tests.
+  mobileRef: { current: true },
+  pendingPermissionsRef: { current: {} as Record<string, object> },
+  pendingQuestionsRef: { current: {} as Record<string, object> },
+  pendingElicitationsRef: { current: {} as Record<string, object> },
+  plansRef: { current: {} as Record<string, object[]> },
+  planPanelPropsRef: {
+    current: [] as Array<{ defaultCollapsed?: boolean; forceCollapsed?: boolean }>
+  },
+  askQuestionPropsRef: { current: [] as Array<{ autoFocusFirstOption?: boolean }> },
+  elicitationPropsRef: { current: [] as Array<{ autoFocusHeading?: boolean }> },
+  openGitSheetRef: { current: vi.fn() },
+  // L-09: the store's denied-by-disconnect notices (keyed by session id), every
+  // ChatErrorNotice render in order (the panel mounts the denial line right
+  // before the session error line, so each panel render pushes the pair
+  // [denial, error]), and the props the morph branch hands PermissionPrompt.
+  denialNoticesRef: { current: {} as Record<string, { requestId: string; tool: string }> },
+  errorNoticeCallsRef: {
+    current: [] as Array<{
+      message: string | null
+      onRetry?: () => void
+      onDismiss: () => void
+    }>
+  },
+  permissionPromptPropsRef: {
+    current: [] as Array<{ isVisible?: boolean; embedded?: boolean }>
   }
 }))
 
@@ -169,10 +221,11 @@ vi.mock('@/stores/acp-store', () => {
     agentSwitches: agentSwitchesRef.current,
     agentConfigs: agentConfigsRef.current,
     toolCalls: toolCallsRef.current,
-    plans: {},
-    pendingPermissions: {},
-    pendingQuestions: {},
-    pendingElicitations: {},
+    plans: plansRef.current,
+    pendingPermissions: pendingPermissionsRef.current,
+    pendingQuestions: pendingQuestionsRef.current,
+    pendingElicitations: pendingElicitationsRef.current,
+    permissionDenialNotices: denialNoticesRef.current,
     pendingBrowserConsents: pendingBrowserConsentsRef.current,
     // The panel's gate selects `s.messages[sessionId]`; the legacy
     // useAcpMessages mock serves one flat list for ANY session, so the map
@@ -265,7 +318,12 @@ vi.mock('@/hooks/use-osk-viewport', () => ({
   useOskViewport: () => oskRef.current
 }))
 vi.mock('@/hooks/use-mobile-web-shell', () => ({
-  useMobileWebShell: () => true
+  useMobileWebShell: () => mobileRef.current
+}))
+vi.mock('@/stores/git-sheet-store', () => ({
+  useGitSheetStore: (
+    sel: (s: { openGitSheet: (cwd?: string, opener?: HTMLElement | null) => void }) => unknown
+  ) => sel({ openGitSheet: (cwd, opener) => openGitSheetRef.current(cwd, opener) })
 }))
 
 // Child components pull in heavy chat rendering; the states under test render
@@ -278,13 +336,20 @@ vi.mock('./ChatErrorNotice', () => ({
     onDismiss: () => void
   }) => {
     errorNoticePropsRef.current = props
+    errorNoticeCallsRef.current.push(props)
     return null
   }
 }))
 vi.mock('./ChatChangedFilesPanel', () => ({
-  ChatChangedFilesPanel: (props: { cwd: string; toolCalls: unknown[] }) => {
+  ChatChangedFilesPanel: (props: {
+    cwd: string
+    toolCalls: unknown[]
+    forceCollapsed?: boolean
+    onOpenGitChanges?: (opener: HTMLElement) => void
+  }) => {
     changedFilesPanelPropsRef.current.push(props)
-    return null
+    // A marker, so the dock tests can assert the bar sits inside the dock wrapper.
+    return <div data-testid="changed-files-stub" />
   }
 }))
 const { chatInputBarPropsRef } = vi.hoisted(() => ({
@@ -300,10 +365,22 @@ const { chatInputBarPropsRef } = vi.hoisted(() => ({
     }>
   }
 }))
+// The stub keeps the real composer-card contract the dock relies on
+// (`data-chat-composer`, `tabIndex=-1`) and renders the embedded permission
+// prompt marker + button, so focus return can be asserted through the panel.
 vi.mock('./ChatInputBar', () => ({
-  ChatInputBar: (props: { isVisible?: boolean }) => {
+  ChatInputBar: (props: { isVisible?: boolean; permission?: { requestId: string } | null }) => {
     chatInputBarPropsRef.current.push(props)
-    return null
+    return (
+      <div data-chat-composer="true" tabIndex={-1} data-testid="composer-stub">
+        {props.permission ? (
+          <section data-approval-prompt={`permission:${props.permission.requestId}`}>
+            <button type="button">Allow once</button>
+          </section>
+        ) : null}
+        <input aria-label="editor" />
+      </div>
+    )
   }
 }))
 vi.mock('./ChatMessageList', () => ({
@@ -312,15 +389,38 @@ vi.mock('./ChatMessageList', () => ({
     return null
   }
 }))
-vi.mock('./PermissionPrompt', () => ({ PermissionPrompt: () => null }))
-vi.mock('./AskUserQuestion', () => ({ AskUserQuestion: () => null }))
+// The three prompt stubs render a marker each (like `composer-stub`) so the dock
+// tests can assert they sit inside the dock wrapper.
+vi.mock('./PermissionPrompt', () => ({
+  PermissionPrompt: (props: { isVisible?: boolean; embedded?: boolean }) => {
+    permissionPromptPropsRef.current.push(props)
+    return <div data-testid="permission-stub" />
+  }
+}))
+vi.mock('./AskUserQuestion', () => ({
+  AskUserQuestion: (props: { autoFocusFirstOption?: boolean }) => {
+    askQuestionPropsRef.current.push(props)
+    return <div data-testid="question-stub" />
+  }
+}))
+vi.mock('./ElicitationPrompt', () => ({
+  ElicitationPrompt: (props: { autoFocusHeading?: boolean }) => {
+    elicitationPropsRef.current.push(props)
+    return <div data-testid="elicitation-stub" />
+  }
+}))
 vi.mock('./BrowserConsentCard', () => ({
   BrowserConsentCard: (props: { consent?: { requestId: string; sessionId: string } }) => {
     browserConsentCardPropsRef.current = props
     return null
   }
 }))
-vi.mock('./PlanPanel', () => ({ PlanPanel: () => null }))
+vi.mock('./PlanPanel', () => ({
+  PlanPanel: (props: { defaultCollapsed?: boolean; forceCollapsed?: boolean }) => {
+    planPanelPropsRef.current.push(props)
+    return null
+  }
+}))
 vi.mock('./chat-timeline', () => {
   return {
     buildTimeline: (
@@ -690,6 +790,118 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
   })
 })
 
+describe('AgentChatPanel permission denial notice (L-09)', () => {
+  const NOTICE = { requestId: 'r1', tool: 'npm test -- auth' }
+  const DENIED =
+    'Permission for npm test -- auth was denied because this device disconnected. Ask the agent to retry.'
+
+  /** The denial line is the first of the two notices each panel render mounts. */
+  const lastDenialLine = () => errorNoticeCallsRef.current.at(-2)
+  const lastErrorLine = () => errorNoticeCallsRef.current.at(-1)
+
+  beforeEach(() => {
+    mobileRef.current = true
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w' })
+    sessionsMapRef.current = {}
+    indexRef.current = []
+    openingRef.current = {}
+    restoringRef.current = {}
+    launchingRef.current = {}
+    discoveredContextRef.current = {}
+    messagesRef.current = []
+    pendingPermissionsRef.current = {}
+    pendingQuestionsRef.current = {}
+    pendingElicitationsRef.current = {}
+    denialNoticesRef.current = {}
+    errorNoticeCallsRef.current = []
+    errorNoticePropsRef.current = null
+  })
+
+  afterEach(() => {
+    mobileRef.current = true
+    denialNoticesRef.current = {}
+  })
+
+  it('shows the denial line for a notice of this panel session, with no Retry', () => {
+    denialNoticesRef.current = { s1: NOTICE }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    expect(lastDenialLine()?.message).toBe(DENIED)
+    expect(lastDenialLine()?.onRetry).toBeUndefined()
+    // The session error line is a separate notice and stays empty.
+    expect(lastErrorLine()?.message).toBeNull()
+  })
+
+  it('does not show the notice of another session', () => {
+    denialNoticesRef.current = { s2: NOTICE }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    expect(lastDenialLine()?.message).toBeNull()
+  })
+
+  it('shows nothing without a notice, and drops the line when the notice is removed', () => {
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastDenialLine()?.message).toBeNull()
+
+    denialNoticesRef.current = { s1: NOTICE }
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastDenialLine()?.message).toBe(DENIED)
+
+    // The store clears it when the next turn starts.
+    denialNoticesRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastDenialLine()?.message).toBeNull()
+  })
+
+  it('keeps the line across unrelated re-renders', () => {
+    denialNoticesRef.current = { s1: NOTICE }
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    messagesRef.current = [{ id: 'm1', role: 'agent', blocks: [{ type: 'text', text: 'hi' }] }]
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    rerender(<AgentChatPanel sessionId="s1" isVisible={false} />)
+
+    expect(lastDenialLine()?.message).toBe(DENIED)
+  })
+
+  it('hides only that notice on Dismiss, and shows a newer denial again', () => {
+    denialNoticesRef.current = { s1: NOTICE }
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    act(() => lastDenialLine()?.onDismiss())
+    expect(lastDenialLine()?.message).toBeNull()
+
+    // The same notice stays hidden through further renders.
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastDenialLine()?.message).toBeNull()
+
+    denialNoticesRef.current = { s1: { requestId: 'r2', tool: 'git push' } }
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastDenialLine()?.message).toBe(
+      'Permission for git push was denied because this device disconnected. Ask the agent to retry.'
+    )
+  })
+
+  it('does not touch the session error line when Dismiss is pressed', () => {
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w', lastError: 'agent said no' })
+    denialNoticesRef.current = { s1: NOTICE }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(lastErrorLine()?.message).toBe('agent said no')
+
+    act(() => lastDenialLine()?.onDismiss())
+
+    expect(lastDenialLine()?.message).toBeNull()
+    expect(lastErrorLine()?.message).toBe('agent said no')
+  })
+
+  it('shows the line on the desktop layout too (the notice is shell-independent)', () => {
+    mobileRef.current = false
+    denialNoticesRef.current = { s1: NOTICE }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    expect(lastDenialLine()?.message).toBe(DENIED)
+  })
+})
+
 describe('AgentChatPanel ChatChangedFilesPanel mounting', () => {
   beforeEach(() => {
     changedFilesPanelPropsRef.current = []
@@ -707,6 +919,41 @@ describe('AgentChatPanel ChatChangedFilesPanel mounting', () => {
     sessionRef.current = mockAcpSession({ id: 's2', cwd: '/w', status: 'closed' })
     render(<AgentChatPanel sessionId="s2" isVisible />)
     expect(changedFilesPanelPropsRef.current.length).toBeGreaterThan(0)
+  })
+})
+
+// Web/desktop parity: `filePathContext` drives the `termul-file-path`
+// open-in-editor links in agent markdown — the open chain (`/fs/info` →
+// `openFile` → `addEditorTab`) is transport-agnostic, so the context must be
+// built on web too (the ChatChangedFilesPanel file-open path is proof it works).
+describe('AgentChatPanel filePathContext parity', () => {
+  beforeEach(() => {
+    chatMessageListPropsRef.current = null
+  })
+
+  afterEach(() => {
+    runtimeState.tauri = false
+  })
+
+  it('builds filePathContext on web (isTauriContext false)', () => {
+    runtimeState.tauri = false
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w', projectId: 'p-unlisted' })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    // No project 'p-unlisted' in the store → projectRoot falls back to cwd.
+    expect(chatMessageListPropsRef.current?.filePathContext).toEqual({
+      cwd: '/w',
+      projectRoot: '/w'
+    })
+  })
+
+  it('builds the same filePathContext on desktop (isTauriContext true)', () => {
+    runtimeState.tauri = true
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w', projectId: 'p-unlisted' })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(chatMessageListPropsRef.current?.filePathContext).toEqual({
+      cwd: '/w',
+      projectRoot: '/w'
+    })
   })
 })
 
@@ -1269,5 +1516,413 @@ describe('AgentChatPanel browser consent card mounting (CAP-5)', () => {
     }
     render(<AgentChatPanel sessionId="s1" isVisible={false} />)
     expect(useConsentCardHost.getState().hostedSessionIds.has('s1')).toBe(false)
+  })
+})
+
+// Mobile chat dock: plan bar, changed-files Git action, approval compaction,
+// arrival focus and focus return, all gated on `useMobileWebShell()`.
+describe('AgentChatPanel mobile dock wiring', () => {
+  const OSK_OPEN = { isOskOpen: true, keyboardHeight: 300, height: 500, offsetTop: 300 }
+
+  const seedPermission = (requestId = 'r1'): void => {
+    pendingPermissionsRef.current = {
+      [requestId]: { requestId, sessionId: 's1', agentId: 'agent-1', options: [], toolCall: {} }
+    }
+  }
+  const seedQuestion = (): void => {
+    pendingQuestionsRef.current = {
+      q1: { questionId: 'q1', sessionId: 's1', agentId: 'agent-1', question: 'Which?', options: [] }
+    }
+  }
+  const seedElicitation = (): void => {
+    pendingElicitationsRef.current = {
+      el1: {
+        requestId: 'el1',
+        sessionId: 's1',
+        agentId: 'agent-1',
+        mode: 'form',
+        message: 'Configure',
+        fields: []
+      }
+    }
+  }
+  const lastPlan = () => planPanelPropsRef.current.at(-1)
+  const lastChangedFiles = () => changedFilesPanelPropsRef.current.at(-1)
+
+  beforeEach(() => {
+    mobileRef.current = true
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/repo/.worktrees/a' })
+    indexRef.current = []
+    openingRef.current = {}
+    restoringRef.current = {}
+    launchingRef.current = {}
+    discoveredContextRef.current = {}
+    messagesRef.current = []
+    oskRef.current = { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 }
+    pendingPermissionsRef.current = {}
+    pendingQuestionsRef.current = {}
+    pendingElicitationsRef.current = {}
+    plansRef.current = {}
+    planPanelPropsRef.current = []
+    changedFilesPanelPropsRef.current = []
+    askQuestionPropsRef.current = []
+    elicitationPropsRef.current = []
+    chatInputBarPropsRef.current = []
+    openGitSheetRef.current = vi.fn()
+  })
+
+  afterEach(() => {
+    mobileRef.current = true
+    pendingPermissionsRef.current = {}
+    pendingQuestionsRef.current = {}
+    pendingElicitationsRef.current = {}
+    oskRef.current = { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 }
+  })
+
+  describe('plan bar and Git action', () => {
+    it('starts the plan collapsed and wires the changed-files Git action to the chat cwd', () => {
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(lastPlan()).toMatchObject({ defaultCollapsed: true, forceCollapsed: false })
+      expect(lastChangedFiles()).toMatchObject({ cwd: '/repo/.worktrees/a', forceCollapsed: false })
+      expect(typeof lastChangedFiles()?.onOpenGitChanges).toBe('function')
+
+      // The tapped Git button is forwarded, so the sheet can return focus to it.
+      const gitButton = document.createElement('button')
+      lastChangedFiles()?.onOpenGitChanges?.(gitButton)
+      expect(openGitSheetRef.current).toHaveBeenCalledTimes(1)
+      expect(openGitSheetRef.current).toHaveBeenCalledWith('/repo/.worktrees/a', gitButton)
+    })
+
+    it('keeps the baseline props on the desktop shell', () => {
+      mobileRef.current = false
+      oskRef.current = OSK_OPEN
+      seedPermission()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(lastPlan()).toMatchObject({ defaultCollapsed: false, forceCollapsed: false })
+      expect(lastChangedFiles()?.forceCollapsed).toBe(false)
+      expect(lastChangedFiles()?.onOpenGitChanges).toBeUndefined()
+    })
+  })
+
+  describe('collapsing the dock bars while the keyboard is up with an approval pending', () => {
+    it.each([
+      ['a permission', seedPermission],
+      ['an elicitation', seedElicitation],
+      ['a question', seedQuestion]
+    ])('forces the plan bar collapsed for %s', (_label, seed) => {
+      oskRef.current = OSK_OPEN
+      seed()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(lastPlan()?.forceCollapsed).toBe(true)
+    })
+
+    it('forces the changed-files bar collapsed too', () => {
+      oskRef.current = OSK_OPEN
+      seedPermission()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(lastChangedFiles()?.forceCollapsed).toBe(true)
+    })
+
+    it('does not collapse without the keyboard, without an approval, or for a closed session', () => {
+      seedPermission()
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(lastPlan()?.forceCollapsed).toBe(false)
+
+      pendingPermissionsRef.current = {}
+      oskRef.current = OSK_OPEN
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(lastPlan()?.forceCollapsed).toBe(false)
+
+      seedPermission()
+      sessionRef.current = mockAcpSession({
+        id: 's1',
+        cwd: '/repo/.worktrees/a',
+        status: 'closed'
+      })
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(lastPlan()?.forceCollapsed).toBe(false)
+    })
+
+    it('does not collapse a hidden pane', () => {
+      oskRef.current = OSK_OPEN
+      seedPermission()
+      render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(lastPlan()?.forceCollapsed).toBe(false)
+    })
+  })
+
+  describe('arrival focus', () => {
+    it('asks a visible mobile question to focus its first option', () => {
+      seedQuestion()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(askQuestionPropsRef.current.at(-1)?.autoFocusFirstOption).toBe(true)
+    })
+
+    it('does not ask a hidden pane, or the desktop shell, to focus a question', () => {
+      seedQuestion()
+      const hidden = render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(askQuestionPropsRef.current.at(-1)?.autoFocusFirstOption).toBe(false)
+      hidden.unmount()
+
+      mobileRef.current = false
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(askQuestionPropsRef.current.at(-1)?.autoFocusFirstOption).toBe(false)
+    })
+
+    it('asks a visible mobile elicitation to focus its heading, and nothing else', () => {
+      seedElicitation()
+      const visible = render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(elicitationPropsRef.current.at(-1)?.autoFocusHeading).toBe(true)
+      visible.unmount()
+
+      render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(elicitationPropsRef.current.at(-1)?.autoFocusHeading).toBe(false)
+    })
+
+    it('does not ask the desktop shell to focus an elicitation heading', () => {
+      mobileRef.current = false
+      seedElicitation()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(elicitationPropsRef.current.at(-1)?.autoFocusHeading).toBe(false)
+    })
+  })
+
+  describe('hidden-pane arrival of a stacked permission', () => {
+    it('forwards isVisible to the PermissionPrompt that stacks with an elicitation or a question', () => {
+      seedPermission()
+      seedElicitation()
+      permissionPromptPropsRef.current = []
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(permissionPromptPropsRef.current.at(-1)).toMatchObject({
+        embedded: false,
+        isVisible: false
+      })
+
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(permissionPromptPropsRef.current.at(-1)).toMatchObject({
+        embedded: false,
+        isVisible: true
+      })
+    })
+
+    it('forwards isVisible to the composer, which mounts the embedded prompt', () => {
+      seedPermission()
+      chatInputBarPropsRef.current = []
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(chatInputBarPropsRef.current.at(-1)?.isVisible).toBe(false)
+
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(chatInputBarPropsRef.current.at(-1)?.isVisible).toBe(true)
+    })
+  })
+
+  describe('focus return when a permission resolves', () => {
+    it('moves focus from the resolved prompt to the composer card on the mobile shell', () => {
+      seedPermission()
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      const allow = screen.getByRole('button', { name: 'Allow once' })
+      act(() => allow.focus())
+      expect(allow).toHaveFocus()
+
+      pendingPermissionsRef.current = {}
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(screen.getByTestId('composer-stub')).toHaveFocus()
+      expect(screen.getByLabelText('editor')).not.toHaveFocus()
+    })
+
+    it('leaves focus in the editor when the user was typing there', () => {
+      seedPermission()
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => screen.getByRole('button', { name: 'Allow once' }).focus())
+      act(() => screen.getByLabelText('editor').focus())
+
+      pendingPermissionsRef.current = {}
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(screen.getByLabelText('editor')).toHaveFocus()
+    })
+
+    it('leaves focus alone when the user tapped away from the prompt before it resolved', () => {
+      // The panel root's onBlur (from useApprovalDock) forgets the prompt focus;
+      // its frame check runs synchronously here.
+      const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+        cb(0)
+        return 1
+      })
+      try {
+        seedPermission()
+        const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+        const allow = screen.getByRole('button', { name: 'Allow once' })
+        act(() => allow.focus())
+        // Tapping a non-focusable area drops focus to <body> with no new target.
+        act(() => allow.blur())
+        expect(document.body).toHaveFocus()
+
+        pendingPermissionsRef.current = {}
+        rerender(<AgentChatPanel sessionId="s1" isVisible />)
+
+        expect(document.body).toHaveFocus()
+        expect(screen.getByTestId('composer-stub')).not.toHaveFocus()
+      } finally {
+        raf.mockRestore()
+      }
+    })
+
+    it('moves no focus on the desktop shell', () => {
+      mobileRef.current = false
+      seedPermission()
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => screen.getByRole('button', { name: 'Allow once' }).focus())
+
+      pendingPermissionsRef.current = {}
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(screen.getByTestId('composer-stub')).not.toHaveFocus()
+      expect(document.body).toHaveFocus()
+    })
+  })
+
+  // The dock wrapper reports its top edge (`--mobile-dock-height`) so the toast
+  // stack clears it. Layout: a plain box on the mobile shell, `display:
+  // contents` on desktop. The rect of the wrapper is stubbed through its
+  // `data-chat-dock` attribute: jsdom lays nothing out.
+  describe('dock clearance', () => {
+    const DOCK_VAR = '--mobile-dock-height'
+    const dockVar = (): string => document.documentElement.style.getPropertyValue(DOCK_VAR)
+    const originalInnerHeight = window.innerHeight
+    let rectSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        writable: true,
+        value: 844
+      })
+      rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: Element
+      ) {
+        const isDock = this.getAttribute('data-chat-dock') === 'true'
+        const top = isDock ? 708 : 0
+        const width = isDock ? 390 : 0
+        const height = isDock ? 136 : 0
+        return {
+          x: 0,
+          y: top,
+          top,
+          left: 0,
+          width,
+          height,
+          right: width,
+          bottom: top + height,
+          toJSON: () => ({})
+        }
+      })
+    })
+
+    afterEach(() => {
+      rectSpy.mockRestore()
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        writable: true,
+        value: originalInnerHeight
+      })
+      document.documentElement.style.removeProperty(DOCK_VAR)
+    })
+
+    const dockOf = (container: HTMLElement): HTMLElement | null =>
+      container.querySelector<HTMLElement>('[data-chat-dock="true"]')
+
+    it('writes the distance to the composer dock top for a visible mobile chat', () => {
+      const { container, unmount } = render(<AgentChatPanel sessionId="s1" isVisible />)
+
+      // The composer and the changed-files bar are the wrapper's children.
+      expect(screen.getByTestId('composer-stub').parentElement).toBe(dockOf(container))
+      expect(dockVar()).toBe('136px')
+
+      unmount()
+      expect(dockVar()).toBe('')
+    })
+
+    it.each([
+      ['a question', seedQuestion],
+      ['an elicitation', seedElicitation]
+    ])('reports the prompt dock too while %s replaces the composer', (_label, seed) => {
+      seed()
+      const { container } = render(<AgentChatPanel sessionId="s1" isVisible />)
+
+      expect(screen.queryByTestId('composer-stub')).toBeNull()
+      expect(dockOf(container)).not.toBeNull()
+      expect(dockVar()).toBe('136px')
+    })
+
+    // The wrapper's rect is only worth measuring if everything that sits on the
+    // dock is inside it: a child outside would be uncounted and a toast could
+    // cover it.
+    it('holds the changed-files bar and the composer in the composer branch', () => {
+      const { container } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      const dock = dockOf(container)
+
+      expect(dock).not.toBeNull()
+      expect(screen.getByTestId('changed-files-stub').closest('[data-chat-dock="true"]')).toBe(dock)
+      expect(screen.getByTestId('composer-stub').closest('[data-chat-dock="true"]')).toBe(dock)
+    })
+
+    it('holds the question, the elicitation and the permission in the prompt branch', () => {
+      seedQuestion()
+      seedElicitation()
+      seedPermission()
+      const { container } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      const dock = dockOf(container)
+
+      expect(dock).not.toBeNull()
+      expect(screen.queryByTestId('composer-stub')).toBeNull()
+      for (const id of ['question-stub', 'elicitation-stub', 'permission-stub']) {
+        expect(screen.getByTestId(id).closest('[data-chat-dock="true"]')).toBe(dock)
+      }
+    })
+
+    it('keeps one wrapper element across the composer and prompt branches', () => {
+      const { container, rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      const dock = dockOf(container)
+      expect(dock).not.toBeNull()
+
+      seedQuestion()
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.queryByTestId('composer-stub')).toBeNull()
+      expect(dockOf(container)).toBe(dock)
+      expect(dockVar()).toBe('136px')
+    })
+
+    it('leaves the property absent for a hidden pane, then writes it once visible', () => {
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(dockVar()).toBe('')
+
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(dockVar()).toBe('136px')
+
+      rerender(<AgentChatPanel sessionId="s1" isVisible={false} />)
+      expect(dockVar()).toBe('')
+    })
+
+    it('leaves the property absent on the desktop shell', () => {
+      mobileRef.current = false
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(dockVar()).toBe('')
+    })
+
+    it('lays the wrapper out as a box on mobile and as display: contents on desktop', () => {
+      const mobile = render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(dockOf(mobile.container)).toHaveClass('flex', 'shrink-0', 'flex-col')
+      expect(dockOf(mobile.container)).not.toHaveClass('contents')
+      mobile.unmount()
+
+      mobileRef.current = false
+      const desktop = render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(dockOf(desktop.container)).toHaveClass('contents')
+      expect(dockOf(desktop.container)).not.toHaveClass('flex')
+    })
   })
 })

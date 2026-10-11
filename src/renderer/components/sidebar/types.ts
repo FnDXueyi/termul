@@ -1,27 +1,11 @@
 import type { Project } from '@/types/project'
 
+/** Target of the "Change Color" popover, opened at the last right-click point. */
 export interface ColorPickerState {
-  isOpen: boolean
   x: number
   y: number
   targetId: string
   targetType: 'project' | 'group'
-}
-
-export interface DeleteConfirmState {
-  isOpen: boolean
-  projectId: string
-  projectName: string
-}
-
-export interface SettingsDialogState {
-  isOpen: boolean
-  projectId: string
-}
-
-export interface NewWorktreeModalState {
-  isOpen: boolean
-  projectId: string
 }
 
 export interface ProjectSidebarProps {
@@ -37,4 +21,10 @@ export interface ProjectSidebarProps {
   onSSHConnect?: (profileId: string) => void
   onSelectSSHProfile?: (profileId: string) => void
   activeSSHProfileId?: string | null
+  /**
+   * `rail` is the shell Rail's Projects section: no chat chevrons or chat
+   * lists, one `+` menu, the diff stat on each row, and no version footer.
+   * Defaults to the classic sidebar.
+   */
+  variant?: 'classic' | 'rail'
 }

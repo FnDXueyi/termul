@@ -2,6 +2,7 @@ import type { GitFileStatus } from '@shared/types/ipc.types'
 import type React from 'react'
 import { GitStatusBadge } from '@/components/git/git-status-badge'
 import { ChevronDown } from '@/components/icons'
+import { WriteGate } from '@/components/ui/write-gate'
 import { cn } from '@/lib/utils'
 
 export function SectionHeader({
@@ -36,30 +37,36 @@ export function SectionAction({
   label,
   onClick,
   disabled,
+  gated,
   variant
 }: {
   icon: React.ReactNode
   label: string
   onClick: () => void
   disabled?: boolean
+  /** Write control on a server that refuses writes: disabled, with the
+      read-only reason exposed on hover and focus. */
+  gated?: boolean
   variant?: 'danger'
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        'flex h-6 w-6 items-center justify-center rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-        variant === 'danger'
-          ? 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
-          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-      )}
-    >
-      {icon}
-    </button>
+    <WriteGate gated={!!gated}>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        disabled={disabled || gated}
+        onClick={onClick}
+        className={cn(
+          'flex h-6 w-6 items-center justify-center rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+          variant === 'danger'
+            ? 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+            : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+        )}
+      >
+        {icon}
+      </button>
+    </WriteGate>
   )
 }
 
@@ -68,6 +75,7 @@ export function RowAction({
   label,
   onClick,
   disabled,
+  gated,
   touch,
   variant
 }: {
@@ -75,6 +83,8 @@ export function RowAction({
   label: string
   onClick: () => void
   disabled?: boolean
+  /** Write control on a server that refuses writes (see `SectionAction`). */
+  gated?: boolean
   /** Story 10: mobile rows pass `touch` — grows the hit area to the 44px
       floor via hit-slop (32px visual + −inset-1.5 ≈ 48×48 tappable);
       desktop rows stay 24×24. */
@@ -88,23 +98,25 @@ export function RowAction({
     onClick()
   }
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={handleClick}
-      className={cn(
-        'flex items-center justify-center rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
-        touch ? 'relative size-8' : 'h-6 w-6',
-        touch && "after:absolute after:-inset-1.5 after:content-['']",
-        variant === 'danger'
-          ? 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
-          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-      )}
-    >
-      {icon}
-    </button>
+    <WriteGate gated={!!gated}>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        disabled={disabled || gated}
+        onClick={handleClick}
+        className={cn(
+          'flex items-center justify-center rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+          touch ? 'relative size-8' : 'h-6 w-6',
+          touch && "after:absolute after:-inset-1.5 after:content-['']",
+          variant === 'danger'
+            ? 'text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+            : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+        )}
+      >
+        {icon}
+      </button>
+    </WriteGate>
   )
 }
 

@@ -1,12 +1,27 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
-import { useSidebarStore } from '@/stores/sidebar-store'
-import { FileExplorerToggleButton, SidebarToggleButton } from './TitlebarPanelToggles'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
+import {
+  FileExplorerToggleButton,
+  SidebarToggleButton,
+  TitleStripTitle
+} from './TitlebarPanelToggles'
 
-const { mockUpdatePanelVisibility, mockToastError } = vi.hoisted(() => ({
+const { mockUpdatePanelVisibility, mockToastError, titleState } = vi.hoisted(() => ({
   mockUpdatePanelVisibility: vi.fn(() => Promise.resolve()),
-  mockToastError: vi.fn()
+  mockToastError: vi.fn(),
+  titleState: {
+    activeProject: null as null | { name: string },
+    activeTab: undefined as undefined | { type: string; filePath?: string }
+  }
+}))
+
+vi.mock('@/stores/project-store', () => ({
+  useActiveProject: () => titleState.activeProject
+}))
+
+vi.mock('@/stores/workspace-store', () => ({
+  useActiveTab: () => titleState.activeTab
 }))
 
 vi.mock('sonner', () => ({
@@ -22,8 +37,8 @@ vi.mock('@/hooks/use-app-settings', () => ({
 describe('TitlebarPanelToggles', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useSidebarStore.setState({ isVisible: true })
-    useFileExplorerStore.setState({ isVisible: true })
+    resetShellLayoutStoreForTests()
+    useShellLayoutStore.setState({ status: 'ready', railExpanded: true, sidePanelVisible: true })
   })
 
   it('toggles sidebar via persistence-aware updater on click', async () => {
@@ -71,8 +86,7 @@ describe('TitlebarPanelToggles', () => {
   })
 
   it('reflects hidden state in label and pressed state when not visible', () => {
-    useSidebarStore.setState({ isVisible: false })
-    useFileExplorerStore.setState({ isVisible: false })
+    useShellLayoutStore.setState({ railExpanded: false, sidePanelVisible: false })
 
     render(
       <>
@@ -86,5 +100,36 @@ describe('TitlebarPanelToggles', () => {
 
     expect(sidebarButton).toHaveAttribute('aria-pressed', 'false')
     expect(explorerButton).toHaveAttribute('aria-pressed', 'false')
+  })
+})
+
+describe('TitleStripTitle', () => {
+  beforeEach(() => {
+    titleState.activeProject = { name: 'termul' }
+    titleState.activeTab = undefined
+  })
+
+  it('renders nothing without an active project', () => {
+    titleState.activeProject = null
+    render(<TitleStripTitle />)
+    expect(screen.queryByTestId('title-strip-title')).toBeNull()
+  })
+
+  it('renders only the project name when the active tab is not an editor', () => {
+    titleState.activeTab = { type: 'terminal' }
+    render(<TitleStripTitle />)
+    expect(screen.getByTestId('title-strip-title')).toHaveTextContent(/^termul$/)
+  })
+
+  it('appends the editor file base name', () => {
+    titleState.activeTab = { type: 'editor', filePath: '/repo/src/StatusBar.tsx' }
+    render(<TitleStripTitle />)
+    expect(screen.getByTestId('title-strip-title')).toHaveTextContent('termul · StatusBar.tsx')
+  })
+
+  it('handles Windows separators', () => {
+    titleState.activeTab = { type: 'editor', filePath: 'C:\\repo\\README.md' }
+    render(<TitleStripTitle />)
+    expect(screen.getByTestId('title-strip-title')).toHaveTextContent('termul · README.md')
   })
 })

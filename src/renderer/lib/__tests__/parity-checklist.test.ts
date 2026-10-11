@@ -1442,6 +1442,70 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
+  // Git hunk staging parity: per-hunk stage/unstage ships on THREE transports
+  // (Tauri `git_stage_hunk`/`git_unstage_hunk`, HTTP `/git/stage-hunk` |
+  // `/git/unstage-hunk`, and the `gitApi` facade branching on
+  // `isTauriContext()`), all reusing the same `git_tracker` functions.
+  describe('Git hunk staging parity', () => {
+    const SrcTauri = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+    const Facade = join(LIB_DIR, 'git-api.ts')
+    const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+    const RouterRust = join(SrcTauri, 'web', 'router.rs')
+    const HunkApiRust = join(SrcTauri, 'web', 'git_hunk_api.rs')
+    const CommandsGitRust = join(SrcTauri, 'commands', 'git.rs')
+    const LibRust = join(SrcTauri, 'lib.rs')
+
+    const ROUTES = ['/git/stage-hunk', '/git/unstage-hunk'] as const
+
+    it('gitApi.stageHunk/unstageHunk branch on isTauriContext() between invoke and webServerGit', () => {
+      const content = readFileSync(Facade, 'utf-8')
+      expect(content).toMatch(
+        /stageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_stage_hunk'[\s\S]*?webServerGit\.stageHunk\(/
+      )
+      expect(content).toMatch(
+        /unstageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_unstage_hunk'[\s\S]*?webServerGit\.unstageHunk\(/
+      )
+      expect(content).not.toMatch(/desktop-only/i)
+    })
+
+    it('webServerGit hits both hunk routes with { cwd, path, hunkPatch }', () => {
+      const content = readFileSync(WebAdapter, 'utf-8')
+      for (const route of ROUTES) {
+        expect(content, `webServerGit should hit ${route}`).toContain(`'${route}'`)
+      }
+      expect(content).toMatch(/async stageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+      expect(content).toMatch(/async unstageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+    })
+
+    it('router.rs registers both hunk routes in BOTH router tables', () => {
+      const content = readFileSync(RouterRust, 'utf-8')
+      for (const route of ROUTES) {
+        const matches = content.match(new RegExp(`"${route}"`, 'g')) ?? []
+        expect(matches.length, `${route} should be registered in both router tables`).toBe(2)
+      }
+    })
+
+    it('git_hunk_api.rs defines both handlers behind the resolve_cwd write guard', () => {
+      expect(existsSync(HunkApiRust), 'git_hunk_api.rs should exist').toBe(true)
+      const content = readFileSync(HunkApiRust, 'utf-8')
+      expect(content).toMatch(/pub async fn stage_hunk\b/)
+      expect(content).toMatch(/pub async fn unstage_hunk\b/)
+      expect(content).toMatch(/resolve_cwd::<\(\)>\([^)]*Some\(peer\),\s*true\)/)
+      expect(content).toMatch(/git_tracker::git_stage_hunk/)
+      expect(content).toMatch(/git_tracker::git_unstage_hunk/)
+      expect(content).toMatch(/classify_hunk_error/)
+    })
+
+    it('desktop Tauri commands exist and stay registered', () => {
+      const commands = readFileSync(CommandsGitRust, 'utf-8')
+      const lib = readFileSync(LibRust, 'utf-8')
+      for (const cmd of ['git_stage_hunk', 'git_unstage_hunk']) {
+        expect(commands).toMatch(new RegExp(`\\bfn ${cmd}\\b`))
+        expect(lib).toMatch(new RegExp(`commands::${cmd}\\b`))
+      }
+    })
+  })
+
   // Filename-search transport parity (issue #848): the @-mention picker's
   // `search_file_names_stream` desktop command gains a web transport — the
   // one-shot `GET /search/file-names` HTTP route reusing the same rg walk.
@@ -1652,33 +1716,24 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/browserTabOpenDevtools/)
     })
 
-    it('ProjectSidebar.tsx handleContextMenu calls stopPropagation so the global trigger does not fire', () => {
+    it('ProjectSidebar.tsx handleRowContextMenu calls stopPropagation so the global trigger does not fire', () => {
       const sidebar = join(LIB_DIR, '..', 'components', 'ProjectSidebar.tsx')
       expect(existsSync(sidebar), 'ProjectSidebar.tsx should exist').toBe(true)
       const content = readFileSync(sidebar, 'utf-8')
-      // The handleContextMenu callback must call both preventDefault and
-      // stopPropagation so the global Radix trigger doesn't double-fire.
-      const handlerMatch = content.match(
-        /handleContextMenu[\s\S]*?useCallback\(([\s\S]*?),\s*\[\]\)/
-      )
-      expect(handlerMatch, 'handleContextMenu callback should exist').not.toBeNull()
+      // One handler serves project and group rows. It must stopPropagation so
+      // the global Radix trigger doesn't double-fire over the sidebar menus.
+      // It must NOT call preventDefault (F1): Radix would skip opening the menu.
+      const handlerMatch = content.match(/handleRowContextMenu = useCallback\(([\s\S]*?),\s*\[\]\)/)
+      expect(handlerMatch, 'handleRowContextMenu callback should exist').not.toBeNull()
       const handler = handlerMatch![1]
-      expect(handler).toMatch(/preventDefault/)
-      expect(handler).toMatch(/stopPropagation/)
+      expect(handler).toMatch(/e\.stopPropagation\(\)/)
+      expect(handler).not.toMatch(/e\.preventDefault\(\)/)
     })
 
-    it('ProjectSidebar.tsx handleGroupContextMenu calls stopPropagation (parity with handleContextMenu)', () => {
+    it('ProjectSidebar.tsx routes project and group rows through handleRowContextMenu', () => {
       const sidebar = join(LIB_DIR, '..', 'components', 'ProjectSidebar.tsx')
       const content = readFileSync(sidebar, 'utf-8')
-      // The group context menu handler must also stopPropagation so the global
-      // Radix trigger doesn't double-fire over the sidebar's group menu.
-      const handlerMatch = content.match(
-        /handleGroupContextMenu[\s\S]*?useCallback\(([\s\S]*?),\s*\[/
-      )
-      expect(handlerMatch, 'handleGroupContextMenu callback should exist').not.toBeNull()
-      const handler = handlerMatch![1]
-      expect(handler).toMatch(/preventDefault/)
-      expect(handler).toMatch(/stopPropagation/)
+      expect(content).toMatch(/onRowContextMenu=\{handleRowContextMenu\}/)
     })
 
     it('FileExplorer.tsx handleContextMenu calls stopPropagation (pre-existing pattern)', () => {
@@ -1847,8 +1902,10 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeCanvas/)
 
       // The workspace store owns the singleton-per-project tab id helper.
-      const workspaceStore = join(LIB_DIR, '..', 'stores', 'workspace-store.ts')
-      expect(readFileSync(workspaceStore, 'utf-8')).toMatch(/export function canvasTabId/)
+      const workspaceStoreTree = join(LIB_DIR, '..', 'stores', 'workspace-store', 'tree.ts')
+      expect(readFileSync(workspaceStoreTree, 'utf-8')).toMatch(/export function canvasTabId/)
+      const workspaceStoreIndex = join(LIB_DIR, '..', 'stores', 'workspace-store', 'index.ts')
+      expect(readFileSync(workspaceStoreIndex, 'utf-8')).toMatch(/canvasTabId/)
     })
 
     it('MCP upsert goes through the serialized acp-store mcp slice (never the persistence key)', () => {
@@ -1937,5 +1994,63 @@ describe('Web FS watcher parity (#856)', () => {
     expect(content).toMatch(/'acp:fs_changed'/)
     // watchDirectory on web is a success no-op (the server owns watching).
     expect(content).toMatch(/isTauriContext\(\)\) \{\s*$/m)
+  })
+})
+
+// Diff stat host operation (CAP-1 project-row +N -M). Source-grep checks pin that
+// one shared Rust function backs the Tauri command AND the web read route, and
+// that the renderer facade reaches both.
+describe('Git diff stat parity (shell revamp story 8)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const GitApiFacade = join(LIB_DIR, 'git-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'git_diff_stat_api.rs')
+  const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'diff_stat.rs')
+  const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+
+  it('git-api.ts branches getDiffStat on isTauriContext() between invoke and webServerGit', () => {
+    const content = readFileSync(GitApiFacade, 'utf-8')
+    expect(content).toMatch(/getDiffStat: async/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    expect(content).toMatch(/invokeIpc<GitDiffStat>\('git_get_diff_stat'/)
+    expect(content).toMatch(/webServerGit\.getDiffStat\(/)
+  })
+
+  it('web-server-api.ts exposes webServerGit.getDiffStat hitting /git/diff-stat', () => {
+    const content = readFileSync(WebAdapter, 'utf-8')
+    expect(content).toMatch(/async getDiffStat\(/)
+    expect(content).toMatch(/\/git\/diff-stat/)
+  })
+
+  it('router.rs registers /git/diff-stat in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = (content.match(/"\/git\/diff-stat"/g) ?? []).length
+    expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+  })
+
+  it('git_diff_stat_api.rs is a READ route through resolve_cwd and the shared service', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/pub async fn get_diff_stat/)
+    // Read path: containment only, no remote-write gate.
+    expect(content).toMatch(/resolve_cwd::<GitDiffStat>\(&req\.cwd, &state, None, false\)/)
+    expect(content).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/spawn_blocking/)
+    expect(content).toMatch(/tracing/)
+  })
+
+  it('the Tauri command is defined and registered in lib.rs over the same shared service', () => {
+    const command = readFileSync(CommandsGitRust, 'utf-8')
+    expect(command).toMatch(/pub async fn git_get_diff_stat/)
+    expect(command).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::git_get_diff_stat,/)
+  })
+
+  it('the shared service returns DiffStatError with a stable code', () => {
+    const content = readFileSync(ServiceRust, 'utf-8')
+    expect(content).toMatch(/pub fn git_get_diff_stat/)
+    expect(content).toMatch(/GIT_DIFF_STAT_ERROR/)
   })
 })

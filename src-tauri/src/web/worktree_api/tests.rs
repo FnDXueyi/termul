@@ -715,3 +715,217 @@ async fn production_router_does_not_swallow_unregistered_path_as_ipcbody() {
         "unregistered /worktree/nonexistent-route must not return an IpcBody JSON, got: {text}"
     );
 }
+
+// ----- Server topologies: launching a chat into an EXISTING worktree is a read -----
+//
+// The renderer write gate (CAP-15 / AD-9) disables "New worktree" on a server
+// that refuses remote writes, but "launch into an existing worktree" must stay
+// available: it only needs `/worktree/list`, which is containment-checked and
+// never loopback-guarded. These tests pin that per host topology.
+
+/// Create a worktree through an admitting (loopback, default) state, then list
+/// it under the topology state `(allow_remote_writes, shared_live_writes_denied)`
+/// from `peer`. Returns the topology state's `/worktree/create` outcome code
+/// (for the write-refusal assertions) after asserting the list succeeded.
+async fn assert_existing_worktree_listed_under(
+    tag: &str,
+    allow_remote_writes: bool,
+    shared_live_writes_denied: bool,
+    peer: SocketAddr,
+) -> Option<String> {
+    let repo = init_repo(tag);
+    let admitting = test_state(
+        repo.path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
+    let created = post_json(
+        admitting.clone(),
+        "/worktree/create",
+        &serde_json::json!({
+            "projectPath": repo.path().to_string_lossy(),
+            "name": "wt-existing",
+            "branch": "chat/wt-existing",
+            "isNewBranch": true
+        }),
+    )
+    .await;
+    let created: IpcBody<GitWorktreeEntry> = body_as(created.into_body()).await;
+    assert!(created.success, "setup create failed: {:?}", created.error);
+    let entry = created.data.expect("created entry");
+
+    let topology = AppState {
+        allow_remote_writes,
+        shared_live_writes_denied,
+        ..admitting
+    };
+
+    // Separator/trailing-slash agnostic compare (Windows reports `/`, create `\`).
+    let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_string();
+
+    // Existing-worktree launch needs the list read: admitted, entry returned.
+    let resp = post_json_from(
+        topology.clone(),
+        "/worktree/list",
+        &serde_json::json!({ "projectPath": repo.path().to_string_lossy() }),
+        peer,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed: IpcBody<Vec<GitWorktreeEntry>> = body_as(resp.into_body()).await;
+    assert!(listed.success, "list must be admitted: {:?}", listed.error);
+    let entries = listed.data.expect("entries");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.branch == "chat/wt-existing" && norm(&e.path) == norm(&entry.path)),
+        "expected the existing worktree {} in {:?}",
+        entry.path,
+        entries
+    );
+
+    // Probe the write route under the same topology.
+    let resp = post_json_from(
+        topology,
+        "/worktree/create",
+        &serde_json::json!({
+            "projectPath": repo.path().to_string_lossy(),
+            "name": "wt-new",
+            "branch": "chat/wt-new",
+            "isNewBranch": true
+        }),
+        peer,
+    )
+    .await;
+    let body: IpcBody<GitWorktreeEntry> = body_as(resp.into_body()).await;
+    if body.success {
+        None
+    } else {
+        Some(body.code.unwrap_or_default())
+    }
+}
+
+#[tokio::test]
+async fn existing_worktree_listed_but_create_refused_on_shared_live() {
+    if git_missing() {
+        return;
+    }
+    // Desktop shared-live: writes denied for every peer, even loopback.
+    let create =
+        assert_existing_worktree_listed_under("topo-shared-live", false, true, loopback()).await;
+    assert_eq!(create.as_deref(), Some("FORBIDDEN"));
+}
+
+#[tokio::test]
+async fn existing_worktree_listed_but_create_refused_on_server_without_opt_in() {
+    if git_missing() {
+        return;
+    }
+    // `termul-server` without `--allow-remote-writes`, LAN peer.
+    let lan = SocketAddr::from(([192, 168, 1, 60], 40010));
+    let create =
+        assert_existing_worktree_listed_under("topo-server-closed", false, false, lan).await;
+    assert_eq!(create.as_deref(), Some("FORBIDDEN"));
+}
+
+#[tokio::test]
+async fn existing_worktree_listed_on_server_with_allow_remote_writes() {
+    if git_missing() {
+        return;
+    }
+    // `termul-server --allow-remote-writes`, LAN peer: the list read is admitted
+    // exactly as in the read-only topologies (writes are admitted here too).
+    let lan = SocketAddr::from(([192, 168, 1, 61], 40011));
+    let create = assert_existing_worktree_listed_under("topo-server-open", true, false, lan).await;
+    assert_ne!(create.as_deref(), Some("FORBIDDEN"));
+}
+
+// ----- Outside-project-folder worktrees (AD-9 / CAP-14) -----
+
+/// Add a worktree for a new branch at `target` (outside the repo).
+fn add_worktree_at(repo: &std::path::Path, target: &std::path::Path, branch: &str) {
+    let out = GitTracker::run_git_command(
+        repo.to_str().unwrap(),
+        &["worktree", "add", "-b", branch, target.to_str().unwrap()],
+    )
+    .expect("git worktree add");
+    assert!(
+        out.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn list_flags_outside_project_root_worktree_instead_of_dropping_it() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("list-outside");
+    let outside = TempDir::new("list-outside-wt");
+    let outside_wt = outside.path().join("elsewhere-wt");
+    add_worktree_at(repo.path(), &outside_wt, "outside-branch");
+
+    let state = test_state(repo.path());
+    let resp = post_json(
+        state,
+        "/worktree/list",
+        &serde_json::json!({ "projectPath": repo.path().to_string_lossy() }),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(json["success"], serde_json::json!(true), "{json}");
+    let rows = json["data"].as_array().expect("data array");
+    let outside_row = rows
+        .iter()
+        .find(|r| r["branch"] == serde_json::json!("outside-branch"))
+        .expect("outside-root worktree must be listed, not filtered");
+    assert_eq!(outside_row["outsideProjectRoot"], serde_json::json!(true));
+    let main_row = rows
+        .iter()
+        .find(|r| r["branch"] != serde_json::json!("outside-branch"))
+        .expect("main worktree");
+    assert!(
+        main_row.get("outsideProjectRoot").is_none(),
+        "in-root rows carry no flag: {main_row}"
+    );
+}
+
+#[tokio::test]
+async fn act_routes_still_refuse_an_outside_root_worktree() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("act-outside");
+    let outside = TempDir::new("act-outside-wt");
+    let outside_wt = outside.path().join("elsewhere-wt");
+    add_worktree_at(repo.path(), &outside_wt, "outside-act");
+    let wt = outside_wt.to_string_lossy().to_string();
+
+    // check-dirty (read) is refused by containment.
+    let uri = format!("/worktree/check-dirty?worktreePath={}", urlencoding(&wt));
+    let resp = get_request(test_state(repo.path()), &uri).await;
+    let body: IpcBody<DirtyStatus> = body_as(resp.into_body()).await;
+    assert!(
+        !body.success,
+        "check-dirty on outside worktree must be refused"
+    );
+
+    // remove (write) is refused too; the worktree stays on disk.
+    let resp = post_json(
+        test_state(repo.path()),
+        "/worktree/remove",
+        &serde_json::json!({
+            "projectPath": repo.path().to_string_lossy(),
+            "worktreePath": wt,
+            "force": true
+        }),
+    )
+    .await;
+    let body: IpcBody<()> = body_as(resp.into_body()).await;
+    assert!(!body.success, "remove of outside worktree must be refused");
+    assert!(outside_wt.exists(), "outside worktree must be untouched");
+}

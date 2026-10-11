@@ -9,6 +9,7 @@ import {
   MessageScrollerViewport,
   useMessageScroller
 } from '@/components/ui/message-scroller'
+import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { AgentId, SessionId, ToolCall } from '@/lib/acp-api'
 import type { FilePathResolutionContext } from '@/lib/file-path-links'
 import { cn } from '@/lib/utils'
@@ -82,6 +83,8 @@ interface TimelineRenderProps {
   onOpenSubagent: (toolCall: ToolCall) => void
   parentTurnActive: boolean
   statusLine: string | null
+  /** Whether the scroller log announces additions (off on the mobile shell). */
+  live: boolean
 }
 
 /**
@@ -99,7 +102,8 @@ function VirtualizedTimeline({
   filePathContext,
   onOpenSubagent,
   parentTurnActive,
-  statusLine
+  statusLine,
+  live
 }: TimelineRenderProps): React.JSX.Element {
   const { viewportEl, pinned } = useMessageScroller()
   const virtualizer = useVirtualizer({
@@ -241,7 +245,7 @@ function VirtualizedTimeline({
   const virtualItems = virtualizer.getVirtualItems()
   if (viewportEl === null || virtualItems.length === 0) {
     return (
-      <MessageScrollerContent className="mx-auto w-full max-w-3xl">
+      <MessageScrollerContent live={live} className="mx-auto w-full max-w-3xl">
         {groupedItems.map((item, index) => (
           <MessageScrollerItem
             key={item.key}
@@ -257,6 +261,7 @@ function VirtualizedTimeline({
 
   return (
     <MessageScrollerContent
+      live={live}
       className="mx-auto w-full max-w-3xl"
       style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}
     >
@@ -301,6 +306,9 @@ export function ChatMessageList({
 }: ChatMessageListProps): React.JSX.Element {
   const opencodeNotice = useAcpStore((s) => s.sessions[sessionId]?.opencodeNotice)
   const statusLine = opencodeStatusLine(opencodeNotice)
+  // The mobile shell announces turn events through its own live region, so the
+  // log stops re-announcing rows as the virtualiser mounts them.
+  const live = !useMobileWebShell()
   const groupedItems = useMemo(
     () => groupTurnActivity(items, showRunningIndicator),
     [items, showRunningIndicator]
@@ -358,6 +366,7 @@ export function ChatMessageList({
               onOpenSubagent={openSubagent}
               parentTurnActive={showRunningIndicator}
               statusLine={statusLine}
+              live={live}
             />
           </MessageScrollerViewport>
           <MessageScrollerButton />

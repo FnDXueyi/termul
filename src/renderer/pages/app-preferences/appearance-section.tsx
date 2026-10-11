@@ -1,4 +1,6 @@
 import { SettingsSection } from '@/components/settings/SettingsLayout'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import {
   type AppSettings,
@@ -11,6 +13,7 @@ import {
   UI_ZOOM_MIN,
   UI_ZOOM_STEP
 } from '@/types/settings'
+import { ShellLayoutToggle } from './shell-layout-toggle'
 
 interface AppearanceSectionProps {
   fontFamily: string
@@ -18,6 +21,7 @@ interface AppearanceSectionProps {
   uiZoomLevel: number
   bufferSize: number
   terminalRenderer: AppSettings['terminalRenderer']
+  screenReaderMode: boolean
   maxTerminals: number
   handleFontFamilyChange: (value: string) => void
   handleFontSizeChange: (value: number) => void
@@ -25,6 +29,7 @@ interface AppearanceSectionProps {
   handleUiZoomReset: () => void
   handleBufferSizeChange: (value: number) => void
   handleRendererChange: (value: string) => void
+  handleScreenReaderModeChange: (enabled: boolean) => void
   handleMaxTerminalsChange: (value: number) => void
 }
 
@@ -34,6 +39,7 @@ export function AppearanceSection({
   uiZoomLevel,
   bufferSize,
   terminalRenderer,
+  screenReaderMode,
   maxTerminals,
   handleFontFamilyChange,
   handleFontSizeChange,
@@ -41,6 +47,7 @@ export function AppearanceSection({
   handleUiZoomReset,
   handleBufferSizeChange,
   handleRendererChange,
+  handleScreenReaderModeChange,
   handleMaxTerminalsChange
 }: AppearanceSectionProps): React.JSX.Element {
   return (
@@ -99,7 +106,7 @@ export function AppearanceSection({
             <select
               value={fontFamily}
               onChange={(e) => handleFontFamilyChange(e.target.value)}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
             >
               {FONT_FAMILY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -141,7 +148,7 @@ export function AppearanceSection({
             <select
               value={bufferSize}
               onChange={(e) => handleBufferSizeChange(parseInt(e.target.value, 10))}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
             >
               {BUFFER_SIZE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -163,7 +170,7 @@ export function AppearanceSection({
             <select
               value={maxTerminals}
               onChange={(e) => handleMaxTerminalsChange(parseInt(e.target.value, 10))}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
             >
               {MAX_TERMINALS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -184,7 +191,7 @@ export function AppearanceSection({
             <select
               value={terminalRenderer}
               onChange={(e) => handleRendererChange(e.target.value)}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
             >
               {TERMINAL_RENDERER_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -197,6 +204,29 @@ export function AppearanceSection({
               Changes apply to new terminals.
             </p>
           </div>
+
+          {/* Screen reader mode */}
+          <div className="flex min-h-11 items-center justify-between gap-4 rounded-md border border-border bg-secondary/30 px-4 py-3">
+            <div className="flex-1">
+              <Label htmlFor="terminal-screen-reader-mode">Screen reader mode</Label>
+              <p
+                id="terminal-screen-reader-mode-help"
+                className="mt-0.5 text-xs text-muted-foreground"
+              >
+                Makes terminal output readable by screen readers. Can repeat typed characters in
+                some setups. Changes apply to new terminals.
+              </p>
+            </div>
+            <Switch
+              id="terminal-screen-reader-mode"
+              aria-describedby="terminal-screen-reader-mode-help"
+              checked={screenReaderMode}
+              onCheckedChange={handleScreenReaderModeChange}
+            />
+          </div>
+
+          {/* Opt-in shell layout (applies after reload) */}
+          <ShellLayoutToggle />
 
           {/* Preview */}
           <div>

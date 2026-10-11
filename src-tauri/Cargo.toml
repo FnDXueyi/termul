@@ -42,6 +42,12 @@ default = []
 # "default `cargo build` / `tauri build` do NOT bundle the standalone server
 # binary" invariant.
 standalone-server = []
+# Forwards to `tauri/custom-protocol`, which makes the Tauri build script
+# embed `frontendDist` instead of loading `devUrl`. The Tauri CLI (`tauri
+# build`) enables it itself; raw `cargo build --release` packagers must pass
+# `--features custom-protocol`. `build.rs` fails a release desktop build that
+# lacks it.
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -107,8 +113,9 @@ agent-client-protocol = { version = "1.3", features = ["unstable_auth_methods", 
 #     `transport-io` (`rmcp::transport::io::stdio()`), and `macros`
 #     (`#[tool_router]` / `#[tool]` / `#[tool_handler]`; the `#[tool]` macro
 #     re-exports `rmcp::schemars` for `JsonSchema` derives — no direct `schemars`
-#     dep needed). Resolved to 1.8.0 from `^1.2.0`.
-rmcp = { version = "1.4.0", features = [
+#     dep needed). 3.5.0 speaks MCP 2026-07-28 (`server/discover`) and still
+#     accepts the legacy initialize handshake.
+rmcp = { version = "3.5.0", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",

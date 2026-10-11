@@ -22,7 +22,16 @@
  */
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { claimEscape } from '@/lib/escape-claim'
+import {
+  armMobileOverlayBackStack,
+  pressSystemBack,
+  settleOverlayBackStack,
+  waitForSentinelDepth
+} from '@/lib/test-utils/overlay-back-stack'
+import { readOverlaySentinelDepth, useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { NewProjectModal } from './NewProjectModal'
 
 const {
@@ -55,6 +64,12 @@ const {
 
 vi.mock('@/lib/tauri-runtime', () => ({
   isTauriContext: mockIsTauriContext
+}))
+
+// Overlay back-stack boundary logs must not POST through the mocked fetch.
+vi.mock('@/lib/log-api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/log-api')>()),
+  logFrontendError: vi.fn()
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -370,6 +385,25 @@ describe('NewProjectModal (web-mode · auto-name + advanced options)', () => {
     expect(screen.queryByLabelText(/Initialize Git repository/i)).not.toBeInTheDocument()
   })
 
+  it('keeps the path, name and advanced selects at 16px on a coarse pointer', async () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    expect(screen.getByPlaceholderText('No directory selected')).toHaveClass(
+      'pointer-coarse:text-base'
+    )
+    expect(screen.getByPlaceholderText('My Project')).toHaveClass('pointer-coarse:text-base')
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Advanced options'))
+    })
+    await waitFor(() => {
+      expect(screen.getAllByRole('combobox').length).toBe(2)
+    })
+    for (const select of screen.getAllByRole('combobox')) {
+      expect(select).toHaveClass('pointer-coarse:text-base')
+    }
+  })
+
   it('shows all advanced controls when the section is expanded', async () => {
     render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
 
@@ -588,5 +622,190 @@ describe('NewProjectModal (web-mode · auto-name + advanced options)', () => {
       fireEvent.change(nameInput, { target: { value: 'aa' } })
     })
     expect(screen.queryByTestId('new-project-name-warning')).not.toBeInTheDocument()
+  })
+
+  describe('Escape (L-32: one Esc closes one layer)', () => {
+    it('closes once on an Esc nothing else handled', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes once, not twice, on an Esc inside the panel (panel handler, then the window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes nothing on an Esc a layer above already claimed (window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+      const layerAbove = (event: KeyboardEvent): void => {
+        event.preventDefault()
+        claimEscape(event)
+      }
+      window.addEventListener('keydown', layerAbove, true)
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      window.removeEventListener('keydown', layerAbove, true)
+
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('closes nothing on a claimed Esc with focus inside the panel (panel onKeyDown)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+      const layerAbove = (event: KeyboardEvent): void => {
+        event.preventDefault()
+        claimEscape(event)
+      }
+      window.addEventListener('keydown', layerAbove, true)
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+      window.removeEventListener('keydown', layerAbove, true)
+
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    // A Radix layer still animating out (the project sheet this modal was swapped
+    // in from) prevents the Esc it receives although it sits above nothing: that
+    // Esc is the modal's own. The phone shell's Esc after "Add project" needs it.
+    it('closes on an Esc that only a closing layer prevented, without claiming it (window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+      const closingLayer = (event: KeyboardEvent): void => event.preventDefault()
+      document.addEventListener('keydown', closingLayer, true)
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      document.removeEventListener('keydown', closingLayer, true)
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes once on an Esc that only a closing layer prevented, with focus inside the panel (panel onKeyDown)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+      const closingLayer = (event: KeyboardEvent): void => event.preventDefault()
+      document.addEventListener('keydown', closingLayer, true)
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+      document.removeEventListener('keydown', closingLayer, true)
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('NewProjectModal overlay back stack', () => {
+  let cleanup: () => void
+
+  function Harness({ onClose }: { onClose: () => void }): React.JSX.Element {
+    const [open, setOpen] = useState(true)
+    return (
+      <NewProjectModal
+        isOpen={open}
+        onClose={() => {
+          onClose()
+          setOpen(false)
+        }}
+        onCreateProject={vi.fn()}
+      />
+    )
+  }
+
+  const stackIds = (): string[] => useOverlayStackStore.getState().stack.map((entry) => entry.id)
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockReset()
+    vi.stubGlobal('fetch', mockFetch)
+    existingProjectsRef.current = []
+    mockFetch.mockImplementation(async (url: string) =>
+      String(url).includes('/shells')
+        ? jsonResponse({
+            success: true,
+            data: {
+              default: { name: 'bash', path: '/bin/bash', displayName: 'Bash' },
+              available: [{ name: 'bash', path: '/bin/bash', displayName: 'Bash' }]
+            }
+          })
+        : jsonResponse({ success: true, data: [] })
+    )
+    window.history.replaceState(null, '', '#/base')
+    cleanup = armMobileOverlayBackStack()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  describe('mobile shell', () => {
+    it('registers while open and system back closes it and consumes the sentinel', async () => {
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+
+      expect(stackIds()[0]).toMatch(/^new-project-modal:/)
+      await waitForSentinelDepth(1)
+
+      await pressSystemBack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+      await waitFor(
+        () => expect(screen.queryByPlaceholderText('My Project')).not.toBeInTheDocument(),
+        {
+          timeout: 3000
+        }
+      )
+      expect(location.hash).toBe('#/base')
+      expect(readOverlaySentinelDepth(history.state)).toBe(0)
+      expect(stackIds()).toEqual([])
+    })
+
+    it('a close by Esc closes exactly once and consumes the sentinel', async () => {
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+      await waitForSentinelDepth(1)
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await waitForSentinelDepth(0)
+      await settleOverlayBackStack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('desktop shell', () => {
+    it('is inert: no registration, no history push and no traversal', async () => {
+      useOverlayStackStore.getState().setMobileShell(false)
+      const pushSpy = vi.spyOn(history, 'pushState')
+      const backSpy = vi.spyOn(history, 'back')
+      const goSpy = vi.spyOn(history, 'go')
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+
+      expect(stackIds()).toEqual([])
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await settleOverlayBackStack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(backSpy).not.toHaveBeenCalled()
+      expect(goSpy).not.toHaveBeenCalled()
+    })
   })
 })

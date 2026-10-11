@@ -40,6 +40,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 const CWD = '/web/proj'
+const HUNK_PATCH = '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-one\n+two\n'
 
 describe('gitApi (web vs desktop branch)', () => {
   beforeEach(() => {
@@ -159,6 +160,47 @@ describe('gitApi (web vs desktop branch)', () => {
       cwd: CWD,
       path: 'a.txt'
     })
+  })
+
+  // ---- stageHunk / unstageHunk ----
+  it('stageHunk: web → POST /git/stage-hunk', async () => {
+    await expectWebCall(
+      () => gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH),
+      '/git/stage-hunk',
+      'POST',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH },
+      { success: true }
+    )
+  })
+  it('stageHunk: desktop → invoke("git_stage_hunk")', async () => {
+    await expectDesktopCall(() => gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH), 'git_stage_hunk', {
+      cwd: CWD,
+      path: 'a.txt',
+      hunkPatch: HUNK_PATCH
+    })
+  })
+  it('stageHunk: web surfaces a failure body as a thrown error', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: false, error: 'patch does not apply', code: 'HUNK_DOES_NOT_APPLY' })
+    )
+    await expect(gitApi.stageHunk(CWD, 'a.txt', HUNK_PATCH)).rejects.toThrow('patch does not apply')
+  })
+  it('unstageHunk: web → POST /git/unstage-hunk', async () => {
+    await expectWebCall(
+      () => gitApi.unstageHunk(CWD, 'a.txt', HUNK_PATCH),
+      '/git/unstage-hunk',
+      'POST',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH },
+      { success: true }
+    )
+  })
+  it('unstageHunk: desktop → invoke("git_unstage_hunk")', async () => {
+    await expectDesktopCall(
+      () => gitApi.unstageHunk(CWD, 'a.txt', HUNK_PATCH),
+      'git_unstage_hunk',
+      { cwd: CWD, path: 'a.txt', hunkPatch: HUNK_PATCH }
+    )
   })
 
   // ---- discard ----
@@ -458,6 +500,45 @@ describe('gitApi (web vs desktop branch)', () => {
     mockIsTauriContext.mockReturnValue(false)
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: null }))
     await expect(gitApi.getProjectIcon(CWD)).resolves.toBeNull()
+  })
+
+  // ---- getDiffStat ----
+  it('getDiffStat: web → POST /git/diff-stat, returns the unwrapped stat', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: { added: 4, removed: 2 } }))
+    const result = await gitApi.getDiffStat(CWD)
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${window.location.origin}/git/diff-stat`,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ cwd: CWD }) })
+    )
+    expect(mockInvoke).not.toHaveBeenCalled()
+    expect(result).toEqual({ added: 4, removed: 2 })
+  })
+  it('getDiffStat: desktop → invoke("git_get_diff_stat"), unwraps IpcResult', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({ success: true, data: { added: 3, removed: 1 } })
+    const result = await gitApi.getDiffStat(CWD)
+    expect(mockInvoke).toHaveBeenCalledWith('git_get_diff_stat', { cwd: CWD })
+    expect(mockFetch).not.toHaveBeenCalled()
+    expect(result).toEqual({ added: 3, removed: 1 })
+  })
+  it('getDiffStat: desktop → error envelope throws the host message', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({
+      success: false,
+      error: 'git diff failed: not a repository',
+      code: 'GIT_DIFF_STAT_ERROR'
+    })
+    await expect(gitApi.getDiffStat(CWD)).rejects.toThrow('git diff failed: not a repository')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+  it('getDiffStat: web → error envelope throws the host message', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: false, error: 'outside root', code: 'OUTSIDE_PROJECT_ROOT' })
+    )
+    await expect(gitApi.getDiffStat(CWD)).rejects.toThrow('outside root')
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 
   it('web branch throws on IpcBody error (status method)', async () => {

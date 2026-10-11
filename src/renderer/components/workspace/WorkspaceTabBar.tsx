@@ -3,6 +3,7 @@ import { AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { Globe, Maximize2, Minimize2, Terminal as TerminalIcon } from '@/components/icons'
+import { WindowControls } from '@/components/shell/TopRowChrome'
 import { Skeleton } from '@/components/ui/skeleton'
 import { requestCloseAgentChat } from '@/hooks/use-agent-idle-shutdown'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
@@ -11,6 +12,7 @@ import { browserTabHide, browserTabShow } from '@/lib/browser-api'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useCanvasStore } from '@/stores/canvas-store'
@@ -25,6 +27,7 @@ import type { TabBulkMenuProps } from './tab-context-menu'
 import { AgentChatTabInline } from './tabs/agent-chat-tab'
 import { BrowserTabInline } from './tabs/browser-tab'
 import { CanvasTabInline } from './tabs/canvas-tab'
+import { DiffTabInline } from './tabs/diff-tab'
 import { GitHistoryTabInline } from './tabs/git-history-tab'
 import { GitTabInline } from './tabs/git-tab'
 import { TabPaneProvider } from './tabs/tab-chrome'
@@ -49,6 +52,12 @@ interface WorkspaceTabBarProps {
    */
   onCloseTabs?: (tabs: WorkspaceTab[]) => void
   defaultShell?: string
+  /**
+   * Flagged shell only: this bar is part of the window top row. `dragRegion`
+   * marks the empty space of the bar as a window drag region; `windowControls`
+   * renders the window controls flush at its right end. Unset = classic bar.
+   */
+  topRow?: { dragRegion: boolean; windowControls: boolean }
 }
 
 export function WorkspaceTabBar({
@@ -62,7 +71,8 @@ export function WorkspaceTabBar({
   onRenameTerminal,
   onCloseEditorTab,
   onCloseTabs,
-  defaultShell
+  defaultShell,
+  topRow
 }: WorkspaceTabBarProps): React.JSX.Element {
   const { setActiveTab, setActivePane, fullscreenPaneId, togglePaneFullscreen } = useWorkspaceStore(
     useShallow((state) => ({
@@ -83,6 +93,8 @@ export function WorkspaceTabBar({
   } = usePaneDnd()
   // FLIP reorder feedback — instant under prefers-reduced-motion.
   const reducedMotion = useReducedMotion() ?? false
+
+  const dragAttr = topRow?.dragRegion ? true : undefined
 
   const [isTerminalMenuOpen, setIsTerminalMenuOpen] = useState(false)
   const [shells, setShells] = useState<DetectedShells | null>(null)
@@ -364,6 +376,7 @@ export function WorkspaceTabBar({
           break
         case 'git':
         case 'git-history':
+        case 'diff':
           useWorkspaceStore.getState().removeTab(tab.id)
           break
         case 'agent-chat':
@@ -482,19 +495,28 @@ export function WorkspaceTabBar({
     <TabPaneProvider paneId={paneId}>
       <div
         className="flex h-10 items-center bg-card"
+        data-tauri-drag-region={dragAttr}
         onDragOver={(e) => {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'move'
         }}
       >
-        <div className="relative flex items-center h-full min-w-0 flex-1 overflow-hidden">
+        <div
+          className="relative flex items-center h-full min-w-0 flex-1 overflow-hidden"
+          data-tauri-drag-region={dragAttr}
+        >
           <div
             ref={tabsContainerRef}
+            data-tauri-drag-region={dragAttr}
             onWheel={handleWheel}
             onDragLeave={handleContainerDragLeave}
             className="overflow-x-auto scrollbar-hide flex items-center h-full min-w-0 flex-1"
           >
-            <div role="tablist" className="flex h-full min-w-max items-center gap-0.5 px-1">
+            <div
+              role="tablist"
+              className="flex h-full min-w-max items-center gap-0.5 px-1"
+              data-tauri-drag-region={dragAttr}
+            >
               {/* Tab mount/unmount motion: arrivals (center drops, opened
                 files, new terminals) grow width 0→auto with a fade,
                 departures shrink back — the same push feel as a pane grow.
@@ -592,6 +614,24 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
+                      ) : tab.type === 'diff' ? (
+                        <DiffTabInline
+                          tab={tab}
+                          isActive={tab.id === activeTabId}
+                          isDragging={dragging}
+                          isDropTarget={isTarget}
+                          dropPosition={position}
+                          bulkMenu={buildBulkMenuProps(tab)}
+                          onSelect={() => {
+                            setActiveTab(paneId, tab.id)
+                            setActivePane(paneId)
+                          }}
+                          onClose={() => closeWorkspaceTab(tab)}
+                          onDragStart={(e) => handleTabDragStart(tab.id, e)}
+                          onDragOver={(e) => handleTabDragOver(tab.id, e)}
+                          onDragLeave={handleTabDragLeave}
+                          onDrop={(e) => handleTabDrop(tab.id, e)}
+                        />
                       ) : tab.type === 'agent-chat' ? (
                         <AgentChatTabInline
                           tab={tab as { type: 'agent-chat'; id: string; sessionId: string }}
@@ -635,7 +675,7 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
-                      ) : (
+                      ) : tab.type === 'browser' ? (
                         <BrowserTabInline
                           tab={tab as { type: 'browser'; id: string; browserTabId: string }}
                           isActive={tab.id === activeTabId}
@@ -653,6 +693,11 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
+                      ) : (
+                        (() => {
+                          reportUnknownTabKind(tab, 'WorkspaceTabBar', 'rendered nothing')
+                          return null
+                        })()
                       )}
                     </TabListItem>
                   )
@@ -666,7 +711,10 @@ export function WorkspaceTabBar({
           )}
         </div>
 
-        <div className="ml-auto flex h-full shrink-0 items-center gap-1 px-2">
+        <div
+          className="ml-auto flex h-full shrink-0 items-center gap-1 px-2"
+          data-tauri-drag-region={dragAttr}
+        >
           {(leafCount > 1 || onAddTerminal || (onAddBrowserTab && isTauriContext())) && (
             <span aria-hidden className="mr-1 h-5 w-px shrink-0 bg-border/60" />
           )}
@@ -744,6 +792,8 @@ export function WorkspaceTabBar({
             </button>
           )}
         </div>
+
+        {topRow?.windowControls && <WindowControls windowControls />}
       </div>
     </TabPaneProvider>
   )

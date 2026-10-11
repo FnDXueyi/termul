@@ -47,6 +47,16 @@ pub struct PersistedEventRecord {
     pub payload: Value,
 }
 
+/// A tail replay plus the session's whole seq-sorted tool-call log (see
+/// `SessionPersistence::replay_tail_with_tool_records`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TailReplay {
+    /// The tail window records (identical to `replay_tail`).
+    pub records: Vec<PersistedEventRecord>,
+    /// Every `tool_call`/`tool_call_update` record of the session.
+    pub tool_records: Vec<PersistedEventRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
@@ -87,6 +97,13 @@ pub struct SessionMetadata {
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Host-recorded current model id (CAP-3). Additive: old entries
+    /// deserialize with `None`; discovered/imported sessions never have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Display-name snapshot of `model_id` taken when it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +133,13 @@ pub struct SessionIndexEntry {
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Host-recorded current model id (CAP-3). Additive: old entries
+    /// deserialize with `None`; discovered/imported sessions never have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Display-name snapshot of `model_id` taken when it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 impl From<&SessionMetadata> for SessionIndexEntry {
@@ -139,6 +163,8 @@ impl From<&SessionMetadata> for SessionIndexEntry {
             resume_eligible: metadata.stable_agent_namespace.is_some(),
             worktree_path: metadata.worktree_path.clone(),
             worktree_branch: metadata.worktree_branch.clone(),
+            model_id: metadata.model_id.clone(),
+            model_name: metadata.model_name.clone(),
         }
     }
 }
@@ -159,6 +185,16 @@ pub struct SessionRegistration {
     pub cwd: PathBuf,
     pub worktree_path: Option<String>,
     pub worktree_branch: Option<String>,
+    /// Model captured at session creation (stashed with an ephemeral
+    /// registration until promotion). `None` when the agent advertises none.
+    pub model: Option<SessionModelSnapshot>,
+}
+
+/// A session's current model id plus a display-name snapshot (CAP-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModelSnapshot {
+    pub model_id: String,
+    pub model_name: String,
 }
 
 /// Host-authored durable agent-switch marker payload (CAP-2). camelCase on

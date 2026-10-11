@@ -54,11 +54,13 @@ import {
   deleteSessionPayload,
   deriveTitle,
   flushSessionHistory,
+  fromPersistedSessionSummary,
   getCachedSessionPayload,
   groupSessionsByRecency,
   INACTIVE_PAYLOAD_CACHE_BUDGET,
   loadSessionIndex,
   loadSessionPayload,
+  loadSessionPayloadTail,
   MAX_PINNED_PAYLOADS,
   markSessionPayloadPinned,
   maxPayloadSeq,
@@ -186,7 +188,7 @@ describe('pure history helpers', () => {
   })
 
   it('scopes with worktree-inclusive reachability from the root view', () => {
-    // Root view (activeWorktreeId=null): activeCwd is the project root. The
+    // Root view (no worktree picked): activeCwd is the project root. The
     // sidebar must list root-cwd sessions AND the project's worktree-cwd
     // sessions so a worktree chat stays reachable without a restart.
     const root = entry('root', { cwd: '/project' })
@@ -552,6 +554,75 @@ describe('provider routing', () => {
     await expect(loadSessionIndex()).resolves.toEqual([entry('stored')])
   })
 
+  it('reads the host-recorded model identically via the desktop and WS readers', async () => {
+    const hostFields = { modelId: 'claude-opus', modelName: 'Claude Opus' }
+    const wireSummary = {
+      storageKey: 'opaque',
+      sessionId: 'host-1',
+      stableAgentNamespace: 'config:cfg-1',
+      runtimeAgentId: 'runtime-1',
+      projectId: 'project-1',
+      cwd: '/project',
+      title: 'Host chat',
+      createdAt: 1,
+      lastActivityAt: 2,
+      status: 'closed' as const,
+      messageCount: 3,
+      toolCount: 1,
+      lastSeq: 7,
+      resumeEligible: true
+    }
+
+    // Desktop: the Rust reader maps the same host fields onto the renderer
+    // `SessionIndexEntry` and `acpHistoryApi.list()` is read verbatim.
+    mockHistoryApi.list.mockResolvedValueOnce({
+      sessions: [entry('host-1', hostFields)],
+      legacyImportComplete: true
+    })
+    const [desktop] = await loadSessionIndex()
+
+    // Web: the WS reader converts the host `PersistedSessionSummary`.
+    const web = fromPersistedSessionSummary({ ...wireSummary, ...hostFields })
+
+    expect(desktop.modelId).toBe('claude-opus')
+    expect(desktop.modelName).toBe('Claude Opus')
+    expect({ id: web.id, modelId: web.modelId, modelName: web.modelName }).toEqual({
+      id: desktop.id,
+      modelId: desktop.modelId,
+      modelName: desktop.modelName
+    })
+
+    // Round-trip back to the wire shape keeps the fields.
+    expect(toPersistedSessionSummaries([web])[0]).toEqual(expect.objectContaining(hostFields))
+  })
+
+  it('leaves the model absent on both readers when the host recorded none', async () => {
+    mockHistoryApi.list.mockResolvedValueOnce({
+      sessions: [entry('no-model')],
+      legacyImportComplete: true
+    })
+    const [desktop] = await loadSessionIndex()
+    const web = fromPersistedSessionSummary({
+      storageKey: 'opaque',
+      sessionId: 'no-model',
+      stableAgentNamespace: null,
+      cwd: '/project',
+      title: null,
+      createdAt: 1,
+      lastActivityAt: 2,
+      status: 'closed',
+      messageCount: 0,
+      toolCount: 0,
+      lastSeq: 0,
+      resumeEligible: false
+    })
+    for (const read of [desktop, web]) {
+      expect(read.modelId).toBeUndefined()
+      expect(read.modelName).toBeUndefined()
+    }
+    expect(toPersistedSessionSummaries([web])[0].modelId).toBeUndefined()
+  })
+
   it('keeps standalone server and live-only behavior unchanged', async () => {
     mockTransport.historyMode.mockReturnValue('server')
     mockTransport.listPersistedSessions.mockResolvedValue([
@@ -758,6 +829,32 @@ describe('deleteSessionPayload routing (CAP-11)', () => {
 })
 
 describe('bounded full-payload cache', () => {
+  it('keeps whole-session restored summaries when slicing a cached tail', async () => {
+    const messages = Array.from({ length: 6 }, (_, i) => ({
+      ...msg(i % 2 === 0 ? 'user' : 'agent', `t-${i}`),
+      seq: 10 + i
+    }))
+    setCachedSessionPayload('s-tail-sum', {
+      ...payload('s-tail-sum', messages),
+      toolCalls: [
+        {
+          toolCallId: 'early-summary',
+          kind: 'edit',
+          locations: [{ path: 'src/a.ts' }],
+          diffStat: { added: 3, removed: 1 },
+          seq: 1,
+          timestamp: 1,
+          restoredSummary: true
+        },
+        { toolCallId: 'early-card', kind: 'read', seq: 2, timestamp: 2 },
+        { toolCallId: 'tail-card', kind: 'read', seq: 15, timestamp: 15 }
+      ]
+    })
+    const tail = await loadSessionPayloadTail('s-tail-sum', 2)
+    expect(tail?.messages.map((m) => m.seq)).toEqual([14, 15])
+    expect(tail?.toolCalls?.map((t) => t.toolCallId)).toEqual(['early-summary', 'tail-card'])
+  })
+
   it('evicts least-recent inactive entries and reloads them from Rust', async () => {
     for (let index = 0; index <= INACTIVE_PAYLOAD_CACHE_BUDGET; index += 1) {
       setCachedSessionPayload(`s-${index}`, payload(`s-${index}`, [msg('user', `${index}`)]))

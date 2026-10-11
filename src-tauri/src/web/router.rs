@@ -32,6 +32,8 @@ use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub}
 use crate::web::catalog_api;
 use crate::web::fs_api;
 use crate::web::git_api;
+use crate::web::git_diff_stat_api;
+use crate::web::git_hunk_api;
 use crate::web::install_api;
 use crate::web::log_api;
 use crate::web::mcp_oauth_api;
@@ -179,6 +181,8 @@ pub fn router(
         .route("/git/diff", post(git_api::get_diff))
         .route("/git/stage", post(git_api::stage))
         .route("/git/unstage", post(git_api::unstage))
+        .route("/git/stage-hunk", post(git_hunk_api::stage_hunk))
+        .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
         .route("/git/commit", post(git_api::commit))
@@ -194,6 +198,7 @@ pub fn router(
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
         .route("/git/branch-create", post(git_api::branch_create))
+        .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         // Project icon resolution (spec-project-icon). Mirrors the desktop
         // `project_icon_resolve` command — same shared resolver, read-route
         // posture (boundary check, no write guard).
@@ -515,6 +520,8 @@ pub fn router_with_static(
         .route("/git/diff", post(git_api::get_diff))
         .route("/git/stage", post(git_api::stage))
         .route("/git/unstage", post(git_api::unstage))
+        .route("/git/stage-hunk", post(git_hunk_api::stage_hunk))
+        .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
         .route("/git/commit", post(git_api::commit))
@@ -530,6 +537,7 @@ pub fn router_with_static(
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
         .route("/git/branch-create", post(git_api::branch_create))
+        .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         .route("/project/icon", post(project_icon_api::resolve_icon))
         .route("/search/rg-info", get(search_api::rg_info))
         .route("/search/content", post(search_api::content))

@@ -1,7 +1,7 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { PersistenceKeys } from '@shared/types/persistence.types'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
 import {
@@ -34,17 +34,38 @@ import {
   SheetHeader,
   SheetTitle
 } from '@/components/ui/sheet'
+import { useClippedSegments } from '@/hooks/use-clipped-segments'
 import { filesystemApi, persistenceApi } from '@/lib/api'
 import { sortDirectoryEntries } from '@/lib/filesystem-sort'
+import {
+  buildFolderCrumbs,
+  comparePath,
+  isWithinRoot,
+  joinPath,
+  normalizePath,
+  resolveBreadcrumbTarget
+} from '@/lib/mobile-file-paths'
+import { recordSheetOpener, sheetCloseAutoFocus } from '@/lib/sheet-focus-return'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileExplorer, useFileExplorerActions } from '@/stores/file-explorer-store'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 import { useActiveProjectId } from '@/stores/project-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
 
 interface MobileFileExplorerProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /**
+   * Called when a file opened successfully, just before the sheet closes. The
+   * shell uses it to point focus at the new surface's heading instead of the
+   * "Browse files" opener.
+   */
+  onFileOpened?: () => void
 }
+
+// Focus return for the two pre-existing Files sheets (see lib/sheet-focus-return).
+const filesSheetCloseAutoFocus = sheetCloseAutoFocus('files-sheet')
+const fileActionsSheetCloseAutoFocus = sheetCloseAutoFocus('file-actions-sheet')
 
 interface CreateState {
   type: 'file' | 'directory'
@@ -58,49 +79,17 @@ interface RenameState {
 
 type NavigationDirection = -1 | 0 | 1
 
-function normalizePath(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) return normalized
-  return normalized.replace(/\/+$/, '') || '/'
-}
-
-function pathIdentity(path: string): string {
-  const normalized = normalizePath(path)
-  return normalized === '/' ? normalized : normalized.replace(/\/+$/, '')
-}
-
-/** Case-insensitive comparison form of a path: `pathIdentity` lowercased.
- * Routed through every within-root comparison (`isWithinRoot`, `parentOf`,
- * `isAtRoot`, `navigateBack`) so a casing discrepancy between the stored
- * `rootPath` (config casing, e.g. `e:/proj`) and server-canonicalized entry
- * paths (on-disk casing, e.g. `E:/proj/...`) no longer clamps back
- * navigation to root. Never feeds the stored `currentPath` or any display
- * string — those keep the case-preserving `normalizePath` output. */
-function comparePath(path: string): string {
-  return pathIdentity(path).toLowerCase()
-}
-
-function joinPath(parent: string, name: string): string {
-  return `${normalizePath(parent).replace(/\/$/, '')}/${name}`
-}
-
-function isWithinRoot(path: string, root: string): boolean {
-  const p = comparePath(path)
-  const r = comparePath(root)
-  if (p === r) return true
-  // Drive roots (`c:/`, lowercased from `C:/`) and posix `/` prefix any
-  // child without a trailing separator, so check `startsWith(r)` directly
-  // for those.
-  if (r === '/' || /^[A-Za-z]:\/$/.test(r)) return p.startsWith(r)
-  return p.startsWith(`${r}/`)
-}
+// Path helpers live in `lib/mobile-file-paths`; the two below stay importable
+// from here for this module's consumers and tests.
+export { buildFolderCrumbs, resolveBreadcrumbTarget }
 
 /** Lean touch-first file explorer drawer for the web/mobile view. Directory
  * rows drill into a single folder at a time, while files reuse the desktop
  * open-file wiring. Native desktop keeps its existing tree explorer. */
 export function MobileFileExplorer({
   open,
-  onOpenChange
+  onOpenChange,
+  onFileOpened
 }: MobileFileExplorerProps): React.JSX.Element {
   const { rootPath, directoryContents, loadingDirs, rootLoadError } = useFileExplorer()
   const { toggleDirectory, refreshDirectory, selectPath } = useFileExplorerActions()
@@ -110,6 +99,15 @@ export function MobileFileExplorer({
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [navigationDirection, setNavigationDirection] = useState<NavigationDirection>(0)
   const [actionEntry, setActionEntry] = useState<DirectoryEntry | null>(null)
+  // Mobile web shell: system back closes the row-actions sheet (inert on desktop).
+  // The sheet is nested in the Files sheet, so it is only an overlay while that
+  // sheet is open: `actionEntry` survives a close until the next open resets it.
+  useOverlayRegistration(
+    'mobile-file-actions',
+    open && actionEntry !== null,
+    () => setActionEntry(null),
+    { mobileShellOnly: true }
+  )
   const [renaming, setRenaming] = useState<RenameState | null>(null)
   const [creating, setCreating] = useState<CreateState | null>(null)
   const [createSubmitting, setCreateSubmitting] = useState(false)
@@ -158,7 +156,9 @@ export function MobileFileExplorer({
       .read<string>(PersistenceKeys.mobileFileExplorerFolder(projectId))
       .then((res) => {
         if (cancelled) return
-        const persisted = res.success ? res.data : null
+        // Normalize before the containment check so a persisted `..` path
+        // that lexically escapes the root is dropped, never restored.
+        const persisted = res.success && res.data ? normalizePath(res.data) : null
         setCurrentPath(persisted && isWithinRoot(persisted, rootPath) ? persisted : normalizedRoot)
       })
       .catch(() => {
@@ -208,6 +208,7 @@ export function MobileFileExplorer({
     try {
       await useEditorStore.getState().openFile(entry.path)
       useWorkspaceStore.getState().addEditorTab(entry.path)
+      onFileOpened?.()
       onOpenChange(false)
     } catch (error) {
       toast.error('Failed to open file', {
@@ -233,6 +234,18 @@ export function MobileFileExplorer({
     const next = parentOf(currentPath)
     setCurrentPath(next)
     persistFolder(next)
+  }
+
+  /** Breadcrumb tap: jump to an ancestor folder. Mirrors `navigateBack` (clears
+   * the inline create/rename state, slides back, persists the folder). */
+  function navigateTo(path: string): void {
+    const target = resolveBreadcrumbTarget(path, rootPath, currentPath)
+    if (!target) return
+    setCreating(null)
+    setRenaming(null)
+    setNavigationDirection(-1)
+    setCurrentPath(target)
+    persistFolder(target)
   }
 
   function handleRowTap(entry: DirectoryEntry): void {
@@ -378,6 +391,7 @@ export function MobileFileExplorer({
               aria-label={`Actions for ${entry.name}`}
               onClick={(event) => {
                 event.stopPropagation()
+                recordSheetOpener('file-actions-sheet', event.currentTarget)
                 setActionEntry(entry)
               }}
             >
@@ -408,6 +422,17 @@ export function MobileFileExplorer({
         ? normalizedRoot.split('/').filter(Boolean).at(-1) || normalizedRoot
         : normalizedCurrent.split('/').filter(Boolean).at(-1) || normalizedCurrent
       : 'Files'
+  const folderCrumbs =
+    normalizedRoot && normalizedCurrent
+      ? buildFolderCrumbs(normalizedRoot, normalizedCurrent)
+      : null
+  // An ancestor clipped away on the left cannot be scrolled into view, so it
+  // must not take keyboard focus unseen (see `useClippedSegments`).
+  const {
+    rootRef: crumbNavRef,
+    segmentRef: crumbRef,
+    clipped: clippedCrumbs
+  } = useClippedSegments(folderCrumbs?.ancestors.map((crumb) => crumb.path) ?? [])
   const currentEntries = currentPath
     ? sortDirectoryEntries(directoryContents.get(currentPath) ?? [])
     : []
@@ -419,6 +444,7 @@ export function MobileFileExplorer({
       <SheetContent
         side="right"
         className="flex w-[min(100vw,26rem)] flex-col gap-0 p-0 sm:max-w-md"
+        onCloseAutoFocus={filesSheetCloseAutoFocus}
       >
         <SheetHeader className="space-y-0 border-b border-border/60 p-2 text-left">
           <div className="flex min-w-0 items-center gap-1">
@@ -435,12 +461,53 @@ export function MobileFileExplorer({
             </Button>
             <div className="min-w-0">
               <SheetTitle className="truncate text-base">{currentName}</SheetTitle>
-              <p
-                className="truncate text-xs text-muted-foreground"
-                title={normalizedCurrent ?? undefined}
-              >
-                {isAtRoot ? 'Project files' : normalizedCurrent?.slice(rootPrefixLength)}
-              </p>
+              {folderCrumbs ? (
+                // Below the root the path is tappable segments; on narrow
+                // widths it clips from the left (end-aligned) so the current
+                // folder always stays visible. Clip the x axis only
+                // (`overflow-x-clip`, y stays visible): `overflow-hidden`
+                // would also clip the segments' vertical hit-slop below and
+                // shrink every tap target to the 16px row.
+                <nav
+                  ref={crumbNavRef}
+                  aria-label="Folder path"
+                  title={normalizedCurrent ?? undefined}
+                  className="flex w-fit max-w-full items-center justify-end gap-0.5 overflow-x-clip whitespace-nowrap text-xs text-muted-foreground"
+                >
+                  {folderCrumbs.ancestors.map((crumb) => (
+                    <Fragment key={crumb.path}>
+                      <Button
+                        ref={crumbRef(crumb.path)}
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        // A fully clipped ancestor is skipped by Tab until it is
+                        // visible again; the Back button still steps up a level.
+                        tabIndex={clippedCrumbs.has(crumb.path) ? -1 : undefined}
+                        // Vertical-only hit-slop (16px row + 14px each side =
+                        // 44px tall): the header does not grow and neighbouring
+                        // segments never overlap horizontally.
+                        className="relative h-4 shrink-0 px-1 font-normal text-muted-foreground after:absolute after:inset-x-0 after:-inset-y-3.5 after:content-['']"
+                        disabled={createSubmitting}
+                        onClick={() => navigateTo(crumb.path)}
+                      >
+                        {crumb.label}
+                      </Button>
+                      <ChevronRight aria-hidden="true" size={12} className="shrink-0" />
+                    </Fragment>
+                  ))}
+                  <span aria-current="page" className="shrink-0 px-1 text-foreground">
+                    {folderCrumbs.currentLabel}
+                  </span>
+                </nav>
+              ) : (
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  title={normalizedCurrent ?? undefined}
+                >
+                  {isAtRoot ? 'Project files' : normalizedCurrent?.slice(rootPrefixLength)}
+                </p>
+              )}
             </div>
           </div>
           <SheetDescription className="sr-only">Browse project files</SheetDescription>
@@ -562,6 +629,7 @@ export function MobileFileExplorer({
             side="bottom"
             className="flex flex-col gap-0 p-2"
             aria-label={actionEntry ? `Actions for ${actionEntry.name}` : undefined}
+            onCloseAutoFocus={fileActionsSheetCloseAutoFocus}
           >
             {actionEntry && (
               <>

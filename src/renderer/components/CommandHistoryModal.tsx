@@ -177,7 +177,7 @@ export function CommandHistoryModal({
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder="Search commands..."
-                className="w-full px-3 py-2 text-sm bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary"
+                className="w-full px-3 py-2 text-sm pointer-coarse:text-base bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary"
               />
             </div>
 
@@ -203,7 +203,7 @@ export function CommandHistoryModal({
                         onClose()
                       }}
                       className={`px-4 py-3 cursor-pointer transition-colors ${
-                        index === selectedIndex ? 'bg-secondary' : 'hover:bg-secondary/50'
+                        index === selectedIndex ? 'keycap' : 'hover:bg-foreground/[0.03]'
                       }`}
                     >
                       <div className="flex items-start justify-between gap-3">

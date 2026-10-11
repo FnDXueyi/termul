@@ -27,12 +27,18 @@ interface TitleBarShortcutsPopoverProps {
   buttonClassName: string
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /**
+   * After the popover has closed, return focus to its button when focus fell
+   * to the page body. Off by default (the classic rail keeps today's behavior).
+   */
+  restoreFocusOnClose?: boolean
 }
 
 export function TitleBarShortcutsPopover({
   buttonClassName,
   open,
-  onOpenChange
+  onOpenChange,
+  restoreFocusOnClose = false
 }: TitleBarShortcutsPopoverProps): React.JSX.Element {
   const [openFallback, setOpenFallback] = useState(false)
   const isOpen = open ?? openFallback
@@ -40,6 +46,7 @@ export function TitleBarShortcutsPopover({
   const updateShortcut = useUpdateShortcut()
   const resetShortcut = useResetShortcut()
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   const quickShortcuts = QUICK_SHORTCUT_IDS.filter(
     (id) => isTauriContext() || id !== 'newBrowserTab'
@@ -58,6 +65,12 @@ export function TitleBarShortcutsPopover({
     },
     [onOpenChange]
   )
+
+  const handleExitComplete = useCallback(() => {
+    if (!restoreFocusOnClose) return
+    const active = document.activeElement
+    if (!active || active === document.body) triggerRef.current?.focus()
+  }, [restoreFocusOnClose])
 
   const handleUpdate = (id: string, customKey: string): void => {
     void updateShortcut(id, customKey).catch((error: unknown) => {
@@ -106,6 +119,7 @@ export function TitleBarShortcutsPopover({
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         className={buttonClassName}
         title="Keyboard shortcuts"
@@ -116,10 +130,10 @@ export function TitleBarShortcutsPopover({
           setOpen(!isOpen)
         }}
       >
-        <Keyboard size={16} className={isOpen ? 'text-foreground' : 'text-muted-foreground'} />
+        <Keyboard size={16} />
       </button>
 
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={handleExitComplete}>
         {isOpen && (
           <motion.div
             initial={{ opacity: 0 }}

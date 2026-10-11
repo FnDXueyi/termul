@@ -63,6 +63,7 @@ import {
   GripVerticalIcon,
   HandIcon,
   HashIcon,
+  HelpCircleIcon,
   HistoryIcon,
   Home01Icon,
   Image02Icon,
@@ -72,6 +73,7 @@ import {
   KeySquareIcon,
   Layers01Icon,
   Layout2ColumnIcon,
+  Layout3ColumnIcon,
   Link01Icon,
   ListChecksIcon,
   ListIcon,
@@ -221,6 +223,7 @@ export const ClipboardPaste = hugeIcon('ClipboardPaste', ClipboardPasteIcon)
 export const Clock = hugeIcon('Clock', Clock01Icon)
 export const Code2 = hugeIcon('Code2', CodeIcon)
 export const Columns2 = hugeIcon('Columns2', Layout2ColumnIcon)
+export const Columns3 = hugeIcon('Columns3', Layout3ColumnIcon)
 export const Copy = hugeIcon('Copy', CopyIcon)
 export const CopyX = hugeIcon('CopyX', CopyXIcon)
 export const Cpu = hugeIcon('Cpu', CpuIcon)
@@ -252,6 +255,7 @@ export const GitCommit = hugeIcon('GitCommit', GitCommitHorizontalIcon)
 export const GitMerge = hugeIcon('GitMerge', GitMergeIcon)
 export const GripVertical = hugeIcon('GripVertical', GripVerticalIcon)
 export const Hash = hugeIcon('Hash', HashIcon)
+export const HelpCircle = hugeIcon('HelpCircle', HelpCircleIcon)
 export const History = hugeIcon('History', HistoryIcon)
 export const ImageIcon = hugeIcon('ImageIcon', Image02Icon)
 export const KeySquare = hugeIcon('KeySquare', KeySquareIcon)
