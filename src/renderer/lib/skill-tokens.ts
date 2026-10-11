@@ -534,6 +534,17 @@ export const FILE_TOKEN_END = '\uE007'
  */
 export const FILE_TOKEN_SEP = '\u001F'
 
+/**
+ * Folder mentions (gh-896) reuse the file token with a trailing `/` on the
+ * `absPath` as the dir marker, so the token format and the file wire output
+ * stay unchanged. A folder token's display is the project-relative path with a
+ * trailing `/` (e.g. `src/renderer/components/`); on send it becomes that text
+ * verbatim — no `resource_link`, no expansion.
+ */
+export function isFolderTokenPath(absPath: string): boolean {
+  return absPath.endsWith('/')
+}
+
 /** A run of plain text or a single file token extracted from the value. */
 export type FileSegment =
   | { kind: 'text'; text: string }
@@ -670,10 +681,15 @@ export function removeFileTokenBeforeCaret(value: string, caret: number): Remove
  * Replace each file token with `(<display>)` for the wire prompt's user-text
  * portion. Inline duplicates are preserved (the same file may appear at
  * multiple positions). Non-token text is passed through verbatim. Mirrors
- * `replaceSkillTokensInline` for skills.
+ * `replaceSkillTokensInline` for skills. A folder token (see
+ * {@link isFolderTokenPath}) becomes its bare relative path text instead, so
+ * the agent reads `src/renderer/components/` rather than `(…)`.
  */
 export function replaceFileTokensInline(value: string): string {
   return parseFileSegments(value)
-    .map((s) => (s.kind === 'file' ? `(${s.display})` : s.text))
+    .map((s) => {
+      if (s.kind !== 'file') return s.text
+      return isFolderTokenPath(s.absPath) ? s.display : `(${s.display})`
+    })
     .join('')
 }

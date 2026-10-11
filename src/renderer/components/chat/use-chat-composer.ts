@@ -15,6 +15,7 @@ import {
   extractSkillNames,
   insertCommandToken,
   insertSkillToken,
+  isFolderTokenPath,
   parseFileSegments,
   replaceFileTokensInline,
   SKILL_TOKEN_START,
@@ -400,7 +401,8 @@ export function useChatComposer(args: UseChatComposerArgs): UseChatComposerResul
     const fileBlocks: ContentBlock[] = []
     const seenPaths = new Set<string>()
     for (const seg of fileSegments) {
-      if (seg.kind === 'file' && !seenPaths.has(seg.absPath)) {
+      // Folder tokens ride as plain relative-path text (no `resource_link`).
+      if (seg.kind === 'file' && !isFolderTokenPath(seg.absPath) && !seenPaths.has(seg.absPath)) {
         seenPaths.add(seg.absPath)
         fileBlocks.push(
           attachmentToBlock({

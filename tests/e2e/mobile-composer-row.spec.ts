@@ -147,7 +147,11 @@ const addSheet = (page: Page): Locator => page.getByRole('dialog', { name: 'Add 
 const mentionMenu = (page: Page): Locator =>
   page
     .getByRole('listbox')
-    .or(page.getByText(/^(Searching files…|No files match\. Try another name\.)$/))
+    .or(
+      page.getByText(
+        /^(Searching files and folders…|No files or folders match\. Try another name\.)$/
+      )
+    )
 const contextRing = (page: Page): Locator =>
   page.getByRole('button', { name: /^Context \d+ percent used$/ })
 

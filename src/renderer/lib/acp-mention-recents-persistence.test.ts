@@ -50,6 +50,37 @@ describe('mention recents — pure helpers', () => {
     expect(fromStoredRecent(stored, '/work')).toEqual(match('src/auth.ts', true))
   })
 
+  it('round-trips a folder recent with kind and a trailing-slash absPath', () => {
+    const dir: MentionMatch = {
+      relPath: 'src/components',
+      absPath: '/work/src/components/',
+      name: 'components',
+      ignored: false,
+      kind: 'dir'
+    }
+    const stored = toStoredRecent(dir)
+    expect(stored).toEqual({
+      relPath: 'src/components',
+      name: 'components',
+      ignored: false,
+      kind: 'dir'
+    })
+    expect(fromStoredRecent(stored, '/work')).toEqual(dir)
+  })
+
+  it('treats a stored record without kind as a file (old persisted recents)', () => {
+    const restored = fromStoredRecent({ relPath: 'a/b.ts', name: 'b.ts', ignored: false }, '/work')
+    expect(restored.kind).toBeUndefined()
+    expect(restored.absPath).toBe('/work/a/b.ts')
+  })
+
+  it('pushRecent keeps a file and a folder with the same relPath as separate entries', () => {
+    const dir: MentionMatch = { ...match('src/search'), absPath: '/work/src/search/', kind: 'dir' }
+    const next = pushRecent([match('src/search')], dir)
+    expect(next).toHaveLength(2)
+    expect(pushRecent(next, dir)).toHaveLength(2)
+  })
+
   it('pushRecent moves the match to front, dedups by relPath, and caps', () => {
     const list = [match('a.ts'), match('b.ts')]
     const next = pushRecent(list, match('b.ts'))

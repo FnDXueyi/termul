@@ -85,6 +85,7 @@ pub mod notification;
 pub mod project_icon;
 pub mod remote;
 pub mod search;
+pub(crate) mod search_dirs;
 pub mod ssh;
 pub mod terminal;
 pub mod workspace;
@@ -111,6 +112,9 @@ mod notification_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod search_dirs_tests;
 
 #[cfg(test)]
 mod remote_sync_mcp_registry_tests;

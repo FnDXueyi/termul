@@ -25,6 +25,7 @@ use std::io::BufRead;
 use axum::{extract::Query, extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
 
+use crate::commands::search_dirs::start_dir_search;
 use crate::commands::{
     build_file_name_search_args, build_search_args, configure_background_command, detect_rg_path,
     path_is_ignored, rank_search_hits, resolve_rg_path, search_processes, validated_search_root,
@@ -287,6 +288,11 @@ pub async fn content(
 /// debounces queries client-side, so a single batch is an acceptable
 /// substitute for the desktop's streaming batches.
 ///
+/// A concurrent directory-name pass (`commands::search_dirs`, gh-896) appends
+/// folder hits (`kind: "dir"`, root-relative, no trailing slash) after the file
+/// hits, with the same ignore rules and ranking. A dir-pass failure is logged
+/// and the file hits are still returned.
+///
 /// Paths are returned relative to `root` (identical to the desktop stream:
 /// the desktop command searches the `root` directory and rg emits
 /// root-relative lines there). SECURITY: paths are logged only as lengths
@@ -407,6 +413,21 @@ pub async fn file_names(
                 .take()
                 .ok_or_else(|| ("rg stdout capture failed".to_string(), "SEARCH_ERROR"))?;
 
+            // Directory-name pass (gh-896), concurrent with the file walk.
+            // A spawn failure is logged and the file hits are still returned.
+            let dir_search = match start_dir_search(
+                &rg_path,
+                &trimmed_query,
+                &validated_root,
+                include_ignored,
+            ) {
+                Ok(dir_search) => dir_search,
+                Err(e) => {
+                    tracing::warn!("[Search] folder name pass not started: {}", e);
+                    None
+                }
+            };
+
             // Same caps/buckets as the desktop stream (ADR 0003): non-ignored
             // first, ignored bucketed + ranked after the walk when
             // `include_ignored`, plain cap otherwise.
@@ -452,6 +473,7 @@ pub async fn file_names(
                                     ignored_bucket.push(SearchFileHit {
                                         path: normalized,
                                         ignored: true,
+                                        kind: None,
                                     });
                                 } else {
                                     ignored_dropped += 1;
@@ -460,6 +482,7 @@ pub async fn file_names(
                                 non_ignored.push(SearchFileHit {
                                     path: normalized,
                                     ignored: false,
+                                    kind: None,
                                 });
                             }
                         } else {
@@ -470,6 +493,7 @@ pub async fn file_names(
                             files.push(SearchFileHit {
                                 path: normalized,
                                 ignored: false,
+                                kind: None,
                             });
                         }
                     }
@@ -483,16 +507,40 @@ pub async fn file_names(
             let _ = child.kill();
             let _ = child.wait();
 
+            // Join the folder pass before any early return so its rg child and
+            // collector thread never outlive the request.
+            // A file-pass stream error aborts the request, so do not wait for
+            // the whole folder walk: kill it first.
+            if stream_error.is_some() {
+                if let Some(d) = dir_search.as_ref() {
+                    d.kill();
+                }
+            }
+            let dir_outcome = dir_search.map(|d| d.finish()).unwrap_or_default();
+            if let Some(e) = dir_outcome.error.as_deref() {
+                tracing::warn!("[Search] folder name pass failed: {}", e);
+            }
+            if dir_outcome.skipped_lines > 0 {
+                tracing::warn!(
+                    "[Search] folder name pass skipped {} line(s) outside the search root",
+                    dir_outcome.skipped_lines
+                );
+            }
+
             if let Some(error) = stream_error {
                 return Err((error, "SEARCH_ERROR"));
             }
 
-            let out_files = if include_ignored {
+            // Files first, then folder hits (the picker renders a separate
+            // "Folders" section after "Files").
+            let mut out_files = if include_ignored {
                 truncated = broke_at_cap || ignored_dropped > 0;
                 rank_search_hits(non_ignored, ignored_bucket, max_files)
             } else {
                 files
             };
+            truncated |= dir_outcome.truncated;
+            out_files.extend(dir_outcome.hits);
             Ok(FileNameSearchResponse {
                 files: out_files,
                 truncated,

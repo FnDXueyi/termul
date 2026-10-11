@@ -17,6 +17,8 @@ export interface StoredRecent {
   relPath: string
   name: string
   ignored: boolean
+  /** Absent means `'file'` so records saved before folder mentions still parse. */
+  kind?: 'file' | 'dir'
 }
 
 /** Composite key isolates a project's main checkout from its worktrees. */
@@ -36,11 +38,21 @@ export function mentionRecentsKey(projectId: string, cwd: string): string {
 }
 
 export function toStoredRecent(match: MentionMatch): StoredRecent {
-  return { relPath: match.relPath, name: match.name, ignored: match.ignored }
+  const base = { relPath: match.relPath, name: match.name, ignored: match.ignored }
+  return match.kind === 'dir' ? { ...base, kind: 'dir' } : base
 }
 
 export function fromStoredRecent(stored: StoredRecent, cwd: string): MentionMatch {
   const root = cwd.replace(/\\/g, '/').replace(/\/$/, '')
+  if (stored.kind === 'dir') {
+    return {
+      relPath: stored.relPath,
+      absPath: `${root}/${stored.relPath}/`,
+      name: stored.name,
+      ignored: stored.ignored,
+      kind: 'dir'
+    }
+  }
   return {
     relPath: stored.relPath,
     absPath: `${root}/${stored.relPath}`,
@@ -50,11 +62,13 @@ export function fromStoredRecent(stored: StoredRecent, cwd: string): MentionMatc
 }
 
 /**
- * Add `match` to the front of the list, dedup by `relPath`, and cap. Pure so
+ * Add `match` to the front of the list, dedup by `relPath` + kind (a file and a
+ * folder may share a path name), and cap. Pure so
  * it can be unit-tested directly.
  */
 export function pushRecent(list: MentionMatch[], match: MentionMatch): MentionMatch[] {
-  const deduped = list.filter((m) => m.relPath !== match.relPath)
+  const isDir = match.kind === 'dir'
+  const deduped = list.filter((m) => m.relPath !== match.relPath || (m.kind === 'dir') !== isDir)
   return [match, ...deduped].slice(0, MENTION_RECENTS_CAP)
 }
 

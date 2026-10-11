@@ -54,7 +54,11 @@ import {
 import { useComposerToolbarMode } from '@/components/chat/chat-layout'
 import { ChatStarters, ChatStartHero } from '@/components/chat/chat-start'
 import { ChatComposerEditor } from '@/components/chat/composer/ChatComposerEditor'
-import { FileMentionMenu } from '@/components/chat/FileMentionMenu'
+import {
+  FileMentionMenu,
+  MENTION_EMPTY_LABEL,
+  MENTION_SEARCHING_LABEL
+} from '@/components/chat/FileMentionMenu'
 import { SlashCommandMenu, type SlashMenuHandle } from '@/components/chat/SlashCommandMenu'
 import { useChatComposer } from '@/components/chat/use-chat-composer'
 import { useComposerAttachments } from '@/components/chat/use-composer-attachments'
@@ -791,7 +795,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // programmatic splices).
   const mentionSections = mentions.sections
   const mentionMenuRef = mentions.menuRef
-  const emptyLabel = mentions.loading ? 'Searching files…' : 'No files match. Try another name.'
+  const emptyLabel = mentions.loading ? MENTION_SEARCHING_LABEL : MENTION_EMPTY_LABEL
   const resetMentions = mentions.reset
   const onMentionSelect = useComposerMentionSelect({
     value: prompt,
