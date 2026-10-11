@@ -5,6 +5,7 @@ import { baseName, describeToolCall, toolCallPath } from '@/components/chat/tool
 import { ChevronDown, ChevronRight, FileDiff } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
+import { DiffStatCounts } from '@/components/ui/diff-stat-counts'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ToolCall } from '@/lib/acp-api'
 import { logFrontendError } from '@/lib/log-api'
@@ -172,8 +173,7 @@ function FileRow({
       </span>
       {hasCounts && (
         <span className="shrink-0 font-mono text-2xs leading-tight">
-          <span className="text-success">+{file.added}</span>{' '}
-          <span className="text-destructive">−{file.removed}</span>
+          <DiffStatCounts added={file.added} removed={file.removed} />
         </span>
       )}
     </button>
@@ -282,8 +282,7 @@ export function ChatChangedFilesPanel({
       </span>{' '}
       {hasTotalCounts && (
         <span className="ms-auto shrink-0 font-mono text-2xs tabular-nums">
-          <span className="text-success">+{totalAdded}</span>{' '}
-          <span className="text-destructive">−{totalRemoved}</span>
+          <DiffStatCounts added={totalAdded} removed={totalRemoved} />
         </span>
       )}
     </button>
