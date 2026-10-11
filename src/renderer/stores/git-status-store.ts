@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   GitCommitContext,
   GitDiffStat,
   GitStashInfo,
@@ -150,19 +150,26 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
 
   refreshStatus: async (cwd) => {
     const key = trackPath(cwd)
+    // Per-key request ordering: a slow earlier refresh (focus/poll started before
+    // a git write) must not overwrite the newer status from the write's refresh.
+    // biome-ignore lint/suspicious/noAssignInExpressions: deliberate request-token bump and capture
+    const token = (statusRequests[key] = (statusRequests[key] ?? 0) + 1)
+    const isCurrent = () => statusRequests[key] === token
     set((state) => ({
       statusFetchCount: state.statusFetchCount + 1,
       isFetchingStatus: true
     }))
     try {
       const status = await gitApi.getStatus(cwd)
-      set((state) => ({
-        statuses: { ...state.statuses, [key]: status }
-      }))
-      patchError(key, 'status', null)
+      if (isCurrent()) {
+        set((state) => ({
+          statuses: { ...state.statuses, [key]: status }
+        }))
+        patchError(key, 'status', null)
+      }
     } catch (error) {
       // Keep the previous status; record the failure and let the caller decide.
-      patchError(key, 'status', errorMessage(error))
+      if (isCurrent()) patchError(key, 'status', errorMessage(error))
       logFailure('status refresh', key, error)
       throw error
     } finally {
@@ -256,8 +263,10 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
           commitContexts: { ...state.commitContexts, [key]: context }
         }))
         patchError(key, 'commitContext', null)
+        return context
       }
-      return context
+      // Superseded by a newer fetch: never hand the caller an older context.
+      return null
     } catch (error) {
       if (!isCurrent()) return null
       // Drop any stale context so the footer disables its actions rather than
@@ -373,7 +382,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     await gitApi.commit(cwd, summary, description, amend)
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
-    // already happened) — swallow refresh errors here.
+    // already happened) â€” swallow refresh errors here.
     await refreshAfterMutation(get, cwd)
   },
 
@@ -507,6 +516,9 @@ const diffRequestVersions: Record<string, number> = {}
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
 
+/** Monotonic request token per working-copy key for efreshStatus (same idea). */
+const statusRequests: Record<string, number> = {}
+
 const DIFF_STAT_MIN_INTERVAL_MS = 30_000
 
 /** Watcher ref-counts, last fetch time and the pending trailing refresh per key
@@ -528,6 +540,7 @@ export function resetGitStatusStoreControlForTests(): void {
   diffStatWatchers.clear()
   diffStatLastFetch.clear()
   for (const key of Object.keys(commitContextRequests)) delete commitContextRequests[key]
+  for (const key of Object.keys(statusRequests)) delete statusRequests[key]
 }
 
 /** Canonical key for `cwd`; records the first display path seen for it so
