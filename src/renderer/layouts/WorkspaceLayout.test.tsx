@@ -17,7 +17,7 @@ const { platformState, tauriRef, webAuthGateRef, appSettingsRef } = vi.hoisted((
   platformState: { isMac: false },
   // Story 22: switchable settings state for the shell-layout flag tests.
   appSettingsRef: {
-    current: { shellLayout: undefined as string | undefined, isLoaded: true as boolean }
+    current: { shellLayout: 'classic' as string | undefined, isLoaded: true as boolean }
   },
   tauriRef: { current: true as boolean },
   // #907: switchable gate state for the mid-session token-screen tests.
@@ -477,7 +477,7 @@ beforeEach(() => {
   mockUseActiveTerminal.mockReturnValue(null)
   mockUseActiveTerminalId.mockReturnValue('')
   mockUpdatePanelVisibility.mockReset()
-  appSettingsRef.current = { shellLayout: undefined, isLoaded: true }
+  appSettingsRef.current = { shellLayout: 'classic', isLoaded: true }
   resetShellLayoutActiveAtLoadForTests()
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'ready', sidePanelVisible: true, railExpanded: true })
@@ -1424,13 +1424,28 @@ describe('WorkspaceLayout - shellLayout flag', () => {
     return Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
   }
 
-  it('renders the classic shell with the explorer right of main when the flag is absent', () => {
+  it('renders the revamped shell (ShellFrame) when the flag is absent', () => {
+    appSettingsRef.current = { shellLayout: undefined, isLoaded: true }
     mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
 
     renderWithRouter()
 
+    const rail = screen.getByRole('navigation', { name: 'Projects' })
+    const explorer = screen.getByTestId('side-panel-column')
     const main = document.querySelector('main') as Element
-    expect(precedes(main, screen.getByTestId('file-explorer'))).toBe(true)
+    expect(screen.queryByRole('navigation', { name: 'Global actions' })).not.toBeInTheDocument()
+    expect(precedes(rail, explorer)).toBe(true)
+    expect(precedes(explorer, main)).toBe(true)
+  })
+
+  it('renders the revamped shell when the flag is an unknown value', () => {
+    appSettingsRef.current = { shellLayout: 'nonsense', isLoaded: true }
+    mockUseActiveProject.mockReturnValue(createProject('p1', '/workspace/p1', 'blue'))
+
+    renderWithRouter()
+
+    expect(screen.getByTestId('side-panel-column')).toBeInTheDocument()
+    expect(document.querySelector('aside.w-64')).toBeNull()
   })
 
   it('renders the classic shell when the flag is classic', () => {

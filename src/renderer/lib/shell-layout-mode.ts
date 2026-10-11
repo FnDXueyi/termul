@@ -1,8 +1,10 @@
 /**
- * Opt-in shell layout flag (shell revamp, CAP-18).
+ * Shell layout flag (shell revamp, CAP-18). The default is `revamp`; a user
+ * can still opt back to `classic` until the flag is retired.
  *
  * `AppSettings.shellLayout` is optional and absent from `DEFAULT_APP_SETTINGS`,
- * so an unset flag resolves to `SHELL_LAYOUT_DEFAULT`. The mode that was
+ * so an unset flag resolves to `SHELL_LAYOUT_DEFAULT`. A stored explicit value
+ * (`classic` or `revamp`) always wins and is never rewritten. The mode that was
  * active when the app loaded is captured once (first wins); the Preferences
  * toggle compares the saved setting with it to show "Reload to apply".
  *
@@ -13,8 +15,8 @@
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import type { ShellLayoutMode } from '@/types/settings'
 
-/** Code-constant default; never stored in `DEFAULT_APP_SETTINGS`. */
-export const SHELL_LAYOUT_DEFAULT: ShellLayoutMode = 'classic'
+/** Code-constant default (revamp); never stored in `DEFAULT_APP_SETTINGS`. */
+export const SHELL_LAYOUT_DEFAULT: ShellLayoutMode = 'revamp'
 
 /** Maps a stored (possibly absent or unknown) value to a valid mode. */
 export function resolveShellLayout(setting: unknown): ShellLayoutMode {

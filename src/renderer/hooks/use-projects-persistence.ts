@@ -443,7 +443,11 @@ export function useProjectsLoader(): void {
             ...project,
             ...(icon ? { icon } : {}),
             ...(isGitRepo ? { isGitRepo } : {}),
-            ...(prev?.worktrees ? { worktrees: prev.worktrees } : {})
+            ...(prev?.worktrees ? { worktrees: prev.worktrees } : {}),
+            // The probed HEAD branch is not on the wire either; without it every
+            // refetch blanks the Chat cards' branch line and the Launcher strip
+            // reads "Detached HEAD" until the next probe.
+            ...(prev?.gitBranch ? { gitBranch: prev.gitBranch } : {})
           }
         })
         const defaultId = result.data.defaultProjectId

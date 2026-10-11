@@ -18,6 +18,17 @@ import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/project'
 
+/**
+ * cmdk marks every item `data-disabled="false"`, and `MENU_ITEM_CLASS` matches
+ * the bare `data-disabled` attribute (Radix sets it only when disabled), which
+ * would make every row ignore the pointer. Re-enable the pointer on the
+ * not-disabled state.
+ */
+const SWITCHER_ITEM_CLASS = cn(
+  MENU_ITEM_CLASS,
+  'gap-2 data-[disabled=false]:pointer-events-auto! data-[disabled=false]:opacity-100!'
+)
+
 interface ProjectSwitcherProps {
   projects: Project[]
   activeProject: Project | undefined
@@ -121,7 +132,7 @@ export function ProjectSwitcher({
                       key={project.id}
                       value={project.id}
                       onSelect={() => selectProject(project.id)}
-                      className={cn(MENU_ITEM_CLASS, 'gap-2')}
+                      className={SWITCHER_ITEM_CLASS}
                       aria-current={isActive ? 'true' : undefined}
                     >
                       <ProjectIcon project={project} size={16} />
@@ -152,7 +163,7 @@ export function ProjectSwitcher({
                 handleOpenChange(false)
                 onNewProject()
               }}
-              className={cn(MENU_ITEM_CLASS, 'gap-2')}
+              className={SWITCHER_ITEM_CLASS}
             >
               <Plus size={14} aria-hidden="true" className="shrink-0 text-muted-foreground" />
               New project
