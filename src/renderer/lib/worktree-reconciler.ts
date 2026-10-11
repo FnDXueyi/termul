@@ -21,7 +21,6 @@
 
 import { normalizeCwdForScope } from '@/lib/acp-history-persistence'
 import { logFrontendError } from '@/lib/log-api'
-import { isTauriContext } from '@/lib/tauri-runtime'
 import { worktreeApi } from '@/lib/worktree-api'
 import { useProjectStore } from '@/stores/project-store'
 import type { Project, Worktree } from '@/types/project'
@@ -33,6 +32,12 @@ export interface ListedWorktree {
   name: string
   branch: string
   path: string
+  /**
+   * Host-set flag (web `/worktree/list`, AD-9): the worktree is outside the
+   * registered project folder. The host is authoritative; the renderer never
+   * recomputes it.
+   */
+  outsideProjectRoot?: boolean
 }
 
 const LOG_PREFIX = '[worktree-reconcile]'
@@ -75,19 +80,10 @@ export function worktreeIdForPath(path: string, attempt = 0): string {
   return `wt-${hashString(salted).toString(16).padStart(14, '0')}`
 }
 
-/** Segment-bounded containment test on canonical keys (`root` itself counts as inside). */
-export function isPathInsideRoot(path: string, root: string): boolean {
-  const key = worktreeKey(path)
-  const rootKey = worktreeKey(root)
-  return key === rootKey || key.startsWith(`${rootKey}/`)
-}
-
 export interface MergeWorktreesInput {
   stored: readonly Worktree[]
   listed: readonly ListedWorktree[]
   projectPath: string
-  /** Flag listed paths outside the project folder (web only). */
-  flagOutsideRoot: boolean
   now?: string
 }
 
@@ -112,7 +108,7 @@ function withOutsideFlag(worktree: Worktree, outside: boolean): Worktree {
  * cheaply. The project root is never kept as a worktree.
  */
 export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult {
-  const { stored, listed, projectPath, flagOutsideRoot } = input
+  const { stored, listed, projectPath } = input
   const now = input.now ?? new Date().toISOString()
   const rootKey = worktreeKey(projectPath)
 
@@ -140,7 +136,7 @@ export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult
     if (worktree.branch !== entry.branch || worktree.name !== entry.name) {
       next = { ...worktree, branch: entry.branch, name: entry.name }
     }
-    if (flagOutsideRoot) next = withOutsideFlag(next, !isPathInsideRoot(entry.path, projectPath))
+    next = withOutsideFlag(next, entry.outsideProjectRoot === true)
     if (next !== worktree) updated++
     result.push(next)
   }
@@ -160,11 +156,7 @@ export function mergeWorktrees(input: MergeWorktreesInput): MergeWorktreesResult
       path: entry.path,
       createdAt: now
     }
-    result.push(
-      flagOutsideRoot
-        ? withOutsideFlag(created, !isPathInsideRoot(entry.path, projectPath))
-        : created
-    )
+    result.push(withOutsideFlag(created, entry.outsideProjectRoot === true))
     added++
   }
 
@@ -218,8 +210,7 @@ async function runOnce(projectId: string): Promise<ReconcileOutcome> {
     const merged = mergeWorktrees({
       stored: storedList,
       listed: listing.data,
-      projectPath: current.path,
-      flagOutsideRoot: !isTauriContext()
+      projectPath: current.path
     })
 
     const patch: Partial<Project> = {}

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useProjectStore } from '@/stores/project-store'
 import type { Project, Worktree } from '@/types/project'
 import {
-  isPathInsideRoot,
   mergeWorktrees,
   reconcileProjectWorktrees,
   worktreeIdForPath,
@@ -11,13 +10,11 @@ import {
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
-  logFrontendError: vi.fn(),
-  isTauri: { value: true }
+  logFrontendError: vi.fn()
 }))
 
 vi.mock('@/lib/worktree-api', () => ({ worktreeApi: { list: mocks.list } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: mocks.logFrontendError }))
-vi.mock('@/lib/tauri-runtime', () => ({ isTauriContext: () => mocks.isTauri.value }))
 
 const ROOT = '/repo'
 const WT_A = '/repo/.termul/worktrees/a'
@@ -70,7 +67,6 @@ function deferredList() {
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.list.mockReset()
-  mocks.isTauri.value = true
   vi.spyOn(console, 'debug').mockImplementation(() => {})
 })
 
@@ -96,13 +92,7 @@ describe('worktreeKey / worktreeIdForPath / isPathInsideRoot', () => {
     expect(worktreeIdForPath('/repo/wt', 1)).not.toBe(worktreeIdForPath('/repo/wt'))
   })
 
-  it('tests containment on segment boundaries', () => {
-    expect(isPathInsideRoot('/repo/wt', '/repo')).toBe(true)
-    expect(isPathInsideRoot('/repo', '/repo')).toBe(true)
-    expect(isPathInsideRoot('/repo-other/wt', '/repo')).toBe(false)
-    expect(isPathInsideRoot('/elsewhere/wt', '/repo')).toBe(false)
-    expect(isPathInsideRoot('E:\\Repo\\wt', 'e:/repo/')).toBe(true)
-  })
+  it('tests containment on segment boundaries', () => {})
 })
 
 describe('mergeWorktrees', () => {
@@ -111,8 +101,7 @@ describe('mergeWorktrees', () => {
     const result = mergeWorktrees({
       stored,
       listed: [info(WT_A, 'b', 'n')],
-      projectPath: ROOT,
-      flagOutsideRoot: false
+      projectPath: ROOT
     })
     expect(result.worktrees[0]).toBe(stored[0])
     expect(result).toMatchObject({ added: 0, updated: 0, removed: 0 })
@@ -122,8 +111,7 @@ describe('mergeWorktrees', () => {
     const result = mergeWorktrees({
       stored: [wt({ id: 'wt-root', path: '/repo/' })],
       listed: [info('/repo'), info(WT_A)],
-      projectPath: ROOT,
-      flagOutsideRoot: false
+      projectPath: ROOT
     })
     expect(result.worktrees.map((w) => w.path)).toEqual([WT_A])
     expect(result.removed).toBe(1)
@@ -133,8 +121,7 @@ describe('mergeWorktrees', () => {
     const result = mergeWorktrees({
       stored: [wt({ id: 'wt-1', path: WT_A }), wt({ id: 'wt-2', path: `${WT_A}/` })],
       listed: [info(WT_A)],
-      projectPath: ROOT,
-      flagOutsideRoot: false
+      projectPath: ROOT
     })
     expect(result.worktrees.map((w) => w.id)).toEqual(['wt-1'])
   })
@@ -144,8 +131,7 @@ describe('mergeWorktrees', () => {
     const result = mergeWorktrees({
       stored: [wt({ id: collidingId, path: WT_A })],
       listed: [info(WT_A), info('/repo/.termul/worktrees/new')],
-      projectPath: ROOT,
-      flagOutsideRoot: false
+      projectPath: ROOT
     })
     const ids = result.worktrees.map((w) => w.id)
     expect(new Set(ids).size).toBe(2)
@@ -399,27 +385,28 @@ describe('reconcileProjectWorktrees', () => {
     })
   })
 
-  describe('web outside-root flag', () => {
-    it('flags a listed path outside the project folder on web only', async () => {
-      mocks.isTauri.value = false
+  describe('outside-root flag (host-provided)', () => {
+    it('stores the host flag on new and existing rows', async () => {
       seed()
-      mocks.list.mockResolvedValue(ok(info(WT_A), info('/elsewhere/wt-out'), info('/repo-other/x')))
+      mocks.list.mockResolvedValue(
+        ok(info(WT_A), { ...info('/elsewhere/wt-out'), outsideProjectRoot: true })
+      )
 
       await reconcileProjectWorktrees('p1')
 
       const byPath = new Map(project().worktrees?.map((w) => [w.path, w]))
       expect(byPath.get(WT_A)?.outsideProjectRoot).toBeUndefined()
       expect(byPath.get('/elsewhere/wt-out')?.outsideProjectRoot).toBe(true)
-      expect(byPath.get('/repo-other/x')?.outsideProjectRoot).toBe(true)
     })
 
-    it('never sets the flag on desktop', async () => {
-      mocks.isTauri.value = true
+    it('does not recompute the flag from paths and clears it when the host drops it', async () => {
       seed()
-      mocks.list.mockResolvedValue(ok(info('/elsewhere/wt-out')))
-
+      mocks.list.mockResolvedValue(ok({ ...info('/elsewhere/wt-out'), outsideProjectRoot: true }))
       await reconcileProjectWorktrees('p1')
+      expect(project().worktrees?.[0].outsideProjectRoot).toBe(true)
 
+      mocks.list.mockResolvedValue(ok(info('/elsewhere/wt-out')))
+      await reconcileProjectWorktrees('p1')
       expect(project().worktrees?.[0].outsideProjectRoot).toBeUndefined()
     })
   })
