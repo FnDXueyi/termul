@@ -66,6 +66,13 @@ export interface SessionIndexEntry {
   worktreePath?: string
   worktreeBranch?: string
   /**
+   * Host-recorded current model id + display-name snapshot (CAP-3). Additive:
+   * absent on old entries and on discovered/imported sessions. Read-only on the
+   * renderer — the host (`SessionPersistence`) is the sole writer.
+   */
+  modelId?: string
+  modelName?: string
+  /**
    * Ordered agent-config ids this conversation ran with (story 3 /
    * spec-in-chat-agent-switch): first = original, last = current. Additive
    * derived cache — absent on unswitched chats (readers fall back to
@@ -316,7 +323,9 @@ export function toPersistedSessionSummaries(
     lastSeq: entry.lastSeq ?? 0,
     resumeEligible: Boolean(entry.agentConfigId || entry.agentId),
     worktreePath: entry.worktreePath,
-    worktreeBranch: entry.worktreeBranch
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
   }))
 }
 
@@ -442,7 +451,9 @@ export function fromPersistedSessionSummary(entry: PersistedSessionSummary): Ses
       entry.discovered ??
       (entry.messageCount === 0 && entry.toolCount === 0 && entry.lastSeq === 0),
     worktreePath: entry.worktreePath,
-    worktreeBranch: entry.worktreeBranch
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
   }
 }
 

@@ -1,4 +1,5 @@
-use super::validate_project_path;
+use super::{validate_project_path, IpcResult};
+use crate::trackers::git_tracker::{DiffStatError, GitDiffStat};
 use crate::trackers::{GitCommit, GitStatusDetail};
 
 // ==================== Git Commands ====================
@@ -19,6 +20,29 @@ pub async fn git_get_diff(
 ) -> Result<String, String> {
     crate::trackers::git_tracker::git_get_diff(&cwd, &path, staged.unwrap_or(false))
         .map_err(|e: String| e)
+}
+
+/// Working-tree `+added -removed` line stat for the repository at `cwd`
+/// (tracked changes against HEAD plus untracked files). Read-only; the same
+/// shared function backs `POST /git/diff-stat`. Failures surface as
+/// `IpcResult::error(.., DiffStatError::code())`.
+#[tauri::command]
+pub async fn git_get_diff_stat(cwd: String) -> Result<IpcResult<GitDiffStat>, String> {
+    let cwd = match validate_project_path(&cwd) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::warn!("[git_get_diff_stat] invalid cwd: {e}");
+            return Ok(IpcResult::error(e, "PATH_VALIDATION_FAILED"));
+        }
+    };
+    let result: Result<GitDiffStat, DiffStatError> =
+        tokio::task::spawn_blocking(move || crate::trackers::git_tracker::git_get_diff_stat(&cwd))
+            .await
+            .map_err(|e| format!("git diff stat task failed: {e}"))?;
+    Ok(match result {
+        Ok(stat) => IpcResult::success(stat),
+        Err(e) => IpcResult::error(e.to_string(), e.code()),
+    })
 }
 
 /// Stage a single file (`git add`).
