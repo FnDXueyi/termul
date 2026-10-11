@@ -6,6 +6,9 @@ const {
   mockMoveTabToPane,
   mockMoveTabToNewSplit,
   mockSelectProfile,
+  mockToastInfo,
+  mockToastError,
+  mockOpenHistorySession,
   acpRef,
   wsRef
 } = vi.hoisted(() => ({
@@ -14,10 +17,14 @@ const {
   mockMoveTabToPane: vi.fn(),
   mockMoveTabToNewSplit: vi.fn(),
   mockSelectProfile: vi.fn(),
+  mockToastInfo: vi.fn(),
+  mockToastError: vi.fn(),
+  mockOpenHistorySession: vi.fn(async () => undefined),
   acpRef: {
     current: {
       sessions: {} as Record<string, { projectId: string }>,
       sessionIndex: [] as Array<{ id: string; projectId: string }>,
+      openHistorySession: undefined as unknown as typeof mockOpenHistorySession,
       switchProject: vi.fn(async () => ({ status: 'selected' })),
       setFailedProjectSwitch: vi.fn()
     }
@@ -40,6 +47,7 @@ function leavesOf(node: FakePane): FakePane[] {
 }
 
 vi.mock('@/hooks/use-mobile-web-shell', () => ({ isMobileWebShellViewport: mockIsMobile }))
+vi.mock('sonner', () => ({ toast: { info: mockToastInfo, error: mockToastError } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 vi.mock('@/stores/acp-store', () => ({ useAcpStore: { getState: () => acpRef.current } }))
 vi.mock('@/stores/workspace-store', () => ({
@@ -64,7 +72,7 @@ vi.mock('@/stores/ssh-store', () => ({
 import { logFrontendError } from '@/lib/log-api'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
-import { openAgentChatInOwnProject } from './open-agent-chat'
+import { openAgentChatInOwnProject, openAgentChatPlaced } from './open-agent-chat'
 
 describe('openAgentChatInOwnProject', () => {
   beforeEach(() => {
@@ -179,5 +187,56 @@ describe('openAgentChatInOwnProject', () => {
         expect.objectContaining({ level: 'info', source: 'test' })
       )
     })
+  })
+})
+
+describe('openAgentChatPlaced', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsMobile.mockReturnValue(false)
+    acpRef.current.sessions = { 's-a': { projectId: 'pa' }, 's-b': { projectId: 'pb' } }
+    acpRef.current.sessionIndex = []
+    acpRef.current.openHistorySession = mockOpenHistorySession
+    mockOpenHistorySession.mockReset()
+    mockOpenHistorySession.mockResolvedValue(undefined)
+    wsRef.root = { type: 'leaf', id: 'pane-1', tabs: [], activeTabId: null }
+    useProjectStore.setState({ activeProjectId: 'pa' })
+    useAgentChatLifetimeStore.setState({ retainedByProject: {}, focusSessionByProject: {} })
+  })
+
+  it('places the chat and starts loading its session when opened', () => {
+    expect(openAgentChatPlaced('s-a', 'test', { paneId: 'pane-1', zone: 'center' })).toBe('opened')
+    expect(mockAddAgentChatTab).toHaveBeenCalledWith('s-a', 'pane-1')
+    expect(mockOpenHistorySession).toHaveBeenCalledWith('s-a')
+    expect(mockToastError).not.toHaveBeenCalled()
+  })
+
+  it('toasts and never opens, switches or retains for a foreign chat', () => {
+    expect(openAgentChatPlaced('s-b', 'test', { paneId: 'pane-1', zone: 'right' })).toBe('rejected')
+    expect(mockToastInfo).toHaveBeenCalledTimes(1)
+    expect(mockToastInfo).toHaveBeenCalledWith('That chat belongs to another project.')
+    expect(mockAddAgentChatTab).not.toHaveBeenCalled()
+    expect(mockOpenHistorySession).not.toHaveBeenCalled()
+    expect(useProjectStore.getState().activeProjectId).toBe('pa')
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({})
+  })
+
+  it('logs one warn and toasts when the session fails to open', async () => {
+    mockOpenHistorySession.mockRejectedValue(new Error('boom'))
+    openAgentChatPlaced('s-a', 'test', { paneId: 'pane-1', zone: 'center' })
+    await vi.waitFor(() =>
+      expect(mockToastError).toHaveBeenCalledWith('Could not open that chat. Try again.')
+    )
+    const warns = vi.mocked(logFrontendError).mock.calls.filter(([e]) => e.level === 'warn')
+    expect(warns).toHaveLength(1)
+    expect(warns[0][0].message).toContain('boom')
+  })
+
+  it('handles a synchronous open failure the same way', () => {
+    mockOpenHistorySession.mockImplementation(() => {
+      throw new Error('sync boom')
+    })
+    openAgentChatPlaced('s-a', 'test', { paneId: 'pane-1', zone: 'center' })
+    expect(mockToastError).toHaveBeenCalledWith('Could not open that chat. Try again.')
   })
 })

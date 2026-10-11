@@ -177,6 +177,7 @@ const mockStartTabDrag = vi.hoisted(() => vi.fn())
 const mockSetReorderPreview = vi.hoisted(() => vi.fn())
 const mockClearReorderPreview = vi.hoisted(() => vi.fn())
 const mockHandleTabReorder = vi.hoisted(() => vi.fn())
+const mockHandleDrop = vi.hoisted(() => vi.fn())
 
 interface MockPaneDndValue {
   startTabDrag: typeof mockStartTabDrag
@@ -185,6 +186,7 @@ interface MockPaneDndValue {
   setReorderPreview: typeof mockSetReorderPreview
   clearReorderPreview: typeof mockClearReorderPreview
   handleTabReorder: typeof mockHandleTabReorder
+  handleDrop?: typeof mockHandleDrop
 }
 
 const mockUsePaneDnd = vi.hoisted(() =>
@@ -355,6 +357,7 @@ beforeEach(() => {
   mockSetReorderPreview.mockReset()
   mockClearReorderPreview.mockReset()
   mockHandleTabReorder.mockReset()
+  mockHandleDrop.mockReset()
   mockAgentChatLifetimeState.closingSessionIds = {}
   mockUsePaneDnd.mockReset()
   mockUsePaneDnd.mockReturnValue({
@@ -861,6 +864,50 @@ describe('WorkspaceTabBar', () => {
     })
 
     expect(mockSetReorderPreview).toHaveBeenCalledWith('pane-a', 'tab-2', 'after')
+  })
+
+  it('drops a chat on the tab bar as a centre drop', async () => {
+    mockUsePaneDnd.mockReturnValue({
+      startTabDrag: mockStartTabDrag,
+      dragPayload: { type: 'chat', sessionId: 's-1' },
+      reorderPreview: null,
+      setReorderPreview: mockSetReorderPreview,
+      clearReorderPreview: mockClearReorderPreview,
+      handleTabReorder: mockHandleTabReorder,
+      handleDrop: mockHandleDrop
+    })
+    const tabs: WorkspaceTab[] = [{ type: 'terminal', id: 'tab-1', terminalId: 'term-1' }]
+    const { container } = render(
+      <WorkspaceTabBar paneId="pane-a" tabs={tabs} activeTabId="tab-1" />
+    )
+    await flushShellEffect()
+
+    fireEvent.drop(container.firstElementChild?.firstElementChild as HTMLElement)
+
+    expect(mockHandleDrop).toHaveBeenCalledTimes(1)
+    expect(mockHandleDrop.mock.calls[0][0]).toBe('pane-a')
+    expect(mockHandleDrop.mock.calls[0][1]).toBe('center')
+  })
+
+  it('leaves tab payload drops on the bar to the existing handlers', async () => {
+    mockUsePaneDnd.mockReturnValue({
+      startTabDrag: mockStartTabDrag,
+      dragPayload: { type: 'tab', tabId: 'tab-1', sourcePaneId: 'pane-a' },
+      reorderPreview: null,
+      setReorderPreview: mockSetReorderPreview,
+      clearReorderPreview: mockClearReorderPreview,
+      handleTabReorder: mockHandleTabReorder,
+      handleDrop: mockHandleDrop
+    })
+    const tabs: WorkspaceTab[] = [{ type: 'terminal', id: 'tab-1', terminalId: 'term-1' }]
+    const { container } = render(
+      <WorkspaceTabBar paneId="pane-a" tabs={tabs} activeTabId="tab-1" />
+    )
+    await flushShellEffect()
+
+    fireEvent.drop(container.firstElementChild?.firstElementChild as HTMLElement)
+
+    expect(mockHandleDrop).not.toHaveBeenCalled()
   })
 
   it('calls handleTabReorder when dropping on a tab', async () => {

@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import type { ProjectChatEntry } from '@/components/sidebar/project-chat-row'
 import { clipboardApi, openerApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
+import { openAgentChatPlaced } from '@/lib/open-agent-chat'
 import { openTerminalAtCwd } from '@/lib/terminal-spawn'
 import { useAcpStore } from '@/stores/acp-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -21,6 +22,7 @@ function warnFailure(action: 'open' | 'delete', error: unknown): void {
 
 export interface ChatCardActions {
   onOpen: (entry: ProjectChatEntry) => void
+  onOpenInSplit: (entry: ProjectChatEntry) => void
   onDelete: (id: string) => void
   onOpenTerminal: (entry: ProjectChatEntry) => Promise<void>
   onOpenInFileExplorer: (cwd: string) => Promise<void>
@@ -52,6 +54,12 @@ export function useChatCardActions(projectId: string): ChatCardActions {
     },
     [addAgentChatTab, openHistorySession]
   )
+
+  const onOpenInSplit = useCallback((entry: ProjectChatEntry) => {
+    // Read at call time: the active pane may have changed since render.
+    const { activePaneId } = useWorkspaceStore.getState()
+    openAgentChatPlaced(entry.id, LOG_SOURCE, { paneId: activePaneId, zone: 'right' })
+  }, [])
 
   const onDelete = useCallback(
     (id: string) => {
@@ -106,5 +114,5 @@ export function useChatCardActions(projectId: string): ChatCardActions {
     [onCopyPath]
   )
 
-  return { onOpen, onDelete, onOpenTerminal, onOpenInFileExplorer, onCopyPath }
+  return { onOpen, onOpenInSplit, onDelete, onOpenTerminal, onOpenInFileExplorer, onCopyPath }
 }
