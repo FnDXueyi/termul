@@ -83,22 +83,22 @@ describe('pruneRestoredChatTabs', () => {
     )
   })
 
-  it('keeps the tab and does not retain when the owner is not in the project list', () => {
+  it('keeps the tab and defers the hand-off when the owner is not in the project list', () => {
     seedTree(['s-orphan'])
     prune({ 's-orphan': 'px' })
     expect(treeSessionIds()).toEqual(['s-orphan'])
-    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({})
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({ px: ['s-orphan'] })
     expect(logFrontendError).toHaveBeenCalledTimes(1)
     expect(vi.mocked(logFrontendError).mock.calls[0][0].message).toContain('s-orphan')
     expect(vi.mocked(logFrontendError).mock.calls[0][0].message).toContain('px')
   })
 
-  it('keeps the tab when the owner is archived', () => {
+  it('keeps the tab and defers the hand-off when the owner is archived', () => {
     useProjectStore.setState({ projects: [project('p1'), project('p2', true)] })
     seedTree(['s-foreign'])
     prune({ 's-foreign': 'p2' })
     expect(treeSessionIds()).toEqual(['s-foreign'])
-    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({})
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({ p2: ['s-foreign'] })
   })
 
   it('keeps the tab while the project list is not loaded yet', () => {
@@ -106,7 +106,7 @@ describe('pruneRestoredChatTabs', () => {
     seedTree(['s-foreign'])
     prune({ 's-foreign': 'p2' })
     expect(treeSessionIds()).toEqual(['s-foreign'])
-    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({})
+    expect(useAgentChatLifetimeStore.getState().retainedByProject).toEqual({ p2: ['s-foreign'] })
   })
 
   it('keeps a tab with unknown or stub ownership without a log', () => {

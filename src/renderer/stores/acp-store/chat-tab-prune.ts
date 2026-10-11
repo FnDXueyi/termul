@@ -9,7 +9,13 @@
  *    writing another project's `editor-state` (that would race the owner's own
  *    debounced persist and could lose the tab);
  *  - an owner that is missing from the project list (or not loaded yet) or
- *    archived cannot restore the tab, so it stays where it is.
+ *    archived cannot restore the tab, so it stays where it is; it is ALSO
+ *    retained for that owner (a deferred hand-off). The retained set outlives
+ *    project switches, whereas the kept tab itself is dropped by the next
+ *    switch (retainVisibleAgentChats / persistState exclude known-foreign
+ *    chats and the layout reset discards the rest), so without the retain the
+ *    open chat would be lost. When the owner becomes restorable its restore
+ *    reattaches the tab.
  * Chat sessions keep running; no PTY is touched.
  */
 
@@ -48,10 +54,11 @@ export function pruneRestoredChatTabs(input: PruneRestoredChatTabsInput): void {
       const owner = sessionOwnerProjectId(tab.sessionId, ownership)
       if (!owner) continue
       if (!ownerCanRestore(owner)) {
+        useAgentChatLifetimeStore.getState().retainProjectChats(owner, [tab.sessionId])
         void logFrontendError({
           level: 'warn',
           source: SOURCE,
-          message: `Kept foreign-project chat tab (session ${tab.sessionId}, owner ${owner}) in project ${activeProjectId}: owner project is missing or archived`
+          message: `Kept foreign-project chat tab (session ${tab.sessionId}, owner ${owner}) in project ${activeProjectId}: owner project is missing or archived; hand-off deferred until it restores`
         })
         continue
       }
