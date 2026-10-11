@@ -8,11 +8,16 @@ interface AgentChatUnreadState {
 }
 
 /**
- * Renderer-only, per-session "New activity" flags for the mobile drawer's Open
- * rows. Never persisted and never reset on a project switch: a chat that
- * finished off-screen keeps its dot until it is viewed. The desktop
- * `AgentChatTabInline` keeps its own component-local unread and does not read
- * this store. Driven by `useAgentChatUnreadTracker`.
+ * The single owner of the per-session "Done" ("New activity") flag. The desktop
+ * `AgentChatTabInline` and the mobile Recents rows both read it, so a chat's
+ * tab and card can never disagree. It is set and cleared by the one shell-level
+ * `useAgentChatUnreadTracker` mount (`useShellUnreadTracker`), plus
+ * `deleteHistorySession`.
+ *
+ * Lifetime: a flag is set when a turn finishes (or is cancelled) while the chat
+ * is no pane's active tab; it clears only when the chat becomes a pane's active
+ * tab or the chat is deleted. It survives the session leaving the live set and
+ * project switches. Never persisted, so an app restart resets it.
  */
 export const useAgentChatUnreadStore = create<AgentChatUnreadState>((set) => ({
   unread: {},

@@ -1,11 +1,13 @@
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { groupSessionsByRecency, scopeSessionIndex } from '@/lib/acp-history-persistence'
+import { activeWorktreeOf } from '@/lib/active-worktree'
 import { logFrontendError } from '@/lib/log-api'
 import { chatsMatchAnnouncement } from '@/lib/shell-announcements'
 import { useAcpStore } from '@/stores/acp-store'
-import { getActiveWorktreeFromStore, useActiveProject } from '@/stores/project-store'
+import { useActiveProject } from '@/stores/project-store'
 import { useShellAnnouncerStore } from '@/stores/shell-announcer-store'
+import { useWorktreePick } from '@/stores/shell-layout-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { ChatHistorySidebarEntry } from './ChatHistoryEntryRow'
 
@@ -70,19 +72,21 @@ export function useChatHistoryEntries({
   const openDiscoveredSession = useAcpStore((s) => s.openDiscoveredSession)
   const deleteHistorySession = useAcpStore((s) => s.deleteHistorySession)
   const addAgentChatTab = useWorkspaceStore((s) => s.addAgentChatTab)
-  // Subscribe to the full active-project record so the sidebar re-scopes when
-  // the active worktree changes (not just when the active project id changes).
+  // Subscribe to the full active-project record and the switcher pick so the
+  // sidebar re-scopes when the active worktree changes (not just when the
+  // active project id changes).
   const activeProject = useActiveProject()
   const activeProjectId = activeProject?.id ?? ''
+  const worktreePick = useWorktreePick(activeProjectId)
   const activeCwd = useMemo(() => {
     if (!activeProject) return ''
-    const wt = getActiveWorktreeFromStore(activeProject.id)
+    const wt = activeWorktreeOf(activeProject, worktreePick)
     return wt?.path ?? activeProject.path ?? ''
-  }, [activeProject])
+  }, [activeProject, worktreePick])
 
   // Active project's registered worktree paths. Passed into `scopeSessionIndex`
   // so worktree-cwd chats stay reachable from the project root view and across
-  // restarts where `activeWorktreeId` is null (the sidebar would otherwise hide
+  // restarts where no worktree is picked (the sidebar would otherwise hide
   // them because their cwd differs from the root). Re-derived whenever the
   // active project record changes (covers reconciler discovery + launch adds).
   const worktreePaths = useMemo(

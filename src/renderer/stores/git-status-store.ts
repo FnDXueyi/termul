@@ -1,14 +1,29 @@
-import type { GitCommitContext, GitStashInfo, GitStatusDetail } from '@shared/types/ipc.types'
+﻿import type {
+  GitCommitContext,
+  GitDiffStat,
+  GitStashInfo,
+  GitStatusDetail
+} from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { gitApi } from '@/lib/git-api'
+import { logFrontendError } from '@/lib/log-api'
 import { platform } from '@/lib/tauri-os'
+import { normalizePath } from '@/lib/working-copy'
 import { useProjectStore } from './project-store'
 import { useTerminalStore } from './terminal-store'
 
+/**
+ * Single git cache (shell revamp AD-17). Every per-working-copy map is keyed by
+ * `normalizePath(path)` so `E:\p` and `e:/p/` share one entry; `paths[key]`
+ * keeps the first display path seen (usable as a cwd) for refreshes. Callers
+ * keep passing the raw `cwd` to actions and read through the same key.
+ */
+
 /** Build the staged-aware diff cache key so the staged and unstaged rows of the
- * same file (porcelain `MM`) do not collide. */
-export const diffKey = (cwd: string, path: string, staged: boolean) => `${cwd}:${path}:${staged}`
+ * same file (porcelain `MM`) do not collide. `cwd` is normalized. */
+export const diffKey = (cwd: string, path: string, staged: boolean) =>
+  `${normalizePath(cwd)}:${path}:${staged}`
 
 /**
  * Changed files for `cwd`. A file that is both staged and unstaged has two
@@ -17,21 +32,68 @@ export const diffKey = (cwd: string, path: string, staged: boolean) => `${cwd}:$
 export const selectChangedFileCount =
   (cwd: string | null | undefined) =>
   (state: Pick<GitStatusState, 'statuses'>): number => {
-    const statuses = cwd ? state.statuses[cwd] : undefined
+    const statuses = cwd ? state.statuses[normalizePath(cwd)] : undefined
     if (!statuses || statuses.length === 0) return 0
     return new Set(statuses.map((status) => status.path)).size
   }
 
+/** Current branch of the cached commit context (`null` on a detached HEAD or
+ * when nothing is cached). There is no second branch cache. */
+export const selectGitBranch =
+  (cwd: string | null | undefined) =>
+  (state: Pick<GitStatusState, 'commitContexts'>): string | null =>
+    (cwd ? state.commitContexts[normalizePath(cwd)]?.branch : null) ?? null
+
+export const selectGitDiffStat =
+  (cwd: string | null | undefined) =>
+  (state: Pick<GitStatusState, 'diffStats'>): GitDiffStat | null =>
+    (cwd ? state.diffStats[normalizePath(cwd)] : null) ?? null
+
+const NO_ERRORS: GitStatusErrors = Object.freeze({})
+
+export const selectGitErrors =
+  (cwd: string | null | undefined) =>
+  (state: Pick<GitStatusState, 'errors'>): GitStatusErrors =>
+    (cwd ? state.errors[normalizePath(cwd)] : undefined) ?? NO_ERRORS
+
+/** The deepest tracked key containing `path` (segment-bounded prefix), or
+ * `null` when no tracked working copy contains it. */
+export function deepestTrackedKey(path: string, keys: Iterable<string>): string | null {
+  const target = normalizePath(path)
+  if (!target) return null
+  let best: string | null = null
+  for (const key of keys) {
+    if (!key) continue
+    const contains = target === key || target.startsWith(key.endsWith('/') ? key : `${key}/`)
+    if (contains && (best === null || key.length > best.length)) best = key
+  }
+  return best
+}
+
+/** Failure messages per facade call; set on failure, cleared on success. */
+export interface GitStatusErrors {
+  status?: string
+  commitContext?: string
+  diffStat?: string
+}
+
 export interface GitStatusState {
-  // statuses[cwd] = GitStatusDetail[]
+  // Keys below are `normalizePath(cwd)`.
+  // paths[key] = first display path seen for the key (usable as a cwd)
+  paths: Record<string, string>
+  // statuses[key] = GitStatusDetail[]
   statuses: Record<string, GitStatusDetail[]>
-  // diffs["cwd:path:staged"] = string
+  // diffs["key:path:staged"] = string
   diffs: Record<string, string>
-  // commitContexts[cwd] = GitCommitContext
+  // commitContexts[key] = GitCommitContext
   commitContexts: Record<string, GitCommitContext>
-  // stashes[cwd] = GitStashInfo[]
+  // diffStats[key] = added/removed line totals (watched keys only)
+  diffStats: Record<string, GitDiffStat>
+  // errors[key] = last failure message per facade call
+  errors: Record<string, GitStatusErrors>
+  // stashes[key] = GitStashInfo[]
   stashes: Record<string, GitStashInfo[]>
-  // branches[cwd] = string[]
+  // branches[key] = string[]
   branches: Record<string, string[]>
   selectedFile: string | null
   isFetchingStatus: boolean
@@ -39,8 +101,18 @@ export interface GitStatusState {
 
   setSelectedFile: (path: string | null) => void
   refreshStatus: (cwd: string) => Promise<void>
+  /** Fetches the diff stat of a watched key, at most once per 30 s; a throttled
+   * request schedules one trailing refresh. No-op for unwatched keys. */
+  refreshDiffStat: (cwd: string) => Promise<void>
+  /** Ref-counted opt-in to diff-stat refreshes for `cwd`; returns the unwatch fn. */
+  watchDiffStat: (cwd: string) => () => void
+  /** Status + commit context + (if watched) diff stat for one working copy.
+   * Never rejects; failures land in `errors`. */
+  refreshWorkingCopy: (cwd: string) => Promise<void>
+  /** `refreshWorkingCopy` for every tracked key. Never rejects. */
+  refreshTracked: () => Promise<void>
   fetchDiff: (cwd: string, path: string, staged: boolean) => Promise<void>
-  fetchCommitContext: (cwd: string) => Promise<void>
+  fetchCommitContext: (cwd: string) => Promise<GitCommitContext | null>
   fetchStashes: (cwd: string) => Promise<void>
   fetchBranches: (cwd: string) => Promise<void>
   stageFile: (cwd: string, path: string) => Promise<void>
@@ -62,9 +134,12 @@ export interface GitStatusState {
 }
 
 export const useGitStatusStore = create<GitStatusState>((set, get) => ({
+  paths: {},
   statuses: {},
   diffs: {},
   commitContexts: {},
+  diffStats: {},
+  errors: {},
   stashes: {},
   branches: {},
   selectedFile: null,
@@ -74,15 +149,29 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   setSelectedFile: (path) => set({ selectedFile: path }),
 
   refreshStatus: async (cwd) => {
+    const key = trackPath(cwd)
+    // Per-key request ordering: a slow earlier refresh (focus/poll started before
+    // a git write) must not overwrite the newer status from the write's refresh.
+    // biome-ignore lint/suspicious/noAssignInExpressions: deliberate request-token bump and capture
+    const token = (statusRequests[key] = (statusRequests[key] ?? 0) + 1)
+    const isCurrent = () => statusRequests[key] === token
     set((state) => ({
       statusFetchCount: state.statusFetchCount + 1,
       isFetchingStatus: true
     }))
     try {
       const status = await gitApi.getStatus(cwd)
-      set((state) => ({
-        statuses: { ...state.statuses, [cwd]: status }
-      }))
+      if (isCurrent()) {
+        set((state) => ({
+          statuses: { ...state.statuses, [key]: status }
+        }))
+        patchError(key, 'status', null)
+      }
+    } catch (error) {
+      // Keep the previous status; record the failure and let the caller decide.
+      if (isCurrent()) patchError(key, 'status', errorMessage(error))
+      logFailure('status refresh', key, error)
+      throw error
     } finally {
       set((state) => {
         const statusFetchCount = Math.max(0, state.statusFetchCount - 1)
@@ -94,29 +183,103 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     }
   },
 
+  refreshDiffStat: async (cwd) => {
+    const key = normalizePath(cwd)
+    if (!diffStatWatchers.has(key)) return
+    const now = Date.now()
+    const last = diffStatLastFetch.get(key)
+    if (last !== undefined && now - last < DIFF_STAT_MIN_INTERVAL_MS) {
+      // Throttled: coalesce into one trailing refresh at `last + 30 s`.
+      if (!diffStatTrailing.has(key)) {
+        diffStatTrailing.set(
+          key,
+          setTimeout(
+            () => {
+              diffStatTrailing.delete(key)
+              void get().refreshDiffStat(cwd)
+            },
+            last + DIFF_STAT_MIN_INTERVAL_MS - now
+          )
+        )
+      }
+      return
+    }
+    diffStatLastFetch.set(key, now)
+    trackPath(cwd)
+    try {
+      const stat = await gitApi.getDiffStat(cwd)
+      set((state) => ({ diffStats: { ...state.diffStats, [key]: stat } }))
+      patchError(key, 'diffStat', null)
+    } catch (error) {
+      patchError(key, 'diffStat', errorMessage(error))
+      logFailure('diff stat refresh', key, error)
+    }
+  },
+
+  watchDiffStat: (cwd) => {
+    const key = trackPath(cwd)
+    diffStatWatchers.set(key, (diffStatWatchers.get(key) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const remaining = (diffStatWatchers.get(key) ?? 1) - 1
+      if (remaining > 0) {
+        diffStatWatchers.set(key, remaining)
+        return
+      }
+      diffStatWatchers.delete(key)
+      clearDiffStatTrailing(key)
+    }
+  },
+
+  refreshWorkingCopy: async (cwd) => {
+    await Promise.all([
+      get()
+        .refreshStatus(cwd)
+        .catch(() => {
+          // Stored in `errors` and logged by refreshStatus.
+        }),
+      get().fetchCommitContext(cwd),
+      get().refreshDiffStat(cwd)
+    ])
+  },
+
+  refreshTracked: async () => {
+    await Promise.all(Object.values(get().paths).map((path) => get().refreshWorkingCopy(path)))
+  },
+
   fetchCommitContext: async (cwd) => {
+    const key = trackPath(cwd)
     // Guard against out-of-order responses: a slow earlier fetch must not
     // overwrite or delete a fresher result. Mirror the fetchDiff token pattern.
     // biome-ignore lint/suspicious/noAssignInExpressions: deliberate request-token bump and capture
-    const token = (commitContextRequests[cwd] = (commitContextRequests[cwd] ?? 0) + 1)
-    const isCurrent = () => commitContextRequests[cwd] === token
+    const token = (commitContextRequests[key] = (commitContextRequests[key] ?? 0) + 1)
+    const isCurrent = () => commitContextRequests[key] === token
     try {
       const context = await gitApi.getCommitContext(cwd)
-      if (!isCurrent()) return
-      set((state) => ({
-        commitContexts: { ...state.commitContexts, [cwd]: context }
-      }))
+      if (isCurrent()) {
+        set((state) => ({
+          commitContexts: { ...state.commitContexts, [key]: context }
+        }))
+        patchError(key, 'commitContext', null)
+        return context
+      }
+      // Superseded by a newer fetch: never hand the caller an older context.
+      return null
     } catch (error) {
-      console.error('Failed to fetch commit context:', error)
-      if (!isCurrent()) return
+      if (!isCurrent()) return null
       // Drop any stale context so the footer disables its actions rather than
       // acting on out-of-date ahead/staged/HEAD data.
       set((state) => {
-        if (!(cwd in state.commitContexts)) return {}
+        if (!(key in state.commitContexts)) return {}
         const commitContexts = { ...state.commitContexts }
-        delete commitContexts[cwd]
+        delete commitContexts[key]
         return { commitContexts }
       })
+      patchError(key, 'commitContext', errorMessage(error))
+      logFailure('commit context fetch', key, error)
+      return null
     }
   },
 
@@ -166,8 +329,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
         invalidateFileDiffs(set, cwd, path)
       }
     } finally {
-      await get().refreshStatus(cwd)
-      await get().fetchCommitContext(cwd)
+      await refreshAfterWrite(get, cwd)
     }
   },
 
@@ -179,8 +341,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
         invalidateFileDiffs(set, cwd, path)
       }
     } finally {
-      await get().refreshStatus(cwd)
-      await get().fetchCommitContext(cwd)
+      await refreshAfterWrite(get, cwd)
     }
   },
 
@@ -192,8 +353,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       await gitApi.stageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
     } finally {
-      await get().refreshStatus(cwd)
-      await get().fetchCommitContext(cwd)
+      await refreshAfterWrite(get, cwd)
     }
   },
 
@@ -202,8 +362,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       await gitApi.unstageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
     } finally {
-      await get().refreshStatus(cwd)
-      await get().fetchCommitContext(cwd)
+      await refreshAfterWrite(get, cwd)
     }
   },
 
@@ -215,8 +374,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
         invalidateFileDiffs(set, cwd, path)
       }
     } finally {
-      await get().refreshStatus(cwd)
-      await get().fetchCommitContext(cwd)
+      await refreshAfterWrite(get, cwd)
     }
   },
 
@@ -224,7 +382,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     await gitApi.commit(cwd, summary, description, amend)
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
-    // already happened) — swallow refresh errors here.
+    // already happened) â€” swallow refresh errors here.
     await refreshAfterMutation(get, cwd)
   },
 
@@ -234,10 +392,11 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   fetchStashes: async (cwd) => {
+    const key = trackPath(cwd)
     try {
       const stashes = await gitApi.stashList(cwd)
       set((state) => ({
-        stashes: { ...state.stashes, [cwd]: stashes }
+        stashes: { ...state.stashes, [key]: stashes }
       }))
     } catch (error) {
       console.error('Failed to fetch stashes:', error)
@@ -245,10 +404,11 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   fetchBranches: async (cwd) => {
+    const key = trackPath(cwd)
     try {
       const branches = await gitApi.branchList(cwd)
       set((state) => ({
-        branches: { ...state.branches, [cwd]: branches }
+        branches: { ...state.branches, [key]: branches }
       }))
     } catch (error) {
       console.error('Failed to fetch branches:', error)
@@ -292,12 +452,12 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
 
 async function updateStoresWithBranch(cwd: string, branchName: string) {
   try {
-    const normalizePath = (p?: string) => (p ? p.replace(/\\/g, '/') : '')
-    const normalizedCwd = normalizePath(cwd)
+    const slashPath = (p?: string) => (p ? p.replace(/\\/g, '/') : '')
+    const normalizedCwd = slashPath(cwd)
 
     const isWindows = platform() === 'windows'
     const matchPath = (otherPath?: string) => {
-      const normalizedOther = normalizePath(otherPath)
+      const normalizedOther = slashPath(otherPath)
       return isWindows
         ? normalizedOther.toLowerCase() === normalizedCwd.toLowerCase()
         : normalizedOther === normalizedCwd
@@ -320,16 +480,23 @@ async function updateStoresWithBranch(cwd: string, branchName: string) {
   }
 }
 
-/** Refresh status + commit context after a successful mutation. Errors here are
- * logged but never rethrown, so a transient read failure does not get reported
- * to the user as a failed commit/push that actually succeeded. */
-async function refreshAfterMutation(get: () => GitStatusState, cwd: string): Promise<void> {
+/** Refresh status, commit context and (if watched) diff stat after an own write.
+ * Never rejects: refresh failures are stored in `errors` (and logged), so a
+ * transient read failure neither masks the write's own error nor gets reported
+ * as a failed commit/push that actually succeeded. */
+async function refreshAfterWrite(get: () => GitStatusState, cwd: string): Promise<void> {
   try {
     await get().refreshStatus(cwd)
-  } catch (error) {
-    console.error('Post-mutation status refresh failed:', error)
+  } catch {
+    // Stored in `errors` and logged by refreshStatus.
   }
   await get().fetchCommitContext(cwd)
+  await get().refreshDiffStat(cwd)
+}
+
+/** `refreshAfterWrite` plus stash and branch lists, for writes that move them. */
+async function refreshAfterMutation(get: () => GitStatusState, cwd: string): Promise<void> {
+  await refreshAfterWrite(get, cwd)
   await get()
     .fetchStashes(cwd)
     .catch(() => {})
@@ -343,11 +510,78 @@ async function refreshAfterMutation(get: () => GitStatusState, cwd: string): Pro
  * React state because it is control metadata, not render data. */
 const diffRequestVersions: Record<string, number> = {}
 
-/** Monotonic request token per cwd for `fetchCommitContext`. Lets a late
+/** Monotonic request token per key for `fetchCommitContext`. Lets a late
  * response detect it has been superseded by a newer fetch, so out-of-order
  * responses cannot overwrite or delete fresher context. Control metadata, not
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
+
+/** Monotonic request token per working-copy key for efreshStatus (same idea). */
+const statusRequests: Record<string, number> = {}
+
+const DIFF_STAT_MIN_INTERVAL_MS = 30_000
+
+/** Watcher ref-counts, last fetch time and the pending trailing refresh per key
+ * for `refreshDiffStat`. Control metadata, kept outside React state. */
+const diffStatWatchers = new Map<string, number>()
+const diffStatLastFetch = new Map<string, number>()
+const diffStatTrailing = new Map<string, ReturnType<typeof setTimeout>>()
+
+function clearDiffStatTrailing(key: string) {
+  const timer = diffStatTrailing.get(key)
+  if (timer === undefined) return
+  clearTimeout(timer)
+  diffStatTrailing.delete(key)
+}
+
+/** Test-only: drop watcher/throttle/token metadata and any pending timer. */
+export function resetGitStatusStoreControlForTests(): void {
+  for (const key of [...diffStatTrailing.keys()]) clearDiffStatTrailing(key)
+  diffStatWatchers.clear()
+  diffStatLastFetch.clear()
+  for (const key of Object.keys(commitContextRequests)) delete commitContextRequests[key]
+  for (const key of Object.keys(statusRequests)) delete statusRequests[key]
+}
+
+/** Canonical key for `cwd`; records the first display path seen for it so
+ * refreshes have a usable cwd. */
+function trackPath(cwd: string): string {
+  const key = normalizePath(cwd)
+  if (useGitStatusStore.getState().paths[key] === undefined) {
+    useGitStatusStore.setState((state) =>
+      state.paths[key] === undefined ? { paths: { ...state.paths, [key]: cwd } } : {}
+    )
+  }
+  return key
+}
+
+/** Set (`message`) or clear (`null`) one failure slot of `errors[key]`. */
+function patchError(key: string, field: keyof GitStatusErrors, message: string | null) {
+  const current = useGitStatusStore.getState().errors[key]
+  if (message === null ? current?.[field] === undefined : current?.[field] === message) return
+  useGitStatusStore.setState((state) => {
+    const next = { ...state.errors[key] }
+    if (message === null) delete next[field]
+    else next[field] = message
+    const errors = { ...state.errors }
+    if (Object.keys(next).length === 0) delete errors[key]
+    else errors[key] = next
+    return { errors }
+  })
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** One backend record per failed outcome. Never include branch names. */
+function logFailure(outcome: string, key: string, error: unknown) {
+  void logFrontendError({
+    level: 'warn',
+    message: `[git-status] ${outcome} failed for ${key}: ${errorMessage(error)}`,
+    source: 'git-status-store'
+  })
+}
 
 function bumpDiffVersion(key: string) {
   diffRequestVersions[key] = (diffRequestVersions[key] ?? 0) + 1

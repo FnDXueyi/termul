@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
+import { normalizePath } from '@/lib/working-copy'
 import { useAcpStore } from '@/stores/acp-store'
 import { useGitStatusStore } from '@/stores/git-status-store'
 
@@ -45,7 +46,7 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
   const agentConfigs = useAcpStore((state) => state.agentConfigs)
   const generateCommitMessage = useAcpStore((state) => state.generateCommitMessage)
 
-  const commitContext = commitContexts[cwd] ?? null
+  const commitContext = commitContexts[normalizePath(cwd)] ?? null
 
   const [isMutating, setIsMutating] = useState(false)
 
@@ -105,7 +106,7 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
     clearSelection()
   }, [cwd, setSelectedFile, setSelectedStaged, clearSelection])
 
-  const allStatuses = statuses[cwd] ?? []
+  const allStatuses = statuses[normalizePath(cwd)] ?? []
   const hasUncommittedChanges = allStatuses.length > 0
 
   const runStage = useCallback(
@@ -306,7 +307,9 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
     try {
       const paths = [
         ...new Set(
-          (statuses[cwd] ?? []).filter((status) => status.staged).map((status) => status.path)
+          (statuses[normalizePath(cwd)] ?? [])
+            .filter((status) => status.staged)
+            .map((status) => status.path)
         )
       ]
       if (paths.length !== stagedCount) {
@@ -317,7 +320,7 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
       )
       const latestPaths = [
         ...new Set(
-          (currentStatuses.current[requestedCwd] ?? [])
+          (currentStatuses.current[normalizePath(requestedCwd)] ?? [])
             .filter((status) => status.staged)
             .map((status) => status.path)
         )
@@ -601,3 +604,5 @@ export function useGitActions({ cwd, setSelectedStaged, clearSelection }: UseGit
     handleDropStash
   }
 }
+
+export type GitActions = ReturnType<typeof useGitActions>

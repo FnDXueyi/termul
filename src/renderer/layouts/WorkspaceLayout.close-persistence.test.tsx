@@ -20,7 +20,6 @@ const {
   mockUnwatchDirectory,
   mockKeyboardOnShortcut,
   mockUpdatePanelVisibility,
-  mockWaitForPendingAppSettingsPersistence,
   mockWaitForPendingSessionIndexWrite,
   mockFlushSessionHistory,
   mockToastError,
@@ -86,7 +85,6 @@ const {
   mockUnwatchDirectory: vi.fn(async () => ({ success: true })),
   mockKeyboardOnShortcut: vi.fn(() => vi.fn()),
   mockUpdatePanelVisibility: vi.fn(async () => undefined),
-  mockWaitForPendingAppSettingsPersistence: vi.fn(async () => undefined),
   mockWaitForPendingSessionIndexWrite: vi.fn(async () => undefined),
   mockFlushSessionHistory: vi.fn(async () => undefined),
   mockToastError: vi.fn(),
@@ -159,6 +157,10 @@ vi.mock('@/stores/editor-store', () => ({
   }
 }))
 
+// The shell unread tracker reads the real pane tree and acp store; this suite
+// mocks the workspace store wholesale and does not exercise it.
+vi.mock('@/hooks/use-shell-unread-tracker', () => ({ useShellUnreadTracker: () => {} }))
+
 vi.mock('@/stores/workspace-store', () => {
   const useWorkspaceStore = (selector?: (s: typeof mockWorkspaceStoreState) => unknown) =>
     selector ? selector(mockWorkspaceStoreState) : mockWorkspaceStoreState
@@ -198,6 +200,8 @@ vi.mock('@/stores/keyboard-shortcuts-store', () => ({
 }))
 
 vi.mock('@/stores/app-settings-store', () => ({
+  useAppSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({ settings: {}, isLoaded: true }),
   useTerminalFontSize: () => 14,
   useUiZoomLevel: () => 1,
   useDefaultShell: () => 'bash',
@@ -230,8 +234,7 @@ vi.mock('@/hooks/use-command-history', () => ({
 vi.mock('@/hooks/use-app-settings', () => ({
   useUpdateAppSetting: () => vi.fn(),
   useUpdateAppSettings: () => vi.fn(),
-  useUpdatePanelVisibility: () => mockUpdatePanelVisibility,
-  waitForPendingAppSettingsPersistence: mockWaitForPendingAppSettingsPersistence
+  useUpdatePanelVisibility: () => mockUpdatePanelVisibility
 }))
 
 vi.mock('@/lib/acp-history-persistence', () => ({
@@ -399,7 +402,6 @@ describe('WorkspaceLayout close persistence', () => {
     mockEditorStoreState.saveAllDirty.mockResolvedValue(undefined)
     mockFlushPendingWrites.mockResolvedValue({ success: true, data: undefined })
     mockUpdatePanelVisibility.mockResolvedValue(undefined)
-    mockWaitForPendingAppSettingsPersistence.mockResolvedValue(undefined)
     mockWaitForPendingSessionIndexWrite.mockResolvedValue(undefined)
     mockFlushSessionHistory.mockResolvedValue(undefined)
     mockCloseRequested.mockImplementation(() => vi.fn())

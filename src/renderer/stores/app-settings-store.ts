@@ -57,10 +57,6 @@ export const useConfirmTerminalClose = () =>
   useAppSettingsStore((state) => state.settings.confirmTerminalClose)
 export const useTerminalUrlOpenMode = () =>
   useAppSettingsStore((state) => state.settings.terminalUrlOpenMode)
-export const useSidebarVisibilitySetting = () =>
-  useAppSettingsStore((state) => state.settings.sidebarVisible)
-export const useFileExplorerVisibilitySetting = () =>
-  useAppSettingsStore((state) => state.settings.fileExplorerVisible)
 export const useColorTheme = () => useAppSettingsStore((state) => state.settings.colorTheme)
 export const useAppearanceMode = () => useAppSettingsStore((state) => state.settings.appearanceMode)
 export const useUiZoomLevel = () => useAppSettingsStore((state) => state.settings.uiZoomLevel)

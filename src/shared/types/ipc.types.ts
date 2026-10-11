@@ -199,6 +199,12 @@ export interface GitStatusDetail {
   staged: boolean
 }
 
+/** Working-tree line stat (tracked vs HEAD plus untracked files). */
+export interface GitDiffStat {
+  added: number
+  removed: number
+}
+
 // A single commit row for the history/graph view.
 export interface GitCommit {
   /** Full 40-char commit hash. */
@@ -264,6 +270,7 @@ export interface GitStashInfo {
 export interface GitApi {
   getStatus: (cwd: string) => Promise<GitStatusDetail[]>
   getDiff: (cwd: string, path: string, staged?: boolean) => Promise<string>
+  getDiffStat: (cwd: string) => Promise<GitDiffStat>
   stage: (cwd: string, path: string) => Promise<void>
   unstage: (cwd: string, path: string) => Promise<void>
   discard: (cwd: string, path: string) => Promise<void>
@@ -406,6 +413,11 @@ export interface WorktreeInfo {
   branch: string
   path: string
   headCommit: string
+  /**
+   * Web `/worktree/list` only: the worktree is outside the registered project
+   * folder (listed but not actionable, AD-9). Absent on desktop.
+   */
+  outsideProjectRoot?: boolean
 }
 
 export interface BranchInfo {

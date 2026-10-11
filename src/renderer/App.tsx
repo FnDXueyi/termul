@@ -22,6 +22,7 @@ import { useCwd } from './hooks/use-cwd'
 import { useExitCode } from './hooks/use-exit-code'
 import { useGitBranch } from './hooks/use-git-branch'
 import { useGitStatus } from './hooks/use-git-status'
+import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useProjectGitBranch } from './hooks/use-project-git-branch'
 import { useProjectIcon } from './hooks/use-project-icon'
 import { useRemoteProjects } from './hooks/use-remote-projects'
@@ -63,6 +64,7 @@ import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
 import { usePreventNativeContextMenu } from './hooks/use-prevent-native-context-menu'
 import { useProjectsAutoSave, useProjectsLoader } from './hooks/use-projects-persistence'
+import { useShellLayoutHydration } from './hooks/use-shell-layout-hydration'
 import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
 import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
@@ -137,6 +139,7 @@ function AppEffects(): null {
   useCwd()
   useGitBranch()
   useProjectGitBranch()
+  useGitStatusRefresh()
   useProjectIcon()
   useGitStatus()
   useExitCode()
@@ -147,6 +150,7 @@ function AppEffects(): null {
   useKeyboardShortcutsLoader()
   useProjectsLoader()
   useProjectsAutoSave()
+  useShellLayoutHydration()
   useMenuUpdaterListener()
   useUpdateCheck()
   useUpdateToast()

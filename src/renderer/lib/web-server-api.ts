@@ -25,6 +25,7 @@ import type {
   FileInfo,
   GitCommit,
   GitCommitContext,
+  GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
   IpcResult,
@@ -206,6 +207,13 @@ export const webServerGit = {
     return res.data
   },
 
+  /** Working-tree `+added -removed` stat via `POST /git/diff-stat` (read route). */
+  async getDiffStat(cwd: string): Promise<GitDiffStat> {
+    const res = await postJson<GitDiffStat>('/git/diff-stat', { cwd })
+    if (!res.success) throw new Error(res.error)
+    return res.data
+  },
+
   async getDiff(cwd: string, path: string, staged = false): Promise<string> {
     const res = await postJson<string>('/git/diff', { cwd, path, staged })
     if (!res.success) throw new Error(res.error)
@@ -219,6 +227,16 @@ export const webServerGit = {
 
   async unstage(cwd: string, path: string): Promise<void> {
     const res = await postJson<void>('/git/unstage', { cwd, path })
+    if (!res.success) throw new Error(res.error)
+  },
+
+  async stageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/stage-hunk', { cwd, path, hunkPatch })
+    if (!res.success) throw new Error(res.error)
+  },
+
+  async unstageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/unstage-hunk', { cwd, path, hunkPatch })
     if (!res.success) throw new Error(res.error)
   },
 

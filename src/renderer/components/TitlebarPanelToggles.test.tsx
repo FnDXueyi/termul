@@ -1,7 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useFileExplorerStore } from '@/stores/file-explorer-store'
-import { useSidebarStore } from '@/stores/sidebar-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import {
   FileExplorerToggleButton,
   SidebarToggleButton,
@@ -38,8 +37,8 @@ vi.mock('@/hooks/use-app-settings', () => ({
 describe('TitlebarPanelToggles', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useSidebarStore.setState({ isVisible: true })
-    useFileExplorerStore.setState({ isVisible: true })
+    resetShellLayoutStoreForTests()
+    useShellLayoutStore.setState({ status: 'ready', railExpanded: true, sidePanelVisible: true })
   })
 
   it('toggles sidebar via persistence-aware updater on click', async () => {
@@ -87,8 +86,7 @@ describe('TitlebarPanelToggles', () => {
   })
 
   it('reflects hidden state in label and pressed state when not visible', () => {
-    useSidebarStore.setState({ isVisible: false })
-    useFileExplorerStore.setState({ isVisible: false })
+    useShellLayoutStore.setState({ railExpanded: false, sidePanelVisible: false })
 
     render(
       <>

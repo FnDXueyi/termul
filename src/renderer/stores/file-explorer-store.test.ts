@@ -1,4 +1,5 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockEntries: DirectoryEntry[] = [
@@ -45,12 +46,19 @@ const { mockApi, fileNameBatchCbs } = vi.hoisted(() => ({
 }))
 
 vi.mock('@/lib/api', () => ({
-  filesystemApi: mockApi.filesystem
+  filesystemApi: mockApi.filesystem,
+  persistenceApi: {
+    read: vi.fn(),
+    write: vi.fn(),
+    delete: vi.fn(),
+    writeDebounced: vi.fn().mockResolvedValue({ success: true, data: undefined })
+  }
 }))
 const mockLogFrontendError = vi.hoisted(() => vi.fn())
 vi.mock('@/lib/log-api', () => ({ logFrontendError: mockLogFrontendError }))
 
-import { useFileExplorerStore } from './file-explorer-store'
+import { useFileExplorerStore, useFileExplorerVisible } from './file-explorer-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from './shell-layout-store'
 
 beforeEach(() => {
   mockApi.filesystem.readDirectory
@@ -66,10 +74,11 @@ beforeEach(() => {
     selectedPaths: new Set<string>(),
     lastClickedPath: null,
     clipboard: null,
-    isVisible: true,
     loadingDirs: new Set<string>(),
     rootLoadError: null
   })
+  resetShellLayoutStoreForTests()
+  useShellLayoutStore.setState({ status: 'ready' })
 })
 
 describe('file-explorer-store', () => {
@@ -532,13 +541,22 @@ describe('file-explorer-store', () => {
     })
   })
 
-  describe('toggleVisibility', () => {
-    it('should toggle isVisible', () => {
-      expect(useFileExplorerStore.getState().isVisible).toBe(true)
-      useFileExplorerStore.getState().toggleVisibility()
-      expect(useFileExplorerStore.getState().isVisible).toBe(false)
-      useFileExplorerStore.getState().toggleVisibility()
-      expect(useFileExplorerStore.getState().isVisible).toBe(true)
+  describe('useFileExplorerVisible', () => {
+    it('reads through to the shell-layout side panel flag', () => {
+      const { result } = renderHook(() => useFileExplorerVisible())
+      expect(result.current).toBe(true)
+
+      act(() => {
+        useShellLayoutStore.getState().setSidePanelVisible(false)
+      })
+      expect(result.current).toBe(false)
+    })
+
+    it('no longer keeps visibility state of its own', () => {
+      const state = useFileExplorerStore.getState() as unknown as Record<string, unknown>
+      expect(state).not.toHaveProperty('isVisible')
+      expect(state).not.toHaveProperty('toggleVisibility')
+      expect(state).not.toHaveProperty('setVisible')
     })
   })
 

@@ -92,7 +92,11 @@ export const PersistenceKeys = {
   // a reload returns to the project the user switched to, not the first one.
   // Web/remote only: the desktop already persists `activeProjectId` inside
   // the `projects` snapshot (plugin-store), so it never reads this key.
-  webActiveProject: 'web-active-project'
+  webActiveProject: 'web-active-project',
+  // Shell-revamp layout record (versioned): rail/side-panel/SSH/graph sizes and
+  // visibility plus per-project last column tab and worktree pick. Owned by
+  // `stores/shell-layout-store.ts`; written on both desktop and web.
+  shellLayout: 'shell-layout'
 } as const
 
 // GH-289: persisted launcher selection — the chosen agent plus its call mode.
@@ -165,6 +169,11 @@ export interface PersistedProject {
   envVars?: PersistedEnvVariable[]
   // Worktree fields (added by worktree feature)
   worktrees?: PersistedWorktree[]
+  /**
+   * Legacy: no longer written. Records saved before the switcher pick moved to
+   * the shell-layout store (`worktreePickByProject`, keyed by path) may still
+   * carry it; only the shell-layout migration reads it.
+   */
   activeWorktreeId?: string | null
   // Git detection (cached)
   isGitRepo?: boolean
