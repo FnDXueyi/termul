@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from 'react'
+import { type Dispatch, type SetStateAction, useState } from 'react'
 import { Folder, FolderGit2, GitBranch } from '@/components/icons'
 import {
   Select,
@@ -8,22 +8,37 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { WriteGate } from '@/components/ui/write-gate'
+import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
+import { OUTSIDE_PROJECT_ROOT_REASON } from '@/lib/active-worktree'
 import { cn } from '@/lib/utils'
+import { worktreeLabel } from '@/lib/workspace-rows'
 import type { BaseBranchInfo } from '@/lib/worktree-api'
+import type { Worktree } from '@/types/project'
 import { STRIP_MENU_ITEM_CLASS, STRIP_TRIGGER_CLASS } from './launcher-classes'
+import type { LaunchWorkspace } from './use-launch-workspace'
+
+const NO_WORKTREES_REASON = 'No worktrees yet'
+
+/** Why the Existing worktree item is unavailable, or `undefined` when usable. */
+function existingDisabledReason(worktrees: readonly Worktree[]): string | undefined {
+  if (worktrees.length === 0) return NO_WORKTREES_REASON
+  if (worktrees.every((w) => w.outsideProjectRoot === true)) return OUTSIDE_PROJECT_ROOT_REASON
+  return undefined
+}
 
 /**
  * Context strip tucked under the composer card (CAP-2) — always present, like
  * the chat composer's workspace strip. When worktree launches are available
- * (`interactive`) it carries the isolation-mode picker (Local vs New
- * worktree) and, in worktree mode, the base-branch picker. Otherwise it
- * degrades to the chat strip's read-only workspace + branch text so both
- * surfaces agree on "there is always a strip" (a non-git project shows just
- * Local, a git project adds its branch or Detached HEAD).
+ * (`interactive`) it carries the Workspace chip (Current checkout, Existing
+ * worktree or New worktree) and, per mode, the checkout's branch, the
+ * worktree picker or the base-branch picker. Otherwise it degrades to the chat
+ * strip's read-only workspace + branch text so both surfaces agree on "there
+ * is always a strip" (a non-git project shows just Local, a git project adds
+ * its branch or Detached HEAD).
  */
 export function LauncherContextStrip({
-  isolationMode,
-  setIsolationMode,
+  workspace,
+  worktrees,
   baseBranch,
   setBaseBranch,
   baseBranchInfo,
@@ -33,8 +48,13 @@ export function LauncherContextStrip({
   gitBranch,
   isGitRepo
 }: {
-  isolationMode: 'current' | 'worktree'
-  setIsolationMode: Dispatch<SetStateAction<'current' | 'worktree'>>
+  /** Chip mode and the selected existing worktree (`useLaunchWorkspace`). */
+  workspace: Pick<
+    LaunchWorkspace,
+    'isolationMode' | 'setIsolationMode' | 'existingWorktreeId' | 'setExistingWorktreeId'
+  >
+  /** The project's listed worktrees (Existing worktree picker). */
+  worktrees: readonly Worktree[]
   baseBranch: string | null
   setBaseBranch: Dispatch<SetStateAction<string | null>>
   baseBranchInfo: BaseBranchInfo | null
@@ -48,6 +68,15 @@ export function LauncherContextStrip({
   gitBranch: string | null
   isGitRepo: boolean
 }): React.JSX.Element {
+  const { isolationMode, setIsolationMode, existingWorktreeId, setExistingWorktreeId } = workspace
+  const [openMenus, setOpenMenus] = useState({ mode: false, worktree: false, base: false })
+  useNativeWebviewOcclusion(openMenus.mode || openMenus.worktree || openMenus.base)
+  const trackOpen =
+    (menu: keyof typeof openMenus) =>
+    (open: boolean): void =>
+      setOpenMenus((prev) => ({ ...prev, [menu]: open }))
+  const existingReason = existingDisabledReason(worktrees)
+
   return (
     <div
       data-agent-launcher-context-strip="true"
@@ -58,21 +87,34 @@ export function LauncherContextStrip({
           <Select
             value={isolationMode}
             onValueChange={(value) =>
-              value === 'current' || value === 'worktree' ? setIsolationMode(value) : undefined
+              value === 'current' || value === 'existing' || value === 'worktree'
+                ? setIsolationMode(value)
+                : undefined
             }
+            onOpenChange={trackOpen('mode')}
           >
-            <SelectTrigger aria-label="Isolation mode" className={STRIP_TRIGGER_CLASS}>
-              {isolationMode === 'worktree' ? (
-                <FolderGit2 className="size-3.5 shrink-0" />
-              ) : (
+            <SelectTrigger aria-label="Workspace" className={STRIP_TRIGGER_CLASS}>
+              {isolationMode === 'current' ? (
                 <Folder className="size-3.5 shrink-0" />
+              ) : (
+                <FolderGit2 className="size-3.5 shrink-0" />
               )}
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="current" className={STRIP_MENU_ITEM_CLASS}>
-                Local
+                Current checkout
               </SelectItem>
+              <div title={existingReason} className="flex w-full">
+                <SelectItem
+                  value="existing"
+                  className={STRIP_MENU_ITEM_CLASS}
+                  disabled={!!existingReason}
+                  aria-description={existingReason}
+                >
+                  Existing worktree
+                </SelectItem>
+              </div>
               <WriteGate
                 gated={!!newWorktreeDisabledReason}
                 focusable={false}
@@ -90,6 +132,55 @@ export function LauncherContextStrip({
             </SelectContent>
           </Select>
 
+          {isolationMode === 'current' && (
+            <span
+              className="ml-auto inline-flex min-w-0 items-center justify-end gap-1.5 px-2.5 text-xs text-muted-foreground"
+              title={gitBranch ?? 'HEAD is not on a branch'}
+            >
+              <GitBranch size={13} className="shrink-0" aria-hidden="true" />
+              <span className="sr-only">Branch: </span>
+              <span className="truncate">{gitBranch ?? 'Detached HEAD'}</span>
+            </span>
+          )}
+
+          {isolationMode === 'existing' && (
+            <div className="flex min-w-0 items-center justify-end gap-2">
+              <Select
+                value={existingWorktreeId ?? ''}
+                onValueChange={(value) => setExistingWorktreeId(value)}
+                onOpenChange={trackOpen('worktree')}
+              >
+                <SelectTrigger
+                  aria-label="Worktree"
+                  className={cn(STRIP_TRIGGER_CLASS, 'min-w-0 [&>span]:truncate')}
+                >
+                  <GitBranch className="size-3.5 shrink-0" />
+                  <SelectValue placeholder="Select worktree" />
+                </SelectTrigger>
+                <SelectContent>
+                  {worktrees.map((w) => (
+                    <div
+                      key={w.id}
+                      title={w.outsideProjectRoot ? OUTSIDE_PROJECT_ROOT_REASON : w.path}
+                      className="flex w-full"
+                    >
+                      <SelectItem
+                        value={w.id}
+                        className={STRIP_MENU_ITEM_CLASS}
+                        disabled={w.outsideProjectRoot === true}
+                        aria-description={
+                          w.outsideProjectRoot ? OUTSIDE_PROJECT_ROOT_REASON : undefined
+                        }
+                      >
+                        {worktreeLabel(w)}
+                      </SelectItem>
+                    </div>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           {isolationMode === 'worktree' && (
             <div className="flex min-w-0 items-center justify-end gap-2">
               {!baseBranch && baseBranchInfo?.isDetached && (
@@ -97,7 +188,11 @@ export function LauncherContextStrip({
                   Detached HEAD - pick a base
                 </span>
               )}
-              <Select value={baseBranch ?? ''} onValueChange={(value) => setBaseBranch(value)}>
+              <Select
+                value={baseBranch ?? ''}
+                onValueChange={(value) => setBaseBranch(value)}
+                onOpenChange={trackOpen('base')}
+              >
                 <SelectTrigger
                   aria-label="Base branch"
                   className={cn(STRIP_TRIGGER_CLASS, 'min-w-0 [&>span]:truncate')}

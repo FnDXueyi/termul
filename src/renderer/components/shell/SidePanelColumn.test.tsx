@@ -14,6 +14,14 @@ vi.mock('@/components/file-explorer/FileExplorer', () => ({
   )
 }))
 
+vi.mock('./WorkspaceSwitcher', () => ({
+  WorkspaceSwitcher: ({ project }: { project: { id: string } }) => (
+    <button type="button" data-testid="workspace-switcher" data-project={project.id}>
+      Workspace
+    </button>
+  )
+}))
+
 vi.mock('./ChangesPanel', () => ({
   ChangesPanel: ({ cwd }: { cwd: string }) => <div data-testid="changes-panel" data-cwd={cwd} />
 }))
@@ -72,7 +80,8 @@ beforeEach(() => {
 describe('SidePanelColumn', () => {
   it('renders the header, the three tabs and the Chats list by default', () => {
     renderPanel(makeProject())
-    expect(screen.getByText('Workspace')).toBeInTheDocument()
+    expect(screen.getByTestId('workspace-switcher')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument()
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
       'Chats',
       'Explorer',
@@ -82,13 +91,16 @@ describe('SidePanelColumn', () => {
     expect(screen.getByLabelText('Search chats')).toBeInTheDocument()
   })
 
-  it('shows the picked worktree branch in the header', () => {
-    useShellLayoutStore.setState({
-      worktreePickByProject: { p1: '/repo/.termul/worktrees/feature' }
-    })
+  it('mounts the Workspace switcher for the active project in the header', () => {
     renderPanel(makeProject())
-    expect(screen.getByText('feat/x')).toBeInTheDocument()
-    expect(screen.queryByText('Workspace')).toBeNull()
+    expect(screen.getByTestId('workspace-switcher')).toHaveAttribute('data-project', 'p1')
+  })
+
+  it('keeps the same switcher instance across a project prop update', () => {
+    const { rerenderProject } = renderPanel(makeProject())
+    const before = screen.getByTestId('workspace-switcher')
+    rerenderProject(makeProject({ gitBranch: 'dev' }))
+    expect(screen.getByTestId('workspace-switcher')).toBe(before)
   })
 
   it('opens the launcher from New chat', () => {
@@ -180,17 +192,16 @@ describe('SidePanelColumn', () => {
       expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
     })
 
-    it('marks the header root and its label, never the New chat button', () => {
+    it('marks the header root, never the switcher or the New chat button', () => {
       renderWithDrag(true)
-      const label = screen.getByText('Workspace')
-      const header = label.parentElement as HTMLElement
+      const switcher = screen.getByTestId('workspace-switcher')
+      const header = switcher.parentElement as HTMLElement
       expect(header).toHaveAttribute('data-tauri-drag-region')
-      expect(label).toHaveAttribute('data-tauri-drag-region')
-      expect(label).toHaveClass('pointer-events-none')
+      expect(switcher).not.toHaveAttribute('data-tauri-drag-region')
       expect(screen.getByRole('button', { name: 'New chat' })).not.toHaveAttribute(
         'data-tauri-drag-region'
       )
-      expect(document.querySelectorAll('[data-tauri-drag-region]')).toHaveLength(2)
+      expect(document.querySelectorAll('[data-tauri-drag-region]')).toHaveLength(1)
     })
 
     it('hides the Column tabs while the Rail is collapsed and labels the tabpanel by name', () => {
