@@ -1,6 +1,7 @@
 import type {
   GitCommit,
   GitCommitContext,
+  GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
   ProjectIcon
@@ -82,6 +83,20 @@ export const gitApi = {
       return res.data
     }
     return webServerGit.getProjectIcon(cwd)
+  },
+
+  /**
+   * Working-tree `+added -removed` stat (tracked vs HEAD plus untracked files).
+   * Desktop returns an `IpcResult` envelope; unwrap and throw on failure so
+   * callers see the same error shape as the web branch.
+   */
+  getDiffStat: async (cwd: string): Promise<GitDiffStat> => {
+    if (isTauriContext()) {
+      const res = await invokeIpc<GitDiffStat>('git_get_diff_stat', { cwd })
+      if (!res.success) throw new Error(res.error)
+      return res.data
+    }
+    return webServerGit.getDiffStat(cwd)
   },
 
   // Web/remote mode: route through the same-origin server (Story: Web/remote
