@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { useServerAdmitsRemoteWrites } from '@/components/agents/launcher/use-server-admits-remote-writes'
 import { GitDiffPane } from '@/components/git/GitDiffPane'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { logFrontendError } from '@/lib/log-api'
 import { type GitDiffViewMode, loadGitDiffViewMode } from '@/lib/parse-unified-diff'
 import { diffKey, useGitStatusStore } from '@/stores/git-status-store'

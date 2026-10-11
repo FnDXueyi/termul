@@ -34,7 +34,11 @@ export function useGitPanelModel({ cwd, isVisible }: UseGitPanelModelOptions) {
 
   useEffect(() => {
     if (isVisible) {
-      refreshStatus(cwd)
+      // `refreshStatus` records the failure in the store and rethrows; a non-git
+      // folder or an IPC failure must not surface as an unhandled rejection.
+      Promise.resolve(refreshStatus(cwd)).catch(() => {
+        // Stored in the store's `errors` and logged by `refreshStatus`.
+      })
       fetchCommitContext(cwd)
       fetchStashes(cwd)
       fetchBranches(cwd)

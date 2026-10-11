@@ -6,6 +6,7 @@
 } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
+import { isGitWriteBlocked } from '@/lib/active-working-copy'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
 import { platform } from '@/lib/tauri-os'
@@ -36,6 +37,39 @@ export const selectChangedFileCount =
     if (!statuses || statuses.length === 0) return 0
     return new Set(statuses.map((status) => status.path)).size
   }
+
+/** Per-state changed-file counts for the Status bar. */
+export interface GitStatusCounts {
+  modified: number
+  staged: number
+  untracked: number
+  hasChanges: boolean
+}
+
+/**
+ * Status bar counts from one working copy's cached status list: `modified` =
+ * tracked entries that are not staged, `staged` = staged entries, `untracked`
+ * = untracked entries. A file counts once per bucket (porcelain `MM` is one
+ * staged plus one modified file, never two of either).
+ */
+export function countGitStatuses(
+  statuses: ReadonlyArray<GitStatusDetail> | null | undefined
+): GitStatusCounts {
+  const modified = new Set<string>()
+  const staged = new Set<string>()
+  const untracked = new Set<string>()
+  for (const entry of statuses ?? []) {
+    if (entry.staged) staged.add(entry.path)
+    if (entry.status === 'untracked') untracked.add(entry.path)
+    else if (!entry.staged) modified.add(entry.path)
+  }
+  return {
+    modified: modified.size,
+    staged: staged.size,
+    untracked: untracked.size,
+    hasChanges: modified.size + staged.size + untracked.size > 0
+  }
+}
 
 /** Current branch of the cached commit context (`null` on a detached HEAD or
  * when nothing is cached). There is no second branch cache. */
@@ -350,6 +384,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   // file. The first failing path aborts the run (subsequent files are left
   // untouched) but a refresh still runs so the UI reflects what did change.
   stageFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -362,6 +397,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   unstageFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -377,6 +413,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   // mutations above: invalidate the cached diff for the file, then refresh
   // status + commit context so the panel reflects the partial stage.
   stageHunk: async (cwd, path, hunkPatch) => {
+    assertWritable(cwd)
     try {
       await gitApi.stageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
@@ -386,6 +423,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   unstageHunk: async (cwd, path, hunkPatch) => {
+    assertWritable(cwd)
     try {
       await gitApi.unstageHunk(cwd, path, hunkPatch)
       invalidateFileDiffs(set, cwd, path)
@@ -395,6 +433,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   discardFiles: async (cwd, paths) => {
+    assertWritable(cwd)
     if (paths.length === 0) return
     try {
       for (const path of paths) {
@@ -407,6 +446,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   commit: async (cwd, summary, description, amend) => {
+    assertWritable(cwd)
     await gitApi.commit(cwd, summary, description, amend)
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
@@ -415,6 +455,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   push: async (cwd) => {
+    assertWritable(cwd)
     await gitApi.push(cwd)
     await refreshAfterMutation(get, cwd)
   },
@@ -444,26 +485,31 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   stashSave: async (cwd, message, includeUntracked) => {
+    assertWritable(cwd)
     await gitApi.stashSave(cwd, message, includeUntracked)
     await refreshAfterMutation(get, cwd)
   },
 
   stashApply: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashApply(cwd, index)
     await refreshAfterMutation(get, cwd)
   },
 
   stashPop: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashPop(cwd, index)
     await refreshAfterMutation(get, cwd)
   },
 
   stashDrop: async (cwd, index) => {
+    assertWritable(cwd)
     await gitApi.stashDrop(cwd, index)
     await get().fetchStashes(cwd)
   },
 
   branchSwitch: async (cwd, name) => {
+    assertWritable(cwd)
     await gitApi.branchSwitch(cwd, name)
     set({ selectedFile: null })
     await refreshAfterMutation(get, cwd)
@@ -471,12 +517,28 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
   },
 
   branchCreate: async (cwd, name) => {
+    assertWritable(cwd)
     await gitApi.branchCreate(cwd, name)
     set({ selectedFile: null })
     await refreshAfterMutation(get, cwd)
     await updateStoresWithBranch(cwd, name)
   }
 }))
+
+/** Refuses a git write in a path that is unresolved for a project (a managed
+ * worktree directory no listed worktree contains): throws before any git call. */
+function assertWritable(cwd: string): void {
+  if (!isGitWriteBlocked(cwd, useProjectStore.getState().projects)) return
+  const key = normalizePath(cwd)
+  void logFrontendError({
+    level: 'warn',
+    message: `[git-status] write blocked for unresolved working copy ${key}`,
+    source: 'git-status-store'
+  })
+  throw new Error(
+    'This worktree is no longer available. Git changes are blocked until it resolves.'
+  )
+}
 
 async function updateStoresWithBranch(cwd: string, branchName: string) {
   try {

@@ -3,9 +3,16 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GitBranchPicker } from './GitBranchPicker'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 const mockBranches = vi.fn()
 const mockCheckout = vi.fn()
 const mockCreateBranch = vi.fn()
+const mockUpdateProject = vi.fn()
+const mockUpdateTerminalGitBranch = vi.fn()
 
 type BranchLoadSuccess = {
   success: true
@@ -27,7 +34,7 @@ vi.mock('@/lib/git-api', () => ({
 
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: vi.fn((selector: (state: unknown) => unknown) =>
-    selector({ updateProject: vi.fn() })
+    selector({ updateProject: mockUpdateProject })
   )
 }))
 
@@ -35,7 +42,7 @@ vi.mock('@/stores/terminal-store', () => ({
   useTerminalStore: vi.fn((selector: (state: unknown) => unknown) =>
     selector({
       activeTerminalId: 'terminal-1',
-      updateTerminalGitBranch: vi.fn()
+      updateTerminalGitBranch: mockUpdateTerminalGitBranch
     })
   )
 }))
@@ -79,6 +86,8 @@ describe('GitBranchPicker', () => {
     mockBranches.mockReset()
     mockCheckout.mockReset()
     mockCreateBranch.mockReset()
+    mockUpdateProject.mockReset()
+    mockUpdateTerminalGitBranch.mockReset()
   })
 
   afterEach(() => {
@@ -187,6 +196,48 @@ describe('GitBranchPicker', () => {
     await waitFor(() => {
       expect(mockCheckout).toHaveBeenCalledWith('/repo', 'origin/feature', true)
     })
+  })
+
+  it('records the branch on the project and active terminal by default', async () => {
+    mockBranches.mockResolvedValue({
+      success: true,
+      data: [
+        { name: 'dev', isRemote: false, isCurrent: true, hasOtherWorktree: false },
+        { name: 'feature', isRemote: false, isCurrent: false, hasOtherWorktree: false }
+      ]
+    })
+    mockCheckout.mockResolvedValue(undefined)
+
+    render(<GitBranchPicker {...defaultProps} />)
+    await openPicker()
+    fireEvent.click(await screen.findByText('feature'))
+
+    await waitFor(() => {
+      expect(mockUpdateProject).toHaveBeenCalledWith('project-1', { gitBranch: 'feature' })
+    })
+    expect(mockUpdateTerminalGitBranch).toHaveBeenCalledWith('terminal-1', 'feature')
+  })
+
+  it('hands the new branch to onBranchChanged instead of writing project or terminal', async () => {
+    const onBranchChanged = vi.fn()
+    mockBranches.mockResolvedValue({
+      success: true,
+      data: [
+        { name: 'dev', isRemote: false, isCurrent: true, hasOtherWorktree: false },
+        { name: 'feature', isRemote: false, isCurrent: false, hasOtherWorktree: false }
+      ]
+    })
+    mockCheckout.mockResolvedValue(undefined)
+
+    render(<GitBranchPicker {...defaultProps} onBranchChanged={onBranchChanged} />)
+    await openPicker()
+    fireEvent.click(await screen.findByText('feature'))
+
+    await waitFor(() => {
+      expect(onBranchChanged).toHaveBeenCalledWith('feature')
+    })
+    expect(mockUpdateProject).not.toHaveBeenCalled()
+    expect(mockUpdateTerminalGitBranch).not.toHaveBeenCalled()
   })
 
   it('ignores stale branch loads from a previous repo path', async () => {

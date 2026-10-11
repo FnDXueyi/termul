@@ -6,6 +6,7 @@ import type { GitActions } from '@/components/git/use-git-actions'
 import type { GitSelectionSection } from '@/components/git/use-git-selection'
 import { Minus, Plus, RotateCcw } from '@/components/icons'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 
 interface GitChangeListProps {
   /** `column` is the desktop look at full width without its own scroll area:
@@ -60,6 +61,7 @@ export function GitChangeList({
   onPopStash,
   onDropStash
 }: GitChangeListProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   const isMobile = variant === 'mobile'
   const rowIconSize = isMobile ? 16 : 13
   const fileItemVariant = isMobile ? 'mobile' : undefined
@@ -84,6 +86,7 @@ export function GitChangeList({
               icon={<Minus size={13} />}
               label="Unstage all changes"
               disabled={isMutating || isGenerating}
+              gated={!admitted}
               onClick={() => runUnstage(stagedFiles.map((f) => f.path))}
             />
           </SectionHeader>
@@ -103,6 +106,7 @@ export function GitChangeList({
                   label="Unstage changes"
                   touch={rowActionTouch}
                   disabled={isMutating || isGenerating}
+                  gated={!admitted}
                   onClick={() => runUnstage(targetsFor(file.path, 'staged'))}
                 />
               </FileItem>
@@ -124,12 +128,14 @@ export function GitChangeList({
                 label="Discard all changes"
                 variant="danger"
                 disabled={isMutating || isGenerating}
+                gated={!admitted}
                 onClick={() => requestDiscard(unstagedFiles.map((f) => f.path))}
               />
               <SectionAction
                 icon={<Plus size={13} />}
                 label="Stage all changes"
                 disabled={isMutating || isGenerating}
+                gated={!admitted}
                 onClick={() => runStage(unstagedFiles.map((f) => f.path))}
               />
             </>
@@ -157,6 +163,7 @@ export function GitChangeList({
                   touch={rowActionTouch}
                   variant="danger"
                   disabled={isMutating || isGenerating}
+                  gated={!admitted}
                   onClick={() => requestDiscard(targetsFor(file.path, 'unstaged'))}
                 />
                 <RowAction
@@ -164,6 +171,7 @@ export function GitChangeList({
                   label="Stage changes"
                   touch={rowActionTouch}
                   disabled={isMutating || isGenerating}
+                  gated={!admitted}
                   onClick={() => runStage(targetsFor(file.path, 'unstaged'))}
                 />
               </FileItem>
@@ -185,6 +193,5 @@ export function GitChangeList({
   )
 
   if (isColumn) return body
-
   return <ScrollArea className="flex-1 w-full">{body}</ScrollArea>
 }

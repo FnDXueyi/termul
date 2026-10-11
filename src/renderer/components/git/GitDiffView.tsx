@@ -1,5 +1,7 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { buildHunkPatches, buildLinePatch, type HunkPatch } from '@/lib/build-hunk-patch'
 import {
   getLanguageForFile,
@@ -223,33 +225,40 @@ function HunkActionBar({
   selectedCount?: number
   onSelectedAction?: () => void
 }): React.JSX.Element | null {
+  const admitted = useServerAdmitsRemoteWrites()
   if (!onAction && !onSelectedAction) return null
   const verb = action === 'stage' ? 'Stage' : 'Unstage'
   const buttonClass =
-    'ml-2 inline-flex items-center rounded border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+    'inline-flex items-center rounded border border-border/60 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40 disabled:cursor-not-allowed'
   return (
     <>
       {onAction ? (
-        <button
-          type="button"
-          onClick={onAction}
-          className={buttonClass}
-          title={`${verb} hunk`}
-          aria-label={`${verb} hunk`}
-        >
-          {verb} hunk
-        </button>
+        <WriteGate gated={!admitted} className="ml-2">
+          <button
+            type="button"
+            onClick={onAction}
+            disabled={!admitted}
+            className={cn(buttonClass, admitted && 'ml-2')}
+            title={`${verb} hunk`}
+            aria-label={`${verb} hunk`}
+          >
+            {verb} hunk
+          </button>
+        </WriteGate>
       ) : null}
       {onSelectedAction && selectedCount && selectedCount > 0 ? (
-        <button
-          type="button"
-          onClick={onSelectedAction}
-          className={buttonClass}
-          title={`${verb} selected lines`}
-          aria-label={`${verb} selected lines`}
-        >
-          {verb} selected ({selectedCount})
-        </button>
+        <WriteGate gated={!admitted} className="ml-2">
+          <button
+            type="button"
+            onClick={onSelectedAction}
+            disabled={!admitted}
+            className={cn(buttonClass, admitted && 'ml-2')}
+            title={`${verb} selected lines`}
+            aria-label={`${verb} selected lines`}
+          >
+            {verb} selected ({selectedCount})
+          </button>
+        </WriteGate>
       ) : null}
     </>
   )

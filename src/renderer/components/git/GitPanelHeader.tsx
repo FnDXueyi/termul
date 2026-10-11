@@ -2,6 +2,8 @@ import type React from 'react'
 import { BranchSection } from '@/components/git/BranchSection'
 import { Archive, Search } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
 
 interface GitPanelHeaderProps {
@@ -35,6 +37,7 @@ export function GitPanelHeader({
   onOpenStash,
   belowBranch
 }: GitPanelHeaderProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   if (variant === 'column') {
     return (
       <div className="flex flex-col bg-muted/20">
@@ -51,16 +54,18 @@ export function GitPanelHeader({
             onSwitchBranch={onSwitchBranch}
           />
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
-            title="Stash changes"
-            onClick={onOpenStash}
-            disabled={!hasUncommittedChanges || isGenerating}
-          >
-            <Archive size={14} />
-          </Button>
+          <WriteGate gated={!admitted}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
+              title="Stash changes"
+              onClick={onOpenStash}
+              disabled={!hasUncommittedChanges || isGenerating || !admitted}
+            >
+              <Archive size={14} />
+            </Button>
+          </WriteGate>
         </div>
 
         {belowBranch}
@@ -98,16 +103,18 @@ export function GitPanelHeader({
             onSwitchBranch={onSwitchBranch}
           />
 
-          <Button
-            variant="ghost"
-            size="touch"
-            className="w-11 text-muted-foreground hover:text-foreground hover:bg-secondary"
-            title="Stash changes"
-            onClick={onOpenStash}
-            disabled={!hasUncommittedChanges || isGenerating}
-          >
-            <Archive size={16} />
-          </Button>
+          <WriteGate gated={!admitted}>
+            <Button
+              variant="ghost"
+              size="touch"
+              className="w-11 text-muted-foreground hover:text-foreground hover:bg-secondary"
+              title="Stash changes"
+              onClick={onOpenStash}
+              disabled={!hasUncommittedChanges || isGenerating || !admitted}
+            >
+              <Archive size={16} />
+            </Button>
+          </WriteGate>
         </div>
 
         <div className="relative">
@@ -137,16 +144,18 @@ export function GitPanelHeader({
           onSwitchBranch={onSwitchBranch}
         />
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
-          title="Stash changes"
-          onClick={onOpenStash}
-          disabled={!hasUncommittedChanges || isGenerating}
-        >
-          <Archive size={14} />
-        </Button>
+        <WriteGate gated={!admitted}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-secondary"
+            title="Stash changes"
+            onClick={onOpenStash}
+            disabled={!hasUncommittedChanges || isGenerating || !admitted}
+          >
+            <Archive size={14} />
+          </Button>
+        </WriteGate>
       </div>
 
       <div className="relative">

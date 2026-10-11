@@ -31,7 +31,6 @@ import { spawnAcpLoginTerminal } from '@/components/agents/launcher/spawn-acp-lo
 import { LauncherStatusBanners } from '@/components/agents/launcher/status-banners'
 import { LauncherToolbar } from '@/components/agents/launcher/toolbar'
 import { useLauncherSelectorSource } from '@/components/agents/launcher/use-launcher-selector-source'
-import { useServerAdmitsRemoteWrites } from '@/components/agents/launcher/use-server-admits-remote-writes'
 import {
   emptyPendingLauncherOptions,
   hasPendingLauncherOptions,
@@ -71,6 +70,7 @@ import { useMentionRecents } from '@/hooks/use-mention-recents'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
 import { useResolvedSupportedAcpAgents } from '@/hooks/use-resolved-supported-acp-agents'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { type AuthMethod, acpApi, type ContentBlock } from '@/lib/acp-api'
 import { resolveAgentEnv } from '@/lib/agent-launch'
 import { agentPolicy } from '@/lib/agents/acp-registry'
@@ -94,6 +94,7 @@ import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
 import { type BaseBranchInfo, worktreeApi } from '@/lib/worktree-api'
 import { getDefaultCwdForProject, getProjectRootPath } from '@/lib/worktree-context'
+import { READ_ONLY_SERVER_REASON } from '@/lib/write-gate'
 import {
   type AcpSession,
   agentReuseKey,
@@ -310,6 +311,10 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // the opt-in) does not, avoiding a picker that would fail `FORBIDDEN` at
   // launch. The hook subscribes to the cache so the picker re-renders when the
   // boot fetch resolves.
+  // CAP-15 / AD-9: the picker itself is no longer hidden on such a server —
+  // the strip stays mounted for any git project and shows "New worktree"
+  // disabled with the read-only reason. `canUseWorktree` still gates every
+  // functional path, so a read-only server can never enter worktree mode.
   const serverAdmitsWrites = useServerAdmitsRemoteWrites()
   const canUseWorktree = projectIsGitRepo && serverAdmitsWrites
   const [isolationMode, setIsolationMode] = useState<'current' | 'worktree'>('current')
@@ -2088,7 +2093,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
               setBaseBranch={setBaseBranch}
               baseBranchInfo={baseBranchInfo}
               baseOptions={baseOptions}
-              interactive={canUseWorktree}
+              interactive={projectIsGitRepo}
+              newWorktreeDisabledReason={serverAdmitsWrites ? undefined : READ_ONLY_SERVER_REASON}
               gitBranch={projectGitBranch}
               isGitRepo={projectIsGitRepo}
             />

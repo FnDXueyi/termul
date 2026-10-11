@@ -24,6 +24,7 @@ import { SKILL_PAD_DEFAULT } from '@/lib/composer/doc-to-prompt'
 import { commandToken, fileToken, skillToken } from '@/lib/skill-tokens'
 import { isTauriContext, type ServerCapabilityState } from '@/lib/tauri-runtime'
 import { mockAcpSession } from '@/lib/test-utils/acp'
+import { READ_ONLY_SERVER_REASON } from '@/lib/write-gate'
 import type { AcpSession } from '@/stores/acp-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -404,13 +405,23 @@ vi.mock('@/lib/tauri-runtime', () => ({
 // via context so `SelectTrigger` can render one `<select>` with all options.
 vi.mock('@/components/ui/select', async () => {
   const { createContext, useContext, Children, isValidElement } = await import('react')
-  type Item = { value: string; label: React.ReactNode }
+  type Item = {
+    value: string
+    label: React.ReactNode
+    disabled?: boolean
+    description?: string
+  }
   const SelectCtx = createContext<{
     value?: string
     onValueChange?: (v: string) => void
     items: Item[]
   }>({ items: [] })
-  const SelectItem = (_props: { value: string; children: React.ReactNode }) => null
+  const SelectItem = (_props: {
+    value: string
+    children: React.ReactNode
+    disabled?: boolean
+    'aria-description'?: string
+  }) => null
   return {
     Select: ({
       value,
@@ -425,7 +436,12 @@ vi.mock('@/components/ui/select', async () => {
       const walk = (node: React.ReactNode): void => {
         if (!isValidElement(node)) return
         if (node.type === SelectItem) {
-          items.push({ value: node.props.value, label: node.props.children })
+          items.push({
+            value: node.props.value,
+            label: node.props.children,
+            disabled: node.props.disabled,
+            description: node.props['aria-description']
+          })
         }
         Children.forEach(node.props.children, walk)
       }
@@ -453,7 +469,12 @@ vi.mock('@/components/ui/select', async () => {
           aria-label={ariaLabel}
         >
           {ctx.items.map((item) => (
-            <option key={item.value} value={item.value}>
+            <option
+              key={item.value}
+              value={item.value}
+              disabled={item.disabled}
+              aria-description={item.description}
+            >
               {item.label}
             </option>
           ))}
@@ -2717,24 +2738,39 @@ describe('AgentLauncher worktree isolation', () => {
     expect(screen.getByRole('combobox', { name: 'Isolation mode' })).toBeInTheDocument()
   })
 
-  // CAP — tunnel capability gate: when the server does NOT admit remote writes
+  // CAP-15 / AD-9 — write gate: when the server does NOT admit remote writes
   // (desktop shared-live cloudflared, or a non-loopback peer without
-  // --allow-remote-writes), the picker stays hidden on a git project so the
-  // user never reaches a launch that would fail `FORBIDDEN`. Covers the
-  // previously-untested hide path. (The real cache fetch/parse path is covered
-  // by tauri-runtime.test.ts; here the mock flips the snapshot.)
-  it('hides the isolation selector when the server does not admit remote writes', () => {
+  // --allow-remote-writes), the isolation picker stays visible on a git project
+  // but "New worktree" is disabled with the read-only reason, so the user
+  // never reaches a launch that would fail `FORBIDDEN`. (The real cache
+  // fetch/parse path is covered by tauri-runtime.test.ts; here the mock flips
+  // the snapshot.)
+  it('shows the isolation selector with New worktree disabled when the server does not admit remote writes', () => {
     vi.mocked(isTauriContext).mockReturnValue(false)
     mockServerCapability = { admitted: false, inFlight: false, resolved: true }
     mockProjectOverride.current = { isGitRepo: true, gitBranch: 'feat/x' }
     renderLauncher()
-    expect(screen.queryByRole('combobox', { name: 'Isolation mode' })).not.toBeInTheDocument()
+    const mode = screen.getByRole('combobox', { name: 'Isolation mode' }) as HTMLSelectElement
+    expect(mode.value).toBe('current')
+    expect(screen.getByRole('option', { name: 'Local' })).not.toBeDisabled()
+    const worktree = screen.getByRole('option', { name: 'New worktree' })
+    expect(worktree).toBeDisabled()
+    expect(worktree).toHaveAttribute('aria-description', READ_ONLY_SERVER_REASON)
+    // The E37 wrapper exposes the reason on hover.
+    expect(document.querySelector('[data-write-gate="read-only"]')).toHaveAttribute(
+      'title',
+      READ_ONLY_SERVER_REASON
+    )
+    // No worktree mode is reachable, so no base-branch picker appears.
     expect(screen.queryByRole('combobox', { name: 'Base branch' })).not.toBeInTheDocument()
-    // The strip itself stays (chat parity): read-only workspace + branch.
-    const strip = document.querySelector('[data-agent-launcher-context-strip="true"]')
-    expect(strip).toBeInTheDocument()
-    expect(within(strip as HTMLElement).getByText('Local')).toBeInTheDocument()
-    expect(within(strip as HTMLElement).getByText('feat/x')).toBeInTheDocument()
+    expect(mockWorktreeCreate).not.toHaveBeenCalled()
+  })
+
+  it('keeps New worktree enabled and unwrapped when the server admits remote writes', () => {
+    mockProjectOverride.current = { isGitRepo: true, gitBranch: 'feat/x' }
+    renderLauncher()
+    expect(screen.getByRole('option', { name: 'New worktree' })).not.toBeDisabled()
+    expect(document.querySelector('[data-write-gate]')).not.toBeInTheDocument()
   })
 
   /**

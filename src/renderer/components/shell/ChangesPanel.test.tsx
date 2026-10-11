@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { getLog, addDiffTab, acpState, gitState } = vi.hoisted(() => ({
@@ -181,5 +181,29 @@ describe('ChangesPanel', () => {
     expect(gitState.fetchStashes).not.toHaveBeenCalled()
     expect(gitState.fetchBranches).not.toHaveBeenCalled()
     expect(getLog).not.toHaveBeenCalled()
+  })
+
+  it('handles a failed status refresh (non-git folder or IPC failure) instead of leaving it unhandled', async () => {
+    // A rejected promise whose handlers we can observe: the store records the
+    // error and rethrows, so the caller must attach a rejection handler.
+    const rejectionHandlerAttached = vi.fn()
+    const failing = {
+      // biome-ignore lint/suspicious/noThenProperty: observing that a rejection handler is attached
+      then: (_resolve: unknown, reject: (reason: unknown) => void) => {
+        rejectionHandlerAttached()
+        reject(new Error('not a git repository'))
+      }
+    }
+    gitState.refreshStatus.mockReturnValueOnce(failing)
+    render(<ChangesPanel cwd="/work" isVisible />)
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(gitState.refreshStatus).toHaveBeenCalledWith('/work')
+    expect(rejectionHandlerAttached).toHaveBeenCalledTimes(1)
+    // The rest of the visibility fetches still run.
+    expect(gitState.fetchCommitContext).toHaveBeenCalledWith('/work')
+    expect(gitState.fetchBranches).toHaveBeenCalledWith('/work')
   })
 })
