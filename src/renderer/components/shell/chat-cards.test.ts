@@ -177,4 +177,18 @@ describe('filterChatCards', () => {
   it('returns nothing when no field matches', () => {
     expect(filterChatCards(cards, 'zzz')).toEqual([])
   })
+
+  it('matches the visible model line: the recorded model, or the Agent fallback', () => {
+    const modelCards = buildChatCards({
+      sessionIndex: [
+        entry('m', { title: 'One', cwd: '/repo', modelName: 'Opus 4' }),
+        entry('n', { title: 'Two', cwd: '/repo' })
+      ],
+      project: project(),
+      pick: undefined,
+      agentNames
+    })
+    expect(filterChatCards(modelCards, 'opus').map((c) => c.entry.id)).toEqual(['m'])
+    expect(filterChatCards(modelCards, 'agent').map((c) => c.entry.id)).toEqual(['n'])
+  })
 })
