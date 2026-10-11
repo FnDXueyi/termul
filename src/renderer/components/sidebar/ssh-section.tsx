@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { PANEL_HEADER_CLASS } from '@/components/ui/panel-styles'
+import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { cn } from '@/lib/utils'
 import { useSSHPanelVisible } from '@/stores/ssh-panel-store'
 import { SSHPanel } from '../ssh/SSHPanel'
+import { SSHSectionChevron } from '../ssh/SSHSectionChevron'
 
 // ============================================================================
 // SSH Resizable Section
@@ -136,7 +140,22 @@ export function SSHResizableSection({
   // Desktop-only surface (issue #843): the SSH/SFTP panel is hidden on web —
   // connect/SFTP/port-forwarding are `WEB_UNSUPPORTED` — rather than
   // rendering profiles with disabled Connect actions.
-  if (!isTauriContext() || !isVisible) return null
+  if (!isTauriContext()) return null
+
+  // Revamp (X5): the section collapses to a header-only row instead of
+  // disappearing, so it can be expanded again from the same place.
+  const isRevamp = getShellLayoutActiveAtLoad() === 'revamp'
+  if (!isVisible && !isRevamp) return null
+  if (!isVisible) {
+    return (
+      <div className="flex-shrink-0 border-t border-border">
+        <div className={cn(PANEL_HEADER_CLASS, 'h-9 justify-start gap-1')}>
+          <SSHSectionChevron expanded={false} />
+          <span className="label-panel">SSH</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex-shrink-0 flex flex-col" style={{ height: `${height}px` }}>
@@ -154,6 +173,7 @@ export function SSHResizableSection({
           onConnect={onSSHConnect}
           onSelectProfile={onSelectProfile}
           activeProfileId={activeProfileId}
+          headerLead={isRevamp ? <SSHSectionChevron expanded /> : undefined}
         />
       </div>
     </div>

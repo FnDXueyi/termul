@@ -26,6 +26,7 @@ interface UseWorkspaceKeyboardOptions {
   getActiveKey: (id: string) => string
   handleNewBrowserTab: (paneId?: string) => void
   handleOpenThemePicker: () => void
+  handleOpenAppPreferences: () => void
   setIsCommandPaletteOpen: (open: boolean) => void
   setIsCommandHistoryOpen: (open: boolean) => void
   setIsNewProjectModalOpen: (open: boolean) => void
@@ -43,6 +44,7 @@ export function useWorkspaceKeyboard({
   getActiveKey,
   handleNewBrowserTab,
   handleOpenThemePicker,
+  handleOpenAppPreferences,
   setIsCommandPaletteOpen,
   setIsCommandHistoryOpen,
   setIsNewProjectModalOpen
@@ -201,6 +203,18 @@ export function useWorkspaceKeyboard({
         return
       }
 
+      // Settings (Ctrl+, / Alt+, on web) — the same modal the Rail and
+      // command palette open.
+      if (matchesShortcut(e, getActiveKey('settings'))) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur()
+        }
+        handleOpenAppPreferences()
+        return
+      }
+
       // New project (Ctrl+N)
       if (matchesShortcut(e, getActiveKey('newProject'))) {
         e.preventDefault()
@@ -314,6 +328,7 @@ export function useWorkspaceKeyboard({
     isExplorerVisible,
     isSidebarVisible,
     handleOpenThemePicker,
+    handleOpenAppPreferences,
     closeActiveTab,
     isAgentLauncherOpen
   ])

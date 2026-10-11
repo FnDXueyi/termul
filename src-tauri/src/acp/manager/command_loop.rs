@@ -158,6 +158,17 @@ pub(super) async fn run_command_loop(
                             // sessions stash it on the driver state so a later
                             // `promote_session` registers it without trusting
                             // client-supplied fields.
+                            // Story 16 (CAP-5): the session that CREATED its
+                            // worktree consumes the host's launch note (once,
+                            // branch must match). A model-switch session, a
+                            // retry or a later chat in the same worktree never
+                            // does, so only the creator may auto-rename.
+                            let worktree_created = !ephemeral
+                                && matches!(
+                                    (worktree_path.as_deref(), worktree_branch.as_deref()),
+                                    (Some(path), Some(branch))
+                                        if crate::worktree::take_launch_created(path, branch)
+                                );
                             let registration = SessionRegistration {
                                 session_id: session_id.0.clone(),
                                 stable_agent_namespace,
@@ -166,6 +177,7 @@ pub(super) async fn run_command_loop(
                                 cwd: PathBuf::from(&cwd),
                                 worktree_path,
                                 worktree_branch,
+                                worktree_created,
                                 model: resolved.models.as_ref().map(
                                     crate::acp::session_persistence::snapshot_from_model_state,
                                 ),

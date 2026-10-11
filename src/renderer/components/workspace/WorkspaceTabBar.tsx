@@ -1,17 +1,15 @@
-import type { DetectedShells, ShellInfo } from '@shared/types/ipc.types'
+import type { ShellInfo } from '@shared/types/ipc.types'
 import { AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
-import { Globe, Maximize2, Minimize2, Terminal as TerminalIcon } from '@/components/icons'
+import { Globe, Maximize2, Minimize2 } from '@/components/icons'
 import { WindowControls } from '@/components/shell/TopRowChrome'
-import { Skeleton } from '@/components/ui/skeleton'
 import { requestCloseAgentChat } from '@/hooks/use-agent-idle-shutdown'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
-import { clipboardApi, shellApi } from '@/lib/api'
-import { browserTabHide, browserTabShow } from '@/lib/browser-api'
+import { clipboardApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
+import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { cn } from '@/lib/utils'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
@@ -23,6 +21,8 @@ import { editorTabId, useLeafCount, useWorkspaceStore } from '@/stores/workspace
 import type { Terminal } from '@/types/project'
 import type { TabReorderPosition } from '@/types/workspace.types'
 import { EditorTab } from './EditorTab'
+import { NewTabMenu } from './NewTabMenu'
+import { TerminalMenuButton } from './TerminalMenuButton'
 import type { TabBulkMenuProps } from './tab-context-menu'
 import { AgentChatTabInline } from './tabs/agent-chat-tab'
 import { BrowserTabInline } from './tabs/browser-tab'
@@ -97,42 +97,8 @@ export function WorkspaceTabBar({
 
   const dragAttr = topRow?.dragRegion ? true : undefined
 
-  const [isTerminalMenuOpen, setIsTerminalMenuOpen] = useState(false)
-  const [shells, setShells] = useState<DetectedShells | null>(null)
-  const [loading, setLoading] = useState(true)
   const [hasOverflow, setHasOverflow] = useState(false)
-  const terminalMenuRef = useRef<HTMLDivElement>(null)
   const tabsContainerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const fetchShells = async (): Promise<void> => {
-      try {
-        const result = await shellApi.getAvailableShells()
-        if (result.success) {
-          setShells(result.data)
-        }
-      } catch {
-        setShells(null)
-      } finally {
-        setLoading(false)
-      }
-    }
-    void fetchShells()
-  }, [])
-
-  useEffect(() => {
-    const handleClickOutside = (e: globalThis.MouseEvent): void => {
-      if (terminalMenuRef.current && !terminalMenuRef.current.contains(e.target as Node)) {
-        setIsTerminalMenuOpen(false)
-      }
-    }
-    if (isTerminalMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside)
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
-    }
-  }, [isTerminalMenuOpen])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: tabs.length intentionally retriggers overflow checks
   useEffect(() => {
@@ -147,52 +113,12 @@ export function WorkspaceTabBar({
     return () => window.removeEventListener('resize', checkOverflow)
   }, [tabs.length])
 
-  // Native child webviews paint above the DOM, so the terminal popover would be
-  // obscured unless we temporarily hide browser webviews while the menu is open.
-  useEffect(() => {
-    const browserTabs = tabs.filter(
-      (tab): tab is WorkspaceTab & { type: 'browser'; browserTabId: string } =>
-        tab.type === 'browser'
-    )
-    if (browserTabs.length === 0) return
-
-    const hideAll = (tabsToHide: Array<{ browserTabId: string }>): void => {
-      for (const tab of tabsToHide) {
-        void browserTabHide(tab.browserTabId).catch(console.error)
-      }
-    }
-
-    const showActive = (activeBrowserTab?: { browserTabId: string }): void => {
-      if (activeBrowserTab) {
-        void browserTabShow(activeBrowserTab.browserTabId).catch(console.error)
-      }
-    }
-
-    if (isTerminalMenuOpen) {
-      hideAll(browserTabs)
-      return
-    }
-
-    const activeBrowserTab = browserTabs.find((tab) => tab.id === activeTabId)
-    showActive(activeBrowserTab)
-  }, [isTerminalMenuOpen, tabs, activeTabId])
-
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (tabsContainerRef.current) {
       e.preventDefault()
       tabsContainerRef.current.scrollLeft += e.deltaY
     }
   }, [])
-
-  const handleSelectShell = useCallback(
-    (shell: ShellInfo) => {
-      if (onAddTerminal) {
-        onAddTerminal(shell)
-      }
-      setIsTerminalMenuOpen(false)
-    },
-    [onAddTerminal]
-  )
 
   const handleCloseEditorTab = useCallback(
     (filePath: string) => {
@@ -270,14 +196,6 @@ export function WorkspaceTabBar({
     [dragPayload, paneId, handleTabReorder]
   )
 
-  const sortedShells = shells?.available?.slice().sort((a, b) => {
-    if (defaultShell) {
-      if (a.name === defaultShell) return -1
-      if (b.name === defaultShell) return 1
-    }
-    return a.displayName.localeCompare(b.displayName)
-  })
-
   // Multi-project perf: subscribe ONLY to the terminal records this pane's
   // terminal tabs reference (ids derived from the `tabs` prop). The old
   // whole-`state.terminals` subscription re-rendered this 1100-line bar on
@@ -296,6 +214,8 @@ export function WorkspaceTabBar({
   )
   const terminalStoreTerminals = paneTerminals
   const isFullscreenPane = fullscreenPaneId === paneId
+  // Revamp shell: one `+` New tab menu replaces the terminal and browser buttons.
+  const isRevampShell = getShellLayoutActiveAtLoad() === 'revamp'
 
   // Close guards mirrored at the tab-bar level so menu enablement and bulk
   // target lists agree with what WorkspaceLayout's dispatch will actually
@@ -724,7 +644,10 @@ export function WorkspaceTabBar({
           className="ml-auto flex h-full shrink-0 items-center gap-1 px-2"
           data-tauri-drag-region={dragAttr}
         >
-          {(leafCount > 1 || onAddTerminal || (onAddBrowserTab && isTauriContext())) && (
+          {(isRevampShell ||
+            leafCount > 1 ||
+            onAddTerminal ||
+            (onAddBrowserTab && isTauriContext())) && (
             <span aria-hidden className="mr-1 h-5 w-px shrink-0 bg-border/60" />
           )}
           {leafCount > 1 && (
@@ -737,68 +660,33 @@ export function WorkspaceTabBar({
               {isFullscreenPane ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
             </button>
           )}
-          {onAddTerminal && (
-            <div ref={terminalMenuRef} className="relative flex items-center h-full">
-              <button
-                onClick={() => setIsTerminalMenuOpen((open) => !open)}
-                className="h-7 w-7 flex items-center justify-center rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors duration-150 ease-out"
-                title="Open terminal menu"
-                aria-label="Open terminal menu"
-                aria-expanded={isTerminalMenuOpen}
-              >
-                <TerminalIcon size={12} />
-              </button>
+          {isRevampShell ? (
+            <NewTabMenu
+              paneId={paneId}
+              onAddTerminal={onAddTerminal}
+              onAddBrowserTab={onAddBrowserTab}
+              defaultShell={defaultShell}
+            />
+          ) : (
+            <>
+              <TerminalMenuButton
+                tabs={tabs}
+                activeTabId={activeTabId}
+                onAddTerminal={onAddTerminal}
+                defaultShell={defaultShell}
+              />
 
-              {isTerminalMenuOpen && (
-                <div className="absolute top-full right-0 mt-1 w-44 bg-popover border border-border rounded-md shadow-lg z-50 overflow-hidden">
-                  <div className="px-2.5 py-1 text-2xs font-medium text-muted-foreground bg-secondary/30">
-                    Terminal
-                  </div>
-                  {loading ? (
-                    <div className="py-1 px-2.5 space-y-1.5">
-                      <Skeleton className="h-6 w-full" />
-                      <Skeleton className="h-6 w-full" />
-                    </div>
-                  ) : sortedShells && sortedShells.length > 0 ? (
-                    <div className="py-1">
-                      {sortedShells.map((shell) => (
-                        <button
-                          key={shell.name}
-                          onClick={() => handleSelectShell(shell)}
-                          className={cn(
-                            'w-full px-2.5 py-1.5 text-left text-2xs hover:bg-secondary flex items-center gap-2 leading-none',
-                            shell.name === defaultShell && 'text-primary'
-                          )}
-                        >
-                          <TerminalIcon size={11} />
-                          <span className="truncate">{shell.displayName}</span>
-                          {shell.name === defaultShell && (
-                            <span className="ml-auto text-3xs text-muted-foreground">
-                              (default)
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="px-2.5 py-1.5 text-2xs text-muted-foreground">
-                      No shells detected
-                    </div>
-                  )}
-                </div>
+              {onAddBrowserTab && isTauriContext() && (
+                <button
+                  onClick={onAddBrowserTab}
+                  className="h-7 w-7 flex items-center justify-center rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors duration-150 ease-out"
+                  title="New Browser Tab"
+                  aria-label="New browser tab"
+                >
+                  <Globe size={12} />
+                </button>
               )}
-            </div>
-          )}
-
-          {onAddBrowserTab && isTauriContext() && (
-            <button
-              onClick={onAddBrowserTab}
-              className="h-7 w-7 flex items-center justify-center rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors duration-150 ease-out"
-              title="New Browser Tab"
-              aria-label="New browser tab"
-            >
-              <Globe size={12} />
-            </button>
+            </>
           )}
         </div>
 

@@ -21,8 +21,8 @@ import {
 } from './web-protocol.types'
 
 describe('web-protocol.types — event/request type registries (AC2)', () => {
-  it('exports exactly 25 event types including durable user prompts + switch markers', () => {
-    expect(WS_EVENT_TYPES).toHaveLength(25)
+  it('exports exactly 26 event types including durable user prompts, switch markers + worktree renames', () => {
+    expect(WS_EVENT_TYPES).toHaveLength(26)
     // The 16 from events.rs (prefix-dropped) + auth_required.
     const expected16FromEvents = [
       'agent_spawned',
@@ -59,6 +59,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_EVENT_TYPES).toContain('agent_switch')
     // #856: server-side FS watcher change push (agent-level broadcast).
     expect(WS_EVENT_TYPES).toContain('fs_changed')
+    // Story 16 (CAP-5): host worktree branch rename (agent-level broadcast).
+    expect(WS_EVENT_TYPES).toContain('worktree_branch_renamed')
     expect(WS_REQUEST_TYPES).toContain('list_persisted_sessions')
     expect(WS_REQUEST_TYPES).toContain('open_persisted_session')
     expect(WS_REQUEST_TYPES).toContain('get_session_payload')
@@ -214,7 +216,8 @@ describe('web-protocol.types — reliability tier registry (AC5)', () => {
       'auth_required',
       'projects_changed',
       'project_switch_completed',
-      'project_switch_failed'
+      'project_switch_failed',
+      'worktree_branch_renamed'
     ]
     for (const type of reliable) {
       expect(WS_EVENT_TIERS[type]).toBe('reliable')

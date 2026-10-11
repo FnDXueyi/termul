@@ -50,6 +50,7 @@ use crate::web::store::WebStore;
 use crate::web::terminal_ws::terminal_ws_upgrade;
 use crate::web::workspace_api;
 use crate::web::worktree_api;
+use crate::web::worktree_rename_api;
 use crate::web::ws::{ws_upgrade, AppState, HistoryMode};
 
 use super::assets;
@@ -247,7 +248,7 @@ pub fn router(
         // desktop `#[tauri::command] worktree_*` handler; see
         // `web/worktree_api.rs`. Registered AHEAD of the static fallback so the
         // SPA mount cannot shadow them. Write routes (`create`/`remove`/
-        // `copy-include-files`) are loopback-guarded inside the handler; read
+        // `copy-include-files`/`rename-branch`) are loopback-guarded inside the handler; read
         // routes (`list`/`branches`/`check-dirty`/`resolve-base-branch`)
         // enforce containment only. Only the 7 launch-flow routes ship here;
         // the 8 advanced ops are deferred (see deferred-work.md).
@@ -263,6 +264,10 @@ pub fn router(
         .route(
             "/worktree/copy-include-files",
             post(worktree_api::copy_include_files),
+        )
+        .route(
+            "/worktree/rename-branch",
+            post(worktree_rename_api::rename_branch),
         );
     // CAP-1: `project_root` arrives already wrapped in the shared
     // `Arc<RwLock<PathBuf>>` created by `serve_router` (one per server —
@@ -565,6 +570,10 @@ pub fn router_with_static(
         .route(
             "/worktree/copy-include-files",
             post(worktree_api::copy_include_files),
+        )
+        .route(
+            "/worktree/rename-branch",
+            post(worktree_rename_api::rename_branch),
         )
         .route(
             "/acp/factory-key",

@@ -52,6 +52,7 @@ import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
 import { useVisibilityState } from './hooks/use-visibility-state'
 import { useWhatsNew } from './hooks/use-whats-new'
+import { useWorktreeBranchRenamed } from './hooks/use-worktree-branch-renamed'
 import { useTerminalAutoSave } from './hooks/useTerminalAutoSave'
 import WorkspaceLayout from './layouts/WorkspaceLayout'
 import { initNotificationPermissions } from './lib/tauri-notification-api'
@@ -94,6 +95,8 @@ function AppEffects(): null {
   useAcpAgents()
   useAgentIdleShutdown()
   useAcpHistory()
+  // Story 16: host worktree branch renames reconcile + refresh (both roots).
+  useWorktreeBranchRenamed()
   useAcpSessionResume()
   // #853: chat notifications (turn finished / permission waiting / question
   // waiting), gated on the user not already watching the chat. Mounted on

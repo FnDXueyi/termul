@@ -2,13 +2,17 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
+import {
+  captureShellLayoutAtLoad,
+  resetShellLayoutActiveAtLoadForTests
+} from '@/lib/shell-layout-mode'
 import { normalizePath, type WorkingCopy } from '@/lib/working-copy'
 import { useAcpStore } from '@/stores/acp-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useContextBarSettingsStore } from '@/stores/context-bar-settings-store'
 import { useGitStatusStore } from '@/stores/git-status-store'
 import type { Project } from '@/types/project'
-import { DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
+import { type ContextBarSettings, DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
 import { StatusBar } from './StatusBar'
 
 const { signalsRef } = vi.hoisted(() => ({
@@ -194,6 +198,17 @@ const mockProject: Project = {
   gitBranch: 'main'
 }
 
+function showSettings(overrides: Partial<ContextBarSettings> = {}): void {
+  useContextBarSettingsStore.setState({
+    settings: {
+      ...DEFAULT_CONTEXT_BAR_SETTINGS,
+      showProjectName: true,
+      showGitStatus: true,
+      ...overrides
+    }
+  })
+}
+
 // Helper to render with required providers
 function renderWithProviders(ui: React.ReactElement) {
   return render(<TooltipProvider>{ui}</TooltipProvider>)
@@ -219,6 +234,7 @@ describe('StatusBar', () => {
     })
 
     it('should render git status when showGitStatus is true and has changes', () => {
+      showSettings()
       renderWithProviders(<StatusBar project={mockProject} />)
 
       // Check for modified count (2)
@@ -226,9 +242,7 @@ describe('StatusBar', () => {
     })
 
     it('should not render git status when showGitStatus is false', () => {
-      useContextBarSettingsStore.setState({
-        settings: { ...DEFAULT_CONTEXT_BAR_SETTINGS, showGitStatus: false }
-      })
+      showSettings({ showGitStatus: false })
 
       renderWithProviders(<StatusBar project={mockProject} />)
 
@@ -268,9 +282,28 @@ describe('StatusBar', () => {
       expect(screen.queryByText('Exit 0')).toBeNull()
     })
 
+    it('hides project name and file counts by default but keeps branch, directory and exit code', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+
+      expect(screen.queryByText('test-project')).toBeNull()
+      expect(screen.queryByText('2')).toBeNull()
+      expect(screen.getByText('feature-branch')).toBeDefined()
+      expect(screen.getByText('~/project')).toBeDefined()
+      expect(screen.getByText('Exit 0')).toBeDefined()
+    })
+
+    it('shows the project name and file counts when switched on', () => {
+      showSettings()
+      renderWithProviders(<StatusBar project={mockProject} />)
+
+      expect(screen.getByText('test-project')).toBeDefined()
+      expect(screen.getByText('2')).toBeDefined()
+    })
+
     it('should hide all optional elements when all settings are false', () => {
       useContextBarSettingsStore.setState({
         settings: {
+          showProjectName: false,
           showGitBranch: false,
           showGitStatus: false,
           showWorkingDirectory: false,
@@ -280,8 +313,7 @@ describe('StatusBar', () => {
 
       renderWithProviders(<StatusBar project={mockProject} />)
 
-      // Only project name should be visible
-      expect(screen.getByText('test-project')).toBeDefined()
+      expect(screen.queryByText('test-project')).toBeNull()
       expect(screen.queryByText('feature-branch')).toBeNull()
       expect(screen.queryByText('~/project')).toBeNull()
       expect(screen.queryByText('Exit 0')).toBeNull()
@@ -289,6 +321,10 @@ describe('StatusBar', () => {
   })
 
   describe('working copy (CAP-7)', () => {
+    beforeEach(() => {
+      showSettings()
+    })
+
     const projectFolder = (): WorkingCopy => ({
       state: 'resolved',
       kind: 'project',
@@ -443,11 +479,13 @@ describe('StatusBar', () => {
     })
 
     it('carries the project colour in the glyph', () => {
+      showSettings()
       const { container } = renderWithProviders(<StatusBar project={mockProject} />)
       expect(container.querySelector('[data-project-color="blue"]')).not.toBeNull()
     })
 
     it('renders the project item as a static label (no hover wash)', () => {
+      showSettings()
       renderWithProviders(<StatusBar project={mockProject} />)
       const item = screen.getByText('test-project').parentElement
       expect(item?.className).toContain('cursor-default')
@@ -461,10 +499,11 @@ describe('StatusBar', () => {
     })
   })
 
-  describe('project name always visible', () => {
-    it('should always render project name regardless of settings', () => {
+  describe('project name visibility', () => {
+    it('renders the project name when showProjectName is on, whatever else is off', () => {
       useContextBarSettingsStore.setState({
         settings: {
+          showProjectName: true,
           showGitBranch: false,
           showGitStatus: false,
           showWorkingDirectory: false,
@@ -553,6 +592,30 @@ describe('StatusBar', () => {
       fireEvent.click(pill)
       // Opens in the chat's own project (switching when it is another one).
       expect(openAgentChatInOwnProject).toHaveBeenCalledWith('session-1', 'StatusBar.NeedsYouPill')
+    })
+  })
+
+  describe('Terminal button (shell revamp)', () => {
+    afterEach(() => {
+      resetShellLayoutActiveAtLoadForTests()
+    })
+
+    it('is absent in the classic shell', () => {
+      captureShellLayoutAtLoad('classic')
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.queryByRole('button', { name: /Open terminal at/ })).toBeNull()
+    })
+
+    it('is shown in the revamp shell for an open project', () => {
+      captureShellLayoutAtLoad('revamp')
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByRole('button', { name: `Open terminal at ${WT_PATH}` })).toBeTruthy()
+    })
+
+    it('is absent in the revamp shell without a project', () => {
+      captureShellLayoutAtLoad('revamp')
+      renderWithProviders(<StatusBar project={undefined} />)
+      expect(screen.queryByRole('button', { name: /Open terminal at/ })).toBeNull()
     })
   })
 })

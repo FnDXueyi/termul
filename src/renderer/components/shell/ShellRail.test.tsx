@@ -345,7 +345,7 @@ describe('ShellRail', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('shows only the icons: toggle, project switcher, Column tabs, Search, Canvas, Settings', () => {
+    it('shows only the icons: toggle, project switcher, Column tabs, Search, Canvas, SSH, Settings', () => {
       renderRail()
 
       const nav = screen.getByRole('navigation', { name: 'Projects' })
@@ -360,6 +360,7 @@ describe('ShellRail', () => {
         'Changes',
         'Search',
         'Open canvas',
+        'SSH hosts',
         'Settings'
       ])
       expect(

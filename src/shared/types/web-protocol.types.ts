@@ -93,7 +93,12 @@ export const WS_EVENT_TYPES = [
   // the renderer's filesystem facade dispatches the paths through its
   // onFileChanged/onFileCreated/onFileDeleted chain (web parity with the
   // desktop notify watcher).
-  'fs_changed'
+  'fs_changed',
+  // Shell revamp story 16 (CAP-5): the host renamed a worktree's git branch
+  // and rewrote every session on it. Agent-level event (sid null, seq 0);
+  // payload `{ worktreePath, oldBranch, newBranch }` — the renderer reconciles
+  // worktrees and refreshes the session index.
+  'worktree_branch_renamed'
 ] as const
 
 /** Union of all WS event `type` strings. */
@@ -443,7 +448,10 @@ export const WS_EVENT_TIERS: Readonly<Record<WsEventType, ReliabilityTier>> = {
   // #856: fs_changed batches are debounced snapshots — a lost one is
   // recovered by the next batch or a manual refresh, but reliable keeps
   // the tree consistent without polling.
-  fs_changed: WS_RELAY_TIERS.RELIABLE
+  fs_changed: WS_RELAY_TIERS.RELIABLE,
+  // Story 16: a one-shot host fact (every session on the worktree changed) —
+  // dropping it would leave stale branch labels, so reliable.
+  worktree_branch_renamed: WS_RELAY_TIERS.RELIABLE
 }
 
 export type HistoryMode = 'server' | 'live_only'

@@ -113,6 +113,9 @@ export function ShellRail({
               onOpenCommandPalette={onOpenCommandPalette}
               onOpenCanvas={onOpenCanvas}
               canOpenCanvas={canOpenCanvas}
+              onSSHConnect={onSSHConnect}
+              onSelectSSHProfile={onSelectSSHProfile}
+              activeSSHProfileId={activeSSHProfileId}
             />
           )}
         </div>

@@ -51,12 +51,14 @@ mod jsonl;
 mod model;
 mod normalize;
 mod types;
+mod worktree_branch;
 mod writer;
 
 use jsonl::*;
 use writer::*;
 
 pub(crate) use model::snapshot_from_model_state;
+pub(crate) use worktree_branch::AutoRenameRefusal;
 
 pub use normalize::*;
 pub use types::*;
@@ -330,6 +332,10 @@ impl SessionPersistence {
         let cwd = strip_verbatim_prefix(&canonical.to_string_lossy()).into_owned();
         let storage_key = Uuid::new_v4().to_string();
         let now = now_millis();
+        let launch_branch = registration.worktree_branch.clone();
+        let creator = registration.worktree_created
+            && registration.worktree_path.is_some()
+            && launch_branch.is_some();
         let metadata = SessionMetadata {
             schema_version: SESSION_SCHEMA_VERSION,
             storage_key,
@@ -352,6 +358,9 @@ impl SessionPersistence {
             worktree_branch: registration.worktree_branch,
             model_id: registration.model.as_ref().map(|m| m.model_id.clone()),
             model_name: registration.model.map(|m| m.model_name),
+            // Story 16: provenance is recorded only for the creating session.
+            worktree_branch_source: creator.then_some(WorktreeBranchSource::Auto),
+            worktree_launch_branch: if creator { launch_branch } else { None },
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -455,6 +464,8 @@ impl SessionPersistence {
             worktree_branch: registration.worktree_branch,
             model_id: None,
             model_name: None,
+            worktree_branch_source: None,
+            worktree_launch_branch: None,
         };
         if let Err(error) = self.persist_metadata(&metadata) {
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
@@ -522,6 +533,8 @@ impl SessionPersistence {
             worktree_branch: registration.worktree_branch,
             model_id: None,
             model_name: None,
+            worktree_branch_source: None,
+            worktree_launch_branch: None,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -1991,3 +2004,5 @@ mod diff_stat_tests;
 mod model_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_branch_tests;
