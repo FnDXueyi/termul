@@ -23,7 +23,8 @@ export function StatusBarTerminalButton({
   const workingCopy = useActiveWorkingCopy()
   if (!project || isMobileWebShell) return null
 
-  const cwd = workingCopy?.state === 'resolved' ? workingCopy.path : project.path
+  // An unresolved working copy names its own path, never the project folder.
+  const cwd = workingCopy ? workingCopy.path : project.path
   const label = cwd ? `Open terminal at ${cwd}` : 'Open terminal'
 
   return (

@@ -26,7 +26,7 @@ import {
   useShowGitStatus,
   useShowWorkingDirectory
 } from '@/stores/context-bar-settings-store'
-import { countGitStatuses, selectGitBranch, useGitStatusStore } from '@/stores/git-status-store'
+import { countGitStatuses, useGitStatusStore } from '@/stores/git-status-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useActiveTerminal, useTerminalStore } from '@/stores/terminal-store'
 import { useUpdateDownloaded, useUpdateVersion } from '@/stores/updater-store'
@@ -56,7 +56,8 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
   // never falls back to the project folder.
   const workingCopy = useActiveWorkingCopy()
   const unresolved = workingCopy?.state === 'unresolved'
-  const displayPath = workingCopy?.state === 'resolved' ? workingCopy.path : project?.path
+  // An unresolved working copy shows its own (managed worktree) path, never the project folder.
+  const displayPath = workingCopy ? workingCopy.path : project?.path
   const gitPath = unresolved ? undefined : displayPath
   const isProjectFolder =
     !workingCopy || (workingCopy.state === 'resolved' && workingCopy.kind === 'project')
@@ -64,7 +65,6 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
 
   // Git data comes from the single git cache, keyed by the working copy.
   const refreshWorkingCopy = useGitStatusStore((state) => state.refreshWorkingCopy)
-  const cachedBranch = useGitStatusStore(selectGitBranch(gitPath))
   const commitContext = useGitStatusStore((state) =>
     gitPath ? state.commitContexts[normalizePath(gitPath)] : undefined
   )
@@ -80,8 +80,14 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
     if (trackedPath) void refreshWorkingCopy(trackedPath)
   }, [trackedPath, refreshWorkingCopy])
 
-  // The stored project branch is only a fallback for the project folder.
-  const gitBranch = cachedBranch ?? (isProjectFolder ? project?.gitBranch : null)
+  // A commit-context result is authoritative (a null branch is a detached HEAD).
+  // The stored project branch only stands in before any result exists, and only
+  // for the project folder.
+  const gitBranch = commitContext
+    ? commitContext.branch
+    : isProjectFolder
+      ? project?.gitBranch
+      : null
   const gitStatus = useMemo(() => countGitStatuses(statusList), [statusList])
 
   // A worktree checkout refreshes its own cache entry and never writes
@@ -90,7 +96,16 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
     if (gitPath) void refreshWorkingCopy(gitPath)
     if (!project || !isProjectFolder) return
     updateProject(project.id, { gitBranch: branch })
-    if (activeTerminalId) updateTerminalGitBranch(activeTerminalId, branch)
+    // Only a terminal of this project sitting in this very working copy.
+    if (
+      activeTerminalId &&
+      gitPath &&
+      activeTerminal?.projectId === project.id &&
+      activeTerminal.cwd &&
+      normalizePath(activeTerminal.cwd) === normalizePath(gitPath)
+    ) {
+      updateTerminalGitBranch(activeTerminalId, branch)
+    }
   }
 
   // Last command exit code from active terminal
@@ -117,9 +132,9 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
               </span>
             </StatusItem>
 
-            {showGitBranch && gitPath && (
+            {showGitBranch && trackedPath && (
               <GitBranchPicker
-                repoPath={gitPath}
+                repoPath={trackedPath}
                 currentBranch={gitBranch}
                 projectId={project.id}
                 ahead={commitContext?.ahead}
@@ -128,7 +143,7 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
               />
             )}
 
-            {showGitStatus && gitPath && gitStatus.hasChanges && (
+            {showGitStatus && trackedPath && gitStatus.hasChanges && (
               <GitStatusIndicator
                 modified={gitStatus.modified}
                 staged={gitStatus.staged}

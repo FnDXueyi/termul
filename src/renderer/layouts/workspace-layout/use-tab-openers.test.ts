@@ -10,11 +10,8 @@ import { useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace-store'
 import type { Project, Worktree } from '@/types/project'
 import { useTabOpeners } from './use-tab-openers'
 
-const { spawnTerminalInPane, openTerminalAtCwd } = vi.hoisted(() => ({
-  spawnTerminalInPane: vi.fn(),
-  openTerminalAtCwd: vi.fn()
-}))
-vi.mock('@/lib/terminal-spawn', () => ({ spawnTerminalInPane, openTerminalAtCwd }))
+const { spawnTerminalInPane } = vi.hoisted(() => ({ spawnTerminalInPane: vi.fn() }))
+vi.mock('@/lib/terminal-spawn', () => ({ spawnTerminalInPane }))
 
 const { toastError } = vi.hoisted(() => ({ toastError: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn(), info: vi.fn() } }))
@@ -72,7 +69,6 @@ function mount(project: Project) {
 
 beforeEach(() => {
   spawnTerminalInPane.mockReset().mockResolvedValue({ success: true })
-  openTerminalAtCwd.mockReset().mockResolvedValue({ status: 'opened', terminalId: 't1' })
   toastError.mockClear()
   reconcile.mockClear()
   resetReconciledUnresolvedForTests()
@@ -128,8 +124,11 @@ describe('useTabOpeners working-copy cwd', () => {
     setChatCwd(`${GONE}/src`)
     const { result } = mount(project)
     await act(async () => {
-      await result.current.handleCreateTerminalInPane('pane-1')
-      await result.current.handleCreateTerminalInPane('pane-1')
+      // Back to back: one reconcile in flight serves both.
+      await Promise.all([
+        result.current.handleCreateTerminalInPane('pane-1'),
+        result.current.handleCreateTerminalInPane('pane-1')
+      ])
     })
     expect(spawnTerminalInPane).not.toHaveBeenCalled()
     expect(toastError).toHaveBeenCalledTimes(2)
@@ -182,9 +181,22 @@ describe('worktree:open-terminal', () => {
     useShellLayoutStore.setState({ worktreePickByProject: { p1: WT } })
     mount(project)
     await fire()
-    expect(openTerminalAtCwd).toHaveBeenCalledWith('p1', WT)
+    expect(spawnTerminalInPane).toHaveBeenCalledWith('pane-1', 'p1', WT, expect.anything())
     expect(useShellLayoutStore.getState().worktreePickByProject).toEqual({ p1: WT })
     expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it('applies the project default shell and env vars', async () => {
+    const project = { ...seed(), defaultShell: 'zsh', envVars: { FOO: 'bar' } } as Project
+    useProjectStore.setState({ projects: [project] })
+    mount(project)
+    await fire()
+    expect(spawnTerminalInPane).toHaveBeenCalledWith(
+      'pane-1',
+      'p1',
+      ROOT,
+      expect.objectContaining({ shell: 'zsh', envVars: { FOO: 'bar' } })
+    )
   })
 
   it('follows the active chat ahead of the pick', async () => {
@@ -192,26 +204,24 @@ describe('worktree:open-terminal', () => {
     setChatCwd(`${WT}/src`)
     mount(project)
     await fire()
-    expect(openTerminalAtCwd).toHaveBeenCalledWith('p1', WT)
+    expect(spawnTerminalInPane).toHaveBeenCalledWith('pane-1', 'p1', WT, expect.anything())
   })
 
   it('toasts "No active pane" when there is no pane', async () => {
     const project = seed()
-    openTerminalAtCwd.mockResolvedValue({ status: 'no-pane' })
+    useWorkspaceStore.setState({ activePaneId: '' })
     mount(project)
     await fire()
     expect(toastError).toHaveBeenCalledWith('No active pane', expect.anything())
+    expect(spawnTerminalInPane).not.toHaveBeenCalled()
   })
 
-  it('toasts "Failed to open terminal" when the spawn fails', async () => {
+  it('toasts the spawn error when the spawn fails', async () => {
     const project = seed()
-    openTerminalAtCwd.mockResolvedValue({ status: 'spawn-failed', error: 'nope' })
+    spawnTerminalInPane.mockResolvedValue({ success: false, error: 'nope' })
     mount(project)
     await fire()
-    expect(toastError).toHaveBeenCalledWith(
-      'Failed to open terminal',
-      expect.objectContaining({ description: 'nope' })
-    )
+    expect(toastError).toHaveBeenCalledWith('nope')
   })
 
   it('does nothing but toast and reconcile when unresolved', async () => {
@@ -219,7 +229,7 @@ describe('worktree:open-terminal', () => {
     setChatCwd(GONE)
     mount(project)
     await fire()
-    expect(openTerminalAtCwd).not.toHaveBeenCalled()
+    expect(spawnTerminalInPane).not.toHaveBeenCalled()
     expect(toastError).toHaveBeenCalledTimes(1)
     expect(reconcile).toHaveBeenCalledTimes(1)
   })
@@ -229,6 +239,6 @@ describe('worktree:open-terminal', () => {
     const { unmount } = mount(project)
     unmount()
     await fire()
-    expect(openTerminalAtCwd).not.toHaveBeenCalled()
+    expect(spawnTerminalInPane).not.toHaveBeenCalled()
   })
 })

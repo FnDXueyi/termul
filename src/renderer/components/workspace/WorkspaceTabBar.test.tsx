@@ -977,6 +977,13 @@ describe('WorkspaceTabBar', () => {
     const gitTab2: WorkspaceTab = { type: 'git', id: 'git-2', cwd: '/repo' }
     const gitHistoryTab: WorkspaceTab = { type: 'git-history', id: 'gh-1', cwd: '/repo' }
     const agentChatTab: WorkspaceTab = { type: 'agent-chat', id: 'ac-1', sessionId: 'session-1' }
+    const diffTab: WorkspaceTab = {
+      type: 'diff',
+      id: 'diff:abc',
+      cwd: '/repo',
+      path: 'src/a.ts',
+      staged: false
+    }
 
     const TAB_LABEL: Array<{ kind: TabContextMenuKind; tab: WorkspaceTab; label: string }> = [
       { kind: 'terminal', tab: terminalTab, label: 'Terminal 1' },
@@ -984,6 +991,7 @@ describe('WorkspaceTabBar', () => {
       { kind: 'browser', tab: browserTab, label: 'Docs' },
       { kind: 'git', tab: gitTab1, label: 'Git Changes' },
       { kind: 'git-history', tab: gitHistoryTab, label: 'Git History' },
+      { kind: 'diff', tab: diffTab, label: 'a.ts' },
       // No ACP session is seeded; the tab labels itself from the mocked index
       // title.
       { kind: 'agent-chat', tab: agentChatTab, label: 'Chat 1' }
@@ -1374,6 +1382,25 @@ describe('WorkspaceTabBar', () => {
       middleClick(container.querySelector('[draggable="true"]') as HTMLElement)
 
       expect(mockRemoveTab).toHaveBeenCalledWith('gh-1')
+    })
+
+    it('renders a diff tab with its file name and side, and closes it on middle click', async () => {
+      const diffTab: WorkspaceTab = {
+        type: 'diff',
+        id: 'diff:abc',
+        cwd: '/repo',
+        path: 'src/a.ts',
+        staged: true
+      }
+      const { container } = render(
+        <WorkspaceTabBar paneId="pane-a" tabs={[diffTab]} activeTabId="diff:abc" />
+      )
+      await flushShellEffect()
+
+      expect(screen.getByText('a.ts (staged)')).toBeInTheDocument()
+      middleClick(container.querySelector('[draggable="true"]') as HTMLElement)
+
+      expect(mockRemoveTab).toHaveBeenCalledWith('diff:abc')
     })
 
     it('closes an agent-chat tab on middle click through requestCloseAgentChat', async () => {

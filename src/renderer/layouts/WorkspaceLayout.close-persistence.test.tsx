@@ -162,6 +162,10 @@ vi.mock('@/stores/editor-store', () => ({
   }
 }))
 
+// The shell unread tracker reads the real pane tree and acp store; this suite
+// mocks the workspace store wholesale and does not exercise it.
+vi.mock('@/hooks/use-shell-unread-tracker', () => ({ useShellUnreadTracker: () => {} }))
+
 vi.mock('@/stores/workspace-store', () => {
   const useWorkspaceStore = (selector?: (s: typeof mockWorkspaceStoreState) => unknown) =>
     selector ? selector(mockWorkspaceStoreState) : mockWorkspaceStoreState

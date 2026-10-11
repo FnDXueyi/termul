@@ -183,4 +183,23 @@ describe('reportUnresolvedWorkingCopy', () => {
     await vi.waitFor(() => expect(logFrontendError).toHaveBeenCalledTimes(1))
     expect(reportUnresolvedWorkingCopy('p1', unresolved)).toBe(true)
   })
+
+  it('retries the same key after an unchanged outcome', async () => {
+    reportUnresolvedWorkingCopy('p1', unresolved)
+    await vi.waitFor(() => expect(logFrontendError).toHaveBeenCalledTimes(1))
+    expect(reportUnresolvedWorkingCopy('p1', unresolved)).toBe(true)
+  })
+
+  it('logs a rejected reconcile without an unhandled rejection and allows a retry', async () => {
+    reconcile.mockRejectedValueOnce(new Error('boom'))
+    expect(reportUnresolvedWorkingCopy('p1', unresolved)).toBe(true)
+    await vi.waitFor(() => expect(logFrontendError).toHaveBeenCalledTimes(1))
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'warn',
+        message: expect.stringContaining('reconcile failed: boom')
+      })
+    )
+    expect(reportUnresolvedWorkingCopy('p1', unresolved)).toBe(true)
+  })
 })

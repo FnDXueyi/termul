@@ -87,7 +87,7 @@ const reconciledUnresolved = new Set<string>()
 
 /**
  * Reconcile the project's worktree list once per distinct unresolved key
- * (`reconcileProjectWorktrees` is itself single-flight) and log one
+ * while one is in flight (`reconcileProjectWorktrees` is itself single-flight) and log one
  * `[working-copy]` outcome record. A no-op for a resolved/absent working copy
  * or a key already reconciled. Returns whether a reconcile was started.
  */
@@ -99,16 +99,27 @@ export function reportUnresolvedWorkingCopy(
   const dedupeKey = `${projectId}\0${wc.key}`
   if (reconciledUnresolved.has(dedupeKey)) return false
   reconciledUnresolved.add(dedupeKey)
-  void reconcileProjectWorktrees(projectId).then((outcome) => {
-    // A changed listing may now resolve this key; forget it so a later prune
-    // of the same directory reconciles again.
-    if (outcome === 'updated') reconciledUnresolved.delete(dedupeKey)
-    void logFrontendError({
-      level: 'info',
-      source: 'working-copy',
-      message: `[working-copy] unresolved ${wc.key} (project ${projectId}): reconcile ${outcome}`
+  // The key is only held while a reconcile is in flight: a later action may
+  // retry after a failure or an unchanged listing.
+  void reconcileProjectWorktrees(projectId)
+    .then((outcome) => {
+      reconciledUnresolved.delete(dedupeKey)
+      void logFrontendError({
+        level: 'info',
+        source: 'working-copy',
+        message: `[working-copy] unresolved ${wc.key} (project ${projectId}): reconcile ${outcome}`
+      })
     })
-  })
+    .catch((error: unknown) => {
+      reconciledUnresolved.delete(dedupeKey)
+      void logFrontendError({
+        level: 'warn',
+        source: 'working-copy',
+        message: `[working-copy] unresolved ${wc.key} (project ${projectId}): reconcile failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      })
+    })
   return true
 }
 

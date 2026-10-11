@@ -102,7 +102,7 @@ export function useMobileTabActions({
   //   terminal → existing confirm flow (threaded as onCloseTerminal)
   //   browser → session-tab teardown + tab removal
   //   canvas → daemon eviction (closeCanvas) + tab removal
-  //   git / git-history / agent-chat → plain removeTab
+  //   git / git-history / diff / agent-chat → plain removeTab
   const closePaneTab = useCallback(
     (tab: WorkspaceTab): boolean => {
       if (tab.type === 'editor') {
@@ -134,7 +134,7 @@ export function useMobileTabActions({
         useWorkspaceStore.getState().removeTab(tab.id)
         return false
       }
-      if (tab.type === 'git' || tab.type === 'git-history') {
+      if (tab.type === 'git' || tab.type === 'git-history' || tab.type === 'diff') {
         useWorkspaceStore.getState().removeTab(tab.id)
         return false
       }

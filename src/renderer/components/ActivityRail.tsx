@@ -261,7 +261,7 @@ interface RailButtonProps {
   children: React.ReactNode
 }
 
-function RailButton({
+export function RailButton({
   label,
   hint,
   'aria-label': ariaLabel,

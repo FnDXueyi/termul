@@ -182,21 +182,19 @@ export function useTabOpeners({
       if (detail?.projectId && detail.projectId !== activeProjectId) return
       const cwd = resolveWorkingCopyCwd(activeProjectId, 'Opening a terminal')
       if (!cwd) return
-      void openTerminalAtCwd(activeProjectId, cwd).then((outcome) => {
-        if (outcome.status === 'no-pane') {
-          toast.error('No active pane', {
-            description: 'Cannot open terminal without an active workspace pane.'
-          })
-        } else if (outcome.status === 'spawn-failed') {
-          toast.error('Failed to open terminal', {
-            description: outcome.error || 'Could not create a terminal.'
-          })
-        }
-      })
+      const paneId = useWorkspaceStore.getState().activePaneId
+      if (!paneId) {
+        toast.error('No active pane', {
+          description: 'Cannot open terminal without an active workspace pane.'
+        })
+        return
+      }
+      // Same path as the New terminal action: project/app default shell + env.
+      void handleCreateTerminalInPane(paneId, undefined, cwd)
     }
     window.addEventListener(WORKTREE_EVENTS.OPEN_TERMINAL, onOpenTerminal)
     return () => window.removeEventListener(WORKTREE_EVENTS.OPEN_TERMINAL, onOpenTerminal)
-  }, [activeProjectId])
+  }, [activeProjectId, handleCreateTerminalInPane])
 
   // Close the mobile Git Changes sheet if the active project loses its path
   // or changes from the one it opened on (its cwd is a snapshot); also on

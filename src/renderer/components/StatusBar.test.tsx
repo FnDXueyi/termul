@@ -30,13 +30,15 @@ const {
   updateProjectMock,
   updateTerminalGitBranchMock,
   refreshWorkingCopyMock,
-  pickerProps
+  pickerProps,
+  terminalRef
 } = vi.hoisted(() => ({
   wcRef: { current: null as unknown },
   updateProjectMock: vi.fn(),
   updateTerminalGitBranchMock: vi.fn(),
   refreshWorkingCopyMock: vi.fn(async () => {}),
-  pickerProps: { current: null as Record<string, unknown> | null }
+  pickerProps: { current: null as Record<string, unknown> | null },
+  terminalRef: { current: {} as Record<string, unknown> }
 }))
 
 vi.mock('@/hooks/use-active-working-copy', () => ({
@@ -64,6 +66,7 @@ vi.mock('@/hooks/use-agent-chat-attention', () => ({
 vi.mock('@/stores/terminal-store', () => ({
   useActiveTerminal: vi.fn(() => ({
     id: 'test-terminal',
+    projectId: 'test-project',
     cwd: '/home/user/project',
     gitBranch: 'feature-branch',
     gitStatus: {
@@ -72,7 +75,8 @@ vi.mock('@/stores/terminal-store', () => ({
       staged: 1,
       untracked: 3
     },
-    lastExitCode: 0
+    lastExitCode: 0,
+    ...terminalRef.current
   })),
   useTerminalStore: vi.fn((selector: (state: unknown) => unknown) =>
     selector({
@@ -173,6 +177,7 @@ beforeEach(() => {
   updateProjectMock.mockClear()
   updateTerminalGitBranchMock.mockClear()
   pickerProps.current = null
+  terminalRef.current = {}
   vi.stubGlobal('api', mockApi)
   // Reset store to defaults before each test
   useContextBarSettingsStore.setState({
@@ -358,6 +363,33 @@ describe('StatusBar', () => {
       expect(refreshWorkingCopyMock).not.toHaveBeenCalled()
     })
 
+    it('shows the unresolved path instead of the project folder', () => {
+      wcRef.current = {
+        state: 'unresolved',
+        key: '/home/user/test-project/.termul/worktrees/gone',
+        path: '/home/user/test-project/.termul/worktrees/gone'
+      }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('~/test-project/.termul/worktrees/gone')).toBeDefined()
+      expect(screen.queryByText('~/test-project')).toBeNull()
+    })
+
+    it('keeps a detached HEAD instead of falling back to project.gitBranch', () => {
+      wcRef.current = projectFolder()
+      seedGit(mockProject.path, null)
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('detached')).toBeDefined()
+      expect(screen.queryByText('main')).toBeNull()
+    })
+
+    it('hides the branch picker for a non-git project folder', () => {
+      wcRef.current = projectFolder()
+      renderWithProviders(<StatusBar project={{ ...mockProject, isGitRepo: false }} />)
+      expect(screen.queryByLabelText('Switch git branch')).toBeNull()
+      expect(pickerProps.current).toBeNull()
+      expect(refreshWorkingCopyMock).not.toHaveBeenCalled()
+    })
+
     it('shows the project path with no resolved working copy', () => {
       wcRef.current = null
       renderWithProviders(<StatusBar project={mockProject} />)
@@ -375,10 +407,24 @@ describe('StatusBar', () => {
 
     it('still records the branch on the project for a project-folder checkout', () => {
       wcRef.current = projectFolder()
+      terminalRef.current = { cwd: mockProject.path }
       renderWithProviders(<StatusBar project={mockProject} />)
       ;(pickerProps.current?.onBranchChanged as (branch: string) => void)('other')
       expect(updateProjectMock).toHaveBeenCalledWith('test-project', { gitBranch: 'other' })
       expect(updateTerminalGitBranchMock).toHaveBeenCalledWith('test-terminal', 'other')
+    })
+
+    it('does not touch a terminal outside the checked-out working copy or project', () => {
+      wcRef.current = projectFolder()
+      renderWithProviders(<StatusBar project={mockProject} />)
+      const change = pickerProps.current?.onBranchChanged as (branch: string) => void
+      // Terminal cwd (/home/user/project) is another folder than the working copy.
+      change('other')
+      expect(updateTerminalGitBranchMock).not.toHaveBeenCalled()
+      terminalRef.current = { cwd: mockProject.path, projectId: 'someone-else' }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      ;(pickerProps.current?.onBranchChanged as (branch: string) => void)('other')
+      expect(updateTerminalGitBranchMock).not.toHaveBeenCalled()
     })
   })
 

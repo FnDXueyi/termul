@@ -26,6 +26,7 @@ import type { TabBulkMenuProps } from './tab-context-menu'
 import { AgentChatTabInline } from './tabs/agent-chat-tab'
 import { BrowserTabInline } from './tabs/browser-tab'
 import { CanvasTabInline } from './tabs/canvas-tab'
+import { DiffTabInline } from './tabs/diff-tab'
 import { GitHistoryTabInline } from './tabs/git-history-tab'
 import { GitTabInline } from './tabs/git-tab'
 import { TabPaneProvider } from './tabs/tab-chrome'
@@ -285,6 +286,7 @@ export function WorkspaceTabBar({
           break
         case 'git':
         case 'git-history':
+        case 'diff':
           useWorkspaceStore.getState().removeTab(tab.id)
           break
         case 'agent-chat':
@@ -498,6 +500,24 @@ export function WorkspaceTabBar({
                       ) : tab.type === 'git-history' ? (
                         <GitHistoryTabInline
                           tab={tab as { type: 'git-history'; id: string; cwd: string }}
+                          isActive={tab.id === activeTabId}
+                          isDragging={dragging}
+                          isDropTarget={isTarget}
+                          dropPosition={position}
+                          bulkMenu={buildBulkMenuProps(tab)}
+                          onSelect={() => {
+                            setActiveTab(paneId, tab.id)
+                            setActivePane(paneId)
+                          }}
+                          onClose={() => closeWorkspaceTab(tab)}
+                          onDragStart={(e) => handleTabDragStart(tab.id, e)}
+                          onDragOver={(e) => handleTabDragOver(tab.id, e)}
+                          onDragLeave={handleTabDragLeave}
+                          onDrop={(e) => handleTabDrop(tab.id, e)}
+                        />
+                      ) : tab.type === 'diff' ? (
+                        <DiffTabInline
+                          tab={tab}
                           isActive={tab.id === activeTabId}
                           isDragging={dragging}
                           isDropTarget={isTarget}

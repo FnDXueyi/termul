@@ -46,6 +46,14 @@ interface PersistedGitHistoryTabRef {
   cwd: string
 }
 
+interface PersistedDiffTabRef {
+  type: 'diff'
+  id: string
+  cwd: string
+  path: string
+  staged: boolean
+}
+
 export type PersistedTabRef =
   | PersistedEditorTabRef
   | PersistedTerminalTabRef
@@ -53,6 +61,7 @@ export type PersistedTabRef =
   | PersistedGitTabRef
   | PersistedAgentChatTabRef
   | PersistedGitHistoryTabRef
+  | PersistedDiffTabRef
 
 // Compile-time check: the persisted ref union must cover exactly the kinds the
 // traits table declares as persisted (a mismatch makes this assignment error).
