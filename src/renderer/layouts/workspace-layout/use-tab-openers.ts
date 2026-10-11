@@ -6,14 +6,12 @@ import { WORKTREE_EVENTS } from '@/hooks/use-worktree-shortcuts'
 import { getActiveWorkingCopy, reportUnresolvedWorkingCopy } from '@/lib/active-working-copy'
 import { launchAgentInPane } from '@/lib/agent-launch'
 import { BUILT_IN_AGENTS } from '@/lib/agents/agent-registry'
-import { filesystemApi } from '@/lib/api'
-import { pickCanvasDoc } from '@/lib/canvas-doc'
+import { openProjectCanvas } from '@/lib/open-project-canvas'
 import { openTerminalAtCwd, spawnTerminalInPane } from '@/lib/terminal-spawn'
 import { randomUUID } from '@/lib/uuid'
 import { getDefaultCwdForProject } from '@/lib/worktree-context'
 import { useDefaultShell, useMaxTerminalsPerProject } from '@/stores/app-settings-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
-import { useCanvasStore } from '@/stores/canvas-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
 
@@ -73,19 +71,7 @@ export function useTabOpeners({
       toast.error('The active project has no root folder to search for a .op document.')
       return
     }
-    void (async () => {
-      const result = await filesystemApi.readDirectory(projectPath)
-      if (!result.success) {
-        toast.error(`Could not read the project folder: ${result.error}`)
-        return
-      }
-      const opDoc = pickCanvasDoc(result.data)
-      if (!opDoc) {
-        toast.info('No .op document found in the project root.')
-        return
-      }
-      await useCanvasStore.getState().openCanvas(activeProjectId, opDoc.path)
-    })()
+    void openProjectCanvas(activeProjectId, projectPath)
   }, [activeProjectId, activeProject?.path, setIsCommandPaletteOpen])
 
   // Terminal creation callbacks - defined before keyboard shortcut useEffect

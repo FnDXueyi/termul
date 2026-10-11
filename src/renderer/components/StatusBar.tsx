@@ -5,6 +5,7 @@ import { GitBranchPicker } from '@/components/GitBranchPicker'
 import { Check, Download, FileQuestion, Folder, Pencil, Plus, X } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { RemoteAccessPopover } from '@/components/RemoteAccessPopover'
+import { StatusBarTerminalButton } from '@/components/StatusBarTerminalButton'
 import { STATUS_BAR_HOVER_CLASS, STATUS_BAR_ITEM_CLASS } from '@/components/status-bar-hit'
 import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -14,6 +15,7 @@ import { formatPath, useHomeDirectory } from '@/hooks/use-cwd'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { needsYouLabel } from '@/lib/agent-chat-attention'
 import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
+import { getShellLayoutActiveAtLoad } from '@/lib/shell-layout-mode'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { normalizePath } from '@/lib/working-copy'
@@ -194,6 +196,9 @@ export function StatusBar({ project }: StatusBarProps): React.JSX.Element {
             </StatusItem>
           </StatusTooltip>
         )}
+
+        {/* Revamp shell only: opens a terminal at the resolved working copy. */}
+        {getShellLayoutActiveAtLoad() === 'revamp' && <StatusBarTerminalButton project={project} />}
 
         {/* Divider before the trailing icon controls. */}
         <span aria-hidden="true" className="mx-1 h-3 w-px shrink-0 bg-border" />

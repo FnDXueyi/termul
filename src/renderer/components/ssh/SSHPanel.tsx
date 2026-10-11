@@ -1,7 +1,6 @@
 import type { SSHProfile } from '@shared/types/ssh.types'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Download, Eye, EyeOff, Pencil, Plus, Trash2, Wifi, WifiOff } from '@/components/icons'
 import {
   ContextMenu,
@@ -11,6 +10,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import {
+  FOCUS_RING_CLASS,
   PANEL_HEADER_CLASS,
   PANEL_ICON_BUTTON_CLASS,
   QUIET_ICON_BUTTON_CLASS
@@ -18,7 +18,11 @@ import {
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { useSSHActions, useSSHConnections, useSSHProfiles } from '@/stores/ssh-store'
-import { SSHProfileForm } from './SSHProfileForm'
+import {
+  SSHPanelDialogs,
+  type SSHPanelDialogsController,
+  useSSHPanelDialogs
+} from './SSHPanelDialogs'
 import { resolveSSHHostState, SSHHostLamp, SSHHostStateWord } from './ssh-host-status'
 
 /** Small row action button (edit / connect / disconnect). */
@@ -28,24 +32,32 @@ interface SSHPanelProps {
   onConnect?: (profileId: string) => void
   onSelectProfile?: (profileId: string) => void
   activeProfileId?: string | null
+  /** Revamp section: leading control (the collapse chevron) before the `SSH` label. */
+  headerLead?: React.ReactNode
+  /**
+   * Profile form / delete confirm owned by a host outside this panel (the Rail
+   * popover). When set, the panel only raises requests and renders no dialogs.
+   */
+  dialogs?: SSHPanelDialogsController
+  /** Rail popover: host rows take focus and move with Up/Down, Enter selects. */
+  focusableRows?: boolean
 }
 
 export function SSHPanel({
   onConnect,
   onSelectProfile,
-  activeProfileId
+  activeProfileId,
+  headerLead,
+  dialogs: externalDialogs,
+  focusableRows = false
 }: SSHPanelProps): React.JSX.Element {
   const profiles = useSSHProfiles()
   const connections = useSSHConnections()
-  const { loadProfiles, disconnect, importConfig, deleteProfile, selectProfile } = useSSHActions()
-  // Profile form: closed when null; `profile` null = new profile.
-  const [form, setForm] = useState<{ profile: SSHProfile | null } | null>(null)
+  const { loadProfiles, disconnect, importConfig } = useSSHActions()
   const [connectingId, setConnectingId] = useState<string | null>(null)
   const [showCredentials, setShowCredentials] = useState(false)
-  // Delete is irreversible — gate it behind a confirmation dialog (mirrors
-  // ProjectChatList) instead of deleting on the first menu click.
-  const [deleteConfirm, setDeleteConfirm] = useState<SSHProfile | null>(null)
-  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const ownDialogs = useSSHPanelDialogs(activeProfileId)
+  const dialogs = externalDialogs ?? ownDialogs
 
   useEffect(() => {
     loadProfiles()
@@ -71,42 +83,6 @@ export function SSHPanel({
     }
   }
 
-  const handleDeleteProfile = async (profile: SSHProfile) => {
-    // In-flight guard: a second confirm while the first delete is still
-    // running is a no-op.
-    if (deletingId !== null) return
-    setDeletingId(profile.id)
-    try {
-      // Tear down any live connection before removing the profile so no orphan
-      // connection state survives the delete. A failed disconnect aborts the
-      // delete — proceeding would orphan live connection state.
-      const connection = getConnectionForProfile(profile.id)
-      if (connection) {
-        const disconnected = await disconnect(connection.id)
-        if (!disconnected) {
-          toast.error(`Could not disconnect from “${profile.name}” — profile not deleted`)
-          return
-        }
-      }
-      const success = await deleteProfile(profile.id)
-      if (!success) {
-        toast.error(`Failed to delete SSH profile “${profile.name}”`)
-        return
-      }
-      // Clear the active selection only after the delete succeeded so a
-      // failed delete never strands the user on an unselected live profile.
-      if (activeProfileId === profile.id) {
-        selectProfile(null)
-      }
-    } catch (error) {
-      toast.error(
-        `Failed to delete SSH profile “${profile.name}”: ${error instanceof Error ? error.message : String(error)}`
-      )
-    } finally {
-      setDeletingId(null)
-    }
-  }
-
   const handleImport = async () => {
     const imported = await importConfig()
     if (imported.length > 0) {
@@ -116,7 +92,27 @@ export function SSHPanel({
     }
   }
 
-  const openNewProfile = () => setForm({ profile: null })
+  // Popover rows: Up/Down move between host rows, Enter selects the host.
+  const handleRowKeyDown = (profileId: string) => (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      onSelectProfile?.(profileId)
+      return
+    }
+    const sibling =
+      e.key === 'ArrowDown'
+        ? e.currentTarget.nextElementSibling
+        : e.key === 'ArrowUp'
+          ? e.currentTarget.previousElementSibling
+          : null
+    if (sibling instanceof HTMLElement) {
+      e.preventDefault()
+      sibling.focus()
+    }
+  }
+
+  const openNewProfile = () => dialogs.openForm(null)
 
   const getConnectionForProfile = (profileId: string) =>
     connections.find((c) => c.profileId === profileId)
@@ -126,6 +122,7 @@ export function SSHPanel({
       {/* Header */}
       <div className={cn(PANEL_HEADER_CLASS, 'h-9')}>
         <div className="flex items-center gap-1">
+          {headerLead}
           <span className="label-panel">SSH</span>
           {/* Shows/hides user@host:port on each row (privacy). Panel visibility
               itself is toggled from the activity rail. */}
@@ -200,10 +197,13 @@ export function SSHPanel({
                     <div
                       className={cn(
                         'group flex h-10 cursor-pointer items-center gap-2.5 rounded-md px-2 transition-colors duration-150 ease-out',
-                        isSelected ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]'
+                        isSelected ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]',
+                        focusableRows && FOCUS_RING_CLASS
                       )}
                       data-selected={isSelected ? 'true' : undefined}
                       data-testid={`ssh-host-row-${profile.id}`}
+                      tabIndex={focusableRows ? 0 : undefined}
+                      onKeyDown={focusableRows ? handleRowKeyDown(profile.id) : undefined}
                       onClick={() => onSelectProfile?.(profile.id)}
                       onDoubleClick={() => {
                         if (isTauriContext() && !isConnected && !isConnecting) {
@@ -232,7 +232,7 @@ export function SSHPanel({
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            setForm({ profile })
+                            dialogs.openForm(profile)
                           }}
                           className={ROW_ACTION_BUTTON}
                           title="Edit profile"
@@ -272,7 +272,7 @@ export function SSHPanel({
                     </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
-                    <ContextMenuItem onSelect={() => setForm({ profile })}>
+                    <ContextMenuItem onSelect={() => dialogs.openForm(profile)}>
                       <Pencil className="mr-2 h-4 w-4" /> Edit Profile
                     </ContextMenuItem>
                     {isTauriContext() &&
@@ -294,7 +294,7 @@ export function SSHPanel({
                     <ContextMenuItem
                       variant="destructive"
                       disabled={isConnecting}
-                      onSelect={() => setDeleteConfirm(profile)}
+                      onSelect={() => dialogs.requestDelete(profile)}
                     >
                       <Trash2 className="mr-2 h-4 w-4" /> Delete Profile
                     </ContextMenuItem>
@@ -306,36 +306,7 @@ export function SSHPanel({
         )}
       </div>
 
-      {/* Profile Form Modal */}
-      {form && (
-        <SSHProfileForm
-          profile={form.profile}
-          onClose={() => setForm(null)}
-          onSaved={() => {
-            setForm(null)
-            loadProfiles()
-          }}
-        />
-      )}
-
-      <ConfirmDialog
-        isOpen={deleteConfirm !== null}
-        title="Delete SSH profile"
-        message={
-          deleteConfirm ? `Delete “${deleteConfirm.name}”? This action cannot be undone.` : ''
-        }
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
-        variant="danger"
-        onConfirm={() => {
-          if (deleteConfirm) {
-            const profile = deleteConfirm
-            setDeleteConfirm(null)
-            void handleDeleteProfile(profile)
-          }
-        }}
-        onCancel={() => setDeleteConfirm(null)}
-      />
+      {!externalDialogs && <SSHPanelDialogs controller={ownDialogs} />}
     </div>
   )
 }

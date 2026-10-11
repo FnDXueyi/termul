@@ -29,7 +29,7 @@ import { useSSHPanelVisible } from '@/stores/ssh-panel-store'
  * pressed / open view takes the `.keycap` surface. Disabled icons sit at 40%
  * with no hover.
  */
-function railButtonClass(active: boolean): string {
+export function railButtonClass(active: boolean): string {
   return cn(
     QUIET_ICON_BUTTON_CLASS,
     'relative flex size-9 shrink-0 rounded-lg disabled:pointer-events-none disabled:opacity-40',
