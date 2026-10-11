@@ -420,3 +420,83 @@ describe('ElicitationPrompt question mode (GH-935)', () => {
     expect(screen.getByRole('option', { name: 'Blue' })).toBeInTheDocument()
   })
 })
+
+/** claude-agent-acp: each question is followed by an optional `<name>_custom` string field. */
+const withCompanions: PendingElicitation = {
+  ...pending,
+  message: 'Please answer the following questions.',
+  allowOther: false,
+  fields: [
+    { ...pending.fields[0], name: 'question_0', required: false },
+    {
+      name: 'question_0_custom',
+      kind: 'string',
+      required: false,
+      title: 'Other',
+      description: 'Type your own answer, or add a note to the option you chose above (optional).',
+      options: []
+    },
+    { ...pending.fields[1], name: 'question_1', required: false },
+    {
+      name: 'question_1_custom',
+      kind: 'string',
+      required: false,
+      title: 'Other',
+      description: 'Type your own answer to add to your selection above (optional).',
+      options: []
+    }
+  ]
+}
+
+describe('ElicitationPrompt `<name>_custom` companions', () => {
+  beforeEach(() => {
+    mockRespond.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('renders the stepper (not the generic form) with an Other row per question', () => {
+    render(<ElicitationPrompt request={withCompanions} />)
+    expect(screen.getByTestId('elicitation-questions')).toBeInTheDocument()
+    expect(screen.getByText('1 of 2')).toBeInTheDocument()
+    expect(screen.queryByText('Request from the agent')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Other answer for Color')).toBeInTheDocument()
+  })
+
+  it('sends the pick and the custom text under their own field names', () => {
+    render(<ElicitationPrompt request={withCompanions} />)
+    fireEvent.click(screen.getByRole('button', { name: /Red/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Logging/ }))
+    fireEvent.change(screen.getByLabelText('Other answer for Features'), {
+      target: { value: 'Metrics' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    expect(mockRespond).toHaveBeenCalledWith('el-1', 'accept', {
+      question_0: 'Red',
+      question_1: ['Logging'],
+      question_1_custom: 'Metrics'
+    })
+  })
+
+  it('a typed single-select Other answer goes to the companion field only', () => {
+    render(<ElicitationPrompt request={withCompanions} />)
+    fireEvent.change(screen.getByLabelText('Other answer for Color'), {
+      target: { value: 'Chartreuse' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }))
+    expect(mockRespond).toHaveBeenCalledWith('el-1', 'accept', {
+      question_0_custom: 'Chartreuse'
+    })
+  })
+
+  it('keeps the generic form when a string field is not a companion', () => {
+    render(
+      <ElicitationPrompt
+        request={{
+          ...withCompanions,
+          fields: [...withCompanions.fields, { ...withCompanions.fields[1], name: 'notes' }]
+        }}
+      />
+    )
+    expect(screen.getByText('Request from the agent')).toBeInTheDocument()
+  })
+})

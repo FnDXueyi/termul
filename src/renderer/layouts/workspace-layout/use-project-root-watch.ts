@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react'
+import { useActiveWorkingCopy } from '@/hooks/use-active-working-copy'
+import { reportUnresolvedWorkingCopy } from '@/lib/active-working-copy'
 import { filesystemApi } from '@/lib/api'
 import { useFileExplorerStore } from '@/stores/file-explorer-store'
 import type { Project } from '@/types/project'
@@ -8,90 +10,134 @@ interface UseProjectRootWatchOptions {
   activeProjectId: string
 }
 
-/** Syncs the file explorer root and the project root watcher on project switch. */
+/**
+ * The single owner of the Explorer root and its file watch (AD-1). The scope
+ * root is the project folder (`setRootPath`); the active working copy's
+ * worktree is applied through the `setWorktreeRoot` override (`null` for the
+ * project folder), and the watch follows the effective root.
+ *
+ * An `unresolved` working copy triggers one reconcile per distinct key. It
+ * keeps the current root when the project did not change; on a project switch
+ * the root sits at the project folder until the reconcile resolves.
+ */
 export function useProjectRootWatch({
   activeProject,
   activeProjectId
 }: UseProjectRootWatchOptions): void {
-  const prevProjectIdRef = useRef<string>('')
-  const watchedRootPathRef = useRef<string | null>(null)
-  const projectSwitchRequestIdRef = useRef(0)
+  const wc = useActiveWorkingCopy()
+  const projectPath = activeProject?.path
+  const wcState = wc?.state
+  const wcKey = wc?.key
+  const wcKind = wc?.state === 'resolved' ? wc.kind : null
+  const wcPath = wc?.path
 
-  // Sync file explorer root path and register project root watcher when project changes
-  // biome-ignore lint/correctness/useExhaustiveDependencies: activeProject?.path covers the only property used
+  // `${projectId}\0${projectPath}` whose scope root the explorer currently has.
+  const appliedScopeRef = useRef<string | null>(null)
+  const watchedRootPathRef = useRef<string | null>(null)
+  // The worktree override last applied (`null` = project folder).
+  const appliedWorktreePathRef = useRef<string | null>(null)
+  const requestIdRef = useRef(0)
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: wcState/wcKey/wcKind/wcPath are the identity of `wc`; the object itself is deliberately not a dependency
   useEffect(() => {
-    const nextRootPathCandidate = activeProject?.path
-    if (
-      !activeProject ||
-      typeof nextRootPathCandidate !== 'string' ||
-      nextRootPathCandidate === ''
-    ) {
-      // Project removed or has no path — clear explorer root and unwatch
-      useFileExplorerStore.getState().setRootPath('')
+    const explorer = useFileExplorerStore.getState()
+
+    if (typeof projectPath !== 'string' || projectPath === '') {
+      // Project removed or has no path: clear the explorer root and unwatch.
+      requestIdRef.current += 1
+      explorer.setRootPath('')
+      explorer.setWorktreeRoot(null)
+      appliedWorktreePathRef.current = null
       if (watchedRootPathRef.current) {
         filesystemApi.unwatchDirectory(watchedRootPathRef.current)
         watchedRootPathRef.current = null
       }
-      prevProjectIdRef.current = activeProjectId
-      return
-    }
-    if (activeProjectId === prevProjectIdRef.current) {
+      appliedScopeRef.current = null
       return
     }
 
-    const nextRootPath = nextRootPathCandidate
+    const scopeKey = `${activeProjectId}\0${projectPath}`
+    const projectChanged = appliedScopeRef.current !== scopeKey
 
-    const switchRequestId = ++projectSwitchRequestIdRef.current
-    const previousWatchedRoot = watchedRootPathRef.current
+    if (wc?.state === 'unresolved') {
+      reportUnresolvedWorkingCopy(activeProjectId, wc)
+      // Same project: keep the current root and watch until it resolves.
+      if (!projectChanged) return
+    }
 
+    // Unresolved on a project switch roots at the project folder (read-only).
+    const worktreePath = wc?.state === 'resolved' && wc.kind === 'worktree' ? wc.path : null
+    const watchPath = worktreePath ?? projectPath
+
+    if (
+      !projectChanged &&
+      watchedRootPathRef.current === watchPath &&
+      appliedWorktreePathRef.current === worktreePath
+    ) {
+      return
+    }
+
+    const requestId = ++requestIdRef.current
     let cancelled = false
+    const isStale = (): boolean => cancelled || requestId !== requestIdRef.current
 
-    async function applyProjectSwitch(): Promise<void> {
+    function applyRoot(): void {
+      const store = useFileExplorerStore.getState()
+      if (projectChanged) {
+        store.setRootPath(projectPath as string)
+        appliedScopeRef.current = scopeKey
+      }
+      if (projectChanged || appliedWorktreePathRef.current !== worktreePath) {
+        useFileExplorerStore.getState().setWorktreeRoot(worktreePath)
+        appliedWorktreePathRef.current = worktreePath
+      }
+    }
+
+    function releasePrevious(keep: string | null): void {
+      const previous = watchedRootPathRef.current
+      if (previous && previous !== keep) filesystemApi.unwatchDirectory(previous)
+    }
+
+    async function applyWorkingCopy(): Promise<void> {
       try {
-        const watchResult = await filesystemApi.watchDirectory(nextRootPath)
+        const watchResult = await filesystemApi.watchDirectory(watchPath)
 
-        if (cancelled || switchRequestId !== projectSwitchRequestIdRef.current) {
-          filesystemApi.unwatchDirectory(nextRootPath)
+        if (isStale()) {
+          if (watchedRootPathRef.current !== watchPath) filesystemApi.unwatchDirectory(watchPath)
           return
         }
 
+        applyRoot()
+
         if (!watchResult.success) {
-          useFileExplorerStore.getState().setRootPath(nextRootPath)
           useFileExplorerStore.getState().setRootLoadError({
             message: watchResult.error,
             code: watchResult.code
           })
+          releasePrevious(null)
+          watchedRootPathRef.current = null
           return
         }
 
-        useFileExplorerStore.getState().setRootPath(nextRootPath)
-
-        if (previousWatchedRoot && previousWatchedRoot !== nextRootPath) {
-          filesystemApi.unwatchDirectory(previousWatchedRoot)
-        }
-
-        watchedRootPathRef.current = nextRootPath
-        prevProjectIdRef.current = activeProjectId
+        releasePrevious(watchPath)
+        watchedRootPathRef.current = watchPath
       } catch (error) {
-        if (cancelled || switchRequestId !== projectSwitchRequestIdRef.current) {
-          return
-        }
+        if (isStale()) return
 
+        applyRoot()
         const message = error instanceof Error ? error.message : 'Failed to watch project directory'
-        useFileExplorerStore.getState().setRootPath(nextRootPath)
-        useFileExplorerStore.getState().setRootLoadError({
-          message,
-          code: 'WATCH_FAILED'
-        })
+        useFileExplorerStore.getState().setRootLoadError({ message, code: 'WATCH_FAILED' })
+        releasePrevious(null)
+        watchedRootPathRef.current = null
       }
     }
 
-    void applyProjectSwitch()
+    void applyWorkingCopy()
 
     return () => {
       cancelled = true
     }
-  }, [activeProject?.path, activeProjectId])
+  }, [activeProjectId, projectPath, wcState, wcKey, wcKind, wcPath])
 
   useEffect(() => {
     return () => {

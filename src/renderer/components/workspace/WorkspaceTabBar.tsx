@@ -11,6 +11,7 @@ import { browserTabHide, browserTabShow } from '@/lib/browser-api'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useCanvasStore } from '@/stores/canvas-store'
@@ -25,6 +26,7 @@ import type { TabBulkMenuProps } from './tab-context-menu'
 import { AgentChatTabInline } from './tabs/agent-chat-tab'
 import { BrowserTabInline } from './tabs/browser-tab'
 import { CanvasTabInline } from './tabs/canvas-tab'
+import { DiffTabInline } from './tabs/diff-tab'
 import { GitHistoryTabInline } from './tabs/git-history-tab'
 import { GitTabInline } from './tabs/git-tab'
 import { TabPaneProvider } from './tabs/tab-chrome'
@@ -364,6 +366,7 @@ export function WorkspaceTabBar({
           break
         case 'git':
         case 'git-history':
+        case 'diff':
           useWorkspaceStore.getState().removeTab(tab.id)
           break
         case 'agent-chat':
@@ -592,6 +595,24 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
+                      ) : tab.type === 'diff' ? (
+                        <DiffTabInline
+                          tab={tab}
+                          isActive={tab.id === activeTabId}
+                          isDragging={dragging}
+                          isDropTarget={isTarget}
+                          dropPosition={position}
+                          bulkMenu={buildBulkMenuProps(tab)}
+                          onSelect={() => {
+                            setActiveTab(paneId, tab.id)
+                            setActivePane(paneId)
+                          }}
+                          onClose={() => closeWorkspaceTab(tab)}
+                          onDragStart={(e) => handleTabDragStart(tab.id, e)}
+                          onDragOver={(e) => handleTabDragOver(tab.id, e)}
+                          onDragLeave={handleTabDragLeave}
+                          onDrop={(e) => handleTabDrop(tab.id, e)}
+                        />
                       ) : tab.type === 'agent-chat' ? (
                         <AgentChatTabInline
                           tab={tab as { type: 'agent-chat'; id: string; sessionId: string }}
@@ -635,7 +656,7 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
-                      ) : (
+                      ) : tab.type === 'browser' ? (
                         <BrowserTabInline
                           tab={tab as { type: 'browser'; id: string; browserTabId: string }}
                           isActive={tab.id === activeTabId}
@@ -653,6 +674,11 @@ export function WorkspaceTabBar({
                           onDragLeave={handleTabDragLeave}
                           onDrop={(e) => handleTabDrop(tab.id, e)}
                         />
+                      ) : (
+                        (() => {
+                          reportUnknownTabKind(tab, 'WorkspaceTabBar', 'rendered nothing')
+                          return null
+                        })()
                       )}
                     </TabListItem>
                   )

@@ -45,6 +45,9 @@ export type TerminalUrlOpenMode = 'system' | 'termul'
 /** Which interface the remote terminal HTTP server binds to when started. */
 export type RemoteBindMode = 'localhost' | 'all'
 
+/** Shell layout the app opens with: the existing shell or the opt-in revamp. */
+export type ShellLayoutMode = 'classic' | 'revamp'
+
 // Application-wide settings
 export interface AppSettings {
   terminalFontFamily: string
@@ -62,6 +65,12 @@ export interface AppSettings {
   sidebarVisible: boolean
   fileExplorerVisible: boolean
   sshPanelVisible: boolean
+  /**
+   * Opt-in shell layout. Optional and deliberately absent from
+   * `DEFAULT_APP_SETTINGS`: absent means the code default in
+   * `lib/shell-layout-mode.ts`. Read at load; changes apply after a reload.
+   */
+  shellLayout?: ShellLayoutMode
   /** Remote server bind: localhost (127.0.0.1) or all interfaces (0.0.0.0). */
   remoteBindMode: RemoteBindMode
   /** App-wide color theme family id (without `-light` suffix). */
@@ -376,8 +385,8 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
   },
   sidebarToggle: {
     id: 'sidebarToggle',
-    label: 'Toggle Sidebar',
-    description: 'Show or hide the project sidebar',
+    label: 'Toggle Projects',
+    description: 'Expand or collapse projects',
     defaultKey: 'ctrl+shift+b'
   },
   closeTab: {
@@ -394,8 +403,8 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
   },
   toggleFileExplorer: {
     id: 'toggleFileExplorer',
-    label: 'Toggle File Explorer',
-    description: 'Show or hide the file explorer panel',
+    label: 'Toggle Side Panel',
+    description: 'Show or hide side panel',
     defaultKey: 'ctrl+b'
   },
   fileExplorerRename: {
@@ -422,13 +431,13 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
     id: 'worktreeSwitchNext',
     label: 'Switch to Next Worktree',
     description: 'Cycle to the next worktree in the sidebar',
-    defaultKey: 'ctrl+shift+downarrow'
+    defaultKey: 'ctrl+shift+arrowdown'
   },
   worktreeSwitchPrev: {
     id: 'worktreeSwitchPrev',
     label: 'Switch to Previous Worktree',
     description: 'Cycle to the previous worktree in the sidebar',
-    defaultKey: 'ctrl+shift+uparrow'
+    defaultKey: 'ctrl+shift+arrowup'
   },
   worktreeOpenTerminal: {
     id: 'worktreeOpenTerminal',

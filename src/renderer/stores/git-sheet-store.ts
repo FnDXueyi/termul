@@ -1,49 +1,12 @@
+import { toast } from 'sonner'
 import { create } from 'zustand'
+import { getActiveWorkingCopy, reportUnresolvedWorkingCopy } from '@/lib/active-working-copy'
 import { logFrontendError } from '@/lib/log-api'
 import { recordSheetOpener } from '@/lib/sheet-focus-return'
-import { getActiveWorktreeRoot, getProjectRootPath } from '@/lib/worktree-context'
-import { useAcpStore } from '@/stores/acp-store'
 import { useProjectStore } from '@/stores/project-store'
-import { getAllLeafPanes, useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace-store'
 
 /** Where the Git sheet's working directory came from (logged at open). */
-export type GitSheetCwdSource = 'explicit' | 'active-chat' | 'active-worktree' | 'project'
-
-export interface ResolveGitSheetCwdInput {
-  /** A caller-supplied directory, e.g. the chat's own `session.cwd`. Wins when non-blank. */
-  explicitCwd?: string | null
-  /** The pane's active tab; only an `agent-chat` tab makes `sessionCwd` apply. */
-  activeTab?: { type: string } | null
-  /** `cwd` of the session behind the active chat tab. */
-  sessionCwd?: string | null
-  /** Root of the project's active worktree, or null when on the project root. */
-  activeWorktreeRoot?: string | null
-  /** The active project's own path. */
-  projectPath?: string | null
-}
-
-function present(value: string | null | undefined): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-/**
- * Pick the directory the mobile Git sheet should open on: an explicit cwd,
- * else the active chat's session cwd, else the project's active worktree root,
- * else the project path. Null when none resolve (the sheet then stays closed).
- */
-export function resolveGitSheetCwd(
-  input: ResolveGitSheetCwdInput
-): { cwd: string; source: GitSheetCwdSource } | null {
-  if (present(input.explicitCwd)) return { cwd: input.explicitCwd, source: 'explicit' }
-  if (input.activeTab?.type === 'agent-chat' && present(input.sessionCwd)) {
-    return { cwd: input.sessionCwd, source: 'active-chat' }
-  }
-  if (present(input.activeWorktreeRoot)) {
-    return { cwd: input.activeWorktreeRoot, source: 'active-worktree' }
-  }
-  if (present(input.projectPath)) return { cwd: input.projectPath, source: 'project' }
-  return null
-}
+export type GitSheetCwdSource = 'explicit' | 'working-copy'
 
 interface GitSheetState {
   /** Whether the mobile Git Changes sheet is open. */
@@ -53,21 +16,14 @@ interface GitSheetState {
   /** Active project id recorded at open ('' when unknown); a different active project closes the sheet. */
   projectId: string
   /**
-   * Open the sheet on `cwd`, or on the cwd `resolveGitSheetCwd` finds when
-   * omitted. `opener` is the control the sheet returns focus to on close; it is
+   * Open the sheet on `cwd`, or on the active working copy (active tab, else
+   * the switcher pick, else the project folder) when omitted. An unresolved
+   * working copy never opens the sheet and triggers a worktree reconcile. `opener` is the control the sheet returns focus to on close; it is
    * recorded only when the sheet actually opens, and an omitted one leaves the
    * opener a caller already recorded (the header ⋯ row) in place.
    */
   openGitSheet: (cwd?: string, opener?: HTMLElement | null) => void
   closeGitSheet: () => void
-}
-
-/** The active tab of the active pane (mirrors the MobileChatShell selector). */
-function readActiveTab(): WorkspaceTab | null {
-  const { root, activePaneId } = useWorkspaceStore.getState()
-  const leaves = getAllLeafPanes(root)
-  const pane = leaves.find((p) => p.id === activePaneId) ?? leaves[0]
-  return pane?.tabs.find((t) => t.id === pane.activeTabId) ?? null
 }
 
 /**
@@ -82,22 +38,26 @@ export const useGitSheetStore = create<GitSheetState>((set) => ({
 
   openGitSheet: (explicitCwd, opener): void => {
     const projectId = useProjectStore.getState().activeProjectId
-    // Only read the other stores when no explicit cwd already answers.
-    let resolved = resolveGitSheetCwd({ explicitCwd })
-    if (!resolved) {
-      const activeTab = readActiveTab()
-      const sessionCwd =
-        activeTab?.type === 'agent-chat'
-          ? (useAcpStore.getState().sessions[activeTab.sessionId]?.cwd ?? null)
-          : null
-      resolved = resolveGitSheetCwd({
-        activeTab,
-        sessionCwd,
-        activeWorktreeRoot: projectId ? getActiveWorktreeRoot(projectId) : null,
-        projectPath: projectId ? getProjectRootPath(projectId) : null
-      })
+    let cwd = typeof explicitCwd === 'string' && explicitCwd.trim().length > 0 ? explicitCwd : null
+    let source: GitSheetCwdSource = 'explicit'
+    if (!cwd) {
+      const wc = projectId ? getActiveWorkingCopy(projectId) : null
+      if (wc?.state === 'unresolved') {
+        reportUnresolvedWorkingCopy(projectId, wc)
+        toast.error('This worktree is no longer available', {
+          description: 'Termul is refreshing the worktree list.'
+        })
+        void logFrontendError({
+          level: 'warn',
+          source: 'git-sheet-store',
+          message: `Git sheet not opened: unresolved working copy (project ${projectId})`
+        })
+        return
+      }
+      cwd = wc?.path ?? null
+      source = 'working-copy'
     }
-    if (!resolved) {
+    if (!cwd) {
       void logFrontendError({
         level: 'warn',
         source: 'git-sheet-store',
@@ -108,10 +68,10 @@ export const useGitSheetStore = create<GitSheetState>((set) => ({
     void logFrontendError({
       level: 'info',
       source: 'git-sheet-store',
-      message: `Git sheet opened from ${resolved.source} cwd`
+      message: `Git sheet opened from ${source} cwd`
     })
     recordSheetOpener('git-sheet', opener)
-    set({ open: true, cwd: resolved.cwd, projectId })
+    set({ open: true, cwd, projectId })
   },
 
   closeGitSheet: (): void => {

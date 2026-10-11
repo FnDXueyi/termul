@@ -243,7 +243,7 @@ pub(super) fn resolve_cwd<T>(
 /// desktop `validate_project_path` behavior of stripping the Windows verbatim
 /// (`\\?\`) prefix so `git.exe` receives a path it understands. Returns an
 /// `IpcBody::err` (`INVALID_PATH_ENCODING`) when the path resolves to empty.
-fn cwd_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
+pub(super) fn cwd_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
     let lossy = resolved.to_string_lossy();
     let simplified = crate::path_validation::strip_verbatim_prefix(&lossy).into_owned();
     if simplified.is_empty() {

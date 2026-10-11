@@ -1263,3 +1263,106 @@ describe('deserializePaneTree agent-chat restore (story 5)', () => {
     expect(tree.activeTabId).toBe('chat-sess-1')
   })
 })
+
+describe('unrecognised persisted tab kinds (E4a)', () => {
+  const unknownTab = (extra: Record<string, unknown> = {}) =>
+    ({ type: 'future-kind', id: 'future-1', secretPayload: 'do-not-log', ...extra }) as never
+
+  const warnMessages = () =>
+    mockLogFrontendError.mock.calls
+      .map((call) => call[0] as { level?: string; message: string })
+      .filter((payload) => payload.level === 'warn')
+
+  it('drops an unknown kind on restore without coercing it into a terminal tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'edit-/a.ts',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    expect(tree.tabs).toEqual([{ type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' }])
+    expect(tree.tabs.some((tab) => tab.type === 'terminal')).toBe(false)
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('"future-kind"')
+    expect(warns[0].message).not.toContain('do-not-log')
+  })
+
+  it('repairs activeTabId when it pointed at the dropped unknown tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.activeTabId).toBe('edit-/a.ts')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('falls activeTabId to null when the unknown tab was the only one', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab()]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    expect(tree.activeTabId).toBeNull()
+  })
+
+  it('drops a ref with a missing type and reports the kind as undefined', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{} as never]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('undefined')
+  })
+
+  it('truncates an overlong kind in the log', () => {
+    deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{ type: 'x'.repeat(500) } as never]
+    })
+    const [warn] = warnMessages()
+    expect(warn.message.length).toBeLessThan(200)
+  })
+
+  it('reconcileTerminalTabs drops an unknown kind with one warn and repairs activeTabId', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'git', id: 'git-1', cwd: '/repo' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([{ type: 'git', id: 'git-1', cwd: '/repo' }])
+    expect(result.activeTabId).toBe('git-1')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('reconcileTerminalTabs drops canvas tabs silently', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'canvas-1',
+      tabs: [{ type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([])
+    expect(warnMessages()).toHaveLength(0)
+  })
+})

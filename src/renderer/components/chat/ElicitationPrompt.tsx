@@ -12,6 +12,7 @@ import type { PendingElicitation } from '@/stores/acp-store'
 import { useAcpStore } from '@/stores/acp-store'
 import { CHAT_GUTTER_X } from './chat-layout'
 import { ElicitationQuestions } from './ElicitationQuestions'
+import { questionShape } from './elicitation-shape'
 
 interface ElicitationPromptProps {
   request: PendingElicitation
@@ -33,7 +34,8 @@ type FieldValue = string | boolean | string[]
  * Primitive fields only: string, number, boolean, enum, and multi-enum.
  *
  * GH-935: a form whose fields are all titled `enum`/`multi-enum` questions
- * is an agent `ask_user_question` batch — it replaces the composer with the
+ * (optionally followed by `<name>_custom` free-text companions) is an agent
+ * `ask_user_question` batch — it replaces the composer with the
  * one-question-at-a-time stepper (`ElicitationQuestions`) instead of the
  * generic field loop. Untitled forms keep the generic path.
  *
@@ -57,13 +59,7 @@ export function ElicitationPrompt({
   const headingRef = useRef<HTMLHeadingElement>(null)
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({})
 
-  const questionShaped =
-    request.mode === 'form' &&
-    request.fields.length > 0 &&
-    request.fields.every(
-      (field) =>
-        (field.kind === 'enum' || field.kind === 'multi-enum') && Boolean(field.title?.trim())
-    )
+  const questionShaped = request.mode === 'form' && questionShape(request.fields) !== null
   // The wire `message` often repeats a field `description` verbatim (Devin
   // sends the first question as the message) — skip the duplicate heading.
   const showMessage =

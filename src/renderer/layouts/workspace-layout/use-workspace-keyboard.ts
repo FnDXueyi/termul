@@ -137,7 +137,7 @@ export function useWorkspaceKeyboard({
         return
       }
 
-      // Toggle File Explorer (Ctrl+B / ⌘+B) — skip when in editor/input/terminal
+      // Toggle Side Panel (Ctrl+B / ⌘+B; id toggleFileExplorer) — skip when in editor/input/terminal
       if (matchesShortcut(e, getActiveKey('toggleFileExplorer'))) {
         if (!isInEditor && !isInInput && !isInTerminal) {
           e.preventDefault()

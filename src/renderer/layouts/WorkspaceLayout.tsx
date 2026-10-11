@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { ShellFrame } from '@/components/shell/ShellFrame'
 import { WebTokenGateScreen } from '@/components/WebTokenGateScreen'
 import { useEditorPersistence } from '@/hooks/use-editor-persistence'
 import { useFileWatcher } from '@/hooks/use-file-watcher'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useProjectSwitch } from '@/hooks/use-project-switch'
+import { useShellUnreadTracker } from '@/hooks/use-shell-unread-tracker'
 import { useWorkspaceManifestSync } from '@/hooks/use-workspace-manifest-sync'
 import { useWorktreeShortcuts } from '@/hooks/use-worktree-shortcuts'
 import { useWorkspaceOverlayBackStack } from '@/layouts/use-workspace-overlay-back-stack'
@@ -28,6 +30,7 @@ import { useWorkspaceKeyboard } from '@/layouts/workspace-layout/use-workspace-k
 import { WorkspaceLoadingScreen } from '@/layouts/workspace-layout/WorkspaceLoadingScreen'
 import { WorkspaceMain } from '@/layouts/workspace-layout/WorkspaceMain'
 import { WorkspaceModals } from '@/layouts/workspace-layout/WorkspaceModals'
+import { useShellLayoutForRender } from '@/lib/shell-layout-mode'
 import { useWebAuthGate } from '@/lib/web-auth-gate'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useGitSheetStore } from '@/stores/git-sheet-store'
@@ -63,6 +66,9 @@ export default function WorkspaceLayout(): React.JSX.Element {
 
   const webAuthGate = useWebAuthGate()
 
+  // Decided once per renderer load: null while settings are still loading.
+  const shellLayout = useShellLayoutForRender()
+
   const projects = useProjects()
   const activeProject = useActiveProject()
   const activeProjectId = useActiveProjectId()
@@ -73,6 +79,8 @@ export default function WorkspaceLayout(): React.JSX.Element {
   const terminals = useTerminals()
 
   const isMobileWebShell = useMobileWebShell()
+  // The one agent-chat "Done" tracker for this renderer (AD-12).
+  useShellUnreadTracker()
   const { switchTo: switchProjectFromPalette } = useProjectSwitch('CommandPalette')
 
   const ssh = useSSHWorkspace()
@@ -191,8 +199,9 @@ export default function WorkspaceLayout(): React.JSX.Element {
     closeTerminalTabByTabId: terminalClose.closeTerminalTabByTabId
   })
 
-  // Show loading state while projects are being loaded
-  if (!isLoaded) {
+  // Show loading state while projects (or, on desktop, settings) are loading.
+  // The phone shell ignores the shell-layout flag, so it never waits for it.
+  if (!isLoaded || (shellLayout === null && !isMobileWebShell)) {
     // #854: a token-gated server refusing our (absent/rotated) token shows
     // the token-entry screen INSTEAD of the Loading state — the missing UX
     // that made the web client hang forever on an installed PWA.
@@ -295,24 +304,28 @@ export default function WorkspaceLayout(): React.JSX.Element {
     )
   }
 
-  return (
-    <DesktopWorkspaceShell
-      projects={projects}
-      activeProject={activeProject}
-      activeProjectId={activeProjectId}
-      ssh={ssh}
-      isShortcutMenuOpen={isShortcutMenuOpen}
-      setIsShortcutMenuOpen={setIsShortcutMenuOpen}
-      setIsCommandPaletteOpen={setIsCommandPaletteOpen}
-      setIsNewProjectModalOpen={setIsNewProjectModalOpen}
-      onSelectProject={handleSelectProject}
-      handleAddGitTab={tabOpeners.handleAddGitTab}
-      handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
-      handleToggleThemePicker={handleToggleThemePicker}
-      handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
-      handleOpenCanvas={tabOpeners.handleOpenCanvas}
-      workspaceMain={workspaceMain}
-      appModals={appModals}
-    />
+  const desktopShellProps = {
+    projects,
+    activeProject,
+    activeProjectId,
+    ssh,
+    isShortcutMenuOpen,
+    setIsShortcutMenuOpen,
+    setIsCommandPaletteOpen,
+    setIsNewProjectModalOpen,
+    onSelectProject: handleSelectProject,
+    handleAddGitTab: tabOpeners.handleAddGitTab,
+    handleAddGitHistoryTab: tabOpeners.handleAddGitHistoryTab,
+    handleToggleThemePicker,
+    handleOpenAgentChat: tabOpeners.handleOpenAgentChat,
+    handleOpenCanvas: tabOpeners.handleOpenCanvas,
+    workspaceMain,
+    appModals
+  }
+
+  return shellLayout === 'revamp' ? (
+    <ShellFrame {...desktopShellProps} />
+  ) : (
+    <DesktopWorkspaceShell {...desktopShellProps} />
   )
 }
