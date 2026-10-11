@@ -1,6 +1,7 @@
 import { chatForeignToProject as chatForeignToProjectIn } from '@/lib/acp-session-ownership'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
+import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useAcpStore } from '@/stores/acp-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
@@ -23,41 +24,38 @@ export function serializePaneTree(
 ): PersistedPaneNode {
   if (node.type === 'leaf') {
     const tabs: PersistedTabRef[] = node.tabs.flatMap((tab): PersistedTabRef[] => {
-      if (tab.type === 'editor') {
-        return [{ type: 'editor', filePath: tab.filePath }]
-      }
-
-      if (tab.type === 'terminal') {
-        return [{ type: 'terminal', terminalId: tab.terminalId }]
-      }
-
-      if (tab.type === 'browser') {
-        const browserTab = useBrowserSessionStore.getState().tabs.get(tab.browserTabId)
-        return [{ type: 'browser', browserTabId: tab.browserTabId, url: browserTab?.url }]
-      }
-
-      if (tab.type === 'git') {
-        return [{ type: 'git', id: tab.id, cwd: tab.cwd }]
-      }
-
-      if (tab.type === 'agent-chat') {
-        // The session itself is persisted separately (P5 history); we persist
-        // the tab so the pane reappears on restart. The chat shows its closed/
-        // empty state until reopened from history. An ownership predicate
-        // (persistState) drops other projects' chats — the global tree can
-        // carry them mid-switch, and persisting them would seed cross-project
-        // tab leaks on restore.
-        if (options?.agentChatOwnedBy && !options.agentChatOwnedBy(tab.sessionId)) {
-          return []
+      switch (tab.type) {
+        case 'editor':
+          return [{ type: 'editor', filePath: tab.filePath }]
+        case 'terminal':
+          return [{ type: 'terminal', terminalId: tab.terminalId }]
+        case 'browser': {
+          const browserTab = useBrowserSessionStore.getState().tabs.get(tab.browserTabId)
+          return [{ type: 'browser', browserTabId: tab.browserTabId, url: browserTab?.url }]
         }
-        return [{ type: 'agent-chat', id: tab.id, sessionId: tab.sessionId }]
+        case 'git':
+          return [{ type: 'git', id: tab.id, cwd: tab.cwd }]
+        case 'agent-chat':
+          // The session itself is persisted separately (P5 history); we persist
+          // the tab so the pane reappears on restart. The chat shows its closed/
+          // empty state until reopened from history. An ownership predicate
+          // (persistState) drops other projects' chats — the global tree can
+          // carry them mid-switch, and persisting them would seed cross-project
+          // tab leaks on restore.
+          if (options?.agentChatOwnedBy && !options.agentChatOwnedBy(tab.sessionId)) {
+            return []
+          }
+          return [{ type: 'agent-chat', id: tab.id, sessionId: tab.sessionId }]
+        case 'git-history':
+          return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
+        case 'canvas':
+          // Not persisted (see WORKSPACE_TAB_KIND_TRAITS): the canvas re-opens
+          // user-initiated.
+          return []
+        default:
+          reportUnknownTabKind(tab, 'useEditorPersistence.serializePaneTree', 'not persisted')
+          return []
       }
-
-      if (tab.type === 'git-history') {
-        return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
-      }
-
-      return []
     })
 
     return {
@@ -213,52 +211,44 @@ export function reconcileTerminalTabs(
     if (node.type === 'leaf') {
       const terminalTabIdMap = new Map<string, string>()
       const validTabs = node.tabs.flatMap((tab): WorkspaceTab[] => {
-        if (tab.type === 'editor') {
-          return openFilePaths.has(tab.filePath) ? [tab] : []
-        }
+        switch (tab.type) {
+          case 'editor':
+            return openFilePaths.has(tab.filePath) ? [tab] : []
+          case 'browser':
+          case 'git':
+          case 'agent-chat':
+          case 'git-history':
+            return [tab]
+          case 'canvas':
+            // Canvas tabs: the daemon/iframe runtime is host-local state, never
+            // portable across a restore — dropped here like every other
+            // non-portable tab body; the canvas re-opens user-initiated.
+            return []
+          case 'terminal': {
+            if (shouldKeepPersistedTerminalTabs) {
+              return [tab]
+            }
 
-        if (tab.type === 'browser') {
-          return [tab]
-        }
+            const mappedTerminalId = matchTerminalId(tab.terminalId)
+            if (!mappedTerminalId) {
+              return []
+            }
 
-        if (tab.type === 'git') {
-          return [tab]
-        }
+            const mappedTabId = terminalTabId(mappedTerminalId)
+            terminalTabIdMap.set(tab.id, mappedTabId)
 
-        if (tab.type === 'agent-chat') {
-          return [tab]
-        }
-
-        if (tab.type === 'git-history') {
-          return [tab]
-        }
-
-        // Canvas tabs: the daemon/iframe runtime is host-local state, never
-        // portable across a restore — dropped here like every other
-        // non-portable tab body; the canvas re-opens user-initiated.
-        if (tab.type === 'canvas') {
-          return []
-        }
-
-        if (shouldKeepPersistedTerminalTabs) {
-          return [tab]
-        }
-
-        const mappedTerminalId = matchTerminalId(tab.terminalId)
-        if (!mappedTerminalId) {
-          return []
-        }
-
-        const mappedTabId = terminalTabId(mappedTerminalId)
-        terminalTabIdMap.set(tab.id, mappedTabId)
-
-        return [
-          {
-            type: 'terminal',
-            id: mappedTabId,
-            terminalId: mappedTerminalId
+            return [
+              {
+                type: 'terminal',
+                id: mappedTabId,
+                terminalId: mappedTerminalId
+              }
+            ]
           }
-        ]
+          default:
+            reportUnknownTabKind(tab, 'useEditorPersistence.reconcileTerminalTabs', 'dropped')
+            return []
+        }
       })
 
       let activeTabId = node.activeTabId
@@ -293,92 +283,92 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput, projectId
   if (persisted.type === 'leaf') {
     const tabs: WorkspaceTab[] = ('tabs' in persisted ? persisted.tabs : []).flatMap(
       (tab): WorkspaceTab[] => {
-        if (tab.type === 'editor') {
-          return [
-            {
-              type: 'editor',
-              id: editorTabId(tab.filePath),
-              filePath: tab.filePath
+        switch (tab.type) {
+          case 'editor':
+            return [
+              {
+                type: 'editor',
+                id: editorTabId(tab.filePath),
+                filePath: tab.filePath
+              }
+            ]
+          case 'browser': {
+            const bTabId = browserTabId(tab.browserTabId)
+            // Restore browser session entry lazily
+            useBrowserSessionStore.getState().createTab(tab.browserTabId, tab.url)
+            return [
+              {
+                type: 'browser',
+                id: bTabId,
+                browserTabId: tab.browserTabId
+              }
+            ]
+          }
+          case 'git':
+            return [
+              {
+                type: 'git',
+                id: tab.id,
+                cwd: tab.cwd
+              }
+            ]
+          case 'agent-chat': {
+            // Drop `launch-*` placeholder tabs: a successful launch always remaps
+            // the tab to the real session id, so a persisted launch-* tab is
+            // always a corpse from a failed launch (restoring it would render the
+            // "chat unavailable" fallback with nothing to retry). Also tolerate
+            // corrupt/legacy entries missing a sessionId — drop just that tab
+            // instead of aborting the whole restore.
+            if (typeof tab.sessionId !== 'string' || tab.sessionId.startsWith('launch-')) {
+              // Durable boundary log: a pruned tab is otherwise invisible.
+              void logFrontendError({
+                level: 'warn',
+                source: 'useEditorPersistence.deserializePaneTree',
+                message:
+                  typeof tab.sessionId === 'string'
+                    ? `Dropped failed-launch placeholder chat tab (session ${tab.sessionId}) during workspace restore`
+                    : 'Dropped agent-chat tab with a missing/invalid sessionId during workspace restore'
+              })
+              return []
             }
-          ]
-        }
-
-        if (tab.type === 'browser') {
-          const bTabId = browserTabId(tab.browserTabId)
-          // Restore browser session entry lazily
-          useBrowserSessionStore.getState().createTab(tab.browserTabId, tab.url)
-          return [
-            {
-              type: 'browser',
-              id: bTabId,
-              browserTabId: tab.browserTabId
+            if (chatForeignToProject(tab.sessionId, projectId)) {
+              void logFrontendError({
+                level: 'warn',
+                source: 'useEditorPersistence.deserializePaneTree',
+                message: `Dropped foreign-project chat tab (session ${tab.sessionId}) during workspace restore for project ${projectId}`
+              })
+              return []
             }
-          ]
-        }
-
-        if (tab.type === 'git') {
-          return [
-            {
-              type: 'git',
-              id: tab.id,
-              cwd: tab.cwd
-            }
-          ]
-        }
-
-        if (tab.type === 'agent-chat') {
-          // Drop `launch-*` placeholder tabs: a successful launch always remaps
-          // the tab to the real session id, so a persisted launch-* tab is
-          // always a corpse from a failed launch (restoring it would render the
-          // "chat unavailable" fallback with nothing to retry). Also tolerate
-          // corrupt/legacy entries missing a sessionId — drop just that tab
-          // instead of aborting the whole restore.
-          if (typeof tab.sessionId !== 'string' || tab.sessionId.startsWith('launch-')) {
-            // Durable boundary log: a pruned tab is otherwise invisible.
-            void logFrontendError({
-              level: 'warn',
-              source: 'useEditorPersistence.deserializePaneTree',
-              message:
-                typeof tab.sessionId === 'string'
-                  ? `Dropped failed-launch placeholder chat tab (session ${tab.sessionId}) during workspace restore`
-                  : 'Dropped agent-chat tab with a missing/invalid sessionId during workspace restore'
-            })
+            return [
+              {
+                type: 'agent-chat',
+                id: tab.id,
+                sessionId: tab.sessionId
+              }
+            ]
+          }
+          case 'git-history':
+            return [
+              {
+                type: 'git-history',
+                id: tab.id,
+                cwd: tab.cwd
+              }
+            ]
+          case 'terminal':
+            return [
+              {
+                type: 'terminal',
+                id: terminalTabId(tab.terminalId),
+                terminalId: tab.terminalId
+              }
+            ]
+          default:
+            // An unrecognised persisted kind (e.g. written by a newer build) is
+            // dropped, never coerced into a terminal tab.
+            reportUnknownTabKind(tab, 'useEditorPersistence.deserializePaneTree', 'dropped')
             return []
-          }
-          if (chatForeignToProject(tab.sessionId, projectId)) {
-            void logFrontendError({
-              level: 'warn',
-              source: 'useEditorPersistence.deserializePaneTree',
-              message: `Dropped foreign-project chat tab (session ${tab.sessionId}) during workspace restore for project ${projectId}`
-            })
-            return []
-          }
-          return [
-            {
-              type: 'agent-chat',
-              id: tab.id,
-              sessionId: tab.sessionId
-            }
-          ]
         }
-
-        if (tab.type === 'git-history') {
-          return [
-            {
-              type: 'git-history',
-              id: tab.id,
-              cwd: tab.cwd
-            }
-          ]
-        }
-
-        return [
-          {
-            type: 'terminal',
-            id: terminalTabId(tab.terminalId),
-            terminalId: tab.terminalId
-          }
-        ]
       }
     )
 
