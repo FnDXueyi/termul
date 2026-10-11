@@ -192,6 +192,7 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
       open,
       onOpenChange,
       onAddProject,
+      onOpenProjectSettings,
       side,
       id,
       onCloseAutoFocus
@@ -199,6 +200,7 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
       open: boolean
       onOpenChange: (open: boolean) => void
       onAddProject?: () => void
+      onOpenProjectSettings?: () => void
       side?: string
       id?: string
       onCloseAutoFocus?: (event: Event) => void
@@ -225,6 +227,17 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
               }}
             >
               add-project
+            </button>
+          )}
+          {onOpenProjectSettings && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenChange(false)
+                onOpenProjectSettings()
+              }}
+            >
+              project-settings
             </button>
           )}
         </div>
@@ -1494,6 +1507,29 @@ describe('MobileChatShell', () => {
 
       expect(await screen.findByTestId('project-sheet')).toBeInTheDocument()
       expect(screen.queryByText('add-project')).not.toBeInTheDocument()
+    })
+
+    it('hands onOpenProjectSettings to the sheet as its Project settings action', async () => {
+      tauriRef.current = false
+      const onOpenProjectSettings = vi.fn()
+      renderShell({ onOpenProjectSettings })
+
+      fireEvent.click(screen.getByRole('button', { name: /switch project/ }))
+      fireEvent.click(await screen.findByText('project-settings'))
+
+      expect(onOpenProjectSettings).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('project-sheet')).not.toBeInTheDocument()
+    })
+
+    it('offers no Project settings action when there is no active project', async () => {
+      tauriRef.current = false
+      projectRef.current = undefined
+      renderShell({ onOpenProjectSettings: vi.fn() })
+
+      fireEvent.click(screen.getByRole('button', { name: /switch project/ }))
+
+      expect(await screen.findByTestId('project-sheet')).toBeInTheDocument()
+      expect(screen.queryByText('project-settings')).not.toBeInTheDocument()
     })
 
     it('does not mount the project sheet in Tauri (desktop) mode', () => {
