@@ -149,7 +149,7 @@ export function serializeTopologyForManifest(node: PaneNode): PortablePaneNode {
           // Non-portable: dropped (see WORKSPACE_TAB_KIND_TRAITS).
           break
         case 'canvas':
-          // Dropped too — the daemon's `.op` doc + the canvas tab are
+          // canvas: dropped — the daemon's `.op` doc + the canvas tab are
           // host-local runtime state, never a portable manifest projection
           // (the canvas re-opens user-initiated, never auto-restored).
           break
