@@ -1,15 +1,10 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FolderPlus, Plus } from '@/components/icons'
-import { SidebarToggleButton } from '@/components/TitlebarPanelToggles'
 import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { toast } from '@/hooks/use-toast'
-import { useWorktreeReconciler } from '@/hooks/use-worktree-reconciler'
 import { dialogApi, shellApi } from '@/lib/api'
-import { filterProjects, shouldShowProjectSearch } from '@/lib/project-filter'
-import { isTauriContext } from '@/lib/tauri-runtime'
 import { useProjectsWithActiveAgentChat } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
@@ -29,8 +24,6 @@ import {
 } from './sidebar/project-context-menu'
 import { ProjectList } from './sidebar/project-list'
 import { ProjectSettingsDialog } from './sidebar/project-settings-dialog'
-import { SidebarFooter } from './sidebar/sidebar-footer'
-import { SidebarSearchField } from './sidebar/sidebar-search-field'
 import { SSHResizableSection } from './sidebar/ssh-section'
 import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
 
@@ -38,15 +31,11 @@ import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
 const HEADER_ICON_BUTTON = `${PANEL_ICON_BUTTON_CLASS} cursor-pointer [&_svg]:size-3.5`
 
 /**
- * Reconciles stored worktrees for the active project. A component (not a hook
- * call in `ProjectSidebar`) so the rail variant can leave it out: the Rail
- * container runs the reconciler itself so it keeps running while collapsed.
+ * The shell Rail's Projects section: header with one `+` menu, search, the
+ * project list (diff stat on each row, no chat lists) and the SSH section. The
+ * Rail container runs the worktree reconciler itself so it keeps running while
+ * collapsed, and owns the footer.
  */
-function WorktreeReconciler({ projectId }: { projectId: string }): null {
-  useWorktreeReconciler(projectId)
-  return null
-}
-
 export function ProjectSidebar({
   projects,
   activeProjectId,
@@ -59,10 +48,8 @@ export function ProjectSidebar({
   onReorderProjects,
   onSSHConnect,
   onSelectSSHProfile,
-  activeSSHProfileId,
-  variant = 'classic'
+  activeSSHProfileId
 }: ProjectSidebarProps): React.JSX.Element {
-  const isRail = variant === 'rail'
   const navigate = useNavigate()
   const {
     selectProject,
@@ -100,13 +87,6 @@ export function ProjectSidebar({
 
   const [activeDragOverGroupId, setActiveDragOverGroupId] = useState<string | null>(null)
   const activeDragOverGroupIdRef = useRef<string | null>(null)
-
-  // Project search/filter query
-  const [searchQuery, setSearchQuery] = useState('')
-
-  // Expanded projects — expansion is controlled solely by the chevron.
-  // Selecting a project does not auto-expand its chat list, keeping the list uncluttered.
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set<string>())
 
   // Inline editing state
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -198,18 +178,6 @@ export function ProjectSidebar({
     }),
     [projectActivityIds, agentChatActivityIds, runningProjectIds, attentionCounts, projectErrorIds]
   )
-
-  const toggleProjectExpanded = useCallback((projectId: string): void => {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev)
-      if (next.has(projectId)) {
-        next.delete(projectId)
-      } else {
-        next.add(projectId)
-      }
-      return next
-    })
-  }, [])
 
   const handleCreateGroupSubmit = useCallback(
     (name: string) => {
@@ -377,25 +345,6 @@ export function ProjectSidebar({
       ? projects.find((p) => p.id === colorPicker.targetId)
       : groups.find((g) => g.id === colorPicker?.targetId)
 
-  // The search box only renders once the list is long enough to be worth filtering.
-  // The Rail has none: its top Search covers projects.
-  const showSearch = !isRail && shouldShowProjectSearch(projects.length)
-
-  // Apply the search query to each group. Filtering is gated on `showSearch` so a
-  // lingering query can never keep the list filtered after the search box unmounts
-  // (e.g. project count drops below the threshold). The unfiltered `activeProjects`
-  // is kept for shortcut-index math below.
-  const trimmedQuery = showSearch ? searchQuery.trim() : ''
-  const isSearching = trimmedQuery.length > 0
-  const filteredActiveProjects = useMemo(
-    () => filterProjects(activeProjects, { searchQuery: trimmedQuery }),
-    [activeProjects, trimmedQuery]
-  )
-  const filteredArchivedProjects = useMemo(
-    () => filterProjects(archivedProjects, { searchQuery: trimmedQuery }),
-    [archivedProjects, trimmedQuery]
-  )
-
   // Map each active project id to its position in the UNFILTERED active list.
   // The badge reflects this position (not the filtered render index) so the
   // number a user sees doesn't shift around as they type a search query.
@@ -421,114 +370,39 @@ export function ProjectSidebar({
   const groupProjectsMap = useMemo(() => {
     return groups.map((g) => {
       const projectsInGroup = g.projectIds
-        .map((pid) => filteredActiveProjects.find((p) => p.id === pid))
+        .map((pid) => activeProjects.find((p) => p.id === pid))
         .filter((p): p is Project => p !== undefined)
       return {
         group: g,
         projects: projectsInGroup
       }
     })
-  }, [groups, filteredActiveProjects])
+  }, [groups, activeProjects])
 
   const ungroupedActiveProjects = useMemo(() => {
-    return filteredActiveProjects.filter((p) => !groupedProjectIds.has(p.id))
-  }, [filteredActiveProjects, groupedProjectIds])
+    return activeProjects.filter((p) => !groupedProjectIds.has(p.id))
+  }, [activeProjects, groupedProjectIds])
 
-  const visibleGroups = useMemo(() => {
-    return groupProjectsMap.filter((gp) => gp.projects.length > 0 || !isSearching)
-  }, [groupProjectsMap, isSearching])
+  const visibleGroups = groupProjectsMap
 
-  // Reset a lingering query if the search box is no longer shown.
-  useEffect(() => {
-    if (!showSearch && searchQuery) setSearchQuery('')
-  }, [showSearch, searchQuery])
-
-  // When the active project CHANGES to one that the current query hides (e.g. a
-  // project was just created, or a Ctrl+1..9 shortcut selected a hidden project),
-  // clear the search so the now-active project becomes visible instead of silently
-  // vanishing. Keyed on a change of `activeProjectId` only — searching for OTHER
-  // projects while the active one stays put must NOT wipe the query.
-  const prevActiveProjectId = useRef(activeProjectId)
-  useEffect(() => {
-    const changed = prevActiveProjectId.current !== activeProjectId
-    prevActiveProjectId.current = activeProjectId
-    if (!changed || !isSearching || !activeProjectId) return
-    const visible =
-      filteredActiveProjects.some((p) => p.id === activeProjectId) ||
-      filteredArchivedProjects.some((p) => p.id === activeProjectId)
-    if (!visible) setSearchQuery('')
-  }, [activeProjectId, isSearching, filteredActiveProjects, filteredArchivedProjects])
-  const hasNoSearchResults =
-    isSearching && filteredActiveProjects.length === 0 && filteredArchivedProjects.length === 0
-
-  // Rail with groups: "Groups" and "Projects" headers sit inside the list, so
-  // the sidebar's own Projects header steps aside. With no group (or nothing to
+  // With groups, "Groups" and "Projects" headers sit inside the list, so the
+  // sidebar's own Projects header steps aside. With no group (or nothing to
   // list) it stays, and so does its + menu, the path to the first group.
-  const railSections =
-    isRail && visibleGroups.length > 0 && projects.length > 0 && !hasNoSearchResults
-
-  const Root = isRail ? 'div' : 'aside'
+  const railSections = visibleGroups.length > 0 && projects.length > 0
 
   return (
-    <Root
-      className={
-        isRail
-          ? 'flex min-h-0 w-full flex-1 flex-col bg-background'
-          : 'w-64 bg-background flex flex-col flex-shrink-0 rounded-xl h-full'
-      }
-    >
-      {/* Reconcile stored worktrees against actual git state (detects orphaned entries) */}
-      {!isRail && <WorktreeReconciler projectId={activeProjectId} />}
-
+    <div className="flex min-h-0 w-full flex-1 flex-col bg-background">
       {/* Header with inline + button */}
       {!railSections && (
         <div className={PANEL_HEADER_CLASS}>
           <span className="label-panel">Projects</span>
           <div className="flex items-center">
-            {isRail ? (
-              <AddProjectMenu
-                onNewProject={onNewProject}
-                onNewGroup={() => setNewGroupModal({})}
-                buttonClassName={HEADER_ICON_BUTTON}
-              />
-            ) : (
-              <>
-                {!isTauriContext() && <SidebarToggleButton className={HEADER_ICON_BUTTON} />}
-                <button
-                  onClick={() => setNewGroupModal({})}
-                  className={HEADER_ICON_BUTTON}
-                  title="New Group Folder"
-                  aria-label="Create new group folder"
-                >
-                  <FolderPlus size={14} />
-                </button>
-                <button
-                  onClick={onNewProject}
-                  className={HEADER_ICON_BUTTON}
-                  title="New Project"
-                  aria-label="Create new project from header"
-                  data-testid="header-new-project"
-                >
-                  <Plus size={14} />
-                </button>
-              </>
-            )}
+            <AddProjectMenu
+              onNewProject={onNewProject}
+              onNewGroup={() => setNewGroupModal({})}
+              buttonClassName={HEADER_ICON_BUTTON}
+            />
           </div>
-        </div>
-      )}
-
-      {/* Project search — shared sidebar field */}
-      {showSearch && (
-        <div className="shrink-0 px-2 pb-2">
-          <SidebarSearchField
-            size="md"
-            value={searchQuery}
-            onChange={setSearchQuery}
-            placeholder="Search projects…"
-            ariaLabel="Search projects"
-            clearLabel="Clear project search"
-            testIdPrefix="project-search"
-          />
         </div>
       )}
 
@@ -536,9 +410,6 @@ export function ProjectSidebar({
       <ProjectList
         projects={projects}
         activeProjectId={activeProjectId}
-        isSearching={isSearching}
-        trimmedQuery={trimmedQuery}
-        hasNoSearchResults={hasNoSearchResults}
         groups={groups}
         visibleGroups={visibleGroups}
         activeDragOverGroupId={activeDragOverGroupId}
@@ -556,11 +427,9 @@ export function ProjectSidebar({
         renderGroupContextMenu={renderGroupContextMenu}
         ungroupedActiveProjects={ungroupedActiveProjects}
         activeIndexById={activeIndexById}
-        expandedProjects={expandedProjects}
         editingId={editingId}
         editName={editName}
         projectStatus={projectStatus}
-        toggleProjectExpanded={toggleProjectExpanded}
         setEditName={setEditName}
         handleSaveRename={handleSaveRename}
         handleCancelRename={handleCancelRename}
@@ -570,11 +439,10 @@ export function ProjectSidebar({
         openProject={openProject}
         selectProject={selectProject}
         onReorderProjects={onReorderProjects}
-        filteredArchivedProjects={filteredArchivedProjects}
+        archivedProjects={archivedProjects}
         showArchived={showArchived}
         setShowArchived={setShowArchived}
         renderArchivedProjectContextMenu={renderArchivedProjectContextMenu}
-        variant={variant}
         railSections={railSections}
         onNewProject={onNewProject}
         onNewGroup={() => setNewGroupModal({})}
@@ -586,9 +454,6 @@ export function ProjectSidebar({
         onSelectProfile={onSelectSSHProfile}
         activeProfileId={activeSSHProfileId}
       />
-
-      {/* Version + update chip - pinned bottom (the Rail has its own footer) */}
-      {!isRail && <SidebarFooter />}
 
       {/* Group Delete Confirmation Dialog */}
       <ConfirmDialog
@@ -651,6 +516,6 @@ export function ProjectSidebar({
         onClose={() => setNewGroupModal(null)}
         onSubmit={handleCreateGroupSubmit}
       />
-    </Root>
+    </div>
   )
 }

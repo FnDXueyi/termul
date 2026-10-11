@@ -773,8 +773,8 @@ test.describe('toast offset', () => {
       const project = await registerProject()
       await openApp(page, project)
       await expect(page.locator(`[aria-label^="Project: ${project.name}"]`).first()).toBeVisible()
-      // The rail's New agent chat button opens the launcher.
-      await page.locator('[aria-label="New agent chat"]').first().click()
+      // The Side panel's New chat button opens the launcher.
+      await page.getByRole('button', { name: 'New chat', exact: true }).first().click()
       const composer = page
         .locator('[data-composer-editor="true"][aria-label="Agent prompt"]')
         .first()

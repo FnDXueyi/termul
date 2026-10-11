@@ -73,7 +73,6 @@ export function RailExpanded({
       </div>
 
       <ProjectSidebar
-        variant="rail"
         projects={projects}
         activeProjectId={activeProjectId}
         onSelectProject={onSelectProject}

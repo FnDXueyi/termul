@@ -9,9 +9,7 @@ import type { Project } from '@/types/project'
 import { SidePanelColumn } from './SidePanelColumn'
 
 vi.mock('@/components/file-explorer/FileExplorer', () => ({
-  FileExplorer: ({ embedded }: { embedded?: boolean }) => (
-    <div data-testid="file-explorer" data-embedded={String(Boolean(embedded))} />
-  )
+  FileExplorer: () => <div data-testid="file-explorer" />
 }))
 
 vi.mock('./WorkspaceSwitcher', () => ({
@@ -129,7 +127,7 @@ describe('SidePanelColumn', () => {
     const { rerenderProject } = renderPanel(p1)
 
     fireEvent.click(screen.getByRole('tab', { name: 'Explorer' }))
-    expect(await screen.findByTestId('file-explorer')).toHaveAttribute('data-embedded', 'true')
+    expect(await screen.findByTestId('file-explorer')).toBeInTheDocument()
     expect(useShellLayoutStore.getState().lastColumnTabByProject).toEqual({ p1: 'explorer' })
 
     rerenderProject(p2)

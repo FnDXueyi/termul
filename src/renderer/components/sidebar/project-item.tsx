@@ -1,22 +1,18 @@
 import type { GitDiffStat } from '@shared/types/ipc.types'
 import { type KeyboardEvent, memo, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronRight, Settings } from '@/components/icons'
+import { Settings } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
-import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/project'
-import { ProjectChatList } from '../ProjectChatList'
 import { ProjectDiffStat } from '../shell/ProjectDiffStat'
 import { type ProjectRowStatus, ProjectStatusMarks } from './indicators'
 
 export interface ProjectItemProps {
   project: Project
   isActive: boolean
-  isExpanded: boolean
-  onToggleExpand: () => void
   isEditing: boolean
   editName: string
   shortcut?: string
@@ -29,20 +25,13 @@ export interface ProjectItemProps {
   onCancelRename: () => void
   onSettingsClick: () => void
   renderContextMenu?: (project: Project) => React.ReactNode
-  /**
-   * `rail` is the shell Rail row: no chat chevron and no chat list, and the
-   * uncommitted diff stat in the right slot. Defaults to the classic row.
-   */
-  variant?: 'classic' | 'rail'
-  /** Uncommitted line stat for the rail row (see `RailProjectItem`); nothing when null. */
+  /** Uncommitted line stat for the row (see `RailProjectItem`); nothing when null. */
   diffStat?: GitDiffStat | null
 }
 
 export const ProjectItem = memo(function ProjectItem({
   project,
   isActive,
-  isExpanded,
-  onToggleExpand,
   isEditing,
   editName,
   shortcut,
@@ -55,11 +44,9 @@ export const ProjectItem = memo(function ProjectItem({
   onCancelRename,
   onSettingsClick,
   renderContextMenu,
-  variant = 'classic',
   diffStat: watchedDiffStat = null
 }: ProjectItemProps): React.JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null)
-  const isRail = variant === 'rail'
   // At rest the stat holds the right slot; hover or focus swaps it for the
   // settings gear and shortcut chip. It yields to the rename input.
   const diffStat = isEditing ? null : watchedDiffStat
@@ -99,37 +86,17 @@ export const ProjectItem = memo(function ProjectItem({
             }}
             className={cn(
               'group flex h-8 w-full cursor-pointer select-none items-center pr-1.5 text-left text-xs',
-              isRail ? 'rounded-lg' : 'rounded-md',
-              isRail ? RAIL_ROW_INSET_CLASS : 'gap-1.5 pl-1',
+              'rounded-lg',
+              RAIL_ROW_INSET_CLASS,
               'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
               isActive ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]'
             )}
             aria-current={isActive ? 'page' : undefined}
             aria-label={`Project: ${project.name}${isActive ? ' (active)' : ''}`}
           >
-            {/* Expand/collapse chevron — every project can have chats, so the
-            chevron always shows (not only git projects). */}
-            {!isRail && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onToggleExpand()
-                }}
-                className="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground/70 transition-colors duration-150 ease-out hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                aria-label={isExpanded ? 'Collapse chats' : 'Expand chats'}
-                aria-expanded={isExpanded}
-              >
-                {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-              </button>
-            )}
-
-            {isRail ? (
-              <span data-rail-icon-column className={RAIL_ICON_BOX_CLASS}>
-                <ProjectIcon project={project} size={16} />
-              </span>
-            ) : (
+            <span data-rail-icon-column className={RAIL_ICON_BOX_CLASS}>
               <ProjectIcon project={project} size={16} />
-            )}
+            </span>
 
             {isEditing ? (
               <input
@@ -197,13 +164,6 @@ export const ProjectItem = memo(function ProjectItem({
         </ContextMenuTrigger>
         {renderContextMenu?.(project)}
       </ContextMenu>
-
-      {/* Project chat history sub-items (the rail keeps chats out of project rows) */}
-      {!isRail && (
-        <CollapseExpandMotion open={isExpanded}>
-          <ProjectChatList projectId={project.id} />
-        </CollapseExpandMotion>
-      )}
     </div>
   )
 })

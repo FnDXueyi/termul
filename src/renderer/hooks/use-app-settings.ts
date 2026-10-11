@@ -1,17 +1,16 @@
 import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi, terminalApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
-import { captureShellLayoutAtLoad } from '@/lib/shell-layout-mode'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import { setSidebarVisible } from '@/stores/sidebar-store'
 import { setSSHPanelVisible } from '@/stores/ssh-panel-store'
 import { useTerminalStore } from '@/stores/terminal-store'
-import type { AppPanelVisibilitySettingKey, AppSettings, AppSettingsUpdate } from '@/types/settings'
+import type { AppSettings, AppSettingsUpdate } from '@/types/settings'
 import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
 
-type PanelSettingKey = AppPanelVisibilitySettingKey
+type PanelSettingKey = 'sidebarVisible' | 'fileExplorerVisible' | 'sshPanelVisible'
 
 function applyPanelVisibility(panel: PanelSettingKey, visible: boolean): void {
   if (panel === 'sidebarVisible') {
@@ -146,14 +145,12 @@ export function useAppSettingsLoader(): void {
         }
 
         setSettings(settings)
-        captureShellLayoutAtLoad(settings.shellLayout)
         if (shouldPersistSettings) {
           void persistenceApi.writeDebounced(APP_SETTINGS_KEY, settings)
         }
       } else {
         settings = DEFAULT_APP_SETTINGS
         setSettings(settings)
-        captureShellLayoutAtLoad(settings.shellLayout)
       }
 
       // Apply orphan detection settings to PtyManager after settings load.
@@ -256,9 +253,9 @@ export function useResetAppSettings(): () => Promise<void> {
   return useCallback(async () => {
     resetToDefaults()
     // Reset reopens all three panels, through the shell-layout actions.
-    applyPanelVisibility('sidebarVisible', DEFAULT_APP_SETTINGS.sidebarVisible)
-    applyPanelVisibility('fileExplorerVisible', DEFAULT_APP_SETTINGS.fileExplorerVisible)
-    applyPanelVisibility('sshPanelVisible', DEFAULT_APP_SETTINGS.sshPanelVisible)
+    applyPanelVisibility('sidebarVisible', true)
+    applyPanelVisibility('fileExplorerVisible', true)
+    applyPanelVisibility('sshPanelVisible', true)
 
     await persistenceApi.write(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
     // Clear the in-process ACP timeout overrides too (mirrors the load

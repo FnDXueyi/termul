@@ -1,16 +1,13 @@
 import { LayoutGroup, Reorder } from 'framer-motion'
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react'
-import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus } from '@/components/icons'
+import { ChevronDown, ChevronRight, FolderPlus } from '@/components/icons'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
-import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
-import { getColorClasses } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import type { Project, ProjectGroup } from '@/types/project'
 import { AddProjectMenu } from './add-project-menu'
 import { ArchivedProjectItem } from './archived-project-item'
 import type { ProjectRowStatus } from './indicators'
-import { ProjectItem } from './project-item'
 import { RailGroupRow } from './rail-group-row'
 import { RailProjectItem } from './rail-project-item'
 import { RAIL_SECTION_BUTTON_CLASS, RailSectionHeader } from './rail-section-header'
@@ -18,9 +15,6 @@ import { RAIL_SECTION_BUTTON_CLASS, RailSectionHeader } from './rail-section-hea
 export interface ProjectListProps {
   projects: Project[]
   activeProjectId: string
-  isSearching: boolean
-  trimmedQuery: string
-  hasNoSearchResults: boolean
 
   // Groups
   groups: ProjectGroup[]
@@ -42,11 +36,9 @@ export interface ProjectListProps {
   // Project rows
   ungroupedActiveProjects: Project[]
   activeIndexById: ReadonlyMap<string, number>
-  expandedProjects: ReadonlySet<string>
   editingId: string | null
   editName: string
   projectStatus: (projectId: string) => ProjectRowStatus
-  toggleProjectExpanded: (projectId: string) => void
   setEditName: Dispatch<SetStateAction<string>>
   handleSaveRename: (projectId: string) => void
   handleCancelRename: () => void
@@ -61,17 +53,15 @@ export interface ProjectListProps {
   onReorderProjects: (projectIds: string[]) => void
 
   // Archived section
-  filteredArchivedProjects: Project[]
+  archivedProjects: Project[]
   showArchived: boolean
   setShowArchived: Dispatch<SetStateAction<boolean>>
   renderArchivedProjectContextMenu: (project: Project) => React.ReactNode
 
-  /** `rail` renders the shell Rail rows (no chat chevron, diff stat). Defaults to classic. */
-  variant?: 'classic' | 'rail'
   /**
-   * Rail only: label the grouped rows "Groups" and the ungrouped ones
-   * "Projects", each with a `+`. Off when there is no group (the sidebar then
-   * keeps its own Projects header above the list).
+   * Label the grouped rows "Groups" and the ungrouped ones "Projects", each
+   * with a `+`. Off when there is no group (the sidebar then keeps its own
+   * Projects header above the list).
    */
   railSections?: boolean
   onNewProject?: () => void
@@ -81,9 +71,6 @@ export interface ProjectListProps {
 export function ProjectList({
   projects,
   activeProjectId,
-  isSearching,
-  trimmedQuery,
-  hasNoSearchResults,
   groups,
   visibleGroups,
   activeDragOverGroupId,
@@ -101,11 +88,9 @@ export function ProjectList({
   renderGroupContextMenu,
   ungroupedActiveProjects,
   activeIndexById,
-  expandedProjects,
   editingId,
   editName,
   projectStatus,
-  toggleProjectExpanded,
   setEditName,
   handleSaveRename,
   handleCancelRename,
@@ -115,28 +100,25 @@ export function ProjectList({
   openProject,
   selectProject,
   onReorderProjects,
-  filteredArchivedProjects,
+  archivedProjects,
   showArchived,
   setShowArchived,
   renderArchivedProjectContextMenu,
-  variant = 'classic',
   railSections = false,
   onNewProject,
   onNewGroup
 }: ProjectListProps): React.JSX.Element {
   // One draggable active-project row, shared by grouped and ungrouped lists.
   // Dropping on a folder header or group container moves the project there.
-  // The rail row also watches git for its diff stat; the classic row never does.
-  const isRail = variant === 'rail'
-  const showSections = isRail && railSections
-  const Item = isRail ? RailProjectItem : ProjectItem
+  // The row also watches git for its diff stat.
+  const showSections = railSections
   const renderProjectRow = (project: Project): React.JSX.Element => {
     const shortcutIndex = activeIndexById.get(project.id) ?? -1
     return (
       <Reorder.Item
         key={project.id}
         value={project}
-        drag={isSearching ? false : 'y'}
+        drag="y"
         layout="position"
         className="list-none"
         whileDrag={{
@@ -171,11 +153,9 @@ export function ProjectList({
           activeDragOverGroupIdRef.current = null
         }}
       >
-        <Item
+        <RailProjectItem
           project={project}
           isActive={project.id === activeProjectId}
-          isExpanded={expandedProjects.has(project.id)}
-          onToggleExpand={() => toggleProjectExpanded(project.id)}
           isEditing={editingId === project.id}
           editName={editName}
           shortcut={
@@ -207,18 +187,6 @@ export function ProjectList({
             Create your first project to get started
           </p>
         </div>
-      ) : hasNoSearchResults ? (
-        <div
-          className="flex flex-col items-center justify-center p-6 text-center opacity-60"
-          data-testid="project-search-empty"
-          role="status"
-          aria-live="polite"
-        >
-          <p className="text-sm text-muted-foreground">No projects found</p>
-          <p className="text-xs text-muted-foreground mt-1 break-words">
-            Nothing matches “{trimmedQuery}”
-          </p>
-        </div>
       ) : (
         <div data-testid="active-projects-container">
           {/* LayoutGroup keeps Reorder layout measurements in sync when an item's
@@ -246,7 +214,6 @@ export function ProjectList({
               axis="y"
               values={visibleGroups}
               onReorder={(reordered) => {
-                if (isSearching) return
                 reorderGroups(reordered.map((gp) => gp.group.id))
               }}
               className="flex flex-col gap-0.5"
@@ -259,7 +226,7 @@ export function ProjectList({
                   <Reorder.Item
                     key={group.id}
                     value={groupEntry}
-                    drag={isSearching ? false : 'y'}
+                    drag="y"
                     layout="position"
                     className="list-none"
                   >
@@ -268,123 +235,42 @@ export function ProjectList({
                         'flex flex-col gap-0.5',
                         // Rail: an expanded group and its projects share one
                         // soft surface; the rows keep the shared icon column.
-                        isRail && !isCollapsed && '-mx-1 rounded-lg bg-foreground/[0.03] px-1 pb-1'
+                        !isCollapsed && '-mx-1 rounded-lg bg-foreground/[0.03] px-1 pb-1'
                       )}
-                      data-testid={isRail ? `rail-group-${group.id}` : undefined}
+                      data-testid={`rail-group-${group.id}`}
                     >
                       {/* Folder Header */}
-                      {isRail ? (
-                        <RailGroupRow
-                          group={group}
-                          isCollapsed={Boolean(isCollapsed)}
-                          isDragOver={activeDragOverGroupId === group.id}
-                          isEditing={editingGroupId === group.id}
-                          editName={editGroupName}
-                          onEditNameChange={setEditGroupName}
-                          onCommitRename={() => {
-                            if (editGroupName.trim()) {
-                              renameGroup(group.id, editGroupName.trim())
-                            }
-                            setEditingGroupId(null)
-                          }}
-                          onCancelRename={() => setEditingGroupId(null)}
-                          onToggle={() => toggleGroupCollapse(group.id)}
-                          onContextMenu={onRowContextMenu}
-                          menu={renderGroupContextMenu(group)}
-                        />
-                      ) : (
-                        <ContextMenu>
-                          <ContextMenuTrigger asChild>
-                            <div
-                              onClick={() => toggleGroupCollapse(group.id)}
-                              onContextMenu={onRowContextMenu}
-                              role="button"
-                              tabIndex={0}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault()
-                                  toggleGroupCollapse(group.id)
-                                }
-                              }}
-                              className={cn(
-                                'flex h-8 w-full cursor-pointer select-none items-center gap-1.5 rounded-md pl-1 pr-1.5 text-left text-xs',
-                                'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                                activeDragOverGroupId === group.id
-                                  ? 'bg-primary/10 ring-1 ring-inset ring-primary/60'
-                                  : 'hover:bg-foreground/[0.03]'
-                              )}
-                              data-group-id={group.id}
-                            >
-                              <span className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
-                                {isCollapsed ? (
-                                  <ChevronRight size={12} />
-                                ) : (
-                                  <ChevronDown size={12} />
-                                )}
-                              </span>
-                              <span
-                                className={cn(
-                                  'inline-flex size-4 shrink-0 items-center justify-center',
-                                  group.color
-                                    ? getColorClasses(group.color).text
-                                    : 'text-muted-foreground'
-                                )}
-                              >
-                                {isCollapsed ? <Folder size={14} /> : <FolderOpen size={14} />}
-                              </span>
-                              {editingGroupId === group.id ? (
-                                <input
-                                  type="text"
-                                  value={editGroupName}
-                                  onChange={(e) => setEditGroupName(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      if (editGroupName.trim()) {
-                                        renameGroup(group.id, editGroupName.trim())
-                                      }
-                                      setEditingGroupId(null)
-                                    } else if (e.key === 'Escape') {
-                                      setEditingGroupId(null)
-                                    }
-                                  }}
-                                  onBlur={() => {
-                                    if (editGroupName.trim()) {
-                                      renameGroup(group.id, editGroupName.trim())
-                                    }
-                                    setEditingGroupId(null)
-                                  }}
-                                  className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                              ) : (
-                                <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-                                  {group.name}
-                                </span>
-                              )}
-                              <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-                                {gpProjects.length}
-                              </span>
-                            </div>
-                          </ContextMenuTrigger>
-                          {renderGroupContextMenu(group)}
-                        </ContextMenu>
-                      )}
+                      <RailGroupRow
+                        group={group}
+                        isCollapsed={Boolean(isCollapsed)}
+                        isDragOver={activeDragOverGroupId === group.id}
+                        isEditing={editingGroupId === group.id}
+                        editName={editGroupName}
+                        onEditNameChange={setEditGroupName}
+                        onCommitRename={() => {
+                          if (editGroupName.trim()) {
+                            renameGroup(group.id, editGroupName.trim())
+                          }
+                          setEditingGroupId(null)
+                        }}
+                        onCancelRename={() => setEditingGroupId(null)}
+                        onToggle={() => toggleGroupCollapse(group.id)}
+                        onContextMenu={onRowContextMenu}
+                        menu={renderGroupContextMenu(group)}
+                      />
 
                       {/* Projects in Group */}
-                      <CollapseExpandMotion
-                        open={(!isCollapsed || isSearching) && gpProjects.length > 0}
-                      >
+                      <CollapseExpandMotion open={!isCollapsed && gpProjects.length > 0}>
                         <Reorder.Group
                           axis="y"
                           values={gpProjects}
                           onReorder={(reordered) => {
-                            if (isSearching) return
                             reorderProjectInGroup(
                               group.id,
                               reordered.map((p) => p.id)
                             )
                           }}
-                          className={cn('flex flex-col gap-0.5', !isRail && 'pl-4')}
+                          className="flex flex-col gap-0.5"
                           data-group-container-id={group.id}
                         >
                           {gpProjects.map(renderProjectRow)}
@@ -412,7 +298,6 @@ export function ProjectList({
                 axis="y"
                 values={ungroupedActiveProjects}
                 onReorder={(reordered) => {
-                  if (isSearching) return
                   onReorderProjects(reordered.map((p) => p.id))
                 }}
                 className="mt-0.5 flex flex-col gap-0.5"
@@ -424,26 +309,21 @@ export function ProjectList({
           </LayoutGroup>
 
           {/* Archived Projects Section */}
-          {filteredArchivedProjects.length > 0 && (
+          {archivedProjects.length > 0 && (
             <div className="mt-2 flex flex-col gap-0.5">
               <button
                 onClick={() => setShowArchived(!showArchived)}
-                disabled={isSearching}
                 className="label-panel flex h-8 w-full items-center gap-1.5 rounded-md pl-1 pr-1.5 transition-colors duration-150 ease-out hover:bg-foreground/[0.03] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent"
-                aria-expanded={showArchived || isSearching}
-                aria-label={`Archived projects (${filteredArchivedProjects.length})`}
+                aria-expanded={showArchived}
+                aria-label={`Archived projects (${archivedProjects.length})`}
               >
                 <span className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
-                  {showArchived || isSearching ? (
-                    <ChevronDown size={12} />
-                  ) : (
-                    <ChevronRight size={12} />
-                  )}
+                  {showArchived ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                 </span>
-                Archived ({filteredArchivedProjects.length})
+                Archived ({archivedProjects.length})
               </button>
-              {(showArchived || isSearching) &&
-                filteredArchivedProjects.map((project) => (
+              {showArchived &&
+                archivedProjects.map((project) => (
                   <ArchivedProjectItem
                     key={project.id}
                     project={project}

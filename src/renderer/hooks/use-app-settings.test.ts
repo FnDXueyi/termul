@@ -1,9 +1,5 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  getShellLayoutActiveAtLoad,
-  resetShellLayoutActiveAtLoadForTests
-} from '@/lib/shell-layout-mode'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
@@ -268,9 +264,7 @@ describe('use-app-settings', () => {
     expect(layout.railExpanded).toBe(false)
     expect(layout.sidePanelVisible).toBe(false)
     expect(layout.sshSectionVisible).toBe(false)
-    expect(useAppSettingsStore.getState().settings.sidebarVisible).toBe(
-      DEFAULT_APP_SETTINGS.sidebarVisible
-    )
+    expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
     expect(mockPersistenceWrite).not.toHaveBeenCalledWith(APP_SETTINGS_KEY, expect.anything())
     expect(mockPersistenceWriteDebounced).not.toHaveBeenCalledWith(
       APP_SETTINGS_KEY,
@@ -316,43 +310,30 @@ describe('use-app-settings', () => {
     )
   })
 
-  describe('shell layout flag (story 12)', () => {
-    beforeEach(() => {
-      resetShellLayoutActiveAtLoadForTests()
-    })
+  describe('retired shell layout flag and legacy panel fields', () => {
+    it('ignores a stored shellLayout and keeps legacy panel fields in the persisted record', async () => {
+      const persisted = {
+        ...DEFAULT_APP_SETTINGS,
+        shellLayout: 'classic',
+        sidebarVisible: false,
+        fileExplorerVisible: false,
+        sshPanelVisible: false
+      }
+      mockPersistenceRead.mockResolvedValueOnce({ success: true, data: persisted })
 
-    it('keeps shellLayout out of the defaults and captures the mode active at load', async () => {
+      renderHook(() => useAppSettingsLoader())
+
+      await waitFor(() => {
+        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
+      })
+      // The loader still merges over the defaults, so raw legacy values survive
+      // in memory until the shell-layout migration has read them.
+      expect(useAppSettingsStore.getState().settings).toEqual(persisted)
       expect('shellLayout' in DEFAULT_APP_SETTINGS).toBe(false)
-      mockPersistenceRead.mockResolvedValueOnce({
-        success: true,
-        data: { ...DEFAULT_APP_SETTINGS, shellLayout: 'revamp' }
-      })
-
-      renderHook(() => useAppSettingsLoader())
-
-      await waitFor(() => {
-        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
-      })
-      expect(useAppSettingsStore.getState().settings.shellLayout).toBe('revamp')
-      expect(getShellLayoutActiveAtLoad()).toBe('revamp')
+      expect('sidebarVisible' in DEFAULT_APP_SETTINGS).toBe(false)
     })
 
-    it('keeps a stored classic choice over the revamp default', async () => {
-      mockPersistenceRead.mockResolvedValueOnce({
-        success: true,
-        data: { ...DEFAULT_APP_SETTINGS, shellLayout: 'classic' }
-      })
-
-      renderHook(() => useAppSettingsLoader())
-
-      await waitFor(() => {
-        expect(useAppSettingsStore.getState().isLoaded).toBe(true)
-      })
-      expect(useAppSettingsStore.getState().settings.shellLayout).toBe('classic')
-      expect(getShellLayoutActiveAtLoad()).toBe('classic')
-    })
-
-    it('captures the code default when no record exists', async () => {
+    it('loads without error when no record exists', async () => {
       mockPersistenceRead.mockResolvedValueOnce({ success: false, code: 'KEY_NOT_FOUND' })
 
       renderHook(() => useAppSettingsLoader())
@@ -360,19 +341,7 @@ describe('use-app-settings', () => {
       await waitFor(() => {
         expect(useAppSettingsStore.getState().isLoaded).toBe(true)
       })
-      expect(useAppSettingsStore.getState().settings.shellLayout).toBeUndefined()
-      expect(getShellLayoutActiveAtLoad()).toBe('revamp')
-    })
-
-    it('persists the flag through the debounced settings write', async () => {
-      const { result } = renderHook(() => useUpdateAppSetting())
-
-      await result.current('shellLayout', 'revamp')
-
-      expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-        APP_SETTINGS_KEY,
-        expect.objectContaining({ shellLayout: 'revamp' })
-      )
+      expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
     })
   })
 
@@ -462,9 +431,9 @@ describe('use-app-settings', () => {
     await result.current()
 
     const layout = useShellLayoutStore.getState()
-    expect(layout.railExpanded).toBe(DEFAULT_APP_SETTINGS.sidebarVisible)
-    expect(layout.sidePanelVisible).toBe(DEFAULT_APP_SETTINGS.fileExplorerVisible)
-    expect(layout.sshSectionVisible).toBe(DEFAULT_APP_SETTINGS.sshPanelVisible)
+    expect(layout.railExpanded).toBe(true)
+    expect(layout.sidePanelVisible).toBe(true)
+    expect(layout.sshSectionVisible).toBe(true)
     expect(mockPersistenceWrite).toHaveBeenCalledWith(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
   })
 

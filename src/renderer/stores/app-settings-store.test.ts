@@ -9,15 +9,6 @@ import {
   useTerminalUrlOpenMode
 } from './app-settings-store'
 
-function assertUpdateSettingsRejectsPanelVisibility(
-  updateSettings: ReturnType<typeof useAppSettingsStore.getState>['updateSettings']
-): void {
-  // @ts-expect-error Panel visibility changes must go through useUpdatePanelVisibility.
-  updateSettings({ sidebarVisible: false })
-}
-
-void assertUpdateSettingsRejectsPanelVisibility
-
 describe('app-settings-store', () => {
   beforeEach(() => {
     // Reset store to initial state before each test
@@ -147,9 +138,6 @@ describe('app-settings-store', () => {
         orphanDetectionTimeout: 600000,
         confirmTerminalClose: true,
         terminalUrlOpenMode: 'termul' as const,
-        sidebarVisible: false,
-        fileExplorerVisible: true,
-        sshPanelVisible: true,
         remoteBindMode: 'localhost' as const,
         colorTheme: 'dracula',
         appearanceMode: 'dark' as const,
@@ -181,9 +169,6 @@ describe('app-settings-store', () => {
           orphanDetectionTimeout: 300000,
           confirmTerminalClose: false,
           terminalUrlOpenMode: 'termul',
-          sidebarVisible: false,
-          fileExplorerVisible: false,
-          sshPanelVisible: false,
           remoteBindMode: 'all' as const,
           colorTheme: 'nord',
           appearanceMode: 'light' as const,
@@ -243,28 +228,6 @@ describe('app-settings-store', () => {
 
       useAppSettingsStore.getState().resetToDefaults()
       expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(false)
-    })
-  })
-
-  describe('panel visibility settings', () => {
-    it('should default sidebar and file explorer visibility to true', () => {
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.sidebarVisible).toBe(true)
-      expect(settings.fileExplorerVisible).toBe(true)
-    })
-
-    it('should update sidebar visibility setting', () => {
-      const { updateSetting } = useAppSettingsStore.getState()
-      updateSetting('sidebarVisible', false)
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.sidebarVisible).toBe(false)
-    })
-
-    it('should update file explorer visibility setting', () => {
-      const { updateSetting } = useAppSettingsStore.getState()
-      updateSetting('fileExplorerVisible', false)
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.fileExplorerVisible).toBe(false)
     })
   })
 

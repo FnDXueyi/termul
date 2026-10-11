@@ -32,7 +32,7 @@ export function useSSHPanelDialogs(activeProfileId?: string | null): SSHPanelDia
   // Profile form: closed when null; `profile` null = new profile.
   const [form, setForm] = useState<{ profile: SSHProfile | null } | null>(null)
   // Delete is irreversible — gate it behind a confirmation dialog (mirrors
-  // ProjectChatList) instead of deleting on the first menu click.
+  // the shell Chats list) instead of deleting on the first menu click.
   const [deleteConfirm, setDeleteConfirm] = useState<SSHProfile | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 

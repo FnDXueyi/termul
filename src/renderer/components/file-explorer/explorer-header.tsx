@@ -50,9 +50,7 @@ export function ExplorerHeader({
     try {
       await updatePanelVisibility('fileExplorerVisible', !isVisible)
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to update file explorer visibility'
-      )
+      toast.error(error instanceof Error ? error.message : 'Failed to update side panel visibility')
     }
   }
 
@@ -113,7 +111,7 @@ export function ExplorerHeader({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => void handleTogglePanel()}>
                   <PanelRight className="mr-2 h-3.5 w-3.5" />
-                  {isVisible ? 'Hide file explorer' : 'Show file explorer'}
+                  {isVisible ? 'Hide side panel' : 'Show side panel'}
                 </DropdownMenuItem>
               </>
             )}

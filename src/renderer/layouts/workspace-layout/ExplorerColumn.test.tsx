@@ -10,11 +10,6 @@ vi.mock('@/stores/file-explorer-store', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useFileExplorerVisible: () => visible.value
 }))
-vi.mock('@/components/file-explorer/FileExplorer', () => ({
-  FileExplorer: ({ side }: { side?: string }) => (
-    <div data-testid="file-explorer" data-side={side} />
-  )
-}))
 vi.mock('@/components/ssh/SSHFileExplorer', () => ({
   SSHFileExplorer: () => <div data-testid="ssh-explorer" />
 }))
@@ -53,41 +48,21 @@ describe('ExplorerColumn', () => {
     visible.value = true
   })
 
-  it('renders the classic File Explorer without a sidePanel slot', async () => {
-    render(<ExplorerColumn activeProject={project} ssh={makeSsh(false)} side="right" />)
-    expect(await screen.findByTestId('file-explorer')).toHaveAttribute('data-side', 'right')
-    expect(screen.queryByTestId('side-panel-slot')).toBeNull()
-  })
-
-  it('keeps the classic File Explorer and the SSH block together without a slot', async () => {
-    render(<ExplorerColumn activeProject={project} ssh={makeSsh(true)} />)
-    expect(await screen.findByTestId('file-explorer')).toBeInTheDocument()
-    expect(await screen.findByTestId('ssh-explorer')).toBeInTheDocument()
-  })
-
   it('renders the sidePanel slot in place of the File Explorer', async () => {
-    render(
-      <ExplorerColumn activeProject={project} ssh={makeSsh(false)} side="left" sidePanel={slot} />
-    )
+    render(<ExplorerColumn activeProject={project} ssh={makeSsh(false)} sidePanel={slot} />)
     expect(await screen.findByTestId('side-panel-slot')).toBeInTheDocument()
-    expect(screen.queryByTestId('file-explorer')).toBeNull()
   })
 
   it('shows only the SSH block, at its own width, while an SSH profile is active', async () => {
-    render(
-      <ExplorerColumn activeProject={project} ssh={makeSsh(true)} side="left" sidePanel={slot} />
-    )
+    render(<ExplorerColumn activeProject={project} ssh={makeSsh(true)} sidePanel={slot} />)
     const ssh = await screen.findByTestId('ssh-explorer')
     expect(screen.queryByTestId('side-panel-slot')).toBeNull()
-    expect(screen.queryByTestId('file-explorer')).toBeNull()
     expect(ssh.parentElement).toHaveClass('w-64')
   })
 
   it('renders nothing for the slot while the explorer is hidden', () => {
     visible.value = false
-    render(
-      <ExplorerColumn activeProject={project} ssh={makeSsh(false)} side="left" sidePanel={slot} />
-    )
+    render(<ExplorerColumn activeProject={project} ssh={makeSsh(false)} sidePanel={slot} />)
     expect(screen.queryByTestId('side-panel-slot')).toBeNull()
   })
 })

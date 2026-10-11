@@ -24,7 +24,6 @@ const SHELL_LAYOUT_SOURCES = {
   store: join(RENDERER_DIR, 'stores', 'shell-layout-store.ts'),
   record: join(LIB_DIR, 'shell-layout-record.ts'),
   migration: join(LIB_DIR, 'shell-layout-migration.ts'),
-  mode: join(LIB_DIR, 'shell-layout-mode.ts'),
   hook: join(RENDERER_DIR, 'hooks', 'use-shell-layout-hydration.ts')
 }
 
@@ -57,6 +56,18 @@ describe('shell-layout persistence parity', () => {
       }
     }
     expect(read(SHELL_LAYOUT_SOURCES.migration)).toMatch(/localStorage\?\.getItem/)
+  })
+
+  it('keeps the legacy layout keys read-only: resize code no longer touches localStorage', () => {
+    const migration = read(SHELL_LAYOUT_SOURCES.migration)
+    expect(migration).toContain("'termul:file-explorer-width'")
+    expect(migration).toContain("'termul-ssh-panel-height'")
+    expect(
+      existsSync(join(RENDERER_DIR, 'components', 'file-explorer', 'use-explorer-resize.ts'))
+    ).toBe(false)
+    const sshSection = read(join(RENDERER_DIR, 'components', 'sidebar', 'ssh-section.tsx'))
+    expect(sshSection).not.toContain('localStorage')
+    expect(sshSection).toContain('setSshSectionHeight')
   })
 
   it.each([

@@ -26,10 +26,8 @@ vi.mock('@/components/shell/TopRowToggles', () => ({
 }))
 vi.mock('@/components/shell/ShellRail', () => ({ COLLAPSED_WIDTH: 48 }))
 vi.mock('@/layouts/workspace-layout/ExplorerColumn', () => ({
-  ExplorerColumn: ({ side, sidePanel }: { side?: string; sidePanel?: React.ReactNode }) => (
-    <div data-testid="explorer-column" data-side={side}>
-      {sidePanel}
-    </div>
+  ExplorerColumn: ({ sidePanel }: { sidePanel?: React.ReactNode }) => (
+    <div data-testid="explorer-column">{sidePanel}</div>
   )
 }))
 
@@ -64,9 +62,8 @@ beforeEach(() => {
 })
 
 describe('ShellSidePanel', () => {
-  it('injects the Column tabs panel into the explorer column on the left', () => {
+  it('injects the Column tabs panel into the explorer column', () => {
     renderPanel(null)
-    expect(screen.getByTestId('explorer-column')).toHaveAttribute('data-side', 'left')
     expect(screen.getByTestId('side-panel-column')).toHaveTextContent('p1')
   })
 

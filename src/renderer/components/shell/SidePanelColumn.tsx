@@ -28,7 +28,7 @@ interface SidePanelColumnProps {
   activeProject: Project
   /**
    * The header is part of the window top row (expanded Rail on desktop): it
-   * becomes a drag region. Defaults to the classic, non-draggable header.
+   * becomes a drag region. Defaults to a non-draggable header.
    */
   dragRegion?: boolean
 }
@@ -40,7 +40,7 @@ const TAB_LABELS: Record<ShellLastColumnTab, string> = {
 }
 
 /**
- * Shell Side panel (flagged shell only): a header with the New chat button,
+ * Shell Side panel: a header with the New chat button,
  * the Chats / Explorer / Changes Column tabs and the selected tab's body. The
  * last tab is remembered per project. The tabs render only while the Rail is
  * expanded; collapsed, the Rail's own icons select the tab. Mounted through
@@ -119,7 +119,7 @@ export function SidePanelColumn({
           {selected === 'chats' && <ChatsList project={activeProject} />}
           {selected === 'explorer' && (
             <Suspense fallback={<ShellSkeleton />}>
-              <FileExplorer side="left" embedded />
+              <FileExplorer />
             </Suspense>
           )}
           {selected === 'changes' && <ChangesPanel cwd={cwd} isVisible />}

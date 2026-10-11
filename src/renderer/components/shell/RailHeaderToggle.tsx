@@ -2,9 +2,8 @@ import { PanelLeft } from '@/components/icons'
 import { RAIL_TOGGLE_LABEL, useRailToggle } from '@/components/shell/use-rail-toggle'
 
 /**
- * Rail toggle as the first control of the Projects header row (web only: on
- * desktop the TitleBar toggles stay). Same name and `aria-pressed` contract
- * as the collapsed Rail's toggle.
+ * Rail toggle as the first control of the Projects header row. Same name and
+ * `aria-pressed` contract as the collapsed Rail's toggle.
  */
 export function RailHeaderToggle({ className }: { className: string }): React.JSX.Element {
   const { expanded, toggle } = useRailToggle()
