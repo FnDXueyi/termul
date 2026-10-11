@@ -217,26 +217,77 @@ fn agent_switch_serializes_camel_case() {
 #[test]
 fn session_info_update_serializes_camel_case() {
     // With a title → serialized as `"title": "T"`
-    let event = SessionInfoUpdateEvent {
-        agent_id: AgentId("a".to_string()),
-        session_id: SessionId::new("s"),
-        title: Some("T".to_string()),
-    };
+    let event = SessionInfoUpdateEvent::title_only(
+        AgentId("a".to_string()),
+        SessionId::new("s"),
+        Some("T".to_string()),
+    );
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["agentId"], "a");
     assert_eq!(value["sessionId"], "s");
     assert_eq!(value["title"], "T");
+    assert!(value.get("compaction").is_none());
+    assert!(value.get("retry").is_none());
 
     // Without a title → serialized as `"title": null` (agent explicitly cleared)
-    let event_no_title = SessionInfoUpdateEvent {
-        agent_id: AgentId("a".to_string()),
-        session_id: SessionId::new("s"),
-        title: None,
-    };
+    let event_no_title =
+        SessionInfoUpdateEvent::title_only(AgentId("a".to_string()), SessionId::new("s"), None);
     let value = serde_json::to_value(&event_no_title).unwrap();
     assert_eq!(value["agentId"], "a");
     assert_eq!(value["sessionId"], "s");
     assert_eq!(value["title"], serde_json::Value::Null);
+}
+
+#[test]
+fn session_info_update_omits_title_when_only_opencode_markers_are_present() {
+    let meta = Meta::from_iter([
+        (
+            "opencode/compaction".to_string(),
+            serde_json::json!({
+                "status": "started",
+                "messageId": "msg_1",
+                "reason": "auto"
+            }),
+        ),
+        (
+            "opencode/retry".to_string(),
+            serde_json::json!({
+                "attempt": 2,
+                "nextRetryAt": "2026-10-09T00:00:00Z",
+                "error": { "type": "provider.rate-limit", "message": "slow down" }
+            }),
+        ),
+    ]);
+    let notices = opencode_notices(Some(&meta));
+    let event = SessionInfoUpdateEvent {
+        agent_id: AgentId("a".to_string()),
+        session_id: SessionId::new("s"),
+        title: None,
+        compaction: notices.compaction,
+        retry: notices.retry,
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert!(value.get("title").is_none());
+    assert_eq!(value["compaction"]["status"], "started");
+    assert_eq!(value["compaction"]["messageId"], "msg_1");
+    assert_eq!(value["compaction"]["reason"], "auto");
+    assert_eq!(value["retry"]["attempt"], 2);
+    assert_eq!(value["retry"]["errorMessage"], "slow down");
+}
+
+#[test]
+fn opencode_retry_null_clears_and_bad_markers_are_dropped() {
+    let clear = Meta::from_iter([("opencode/retry".to_string(), serde_json::Value::Null)]);
+    let notices = opencode_notices(Some(&clear));
+    assert_eq!(notices.retry, Some(None));
+    assert!(notices.compaction.is_none());
+
+    let bad = Meta::from_iter([(
+        "opencode/compaction".to_string(),
+        serde_json::json!({ "status": "nope" }),
+    )]);
+    assert!(opencode_notices(Some(&bad)).compaction.is_none());
+    assert!(opencode_notices(None).retry.is_none());
 }
 
 #[test]
