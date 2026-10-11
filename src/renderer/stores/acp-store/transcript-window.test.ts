@@ -949,6 +949,55 @@ describe('acp-store live window + lazy-load + coalescing', () => {
     ])
   })
 
+  it('(c3e) twin folding ignores folder tokens: a live folder-token prompt folds against its plain-text persisted twin', async () => {
+    // A folder pick sends as plain relative-path text with no resource block,
+    // so the live `\uE006…\uE007` folder token must leave no file evidence.
+    const sid = 's-twin-folder-evidence'
+    seedSession(sid, 'agent-1', false)
+    const persisted: ChatMessage[] = [
+      ...buildMessages(2),
+      {
+        id: 'user:seq-10',
+        role: 'user',
+        blocks: [{ type: 'text', text: 'look in src/x/' }],
+        streaming: false,
+        timestamp: 10,
+        seq: 10
+      },
+      {
+        id: 'snapshot:agent:11',
+        role: 'agent',
+        blocks: [{ type: 'text', text: 'done' }],
+        streaming: false,
+        timestamp: 11,
+        seq: 11
+      }
+    ]
+    setCachedSessionPayload(sid, { metadata: fakeMetadata(sid, 4), messages: persisted })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          {
+            id: 'turn:live-1',
+            role: 'user',
+            blocks: [{ type: 'text', text: `look in ${fileToken('src/x/', '/work/src/x/')}` }],
+            streaming: false,
+            timestamp: 0,
+            seq: 900
+          }
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+    // Folded: no duplicated prompt.
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'm1',
+      'turn:live-1'
+    ])
+  })
+
   it('(c4) twin folding is count-bounded: a repeated identical prompt keeps its older copy', async () => {
     // The user sent the same prompt twice — the persisted copy adjacent to
     // the live seam is the live bubble's twin, but the identical older copy

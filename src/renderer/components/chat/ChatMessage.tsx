@@ -10,6 +10,7 @@ import type { ContentBlock } from '@/lib/acp-api'
 import { readAttachmentBytes } from '@/lib/attachment-api'
 import type { FilePathResolutionContext } from '@/lib/file-path-links'
 import {
+  isFolderTokenPath,
   parseCommandSegments,
   parseFileSegments,
   parseSkillSegments,
@@ -76,7 +77,7 @@ function UserMessageText({ text }: { text: string }): React.JSX.Element {
   type FlatSeg =
     | { kind: 'text'; text: string }
     | { kind: 'skill'; name: string }
-    | { kind: 'file'; display: string }
+    | { kind: 'file'; display: string; dir: boolean }
     | { kind: 'command'; name: string }
   const flat: FlatSeg[] = []
   let hasPills = false
@@ -89,7 +90,11 @@ function UserMessageText({ text }: { text: string }): React.JSX.Element {
     }
     for (const fseg of fileSegs) {
       if (fseg.kind === 'file') {
-        flat.push({ kind: 'file', display: fseg.display })
+        flat.push({
+          kind: 'file',
+          display: fseg.display,
+          dir: isFolderTokenPath(fseg.absPath)
+        })
         hasPills = true
       } else {
         flat.push({ kind: 'text', text: fseg.text })
@@ -130,7 +135,7 @@ function UserMessageText({ text }: { text: string }): React.JSX.Element {
             ) : seg.kind === 'command' ? (
               <SkillChip key={`command-${i}`} name={`/${seg.name}`} />
             ) : seg.kind === 'file' ? (
-              <FileChip key={`file-${i}`} name={seg.display} />
+              <FileChip key={`file-${i}`} name={seg.display} kind={seg.dir ? 'dir' : 'file'} />
             ) : (
               <span key={`text-${i}`}>{seg.text}</span>
             )

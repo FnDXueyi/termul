@@ -45,7 +45,7 @@ import { ChatComposerEditor } from './composer/ChatComposerEditor'
 import { ComposerAddSheet } from './composer/ComposerAddSheet'
 import { ComposerSendButton } from './composer/ComposerSendButton'
 import { blurComposerEditor, insertComposerTrigger } from './composer/insert-composer-trigger'
-import { FileMentionMenu } from './FileMentionMenu'
+import { FileMentionMenu, MENTION_EMPTY_LABEL, MENTION_SEARCHING_LABEL } from './FileMentionMenu'
 import { McpBadge } from './McpBadge'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PromptQueuePanel } from './PromptQueuePanel'
@@ -258,7 +258,7 @@ export function ChatInputBar({
   }, [])
   const mentionSections = mentions.sections
   const mentionMenuRef = mentions.menuRef
-  const emptyLabel = mentions.loading ? 'Searching files…' : 'No files match. Try another name.'
+  const emptyLabel = mentions.loading ? MENTION_SEARCHING_LABEL : MENTION_EMPTY_LABEL
   const resetMentions = mentions.reset
   const onMentionSelect = useComposerMentionSelect({
     value,

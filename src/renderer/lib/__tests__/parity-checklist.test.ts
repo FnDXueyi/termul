@@ -1442,6 +1442,41 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
+  // Folder @-mention parity (gh-896): the renderer-side contract strings that
+  // both transports share. The Rust-side source strings are intentionally not
+  // asserted here.
+  describe('Folder mention parity (gh-896)', () => {
+    const readLib = (rel: string): string => readFileSync(join(LIB_DIR, rel), 'utf-8')
+
+    it('the web adapter hit type carries the optional dir kind', () => {
+      expect(readLib('web-server-api.ts')).toMatch(/kind\?: 'file' \| 'dir'/)
+    })
+
+    it('the shared SearchFileHit contract carries the optional dir kind', () => {
+      const shared = join(LIB_DIR, '..', '..', 'shared', 'types', 'filesystem.types.ts')
+      expect(readFileSync(shared, 'utf-8')).toMatch(/kind\?: 'file' \| 'dir'/)
+    })
+
+    it('the web facade fans hits through the shared batch emitter without re-shaping them', () => {
+      expect(readLib('tauri-filesystem-api.ts')).toMatch(/files: data\.files/)
+    })
+
+    it('folder tokens reuse the file token with a trailing-slash dir marker', () => {
+      const tokens = readLib('skill-tokens.ts')
+      expect(tokens).toMatch(/export function isFolderTokenPath/)
+      expect(tokens).toMatch(/absPath\.endsWith\('\/'\)/)
+    })
+
+    it('the picker model renders a separate Folders section after Files', () => {
+      const model = readFileSync(
+        join(LIB_DIR, '..', 'components', 'chat', 'mention-menu-model.ts'),
+        'utf-8'
+      )
+      expect(model).toMatch(/heading: 'Folders'/)
+      expect(model).toMatch(/MAX_FOLDER_RESULTS/)
+    })
+  })
+
   // Filename-search transport parity (issue #848): the @-mention picker's
   // `search_file_names_stream` desktop command gains a web transport — the
   // one-shot `GET /search/file-names` HTTP route reusing the same rg walk.

@@ -461,6 +461,18 @@ describe('ChatMessage', () => {
       expect(chip).not.toHaveClass('rounded-md')
     })
 
+    it('renders a folder token as a Folder-icon chip, distinct from a file chip', () => {
+      const text = `see ${FT('src/renderer/components/', '/work/src/renderer/components/')}`
+      const { container } = render(
+        <TooltipProvider>
+          <ChatMessage message={userMessage(text)} />
+        </TooltipProvider>
+      )
+      expect(screen.getByText('src/renderer/components/')).toBeInTheDocument()
+      expect(container.querySelector('svg[data-termul-icon="Folder"]')).not.toBeNull()
+      expect(container.querySelector('svg[data-termul-icon="File"]')).toBeNull()
+    })
+
     it('renders plain user text verbatim (no chip parsing) when there are no tokens', () => {
       const { container } = render(
         <TooltipProvider>

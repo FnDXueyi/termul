@@ -1,5 +1,5 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mockEntries: DirectoryEntry[] = [
   {
@@ -20,7 +20,10 @@ const mockEntries: DirectoryEntry[] = [
   }
 ]
 
-const { mockApi } = vi.hoisted(() => ({
+const { mockApi, fileNameBatchCbs } = vi.hoisted(() => ({
+  // The store subscribes once per module load, so captured callbacks persist
+  // across tests (never cleared).
+  fileNameBatchCbs: [] as Array<(e: { searchId: string; files: unknown[] }) => void>,
   mockApi: {
     filesystem: {
       readDirectory: vi.fn(),
@@ -28,9 +31,14 @@ const { mockApi } = vi.hoisted(() => ({
       unwatchDirectory: vi.fn(),
       searchContentStreamCancel: vi.fn(),
       searchFileNamesStreamCancel: vi.fn(),
+      searchContentStreamStart: vi.fn(),
+      searchFileNamesStreamStart: vi.fn(),
       onSearchContentBatch: vi.fn(() => () => {}),
       onSearchContentDone: vi.fn(() => () => {}),
-      onSearchFileNamesBatch: vi.fn(() => () => {}),
+      onSearchFileNamesBatch: vi.fn((cb: (e: { searchId: string; files: unknown[] }) => void) => {
+        fileNameBatchCbs.push(cb)
+        return () => {}
+      }),
       onSearchFileNamesDone: vi.fn(() => () => {})
     }
   }
@@ -587,6 +595,34 @@ describe('file-explorer-store', () => {
       expect(state.searchErrorCode).toBeNull()
     })
   })
+  describe('searchInRoot - filename batches (gh-896)', () => {
+    afterEach(() => {
+      // Leave no active search id behind (setRootPath cancels active searches).
+      useFileExplorerStore.setState({ searchRequestId: 0, searchFileNameMatches: null })
+    })
+
+    it('drops kind:dir hits so the explorer lists files only', async () => {
+      mockApi.filesystem.searchContentStreamStart.mockReset().mockResolvedValue({ success: true })
+      mockApi.filesystem.searchFileNamesStreamStart.mockReset().mockResolvedValue({ success: true })
+      useFileExplorerStore.setState({ rootPath: '/project', scopeRoot: '/project' })
+
+      await useFileExplorerStore.getState().searchInRoot('components', 7)
+      expect(fileNameBatchCbs.length).toBeGreaterThan(0)
+
+      for (const cb of fileNameBatchCbs) {
+        cb({
+          searchId: 'search-7',
+          files: [
+            { path: 'src/components.ts', ignored: false },
+            { path: 'src/renderer/components', ignored: false, kind: 'dir' }
+          ]
+        })
+      }
+
+      expect(useFileExplorerStore.getState().searchFileNameMatches).toEqual(['src/components.ts'])
+    })
+  })
+
   // Story 10 (F11): `retryRootLoad` force-reloads the root, bypassing the
   // guards that strand the Explorer on "Loading…" after an outage — a hung
   // read leaves a stale loadingDirs entry (toggleDirectory no-ops), and an
