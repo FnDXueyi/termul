@@ -3,6 +3,7 @@
  */
 
 import type { StateCreator } from 'zustand'
+import { diffTabIdentity } from '@/lib/diff-tab-identity'
 import { logFrontendError } from '@/lib/log-api'
 import { navigateToChatSession } from '@/lib/router-navigate'
 import {
@@ -307,22 +308,31 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
   // whichever pane holds it (the addGitTab pattern). The tab stores the cwd and
   // path as given; identity, not the stored strings, decides reuse.
   addDiffTab: (cwd: string, path: string, staged: boolean, targetPaneId?: string): void => {
+    // Identity, id and the stored path share one repo-relative POSIX form: the
+    // stored path later reaches git as a pathspec and keys the diff cache.
+    const identity = diffTabIdentity(cwd, path, staged)
     const id = diffTabId(cwd, path, staged)
     const { root, activePaneId, agentLauncherPaneId } = get()
     const paneId = targetPaneId ?? activePaneId
 
     const existing = findPaneContainingTab(root, id)
     if (existing) {
+      // Only the fullscreen pane renders while one is active, so focusing a tab
+      // held by another pane would leave it hidden: leave fullscreen first.
       const { fullscreenPaneId } = get()
+      const leavesFullscreen = fullscreenPaneId !== null && fullscreenPaneId !== existing.id
       set({
         root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
-        activePaneId: resolveActivePaneId(fullscreenPaneId, existing.id),
+        activePaneId: leavesFullscreen
+          ? existing.id
+          : resolveActivePaneId(fullscreenPaneId, existing.id),
+        fullscreenPaneId: leavesFullscreen ? null : fullscreenPaneId,
         agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
       })
       return
     }
 
-    const tab: WorkspaceTab = { type: 'diff', id, cwd, path, staged }
+    const tab: WorkspaceTab = { type: 'diff', id, cwd, path: identity.path, staged }
     get().addTabToPane(paneId, tab)
   },
 
