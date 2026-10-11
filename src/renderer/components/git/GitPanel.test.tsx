@@ -81,6 +81,11 @@ import { useProjectStore } from '@/stores/project-store'
 import type { Project } from '@/types/project'
 import { GitPanel } from './GitPanel'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 describe('GitPanel commit message generation', () => {
   beforeEach(() => {
     vi.clearAllMocks()

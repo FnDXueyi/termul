@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { WriteGate } from '@/components/ui/write-gate'
 import { cn } from '@/lib/utils'
 import type { BaseBranchInfo } from '@/lib/worktree-api'
 import { STRIP_MENU_ITEM_CLASS, STRIP_TRIGGER_CLASS } from './launcher-classes'
@@ -28,6 +29,7 @@ export function LauncherContextStrip({
   baseBranchInfo,
   baseOptions,
   interactive,
+  newWorktreeDisabledReason,
   gitBranch,
   isGitRepo
 }: {
@@ -37,8 +39,11 @@ export function LauncherContextStrip({
   setBaseBranch: Dispatch<SetStateAction<string | null>>
   baseBranchInfo: BaseBranchInfo | null
   baseOptions: { value: string; label: string }[]
-  /** Worktree launches available — the pickers mount; else read-only text. */
+  /** Git project — the pickers mount; else read-only text. */
   interactive: boolean
+  /** When set, the "New worktree" option stays visible but disabled and this
+      reason is exposed on hover and to assistive tech (write-gated server). */
+  newWorktreeDisabledReason?: string
   /** Reactive project branch (the same fallback the chat strip reads). */
   gitBranch: string | null
   isGitRepo: boolean
@@ -68,9 +73,20 @@ export function LauncherContextStrip({
               <SelectItem value="current" className={STRIP_MENU_ITEM_CLASS}>
                 Local
               </SelectItem>
-              <SelectItem value="worktree" className={STRIP_MENU_ITEM_CLASS}>
-                New worktree
-              </SelectItem>
+              <WriteGate
+                gated={!!newWorktreeDisabledReason}
+                focusable={false}
+                className="flex w-full"
+              >
+                <SelectItem
+                  value="worktree"
+                  className={STRIP_MENU_ITEM_CLASS}
+                  disabled={!!newWorktreeDisabledReason}
+                  aria-description={newWorktreeDisabledReason}
+                >
+                  New worktree
+                </SelectItem>
+              </WriteGate>
             </SelectContent>
           </Select>
 

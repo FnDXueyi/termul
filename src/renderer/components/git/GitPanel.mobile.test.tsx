@@ -102,6 +102,11 @@ vi.mock('@/hooks/use-mobile-web-shell', () => ({
 
 import { GitPanel } from './GitPanel'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 function resetState() {
   vi.clearAllMocks()
   mobileRef.current = true
