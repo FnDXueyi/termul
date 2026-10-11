@@ -166,6 +166,9 @@ pub(super) async fn run_command_loop(
                                 cwd: PathBuf::from(&cwd),
                                 worktree_path,
                                 worktree_branch,
+                                model: resolved.models.as_ref().map(
+                                    crate::acp::session_persistence::snapshot_from_model_state,
+                                ),
                             };
                             if !ephemeral {
                                 if let Some(persistence) = req_persistence {
@@ -358,6 +361,11 @@ pub(super) async fn run_command_loop(
                         send_with_legacy_models(&req_cx, request),
                     )
                     .await;
+                    if let (Ok(outcome), Some(persistence)) = (&result, &req_persistence) {
+                        persistence
+                            .record_session_model(&session_id.0, outcome.models.as_ref())
+                            .await;
+                    }
                     send_reply(&task_slot, result);
                 });
             }
@@ -440,6 +448,11 @@ pub(super) async fn run_command_loop(
                         send_with_legacy_models(&req_cx, request),
                     )
                     .await;
+                    if let (Ok(outcome), Some(persistence)) = (&result, &req_persistence) {
+                        persistence
+                            .record_session_model(&session_id.0, outcome.models.as_ref())
+                            .await;
+                    }
                     send_reply(&task_slot, result);
                 });
             }

@@ -1,4 +1,4 @@
-import type { GitCommitContext, GitStatusDetail } from '@shared/types/ipc.types'
+﻿import type { GitCommitContext, GitStatusDetail } from '@shared/types/ipc.types'
 import { platform } from '@tauri-apps/plugin-os'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -152,6 +152,40 @@ describe('git-status-store commit footer', () => {
     await first
 
     expect(useGitStatusStore.getState().commitContexts[CWD].ahead).toBe(9)
+  })
+
+  it('fetchCommitContext returns null for a superseded response', async () => {
+    let resolveSlow: (v: GitCommitContext) => void = () => {}
+    const slow = new Promise<GitCommitContext>((r) => {
+      resolveSlow = r
+    })
+    gitApi.getCommitContext.mockReturnValueOnce(slow)
+    gitApi.getCommitContext.mockResolvedValueOnce(makeContext({ branch: 'new' }))
+
+    const first = useGitStatusStore.getState().fetchCommitContext(CWD)
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    resolveSlow(makeContext({ branch: 'old' }))
+
+    await expect(first).resolves.toBeNull()
+    expect(useGitStatusStore.getState().commitContexts[CWD].branch).toBe('new')
+  })
+
+  it('refreshStatus ignores a stale (out-of-order) response', async () => {
+    let resolveSlow: (v: GitStatusDetail[]) => void = () => {}
+    const slow = new Promise<GitStatusDetail[]>((r) => {
+      resolveSlow = r
+    })
+    const fresh: GitStatusDetail[] = [{ path: 'new.ts', staged: true, status: 'modified' }]
+    gitApi.getStatus.mockReturnValueOnce(slow)
+    gitApi.getStatus.mockResolvedValueOnce(fresh)
+
+    const first = useGitStatusStore.getState().refreshStatus(CWD)
+    await useGitStatusStore.getState().refreshStatus(CWD)
+    resolveSlow([{ path: 'old.ts', staged: false, status: 'modified' }])
+    await first
+
+    expect(useGitStatusStore.getState().statuses[CWD]).toEqual(fresh)
+    expect(useGitStatusStore.getState().isFetchingStatus).toBe(false)
   })
 
   it('fetchCommitContext drops stale context when the fetch fails', async () => {

@@ -79,6 +79,12 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     keywords: ['accessibility', 'a11y', 'talkback', 'voiceover', 'nvda']
   },
   {
+    categoryId: 'appearance',
+    label: 'Revamped shell layout',
+    description: 'Opt in to the redesigned workspace shell. Applies after a reload.',
+    keywords: ['revamp', 'redesign', 'layout', 'new ui', 'preview']
+  },
+  {
     categoryId: 'shell',
     label: 'Default Shell',
     description: 'Set the default shell for new terminals.',

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Named refresh sources of the git status store (AD-17), mounted once per
  * renderer root by `useGitStatusRefresh`:
  *
@@ -41,11 +41,18 @@ function refreshKeyCoalesced(key: string): void {
   })
 }
 
-function onTerminalGitEvent(ptyId: string): void {
+function onTerminalGitEvent(ptyId: string, branchChanged = false): void {
   const cwd = useTerminalStore.getState().findTerminalByPtyId(ptyId)?.cwd
   if (!cwd) return
-  const key = deepestTrackedKey(cwd, Object.keys(useGitStatusStore.getState().paths))
-  if (key) refreshKeyCoalesced(key)
+  const state = useGitStatusStore.getState()
+  const key = deepestTrackedKey(cwd, Object.keys(state.paths))
+  if (!key) return
+  refreshKeyCoalesced(key)
+  // A branch change also invalidates a loaded branch list (only for keys that have one).
+  const path = state.paths[key]
+  if (branchChanged && path && state.branches[key] !== undefined) {
+    void state.fetchBranches(path)
+  }
 }
 
 function refreshAllTracked(): void {
@@ -55,7 +62,7 @@ function refreshAllTracked(): void {
 /** Starts every source; returns one teardown that stops them all. */
 export function startGitStatusRefreshSources(): () => void {
   const stopStatus = terminalApi.onGitStatusChanged((ptyId) => onTerminalGitEvent(ptyId))
-  const stopBranch = terminalApi.onGitBranchChanged((ptyId) => onTerminalGitEvent(ptyId))
+  const stopBranch = terminalApi.onGitBranchChanged((ptyId) => onTerminalGitEvent(ptyId, true))
   const stopFocus = onWindowFocus(refreshAllTracked)
   const interval = setInterval(() => {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return

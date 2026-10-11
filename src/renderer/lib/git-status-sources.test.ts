@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+﻿import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mockTerminal } from '@/lib/test-utils/terminal'
 import { useGitStatusStore } from '@/stores/git-status-store'
 import { useTerminalStore } from '@/stores/terminal-store'
@@ -92,6 +92,26 @@ describe('startGitStatusRefreshSources', () => {
     onBranch(ptyOf('t-root'))
     expect(refreshWorkingCopy).toHaveBeenCalledTimes(1)
     expect(refreshWorkingCopy).toHaveBeenCalledWith(ROOT)
+    stop()
+  })
+
+  it('refetches a loaded branch list on a branch change, but not on a status event', () => {
+    bindPty()
+    const fetchBranches = vi.fn().mockResolvedValue(undefined)
+    useGitStatusStore.setState({ fetchBranches, branches: { 'c:/project': ['main'] } })
+    const stop = startGitStatusRefreshSources()
+
+    onStatus(ptyOf('t-root'))
+    expect(fetchBranches).not.toHaveBeenCalled()
+
+    onBranch(ptyOf('t-root'))
+    expect(fetchBranches).toHaveBeenCalledTimes(1)
+    expect(fetchBranches).toHaveBeenCalledWith(ROOT)
+
+    // No branch list loaded for the worktree: nothing to refetch.
+    fetchBranches.mockClear()
+    onBranch(ptyOf('t-wt'))
+    expect(fetchBranches).not.toHaveBeenCalled()
     stop()
   })
 
