@@ -1,5 +1,5 @@
 import { ChatEntryIcon } from '@/components/chat/ChatHistoryEntryRow'
-import { Copy, FolderOpen, GitBranch, Terminal, Trash2 } from '@/components/icons'
+import { Columns2, Copy, FolderOpen, GitBranch, Terminal, Trash2 } from '@/components/icons'
 import {
   ChatRowTrail,
   type ProjectChatEntry,
@@ -13,6 +13,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { useAgentChatStatusSignals } from '@/components/workspace/tabs/agent-chat-status'
+import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { cn } from '@/lib/utils'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import type { ChatCardData } from './chat-cards'
@@ -48,6 +49,7 @@ export function ChatCard({
   onRequestDelete
 }: ChatCardProps): React.JSX.Element {
   const { entry, agentName, indexModel, branch } = card
+  const { startChatDrag } = usePaneDnd()
   const signals = useAgentChatStatusSignals(entry.id)
   const unread = useAgentChatUnreadStore((s) => Boolean(s.unread[entry.id]))
 
@@ -72,6 +74,8 @@ export function ChatCard({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
+          draggable
+          onDragStart={(e) => startChatDrag(entry.id, e)}
           className={cn(
             'group relative flex w-full items-center rounded-md pr-1 transition-colors duration-150 ease-out',
             isActive ? 'bg-foreground/[0.05]' : 'hover:bg-foreground/[0.03]',
@@ -139,6 +143,10 @@ export function ChatCard({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent className="w-48">
+        <ContextMenuItem onSelect={() => actions.onOpenInSplit(entry)}>
+          <Columns2 className="mr-2 h-4 w-4" /> Open in split
+        </ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem disabled={!hasCwd} onSelect={() => void actions.onOpenTerminal(entry)}>
           <Terminal className="mr-2 h-4 w-4" /> Open Terminal Here
         </ContextMenuItem>

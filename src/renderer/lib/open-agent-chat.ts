@@ -1,3 +1,4 @@
+import { toast } from 'sonner'
 import { isMobileWebShellViewport } from '@/hooks/use-mobile-web-shell'
 import { sessionOwnerProjectId } from '@/lib/acp-session-ownership'
 import { logFrontendError } from '@/lib/log-api'
@@ -109,4 +110,39 @@ export function openAgentChatInOwnProject(
   useProjectStore.getState().selectProject(owner)
   useSSHStore.getState().selectProfile(null)
   return 'switched-project'
+}
+
+/**
+ * Place an Agent chat in a pane or split (drag-and-drop, "Open in split"). Only
+ * an `opened` outcome loads the session (a closed chat needs it, as a card
+ * click does); a foreign chat is rejected with a toast and never resumed.
+ */
+export function openAgentChatPlaced(
+  sessionId: string,
+  source: string,
+  placement: AgentChatPlacement
+): OpenAgentChatOutcome {
+  const outcome = openAgentChatInOwnProject(sessionId, source, placement)
+  if (outcome === 'rejected') {
+    toast.info('That chat belongs to another project.')
+    return outcome
+  }
+  if (outcome === 'opened') {
+    const fail = (error: unknown): void => {
+      // Never the chat title or any prompt text: the error message only.
+      const reason = error instanceof Error ? error.message : 'unknown error'
+      void logFrontendError({
+        level: 'warn',
+        source,
+        message: `Open chat ${sessionId} failed: ${reason}`
+      })
+      toast.error('Could not open that chat. Try again.')
+    }
+    try {
+      void useAcpStore.getState().openHistorySession(sessionId).catch(fail)
+    } catch (error) {
+      fail(error)
+    }
+  }
+  return outcome
 }

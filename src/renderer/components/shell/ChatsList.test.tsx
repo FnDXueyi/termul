@@ -18,7 +18,9 @@ const mocks = vi.hoisted(() => ({
   revealInFileManager: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
-  logFrontendError: vi.fn()
+  logFrontendError: vi.fn(),
+  startChatDrag: vi.fn(),
+  openAgentChatPlaced: vi.fn()
 }))
 
 vi.mock('@/lib/terminal-spawn', () => ({ openTerminalAtCwd: mocks.openTerminalAtCwd }))
@@ -27,6 +29,10 @@ vi.mock('@/lib/api', () => ({
   openerApi: { revealInFileManager: mocks.revealInFileManager }
 }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: mocks.logFrontendError }))
+vi.mock('@/hooks/use-pane-dnd', () => ({
+  usePaneDnd: () => ({ startChatDrag: mocks.startChatDrag })
+}))
+vi.mock('@/lib/open-agent-chat', () => ({ openAgentChatPlaced: mocks.openAgentChatPlaced }))
 vi.mock('sonner', () => ({ toast: { success: mocks.toastSuccess, error: mocks.toastError } }))
 
 const project = {
@@ -69,6 +75,8 @@ beforeEach(() => {
   mocks.toastSuccess.mockReset()
   mocks.toastError.mockReset()
   mocks.logFrontendError.mockReset()
+  mocks.startChatDrag.mockReset()
+  mocks.openAgentChatPlaced.mockReset()
   mocks.openHistorySession.mockReset().mockResolvedValue(undefined)
   mocks.deleteHistorySession.mockReset().mockResolvedValue(undefined)
   mocks.writeText.mockReset().mockResolvedValue({ success: true })
@@ -329,6 +337,27 @@ describe('ChatsList interactions', () => {
       expect(mocks.toastError).toHaveBeenCalledWith('Could not delete that chat. Try again.')
     )
     expect(mocks.logFrontendError).toHaveBeenCalledTimes(1)
+  })
+
+  it('makes the card draggable and starts a chat drag on dragstart', () => {
+    render(<ChatsList project={project} />)
+    const row = screen.getByTitle('Chat a').parentElement as HTMLElement
+    expect(row).toHaveAttribute('draggable', 'true')
+    fireEvent.dragStart(row)
+    expect(mocks.startChatDrag).toHaveBeenCalledTimes(1)
+    expect(mocks.startChatDrag.mock.calls[0][0]).toBe('a')
+  })
+
+  it('opens the chat in a split to the right of the active pane from the context menu', async () => {
+    useWorkspaceStore.setState({ activePaneId: 'pane-7' })
+    render(<ChatsList project={project} />)
+    fireEvent.contextMenu(screen.getByTitle('Chat a'))
+    fireEvent.click(await screen.findByText('Open in split'))
+    expect(mocks.openAgentChatPlaced).toHaveBeenCalledWith('a', 'shell-chats-list', {
+      paneId: 'pane-7',
+      zone: 'right'
+    })
+    expect(mocks.addAgentChatTab).not.toHaveBeenCalled()
   })
 
   it('moves focus between cards with Up and Down', () => {
