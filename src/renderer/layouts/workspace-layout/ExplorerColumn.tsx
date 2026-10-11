@@ -22,6 +22,8 @@ const SSHFileExplorer = lazy(() =>
 interface ExplorerColumnProps {
   activeProject: Project | undefined
   ssh: SSHWorkspaceState
+  /** Which edge of the window the explorer sits against. */
+  side?: 'left' | 'right'
 }
 
 /**
@@ -30,7 +32,11 @@ interface ExplorerColumnProps {
  * on its own — toggling the explorer or connecting SSH
  * animates instead of shifting layout.
  */
-export function ExplorerColumn({ activeProject, ssh }: ExplorerColumnProps): React.JSX.Element {
+export function ExplorerColumn({
+  activeProject,
+  ssh,
+  side = 'right'
+}: ExplorerColumnProps): React.JSX.Element {
   const reducedMotion = useReducedMotion() ?? false
   const isExplorerVisible = useFileExplorerVisible()
   const {
@@ -59,7 +65,7 @@ export function ExplorerColumn({ activeProject, ssh }: ExplorerColumnProps): Rea
                   {...panelRevealMotion(reducedMotion)}
                 >
                   <Suspense fallback={<ShellSkeleton />}>
-                    <FileExplorer side="right" />
+                    <FileExplorer side={side} />
                   </Suspense>
                 </motion.div>
               )}
