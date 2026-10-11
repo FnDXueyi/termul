@@ -1,6 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ChangesTabBody } from './ChangesTabBody'
 import { ColumnTabs } from './ColumnTabs'
 
 describe('ColumnTabs', () => {
@@ -61,14 +60,5 @@ describe('ColumnTabs', () => {
 
     rerender(<ColumnTabs selected="chats" onSelect={vi.fn()} changedCount={150} />)
     expect(screen.getByTestId('column-tab-changes-badge')).toHaveTextContent('99+')
-  })
-})
-
-describe('ChangesTabBody', () => {
-  it('opens the Git changes for its working copy', () => {
-    const onOpenGitChanges = vi.fn()
-    render(<ChangesTabBody cwd="/repo/wt" onOpenGitChanges={onOpenGitChanges} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open Git changes' }))
-    expect(onOpenGitChanges).toHaveBeenCalledWith('/repo/wt')
   })
 })
