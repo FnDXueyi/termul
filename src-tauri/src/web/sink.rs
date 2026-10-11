@@ -1437,6 +1437,10 @@ impl EventSink for WsRelaySink {
                     // fan-out (emitted after the record is durable) triggers
                     // the same index refetch as a title change.
                     | "agent_switch"
+                    // Story 16 (CAP-5): a worktree branch rename rewrites
+                    // `worktree_branch` on every session of that worktree, so
+                    // web clients refetch the index the same way.
+                    | "worktree_branch_renamed"
             )
         {
             self.notify_history_changed();

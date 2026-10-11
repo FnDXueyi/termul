@@ -65,6 +65,13 @@ pub struct HostPlanServer {
     /// retrying. Cleared on `unregister_session`. In-memory only — a resumed
     /// session in a new process can set the title once again.
     title_set_for_session: Mutex<HashSet<String>>,
+    /// Sessions whose first `set_session_title` call already ran the worktree
+    /// branch auto rename (story 16). Independent of the title outcome: a
+    /// protected/failed title must not skip it, and a second call never
+    /// retries it. Cleared on `unregister_session`; in-memory only (a resumed
+    /// session starts empty, the persisted launch-branch guard blocks a
+    /// second rename).
+    branch_attempted_for_session: Mutex<HashSet<String>>,
     /// Per-session plan cache (emit-and-cache). v1 doesn't persist; this is
     /// the seam a future persistence layer reads from on resume. Updated in
     /// `process_request` (set on emit) + `unregister_*` (drop on close).
@@ -92,6 +99,7 @@ impl HostPlanServer {
             sessions: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
             title_set_for_session: Mutex::new(HashSet::new()),
+            branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
             persistence,
         });
@@ -258,6 +266,9 @@ impl HostPlanServer {
         });
         drop(active_turns);
         self.title_set_for_session.lock().remove(real_session_id);
+        self.branch_attempted_for_session
+            .lock()
+            .remove(real_session_id);
         self.plan_store.drop_session(real_session_id);
         // Close agent-controlled browser tabs + drop the consent grant. The
         // host no-ops when no browser feature was used by this session.
@@ -483,6 +494,25 @@ impl HostPlanServer {
                 let Some(title) = req.title else {
                     return FrameReply::err("title is required");
                 };
+                // Story 16 (CAP-5): the branch slug is processed on the
+                // session's FIRST call only, before (and independent of) the
+                // title outcome. Refusals are logged inside; the reply stays
+                // the title result.
+                if self
+                    .branch_attempted_for_session
+                    .lock()
+                    .insert(real_session_id.clone())
+                {
+                    if let Some(persistence) = self.persistence.as_ref() {
+                        crate::acp::manager::auto_rename_for_session(
+                            persistence,
+                            &self.sinks,
+                            &real_session_id,
+                            req.branch.as_deref(),
+                        )
+                        .await;
+                    }
+                }
                 // Per-session: the first title call wins; subsequent calls for
                 // the same session are a success no-op (the agent is told it
                 // succeeded so it stops retrying — no churn to the sidebar

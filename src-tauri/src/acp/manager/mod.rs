@@ -72,6 +72,7 @@ mod history;
 mod reopen;
 mod timeouts;
 mod wire;
+mod worktree_branch;
 
 use command_loop::*;
 use driver::*;
@@ -81,6 +82,7 @@ use wire::*;
 pub(crate) use history::*;
 pub use reopen::*;
 pub use timeouts::*;
+pub(crate) use worktree_branch::*;
 
 /// How long to wait for the agent to answer `initialize` before treating the
 /// spawn as failed (and tearing the child down).
@@ -513,6 +515,28 @@ impl AcpManager {
             .map(AgentId)
             .unwrap_or_default();
         record_agent_switch(persistence, &self.sinks, agent_id, session_id, record).await
+    }
+
+    /// Rename a worktree's branch by hand (story 16, CAP-5): git rename, rewrite
+    /// every session on the worktree (source flips to `user`) and fan out
+    /// `worktree_branch_renamed` through this manager's sinks. Shared by the
+    /// Tauri command and the write-gated web route; callers own the outcome
+    /// log. See [`rename_and_record`].
+    pub async fn rename_worktree_branch(
+        &self,
+        worktree_path: &str,
+        old_branch: &str,
+        new_branch: &str,
+    ) -> Result<(), RenameBranchError> {
+        rename_and_record(
+            self.persistence.as_deref(),
+            &self.sinks,
+            worktree_path,
+            old_branch,
+            new_branch,
+            crate::acp::session_persistence::WorktreeBranchSource::User,
+        )
+        .await
     }
 
     /// Spawn an ACP agent: launch the subprocess, complete `initialize`, and
@@ -1820,3 +1844,5 @@ impl AcpManager {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_branch_tests;

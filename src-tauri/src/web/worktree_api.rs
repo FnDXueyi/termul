@@ -118,7 +118,7 @@ type RouteErr<T> = (StatusCode, Json<IpcBody<T>>);
 /// (`Some` on write routes, `None` on read routes). Mirrors
 /// `git_api::resolve_cwd` — kept self-contained so the worktree module does not
 /// depend on git_api's private helpers.
-fn resolve_project_path<T>(
+pub(super) fn resolve_project_path<T>(
     req_path: &str,
     state: &AppState,
     peer: Option<SocketAddr>,
@@ -165,7 +165,7 @@ fn resolve_project_path<T>(
 /// `validate_project_path` behavior of stripping the Windows verbatim (`\\?\`)
 /// prefix so `git.exe` receives a path it understands. Returns an `IpcBody::err`
 /// (`INVALID_PATH_ENCODING`) when the path resolves to empty.
-fn path_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
+pub(super) fn path_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
     let lossy = resolved.to_string_lossy();
     let simplified = crate::path_validation::strip_verbatim_prefix(&lossy).into_owned();
     if simplified.is_empty() {

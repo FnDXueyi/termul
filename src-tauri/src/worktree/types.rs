@@ -179,6 +179,13 @@ pub enum WorktreeError {
     ArchiveFailed,
     ArchiveNotFound,
     MergeFailed,
+    /// `git check-ref-format --branch` rejected the requested name.
+    InvalidBranchName,
+    /// The worktree's current branch is not the one the rename expected
+    /// (switched, detached, mid-rebase).
+    BranchChanged,
+    /// The rename target branch already exists.
+    BranchExists,
     IoError(String),
     GitError(String),
 }
@@ -198,6 +205,9 @@ impl WorktreeError {
             Self::ArchiveFailed => "ARCHIVE_FAILED",
             Self::MergeFailed => "MERGE_FAILED",
             Self::ArchiveNotFound => "ARCHIVE_NOT_FOUND",
+            Self::InvalidBranchName => "INVALID_BRANCH_NAME",
+            Self::BranchChanged => "BRANCH_CHANGED",
+            Self::BranchExists => "BRANCH_EXISTS",
         }
     }
 }
@@ -230,6 +240,12 @@ impl std::fmt::Display for WorktreeError {
             Self::ArchiveFailed => write!(f, "Failed to archive worktree."),
             Self::ArchiveNotFound => write!(f, "Archive not found."),
             Self::MergeFailed => write!(f, "Merge operation failed. There may be conflicts."),
+            Self::InvalidBranchName => write!(f, "That is not a valid branch name."),
+            Self::BranchChanged => write!(
+                f,
+                "The worktree is no longer on the expected branch. Nothing was renamed."
+            ),
+            Self::BranchExists => write!(f, "A branch with that name already exists."),
             Self::IoError(msg) => write!(f, "Filesystem error: {}", msg),
             Self::GitError(msg) => write!(f, "Git error: {}", msg),
         }

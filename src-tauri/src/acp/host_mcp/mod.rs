@@ -88,6 +88,11 @@ pub struct TermulPlanInput {
 pub struct TermulSetTitleInput {
     /// Concise title for the current chat session.
     pub title: String,
+    /// Optional short kebab-case slug naming this chat's git branch (for
+    /// example `fix-login-redirect`): lowercase letters, digits and single
+    /// hyphens, at most 48 characters. Honoured on the first call only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// One todo item. `status`/`priority` are optional strings (the agent may omit
@@ -301,6 +306,10 @@ pub struct FrameRequest {
     pub todos: Vec<TermulPlanTodo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Branch slug from `set_session_title` (story 16). Only meaningful on a
+    /// `SetTitle` frame; validated and applied host-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

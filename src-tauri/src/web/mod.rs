@@ -47,6 +47,7 @@ pub mod store;
 pub mod terminal_ws;
 pub mod workspace_api;
 pub mod worktree_api;
+pub mod worktree_rename_api;
 pub mod ws;
 
 pub use config::ServerConfig;

@@ -145,6 +145,27 @@ export const worktreeApi = {
       : webServerWorktree.remove(projectPath, worktreePath, force),
 
   /**
+   * Rename a worktree's branch by hand (shell revamp story 16, CAP-5): `git
+   * branch -m`, every session on the worktree is rewritten by the host (the
+   * branch source becomes `user`) and `acp:worktree_branch_renamed` reaches
+   * every client. The error code comes from the host (`INVALID_BRANCH_NAME`,
+   * `BRANCH_EXISTS`, `BRANCH_CHANGED`, `FORBIDDEN`, `OUTSIDE_PROJECT_ROOT`).
+   *
+   * **Write gating:** this is a write route. Callers MUST gate any UI with
+   * `useServerAdmitsRemoteWrites` / the S19 `WriteGate` so read-only servers
+   * show the control disabled with the reason (CAP-15). This story ships no UI
+   * consumer; the server refuses the write either way.
+   */
+  renameBranch: (
+    worktreePath: string,
+    oldBranch: string,
+    newBranch: string
+  ): Promise<IpcResult<void>> =>
+    isTauriContext()
+      ? invoke<IpcResult<void>>('worktree_rename_branch', { worktreePath, oldBranch, newBranch })
+      : webServerWorktree.renameBranch(worktreePath, oldBranch, newBranch),
+
+  /**
    * List local and remote branches for a git repo.
    */
   branches: (projectPath: string): Promise<IpcResult<BranchInfo[]>> =>

@@ -1703,6 +1703,7 @@ pub fn run() {
             commands::worktree_list,
             commands::worktree_create,
             commands::worktree_remove,
+            commands::worktree_rename_branch,
             commands::worktree_branches,
             commands::worktree_check_dirty,
             commands::worktree_remove_all_managed,

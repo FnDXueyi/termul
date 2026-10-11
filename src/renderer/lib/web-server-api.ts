@@ -626,6 +626,19 @@ export const webServerWorktree = {
     return postJson<void>('/worktree/remove', { projectPath, worktreePath, force })
   },
 
+  /**
+   * Rename a worktree's branch by hand (story 16). WRITE route: refused with
+   * `FORBIDDEN` on a read-only server (non-loopback peer without
+   * `--allow-remote-writes`, or shared-live).
+   */
+  async renameBranch(
+    worktreePath: string,
+    oldBranch: string,
+    newBranch: string
+  ): Promise<IpcResult<void>> {
+    return postJson<void>('/worktree/rename-branch', { worktreePath, oldBranch, newBranch })
+  },
+
   async branches(projectPath: string): Promise<IpcResult<BranchInfo[]>> {
     const encoded = encodeURIComponent(projectPath)
     return getJson<BranchInfo[]>(`/worktree/branches?projectPath=${encoded}`)

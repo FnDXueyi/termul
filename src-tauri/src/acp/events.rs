@@ -170,6 +170,11 @@ pub const EVENT_SESSION_INFO_UPDATE: &str = "acp:session_info_update";
 /// synthetically by the host after the `agent_switch` record is durable —
 /// the record is the transcript authority, the event is live-only delivery.
 pub const EVENT_AGENT_SWITCH: &str = "acp:agent_switch";
+/// Event name: a worktree's branch was renamed by the host (story 16,
+/// CAP-5). Agent-level (`sid = None`); the payload is
+/// [`WorktreeBranchRenamedEvent`]. Every client reconciles worktrees and
+/// refreshes the session index.
+pub const EVENT_WORKTREE_BRANCH_RENAMED: &str = "acp:worktree_branch_renamed";
 /// Event name: the agent reported context window utilization (and optional cost).
 pub const EVENT_USAGE_UPDATE: &str = "acp:usage_update";
 /// Event name: the agent tried to open a browser URL on a headless host and
@@ -799,6 +804,18 @@ pub struct SessionInfoUpdateEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
     pub title: Option<String>,
+}
+
+/// `acp:worktree_branch_renamed` (story 16, CAP-5) — emitted once, agent-level,
+/// after the host renamed a worktree's git branch and rewrote every session on
+/// that worktree. Carries paths and branch names; it is a wire event only,
+/// never logged above `debug`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeBranchRenamedEvent {
+    pub worktree_path: String,
+    pub old_branch: String,
+    pub new_branch: String,
 }
 
 /// `acp:agent_switch` (CAP-2) — the live fan-out of a durable agent-switch
