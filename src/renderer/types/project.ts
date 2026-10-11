@@ -57,7 +57,6 @@ export interface Project {
   defaultShell?: string
   envVars?: EnvVariable[]
   worktrees?: Worktree[]
-  activeWorktreeId?: string | null
   isGitRepo?: boolean
   symlinkDirs?: string[] // Directories to symlink from project root into worktrees
   /**
@@ -68,12 +67,6 @@ export interface Project {
    * before re-resolution finishes.
    */
   icon?: ProjectIcon
-}
-
-// Helper getters for worktree operations
-export function getActiveWorktree(project: Project): Worktree | undefined {
-  if (!project.activeWorktreeId) return undefined
-  return project.worktrees?.find((w) => w.id === project.activeWorktreeId)
 }
 
 export function isWorktreeTermulManaged(worktree: Worktree): boolean {
