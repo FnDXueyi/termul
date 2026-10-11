@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { GitBranchPicker } from '@/components/GitBranchPicker'
 import { Folder, FolderGit2, GitBranch } from '@/components/icons'
 import { useChatIsolationContext } from '@/hooks/use-chat-isolation-context'
@@ -29,12 +30,30 @@ export function ChatContextStrip({
     wc?.state === 'resolved' && wc.kind === 'worktree'
       ? project?.worktrees?.find((w) => w.id === wc.worktreeId)?.branch
       : undefined
-  const branch = (isWorktree ? listedBranch : undefined) || isolationBranch
+  // A checkout in a worktree chat is shown at once, scoped to this cwd, until the
+  // reconciler lists the new branch (it never lists an unresolved worktree).
+  const [override, setOverride] = useState<{
+    cwd: string
+    branch: string
+    listedAtChange: string | undefined
+  } | null>(null)
+  const activeOverride = override && override.cwd === cwd ? override : null
+  useEffect(() => {
+    if (override && (override.cwd !== cwd || listedBranch !== override.listedAtChange)) {
+      setOverride(null)
+    }
+  }, [override, cwd, listedBranch])
+  const branch =
+    activeOverride?.branch || (isWorktree ? listedBranch : undefined) || isolationBranch
 
   const handleBranchChanged = (next: string): void => {
     if (!projectId) return
-    if (isWorktree) void reconcileProjectWorktrees(projectId)
-    else useProjectStore.getState().updateProject(projectId, { gitBranch: next })
+    if (isWorktree) {
+      setOverride({ cwd, branch: next, listedAtChange: listedBranch })
+      void reconcileProjectWorktrees(projectId)
+    } else {
+      useProjectStore.getState().updateProject(projectId, { gitBranch: next })
+    }
   }
 
   const showBranch = Boolean(branch) || isDetachedHead

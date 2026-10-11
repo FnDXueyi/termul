@@ -132,6 +132,56 @@ describe('ChatContextStrip', () => {
     expect(useProjectStore.getState().projects[0].gitBranch).toBe('main')
   })
 
+  it('shows the new branch at once for an unresolved worktree until it is listed', async () => {
+    render(<ChatContextStrip session={worktreeSession} />)
+    await openPicker()
+    fireEvent.click((await screen.findByText('dev')).closest('button') as HTMLButtonElement)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent('dev')
+    )
+    // Once the reconciler lists the worktree, its branch wins again.
+    act(() =>
+      seedProject({
+        worktrees: [
+          {
+            id: 'w1',
+            name: 'abcd1234',
+            branch: 'dev-listed',
+            path: '/work/.termul/worktrees/abcd1234',
+            createdAt: '2026-01-01T00:00:00.000Z'
+          }
+        ]
+      })
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+        'dev-listed'
+      )
+    )
+  })
+
+  it('does not carry the override to another chat cwd', async () => {
+    const { rerender } = render(<ChatContextStrip session={worktreeSession} />)
+    await openPicker()
+    fireEvent.click((await screen.findByText('dev')).closest('button') as HTMLButtonElement)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent('dev')
+    )
+    rerender(
+      <ChatContextStrip
+        session={{
+          ...worktreeSession,
+          cwd: '/work/.termul/worktrees/other',
+          worktreePath: '/work/.termul/worktrees/other',
+          worktreeBranch: 'chat/other'
+        }}
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+      'chat/other'
+    )
+  })
+
   it('keeps the picker write gate on a read-only server', async () => {
     mocks.admits.value = false
     render(<ChatContextStrip session={localSession} />)
