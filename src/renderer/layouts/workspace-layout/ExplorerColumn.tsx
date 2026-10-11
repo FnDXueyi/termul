@@ -12,9 +12,6 @@ import { cn } from '@/lib/utils'
 import { useFileExplorerVisible } from '@/stores/file-explorer-store'
 import type { Project } from '@/types/project'
 
-const FileExplorer = lazy(() =>
-  import('@/components/file-explorer/FileExplorer').then((m) => ({ default: m.FileExplorer }))
-)
 const SSHFileExplorer = lazy(() =>
   import('@/components/ssh/SSHFileExplorer').then((m) => ({ default: m.SSHFileExplorer }))
 )
@@ -22,18 +19,15 @@ const SSHFileExplorer = lazy(() =>
 interface ExplorerColumnProps {
   activeProject: Project | undefined
   ssh: SSHWorkspaceState
-  /** Which edge of the window the explorer sits against. */
-  side?: 'left' | 'right'
   /**
-   * Shell Side panel that replaces the File Explorer block (flagged shell
-   * only). Not rendered while an SSH profile is active: the SSH block then
-   * stands alone. Without it the column is unchanged.
+   * Shell Side panel that fills the file column. Not rendered while an SSH
+   * profile is active: the SSH block then stands alone.
    */
-  sidePanel?: ReactNode
+  sidePanel: ReactNode
 }
 
 /**
- * File Explorer. The whole column (explorer + SSH block)
+ * Side panel column. The whole column (file panel + SSH block)
  * width-reveals together; each inner block also reveals
  * on its own — toggling the explorer or connecting SSH
  * animates instead of shifting layout.
@@ -41,7 +35,6 @@ interface ExplorerColumnProps {
 export function ExplorerColumn({
   activeProject,
   ssh,
-  side = 'right',
   sidePanel
 }: ExplorerColumnProps): React.JSX.Element {
   const reducedMotion = useReducedMotion() ?? false
@@ -74,9 +67,7 @@ export function ExplorerColumn({
                   className={cn('overflow-hidden', activeSSHProfile ? 'flex-1 min-h-0' : 'h-full')}
                   {...panelRevealMotion(reducedMotion)}
                 >
-                  <Suspense fallback={<ShellSkeleton />}>
-                    {sidePanel ?? <FileExplorer side={side} />}
-                  </Suspense>
+                  <Suspense fallback={<ShellSkeleton />}>{sidePanel}</Suspense>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -127,7 +118,7 @@ export function ExplorerColumn({
         !isTauriContext() && (
           // Web-only slim edge toggle so a hidden file explorer
           // stays re-openable. Desktop re-opens via the
-          // TitleBar. Its enter is deferred until the column's
+          // Rail and top row toggles. Its enter is deferred until the column's
           // collapse exits (edgeToggleMotion).
           <motion.div
             key="explorer-edge-toggle"

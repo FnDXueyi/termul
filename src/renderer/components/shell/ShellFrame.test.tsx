@@ -46,7 +46,7 @@ vi.mock('@/components/shell/ShellRail', () => ({
   }
 }))
 vi.mock('@/layouts/workspace-layout/ExplorerColumn', () => ({
-  ExplorerColumn: ({ side }: { side?: string }) => <div data-testid="side-panel" data-side={side} />
+  ExplorerColumn: () => <div data-testid="side-panel" />
 }))
 
 const mountSpy = vi.fn()
@@ -134,7 +134,6 @@ describe('ShellFrame', () => {
     const sidePanel = screen.getByTestId('side-panel')
     const main = screen.getByTestId('workspace-main').closest('main')
     expect(main).not.toBeNull()
-    expect(sidePanel).toHaveAttribute('data-side', 'left')
     // DOM order: Rail, Side panel, main.
     expect(rail.compareDocumentPosition(sidePanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(

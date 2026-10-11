@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
-import { FileExplorerToggleButton, SidebarToggleButton } from './TitlebarPanelToggles'
+import { FileExplorerToggleButton } from './TitlebarPanelToggles'
 
 const { mockUpdatePanelVisibility, mockToastError } = vi.hoisted(() => ({
   mockUpdatePanelVisibility: vi.fn(() => Promise.resolve()),
@@ -22,17 +22,7 @@ describe('TitlebarPanelToggles', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     resetShellLayoutStoreForTests()
-    useShellLayoutStore.setState({ status: 'ready', railExpanded: true, sidePanelVisible: true })
-  })
-
-  it('toggles sidebar via persistence-aware updater on click', async () => {
-    render(<SidebarToggleButton />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Hide sidebar' }))
-
-    await waitFor(() => {
-      expect(mockUpdatePanelVisibility).toHaveBeenCalledWith('sidebarVisible', false)
-    })
+    useShellLayoutStore.setState({ status: 'ready', sidePanelVisible: true })
   })
 
   it('toggles file explorer via persistence-aware updater on click', async () => {
@@ -42,18 +32,6 @@ describe('TitlebarPanelToggles', () => {
 
     await waitFor(() => {
       expect(mockUpdatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', false)
-    })
-  })
-
-  it('shows error toast when sidebar persistence update fails', async () => {
-    mockUpdatePanelVisibility.mockRejectedValueOnce(new Error('persist failed'))
-
-    render(<SidebarToggleButton />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Hide sidebar' }))
-
-    await waitFor(() => {
-      expect(mockToastError).toHaveBeenCalledWith('persist failed')
     })
   })
 
@@ -70,19 +48,12 @@ describe('TitlebarPanelToggles', () => {
   })
 
   it('reflects hidden state in label and pressed state when not visible', () => {
-    useShellLayoutStore.setState({ railExpanded: false, sidePanelVisible: false })
+    useShellLayoutStore.setState({ sidePanelVisible: false })
 
-    render(
-      <>
-        <SidebarToggleButton />
-        <FileExplorerToggleButton />
-      </>
-    )
+    render(<FileExplorerToggleButton />)
 
-    const sidebarButton = screen.getByRole('button', { name: 'Show sidebar' })
     const explorerButton = screen.getByRole('button', { name: 'Show file explorer' })
 
-    expect(sidebarButton).toHaveAttribute('aria-pressed', 'false')
     expect(explorerButton).toHaveAttribute('aria-pressed', 'false')
   })
 })

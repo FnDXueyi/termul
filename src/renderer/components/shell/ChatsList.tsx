@@ -64,7 +64,7 @@ export function ChatsList({ project }: ChatsListProps): React.JSX.Element {
     getItemKey: (index) => filtered[index]?.entry.id ?? index
   })
 
-  // Delete is irreversible: confirm first, as the classic list does.
+  // Delete is irreversible: confirm first.
   const [deleteConfirm, setDeleteConfirm] = useState<ProjectChatEntry | null>(null)
 
   const cardButton = (index: number): HTMLElement | null =>

@@ -5,7 +5,7 @@ import { useTopRow } from '@/components/shell/top-row-context'
 import { ExplorerColumn } from '@/layouts/workspace-layout/ExplorerColumn'
 import { useSidebarVisible } from '@/stores/sidebar-store'
 
-type ShellSidePanelProps = Omit<ComponentProps<typeof ExplorerColumn>, 'side' | 'sidePanel'>
+type ShellSidePanelProps = Omit<ComponentProps<typeof ExplorerColumn>, 'sidePanel'>
 
 /**
  * Shell frame Side panel area, placed left of the main area. `ExplorerColumn`
@@ -24,7 +24,6 @@ export function ShellSidePanel(props: ShellSidePanelProps): React.JSX.Element {
   const column = (
     <ExplorerColumn
       {...props}
-      side="left"
       sidePanel={
         props.activeProject ? (
           <SidePanelColumn

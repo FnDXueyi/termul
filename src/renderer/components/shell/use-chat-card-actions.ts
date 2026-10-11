@@ -30,8 +30,8 @@ export interface ChatCardActions {
 }
 
 /**
- * Chat card interactions, the same behaviour as the classic `ProjectChatList`
- * handlers (which stay frozen), plus one warn log per failed open or delete.
+ * Chat card interactions: open or resume a chat, open its terminal or folder,
+ * copy its path and delete it, plus one warn log per failed open or delete.
  */
 export function useChatCardActions(projectId: string): ChatCardActions {
   const openHistorySession = useAcpStore((s) => s.openHistorySession)

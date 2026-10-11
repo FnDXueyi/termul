@@ -13,7 +13,6 @@ import {
   UI_ZOOM_MIN,
   UI_ZOOM_STEP
 } from '@/types/settings'
-import { ShellLayoutToggle } from './shell-layout-toggle'
 
 interface AppearanceSectionProps {
   fontFamily: string
@@ -224,9 +223,6 @@ export function AppearanceSection({
               onCheckedChange={handleScreenReaderModeChange}
             />
           </div>
-
-          {/* Opt-in shell layout (applies after reload) */}
-          <ShellLayoutToggle />
 
           {/* Preview */}
           <div>

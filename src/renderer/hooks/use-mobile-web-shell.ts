@@ -1,7 +1,7 @@
 /**
  * Detects whether the renderer should use the ChatGPT-style mobile web shell
- * (Epic 5 follow-up): hide ActivityRail / TitleBar / persistent sidebar / tab
- * strip. Desktop Tauri always keeps the full IDE chrome.
+ * (Epic 5 follow-up): hide the Rail / top row / Side panel / tab strip.
+ * Desktop Tauri always keeps the full IDE chrome.
  *
  * Viewport breakpoint (not pane width) — shell chrome is viewport-level.
  *

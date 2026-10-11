@@ -5,7 +5,6 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { clipboardApi, openerApi } from '@/lib/api'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/stores/canvas-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useEditorStore } from '@/stores/editor-store'
@@ -33,17 +32,7 @@ import { FileTreeContextMenuContent } from './FileTreeContextMenu'
 import { FileTreeNodeWrapper } from './FileTreeNode'
 import { useExplorerEntryFlows } from './use-explorer-entry-flows'
 import { useExplorerKeyboard } from './use-explorer-keyboard'
-import { EXPLORER_MAX_WIDTH, EXPLORER_MIN_WIDTH, useExplorerResize } from './use-explorer-resize'
 import { useExplorerSearch } from './use-explorer-search'
-
-interface FileExplorerProps {
-  side?: 'left' | 'right'
-  /**
-   * Fill the host column (the shell Side panel) instead of owning a width: no
-   * own width, rounding, fill or resize handle.
-   */
-  embedded?: boolean
-}
 
 /**
  * Pure gate for the `.op` open branch (OpenPencil canvas mode): desktop-width
@@ -88,10 +77,11 @@ async function showInFileManager(path: string): Promise<void> {
   }
 }
 
-export function FileExplorer({
-  side = 'right',
-  embedded = false
-}: FileExplorerProps): React.JSX.Element {
+/**
+ * File Explorer. Always fills its host column (the shell Side panel): the
+ * column owns the width and the resize handle.
+ */
+export function FileExplorer(): React.JSX.Element {
   const {
     rootPath,
     directoryContents,
@@ -118,7 +108,6 @@ export function FileExplorer({
     retryRootLoad
   } = useFileExplorerActions()
 
-  const { width: explorerWidth, onResizeMouseDown, onResizeKeyDown } = useExplorerResize(side)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const rootEntries = rootPath ? directoryContents.get(rootPath) : undefined
@@ -297,12 +286,7 @@ export function FileExplorer({
     <div
       id="file-explorer-panel"
       ref={containerRef}
-      className={
-        embedded
-          ? 'relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-foreground'
-          : 'relative flex h-full min-w-0 flex-shrink-0 flex-col overflow-hidden rounded-xl bg-background text-foreground'
-      }
-      style={embedded ? undefined : { width: explorerWidth }}
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-foreground"
     >
       <ExplorerHeader
         actionsDisabled={actionsDisabled}
@@ -352,25 +336,6 @@ export function FileExplorer({
           )}
         </div>
       </ExplorerInlineInputProvider>
-
-      {!embedded && (
-        <button
-          type="button"
-          onMouseDown={onResizeMouseDown}
-          onKeyDown={onResizeKeyDown}
-          className={cn(
-            'absolute top-0 h-full w-1 cursor-col-resize bg-transparent transition-colors duration-150 ease-out hover:bg-border focus-visible:bg-muted-foreground/40 focus-visible:outline-none active:bg-muted-foreground/40',
-            side === 'right' ? 'left-0' : 'right-0'
-          )}
-          title="Drag to resize explorer"
-          aria-label="Resize file explorer"
-          role="separator"
-          aria-controls="file-explorer-panel"
-          aria-valuenow={explorerWidth}
-          aria-valuemin={EXPLORER_MIN_WIDTH}
-          aria-valuemax={EXPLORER_MAX_WIDTH}
-        />
-      )}
 
       <ConfirmDialog
         isOpen={deleteTarget !== null}

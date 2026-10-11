@@ -9,7 +9,6 @@ import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import type { Project, ProjectGroup } from '@/types/project'
 import { ArchivedProjectItem } from './archived-project-item'
 import type { ProjectRowStatus } from './indicators'
-import { ProjectItem } from './project-item'
 import { RailProjectItem } from './rail-project-item'
 
 export interface ProjectListProps {
@@ -39,11 +38,9 @@ export interface ProjectListProps {
   // Project rows
   ungroupedActiveProjects: Project[]
   activeIndexById: ReadonlyMap<string, number>
-  expandedProjects: ReadonlySet<string>
   editingId: string | null
   editName: string
   projectStatus: (projectId: string) => ProjectRowStatus
-  toggleProjectExpanded: (projectId: string) => void
   setEditName: Dispatch<SetStateAction<string>>
   handleSaveRename: (projectId: string) => void
   handleCancelRename: () => void
@@ -62,9 +59,6 @@ export interface ProjectListProps {
   showArchived: boolean
   setShowArchived: Dispatch<SetStateAction<boolean>>
   renderArchivedProjectContextMenu: (project: Project) => React.ReactNode
-
-  /** `rail` renders the shell Rail rows (no chat chevron, diff stat). Defaults to classic. */
-  variant?: 'classic' | 'rail'
 }
 
 export function ProjectList({
@@ -90,11 +84,9 @@ export function ProjectList({
   renderGroupContextMenu,
   ungroupedActiveProjects,
   activeIndexById,
-  expandedProjects,
   editingId,
   editName,
   projectStatus,
-  toggleProjectExpanded,
   setEditName,
   handleSaveRename,
   handleCancelRename,
@@ -107,13 +99,10 @@ export function ProjectList({
   filteredArchivedProjects,
   showArchived,
   setShowArchived,
-  renderArchivedProjectContextMenu,
-  variant = 'classic'
+  renderArchivedProjectContextMenu
 }: ProjectListProps): React.JSX.Element {
   // One draggable active-project row, shared by grouped and ungrouped lists.
   // Dropping on a folder header or group container moves the project there.
-  // The rail row also watches git for its diff stat; the classic row never does.
-  const Item = variant === 'rail' ? RailProjectItem : ProjectItem
   const renderProjectRow = (project: Project): React.JSX.Element => {
     const shortcutIndex = activeIndexById.get(project.id) ?? -1
     return (
@@ -155,11 +144,9 @@ export function ProjectList({
           activeDragOverGroupIdRef.current = null
         }}
       >
-        <Item
+        <RailProjectItem
           project={project}
           isActive={project.id === activeProjectId}
-          isExpanded={expandedProjects.has(project.id)}
-          onToggleExpand={() => toggleProjectExpanded(project.id)}
           isEditing={editingId === project.id}
           editName={editName}
           shortcut={

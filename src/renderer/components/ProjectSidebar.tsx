@@ -1,15 +1,11 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FolderPlus, Plus } from '@/components/icons'
-import { SidebarToggleButton } from '@/components/TitlebarPanelToggles'
 import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { toast } from '@/hooks/use-toast'
-import { useWorktreeReconciler } from '@/hooks/use-worktree-reconciler'
 import { dialogApi, shellApi } from '@/lib/api'
 import { filterProjects, shouldShowProjectSearch } from '@/lib/project-filter'
-import { isTauriContext } from '@/lib/tauri-runtime'
 import { useProjectsWithActiveAgentChat } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
@@ -29,7 +25,6 @@ import {
 } from './sidebar/project-context-menu'
 import { ProjectList } from './sidebar/project-list'
 import { ProjectSettingsDialog } from './sidebar/project-settings-dialog'
-import { SidebarFooter } from './sidebar/sidebar-footer'
 import { SidebarSearchField } from './sidebar/sidebar-search-field'
 import { SSHResizableSection } from './sidebar/ssh-section'
 import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
@@ -38,15 +33,11 @@ import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
 const HEADER_ICON_BUTTON = `${PANEL_ICON_BUTTON_CLASS} cursor-pointer [&_svg]:size-3.5`
 
 /**
- * Reconciles stored worktrees for the active project. A component (not a hook
- * call in `ProjectSidebar`) so the rail variant can leave it out: the Rail
- * container runs the reconciler itself so it keeps running while collapsed.
+ * The shell Rail's Projects section: header with one `+` menu, search, the
+ * project list (diff stat on each row, no chat lists) and the SSH section. The
+ * Rail container runs the worktree reconciler itself so it keeps running while
+ * collapsed, and owns the footer.
  */
-function WorktreeReconciler({ projectId }: { projectId: string }): null {
-  useWorktreeReconciler(projectId)
-  return null
-}
-
 export function ProjectSidebar({
   projects,
   activeProjectId,
@@ -59,10 +50,8 @@ export function ProjectSidebar({
   onReorderProjects,
   onSSHConnect,
   onSelectSSHProfile,
-  activeSSHProfileId,
-  variant = 'classic'
+  activeSSHProfileId
 }: ProjectSidebarProps): React.JSX.Element {
-  const isRail = variant === 'rail'
   const navigate = useNavigate()
   const {
     selectProject,
@@ -103,10 +92,6 @@ export function ProjectSidebar({
 
   // Project search/filter query
   const [searchQuery, setSearchQuery] = useState('')
-
-  // Expanded projects — expansion is controlled solely by the chevron.
-  // Selecting a project does not auto-expand its chat list, keeping the list uncluttered.
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set<string>())
 
   // Inline editing state
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -198,18 +183,6 @@ export function ProjectSidebar({
     }),
     [projectActivityIds, agentChatActivityIds, runningProjectIds, attentionCounts, projectErrorIds]
   )
-
-  const toggleProjectExpanded = useCallback((projectId: string): void => {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev)
-      if (next.has(projectId)) {
-        next.delete(projectId)
-      } else {
-        next.add(projectId)
-      }
-      return next
-    })
-  }, [])
 
   const handleCreateGroupSubmit = useCallback(
     (name: string) => {
@@ -460,51 +433,17 @@ export function ProjectSidebar({
   const hasNoSearchResults =
     isSearching && filteredActiveProjects.length === 0 && filteredArchivedProjects.length === 0
 
-  const Root = isRail ? 'div' : 'aside'
-
   return (
-    <Root
-      className={
-        isRail
-          ? 'flex min-h-0 w-full flex-1 flex-col bg-background'
-          : 'w-64 bg-background flex flex-col flex-shrink-0 rounded-xl h-full'
-      }
-    >
-      {/* Reconcile stored worktrees against actual git state (detects orphaned entries) */}
-      {!isRail && <WorktreeReconciler projectId={activeProjectId} />}
-
+    <div className="flex min-h-0 w-full flex-1 flex-col bg-background">
       {/* Header with inline + button */}
       <div className={PANEL_HEADER_CLASS}>
         <span className="label-panel">Projects</span>
         <div className="flex items-center">
-          {isRail ? (
-            <AddProjectMenu
-              onNewProject={onNewProject}
-              onNewGroup={() => setNewGroupModal({})}
-              buttonClassName={HEADER_ICON_BUTTON}
-            />
-          ) : (
-            <>
-              {!isTauriContext() && <SidebarToggleButton className={HEADER_ICON_BUTTON} />}
-              <button
-                onClick={() => setNewGroupModal({})}
-                className={HEADER_ICON_BUTTON}
-                title="New Group Folder"
-                aria-label="Create new group folder"
-              >
-                <FolderPlus size={14} />
-              </button>
-              <button
-                onClick={onNewProject}
-                className={HEADER_ICON_BUTTON}
-                title="New Project"
-                aria-label="Create new project from header"
-                data-testid="header-new-project"
-              >
-                <Plus size={14} />
-              </button>
-            </>
-          )}
+          <AddProjectMenu
+            onNewProject={onNewProject}
+            onNewGroup={() => setNewGroupModal({})}
+            buttonClassName={HEADER_ICON_BUTTON}
+          />
         </div>
       </div>
 
@@ -547,11 +486,9 @@ export function ProjectSidebar({
         renderGroupContextMenu={renderGroupContextMenu}
         ungroupedActiveProjects={ungroupedActiveProjects}
         activeIndexById={activeIndexById}
-        expandedProjects={expandedProjects}
         editingId={editingId}
         editName={editName}
         projectStatus={projectStatus}
-        toggleProjectExpanded={toggleProjectExpanded}
         setEditName={setEditName}
         handleSaveRename={handleSaveRename}
         handleCancelRename={handleCancelRename}
@@ -565,7 +502,6 @@ export function ProjectSidebar({
         showArchived={showArchived}
         setShowArchived={setShowArchived}
         renderArchivedProjectContextMenu={renderArchivedProjectContextMenu}
-        variant={variant}
       />
 
       {/* SSH Connections - Resizable */}
@@ -574,9 +510,6 @@ export function ProjectSidebar({
         onSelectProfile={onSelectSSHProfile}
         activeProfileId={activeSSHProfileId}
       />
-
-      {/* Version + update chip - pinned bottom (the Rail has its own footer) */}
-      {!isRail && <SidebarFooter />}
 
       {/* Group Delete Confirmation Dialog */}
       <ConfirmDialog
@@ -639,6 +572,6 @@ export function ProjectSidebar({
         onClose={() => setNewGroupModal(null)}
         onSubmit={handleCreateGroupSubmit}
       />
-    </Root>
+    </div>
   )
 }
