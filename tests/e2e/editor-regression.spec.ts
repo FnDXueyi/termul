@@ -1,4 +1,4 @@
-import { expect, request, test } from 'playwright/test'
+import { expect, type Page, request, test } from 'playwright/test'
 import { E2E_BASE_URL, E2E_TOKEN } from './helpers'
 import { openWorkspace, selectProject } from './ui'
 
@@ -42,6 +42,12 @@ async function workspaceRoot(): Promise<string> {
   return root
 }
 
+/** Refresh lives in the explorer header's "More explorer actions" menu. */
+async function refreshExplorer(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'More explorer actions' }).click()
+  await page.getByRole('menuitem', { name: 'Refresh' }).click()
+}
+
 test('editor opens a file and renders content (no stuck "Loading...")', async ({ page }) => {
   // proj-e is dedicated to the editor suite: no chats ever run there, so
   // the session-resume bootstrap never reopens agent-chat tabs that would
@@ -51,7 +57,7 @@ test('editor opens a file and renders content (no stuck "Loading...")', async ({
   await selectProject(page, 'proj-e')
 
   // Refresh the explorer so the new file appears, then open it.
-  await page.locator('[aria-label="Refresh"]').first().click()
+  await refreshExplorer(page)
   const fileNode = page.locator(`[data-path$="${FILE_NAME}"]`).first()
   await fileNode.waitFor({ state: 'visible' })
   await fileNode.dblclick()
@@ -69,7 +75,7 @@ test('reload restores the editor tab with its content (not a stuck loader)', asy
   await openWorkspace(page)
   await selectProject(page, 'proj-e')
 
-  await page.locator('[aria-label="Refresh"]').first().click()
+  await refreshExplorer(page)
   const fileNode = page.locator(`[data-path$="${RELOAD_FILE_NAME}"]`).first()
   await fileNode.waitFor({ state: 'visible' })
   await fileNode.dblclick()
