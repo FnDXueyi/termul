@@ -12,7 +12,6 @@ import { ProjectSidebar } from './ProjectSidebar'
 const {
   mockGetAvailableShells,
   mockSpawnTerminalInPane,
-  mockActivateAndOpenTerminal,
   mockOpenTerminalAtCwd,
   mockAddAgentChatTab,
   mockOpenHistorySession,
@@ -23,7 +22,6 @@ const {
 } = vi.hoisted(() => ({
   mockGetAvailableShells: vi.fn(),
   mockSpawnTerminalInPane: vi.fn(),
-  mockActivateAndOpenTerminal: vi.fn(),
   mockOpenTerminalAtCwd: vi.fn(),
   mockAddAgentChatTab: vi.fn(),
   mockOpenHistorySession: vi.fn(),
@@ -70,7 +68,6 @@ vi.mock('@/stores/acp-store', async () => {
 
 vi.mock('@/lib/terminal-spawn', () => ({
   spawnTerminalInPane: mockSpawnTerminalInPane,
-  activateAndOpenTerminal: mockActivateAndOpenTerminal,
   openTerminalAtCwd: mockOpenTerminalAtCwd
 }))
 
@@ -248,8 +245,6 @@ beforeEach(() => {
   mockGetAvailableShells.mockReset()
   mockSpawnTerminalInPane.mockReset()
   mockSpawnTerminalInPane.mockResolvedValue({ success: true, data: { id: 'term-1' } })
-  mockActivateAndOpenTerminal.mockReset()
-  mockActivateAndOpenTerminal.mockResolvedValue({ status: 'opened', terminalId: 'term-1' })
   mockOpenTerminalAtCwd.mockReset()
   mockOpenTerminalAtCwd.mockResolvedValue({ status: 'opened', terminalId: 'term-1' })
   mockAddAgentChatTab.mockReset()
@@ -934,7 +929,7 @@ describe('ProjectSidebar Project Chat List', () => {
     ).toBeInTheDocument()
   })
 
-  it('opens/resumes the chat when a chat row is clicked (no active-worktree sync)', async () => {
+  it('opens/resumes the chat when a chat row is clicked (no terminal spawn)', async () => {
     useAcpStore.setState({ sessionIndex: [chatEntry()] })
     renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
     expandChats()
@@ -945,8 +940,8 @@ describe('ProjectSidebar Project Chat List', () => {
       expect(mockOpenHistorySession).toHaveBeenCalledWith('chat-1')
       expect(mockAddAgentChatTab).toHaveBeenCalledWith('chat-1')
     })
-    // Chat row click must not route through the worktree terminal path.
-    expect(mockActivateAndOpenTerminal).not.toHaveBeenCalled()
+    // Chat row click must not route through the terminal spawn path.
+    expect(mockOpenTerminalAtCwd).not.toHaveBeenCalled()
   })
 
   it('opens a terminal at the chat cwd via openTerminalAtCwd when the terminal icon is clicked', async () => {
@@ -959,8 +954,6 @@ describe('ProjectSidebar Project Chat List', () => {
     await waitFor(() => {
       expect(mockOpenTerminalAtCwd).toHaveBeenCalledWith('1', '/repo/main')
     })
-    // The chat terminal icon must not sync activeWorktreeId (no activateAndOpenTerminal).
-    expect(mockActivateAndOpenTerminal).not.toHaveBeenCalled()
   })
 
   it('keeps the New Worktree action on the project header context menu', async () => {

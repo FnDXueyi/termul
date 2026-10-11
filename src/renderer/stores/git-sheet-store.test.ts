@@ -19,6 +19,7 @@ vi.mock('@/stores/acp-store', () => ({
 
 import { resolveGitSheetCwd, useGitSheetStore } from './git-sheet-store'
 import { useProjectStore } from './project-store'
+import { useShellLayoutStore } from './shell-layout-store'
 import { useWorkspaceStore, type WorkspaceTab } from './workspace-store'
 
 function project(overrides: Partial<Project> = {}): Project {
@@ -104,6 +105,7 @@ describe('useGitSheetStore', () => {
     sessionsRef.current = {}
     useGitSheetStore.setState({ open: false, cwd: '', projectId: '' })
     useProjectStore.setState({ projects: [project()], activeProjectId: 'p1' })
+    useShellLayoutStore.setState({ worktreePickByProject: {} })
     useWorkspaceStore.setState({
       root: { type: 'leaf', id: 'pane-1', tabs: [], activeTabId: null },
       activePaneId: 'pane-1'
@@ -144,11 +146,11 @@ describe('useGitSheetStore', () => {
     useProjectStore.setState({
       projects: [
         project({
-          activeWorktreeId: 'w1',
           worktrees: [{ id: 'w1', name: 'feat', path: '/repo/.worktrees/feat' }] as never
         })
       ]
     })
+    useShellLayoutStore.setState({ worktreePickByProject: { p1: '/repo/.worktrees/feat' } })
     useGitSheetStore.getState().openGitSheet()
     expect(useGitSheetStore.getState()).toMatchObject({
       open: true,

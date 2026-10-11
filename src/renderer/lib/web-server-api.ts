@@ -230,6 +230,16 @@ export const webServerGit = {
     if (!res.success) throw new Error(res.error)
   },
 
+  async stageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/stage-hunk', { cwd, path, hunkPatch })
+    if (!res.success) throw new Error(res.error)
+  },
+
+  async unstageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/unstage-hunk', { cwd, path, hunkPatch })
+    if (!res.success) throw new Error(res.error)
+  },
+
   async discard(cwd: string, path: string): Promise<void> {
     const res = await postJson<void>('/git/discard', { cwd, path })
     if (!res.success) throw new Error(res.error)
