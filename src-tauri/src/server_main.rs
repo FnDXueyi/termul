@@ -743,20 +743,25 @@ OPTIONS:
                                   [env: TERMUL_AGENT_IDLE_REAP_SECS]
                                   [default: 900]
     --overflow-tolerance <N>      Reliable-queue overflow tolerance per client.
-                                  Positive integer.
+                                  Positive integer. Reserved: the host
+                                  validates it but does not read it yet.
                                   [default: 15]
     --receipt-retention-secs <SECS>
                                   How long a command receipt is retained.
-                                  Positive integer.
+                                  Positive integer. Reserved: the host
+                                  validates it but does not read it yet.
                                   [default: 600]
     --partition-gc-age-secs <SECS>
                                   Age after which an unused device partition
                                   is garbage collected. Positive integer.
+                                  Reserved: the host validates it but does
+                                  not read it yet.
                                   [env: TERMUL_PARTITION_GC_AGE_SECS]
                                   [default: unset]
     --partition-byte-budget <BYTES>
                                   Per-device partition byte budget. Positive
-                                  integer.
+                                  integer. Reserved: the host validates it
+                                  but does not read it yet.
                                   [env: TERMUL_PARTITION_BYTE_BUDGET]
                                   [default: unset]
     --permission-timeout <SECS>, --permission-reconnect-grace <SECS>

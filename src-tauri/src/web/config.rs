@@ -342,10 +342,14 @@ pub struct ServerConfig {
     /// value). The desktop host reads the same default const.
     pub agent_idle_window_secs: u64,
     /// Reliable-queue overflow tolerance per client. `--overflow-tolerance`
-    /// → [`DEFAULT_OVERFLOW_TOLERANCE`] (15).
+    /// → [`DEFAULT_OVERFLOW_TOLERANCE`] (15). Reserved: this is the single
+    /// definition; the read-model work that bounds the queue reads it. No
+    /// runtime code reads it yet.
     pub overflow_tolerance: usize,
     /// How long a command receipt is retained, in seconds.
     /// `--receipt-retention-secs` → [`DEFAULT_RECEIPT_RETENTION_SECS`] (600).
+    /// Reserved: the command-receipt work reads it. No runtime code reads it
+    /// yet.
     pub receipt_retention_secs: u64,
     /// Age (seconds) after which an unused per-device partition is garbage
     /// collected. `None` (unset) until the device-state work picks a value;
@@ -353,7 +357,8 @@ pub struct ServerConfig {
     pub partition_gc_age_secs: Option<u64>,
     /// Per-device partition byte budget. `None` (unset) until the
     /// device-state work picks a value; `--partition-byte-budget` →
-    /// `$TERMUL_PARTITION_BYTE_BUDGET`.
+    /// `$TERMUL_PARTITION_BYTE_BUDGET`. Reserved: no runtime code reads it
+    /// yet.
     pub partition_byte_budget: Option<u64>,
     /// Startup warnings gathered while parsing: removed flags that are still
     /// accepted and ignored, and invalid tunable env values that were
