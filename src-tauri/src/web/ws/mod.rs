@@ -664,17 +664,15 @@ pub(super) fn peer_frame_type(text: &str) -> Option<String> {
     value.get("type")?.as_str().map(str::to_owned)
 }
 
-/// Monotonic millis for the keepalive watchdog, read from the tokio clock
-/// (relative to the first call in this process) so a paused test runtime
-/// (`start_paused`) advances the watchdog deterministically. Production
-/// behavior is a monotonic wall clock: unlike `SystemTime` it cannot jump
+/// Monotonic millis elapsed since `epoch`, read from the tokio clock so a
+/// paused test runtime (`start_paused`) advances the watchdog
+/// deterministically. Each relay connection captures its own `epoch` and uses
+/// it for every watchdog timestamp, so the value never depends on process-wide
+/// state or on which runtime first called it (several paused test runtimes
+/// each own an independent clock). Unlike `SystemTime` it cannot jump
 /// backwards, and `saturating_sub` keeps the compare safe regardless.
-pub(super) fn now_ms() -> u64 {
-    static EPOCH: std::sync::LazyLock<tokio::time::Instant> =
-        std::sync::LazyLock::new(tokio::time::Instant::now);
-    tokio::time::Instant::now()
-        .duration_since(*EPOCH)
-        .as_millis() as u64
+pub(super) fn elapsed_ms(epoch: tokio::time::Instant) -> u64 {
+    epoch.elapsed().as_millis() as u64
 }
 
 /// Map an `AcpManager` `Err(String)` to a `WsReply` err. Story 1.8 review:

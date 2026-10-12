@@ -21,7 +21,7 @@
 //! every delay and the relay's keepalive watchdog deterministically.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -49,6 +49,10 @@ struct Shared {
     pong_tx: mpsc::WeakUnboundedSender<Inbound>,
     drop_filter: parking_lot::Mutex<Option<DropFilter>>,
     dropped: AtomicUsize,
+    /// One-way relay→peer delivery delay in millis ([`Peer::delay_outbound`]).
+    /// Shared so the auto-pong is generated when the `Ping` reaches the peer,
+    /// not when the relay writes it.
+    outbound_delay_ms: AtomicU64,
 }
 
 /// The relay-facing half: `Stream<Item = Result<Message, axum::Error>>` plus
@@ -71,6 +75,7 @@ pub(crate) fn pair() -> (FaultCarrier, Peer) {
         pong_tx: inbound_tx.downgrade(),
         drop_filter: parking_lot::Mutex::new(None),
         dropped: AtomicUsize::new(0),
+        outbound_delay_ms: AtomicU64::new(0),
     });
     (
         FaultCarrier {
@@ -83,7 +88,7 @@ pub(crate) fn pair() -> (FaultCarrier, Peer) {
             outbound: outbound_rx,
             pending: None,
             shared,
-            outbound_delay: Duration::ZERO,
+            pings_seen: 0,
             events: Vec::new(),
             replies: Vec::new(),
             close: None,
@@ -124,10 +129,22 @@ impl Sink<Message> for FaultCarrier {
             }
         }
         if let Message::Ping(payload) = &item {
-            if this.shared.auto_pong.load(Ordering::Acquire) {
-                if let Some(tx) = this.shared.pong_tx.upgrade() {
-                    let _ = tx.send(Ok(Message::Pong(payload.clone())));
-                }
+            // The browser answers when the Ping reaches it, so the Pong is
+            // produced once the injected relay→peer delay has elapsed (the
+            // peer→relay path is instantaneous: `delay_outbound` models the
+            // whole round trip). Whether the peer is half-open is decided at
+            // delivery time too.
+            let delay =
+                Duration::from_millis(this.shared.outbound_delay_ms.load(Ordering::Acquire));
+            let shared = Arc::clone(&this.shared);
+            let payload = payload.clone();
+            if delay.is_zero() {
+                answer_ping(&shared, payload);
+            } else {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    answer_ping(&shared, payload);
+                });
             }
         }
         this.outbound
@@ -147,6 +164,17 @@ impl Sink<Message> for FaultCarrier {
     }
 }
 
+/// The peer's reply to a delivered keepalive `Ping`: a `Pong` echoing the
+/// payload unless the peer is half-open.
+fn answer_ping(shared: &Shared, payload: axum::body::Bytes) {
+    if !shared.auto_pong.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(tx) = shared.pong_tx.upgrade() {
+        let _ = tx.send(Ok(Message::Pong(payload)));
+    }
+}
+
 /// The browser-facing half. Frames the relay wrote are decoded into
 /// [`Peer::events`] / replies as they are read, so assertions can scan
 /// everything delivered so far.
@@ -156,7 +184,9 @@ pub(crate) struct Peer {
     /// A frame read from the queue but still held back by `outbound_delay`.
     pending: Option<Outgoing>,
     shared: Arc<Shared>,
-    outbound_delay: Duration,
+    /// Keepalive `Ping`s delivered so far (the carrier-level view of the
+    /// relay's watchdog traffic).
+    pub(crate) pings_seen: usize,
     /// Every event frame delivered so far (`events` batches flattened), in
     /// arrival order.
     pub(crate) events: Vec<Value>,
@@ -237,8 +267,16 @@ impl Peer {
     }
 
     /// Frames written by the relay become visible to the peer this much later.
+    /// This is the one-way relay→peer latency; a `Ping`'s auto-`Pong` is
+    /// produced after the same delay, so keepalive round trips slow down too.
     pub(crate) fn delay_outbound(&mut self, delay: Duration) {
-        self.outbound_delay = delay;
+        self.shared
+            .outbound_delay_ms
+            .store(delay.as_millis() as u64, Ordering::Release);
+    }
+
+    fn outbound_delay(&self) -> Duration {
+        Duration::from_millis(self.shared.outbound_delay_ms.load(Ordering::Acquire))
     }
 
     /// Connection reset: the relay's next read yields an error.
@@ -259,8 +297,9 @@ impl Peer {
         if self.pending.is_none() {
             self.pending = Some(self.outbound.recv().await?);
         }
-        let due = self.pending.as_ref()?.at + self.outbound_delay;
-        if !self.outbound_delay.is_zero() {
+        let delay = self.outbound_delay();
+        let due = self.pending.as_ref()?.at + delay;
+        if !delay.is_zero() {
             tokio::time::sleep_until(due).await;
         }
         let outgoing = self.pending.take()?;
@@ -344,7 +383,8 @@ impl Peer {
                         .map_or((1005, String::new()), |f| (f.code, f.reason.to_string())),
                 );
             }
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+            Message::Ping(_) => self.pings_seen += 1,
+            Message::Binary(_) | Message::Pong(_) => {}
         }
     }
 }

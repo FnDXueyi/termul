@@ -202,11 +202,11 @@ async fn failed_turns_leave_exactly_one_prompt_complete() {
         assert_eq!(completes[0]["payload"]["stopReason"], stop_reason);
         assert_eq!(completes[0]["payload"]["turnId"], "turn-1");
         // No open turn: the single-flight claim is gone, so the next prompt
-        // is admitted rather than `rate_limited`.
+        // is admitted.
         let next = conn
             .request("p2", "send_prompt", prompt_payload("turn-2"))
             .await;
-        assert_ne!(next["err"]["code"], "rate_limited", "{stop_reason}: {next}");
+        assert_eq!(next["ok"], true, "{stop_reason}: {next}");
     }
 }
 

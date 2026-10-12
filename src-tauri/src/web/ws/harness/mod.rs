@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::*;
@@ -81,8 +82,20 @@ impl Host {
     /// Open a connection: the production relay loop on a fault carrier.
     pub(crate) fn connect(&self) -> Conn {
         let (carrier, peer) = pair();
-        let task = tokio::spawn(run_relay(carrier, self.state.clone()));
-        Conn { peer, task }
+        let (done_tx, done) = watch::channel(false);
+        let state = self.state.clone();
+        let task = tokio::spawn(async move {
+            // Signals completion on every exit path, including a panic.
+            struct Finished(watch::Sender<bool>);
+            impl Drop for Finished {
+                fn drop(&mut self) {
+                    let _ = self.0.send(true);
+                }
+            }
+            let _finished = Finished(done_tx);
+            run_relay(carrier, state).await;
+        });
+        Conn { peer, task, done }
     }
 }
 
@@ -90,6 +103,8 @@ impl Host {
 pub(crate) struct Conn {
     pub(crate) peer: Peer,
     pub(crate) task: JoinHandle<()>,
+    /// Flips to `true` once `run_relay` (including its cleanup) has returned.
+    done: watch::Receiver<bool>,
 }
 
 impl Conn {
@@ -141,16 +156,27 @@ impl Conn {
         );
     }
 
-    /// Let every ready task run at the current (virtual) instant.
+    /// Run every ready task to its next await. Under a paused current-thread
+    /// runtime the clock only auto-advances once no task is runnable, so
+    /// sleeping one virtual millisecond returns after all queued work (frame
+    /// handling, cleanup) has run: a quiescence barrier, not a guess at a
+    /// number of scheduler turns.
     pub(crate) async fn settle() {
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
-    /// Whether the relay loop (including its cleanup) has returned.
+    /// Whether the relay loop (including its cleanup) has returned. Waits on
+    /// the explicit completion signal, bounded by the same quiescence barrier:
+    /// the signal is observed if the relay finishes with the runtime idle, and
+    /// `false` means it is still running with nothing left to run now.
     pub(crate) async fn relay_finished(&self) -> bool {
-        Self::settle().await;
-        self.task.is_finished()
+        let mut done = self.done.clone();
+        let finished = tokio::time::timeout(
+            Duration::from_millis(1),
+            done.wait_for(|finished| *finished),
+        )
+        .await
+        .is_ok();
+        finished
     }
 }

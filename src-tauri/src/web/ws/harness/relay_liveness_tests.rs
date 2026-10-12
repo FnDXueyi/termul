@@ -29,6 +29,24 @@ fn emit_chunk(host: &Host) {
     events::fan_out(&sinks, Some(SESSION), events::EVENT_MESSAGE_CHUNK, &event);
 }
 
+/// How long a half-open peer may stay unnoticed in the foreground: the pong
+/// deadline plus one ping interval (the watchdog only runs on a ping tick).
+fn foreground_reap_by() -> Duration {
+    PONG_TIMEOUT + PING_INTERVAL
+}
+
+/// Last instant a backgrounded half-open peer must still be held: one ping
+/// interval short of the background ceiling.
+fn background_held_until() -> Duration {
+    BACKGROUND_TIMEOUT - PING_INTERVAL
+}
+
+/// By when a backgrounded half-open peer must be gone: the ceiling plus the
+/// tick that notices it, with one more half interval of margin.
+fn background_reap_by() -> Duration {
+    BACKGROUND_TIMEOUT + PING_INTERVAL + PING_INTERVAL / 2
+}
+
 /// A streaming turn: chunks keep flowing for `total` of (virtual) time.
 async fn stream_for(host: &Host, total: Duration) {
     let mut left = total;
@@ -53,7 +71,7 @@ async fn audit_long_handler_vs_ping() {
             sessions,
             Vec::new(),
             false,
-            vec![FakeAuth::ok_after(Duration::from_secs(120))],
+            vec![FakeAuth::ok_after(foreground_reap_by() + PING_INTERVAL)],
         );
     });
     let mut conn = host.connect();
@@ -65,10 +83,18 @@ async fn audit_long_handler_vs_ping() {
         "authenticate_agent",
         json!({"agentId": AGENT, "methodId": "oauth"}),
     );
-    conn.peer.read_for(Duration::from_secs(100)).await;
+    conn.peer.read_for(foreground_reap_by()).await;
     assert!(
         !conn.relay_finished().await,
-        "a handler slower than the pong deadline (75 s) got a healthy connection killed"
+        "a handler slower than the pong deadline ({PONG_TIMEOUT:?}) got a healthy connection killed"
+    );
+    // The watchdog kept pinging throughout; the peer's pongs are what kept
+    // the connection alive.
+    let expected_pings = (foreground_reap_by().as_secs() / PING_INTERVAL.as_secs()) as usize - 1;
+    assert!(
+        conn.peer.pings_seen >= expected_pings,
+        "the relay sent {} keepalive pings, expected at least {expected_pings}",
+        conn.peer.pings_seen
     );
 
     let reply = conn.peer.wait_reply("slow").await;
@@ -76,7 +102,7 @@ async fn audit_long_handler_vs_ping() {
 }
 
 /// A half-open peer during a streaming turn is reaped by the watchdog within
-/// the pong deadline, and a backgrounded one only after the 300 s hold. Today
+/// the pong deadline, and a backgrounded one only after the background hold. Today
 /// the watchdog lives in the write arm that awaits the (stalled) send, so a
 /// peer whose socket stopped draining is never reaped.
 #[tokio::test(start_paused = true)]
@@ -116,42 +142,59 @@ async fn audit_stale_peer_during_stream_is_reaped_by_the_watchdog() {
         conn.peer.stall_writes();
     }
 
-    // Foreground: reaped within PONG_TIMEOUT (75 s) plus one ping interval.
-    stream_for(&host, Duration::from_secs(100)).await;
+    // Foreground: reaped within PONG_TIMEOUT plus one ping interval.
+    stream_for(&host, foreground_reap_by()).await;
     assert!(
         foreground.relay_finished().await,
-        "a stale foreground peer was not reaped within the pong deadline (100 s)"
+        "a stale foreground peer was not reaped within the pong deadline ({:?})",
+        foreground_reap_by()
     );
     assert!(
         !backgrounded.relay_finished().await,
-        "the 300 s background hold must be honored"
+        "the {BACKGROUND_TIMEOUT:?} background hold must be honored"
     );
 
-    // Background: still held at 200 s, reaped by 300 s + one ping interval.
-    stream_for(&host, Duration::from_secs(100)).await;
+    // Background: still held just short of the ceiling, reaped by the first
+    // tick after it.
+    stream_for(&host, background_held_until() - foreground_reap_by()).await;
     assert!(
         !backgrounded.relay_finished().await,
-        "the 300 s background hold must be honored"
+        "the {BACKGROUND_TIMEOUT:?} background hold must be honored"
     );
-    stream_for(&host, Duration::from_secs(130)).await;
+    stream_for(&host, background_reap_by() - background_held_until()).await;
     assert!(
         backgrounded.relay_finished().await,
-        "a stale backgrounded peer was not reaped after the 300 s hold"
+        "a stale backgrounded peer was not reaped after the {BACKGROUND_TIMEOUT:?} hold"
     );
     drop(release_tx);
 }
 
 /// Stopping the host sends `Close(1001)` to an open socket and the upgraded
-/// task is drained by the time `stop()` returns (so `kill_all` / process exit
-/// never races a live relay). Today `serve_router` only stops accepting; the
-/// upgraded socket keeps being served after the UI says "stopped".
+/// task ends with it: after the `Close` the socket reaches EOF (the host
+/// dropped it), so `kill_all` / process exit never races a live relay. Today
+/// `serve_router` only stops accepting; the upgraded socket keeps being
+/// served after the UI says "stopped".
 #[tokio::test]
 #[ignore = "relay execution rework (AD-19): serve_router threads no shutdown token to upgraded sockets, so stop() leaves them open"]
 async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
     let acp = Arc::new(AcpManager::new(vec![]));
     let pty = crate::web::test_pty_manager();
     let relay = Arc::new(WsRelaySink::new());
+    // Root the host in a scratch directory: with an empty registry it falls
+    // back to `$HOME`, whose recursive scan can take minutes on a large tree.
+    let root = tempfile::tempdir().expect("scratch project root");
     let registry = Arc::new(ProjectRegistry::new());
+    registry.set(
+        vec![crate::web::project_registry::ProjectSummary {
+            id: "p-harness".to_string(),
+            name: "harness".to_string(),
+            color: "blue".to_string(),
+            path: Some(root.path().to_string_lossy().into_owned()),
+            is_archived: false,
+            is_default: true,
+        }],
+        Some("p-harness".to_string()),
+    );
     let host = RemoteServerState::new();
     let status = host
         .start(
@@ -169,7 +212,11 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
     let addr: std::net::SocketAddr = ([127, 0, 0, 1], status.port.expect("bound port")).into();
 
     let mut client = RawWsClient::connect(addr, "/ws").await;
-    let first = client.read_json().await.expect("auth_required event");
+    let first = client
+        .read_json_within(Duration::from_secs(5))
+        .await
+        .expect("auth_required event not delivered in time")
+        .expect("auth_required event");
     assert_eq!(first["type"], "auth_required", "{first}");
 
     tokio::time::timeout(Duration::from_secs(10), host.stop())
@@ -177,11 +224,15 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
         .expect("stop must not hang on an open socket")
         .expect("stop succeeds");
 
-    // The tracker drained before `stop` returned: the close is already on the
-    // wire, no further waiting for the host to get around to it.
+    // The close arrives promptly, then the host drops the socket: EOF with no
+    // further frame proves the upgraded task finished instead of lingering.
     let close = client
         .close_code_within(Duration::from_millis(500))
         .await
         .expect("the host stopped but the open socket was never closed");
     assert_eq!(close, Some(1001), "Close(1001 host stopping) expected");
+    let eof = tokio::time::timeout(Duration::from_millis(500), client.read_frame())
+        .await
+        .expect("the upgraded socket stayed open after its Close frame");
+    assert!(eof.is_none(), "unexpected frame after Close: {eof:?}");
 }

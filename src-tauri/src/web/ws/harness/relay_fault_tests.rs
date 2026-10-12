@@ -11,13 +11,17 @@ fn plain_host() -> Host {
     })
 }
 
-/// A slow network delays every reply but loses none: the handshake still
-/// completes and each reply arrives no earlier than the injected delay.
+/// A slow network delays every frame but loses none: the handshake still
+/// completes and its reply arrives no earlier than the injected delay after
+/// the request was sent.
 #[tokio::test(start_paused = true)]
 async fn delayed_wire_delivers_replies_late_but_intact() {
     let host = plain_host();
     let mut conn = host.connect();
     conn.peer.delay_outbound(Duration::from_secs(10));
+    // The initial `auth_required` event is delayed too; time only the span from
+    // sending the request to receiving its reply.
+    conn.peer.wait_event("auth_required").await;
     let started = tokio::time::Instant::now();
     conn.authenticate().await;
     assert!(
@@ -82,20 +86,32 @@ async fn clean_close_and_reset_both_end_the_relay() {
     let mut closing = host.connect();
     closing.authenticate().await;
     closing.subscribe("sub").await;
+    assert_eq!(host.relay.session_subscriber_count(SESSION), 1);
     closing.peer.send_close(1000, "bye");
     tokio::time::timeout(Duration::from_secs(5), closing.task)
         .await
         .expect("relay ends on a clean close")
         .expect("relay task did not panic");
+    assert_eq!(
+        host.relay.session_subscriber_count(SESSION),
+        0,
+        "a clean close leaked its subscription"
+    );
 
     let mut reset = host.connect();
     reset.authenticate().await;
     reset.subscribe("sub").await;
+    assert_eq!(host.relay.session_subscriber_count(SESSION), 1);
     reset.peer.reset();
     tokio::time::timeout(Duration::from_secs(5), reset.task)
         .await
         .expect("relay ends on a reset")
         .expect("relay task did not panic");
+    assert_eq!(
+        host.relay.session_subscriber_count(SESSION),
+        0,
+        "a reset leaked its subscription"
+    );
 }
 
 /// A binary frame is a protocol error: the structured reply is flushed, then
@@ -107,6 +123,38 @@ async fn binary_frame_is_answered_then_closed_with_1003() {
     conn.authenticate().await;
     conn.peer
         .send_message(Message::Binary(vec![1, 2, 3].into()));
+    let reply = conn.peer.wait_reply("binary-frame").await;
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["err"]["code"], "unsupported", "{reply}");
     let (code, _reason) = conn.peer.wait_close().await.expect("close frame");
     assert_eq!(code, 1003);
+}
+
+/// The injected wire delay also slows the keepalive round trip: a Pong is
+/// produced only once its Ping reaches the peer. A one-way delay past
+/// `PONG_TIMEOUT` therefore gets the peer reaped even though it answers every
+/// Ping, while a delay well inside it keeps the connection alive.
+#[tokio::test(start_paused = true)]
+async fn slow_wire_delays_the_pong_past_the_deadline() {
+    let host = plain_host();
+    let mut slow = host.connect();
+    slow.authenticate().await;
+    slow.peer
+        .delay_outbound(PONG_TIMEOUT + Duration::from_secs(5));
+    let mut healthy = host.connect();
+    healthy.authenticate().await;
+    healthy.peer.delay_outbound(PING_INTERVAL);
+
+    let window = PONG_TIMEOUT + PING_INTERVAL;
+    slow.peer.read_for(window).await;
+    healthy.peer.read_for(window).await;
+    assert!(
+        slow.relay_finished().await,
+        "a peer whose Pongs arrive after the deadline was not reaped"
+    );
+    assert!(
+        !healthy.relay_finished().await,
+        "a peer with a modest delay was reaped"
+    );
+    assert!(healthy.peer.pings_seen > 0, "the relay never pinged");
 }

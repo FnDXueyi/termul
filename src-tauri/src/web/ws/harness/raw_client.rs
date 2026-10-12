@@ -15,13 +15,24 @@ use tokio::net::TcpStream;
 pub(crate) const OP_TEXT: u8 = 0x1;
 pub(crate) const OP_CLOSE: u8 = 0x8;
 
+/// Wall-time bound on connecting and completing the upgrade handshake: a
+/// stalled host fails the test instead of hanging the run.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) struct RawWsClient {
     stream: TcpStream,
 }
 
 impl RawWsClient {
-    /// Connect and complete the upgrade handshake for `path`.
+    /// Connect and complete the upgrade handshake for `path`, bounded by
+    /// [`HANDSHAKE_TIMEOUT`].
     pub(crate) async fn connect(addr: SocketAddr, path: &str) -> Self {
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, Self::handshake(addr, path))
+            .await
+            .expect("upgrade handshake did not complete in time")
+    }
+
+    async fn handshake(addr: SocketAddr, path: &str) -> Self {
         let mut stream = TcpStream::connect(addr).await.expect("connect");
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
@@ -82,6 +93,17 @@ impl RawWsClient {
                 _ => {}
             }
         }
+    }
+
+    /// `read_json`, bounded by `timeout` of wall time. `Err(())` means no
+    /// frame arrived within the window.
+    pub(crate) async fn read_json_within(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<Value>, ()> {
+        tokio::time::timeout(timeout, self.read_json())
+            .await
+            .map_err(|_| ())
     }
 
     /// Read frames until the server's `Close`; returns its status code. `None`

@@ -94,7 +94,7 @@ pub(super) const PING_PAYLOAD: &[u8] = b"keepalive";
 /// while a `background` signal is in effect (CAP-3). Extracted from the write
 /// task so the threshold semantics (strict `>`) are unit-testable without
 /// spinning up a real socket. The write task calls this with
-/// `last_activity.load()` + `now_ms()` + the active ceiling on each tick.
+/// `last_activity.load()` + `elapsed_ms()` + the active ceiling on each tick.
 pub(super) fn watchdog_is_stale(last_activity_ms: u64, now_ms_value: u64, ceiling_ms: u64) -> bool {
     now_ms_value.saturating_sub(last_activity_ms) > ceiling_ms
 }
@@ -197,7 +197,8 @@ where
     // (the WS API never exposes ping/pong to JS), so a server-emitted Ping is
     // the only way to refresh NAT/proxy/browser idle timers during silent
     // reasoning phases and to surface a dead client promptly.
-    let last_activity = Arc::new(AtomicU64::new(now_ms()));
+    let epoch = tokio::time::Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(elapsed_ms(epoch)));
     // CAP-3: per-connection background flag. `true` while a web client has
     // signaled `type:"background"` (tab suspending); the watchdog then uses
     // BACKGROUND_TIMEOUT (5min) instead of PONG_TIMEOUT (75s). Reset to
@@ -318,7 +319,7 @@ where
                     // (which would otherwise leak subscriptions + pending
                     // permissions and stall the chat UI mid-response).
                     let last = write_last_activity.load(Ordering::Relaxed);
-                    let now = now_ms();
+                    let now = elapsed_ms(epoch);
                     let stale = now.saturating_sub(last);
                     // CAP-3: a backgrounded client (sent `type:"background"`)
                     // gets the 5-min ceiling; any other state gets 75s.
@@ -365,7 +366,7 @@ where
             // keepalive Ping, or a client Ping) proves the connection is live
             // — stamp it so the write task's watchdog doesn't close a healthy
             // peer during a burst of agent output.
-            read_last_activity.store(now_ms(), Ordering::Relaxed);
+            read_last_activity.store(elapsed_ms(epoch), Ordering::Relaxed);
             match msg {
                 Message::Text(t) => {
                     if protocol_error {
