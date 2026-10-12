@@ -1,21 +1,14 @@
-//! Request dispatch: `handle_request` auth gate + post-auth routing match,
-//! prompt fast-path, and connection subscription cleanup.
+//! Request routing: the post-auth `route_request` match and the connection
+//! subscription cleanup. The pre-auth gate, capability check and executor
+//! hand-off live in `relay::conn`.
 
 use super::*;
 
-pub(super) fn authenticated_send_prompt(text: &str, authed: bool) -> Option<(String, Value)> {
-    if !authed {
-        return None;
-    }
-    let request: WsRequest = serde_json::from_str(text).ok()?;
-    (request.type_ == "send_prompt").then_some((request.id, request.payload))
-}
-
 pub(super) async fn cleanup_connection_subscriptions(
     relay: &Arc<WsRelaySink>,
-    subscribed_clients: &Arc<tokio::sync::Mutex<Vec<(String, ClientId)>>>,
+    subscriptions: &Subscriptions,
 ) {
-    let subscriptions = std::mem::take(&mut *subscribed_clients.lock().await);
+    let subscriptions = subscriptions.take_all();
     let disconnected_sessions: std::collections::HashSet<String> = subscriptions
         .iter()
         .map(|(session_id, _)| session_id.clone())
@@ -59,131 +52,29 @@ pub(super) async fn cleanup_connection_subscriptions(
     }
 }
 
-/// Route a single text request frame to a reply (AC9 + AC10 + Story 1.6 subscribe
-/// + Story 1.7 `respond_permission` + Story 1.8 ACP command forwarding).
+/// Route one validated post-auth request to its handler and return the reply.
+/// The caller has already passed the pre-auth gate and the required-capability
+/// check; `authenticate` is idempotent here.
 ///
-/// Pre-auth: only `authenticate` is allowed; everything else → `unauthorized`.
-/// Post-auth: `authenticate` is a no-op success; `subscribe` wires the sink;
-/// `respond_permission` routes through the Story 1.7 rendezvous; the 10 ACP
-/// command types (`send_prompt`, `create_session`, …) forward to
-/// `AcpManager` (Story 1.8); OS-cap requests → `unsupported`; unknown types →
-/// `not_implemented`.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_request(
-    text: &str,
-    authed: &mut bool,
-    identity: &mut Option<ClientIdentity>,
-    access: &mut ConnectionAccess,
-    web_auth: Option<&WebAuth>,
-    acp: &Arc<AcpManager>,
-    relay: &Arc<WsRelaySink>,
-    registry: &Arc<ProjectRegistry>,
-    registry_persistence: Option<&Arc<parking_lot::Mutex<FileProjectRegistry>>>,
-    projects_file: Option<&PathBuf>,
-    out_tx: &mpsc::UnboundedSender<Outbound>,
-    subscribed_clients: &mut Vec<(String, ClientId)>,
-    history_mode: HistoryMode,
-    acp_catalog: Option<&Arc<crate::acp::AcpCatalogService>>,
-    acp_install: Option<&Arc<crate::acp::install::AcpInstallService>>,
-    store: Option<&Arc<WebStore>>,
-) -> WsReply {
-    let req: WsRequest = match serde_json::from_str(text) {
-        Ok(r) => r,
-        Err(e) => {
-            return WsReply::err(
-                "malformed",
-                WsErrorCode::Unsupported,
-                format!("malformed request frame: {e}"),
-            );
-        }
-    };
+/// The ACP command types (`create_session`, `cancel_prompt`, …) forward to
+/// `AcpManager` (Story 1.8); `respond_permission` routes through the Story 1.7
+/// rendezvous; OS-cap requests → `unsupported`; unknown types →
+/// `not_implemented`. `send_prompt` is NOT routed here: its reply is deferred
+/// (accept now, complete on its own task), so `relay::conn::run_request`
+/// handles it.
+pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
     let id = req.id.clone();
-
-    // Pre-auth gate (AC9): only authenticate is allowed.
-    if !*authed {
-        if req.type_ == "authenticate" {
-            // Handshake checks run FIRST — on gated and ungated hosts alike —
-            // so a stale tab learns it must reload even when its token is
-            // also wrong. A refusal leaves the connection pre-auth.
-            let validated = match validate_authenticate_handshake(&req.payload) {
-                Ok(validated) => validated,
-                Err(refusal) => {
-                    warn!(
-                        target: "termul::web::ws",
-                        request_id = %req.id,
-                        check = refusal.check,
-                        code = refusal.code.as_str(),
-                        "/ws authenticate refused (handshake check failed)"
-                    );
-                    return WsReply::err(id, refusal.code, refusal.message);
-                }
-            };
-            // CAP-1 interim (Story 1): when the server runs gated, validate
-            // the presented token in constant time BEFORE marking authed. A
-            // wrong/absent token is refused `unauthorized`; `authed` stays
-            // false and the connection stays open so the client may retry.
-            // Ungated servers (`web_auth: None`) accept any token once the
-            // handshake checks above pass.
-            if let Some(gate) = web_auth {
-                let presented = req.payload["token"].as_str().unwrap_or("");
-                if !gate.accepts(presented) {
-                    // Durable boundary event (AGENTS.md logging policy): a
-                    // refused authenticate must be visible in the service
-                    // log. NEVER log the presented token — only that the
-                    // gate refused, plus enough context to correlate.
-                    warn!(
-                        target: "termul::web::ws",
-                        request_id = %req.id,
-                        token_presented = !presented.is_empty(),
-                        "web auth gate refused /ws authenticate (invalid or missing token)"
-                    );
-                    return WsReply::err(
-                        id,
-                        WsErrorCode::Unauthorized,
-                        "invalid or missing auth token",
-                    );
-                }
-            }
-            info!(
-                target: "termul::web::ws",
-                request_id = %req.id,
-                device_id = %ClientIdentity::log_label(&validated.device_id),
-                client_instance_id = %ClientIdentity::log_label(&validated.client_instance_id),
-                "/ws connection authenticated"
-            );
-            // Capabilities are resolved ONCE, here (carrier + deployment flags
-            // + peer), and the device joins presence.
-            access.grant(&validated, relay);
-            *identity = Some(validated);
-            *authed = true;
-            let reconnect_grace = relay
-                .rendezvous()
-                .map_or(DEFAULT_PERMISSION_RECONNECT_GRACE, |rendezvous| {
-                    rendezvous.disconnect_grace()
-                });
-            return WsReply::ok(
-                id,
-                Some(json!({
-                    "historyMode": history_mode,
-                    "runtimePolicy": RuntimePolicy::resolved(reconnect_grace),
-                    "protocolVersion": WS_PROTOCOL_VERSION,
-                })),
-            );
-        }
-        return WsReply::err(
-            id,
-            WsErrorCode::Unauthorized,
-            "pre-auth: send an `authenticate` request first",
-        );
-    }
-
-    // Required-capability check: a view-only connection is refused every
-    // mutation before any handler runs.
-    if let Some(reply) = forbidden_reply(&req.id, &req.type_, &req.payload, access, identity.as_ref()) {
-        return reply;
-    }
-
-    // Post-auth routing.
+    let acp = &env.acp;
+    let relay = &env.relay;
+    let registry = &env.registry;
+    let registry_persistence = env.registry_persistence.as_ref();
+    let projects_file = env.projects_file.as_deref();
+    let out_tx = &env.out_tx;
+    let subscribed_clients = &*env.subscriptions;
+    let history_mode = env.history_mode;
+    let acp_catalog = env.acp_catalog.as_ref();
+    let acp_install = env.acp_install.as_ref();
+    let store = env.store.as_ref();
     match req.type_.as_str() {
         "authenticate" => {
             // Idempotent re-auth — accept and succeed.
@@ -243,12 +134,12 @@ pub(super) async fn handle_request(
         // decision through the server-side rendezvous (first-response-wins,
         // TOCTOU re-validation, at-most-one) to `AcpManager::respond_permission`,
         // which resolves the agent's `Responder` on the driver thread.
-        "respond_permission" => handle_respond_permission(id, &req.payload, relay, access.connection_id()).await,
+        "respond_permission" => handle_respond_permission(id, &req.payload, relay, env.connection_id).await,
         // Issue #411: `answer_question` — route the browser's structured-question
         // answer through the server-side question rendezvous (first-response-wins,
         // TOCTOU re-validation) to `AcpManager::answer_question`, which resolves
         // the agent's `Responder` on the driver thread.
-        "answer_question" => handle_answer_question(id, &req.payload, relay, access.connection_id()).await,
+        "answer_question" => handle_answer_question(id, &req.payload, relay, env.connection_id).await,
         // Story 1.8: ACP command forwarding → `AcpManager`. The streaming events
         // (`message_chunk`, `tool_call`, `prompt_complete`, `session_created`,
         // `config_options_update`, …) flow back automatically through the
@@ -373,7 +264,6 @@ pub(super) async fn handle_request(
         "acp_deliver_auth_redirect" => {
             handle_deliver_auth_redirect(id, &req.payload, acp).await
         }
-        "send_prompt" => handle_send_prompt(id, &req.payload, acp, relay).await,
         // CAP-2: host-authored durable agent-switch marker (desktop parity
         // with the `acp_record_agent_switch` Tauri command). Persists the
         // `agent_switch` record through `SessionPersistence`, then fans the
@@ -385,6 +275,9 @@ pub(super) async fn handle_request(
         "set_mode" => handle_set_mode(id, &req.payload, acp).await,
         "set_model" => handle_set_model(id, &req.payload, acp).await,
         "set_config_option" => handle_set_config_option(id, &req.payload, acp).await,
+        // Test hook: a handler that panics (the connection must be closed).
+        #[cfg(test)]
+        "panic_for_test" => panic!("handler panic injected by a test"),
         // OS caps (AC8): server-fulfilled; reject browser requests.
         t if is_os_fulfilled_cap(t) => WsReply::err(
             id,
