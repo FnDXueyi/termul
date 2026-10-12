@@ -124,7 +124,8 @@ pub fn backup_pre_migration(path: &Path, bytes: &[u8], to_version: u32) -> io::R
         } else {
             format!("-{attempt}")
         };
-        let backup = path.with_file_name(format!("{name}.pre-v{to_version}-{unix_secs}{suffix}.bak"));
+        let backup =
+            path.with_file_name(format!("{name}.pre-v{to_version}-{unix_secs}{suffix}.bak"));
         match write_new_synced(&backup, bytes) {
             Ok(()) => return Ok(backup),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,

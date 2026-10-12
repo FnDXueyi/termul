@@ -431,7 +431,10 @@ fn strip_line_comments(src: &str) -> String {
 #[test]
 fn shared_live_requires_token_when_exposed() {
     // Ungated ONLY on loopback with no tunnel; a tunnel or a LAN bind gates.
-    assert!(!shared_live_requires_token(RemoteBindMode::Localhost, false));
+    assert!(!shared_live_requires_token(
+        RemoteBindMode::Localhost,
+        false
+    ));
     assert!(shared_live_requires_token(RemoteBindMode::Localhost, true));
     assert!(shared_live_requires_token(RemoteBindMode::All, false));
     assert!(shared_live_requires_token(RemoteBindMode::All, true));
@@ -504,7 +507,10 @@ async fn shared_live_with_a_tunnel_requires_the_token_and_shares_it_in_the_url()
     state
         .attach_tunnel("https://abc.trycloudflare.com".to_string(), child)
         .expect("attach");
-    let shared = state.status().tunnel_url.expect("tunnel url while child lives");
+    let shared = state
+        .status()
+        .tunnel_url
+        .expect("tunnel url while child lives");
     assert_eq!(
         shared,
         format!("https://abc.trycloudflare.com#token={token}")
@@ -535,10 +541,7 @@ async fn shared_live_on_loopback_without_a_tunnel_is_ungated_and_writes_no_token
         .await
         .expect("start");
     let api = format!("{}/projects", status.url.expect("loopback url"));
-    assert_eq!(
-        http_status(&api, None).await,
-        reqwest::StatusCode::OK
-    );
+    assert_eq!(http_status(&api, None).await, reqwest::StatusCode::OK);
     assert!(
         !data_dir
             .path()
@@ -634,8 +637,13 @@ async fn stop_then_start_reuses_the_one_desktop_store_without_taking_a_second_lo
     names.sort();
     assert!(
         names.iter().all(|n| {
-            n == "store.json" || n == crate::web::auth::WEB_AUTH_TOKEN_FILE || n.contains("lock")
-                || n == "acp-sessions" || n == "workspace-manifests" || n == "acp-catalog"
+            n == "store.json"
+                || n == crate::web::auth::WEB_AUTH_TOKEN_FILE
+                || n.contains("lock")
+                || n == "acp-sessions"
+                || n == "workspace-manifests"
+                || n == "acp-catalog"
+                || n == "acp-registry-binaries"
         }),
         "unexpected files in app_data_dir: {names:?}"
     );
