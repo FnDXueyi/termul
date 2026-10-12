@@ -1,8 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};

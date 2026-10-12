@@ -8,6 +8,7 @@
 //! P1+. See `docs/adr/adr-003-acp-agent-chat-ui-architecture.md` and
 //! `_bmad-output/implementation-artifacts/spec-adr-003-p0-rust-acp-core.md`.
 
+pub mod agent_process;
 pub mod archive;
 pub mod atomic_file;
 pub mod browser_shim;
