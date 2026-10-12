@@ -63,7 +63,8 @@ export interface WebTerminalRequest {
    * Client-minted command id (AD-5) of a ledgered request: `spawn`, `write`
    * (one per input chunk), `kill`, `rotate_claim`, `revoke_claim`. A resend with
    * the same id never runs twice. `spawn` may instead carry it as
-   * `payload.commandId`. Absent = no replay protection (today's behavior).
+   * `payload.commandId`. Required on those types: a request without it is
+   * refused with `INVALID_COMMAND_ID` before it runs.
    * `list_preserved` re-issues claims and is never replayed.
    */
   commandId?: string

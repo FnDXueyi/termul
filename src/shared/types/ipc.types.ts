@@ -54,6 +54,13 @@ export const PRECONDITION_FAILED_CODE = 'precondition_failed'
 export type FsWriteExpected = 'absent' | { sha256: string }
 
 /**
+ * A file read. The web host adds `contentHash` (lower-case sha256 hex of the
+ * file's bytes): send it back as the `expected` precondition of the next write.
+ * Absent on desktop reads (`plugin-fs`), which carry no precondition.
+ */
+export type HashedFileContent = FileContent & { contentHash?: string }
+
+/**
  * `code` values a ledgered command can fail with beyond its own domain codes
  * are listed below (`COMMAND_RESULT_CODES`). A host reply
  * `{ success: true, receipt: "in_progress" }` (first run of a resent id still
@@ -696,7 +703,7 @@ export interface FilesystemApi {
    */
   grantFsScope: (paths: string[]) => Promise<IpcResult<FsScopeGrantSummary>>
   readDirectory: (dirPath: string) => Promise<IpcResult<DirectoryEntry[]>>
-  readFile: (filePath: string) => Promise<IpcResult<FileContent>>
+  readFile: (filePath: string) => Promise<IpcResult<HashedFileContent>>
   getFileInfo: (filePath: string) => Promise<IpcResult<FileInfo>>
   searchContent: (
     scopeRoot: string,

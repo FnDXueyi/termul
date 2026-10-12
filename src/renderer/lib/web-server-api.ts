@@ -21,7 +21,6 @@ import type {
   DetectedShells,
   DirectoryEntry,
   DirtyStatus,
-  FileContent,
   FileInfo,
   GitCommit,
   GitCommitContext,
@@ -33,7 +32,11 @@ import type {
   WorktreeInfo,
   WorktreeProgressEvent
 } from '@shared/types/ipc.types'
-import { COMMAND_ID_HEADER, type FsWriteExpected } from '@shared/types/ipc.types'
+import {
+  COMMAND_ID_HEADER,
+  type FsWriteExpected,
+  type HashedFileContent
+} from '@shared/types/ipc.types'
 import type { ProjectListPayload, ProjectSummary } from '@shared/types/web-projects.types'
 import {
   bodyToResult,
@@ -180,9 +183,9 @@ export const webServerFilesystem = {
     }
   },
 
-  async readFile(filePath: string): Promise<IpcResult<FileContent>> {
+  async readFile(filePath: string): Promise<IpcResult<HashedFileContent>> {
     const encoded = encodeURIComponent(filePath)
-    return getJson<FileContent>(`/fs/read?path=${encoded}`)
+    return getJson<HashedFileContent>(`/fs/read?path=${encoded}`)
   },
 
   async getFileInfo(filePath: string): Promise<IpcResult<FileInfo>> {
