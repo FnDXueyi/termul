@@ -15,7 +15,11 @@ use tauri::State;
 /// quick-tunnel so the phone can reach it on any network — the popover renders
 /// the ephemeral `https://*.trycloudflare.com` URL as a QR. The `bind_mode`
 /// param is accepted for API stability but ignored (the tunnel targets
-/// localhost). App auth / token-gating land in Epic 2.
+/// localhost). The tunnel is always started right after the server binds, so
+/// the shared-live host is always token-gated (AD-3): the bearer token is
+/// required on HTTP, `/ws` and `/terminal/ws`, and the URL in the status
+/// (QR / copy link) carries it in the `#token=` fragment. The desktop's single
+/// web store (`shared_live_data`) is reused across stop/start cycles.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn remote_server_start(
@@ -27,6 +31,7 @@ pub async fn remote_server_start(
     workspace_manifest_store: State<'_, HostWorkspaceManifestStore>,
     acp_catalog_store: State<'_, HostAcpCatalogStore>,
     acp_install_store: State<'_, HostAcpInstallStore>,
+    shared_live_data: State<'_, remote::SharedLiveData>,
     bind_mode: Option<String>,
 ) -> Result<IpcResult<remote::RemoteStatus>, String> {
     // Default to localhost only when the caller omits the bind mode; an
@@ -62,6 +67,10 @@ pub async fn remote_server_start(
             ws_relay.inner().clone(),
             project_registry.inner().clone(),
             bind_mode,
+            // The cloudflared tunnel starts right after the bind below, so the
+            // host must be token-gated from the first request.
+            true,
+            shared_live_data.inner(),
             workspace_manifest,
             acp_catalog,
             acp_install,
@@ -71,7 +80,7 @@ pub async fn remote_server_start(
         Ok(status) => {
             // Server is up on localhost. Bring up the cloudflared quick-tunnel so
             // the phone can reach it on any network — the QR encodes the resulting
-            // ephemeral HTTPS URL (edge TLS via cloudflared; app auth is Epic 2).
+            // ephemeral HTTPS URL (edge TLS via cloudflared) plus the bearer token.
             // On tunnel failure, drain the server and surface the error so the
             // popover never holds a localhost-only server + a stale toggle.
             let port = match status.port {

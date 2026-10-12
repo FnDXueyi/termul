@@ -298,6 +298,61 @@ impl FileProjectRegistry {
         };
         let bytes = serde_json::to_vec_pretty(&file).map_err(ProjectRegistryError::Parse)?;
 
+        // AD-18: `load` migrates 1/2 -> 3 in memory only. The first write
+        // after that replaces the old-schema bytes, so preserve them in
+        // `<name>.pre-v3-<ts>.bak` first; a backup failure aborts the write
+        // (no migration without a recoverable original). A newer-schema file
+        // is never overwritten (same refusal `load` gives it).
+        match fs::read(path) {
+            Ok(existing) => match crate::acp::atomic_file::peek_schema_version(&existing) {
+                Some(found) if found > SCHEMA_VERSION => {
+                    warn!(
+                        "refusing to overwrite projects file '{}': schema version {found} is newer than {SCHEMA_VERSION}",
+                        path.display()
+                    );
+                    return Err(ProjectRegistryError::BadSchemaVersion {
+                        expected: SCHEMA_VERSION,
+                        found,
+                    });
+                }
+                // Only versions `migrate` knows (1, 2) may be rewritten; any
+                // other lower version (e.g. 0) is rejected exactly as `load`
+                // rejects it, never backed up and overwritten.
+                Some(found) if found < SCHEMA_VERSION && !matches!(found, 1 | 2) => {
+                    warn!(
+                        "refusing to overwrite projects file '{}': unsupported schema version {found}",
+                        path.display()
+                    );
+                    return Err(ProjectRegistryError::BadSchemaVersion {
+                        expected: SCHEMA_VERSION,
+                        found,
+                    });
+                }
+                Some(found) if found < SCHEMA_VERSION => {
+                    let backup = crate::acp::atomic_file::backup_pre_migration(
+                        path,
+                        &existing,
+                        SCHEMA_VERSION,
+                    )
+                    .map_err(|e| {
+                        warn!(
+                            "could not back up projects file '{}' before migrating v{found} -> v{SCHEMA_VERSION}: {e}",
+                            path.display()
+                        );
+                        ProjectRegistryError::Io(e)
+                    })?;
+                    info!(
+                        "migrating projects file '{}' v{found} -> v{SCHEMA_VERSION}; original saved to '{}'",
+                        path.display(),
+                        backup.display()
+                    );
+                }
+                _ => {}
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ProjectRegistryError::Io(e)),
+        }
+
         crate::acp::atomic_file::replace(path, &bytes).map_err(ProjectRegistryError::Io)
     }
 

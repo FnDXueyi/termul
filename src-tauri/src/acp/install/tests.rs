@@ -127,6 +127,34 @@ async fn open_service(root: PathBuf) -> Arc<AcpInstallService> {
         .unwrap()
 }
 
+#[tokio::test]
+async fn newer_schema_manifest_refuses_open_and_stays_untouched() {
+    let root = temp_dir("install-newer-schema");
+    let install_root = root.join("installs");
+    fs::create_dir_all(&install_root).unwrap();
+    let manifest_path = install_root.join(INSTALLED_MANIFEST_FILENAME);
+    let newer = br#"{"schemaVersion":99,"agents":{},"futureField":[]}"#;
+    fs::write(&manifest_path, newer).unwrap();
+
+    let catalog = crate::acp::AcpCatalogService::open(root.join("catalog"))
+        .await
+        .unwrap();
+    let error = AcpInstallService::open(install_root.clone(), catalog)
+        .await
+        .err()
+        .expect("a newer manifest must refuse to open");
+    let newer_schema = NewerSchema::from_io(&error).expect("typed NewerSchema");
+    assert_eq!(newer_schema.found, 99);
+    assert_eq!(fs::read(&manifest_path).unwrap(), newer, "file byte-identical");
+    let names: Vec<_> = fs::read_dir(&install_root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec![INSTALLED_MANIFEST_FILENAME.to_string()]);
+    let _ = fs::remove_dir_all(root);
+}
+
 struct FakeNpmPackageInstaller {
     installed_spec: Arc<Mutex<Option<String>>>,
 }

@@ -11,6 +11,7 @@
 //!
 //! This is a CONSOLE server — do NOT add `windows_subsystem = "windows"`.
 
+use termul_manager_lib::data_lock::StandalonePaths;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use termul_manager_lib::web::{
     seed_from_file, serve, PermissionRendezvous, ProjectRegistry, QuestionRendezvous, ServerConfig,
     WsRelaySink,
 };
+use termul_manager_lib::web::store::WebStore;
 use termul_manager_lib::{
     AcpCatalogService, AcpInstallService, AcpManager, CwdTracker, ExitCodeTracker,
     FileProjectRegistry, GitTracker, PtyManager, SessionPersistence, TerminalEventHub,
@@ -106,6 +108,22 @@ fn main() -> ExitCode {
     for warning in &cfg.deprecation_warnings {
         warn!("{warning}");
     }
+
+    // AD-14: one host per durable path. Lock the state dir and every store
+    // path (sessions, projects, workspace manifests, acp catalog, store file)
+    // BEFORE anything opens or writes them — including the web-auth token
+    // file below. A held lock means another Termul host (desktop app or
+    // termul-server) owns the path: refuse to start, never share it. The
+    // locks live until `main` returns.
+    let data_paths = StandalonePaths::resolve(&cfg);
+    let _data_locks = match data_paths.lock() {
+        Ok(locks) => locks,
+        Err(error) => {
+            error!("termul-server: refusing to start: {error}");
+            eprintln!("termul-server: {error}");
+            return ExitCode::from(1);
+        }
+    };
 
     // QA remediation Story 1 (CAP-1 interim): resolve the web auth gate
     // BEFORE any binding/serving setup. Fail-closed: a public bind whose
@@ -250,6 +268,18 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| "(none)".to_string()),
             cfg.service_account_state_dir().display()
         );
+        // AD-14/AD-18: the web store is opened here, after the data locks are
+        // held. A newer-schema file (or a legacy file that cannot be backed
+        // up before migration) refuses startup visibly instead of degrading;
+        // the file is left untouched.
+        let store = match WebStore::open(data_paths.store_file.clone()) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                error!("termul-server: refusing to start: {error}");
+                eprintln!("termul-server: {error}");
+                return ExitCode::from(1);
+            }
+        };
         let persistence = match SessionPersistence::open(sessions_dir).await {
             Ok(persistence) => persistence,
             Err(error) => {
@@ -263,10 +293,7 @@ fn main() -> ExitCode {
         // host on the same machine (two processes on one JSONL store would
         // corrupt both). Defaults to `<state dir>/workspace-manifests`; the
         // explicit `--workspace-manifests-dir` flag overrides.
-        let workspace_manifests_dir = cfg
-            .workspace_manifests_dir
-            .clone()
-            .unwrap_or_else(|| cfg.service_account_state_dir().join("workspace-manifests"));
+        let workspace_manifests_dir = data_paths.workspace_manifests_dir.clone();
         let workspace_manifest = match WorkspaceManifestService::open(workspace_manifests_dir).await
         {
             Ok(service) => Some(service),
@@ -278,10 +305,7 @@ fn main() -> ExitCode {
         // CAP-6 / Story 8: open the host-owned ACP catalog root. The
         // standalone binary owns its own root — NEVER shared with a desktop
         // host on the same machine. Defaults to `<state dir>/acp-catalog`.
-        let acp_catalog_dir = cfg
-            .acp_catalog_dir
-            .clone()
-            .unwrap_or_else(|| cfg.service_account_state_dir().join("acp-catalog"));
+        let acp_catalog_dir = data_paths.acp_catalog_dir.clone();
         let acp_catalog = match AcpCatalogService::open(acp_catalog_dir).await {
             Ok(service) => Some(service),
             Err(error) => {
@@ -438,6 +462,7 @@ fn main() -> ExitCode {
             workspace_manifest,
             acp_catalog,
             acp_install,
+            store,
             web_auth,
             canvas_pool,
         )

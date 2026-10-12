@@ -23,7 +23,7 @@ fn cleanup(p: &PathBuf) {
 fn missing_file_opens_empty_and_round_trips() {
     let dir = tempdir_like("roundtrip");
     let file = dir.join("store.json");
-    let store = WebStore::open(file.clone());
+    let store = WebStore::open(file.clone()).unwrap();
     assert_eq!(store.read("missing").unwrap(), None);
 
     store
@@ -42,7 +42,7 @@ fn missing_file_opens_empty_and_round_trips() {
     );
 
     // A second open (simulating a restart) reloads the persisted map.
-    let reloaded = WebStore::open(file.clone());
+    let reloaded = WebStore::open(file.clone()).unwrap();
     assert_eq!(
         reloaded.read("settings").unwrap(),
         Some(serde_json::json!({ "theme": "dark" }))
@@ -52,7 +52,7 @@ fn missing_file_opens_empty_and_round_trips() {
     assert!(reloaded.delete("settings").unwrap());
     assert_eq!(reloaded.read("settings").unwrap(), None);
     assert!(!reloaded.delete("settings").unwrap());
-    let reloaded_again = WebStore::open(file.clone());
+    let reloaded_again = WebStore::open(file.clone()).unwrap();
     assert_eq!(reloaded_again.read("settings").unwrap(), None);
     assert_eq!(
         reloaded_again.read("terminals/p1").unwrap(),
@@ -65,7 +65,7 @@ fn missing_file_opens_empty_and_round_trips() {
 fn write_replaces_existing_value_and_no_temp_leaks() {
     let dir = tempdir_like("replace");
     let file = dir.join("store.json");
-    let store = WebStore::open(file.clone());
+    let store = WebStore::open(file.clone()).unwrap();
     store.write("k", serde_json::json!(1), None).unwrap();
     store.write("k", serde_json::json!(2), None).unwrap();
     assert_eq!(store.read("k").unwrap(), Some(serde_json::json!(2)));
@@ -90,7 +90,7 @@ fn corrupt_file_is_backed_up_and_treated_as_empty() {
     let file = dir.join("store.json");
     std::fs::write(&file, "{ not valid json").expect("write garbage");
 
-    let store = WebStore::open(file.clone());
+    let store = WebStore::open(file.clone()).unwrap();
     assert_eq!(store.read("anything").unwrap(), None);
 
     let backups: Vec<_> = std::fs::read_dir(&dir)
@@ -107,7 +107,192 @@ fn corrupt_file_is_backed_up_and_treated_as_empty() {
 
     // A write after recovery recreates a valid file.
     store.write("k", serde_json::json!("v"), None).unwrap();
-    let reloaded = WebStore::open(file);
+    let reloaded = WebStore::open(file).unwrap();
     assert_eq!(reloaded.read("k").unwrap(), Some(serde_json::json!("v")));
+    cleanup(&dir);
+}
+
+fn backups_with_prefix(dir: &PathBuf, prefix: &str) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(prefix) && n.ends_with(".bak"))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+#[test]
+fn writes_are_stored_in_the_schema_v1_envelope() {
+    let dir = tempdir_like("envelope");
+    let file = dir.join("store.json");
+    let store = WebStore::open(file.clone()).unwrap();
+    store.write("k", serde_json::json!({ "a": 1 }), None).unwrap();
+
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        on_disk,
+        serde_json::json!({ "schemaVersion": 1, "data": { "k": { "a": 1 } } })
+    );
+    assert_eq!(store.path(), file.as_path());
+    cleanup(&dir);
+}
+
+#[test]
+fn legacy_bare_map_is_backed_up_then_migrated_to_the_envelope() {
+    let dir = tempdir_like("legacy");
+    let file = dir.join("store.json");
+    let legacy = br#"{"settings":{"theme":"dark"},"terminals/p1":[1,2]}"#;
+    std::fs::write(&file, legacy).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert_eq!(
+        store.read("settings").unwrap(),
+        Some(serde_json::json!({ "theme": "dark" }))
+    );
+
+    // Original bytes preserved verbatim in exactly one pre-v1 backup.
+    let backups = backups_with_prefix(&dir, "store.json.pre-v1-");
+    assert_eq!(backups.len(), 1, "exactly one pre-migration backup");
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), legacy);
+
+    // The file itself is already in the envelope (rewritten on open) and a
+    // restart reloads it without taking another backup.
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(on_disk["schemaVersion"], serde_json::json!(1));
+    assert_eq!(on_disk["data"]["settings"], serde_json::json!({ "theme": "dark" }));
+    let reloaded = WebStore::open(file.clone()).unwrap();
+    assert_eq!(
+        reloaded.read("terminals/p1").unwrap(),
+        Some(serde_json::json!([1, 2]))
+    );
+    assert_eq!(backups_with_prefix(&dir, "store.json.pre-v1-").len(), 1);
+    cleanup(&dir);
+}
+
+#[test]
+fn newer_schema_is_refused_and_the_file_is_left_byte_identical() {
+    let dir = tempdir_like("newer");
+    let file = dir.join("store.json");
+    let future = br#"{"schemaVersion":2,"data":{"k":1},"newThing":{"x":[1]}}"#;
+    std::fs::write(&file, future).unwrap();
+
+    let error = match WebStore::open(file.clone()) {
+        Ok(_) => panic!("a newer schema must be refused"),
+        Err(error) => error,
+    };
+    match &error {
+        WebStoreError::NewerSchema(newer) => {
+            assert_eq!((newer.found, newer.supported), (2, STORE_SCHEMA_VERSION));
+            assert_eq!(newer.path, file);
+        }
+        other => panic!("expected NewerSchema, got {other:?}"),
+    }
+    assert!(error.to_string().contains("store.json"));
+    assert_eq!(std::fs::read(&file).unwrap(), future);
+    assert!(
+        backups_with_prefix(&dir, "store.json.").is_empty(),
+        "refusing must not create backups"
+    );
+    cleanup(&dir);
+}
+
+#[test]
+fn bare_map_with_a_user_key_named_schema_version_is_legacy_not_an_envelope() {
+    let dir = tempdir_like("legacy-schema-key");
+    let file = dir.join("store.json");
+    // A numeric user key `schemaVersion` (even a "newer" looking one) without
+    // a `data` envelope is user data, not a version marker.
+    let legacy = br#"{"schemaVersion":7,"settings":{"theme":"dark"}}"#;
+    std::fs::write(&file, legacy).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert_eq!(store.read("schemaVersion").unwrap(), Some(serde_json::json!(7)));
+    assert_eq!(
+        store.read("settings").unwrap(),
+        Some(serde_json::json!({ "theme": "dark" }))
+    );
+    let backups = backups_with_prefix(&dir, "store.json.pre-v1-");
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), legacy);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(on_disk["data"]["schemaVersion"], serde_json::json!(7));
+    cleanup(&dir);
+}
+
+#[test]
+fn envelope_with_non_object_data_is_not_an_envelope() {
+    let dir = tempdir_like("bad-envelope");
+    let file = dir.join("store.json");
+    std::fs::write(&file, br#"{"schemaVersion":1,"data":[1,2]}"#).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    // Read as a legacy map: nothing is lost, and the original is backed up.
+    assert_eq!(store.read("data").unwrap(), Some(serde_json::json!([1, 2])));
+    assert_eq!(backups_with_prefix(&dir, "store.json.pre-v1-").len(), 1);
+    cleanup(&dir);
+}
+
+#[test]
+fn unknown_top_level_envelope_keys_survive_writes_and_deletes() {
+    let dir = tempdir_like("extra-keys");
+    let file = dir.join("store.json");
+    std::fs::write(
+        &file,
+        br#"{"schemaVersion":1,"data":{"k":1},"futureThing":{"x":[1,2]}}"#,
+    )
+    .unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert!(backups_with_prefix(&dir, "store.json.").is_empty());
+    store.write("j", serde_json::json!(2), None).unwrap();
+    store.delete("k").unwrap();
+
+    let reopened = WebStore::open(file.clone()).unwrap();
+    assert_eq!(reopened.read("j").unwrap(), Some(serde_json::json!(2)));
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        on_disk,
+        serde_json::json!({
+            "schemaVersion": 1,
+            "data": { "j": 2 },
+            "futureThing": { "x": [1, 2] }
+        })
+    );
+    cleanup(&dir);
+}
+
+#[test]
+fn write_limit_applies_to_the_data_payload_not_the_envelope() {
+    let dir = tempdir_like("limit");
+    let file = dir.join("store.json");
+    // A bare map whose payload is just under the limit: its envelope is
+    // larger than the limit, yet writes must keep working after migration.
+    let value_len = MAX_DATA_BYTES - br#"{"a":""}"#.len() - 4;
+    let legacy = format!(r#"{{"a":"{}"}}"#, "x".repeat(value_len));
+    assert!(legacy.len() < MAX_DATA_BYTES);
+    std::fs::write(&file, &legacy).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert!(std::fs::metadata(&file).unwrap().len() as usize > MAX_DATA_BYTES);
+    // Same-size rewrite fits (payload unchanged) although the file is over 10 MiB.
+    assert!(store
+        .write("a", serde_json::json!("y".repeat(value_len)), None)
+        .unwrap());
+    // Growing the payload past the limit is still refused, file untouched.
+    let before = std::fs::read(&file).unwrap();
+    let error = store
+        .write("a", serde_json::json!("y".repeat(value_len + 10)), None)
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
     cleanup(&dir);
 }

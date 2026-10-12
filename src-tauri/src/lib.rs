@@ -10,6 +10,9 @@ mod browser_tab_manager;
 // daemon pool + proxies. Compiled unconditionally so the standalone
 // `termul-server` (server_main.rs) constructs its own pool too.
 pub mod canvas;
+// One host per durable path (AD-14): sidecar `File::try_lock` locks taken before
+// any store opens. Tauri-free so the desktop and `termul-server` share it.
+pub mod data_lock;
 mod commands;
 mod logging;
 mod migrations;
@@ -833,6 +836,23 @@ fn show_log_action_error<R: tauri::Runtime>(app: &tauri::AppHandle<R>, message: 
         .show(|_| {});
 }
 
+/// AD-14 / AD-18 startup refusal: another Termul host owns the data directory,
+/// or a store was written by a newer Termul. Nothing else may open that data,
+/// so hide the (still empty) windows, show a native error dialog and exit
+/// non-zero once the user acknowledges it. `setup` returns right after this,
+/// so no store, agent or terminal is ever started.
+fn refuse_startup<R: tauri::Runtime>(app: &tauri::AppHandle<R>, message: &str) {
+    log::error!("[startup] refusing to start: {message}");
+    for window in app.webview_windows().into_values() {
+        let _ = window.hide();
+    }
+    app.dialog()
+        .message(message)
+        .title("Termul cannot start")
+        .kind(MessageDialogKind::Error)
+        .show(|_| std::process::exit(1));
+}
+
 fn export_log_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
     let log_path = match logging::log_file_path(app) {
         Some(path) => path,
@@ -1091,6 +1111,41 @@ pub fn run() {
             // Startup diagnostic banner (issue #244): version, OS/arch, build
             // channel, session id, and resolved log path on a single line.
             logging::log_startup_banner(&handle);
+
+            // AD-14: one host per durable path. Lock `app_data_dir` (and the
+            // stores a server could be pointed at inside it) BEFORE any store
+            // opens; the locks are held for the process lifetime via managed
+            // state. A second host on the same data dir refuses to start with
+            // a visible error instead of corrupting the stores.
+            let app_data_dir = handle
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+            match data_lock::lock_desktop_data(&app_data_dir) {
+                Ok(locks) => {
+                    app.manage(locks);
+                }
+                Err(error) => {
+                    refuse_startup(&handle, &error.to_string());
+                    return Ok(());
+                }
+            }
+            // The ONE desktop web store (AD-14/AD-18), opened inside the
+            // locked `app_data_dir`. Shared-live receives this instance on
+            // every start and never opens its own, so stop/start cycles reuse
+            // it. A newer-schema file refuses startup visibly, untouched.
+            match web::store::WebStore::open(data_lock::desktop_store_file(&app_data_dir)) {
+                Ok(store) => {
+                    app.manage(remote::SharedLiveData {
+                        store: Arc::new(store),
+                        data_dir: app_data_dir.clone(),
+                    });
+                }
+                Err(error) => {
+                    refuse_startup(&handle, &error.to_string());
+                    return Ok(());
+                }
+            }
 
             // Window chrome is configured before show(). macOS overlay settings
             // live in tauri.conf.json — avoid set_decorations(true) there because

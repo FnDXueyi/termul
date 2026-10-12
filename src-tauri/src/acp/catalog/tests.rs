@@ -1124,6 +1124,37 @@ async fn opt_in_persistence_round_trip() {
 }
 
 #[tokio::test]
+async fn opt_in_newer_schema_is_refused_and_never_overwritten() {
+    let root = temp_dir("opt-in-newer");
+    let catalog_dir = root.join("catalog");
+    fs::create_dir_all(&catalog_dir).unwrap();
+    let config_path = catalog_dir.join(CONFIG_FILENAME);
+    let newer = br#"{"schemaVersion":99,"optInCdn":true,"futureField":1}"#;
+    fs::write(&config_path, newer).unwrap();
+
+    let service = AcpCatalogService::open(catalog_dir.clone()).await.unwrap();
+    assert!(!service.is_opt_in(), "a refused config reads as off");
+    let error = service
+        .set_opt_in(true)
+        .expect_err("writing over a newer schema is refused");
+    assert!(
+        matches!(&error, CatalogError::NewerSchema(n) if n.found == 99),
+        "got {error:?}"
+    );
+    assert_eq!(fs::read(&config_path).unwrap(), newer, "file byte-identical");
+    let names: Vec<_> = fs::read_dir(&catalog_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.contains(".bak")),
+        "no backup was made: {names:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn opt_in_corrupt_file_backed_up_and_defaults_false() {
     let root = temp_dir("opt-in-corrupt");
     let catalog_dir = root.join("catalog");
