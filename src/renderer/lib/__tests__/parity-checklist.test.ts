@@ -870,16 +870,6 @@ describe('Parity Checklist Automation', () => {
       'acp',
       'session_payload.rs'
     )
-    const SessionPersistenceRust = join(
-      LIB_DIR,
-      '..',
-      '..',
-      '..',
-      'src-tauri',
-      'src',
-      'acp',
-      'session_persistence'
-    )
     const ManagerRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'manager')
     const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'commands.rs')
     const WsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'ws')
