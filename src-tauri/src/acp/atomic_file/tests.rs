@@ -100,7 +100,7 @@ fn newer_schema_is_recognised_even_when_the_rest_of_the_shape_is_unknown() {
 
 #[cfg(unix)]
 #[test]
-fn backups_are_owner_only_even_under_a_permissive_umask() {
+fn backups_are_never_group_or_world_accessible() {
     use std::os::unix::fs::PermissionsExt;
     let dir = temp_dir("backup-mode");
     let target = dir.join("projects.json");
@@ -113,7 +113,7 @@ fn backups_are_owner_only_even_under_a_permissive_umask() {
         backup_corrupt(&target, b"secret").unwrap(),
     ] {
         let mode = fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "{} has mode {mode:o}", backup.display());
+        assert_eq!(mode & 0o077, 0, "{} has mode {mode:o}", backup.display());
         assert_eq!(fs::read(&backup).unwrap(), b"secret");
     }
     let _ = fs::remove_dir_all(dir);

@@ -139,6 +139,27 @@ fn a_symlink_planted_at_the_sidecar_path_is_refused_and_its_target_untouched() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_hard_link_at_the_sidecar_path_keeps_its_target_untouched() {
+    let root = temp_dir("sidecar-hardlink");
+    let dir = root.join("state");
+    fs::create_dir_all(&dir).unwrap();
+    let victim = root.join("victim.txt");
+    fs::write(&victim, b"precious data").unwrap();
+    fs::hard_link(&victim, dir.join(DIR_LOCK_FILE_NAME)).unwrap();
+
+    let mut locks = DataLocks::new();
+    locks.lock_dir(&dir).expect("a hard-linked sidecar still locks");
+    assert_eq!(locks.len(), 1);
+    assert_eq!(
+        fs::read(&victim).unwrap(),
+        b"precious data",
+        "the pid record must not overwrite a hard-link target"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn recorded_pid_is_readable_by_a_rival_and_never_leaves_stale_digits() {
     let root = temp_dir("pid-record");
@@ -165,7 +186,12 @@ fn desktop_lock_set_covers_app_data_and_its_overridable_stores() {
     let app_data = root.join("com.termul.app");
 
     let held = lock_desktop_data(&app_data).unwrap();
-    assert!(held.len() >= 5);
+    assert!(held.len() >= 6);
+    let mut rival_install = DataLocks::new();
+    assert!(rival_install
+        .lock_dir(&app_data.join(ACP_INSTALL_DIR_NAME))
+        .unwrap_err()
+        .is_busy());
 
     // A second desktop is refused on the app data dir itself...
     assert!(lock_desktop_data(&app_data).unwrap_err().is_busy());
