@@ -349,6 +349,55 @@ impl PtyManager {
     }
 
 
+    /// The live terminal whose spawn carried `command_id` (AD-5 entity
+    /// lookup: a spawn resend whose ledger outcome is gone finds its PTY by the
+    /// id stamped at construction). `None` when it was never spawned, was
+    /// killed, or was reaped.
+    pub fn find_by_command_id(&self, command_id: &str) -> Option<Arc<TerminalInstance>> {
+        self.terminals
+            .read()
+            .values()
+            .find(|instance| instance.command_id.as_deref() == Some(command_id))
+            .cloned()
+    }
+
+    /// The reply for a RESENT spawn whose PTY already exists: its metadata and
+    /// a FRESH claim for the resender. The claim of the first reply is never
+    /// stored anywhere (the reply was lost), but the first reply may still be
+    /// in flight or its client about to attach, so the resender's claim is
+    /// always SHARED (`issue_shared` appends a credential and invalidates no
+    /// existing holder). `None` when no live terminal of `project_id` carries
+    /// `command_id`, or no credential can be issued — a revoked (or missing)
+    /// claim record is never resurrected by a resend — and the caller then
+    /// answers `outcome_unknown` instead of respawning.
+    pub fn replay_spawn(
+        &self,
+        command_id: &str,
+        project_id: Option<&str>,
+    ) -> Option<SpawnedTerminal> {
+        let instance = self.find_by_command_id(command_id)?;
+        if instance.project_id.as_deref() != project_id {
+            return None;
+        }
+        let claim = self
+            .claims
+            .issue_shared(&instance.id, instance.project_id.as_deref())
+            .ok()?;
+        let cols = *instance.cols.read();
+        let rows = *instance.rows.read();
+        Some(SpawnedTerminal {
+            info: TerminalInfo {
+                id: instance.id.clone(),
+                shell: instance.shell.clone(),
+                cwd: instance.cwd.clone(),
+                pid: instance.pid,
+                cols,
+                rows,
+            },
+            claim,
+        })
+    }
+
     /// Enumerate the terminals still preserved for a project, re-issuing a
     /// claim credential for each attachable one (QA round 2 / spec story 5).
     ///

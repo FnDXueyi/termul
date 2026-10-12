@@ -466,3 +466,21 @@ fn search_file_names_cancel_request_is_a_dto_not_aliased_to_content() {
     };
     assert_eq!(req.search_id, "search-1");
 }
+
+/// The refusals a caller can act on carry a stable code prefix on the Tauri
+/// carrier; git's own failures keep their text.
+#[test]
+fn a_refused_commit_maps_to_a_stable_code_prefix() {
+    use crate::trackers::git_tracker::CommitFailure;
+    let stale = git::commit_failure_text(CommitFailure::PreconditionFailed {
+        expected: "a".repeat(40),
+        actual: "b".repeat(40),
+    });
+    assert!(stale.starts_with("precondition_failed: "), "{stale}");
+    let invalid = git::commit_failure_text(CommitFailure::InvalidExpectedHead);
+    assert!(invalid.starts_with("validation_error: "), "{invalid}");
+    assert_eq!(
+        git::commit_failure_text(CommitFailure::Failed("Nothing staged to commit".to_string())),
+        "Nothing staged to commit"
+    );
+}

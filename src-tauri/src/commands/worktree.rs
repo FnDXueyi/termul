@@ -1,6 +1,9 @@
 use super::{validate_project_path, IpcResult};
 use crate::acp::destructive_guard::{ensure_no_active_turn_under, DESTRUCTIVE_OP_BLOCKED};
 use crate::acp::AcpManager;
+use crate::web::command_ledger::{fingerprint_of, no_entity, run_domain};
+use crate::web::worktree_api::create_fingerprint;
+use crate::web::WsRelaySink;
 use crate::worktree::{
     BaseBranchInfo, BranchEntry, DirtyStatus, GitWorktreeEntry, IncludeCopyResult, RemoveResult,
     WorktreeManager,
@@ -39,9 +42,57 @@ pub async fn worktree_list(project_path: String) -> Result<IpcResult<Vec<Worktre
 /// `acp:worktree_progress` events (`{ progressId, line }`) so the renderer can
 /// show live preparation output while the blocking `git worktree add` runs.
 /// Emit failures are logged and ignored — they must not fail the create.
+///
+/// A `command_id` makes a resend answer with the recorded outcome instead of
+/// creating again; a resend whose outcome was evicted is `outcome_unknown`
+/// (a worktree cannot carry a command stamp, so it is never found by existence).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn worktree_create(
+    app: AppHandle,
+    relay: State<'_, Arc<WsRelaySink>>,
+    project_path: String,
+    name: String,
+    branch: String,
+    is_new_branch: bool,
+    start_ref: Option<String>,
+    target_path: Option<String>,
+    progress_id: Option<String>,
+    command_id: Option<String>,
+) -> Result<IpcResult<WorktreeInfo>, String> {
+    // Validate before admission: a bad path is refused without a ledger entry.
+    let validated_path = validate_and_stringify!(&project_path);
+    let print = create_fingerprint(
+        &project_path,
+        &name,
+        &branch,
+        is_new_branch,
+        start_ref.as_deref(),
+        target_path.as_deref(),
+    );
+    run_domain(
+        relay.ledger(),
+        "worktree_create",
+        command_id,
+        print,
+        no_entity(),
+        worktree_create_effect(
+            app,
+            validated_path,
+            name,
+            branch,
+            is_new_branch,
+            start_ref,
+            target_path,
+            progress_id,
+        ),
+    )
+    .await
+}
+
+/// `project_path` is already validated.
+#[allow(clippy::too_many_arguments)]
+async fn worktree_create_effect(
     app: AppHandle,
     project_path: String,
     name: String,
@@ -51,7 +102,7 @@ pub async fn worktree_create(
     target_path: Option<String>,
     progress_id: Option<String>,
 ) -> Result<IpcResult<WorktreeInfo>, String> {
-    let validated_path = validate_and_stringify!(&project_path);
+    let validated_path = project_path;
     let pid = progress_id.filter(|id| !id.is_empty());
 
     // Boundary log: the create inputs so a failed launch is diagnosable
@@ -143,24 +194,46 @@ pub async fn worktree_create(
 #[tauri::command]
 pub async fn worktree_rename_branch(
     manager: State<'_, Arc<AcpManager>>,
+    relay: State<'_, Arc<WsRelaySink>>,
     worktree_path: String,
     old_branch: String,
     new_branch: String,
+    command_id: Option<String>,
 ) -> Result<IpcResult<()>, String> {
-    let validated_path = validate_and_stringify!(&worktree_path);
-    match manager
-        .rename_worktree_branch(&validated_path, &old_branch, &new_branch)
-        .await
-    {
-        Ok(()) => Ok(IpcResult::success(())),
-        Err(e) => {
-            log::warn!(
-                "[worktree-rename] by-hand rename failed code={}",
-                e.error_code()
-            );
-            Ok(IpcResult::error(e.to_string(), e.error_code()))
+    let print = fingerprint_of(
+        "worktree_rename_branch",
+        &[
+            ("worktreePath", &worktree_path),
+            ("oldBranch", &old_branch),
+            ("newBranch", &new_branch),
+        ],
+    );
+    let manager = Arc::clone(manager.inner());
+    let effect = async move {
+        let validated_path = validate_and_stringify!(&worktree_path);
+        match manager
+            .rename_worktree_branch(&validated_path, &old_branch, &new_branch)
+            .await
+        {
+            Ok(()) => Ok(IpcResult::success(())),
+            Err(e) => {
+                log::warn!(
+                    "[worktree-rename] by-hand rename failed code={}",
+                    e.error_code()
+                );
+                Ok(IpcResult::error(e.to_string(), e.error_code()))
+            }
         }
-    }
+    };
+    run_domain(
+        relay.ledger(),
+        "worktree_rename_branch",
+        command_id,
+        print,
+        no_entity(),
+        effect,
+    )
+    .await
 }
 
 /// Remove a worktree. Uses --force if requested. Runs `git worktree prune` after.
@@ -471,7 +544,7 @@ pub async fn worktree_copy_include_files(
 }
 
 /// Worktree info for IPC response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeInfo {
     pub name: String,

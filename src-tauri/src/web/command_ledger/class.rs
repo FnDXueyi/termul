@@ -48,25 +48,25 @@ pub struct CommandClass {
 }
 
 impl CommandClass {
-    const fn create() -> Self {
+    pub(super) const fn create() -> Self {
         Self {
             kind: ClassKind::Create,
             replay: Some(Replay::Entity),
         }
     }
-    const fn command(replay: Replay) -> Self {
+    pub(super) const fn command(replay: Replay) -> Self {
         Self {
             kind: ClassKind::Command,
             replay: Some(replay),
         }
     }
-    const fn idempotent() -> Self {
+    pub(super) const fn idempotent() -> Self {
         Self {
             kind: ClassKind::Idempotent,
             replay: None,
         }
     }
-    const fn read() -> Self {
+    pub(super) const fn read() -> Self {
         Self {
             kind: ClassKind::Read,
             replay: None,
@@ -263,16 +263,51 @@ pub struct Fingerprint([u8; 16]);
 impl Fingerprint {
     #[must_use]
     pub fn of(request_type: &str, payload: &Value) -> Self {
+        let fields: Vec<(&str, String)> = identifying_fields(request_type)
+            .iter()
+            .filter_map(|path| scalar_at(payload, path).map(|value| (*path, value)))
+            .collect();
+        Self::digest(
+            request_type,
+            fields.iter().map(|(name, value)| (*name, value.as_str())),
+        )
+    }
+
+    /// The digest of `request_type` and the named identifying string `fields`
+    /// (for carriers that hold the fields directly, not as a JSON payload).
+    /// Normalized exactly like [`Fingerprint::of`]: trimmed, blank = absent,
+    /// string-tagged, so one request has one fingerprint on every carrier.
+    #[must_use]
+    pub fn of_fields<'a>(
+        request_type: &str,
+        fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        let tagged: Vec<(&str, String)> = fields
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| (name, format!("s{value}")))
+            })
+            .collect();
+        Self::digest(
+            request_type,
+            tagged.iter().map(|(name, value)| (*name, value.as_str())),
+        )
+    }
+
+    /// Hash already-normalized `(name, tagged value)` pairs.
+    fn digest<'a>(
+        request_type: &str,
+        fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(request_type.as_bytes());
         hasher.update([0]);
-        for path in identifying_fields(request_type) {
-            if let Some(value) = scalar_at(payload, path) {
-                hasher.update(path.as_bytes());
-                hasher.update([1]);
-                hasher.update(value.len().to_le_bytes());
-                hasher.update(value.as_bytes());
-            }
+        for (name, value) in fields {
+            hasher.update(name.as_bytes());
+            hasher.update([1]);
+            hasher.update(value.len().to_le_bytes());
+            hasher.update(value.as_bytes());
         }
         let digest = hasher.finalize();
         let mut out = [0u8; 16];
