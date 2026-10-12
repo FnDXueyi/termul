@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { persistenceApi } from '@/lib/api'
+import { flushPendingAutoSaves } from '@/lib/editor-auto-save'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import type { EditorFileState } from '@/stores/editor-store'
 import { useEditorStore } from '@/stores/editor-store'
@@ -31,6 +32,11 @@ export function useEditorPersistence(projectId: string): void {
   const isRestoringRef = useRef(false)
   const prevProjectIdRef = useRef('')
   const restoreRunIdRef = useRef(0)
+  // Project whose state the editor/workspace stores currently hold. Lags
+  // prevProjectIdRef while a switch awaits the autosave flush, so a second
+  // switch issued in that window persists the REAL owner, not the
+  // intermediate project (whose state was never loaded).
+  const storeOwnerProjectIdRef = useRef('')
 
   // Restore state when project changes
   useEffect(() => {
@@ -60,12 +66,19 @@ export function useEditorPersistence(projectId: string): void {
       try {
         // Persist old project state before clearing
         if (oldProjectId) {
-          persistState(oldProjectId)
+          // Write any pending debounced autosave before the switch proceeds
+          // (the draft snapshot below then reflects what reached disk).
+          await flushPendingAutoSaves()
+          if (isStale()) {
+            return
+          }
+          persistState(storeOwnerProjectIdRef.current || oldProjectId)
         }
 
         // Clear editor files (in-memory state) and swap the pane tree to the
         // fresh launcher optimistically (see the resetLayout comment below).
         useEditorStore.getState().clearAllFiles()
+        storeOwnerProjectIdRef.current = projectId
         // Optimistic layout swap (web project-switch lag): reset the pane
         // tree to the fresh launcher NOW, before the async reads below
         // (persistence WS read + manifest GET + open-file loop) — the old
@@ -147,13 +160,12 @@ export function useEditorPersistence(projectId: string): void {
               editorStore.setViewMode(file.filePath, file.viewMode)
             }
             if (file.isDirty && file.draftContent) {
-              const freshEditorState = useEditorStore.getState()
-              const currentState = freshEditorState.openFiles.get(file.filePath)
-              if (currentState) {
-                if (currentState.lastModified <= file.lastModified) {
-                  editorStore.updateContent(file.filePath, file.draftContent)
-                }
-              }
+              // Newer-on-disk file becomes a visible draft conflict, never a
+              // silent drop (reconciled by the pure rules in editor-store).
+              editorStore.restoreDraft(file.filePath, {
+                content: file.draftContent,
+                savedAt: file.lastModified
+              })
             }
           } catch {
             // File may have been deleted since last session
@@ -296,15 +308,20 @@ export function persistState(projectId: string): void {
 
   const openFiles: PersistedEditorFile[] = []
   editorState.openFiles.forEach((file: EditorFileState) => {
+    const conflict = file.draftConflict
     const persisted: PersistedEditorFile = {
       filePath: file.filePath,
       cursorPosition: file.cursorPosition,
       scrollTop: file.scrollTop,
       viewMode: file.viewMode,
-      isDirty: file.isDirty,
-      lastModified: file.lastModified
+      // An unresolved conflict persists as a dirty draft stamped with the
+      // draft's own save time so the next restore re-evaluates it.
+      isDirty: file.isDirty || conflict !== undefined,
+      lastModified: conflict ? conflict.draftSavedAt : file.lastModified
     }
-    if (file.isDirty) {
+    if (conflict) {
+      persisted.draftContent = conflict.draftContent
+    } else if (file.isDirty) {
       persisted.draftContent = file.content
     }
     openFiles.push(persisted)

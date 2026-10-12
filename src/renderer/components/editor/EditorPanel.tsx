@@ -3,6 +3,7 @@ import { useTocSettings } from '@/hooks/use-toc-settings'
 import type { EditorFileState } from '@/stores/editor-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { CodeEditor } from './CodeEditor'
+import { EditorDraftConflictBanner } from './EditorDraftConflictBanner'
 import { EditorToolbar } from './EditorToolbar'
 import { MarkdownEditor } from './MarkdownEditor'
 
@@ -67,6 +68,7 @@ export function EditorPanel({ filePath, isVisible }: EditorPanelProps): React.JS
 
   return (
     <div className="flex h-full w-full flex-col bg-background">
+      <EditorDraftConflictBanner filePath={filePath} />
       {isMarkdownFile && (
         <EditorToolbar
           viewMode={fileState.viewMode}

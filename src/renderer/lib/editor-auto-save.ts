@@ -1,4 +1,5 @@
 import { toast } from 'sonner'
+import { logFrontendError } from '@/lib/log-api'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useEditorStore } from '@/stores/editor-store'
 
@@ -129,4 +130,61 @@ export function scheduleAllDirtyAutoSaves(): void {
 /** Number of pending auto-save timers (used by tests). */
 export function getPendingAutoSaveCount(): number {
   return autoSaveTimers.size
+}
+
+/**
+ * Write every file with a pending auto-save timer NOW (project switch / close
+ * barrier). Each timer is cleared; the file is saved only if it is still open,
+ * dirty and not mid saving/reloading (a busy file keeps a fresh timer so its
+ * pending edit is not dropped). A failed save leaves the file dirty, is logged
+ * (no toast — the caller is mid-flow) and re-arms the normal retry timer.
+ */
+export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed: string[] }> {
+  const paths = Array.from(autoSaveTimers.keys())
+  for (const path of paths) clearTimer(path)
+
+  const saved: string[] = []
+  const failed: string[] = []
+
+  await Promise.all(
+    paths.map(async (path) => {
+      const file = useEditorStore.getState().openFiles.get(path)
+      if (!file || !file.isDirty) return
+      if (file.operationStatus === 'saving' || file.operationStatus === 'reloading') {
+        scheduleAutoSave(path)
+        return
+      }
+
+      let ok = false
+      try {
+        ok = await useEditorStore.getState().saveFile(path)
+      } catch (error) {
+        void logFrontendError({
+          level: 'warn',
+          source: 'editor-auto-save.flush',
+          message: `flush save threw for ${path}: ${error instanceof Error ? error.message : String(error)}`
+        })
+      }
+      if (ok) {
+        failedAutoSavePaths.delete(path)
+        saved.push(path)
+        return
+      }
+
+      // saveFile already boundary-logs a plain failure; skip the clean case
+      // (file saved/closed concurrently) and report only still-dirty files.
+      if (!useEditorStore.getState().openFiles.get(path)?.isDirty) return
+      failed.push(path)
+      void logFrontendError({
+        level: 'warn',
+        source: 'editor-auto-save.flush',
+        message: `flush save failed for ${path}; file stays dirty`
+      })
+      if (useAppSettingsStore.getState().settings.editorAutoSave) {
+        scheduleAutoSave(path)
+      }
+    })
+  )
+
+  return { saved, failed }
 }

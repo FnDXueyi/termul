@@ -9,6 +9,7 @@ import {
   scheduleAutoSave
 } from '@/lib/editor-auto-save'
 import { flushEditorContent } from '@/lib/editor-content-flush'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { markEditorSelfSave } from '@/lib/editor-self-save'
 import { logFrontendError } from '@/lib/log-api'
 import { scheduleGitStatusRefreshForPath } from '@/lib/schedule-git-status-refresh'
@@ -99,6 +100,33 @@ export interface EditorFileState {
   cursorPosition: { line: number; col: number }
   scrollTop: number
   operationStatus: 'idle' | 'saving' | 'reloading' | 'saved'
+  /**
+   * Set when a restored unsaved draft differs from a file that changed on disk
+   * after the draft was saved. `content` holds the disk version; the draft is
+   * kept here until the user resolves it (never silently dropped).
+   */
+  draftConflict?: { draftContent: string; draftSavedAt: number }
+}
+
+/**
+ * Reconcile a persisted unsaved draft with a freshly opened file (pure).
+ * - same text as disk: nothing to restore
+ * - disk not newer than the draft: apply the draft as an unsaved edit
+ * - disk newer: keep disk content and record the draft as a conflict
+ */
+export function reconcileDraft(
+  file: EditorFileState,
+  draft: { content: string; savedAt: number }
+): EditorFileState {
+  if (file.content === draft.content) return file
+  if (file.lastModified <= draft.savedAt) {
+    const { draftConflict: _cleared, ...rest } = file
+    return { ...rest, content: draft.content, isDirty: draft.content !== file.originalContent }
+  }
+  return {
+    ...file,
+    draftConflict: { draftContent: draft.content, draftSavedAt: draft.savedAt }
+  }
 }
 
 export interface EditorState {
@@ -119,6 +147,11 @@ export interface EditorState {
   clearAllFiles: () => void
   hasDirtyFiles: () => boolean
   getDirtyFileCount: () => number
+  restoreDraft: (
+    path: string,
+    draft: { content: string; savedAt: number }
+  ) => 'applied' | 'conflict' | 'unchanged'
+  resolveDraftConflict: (path: string, choice: 'draft' | 'disk') => void
   getOpenFilePaths: () => string[]
 }
 
@@ -152,7 +185,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       let oldestTime = Infinity
 
       newFiles.forEach((file, filePath) => {
-        if (filePath !== activeFilePath && !file.isDirty && file.lastModified < oldestTime) {
+        if (
+          filePath !== activeFilePath &&
+          !fileNeedsAttention(file) &&
+          file.lastModified < oldestTime
+        ) {
           oldestTime = file.lastModified
           oldestPath = filePath
         }
@@ -242,9 +279,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     // returning to the original content clears it (and any pending timer).
     if (content !== file.content) {
       clearAutoSaveFailure(path)
-      if (isDirty) {
+      if (isDirty && !file.draftConflict) {
         scheduleAutoSave(path)
-      } else {
+      } else if (!isDirty) {
         cancelAutoSave(path)
       }
     }
@@ -281,6 +318,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const { openFiles } = get()
       const file = openFiles.get(path)
       if (!file) return false
+
+      // An unresolved draft conflict means the buffer is the disk version
+      // while a newer-than-disk draft is still pending a user decision;
+      // writing now would bury that choice, so refuse until it is resolved.
+      if (file.draftConflict) {
+        void logFrontendError({
+          level: 'info',
+          source: 'editor-store.saveFile',
+          message: `save skipped for ${path}: unresolved draft conflict`
+        })
+        return false
+      }
 
       // Dirty-check skip: a save request for a buffer that already matches
       // the original content must not hit the write API — the autosave
@@ -413,8 +462,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const file = openFiles.get(path)
     if (!file) return
 
-    // Don't reload dirty files silently
-    if (file.isDirty) return
+    // Don't reload dirty (or draft-conflicted) files silently
+    if (file.isDirty || file.draftConflict) return
 
     const snapshotContent = file.content
     const newFiles = new Map(get().openFiles)
@@ -474,22 +523,55 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ openFiles: new Map(), activeFilePath: null })
   },
 
+  restoreDraft: (path, draft) => {
+    const file = get().openFiles.get(path)
+    if (!file) return 'unchanged'
+
+    const next = reconcileDraft(file, draft)
+    if (next === file) return 'unchanged'
+
+    const newFiles = new Map(get().openFiles)
+    newFiles.set(path, next)
+    set({ openFiles: newFiles })
+
+    if (next.draftConflict) return 'conflict'
+    if (next.isDirty) scheduleAutoSave(path)
+    return 'applied'
+  },
+
+  resolveDraftConflict: (path, choice) => {
+    const file = get().openFiles.get(path)
+    if (!file?.draftConflict) return
+
+    const { draftConflict, ...rest } = file
+    const next: EditorFileState =
+      choice === 'draft'
+        ? {
+            ...rest,
+            content: draftConflict.draftContent,
+            isDirty: draftConflict.draftContent !== file.originalContent
+          }
+        : rest
+    const newFiles = new Map(get().openFiles)
+    newFiles.set(path, next)
+    set({ openFiles: newFiles })
+
+    if (choice === 'draft') {
+      clearAutoSaveFailure(path)
+      if (next.isDirty) scheduleAutoSave(path)
+      else cancelAutoSave(path)
+    } else if (next.isDirty) {
+      // The kept disk-side buffer may carry edits typed during the conflict.
+      scheduleAutoSave(path)
+    }
+  },
+
   hasDirtyFiles: (): boolean => {
-    const { openFiles } = get()
-    let hasDirty = false
-    openFiles.forEach((file) => {
-      if (file.isDirty) hasDirty = true
-    })
-    return hasDirty
+    return Array.from(get().openFiles.values()).some(fileNeedsAttention)
   },
 
   getDirtyFileCount: (): number => {
-    const { openFiles } = get()
-    let count = 0
-    openFiles.forEach((file) => {
-      if (file.isDirty) count++
-    })
-    return count
+    return Array.from(get().openFiles.values()).filter(fileNeedsAttention).length
   },
 
   getOpenFilePaths: (): string[] => {
@@ -558,7 +640,7 @@ export function useDirtyFiles(): string[] {
     useShallow((state) => {
       const dirty: string[] = []
       state.openFiles.forEach((file, path) => {
-        if (file.isDirty) dirty.push(path)
+        if (fileNeedsAttention(file)) dirty.push(path)
       })
       return dirty
     })

@@ -3,6 +3,7 @@ import {
   cancelAllAutoSaves,
   cancelAutoSave,
   clearAutoSaveFailure,
+  flushPendingAutoSaves,
   getPendingAutoSaveCount,
   scheduleAllDirtyAutoSaves,
   scheduleAutoSave
@@ -11,6 +12,7 @@ import {
 const mocks = vi.hoisted(() => ({
   openFiles: new Map<string, { isDirty: boolean; operationStatus: string }>(),
   saveFile: vi.fn(),
+  logFrontendError: vi.fn().mockResolvedValue(undefined),
   settings: { editorAutoSave: true, editorAutoSaveDelayMs: 1000 },
   toast: Object.assign(vi.fn(), {
     error: vi.fn(),
@@ -36,6 +38,10 @@ vi.mock('@/stores/app-settings-store', () => ({
 
 vi.mock('sonner', () => ({
   toast: mocks.toast
+}))
+
+vi.mock('@/lib/log-api', () => ({
+  logFrontendError: mocks.logFrontendError
 }))
 
 describe('editor-auto-save (GH-539)', () => {
@@ -283,5 +289,80 @@ describe('editor-auto-save (GH-539)', () => {
 
     vi.advanceTimersByTime(500)
     expect(mocks.saveFile).toHaveBeenCalledTimes(1)
+  })
+
+  describe('flushPendingAutoSaves', () => {
+    it('resolves immediately with empty lists when nothing is pending', async () => {
+      await expect(flushPendingAutoSaves()).resolves.toEqual({ saved: [], failed: [] })
+      expect(mocks.saveFile).not.toHaveBeenCalled()
+    })
+
+    it('writes a pending file now, clears its timer, and resolves only after the save lands', async () => {
+      setOpenFile('/project/a.txt')
+      scheduleAutoSave('/project/a.txt')
+      const saveGate = Promise.withResolvers<boolean>()
+      mocks.saveFile.mockImplementationOnce(() => saveGate.promise)
+
+      let settled = false
+      const flush = flushPendingAutoSaves().then((result) => {
+        settled = true
+        return result
+      })
+      expect(mocks.saveFile).toHaveBeenCalledWith('/project/a.txt')
+      expect(getPendingAutoSaveCount()).toBe(0)
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      saveGate.resolve(true)
+      await expect(flush).resolves.toEqual({ saved: ['/project/a.txt'], failed: [] })
+
+      // The cleared timer must not write a second time.
+      vi.advanceTimersByTime(5000)
+      expect(mocks.saveFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('reports a failed save, keeps the file dirty, and neither toasts nor drops the retry', async () => {
+      setOpenFile('/project/a.txt')
+      scheduleAutoSave('/project/a.txt')
+      mocks.saveFile.mockResolvedValueOnce(false)
+
+      const result = await flushPendingAutoSaves()
+
+      expect(result).toEqual({ saved: [], failed: ['/project/a.txt'] })
+      expect(mocks.openFiles.get('/project/a.txt')?.isDirty).toBe(true)
+      expect(mocks.toast.error).not.toHaveBeenCalled()
+      expect(mocks.logFrontendError).toHaveBeenCalled()
+      // Normal retry timer is re-armed so the edit is not orphaned.
+      expect(getPendingAutoSaveCount()).toBe(1)
+    })
+
+    it('treats a rejecting save as failed instead of throwing', async () => {
+      setOpenFile('/project/a.txt')
+      scheduleAutoSave('/project/a.txt')
+      mocks.saveFile.mockRejectedValueOnce(new Error('boom'))
+
+      await expect(flushPendingAutoSaves()).resolves.toEqual({
+        saved: [],
+        failed: ['/project/a.txt']
+      })
+    })
+
+    it('skips files that closed or became clean, and keeps a busy file pending', async () => {
+      setOpenFile('/project/closed.txt')
+      setOpenFile('/project/clean.txt')
+      setOpenFile('/project/busy.txt')
+      scheduleAutoSave('/project/closed.txt')
+      scheduleAutoSave('/project/clean.txt')
+      scheduleAutoSave('/project/busy.txt')
+      mocks.openFiles.delete('/project/closed.txt')
+      mocks.openFiles.set('/project/clean.txt', { isDirty: false, operationStatus: 'idle' })
+      mocks.openFiles.set('/project/busy.txt', { isDirty: true, operationStatus: 'saving' })
+
+      const result = await flushPendingAutoSaves()
+
+      expect(result).toEqual({ saved: [], failed: [] })
+      expect(mocks.saveFile).not.toHaveBeenCalled()
+      expect(getPendingAutoSaveCount()).toBe(1)
+    })
   })
 })

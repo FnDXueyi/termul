@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { useEditorStore } from '@/stores/editor-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
 
@@ -14,7 +15,7 @@ export function useEditorTabClose() {
     if (fileState?.operationStatus === 'saving' || fileState?.operationStatus === 'reloading') {
       return false
     }
-    if (fileState?.isDirty) {
+    if (fileNeedsAttention(fileState)) {
       setDirtyCloseFilePath(filePath)
       return true
     }
