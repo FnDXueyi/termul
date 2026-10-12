@@ -11,6 +11,7 @@ import {
   MENU_MOTION_CLASS,
   MENU_SEPARATOR_CLASS
 } from './menu-styles'
+import { FIELD_FOCUS_CLASS } from './panel-styles'
 
 const Select = SelectPrimitive.Root
 
@@ -25,7 +26,8 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      'flex h-10 w-full items-center justify-between rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1',
+      'flex h-10 w-full items-center justify-between rounded-lg border border-input bg-background px-3 py-2 text-sm transition-colors duration-150 ease-out placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1',
+      FIELD_FOCUS_CLASS,
       className
     )}
     {...props}

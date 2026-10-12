@@ -9,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { WriteGate } from '@/components/ui/write-gate'
 import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 
@@ -203,7 +204,7 @@ export function StashDialog({
             <label className="text-muted-foreground">Message (optional)</label>
             <input
               type="text"
-              className="w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 focus:ring-1 focus:ring-primary outline-none text-xs pointer-coarse:text-base"
+              className={`w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
               placeholder="WIP on current branch..."
               value={message}
               onChange={(e) => onMessageChange(e.target.value)}

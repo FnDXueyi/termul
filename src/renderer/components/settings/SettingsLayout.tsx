@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from '@/components/icons'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { type SettingsSearchEntry, searchSettings } from '@/lib/settings-search'
 import { cn } from '@/lib/utils'
 
@@ -191,7 +192,7 @@ export function SettingsLayout({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search settings..."
               aria-label="Search settings"
-              className="w-full rounded-md border border-border bg-secondary/50 py-1.5 pl-8 pr-8 text-sm pointer-coarse:text-base text-foreground outline-none transition-shadow focus:ring-2 focus:ring-primary focus:border-transparent"
+              className={`w-full rounded-md border border-border bg-secondary/50 py-1.5 pl-8 pr-8 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             />
             {query && (
               <button
@@ -221,7 +222,7 @@ export function SettingsLayout({
                   key={`${result.categoryId}-${result.label}`}
                   type="button"
                   onClick={() => scrollToSection(result.categoryId, result.anchorId)}
-                  className="flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-secondary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <span className="font-medium">{result.label}</span>
                   <span className="text-2xs text-muted-foreground">
@@ -242,7 +243,7 @@ export function SettingsLayout({
                   onClick={() => scrollToSection(category.id)}
                   onKeyDown={(e) => handleCategoryKeyDown(e, index)}
                   className={cn(
-                    'flex flex-shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary md:w-full',
+                    'flex flex-shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring md:w-full',
                     isActive
                       ? 'bg-primary/10 font-medium text-primary'
                       : 'text-muted-foreground hover:bg-secondary hover:text-foreground'

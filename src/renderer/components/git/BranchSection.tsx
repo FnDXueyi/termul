@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { WriteGate, WriteGateReason } from '@/components/ui/write-gate'
 import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
@@ -129,7 +130,7 @@ export function CreateBranchDialog({
             <label className="text-muted-foreground">Branch name</label>
             <input
               type="text"
-              className="w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 focus:ring-1 focus:ring-primary outline-none text-xs pointer-coarse:text-base"
+              className={`w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
               placeholder="e.g. feature/new-login"
               value={branchName}
               onChange={(e) => onBranchNameChange(e.target.value)}

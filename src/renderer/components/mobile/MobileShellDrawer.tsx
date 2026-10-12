@@ -20,6 +20,7 @@ import { ProjectIcon } from '@/components/ProjectIcon'
 import { TermulMark } from '@/components/TermulMark'
 import { Button } from '@/components/ui/button'
 import { CountBadge } from '@/components/ui/count-badge'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import {
   Sheet,
   SheetContent,
@@ -392,7 +393,7 @@ export function MobileShellDrawer({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search chats…"
-                className="min-h-11 w-full rounded-full bg-secondary py-1 pl-8 pr-3 text-base text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className={`min-h-11 w-full rounded-full bg-secondary py-1 pl-8 pr-3 text-base text-foreground placeholder:text-muted-foreground ${FOCUS_RING_CLASS}`}
               />
             </div>
           )}

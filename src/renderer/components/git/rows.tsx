@@ -159,7 +159,7 @@ export function FileItem({
       onKeyDown={handleKeyDown}
       aria-selected={isSelected || isActive}
       className={cn(
-        'group/row flex w-full items-center gap-3 px-3 py-2 rounded-md text-left cursor-pointer transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+        'group/row flex w-full items-center gap-3 px-3 py-2 rounded-md text-left cursor-pointer transition-colors select-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
         isSelected
           ? 'bg-primary/15 text-foreground'
           : isActive

@@ -171,7 +171,7 @@ export function TitleBarShortcutsPopover({
                   ref={closeButtonRef}
                   type="button"
                   onClick={() => setOpen(false)}
-                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   Esc
                 </button>

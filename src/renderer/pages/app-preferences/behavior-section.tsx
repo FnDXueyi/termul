@@ -1,4 +1,5 @@
 import { SettingsSection } from '@/components/settings/SettingsLayout'
+import { FIELD_FOCUS_CLASS, FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { cn } from '@/lib/utils'
 import {
   DEFAULT_APP_SETTINGS,
@@ -51,7 +52,7 @@ function NotifySwitch({
         aria-label={label}
         onClick={() => onToggle(!checked)}
         className={cn(
-          'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2',
+          `relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${FOCUS_RING_CLASS}`,
           checked ? 'bg-primary-fill' : 'bg-input'
         )}
       >
@@ -101,7 +102,7 @@ export function BehaviorSection({
             <select
               value={terminalUrlOpenMode}
               onChange={(e) => handleTerminalUrlOpenModeChange(e.target.value)}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             >
               {TERMINAL_URL_OPEN_MODE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -130,7 +131,7 @@ export function BehaviorSection({
               <button
                 onClick={() => handleOrphanDetectionToggle(!orphanDetectionEnabled)}
                 className={cn(
-                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2',
+                  `relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${FOCUS_RING_CLASS}`,
                   orphanDetectionEnabled ? 'bg-primary-fill' : 'bg-input'
                 )}
               >
@@ -155,7 +156,7 @@ export function BehaviorSection({
                 handleOrphanTimeoutChange(e.target.value ? parseInt(e.target.value, 10) : null)
               }
               disabled={!orphanDetectionEnabled}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${FIELD_FOCUS_CLASS}`}
             >
               {ORPHAN_TIMEOUT_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -187,7 +188,7 @@ export function BehaviorSection({
                 aria-label="Enable auto save"
                 onClick={() => handleEditorAutoSaveToggle(!editorAutoSave)}
                 className={cn(
-                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2',
+                  `relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${FOCUS_RING_CLASS}`,
                   editorAutoSave ? 'bg-primary-fill' : 'bg-input'
                 )}
               >
@@ -217,7 +218,7 @@ export function BehaviorSection({
               onChange={(e) => handleEditorAutoSaveDelayChange(parseInt(e.target.value, 10))}
               disabled={!editorAutoSave}
               aria-label="Auto save delay"
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${FIELD_FOCUS_CLASS}`}
             >
               {EDITOR_AUTO_SAVE_DELAY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>

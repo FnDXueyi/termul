@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 
 interface SSHPasswordPromptProps {
   profileName: string
@@ -36,7 +37,7 @@ export function SSHPasswordPrompt({
           }}
           placeholder="Password"
           autoFocus
-          className="w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+          className={`w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
         />
         <div className="flex justify-end gap-2 mt-3">
           <Button

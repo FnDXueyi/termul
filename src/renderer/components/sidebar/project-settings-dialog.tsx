@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Skeleton } from '@/components/ui/skeleton'
 import { dialogApi } from '@/lib/api'
 import { availableColors, getColorClasses } from '@/lib/colors'
@@ -126,7 +127,7 @@ export function ProjectSettingsDialog({
               type="text"
               value={settingsName}
               onChange={(e) => setSettingsName(e.target.value)}
-              className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+              className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
               placeholder="My Project"
             />
           </div>
@@ -139,7 +140,7 @@ export function ProjectSettingsDialog({
                 type="text"
                 value={settingsPath}
                 onChange={(e) => setSettingsPath(e.target.value)}
-                className="flex-1 bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                className={`flex-1 bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 placeholder="No directory selected"
               />
               <button
@@ -189,7 +190,7 @@ export function ProjectSettingsDialog({
                 <select
                   value={settingsShell}
                   onChange={(e) => setSettingsShell(e.target.value)}
-                  className="w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none cursor-pointer"
+                  className={`w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm text-foreground cursor-pointer ${FIELD_FOCUS_CLASS}`}
                 >
                   {availableShells.available.map((shell) => (
                     <option key={shell.path} value={shell.path}>

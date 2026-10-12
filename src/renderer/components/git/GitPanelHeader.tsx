@@ -2,6 +2,7 @@ import type React from 'react'
 import { BranchSection } from '@/components/git/BranchSection'
 import { Archive, Search } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { WriteGate } from '@/components/ui/write-gate'
 import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
@@ -79,7 +80,7 @@ export function GitPanelHeader({
             <input
               type="text"
               placeholder="Filter changes..."
-              className="w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+              className={`w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
               value={searchQuery}
               onChange={(e) => onSearchQueryChange(e.target.value)}
             />
@@ -125,7 +126,7 @@ export function GitPanelHeader({
           <input
             type="text"
             placeholder="Filter changes..."
-            className="w-full bg-secondary/50 border-none rounded-md py-2.5 pl-8 pr-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+            className={`w-full bg-secondary/50 border-none rounded-md py-2.5 pl-8 pr-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
             value={searchQuery}
             onChange={(e) => onSearchQueryChange(e.target.value)}
           />
@@ -166,7 +167,7 @@ export function GitPanelHeader({
         <input
           type="text"
           placeholder="Filter changes..."
-          className="w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+          className={`w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
           value={searchQuery}
           onChange={(e) => onSearchQueryChange(e.target.value)}
         />

@@ -4,7 +4,7 @@ import { titlebarNoDragStyle } from '@/components/TitlebarPanelToggles'
 import { windowApi } from '@/lib/api'
 
 const windowControlClass =
-  'h-full px-3 hover:bg-secondary/80 inline-flex items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-inset cursor-pointer'
+  'h-full px-3 hover:bg-secondary/80 inline-flex items-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset cursor-pointer'
 
 /**
  * Windows/Linux window controls (minimize, maximize or restore, close): the
@@ -69,7 +69,7 @@ export function WindowControls({
           e.stopPropagation()
           void windowApi.close()
         }}
-        className="h-full px-3 hover:bg-destructive-fill hover:text-destructive-foreground inline-flex items-center focus:outline-none focus-visible:ring-2 focus-visible:ring-destructive cursor-pointer"
+        className="h-full px-3 hover:bg-destructive-fill hover:text-destructive-foreground inline-flex items-center focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset cursor-pointer"
         title="Close"
         aria-label="Close window"
       >

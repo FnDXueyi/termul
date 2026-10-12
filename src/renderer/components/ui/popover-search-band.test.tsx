@@ -20,10 +20,15 @@ describe('PopoverSearchBand', () => {
       'bg-transparent',
       'h-full',
       'text-xs',
-      'focus-visible:ring-1',
-      'focus-visible:ring-ring'
+      'focus-visible:outline-hidden'
     )
-    expect(input.parentElement).toHaveClass('h-10', 'border-b', 'border-border')
+    expect(input).not.toHaveClass('focus-visible:ring-1')
+    expect(input.parentElement).toHaveClass(
+      'h-10',
+      'border-b',
+      'border-border',
+      'focus-within:border-ring'
+    )
   })
 
   it('reports the typed value', () => {
