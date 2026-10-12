@@ -44,10 +44,11 @@
 //! optional — the test `router_with_static` variant passes `pool: None` →
 //! routes degrade to typed `DAEMON_DOWN`).
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::header::{self, HeaderMap};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -60,7 +61,8 @@ use crate::canvas::mcp_proxy;
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::{canvas_id_for_project, CanvasOpenInfo};
 use crate::web::auth::WebAuth;
-use crate::web::fs_api::IpcBody;
+use crate::web::capabilities::WriteFlags;
+use crate::web::fs_api::{check_local_only, IpcBody};
 use crate::web::project_registry::ProjectRegistry;
 
 /// Router state: the pool handle + the web auth gate + the project-root
@@ -71,6 +73,10 @@ pub struct CanvasState {
     pub pool: Option<Arc<CanvasDaemonPool>>,
     pub web_auth: Option<Arc<WebAuth>>,
     pub boundary: Option<CanvasProjectBoundary>,
+    /// Deployment flags for the shared write predicate: `/canvas/open|close|
+    /// save` start/stop host daemons and write the `.op` document, so they
+    /// are write routes like the fs/git ones.
+    pub write_flags: WriteFlags,
 }
 
 /// Project-root boundary for the web doc-path validation on open — the SAME
@@ -80,6 +86,16 @@ pub struct CanvasState {
 #[derive(Clone)]
 pub struct CanvasProjectBoundary {
     pub registry: Arc<ProjectRegistry>,
+}
+
+/// The shared write predicate for the canvas open/close/save routes.
+fn check_canvas_write<T>(state: &CanvasState, peer: SocketAddr, route: &str) -> Option<IpcBody<T>> {
+    check_local_only::<T>(
+        peer,
+        state.write_flags.allow_remote_writes,
+        state.write_flags.shared_live_writes_denied,
+        route,
+    )
 }
 
 /// Validate a canvas doc path against the project boundary — mirrors the
@@ -282,6 +298,35 @@ fn canvas_unauthorized(message: &str) -> Response {
         .into_response()
 }
 
+/// Typed 403 for a bearer/ungated `/canvas/mcp` caller that may not write.
+fn canvas_forbidden(message: String) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "success": false,
+            "error": message,
+            "code": "FORBIDDEN",
+        })),
+    )
+        .into_response()
+}
+
+/// Shared write predicate for the `/canvas/mcp` callers that are NOT holding a
+/// canvas cookie (agent clients on the bearer token, or an ungated server):
+/// MCP tools edit the open document, so they need the same write posture as
+/// `/canvas/open|close|save`. A request without a peer address (only possible
+/// outside the production server) is refused. The canvas-cookie path needs no
+/// check: that credential is only minted by the guarded `/canvas/open`.
+fn mcp_write_refusal(state: &CanvasState, request: &Request) -> Option<Response> {
+    let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+        return Some(canvas_forbidden(
+            "canvas mcp write access could not be determined (no peer address)".to_string(),
+        ));
+    };
+    check_canvas_write::<()>(state, *peer, "/canvas/mcp")
+        .map(|refused| canvas_forbidden(refused.error.unwrap_or_default()))
+}
+
 /// Typed 502 in the IpcBody failure shape (no live daemon — the "canvas
 /// closed" signal).
 fn daemon_down(message: &str) -> Response {
@@ -354,9 +399,13 @@ fn request_origin(headers: &HeaderMap) -> String {
 /// on a fresh entry.
 async fn open(
     State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<CanvasOpenRequest>,
 ) -> Json<IpcBody<CanvasOpenInfo>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/open") {
+        return Json(forbidden);
+    }
     tracing::info!(
         target: "termul::web::canvas",
         "canvas open (web) project_id={}",
@@ -446,8 +495,12 @@ async fn open(
 /// `POST /canvas/close` — evict the doc's daemon (stdin EOF → kill).
 async fn close(
     State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<CanvasDocRequest>,
 ) -> Json<IpcBody<bool>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/close") {
+        return Json(forbidden);
+    }
     let Some(pool) = state.pool else {
         return Json(IpcBody::err(
             "canvas daemon pool is unavailable on this server",
@@ -464,8 +517,12 @@ async fn close(
 /// `DAEMON_DOWN` (the "canvas closed" signal).
 async fn save(
     State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<CanvasDocRequest>,
 ) -> Json<IpcBody<serde_json::Value>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/save") {
+        return Json(forbidden);
+    }
     let Some(pool) = state.pool else {
         return Json(IpcBody::err(
             "canvas daemon pool is unavailable on this server",
@@ -521,7 +578,12 @@ async fn mcp(State(state): State<CanvasState>, request: Request) -> Response {
         }
     }
     // (a) the web auth bearer (agent clients) → active daemon; an ungated
-    // server stays open (legacy posture).
+    // server stays open (legacy posture). Both edit the open document, so
+    // they take the write predicate (a cookie holder was already admitted by
+    // the guarded `/canvas/open`).
+    if let Some(refused) = mcp_write_refusal(&state, &request) {
+        return refused;
+    }
     let daemon = state.pool.as_ref().and_then(|pool| pool.active_daemon());
     match state.web_auth.as_ref() {
         Some(auth) => {

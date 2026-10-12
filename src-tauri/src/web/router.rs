@@ -289,6 +289,10 @@ pub fn router(
                 boundary: Some(crate::web::canvas_api::CanvasProjectBoundary {
                     registry: registry.clone(),
                 }),
+                write_flags: crate::web::capabilities::WriteFlags {
+                    allow_remote_writes,
+                    shared_live_writes_denied,
+                },
             },
         ));
     // Static fallback: disk ServeDir in dev (dist-web/ on disk) or the embedded
@@ -579,6 +583,10 @@ pub fn router_with_static(
                 boundary: Some(crate::web::canvas_api::CanvasProjectBoundary {
                     registry: registry.clone(),
                 }),
+                write_flags: crate::web::capabilities::WriteFlags {
+                    allow_remote_writes,
+                    shared_live_writes_denied,
+                },
             },
         ))
         .fallback_service(assets::static_service_from(static_dir));
@@ -633,8 +641,12 @@ async fn health_check(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    let allow =
-        !state.shared_live_writes_denied && (peer.ip().is_loopback() || state.allow_remote_writes);
+    // The same predicate `/ws`, `/terminal/ws` and the write routes use.
+    let allow = crate::web::capabilities::write_decision(
+        peer,
+        crate::web::capabilities::WriteFlags::from_state(&state),
+    )
+    .is_allowed();
     // Durable boundary log (AGENTS.md): record the capability-admission
     // decision. No peer address or credentials logged — only the decision
     // + whether the deployment-mode deny or opt-in governed it.

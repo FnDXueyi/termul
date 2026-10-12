@@ -832,6 +832,7 @@ async fn canvas_routes_require_auth_when_gated() {
             Request::builder()
                 .method("POST")
                 .uri("/canvas/mcp")
+                .extension(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54321))))
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
                 .expect("build request"),
@@ -903,6 +904,7 @@ async fn canvas_routes_require_auth_when_gated() {
             Request::builder()
                 .method("POST")
                 .uri("/canvas/mcp")
+                .extension(axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54321))))
                 .header("authorization", "Bearer t0ken")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
@@ -957,6 +959,10 @@ async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
             Request::builder()
                 .method("POST")
                 .uri("/canvas/open")
+                .extension(axum::extract::ConnectInfo(SocketAddr::from((
+                    [127, 0, 0, 1],
+                    54321,
+                ))))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"docPath":"C:/proj/design.op","projectId":"p-1"}"#,
@@ -1209,7 +1215,10 @@ async fn serve_origins(origins: OriginPolicy) -> (TempDir, u16, tokio::task::Joi
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app.into_make_service()).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        ).await;
     });
     (dir, port, handle)
 }

@@ -1,4 +1,5 @@
 use super::{validate_project_path, IpcResult};
+use crate::acp::destructive_guard::{ensure_no_active_turn_under, DESTRUCTIVE_OP_BLOCKED};
 use crate::acp::AcpManager;
 use crate::worktree::{
     BaseBranchInfo, BranchEntry, DirtyStatus, GitWorktreeEntry, IncludeCopyResult, RemoveResult,
@@ -163,14 +164,33 @@ pub async fn worktree_rename_branch(
 }
 
 /// Remove a worktree. Uses --force if requested. Runs `git worktree prune` after.
+/// Refused with `destructive_op_blocked` while a session working inside the
+/// worktree is mid-turn.
 #[tauri::command]
 pub async fn worktree_remove(
+    manager: State<'_, Arc<AcpManager>>,
+    project_path: String,
+    worktree_path: String,
+    force: bool,
+) -> Result<IpcResult<()>, String> {
+    worktree_remove_guarded(&manager, project_path, worktree_path, force).await
+}
+
+/// Body of [`worktree_remove`] taking the manager directly so tests can drive
+/// the desktop entry point without a Tauri app.
+pub(crate) async fn worktree_remove_guarded(
+    acp: &AcpManager,
     project_path: String,
     worktree_path: String,
     force: bool,
 ) -> Result<IpcResult<()>, String> {
     let validated_project = validate_and_stringify!(&project_path);
     let validated_worktree = validate_and_stringify!(&worktree_path);
+    if let Err(blocked) =
+        ensure_no_active_turn_under(acp, std::path::Path::new(&validated_worktree)).await
+    {
+        return Ok(IpcResult::error(blocked.to_string(), DESTRUCTIVE_OP_BLOCKED));
+    }
     match WorktreeManager::remove(&validated_project, &validated_worktree, force) {
         Ok(()) => Ok(IpcResult::success(())),
         Err(e) => Ok(IpcResult::error(e.to_string(), e.error_code())),
@@ -210,13 +230,41 @@ pub async fn worktree_check_dirty(worktree_path: String) -> Result<IpcResult<Dir
 }
 
 /// Remove all Termul-managed worktrees for a project.
-/// Reports per-worktree success/failure.
+/// Reports per-worktree success/failure. Refused as a whole with
+/// `destructive_op_blocked` when a session is mid-turn inside any worktree
+/// that would be removed.
 #[tauri::command]
 pub async fn worktree_remove_all_managed(
+    manager: State<'_, Arc<AcpManager>>,
+    project_path: String,
+    worktrees_json: String,
+) -> Result<IpcResult<Vec<RemoveResult>>, String> {
+    worktree_remove_all_managed_guarded(&manager, project_path, worktrees_json).await
+}
+
+/// Body of [`worktree_remove_all_managed`], see [`worktree_remove_guarded`].
+pub(crate) async fn worktree_remove_all_managed_guarded(
+    acp: &AcpManager,
     project_path: String,
     worktrees_json: String,
 ) -> Result<IpcResult<Vec<RemoveResult>>, String> {
     let validated_path = validate_and_stringify!(&project_path);
+    // An unparsable list skips the guard and then fails in `remove_all_managed`
+    // with its own parse error, so nothing is removed either way.
+    if let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&worktrees_json) {
+        // Only managed worktrees are removed, so only those can block.
+        for path in entries
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .filter(|path| WorktreeManager::is_managed_path(path))
+        {
+            if let Err(blocked) =
+                ensure_no_active_turn_under(acp, std::path::Path::new(path)).await
+            {
+                return Ok(IpcResult::error(blocked.to_string(), DESTRUCTIVE_OP_BLOCKED));
+            }
+        }
+    }
     match WorktreeManager::remove_all_managed(&validated_path, &worktrees_json) {
         Ok(results) => Ok(IpcResult::success(results)),
         Err(e) => Ok(IpcResult::error(e.to_string(), e.error_code())),

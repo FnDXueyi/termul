@@ -21,6 +21,7 @@ import {
   type WsRequestType,
   wsTierOf
 } from './web-protocol.types'
+import { WEB_TERMINAL_ERROR_CODES } from './web-terminal-protocol.types'
 
 describe('web-protocol.types — event/request type registries (AC2)', () => {
   it('exports exactly 26 event types including durable user prompts, switch markers + worktree renames', () => {
@@ -141,9 +142,9 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
 })
 
 describe('web-protocol.types — error codes (AC2)', () => {
-  it('exports exactly 21 stable error codes', () => {
+  it('exports exactly 23 stable error codes', () => {
     const codes = new Set(Object.values(WS_ERROR_CODES))
-    expect(codes.size).toBe(21)
+    expect(codes.size).toBe(23)
     const expected = [
       'not_found',
       'unauthorized',
@@ -167,7 +168,10 @@ describe('web-protocol.types — error codes (AC2)', () => {
       'destructive_op_blocked',
       'provider_quota_exceeded',
       'provider_session_limit',
-      'provider_request_rejected'
+      'provider_request_rejected',
+      // Capability refusal + ticket tombstone.
+      'forbidden',
+      'already_resolved'
     ]
     for (const code of expected) {
       expect(codes).toContain(code)
@@ -372,5 +376,20 @@ describe('web-protocol.types — envelope shapes (AC2 + AC3)', () => {
     expect(typeof e).toBe('string')
     expect(typeof r).toBe('string')
     expect(typeof t).toBe('string')
+  })
+})
+
+describe('web-terminal-protocol.types — error codes', () => {
+  it('mirrors the Rust terminal_ws codes, including the view-only refusal', () => {
+    expect(Object.values(WEB_TERMINAL_ERROR_CODES).sort()).toEqual([
+      'FORBIDDEN',
+      'INVALID_CLIENT_IDENTITY',
+      'PROTOCOL_VERSION_MISMATCH',
+      'UNAUTHORIZED'
+    ])
+  })
+
+  it('FORBIDDEN is the SCREAMING form of the /ws `forbidden` code', () => {
+    expect(WEB_TERMINAL_ERROR_CODES.FORBIDDEN.toLowerCase()).toBe(WS_ERROR_CODES.FORBIDDEN)
   })
 })
