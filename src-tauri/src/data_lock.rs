@@ -251,7 +251,9 @@ impl DataLocks {
 }
 
 /// `true` when the opened sidecar is reachable under more than one name (a
-/// hard link). Always `false` where the link count is not available.
+/// hard link). Where the link count is not available (non-Unix), this returns
+/// `true`, so the host never writes the pid record through a sidecar it cannot
+/// prove is a plain file. The pid record is advisory only.
 fn has_other_links(file: &File) -> bool {
     #[cfg(unix)]
     {
@@ -261,7 +263,7 @@ fn has_other_links(file: &File) -> bool {
     #[cfg(not(unix))]
     {
         let _ = file;
-        false
+        true
     }
 }
 
