@@ -1,6 +1,8 @@
 //! `/ws` upgrade handler + per-connection relay loop (read/write tasks,
 //! keepalive watchdog, lifecycle signals) and the per-frame text dispatch.
 
+use futures_util::{Sink, Stream};
+
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -131,7 +133,17 @@ pub(super) fn handle_lifecycle_signal(text: &str, authed: bool, backgrounded: &A
 
 /// Run the per-connection relay loop: a write task draining the outbound
 /// channel + a read task routing requests. Returns when either half closes.
-pub(super) async fn run_relay(socket: WebSocket, state: AppState) {
+///
+/// Generic over the carrier so a host-level fault harness can drive the exact
+/// production loop over an in-memory duplex; axum's `WebSocket` satisfies
+/// both bounds, so the production path is unchanged.
+pub(super) async fn run_relay<S>(socket: S, state: AppState)
+where
+    S: Stream<Item = Result<Message, axum::Error>>
+        + Sink<Message, Error = axum::Error>
+        + Send
+        + 'static,
+{
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
     let relay = Arc::clone(&state.relay);

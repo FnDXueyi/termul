@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
@@ -664,15 +664,17 @@ pub(super) fn peer_frame_type(text: &str) -> Option<String> {
     value.get("type")?.as_str().map(str::to_owned)
 }
 
-/// Epoch-millis timestamp for the keepalive watchdog. Uses `SystemTime` (not
-/// `Instant`) so it fits an `AtomicU64`; clock skew inside one process over a
-/// ~minute window is negligible, and `saturating_sub` keeps the compare safe
-/// even if the clock jumps backwards.
+/// Monotonic millis for the keepalive watchdog, read from the tokio clock
+/// (relative to the first call in this process) so a paused test runtime
+/// (`start_paused`) advances the watchdog deterministically. Production
+/// behavior is a monotonic wall clock: unlike `SystemTime` it cannot jump
+/// backwards, and `saturating_sub` keeps the compare safe regardless.
 pub(super) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    static EPOCH: std::sync::LazyLock<tokio::time::Instant> =
+        std::sync::LazyLock::new(tokio::time::Instant::now);
+    tokio::time::Instant::now()
+        .duration_since(*EPOCH)
+        .as_millis() as u64
 }
 
 /// Map an `AcpManager` `Err(String)` to a `WsReply` err. Story 1.8 review:
@@ -728,3 +730,5 @@ pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsR
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod harness;

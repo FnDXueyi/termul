@@ -37,29 +37,11 @@ use tracing::{info, warn};
 use crate::acp::{AgentId, AcpManager, SessionId};
 use crate::web::sink::WsRelaySink;
 
-/// Default idle window before an agent with no pinning session is reaped
-/// (issue #837: "reap after 15 min idle; configurable later").
-pub const DEFAULT_IDLE_REAP_WINDOW: Duration = Duration::from_secs(15 * 60);
-
 /// Default sweep cadence: each sweep re-evaluates every live agent's pins.
 pub(crate) const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Shutdown signal for the reaper loop (`serve` resolves it on SIGINT/SIGTERM).
 pub type ShutdownSignal = Pin<Box<dyn Future<Output = ()> + Send>>;
-
-/// Read the idle reap window from `TERMUL_AGENT_IDLE_REAP_SECS` (operator
-/// override + test hook). Falls back to [`DEFAULT_IDLE_REAP_WINDOW`] when
-/// unset or unparsable.
-#[must_use]
-pub fn idle_reap_window_from_env() -> Duration {
-    match std::env::var("TERMUL_AGENT_IDLE_REAP_SECS") {
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(secs) => Duration::from_secs(secs),
-            Err(_) => DEFAULT_IDLE_REAP_WINDOW,
-        },
-        Err(_) => DEFAULT_IDLE_REAP_WINDOW,
-    }
-}
 
 /// True when the agent may be reaped now: no owned session pins it. `pins`
 /// carries one entry per owned session with its pinned flag (durable,
@@ -279,8 +261,7 @@ pub async fn run_agent_idle_reaper(
 }
 
 /// Spawn the reaper on the current runtime (standalone `serve` only).
-/// `window` comes from [`idle_reap_window_from_env`] unless a test injects
-/// one explicitly.
+/// `window` is `ServerConfig.agent_idle_window_secs` (flag → env → default).
 pub fn spawn_agent_idle_reaper(
     acp: Arc<AcpManager>,
     relay: Arc<WsRelaySink>,

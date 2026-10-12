@@ -1,8 +1,10 @@
-//! In-crate fake agent driver for prompt-flow tests. It reproduces the real
-//! command loop's `SendPrompt` behaviour instead of answering "always OK":
-//! the real [`DriverState`] single-flight (`ACP_TURN_IN_PROGRESS` rejection,
-//! which leaves the accept hook unrun), the accept hook before anything of the
-//! turn is emitted, and the real terminator helpers from `turn.rs`.
+//! In-crate fake agent driver for prompt-flow and relay-fault tests. It
+//! reproduces the real command loop's behaviour instead of answering "always
+//! OK": the real [`DriverState`] single-flight (`ACP_TURN_IN_PROGRESS`
+//! rejection, which leaves the accept hook unrun), the accept hook before
+//! anything of the turn is emitted, the real terminator helpers from
+//! `turn.rs`, and an `Authenticate` handler that runs off the command loop
+//! (like the real `spawn_request`) and can be slow, fail or crash.
 
 use super::*;
 use std::collections::VecDeque;
@@ -30,6 +32,48 @@ pub(crate) enum FakeTurn {
     },
 }
 
+/// What an `authenticate` request resolves to once its delay elapsed.
+pub(crate) enum FakeAuthOutcome {
+    /// The agent accepts the method.
+    Ok,
+    /// The agent RPC fails; the message is the real loop's `e.to_string()`.
+    Fail(String),
+    /// The agent connection dies mid-handler: the reply sender is dropped and
+    /// the caller sees the transport's "agent thread dropped" error.
+    Crash,
+}
+
+/// Scripted `authenticate` request: a (virtual-time friendly) delay, then an
+/// outcome. A slow `Ok` is the long-handler fixture for the relay's
+/// slow-handler-vs-pong-deadline invariant.
+pub(crate) struct FakeAuth {
+    pub(crate) delay: std::time::Duration,
+    pub(crate) outcome: FakeAuthOutcome,
+}
+
+impl FakeAuth {
+    pub(crate) fn ok_after(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            outcome: FakeAuthOutcome::Ok,
+        }
+    }
+
+    pub(crate) fn fail_after(delay: std::time::Duration, message: &str) -> Self {
+        Self {
+            delay,
+            outcome: FakeAuthOutcome::Fail(message.to_string()),
+        }
+    }
+
+    pub(crate) fn crash_after(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            outcome: FakeAuthOutcome::Crash,
+        }
+    }
+}
+
 pub(crate) struct FakeDriver {
     sinks: Vec<Arc<dyn EventSink>>,
     agent_id: AgentId,
@@ -37,6 +81,7 @@ pub(crate) struct FakeDriver {
     turns: Mutex<VecDeque<FakeTurn>>,
     emit_chunk: bool,
     accept_gate: Mutex<Option<oneshot::Receiver<()>>>,
+    auths: Mutex<VecDeque<FakeAuth>>,
 }
 
 impl FakeDriver {
@@ -53,7 +98,15 @@ impl FakeDriver {
             turns: Mutex::new(turns.into()),
             emit_chunk,
             accept_gate: Mutex::new(None),
+            auths: Mutex::new(VecDeque::new()),
         }
+    }
+
+    /// Script the outcomes of successive `authenticate` requests (default
+    /// once exhausted: an immediate `Ok`).
+    pub(crate) fn with_auths(self, auths: Vec<FakeAuth>) -> Self {
+        *self.auths.lock() = auths.into();
+        self
     }
 
     /// Withhold the accept ack of the next prompt until `gate` fires (or its
@@ -61,6 +114,31 @@ impl FakeDriver {
     pub(crate) fn with_accept_gate(self, gate: oneshot::Receiver<()>) -> Self {
         *self.accept_gate.lock() = Some(gate);
         self
+    }
+
+    /// Mirror of the command loop's `Authenticate` arm: the request runs on
+    /// its own task so the loop keeps serving other commands while it is
+    /// pending.
+    pub(crate) fn authenticate(&self, reply: oneshot::Sender<Result<(), String>>) {
+        let script = self
+            .auths
+            .lock()
+            .pop_front()
+            .unwrap_or_else(|| FakeAuth::ok_after(std::time::Duration::ZERO));
+        tokio::spawn(async move {
+            if !script.delay.is_zero() {
+                tokio::time::sleep(script.delay).await;
+            }
+            match script.outcome {
+                FakeAuthOutcome::Ok => {
+                    let _ = reply.send(Ok(()));
+                }
+                FakeAuthOutcome::Fail(message) => {
+                    let _ = reply.send(Err(message));
+                }
+                FakeAuthOutcome::Crash => drop(reply),
+            }
+        });
     }
 
     pub(crate) fn is_turn_active(&self, session_id: &str) -> bool {

@@ -85,7 +85,7 @@ pub(crate) use turn::PromptAcceptHook;
 #[cfg(test)]
 mod test_driver;
 #[cfg(test)]
-pub(crate) use test_driver::{FakeDriver, FakeTurn};
+pub(crate) use test_driver::{FakeAuth, FakeDriver, FakeTurn};
 #[cfg(test)]
 mod real_loop_tests;
 
@@ -1539,6 +1539,24 @@ impl AcpManager {
         self.install_fake_driver_agent(agent_id, sessions, driver);
     }
 
+    /// [`Self::install_test_agent_with_turns`] plus scripted `authenticate`
+    /// outcomes (slow / failing / crashing handler) — the relay-fault harness
+    /// fixture. Successive `authenticate` requests consume `auths` in order;
+    /// once exhausted they answer `Ok` immediately.
+    #[cfg(test)]
+    pub(crate) fn install_test_agent_with_scripts(
+        &self,
+        agent_id: AgentId,
+        sessions: std::collections::HashSet<String>,
+        turns: Vec<FakeTurn>,
+        emit_chunk: bool,
+        auths: Vec<FakeAuth>,
+    ) {
+        let driver = FakeDriver::new(self.sinks.clone(), agent_id.clone(), turns, emit_chunk)
+            .with_auths(auths);
+        self.install_fake_driver_agent(agent_id, sessions, driver);
+    }
+
     #[cfg(test)]
     fn install_fake_driver_agent(
         &self,
@@ -1584,6 +1602,7 @@ impl AcpManager {
                         driver.cancel(&session_id.0);
                         let _ = reply.send(Ok(()));
                     }
+                    AcpCommand::Authenticate { reply, .. } => driver.authenticate(reply),
                     // Unhandled commands are silently dropped (same behavior
                     // as the prior `if let`). A reply-bearing variant dropped
                     // here will cause the caller to hang — future tests that
