@@ -197,12 +197,9 @@ async fn workspace_write_resend_answers_updated_not_a_conflict_with_itself() {
     let resend = send(&app, "POST", "/workspace/p1/write", body.clone(), Some("ws-1")).await;
     assert_eq!(resend.json()["data"], first.json()["data"]);
     recorded_once(&ledger);
-    // A new id is a new intent: the same stale write is the conflict it always was.
-    let other = send(&app, "POST", "/workspace/p1/write", body.clone(), Some("ws-2")).await;
-    assert_eq!(other.json()["data"]["status"], "conflict", "{}", other.text);
-    // And a write without any id is refused before it runs.
-    let bare = send_unstamped(&app, "POST", "/workspace/p1/write", body).await;
-    assert_eq!(code(&bare), "INVALID_COMMAND_ID");
+    // Without the id the same stale write is the conflict it always was.
+    let bare = send(&app, "POST", "/workspace/p1/write", body, None).await;
+    assert_eq!(bare.json()["data"]["status"], "conflict", "{}", bare.text);
 }
 
 #[tokio::test]

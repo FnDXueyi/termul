@@ -281,6 +281,19 @@ async fn a_lost_reply_to_a_rename_is_answered_with_the_original_outcome() {
 }
 
 #[tokio::test]
+async fn a_workspace_write_without_a_command_id_is_refused() {
+    let dir = TempDir::new("workspace-bare");
+    let app = app(host(dir.path()));
+    let body = json!({
+        "basedRevision": null,
+        "manifest": { "projectId": "p1", "revision": 0, "updatedAt": 0 },
+    });
+
+    let bare = send_unstamped(&app, "POST", "/workspace/p1/write", body).await;
+    assert_eq!(code(&bare), "INVALID_COMMAND_ID", "{}", bare.text);
+}
+
+#[tokio::test]
 async fn a_rejection_replays_its_original_code_and_a_different_request_conflicts() {
     let dir = TempDir::new("conflict");
     let missing = dir.path().join("nope.txt");
