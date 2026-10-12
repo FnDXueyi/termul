@@ -19,7 +19,9 @@
 //!   cancel, canvas open/close/save, oauth disconnect.
 //! * Never admitted: log frontend-error, oauth start (secret), probes, reads.
 //!
-//! A request without a `commandId` runs exactly as before. The write guard of
+//! A ledgered request without a `commandId` is refused with
+//! `INVALID_COMMAND_ID` (Tauri: the `invalid_command_id:` prefix) before it
+//! runs; the idempotent kinds above run with or without one. The write guard of
 //! the route runs BEFORE this module, so a refused request leaves no entry.
 //! Entries hold the outcome class and the reply payload only: never a request
 //! body, content, token or secret (fingerprints hash entity names).
@@ -265,10 +267,17 @@ where
 {
     // Everything borrowed from the request is read here, so the returned
     // future owns its inputs and the caller can move its fields into `execute`.
+    let ledgered_class = domain_class(kind).filter(|(_, class)| class.ledgered());
     let admission = match command_id_from_headers::<T>(headers) {
+        // A ledgered route without an id has no replay protection: refused
+        // before it runs, nothing is recorded.
+        Ok(None) if ledgered_class.is_some() => Err(Some(IpcBody::err(
+            format!("`{kind}` requires an X-Command-Id header"),
+            INVALID_COMMAND_ID_CODE,
+        ))),
         Ok(None) => Err(None),
         Err(refusal) => Err(Some(refusal)),
-        Ok(Some(id)) => match domain_class(kind).filter(|(_, class)| class.ledgered()) {
+        Ok(Some(id)) => match ledgered_class {
             None => Err(None),
             Some((kind, class)) => Ok((id, kind, class, fingerprint)),
         },
@@ -343,12 +352,16 @@ where
     LF: Future<Output = Option<Settled>>,
     F: Future<Output = DomainRan<T>> + Send + 'static,
 {
+    let ledgered_class = domain_class(kind).filter(|(_, class)| class.ledgered());
     let admission = match command_id {
+        None if ledgered_class.is_some() => Err(Some(format!(
+            "{INVALID_COMMAND_ID}: `{kind}` requires a commandId"
+        ))),
         None => Err(None),
         Some(id) if !is_valid_command_id(&id) => Err(Some(format!(
             "{INVALID_COMMAND_ID}: commandId must be 1-{MAX_COMMAND_ID_LEN} characters of A-Z, a-z, 0-9, `_` or `-`"
         ))),
-        Some(id) => match domain_class(kind).filter(|(_, class)| class.ledgered()) {
+        Some(id) => match ledgered_class {
             None => Err(None),
             Some((kind, class)) => Ok((id, kind, class, fingerprint)),
         },

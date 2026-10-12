@@ -96,7 +96,8 @@ describe('worktreeApi', () => {
         name: 'feat-1',
         branch: 'feat-1',
         isNewBranch: true,
-        startRef: 'main'
+        startRef: 'main',
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
       })
       expect(result.success).toBe(true)
       expect(result.success === true && result.data?.name).toBe('feat-1')
@@ -235,7 +236,8 @@ describe('worktreeApi', () => {
       expect(mockInvoke).toHaveBeenCalledWith('worktree_rename_branch', {
         worktreePath: '/project/.termul/worktrees/ab12cd34',
         oldBranch: 'chat/ab12cd34',
-        newBranch: 'chat/fix-login'
+        newBranch: 'chat/fix-login',
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
       })
       expect(mockFetch).not.toHaveBeenCalled()
       expect(result.success).toBe(true)

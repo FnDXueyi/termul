@@ -1313,6 +1313,20 @@ pub(super) fn handle_sync_with_access(
     access: &mut ConnectionAccess,
     web_auth: Option<&Arc<WebAuth>>,
 ) -> WsReply {
+    // A ledgered request type is stamped with a fresh `command_id`, like a client's.
+    let text = crate::web::command_ledger::test_clock::stamp_ws_text(text);
+    handle_sync_unstamped(&text, authed, identity, access, web_auth)
+}
+
+/// Dispatch `text` exactly as sent (no `command_id` is added): for the tests of
+/// what the host does with a request that carries none.
+fn handle_sync_unstamped(
+    text: &str,
+    authed: &mut bool,
+    identity: &mut Option<ClientIdentity>,
+    access: &mut ConnectionAccess,
+    web_auth: Option<&Arc<WebAuth>>,
+) -> WsReply {
     let relay = Arc::new(WsRelaySink::new());
     let acp = Arc::new(AcpManager::new(vec![]));
     let (tx, mut rx) = test_outbound();
@@ -2157,12 +2171,27 @@ pub(super) async fn ws_read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Ve
 }
 
 /// Write one masked client→server WS frame (RFC 6455 requires client
-/// masking). Test frames stay in the short (≤125-byte) form.
+/// masking). A text frame of a ledgered request type is stamped with a fresh
+/// `command_id` like a client's (`test_clock::stamp_ws_text`); frames up to 64 KiB.
 pub(super) async fn ws_write_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
     use tokio::io::AsyncWriteExt;
-    assert!(payload.len() <= 125, "test frames stay in the short form");
+    let stamped;
+    let payload = match (opcode, std::str::from_utf8(payload)) {
+        (0x1, Ok(text)) => {
+            stamped = crate::web::command_ledger::test_clock::stamp_ws_text(text);
+            stamped.as_bytes()
+        }
+        _ => payload,
+    };
+    assert!(payload.len() <= 0xFFFF, "test frames fit the 16-bit length form");
     let mask = [0x12u8, 0x34, 0x56, 0x78];
-    let mut frame = vec![0x80 | opcode, 0x80 | payload.len() as u8];
+    let mut frame = vec![0x80 | opcode];
+    if payload.len() <= 125 {
+        frame.push(0x80 | payload.len() as u8);
+    } else {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    }
     frame.extend_from_slice(&mask);
     frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     stream.write_all(&frame).await.expect("write frame");
@@ -4350,4 +4379,52 @@ async fn log_epoch_rides_subscribe_snapshot_and_cursor_replies() {
 
     persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// Enforcement (AD-5): a ledgered request without a `command_id` is refused with
+/// the stable `invalid_command_id` before it runs; idempotent types and reads
+/// need none, and `send_prompt` keeps its optional `turnId`.
+#[test]
+fn a_ledgered_request_without_a_command_id_is_refused_and_the_rest_runs_as_before() {
+    let unstamped = |text: &str| {
+        let mut authed = true;
+        handle_sync_unstamped(
+            text,
+            &mut authed,
+            &mut None,
+            &mut test_access(),
+            None,
+        )
+    };
+
+    for (kind, payload) in [
+        ("create_session", r#"{"agentId":"a1","cwd":"/tmp"}"#),
+        ("spawn_agent", r#"{"config":{"name":"n","command":"c","args":[],"env":{}}}"#),
+        ("close_session", r#"{"agentId":"a1","sessionId":"s1"}"#),
+        ("install_acp_agent", r#"{"agentId":"x"}"#),
+    ] {
+        let reply = unstamped(&format!(r#"{{"id":"r1","type":"{kind}","payload":{payload}}}"#));
+        assert!(!reply.ok, "{kind}");
+        assert_eq!(reply.err.unwrap().code, "invalid_command_id", "{kind}");
+    }
+
+    // Idempotent and read types are not ledgered: no id needed.
+    for kind in ["list_agents", "kill_agent", "set_mode"] {
+        let reply = unstamped(&format!(r#"{{"id":"r1","type":"{kind}","payload":{{"agentId":"a1","sessionId":"s1","modeId":"m"}}}}"#));
+        assert_ne!(
+            reply.err.map(|error| error.code),
+            Some("invalid_command_id".to_string()),
+            "{kind}"
+        );
+    }
+
+    // A turnless `send_prompt` is still served (it is refused for other
+    // reasons here: there is no such agent), never as an id refusal.
+    let prompt = unstamped(
+        r#"{"id":"r1","type":"send_prompt","payload":{"agentId":"a1","sessionId":"s1","text":"hi"}}"#,
+    );
+    assert_ne!(
+        prompt.err.map(|error| error.code),
+        Some("invalid_command_id".to_string())
+    );
 }

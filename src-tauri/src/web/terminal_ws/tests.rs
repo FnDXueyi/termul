@@ -201,7 +201,9 @@ fn gate_request(id: &str, type_: &str, payload: Value) -> Request {
         id: id.to_string(),
         type_: type_.to_string(),
         payload,
-        command_id: None,
+        // A ledgered op is refused without an id: stamp one like a real client.
+        command_id: crate::web::command_ledger::terminal::ws_kind(type_)
+            .map(|_| crate::web::command_ledger::test_clock::fresh_command_id()),
     }
 }
 

@@ -88,10 +88,11 @@ async fn create_branch_guards_only_a_start_ref_other_than_head() {
         )
     };
 
-    assert_blocked(create("topic".into(), Some("feature".into()), None).await);
+    let fresh = crate::web::command_ledger::test_clock::fresh_command_id;
+    assert_blocked(create("topic".into(), Some("feature".into()), Some(&fresh())).await);
     for head_ref in [None, Some("HEAD".to_string()), Some("  ".to_string())] {
         let name = format!("from-head-{}", head_ref.as_deref().unwrap_or("none").trim());
-        create(name, head_ref, None)
+        create(name, head_ref, Some(&fresh()))
             .await
             .expect("branching from HEAD leaves the tree alone");
     }

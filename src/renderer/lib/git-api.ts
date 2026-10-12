@@ -7,6 +7,7 @@ import type {
   ProjectIcon
 } from '@shared/types/ipc.types'
 import { invoke } from '@tauri-apps/api/core'
+import { runInvokeCommand } from './acp-transport/tauri-verdicts'
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
 import { webServerGit } from './web-server-api'
@@ -16,6 +17,26 @@ import { webServerGit } from './web-server-api'
 // The `init` template (below) is the canonical pattern — replicate it for the
 // other 19 methods. `webServerGit.*` throws on `!res.success` so callers see
 // the same error shape the desktop `invoke` rejection produces.
+
+/**
+ * A ledgered desktop git command: the engine mints/journals the `commandId`
+ * (same id on a resend, new id after a definite rejection) and the host
+ * answers a resend from its ledger. `fresh` for commands whose request carries
+ * content the entity key cannot name (patch, message).
+ */
+function ledgeredInvoke(
+  command: string,
+  entityKey: string,
+  args: Record<string, unknown>,
+  fresh = false
+): Promise<void> {
+  return runInvokeCommand<void>({
+    kind: command,
+    entityKey,
+    fresh,
+    send: (commandId) => invoke<void>(command, { ...args, commandId })
+  })
+}
 
 export const gitApi = {
   getStatus: (cwd: string) =>
@@ -39,26 +60,53 @@ export const gitApi = {
   // Web/remote posts `/git/stage-hunk` | `/git/unstage-hunk`.
   stageHunk: (cwd: string, path: string, hunkPatch: string) =>
     isTauriContext()
-      ? invoke<void>('git_stage_hunk', { cwd, path, hunkPatch })
+      ? runInvokeCommand<void>({
+          kind: 'git_stage_hunk',
+          entityKey: `${cwd}|${path}`,
+          fresh: true,
+          send: (commandId) => invoke<void>('git_stage_hunk', { cwd, path, hunkPatch, commandId })
+        })
       : webServerGit.stageHunk(cwd, path, hunkPatch),
 
   unstageHunk: (cwd: string, path: string, hunkPatch: string) =>
     isTauriContext()
-      ? invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch })
+      ? runInvokeCommand<void>({
+          kind: 'git_unstage_hunk',
+          entityKey: `${cwd}|${path}`,
+          fresh: true,
+          send: (commandId) => invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch, commandId })
+        })
       : webServerGit.unstageHunk(cwd, path, hunkPatch),
 
   discard: (cwd: string, path: string) =>
-    isTauriContext() ? invoke<void>('git_discard', { cwd, path }) : webServerGit.discard(cwd, path),
+    isTauriContext()
+      ? ledgeredInvoke('git_discard', `${cwd}|${path}`, { cwd, path })
+      : webServerGit.discard(cwd, path),
 
   getLog: (cwd: string, limit?: number) =>
     isTauriContext()
       ? invoke<GitCommit[]>('git_get_log', { cwd, limit })
       : webServerGit.getLog(cwd, limit),
 
-  commit: (cwd: string, summary: string, description = '', amend = false) =>
+  /**
+   * `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch);
+   * a moved HEAD refuses the commit with `precondition_failed`, nothing changes.
+   */
+  commit: (cwd: string, summary: string, description = '', amend = false, expectedHead?: string) =>
     isTauriContext()
-      ? invoke<void>('git_commit', { cwd, summary, description, amend })
-      : webServerGit.commit(cwd, summary, description, amend),
+      ? ledgeredInvoke(
+          'git_commit',
+          cwd,
+          {
+            cwd,
+            summary,
+            description,
+            amend,
+            ...(expectedHead !== undefined ? { expectedHead } : {})
+          },
+          true
+        )
+      : webServerGit.commit(cwd, summary, description, amend, expectedHead),
 
   push: (cwd: string) =>
     isTauriContext() ? invoke<void>('git_push', { cwd }) : webServerGit.push(cwd),
@@ -111,12 +159,12 @@ export const gitApi = {
 
   createBranch: (cwd: string, branch: string, startRef?: string) =>
     isTauriContext()
-      ? invoke<void>('git_create_branch', { cwd, branch, startRef })
+      ? ledgeredInvoke('git_create_branch', `${cwd}|${branch}`, { cwd, branch, startRef })
       : webServerGit.createBranch(cwd, branch, startRef),
 
   stashSave: (cwd: string, message?: string, includeUntracked?: boolean) =>
     isTauriContext()
-      ? invoke<void>('git_stash_save', { cwd, message, includeUntracked })
+      ? ledgeredInvoke('git_stash_save', cwd, { cwd, message, includeUntracked }, true)
       : webServerGit.stashSave(cwd, message, includeUntracked),
 
   stashList: (cwd: string) =>
@@ -126,17 +174,17 @@ export const gitApi = {
 
   stashApply: (cwd: string, index: number) =>
     isTauriContext()
-      ? invoke<void>('git_stash_apply', { cwd, index })
+      ? ledgeredInvoke('git_stash_apply', `${cwd}|${index}`, { cwd, index })
       : webServerGit.stashApply(cwd, index),
 
   stashPop: (cwd: string, index: number) =>
     isTauriContext()
-      ? invoke<void>('git_stash_pop', { cwd, index })
+      ? ledgeredInvoke('git_stash_pop', `${cwd}|${index}`, { cwd, index })
       : webServerGit.stashPop(cwd, index),
 
   stashDrop: (cwd: string, index: number) =>
     isTauriContext()
-      ? invoke<void>('git_stash_drop', { cwd, index })
+      ? ledgeredInvoke('git_stash_drop', `${cwd}|${index}`, { cwd, index })
       : webServerGit.stashDrop(cwd, index),
 
   branchList: (cwd: string) =>

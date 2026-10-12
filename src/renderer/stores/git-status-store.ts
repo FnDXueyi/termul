@@ -1,11 +1,13 @@
-﻿import type {
-  GitCommitContext,
-  GitDiffStat,
-  GitStashInfo,
-  GitStatusDetail
+﻿import {
+  type GitCommitContext,
+  type GitDiffStat,
+  type GitStashInfo,
+  type GitStatusDetail,
+  PRECONDITION_FAILED_CODE
 } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
+import { AcpTransportError } from '@/lib/acp-transport/types'
 import { isGitWriteBlocked } from '@/lib/active-working-copy'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
@@ -311,6 +313,9 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     try {
       const context = await gitApi.getCommitContext(cwd)
       if (isCurrent()) {
+        await rememberHead(key, cwd, context.hasHead)
+      }
+      if (isCurrent()) {
         set((state) => ({
           commitContexts: { ...state.commitContexts, [key]: context }
         }))
@@ -321,6 +326,9 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       return null
     } catch (error) {
       if (!isCurrent()) return null
+      // The HEAD last shown is as stale as the context: no precondition is
+      // better than a wrong one.
+      delete knownHeads[key]
       // Drop any stale context so the footer disables its actions rather than
       // acting on out-of-date ahead/staged/HEAD data.
       set((state) => {
@@ -447,7 +455,16 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
 
   commit: async (cwd, summary, description, amend) => {
     assertWritable(cwd)
-    await gitApi.commit(cwd, summary, description, amend)
+    try {
+      // The commit lands on the HEAD the panel last showed: a HEAD moved by
+      // another client or terminal refuses it (`precondition_failed`).
+      const expectedHead = knownHeads[trackPath(cwd)]
+      if (expectedHead === undefined) await gitApi.commit(cwd, summary, description, amend)
+      else await gitApi.commit(cwd, summary, description, amend, expectedHead)
+    } catch (error) {
+      if (isPreconditionFailed(error)) await refreshAfterWrite(get, cwd)
+      throw error
+    }
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
     // already happened) â€” swallow refresh errors here.
@@ -606,6 +623,29 @@ const diffRequestVersions: Record<string, number> = {}
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
 
+/** Full sha of HEAD (`''`: unborn branch) as of the last commit-context fetch,
+ * per tracked path: the `expectedHead` of the next commit. Absent when it could
+ * not be read (the commit then carries no precondition). Control metadata. */
+const knownHeads: Record<string, string> = {}
+
+async function rememberHead(key: string, cwd: string, hasHead: boolean): Promise<void> {
+  if (!hasHead) {
+    knownHeads[key] = ''
+    return
+  }
+  try {
+    const [head] = await gitApi.getLog(cwd, 1)
+    if (head?.hash) knownHeads[key] = head.hash
+    else delete knownHeads[key]
+  } catch {
+    delete knownHeads[key]
+  }
+}
+
+function isPreconditionFailed(error: unknown): boolean {
+  return error instanceof AcpTransportError && error.code === PRECONDITION_FAILED_CODE
+}
+
 /** Monotonic request token per working-copy key for 
 efreshStatus (same idea). */
 const statusRequests: Record<string, number> = {}
@@ -631,6 +671,7 @@ export function resetGitStatusStoreControlForTests(): void {
   diffStatWatchers.clear()
   diffStatLastFetch.clear()
   for (const key of Object.keys(commitContextRequests)) delete commitContextRequests[key]
+  for (const key of Object.keys(knownHeads)) delete knownHeads[key]
   for (const key of Object.keys(statusRequests)) delete statusRequests[key]
 }
 

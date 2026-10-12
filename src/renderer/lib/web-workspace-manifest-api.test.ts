@@ -10,6 +10,8 @@ vi.mock('./tauri-runtime', () => ({
 }))
 
 import type { WorkspaceManifest } from '@shared/types/workspace-manifest.types'
+import { __resetCommandEngineForTesting, AWAITED_RESEND_DELAYS_MS } from './command-engine'
+import { __clearCommandJournalForTesting } from './command-journal'
 import { webWorkspaceManifestApi } from './web-workspace-manifest-api'
 
 describe('web-workspace-manifest-api (fetch client)', () => {
@@ -18,9 +20,12 @@ describe('web-workspace-manifest-api (fetch client)', () => {
     mockIsTauriContext.mockReturnValue(false)
     mockFetch.mockReset()
     vi.stubGlobal('fetch', mockFetch)
+    __clearCommandJournalForTesting()
+    __resetCommandEngineForTesting()
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
@@ -200,7 +205,10 @@ describe('web-workspace-manifest-api (fetch client)', () => {
         `${window.location.origin}/workspace/project-1/write`,
         expect.objectContaining({
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            'X-Command-Id': expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
+          },
           body: JSON.stringify({ basedRevision: null, manifest: sampleManifest })
         })
       )
@@ -264,9 +272,12 @@ describe('web-workspace-manifest-api (fetch client)', () => {
       // `code: 'FORBIDDEN'` surfacing verbatim, NOT a non-2xx → NETWORK_ERROR
       // mapping. The VALIDATION_ERROR case is now covered by the
       // success-body test above.)
-      mockFetch.mockResolvedValueOnce(jsonResponse({}, 500))
+      vi.useFakeTimers()
+      mockFetch.mockResolvedValue(jsonResponse({}, 500))
 
-      const result = await webWorkspaceManifestApi.writeManifest('project-1', null, sampleManifest)
+      const pending = webWorkspaceManifestApi.writeManifest('project-1', null, sampleManifest)
+      for (const delay of AWAITED_RESEND_DELAYS_MS) await vi.advanceTimersByTimeAsync(delay)
+      const result = await pending
 
       expect(result.success).toBe(false)
       if (!result.success) {
@@ -274,16 +285,24 @@ describe('web-workspace-manifest-api (fetch client)', () => {
       }
     })
 
-    it('maps a network throw to NETWORK_ERROR', async () => {
-      mockFetch.mockRejectedValueOnce(new Error('failed to fetch'))
+    it('a lost reply is resent with the SAME X-Command-Id; a still-lost reply ends NETWORK_ERROR (never rejected)', async () => {
+      vi.useFakeTimers()
+      mockFetch.mockRejectedValue(new Error('failed to fetch'))
 
-      const result = await webWorkspaceManifestApi.writeManifest('project-1', null, sampleManifest)
+      const pending = webWorkspaceManifestApi.writeManifest('project-1', null, sampleManifest)
+      for (const delay of AWAITED_RESEND_DELAYS_MS) await vi.advanceTimersByTimeAsync(delay)
+      const result = await pending
 
       expect(result).toEqual({
         success: false,
         error: 'failed to fetch',
         code: 'NETWORK_ERROR'
       })
+      const ids = mockFetch.mock.calls
+        .filter(([url]) => String(url).includes('/workspace/'))
+        .map(([, init]) => (init as { headers: Record<string, string> }).headers['X-Command-Id'])
+      expect(ids).toHaveLength(AWAITED_RESEND_DELAYS_MS.length + 1)
+      expect(new Set(ids).size).toBe(1)
     })
 
     it('encodes the projectId in the URL', async () => {

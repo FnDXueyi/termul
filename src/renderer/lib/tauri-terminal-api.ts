@@ -15,6 +15,7 @@ import type {
 } from '@shared/types/ipc.types'
 import { Channel } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { invokeIpcCommand } from './acp-transport/tauri-verdicts'
 import { invokeIpc } from './ipc/tauri'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
 import { terminalCursorEpoch } from './terminal-cursor'
@@ -239,6 +240,69 @@ export function createTauriTerminalApi(): TerminalApi {
     }
   }
 
+  /**
+   * CAP-3: attach to a terminal's output stream with terminalId + claim +
+   * lastSeq. The host verifies the credential BEFORE any replay; every
+   * verification failure resolves to the generic UNAUTHORIZED error with no
+   * terminal metadata or output. Output streams through a dedicated raw
+   * channel (parity with the spawn channel), and the response's `latestSeq`
+   * is the desktop reattach cursor.
+   */
+  const attach = async (
+    terminalId: string,
+    claim: string,
+    lastSeq: number,
+    logEpoch?: string
+  ): Promise<IpcResult<TerminalAttachResult>> => {
+    // Never present an id-only attach — the credential is the gate.
+    if (!claim) {
+      return { success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' }
+    }
+    const on_data = new Channel<ArrayBuffer>()
+    const deliver = (bytes: Uint8Array): void => {
+      for (const callback of dataCallbacks) {
+        try {
+          callback(terminalId, bytes)
+        } catch (err) {
+          console.error('[BinaryChannel] Error in attach data callback:', err)
+        }
+      }
+    }
+    // The host streams the replay through the channel BEFORE the attach
+    // result resolves, and only the result says whether the cursor was
+    // refused (`reset`). Hold the replay until then so a reset can clear the
+    // terminal first.
+    let held: Uint8Array[] | null = []
+    on_data.onmessage = (buf: ArrayBuffer) => {
+      const bytes = new Uint8Array(buf)
+      if (held) held.push(bytes)
+      else deliver(bytes)
+    }
+    const result = await invokeIpc<TerminalAttachResult>(IPC_COMMANDS.ATTACH, {
+      terminalId,
+      claim,
+      lastSeq,
+      // A nonzero cursor without its epoch is untrusted (see terminal-cursor).
+      logEpoch: terminalCursorEpoch(lastSeq, logEpoch),
+      onData: on_data
+    })
+    if (!result.success) {
+      // Rejected (or failed) — release the channel so it cannot leak.
+      held = null
+      on_data.onmessage = () => {}
+      return result
+    }
+    if (result.data.reset) {
+      // The cursor did not belong to this terminal's log: discard what was
+      // rendered (RIS, ESC c) before the full replay, as the web path does.
+      deliver(new Uint8Array([0x1b, 0x63]))
+    }
+    const replay = held
+    held = null
+    for (const bytes of replay) deliver(bytes)
+    return result
+  }
+
   return {
     /**
      * Spawn a new terminal PTY
@@ -331,12 +395,43 @@ export function createTauriTerminalApi(): TerminalApi {
         }
       }
 
-      const result = await invokeIpc<SpawnedTerminal>(IPC_COMMANDS.SPAWN, {
-        options,
-        onData: on_data
-      })
+      // One id per spawn intent, minted + journaled by the engine (every call
+      // site goes through this facade). A resend after a lost reply carries the
+      // SAME id: the host answers with the existing terminal and a FRESH claim,
+      // and drops this call's new Channel — the first spawn's Channel stays
+      // bound to the PTY (possibly an abandoned one), so a replayed spawn is
+      // followed by an attach with the fresh claim and ignores this Channel.
+      let replayed = false
+      const result = await invokeIpcCommand<SpawnedTerminal>(
+        IPC_COMMANDS.SPAWN,
+        (commandId) => ({ options: { ...options, commandId }, onData: on_data }),
+        {
+          kind: 'terminal_spawn',
+          // A new terminal is a new intent: never answer it with the PTY an earlier,
+          // unconfirmed spawn of the same project/cwd/program made. (An in-call
+          // resend still reuses its id.)
+          fresh: true,
+          entityKey: `${options?.projectId ?? ''}|${options?.cwd ?? ''}|${options?.program ?? options?.shell ?? ''}`,
+          onRun: (run) => {
+            replayed = run.resent
+          }
+        }
+      )
 
-      if (result.success && result.data) {
+      if (result.success && result.data && replayed) {
+        pendingBuffer = []
+        on_data.onmessage = () => {}
+        const attached = await attach(result.data.id, result.data.claim, 0)
+        if (!attached.success) {
+          // The PTY exists but its output cannot be received: do not orphan it.
+          void invokeIpcCommand<void>(
+            IPC_COMMANDS.KILL,
+            { terminalId: result.data.id },
+            { kind: 'terminal_kill', entityKey: result.data.id }
+          )
+          return { success: false, error: attached.error, code: attached.code }
+        }
+      } else if (result.success && result.data) {
         capturedTerminalId = result.data.id
 
         // Flush any buffered data that arrived before we knew the terminal ID
@@ -361,88 +456,40 @@ export function createTauriTerminalApi(): TerminalApi {
       return result
     },
 
-    /**
-     * CAP-3: attach to a terminal's output stream with terminalId + claim +
-     * lastSeq. The host verifies the credential BEFORE any replay; every
-     * verification failure resolves to the generic UNAUTHORIZED error with no
-     * terminal metadata or output. Output streams through a dedicated raw
-     * channel (parity with the spawn channel), and the response's `latestSeq`
-     * is the desktop reattach cursor.
-     */
-    async attach(
-      terminalId: string,
-      claim: string,
-      lastSeq: number,
-      logEpoch?: string
-    ): Promise<IpcResult<TerminalAttachResult>> {
-      // Never present an id-only attach — the credential is the gate.
-      if (!claim) {
-        return { success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' }
-      }
-      const on_data = new Channel<ArrayBuffer>()
-      const deliver = (bytes: Uint8Array): void => {
-        for (const callback of dataCallbacks) {
-          try {
-            callback(terminalId, bytes)
-          } catch (err) {
-            console.error('[BinaryChannel] Error in attach data callback:', err)
-          }
-        }
-      }
-      // The host streams the replay through the channel BEFORE the attach
-      // result resolves, and only the result says whether the cursor was
-      // refused (`reset`). Hold the replay until then so a reset can clear the
-      // terminal first.
-      let held: Uint8Array[] | null = []
-      on_data.onmessage = (buf: ArrayBuffer) => {
-        const bytes = new Uint8Array(buf)
-        if (held) held.push(bytes)
-        else deliver(bytes)
-      }
-      const result = await invokeIpc<TerminalAttachResult>(IPC_COMMANDS.ATTACH, {
-        terminalId,
-        claim,
-        lastSeq,
-        // A nonzero cursor without its epoch is untrusted (see terminal-cursor).
-        logEpoch: terminalCursorEpoch(lastSeq, logEpoch),
-        onData: on_data
-      })
-      if (!result.success) {
-        // Rejected (or failed) — release the channel so it cannot leak.
-        held = null
-        on_data.onmessage = () => {}
-        return result
-      }
-      if (result.data.reset) {
-        // The cursor did not belong to this terminal's log: discard what was
-        // rendered (RIS, ESC c) before the full replay, as the web path does.
-        deliver(new Uint8Array([0x1b, 0x63]))
-      }
-      const replay = held
-      held = null
-      for (const bytes of replay) deliver(bytes)
-      return result
-    },
+    attach,
 
     /**
      * CAP-3: possession-based rotation — the returned credential replaces the
      * presented one atomically.
      */
     async rotateClaim(terminalId: string, claim: string): Promise<IpcResult<RotatedClaim>> {
-      return invokeIpc<RotatedClaim>(IPC_COMMANDS.ROTATE_CLAIM, { terminalId, claim })
+      // A replay after a lost reply is `OUTCOME_UNKNOWN` (the new credential was
+      // never kept host-side); the desktop has no `list_preserved`, so the
+      // failure stands and the caller falls back to a fresh spawn.
+      return invokeIpcCommand<RotatedClaim>(
+        IPC_COMMANDS.ROTATE_CLAIM,
+        { terminalId, claim },
+        { kind: 'terminal_rotate_claim', entityKey: terminalId }
+      )
     },
 
     /**
      * CAP-3: revoke the credential; the PTY keeps running.
      */
     async revokeClaim(terminalId: string, claim: string): Promise<IpcResult<void>> {
-      return invokeIpc<void>(IPC_COMMANDS.REVOKE_CLAIM, { terminalId, claim })
+      return invokeIpcCommand<void>(
+        IPC_COMMANDS.REVOKE_CLAIM,
+        { terminalId, claim },
+        { kind: 'terminal_revoke_claim', entityKey: terminalId }
+      )
     },
 
     /**
      * Write data to terminal PTY
      */
     async write(terminalId: string, data: string): Promise<IpcResult<void>> {
+      // No commandId: the desktop IPC has no lost-reply window, and an id per
+      // keystroke would flood the host's shared ledger.
       return invokeIpc<void>(IPC_COMMANDS.WRITE, { terminalId, data })
     },
 
@@ -457,7 +504,11 @@ export function createTauriTerminalApi(): TerminalApi {
      * Kill terminal PTY
      */
     async kill(terminalId: string): Promise<IpcResult<void>> {
-      return invokeIpc<void>(IPC_COMMANDS.KILL, { terminalId })
+      return invokeIpcCommand<void>(
+        IPC_COMMANDS.KILL,
+        { terminalId },
+        { kind: 'terminal_kill', entityKey: terminalId }
+      )
     },
 
     /**

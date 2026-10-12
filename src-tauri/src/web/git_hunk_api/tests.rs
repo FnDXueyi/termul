@@ -79,6 +79,10 @@ async fn post_json(
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri(uri)
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(peer))

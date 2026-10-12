@@ -16,6 +16,7 @@ import type {
   TerminalSpawnOptions,
   TerminalStateSnapshot
 } from '@shared/types/ipc.types'
+import { COMMAND_RESULT_CODES, IN_PROGRESS_RECEIPT } from '@shared/types/ipc.types'
 import {
   WEB_TERMINAL_ERROR_CODES,
   type WebTerminalEventPayload,
@@ -29,9 +30,10 @@ import {
   jitteredBackoffMs,
   RECONNECT_STABLE_MS
 } from './acp-transport/ws-transport-timing'
+import { runIpcCommand } from './ipc/http'
 import { logFrontendError } from './log-api'
-
 import { terminalCursorEpoch } from './terminal-cursor'
+import { randomUUID } from './uuid'
 import { getWebAuthToken } from './web-auth-token'
 import { buildAuthenticatePayload } from './web-client-identity'
 import { clearProtocolMismatchLatch, handleProtocolVersionMismatch } from './web-protocol-reload'
@@ -153,6 +155,15 @@ export class WebTerminalClient {
    */
   private readonly inputBuffers = new Map<string, string>()
   /**
+   * The buffered chunk whose replay got no answer (connection died mid-flight),
+   * with the `commandId` it was sent under. The next flush resends THIS chunk
+   * under the SAME id (the host answers ok without typing it twice) before any
+   * newer input. In-memory like the buffer itself: a reload drops both.
+   */
+  private readonly unconfirmedChunks = new Map<string, { commandId: string; data: string }>()
+  /** Project each live terminal was spawned for (recovers a rotated claim via `list_preserved`). */
+  private readonly terminalProjects = new Map<string, string>()
+  /**
    * Story 10 (F1): coarse terminal-channel health listener (feeds the
    * connection-status store). Fired on fresh connects ('connecting'), on
    * `onopen` ('connected'), when the backoff loop engages ('reconnecting'),
@@ -257,9 +268,16 @@ export class WebTerminalClient {
     return this.connectionState
   }
 
+  /**
+   * Send one request. A ledgered op (`spawn`/`write`/`kill`/`rotate_claim`/
+   * `revoke_claim`) carries its `commandId` on the frame; the host's
+   * `{ receipt: "in_progress" }` answer (the first run of that id is still
+   * going) resolves as the `COMMAND_IN_PROGRESS` failure, never as a success.
+   */
   async request<T>(
     type: WebTerminalRequestType,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    commandId?: string
   ): Promise<IpcResult<T>> {
     try {
       await this.connect()
@@ -279,11 +297,20 @@ export class WebTerminalClient {
       this.pending.set(id, {
         timer,
         resolve: (reply) => {
-          if (reply.success) resolve({ success: true, data: reply.data as T })
-          else resolve({ success: false, error: reply.error, code: reply.code })
+          if (!reply.success) {
+            resolve({ success: false, error: reply.error, code: reply.code })
+          } else if (isInProgressReceipt(reply.data)) {
+            resolve({
+              success: false,
+              error: `Terminal ${type} is still running on the host`,
+              code: COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS
+            })
+          } else {
+            resolve({ success: true, data: reply.data as T })
+          }
         }
       })
-      socket.send(JSON.stringify({ id, type, payload }))
+      socket.send(JSON.stringify({ id, type, payload, ...(commandId ? { commandId } : {}) }))
     })
   }
 
@@ -476,6 +503,7 @@ export class WebTerminalClient {
             // client — its buffered input is undeliverable; drop it rather
             // than stranding it (memory + false hope).
             this.inputBuffers.delete(terminalId)
+            this.unconfirmedChunks.delete(terminalId)
             // #850: the channel just RECONNECTED (finishConnect runs only
             // after a successful open + auth) yet the claim is dead — the
             // server restarted and the PTYs/claims died with it. Surface
@@ -542,6 +570,7 @@ export class WebTerminalClient {
     // reporting success for input that never reaches the host.
     for (const tracker of this.trackers.values()) tracker.disconnected = true
     this.inputBuffers.clear()
+    this.unconfirmedChunks.clear()
     this.failConnect(socket, reject, error)
     this.emitConnectionState('disconnected')
     if (code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH) {
@@ -710,16 +739,28 @@ export class WebTerminalClient {
         this.trackers.delete(terminalId)
         // Story 10: an exited terminal's buffer is dropped with its tracker.
         this.inputBuffers.delete(terminalId)
+        this.unconfirmedChunks.delete(terminalId)
       }
     }
+  }
+
+  /** Remember the project a terminal was spawned for (rotate recovery). */
+  noteTerminalProject(terminalId: string, projectId: string | undefined): void {
+    if (projectId) this.terminalProjects.set(terminalId, projectId)
+  }
+
+  terminalProject(terminalId: string): string | undefined {
+    return this.terminalProjects.get(terminalId)
   }
 
   /** Remove a terminal from tracking (used after kill/exit). */
   removeTracker(terminalId: string): void {
     void this.request('detach', { terminalId }).catch(() => {})
     this.trackers.delete(terminalId)
+    this.terminalProjects.delete(terminalId)
     // Story 10: a killed terminal's buffered input is dropped with it.
     this.inputBuffers.delete(terminalId)
+    this.unconfirmedChunks.delete(terminalId)
   }
   /**
    * Story 10 (F9/F10): write terminal input. When the socket is down (or this
@@ -737,7 +778,7 @@ export class WebTerminalClient {
     const tracker = this.trackers.get(terminalId)
     const socketOpen = this.socket?.readyState === this.WebSocketImpl.OPEN
     if (socketOpen && (!tracker || tracker.exited || tracker.attachedSocket === this.socket)) {
-      return this.request('write', { terminalId, data })
+      return this.request('write', { terminalId, data }, randomUUID())
     }
     if (tracker && !tracker.exited && !tracker.disconnected && tracker.claim) {
       const buffered = this.inputBuffers.get(terminalId) ?? ''
@@ -762,7 +803,7 @@ export class WebTerminalClient {
       this.ensureReconnectArmed()
       return { success: true, data: undefined }
     }
-    return this.request('write', { terminalId, data })
+    return this.request('write', { terminalId, data }, randomUUID())
   }
 
   /**
@@ -799,30 +840,66 @@ export class WebTerminalClient {
     const buffered = this.inputBuffers.get(terminalId)
     if (!buffered) return
     this.inputBuffers.delete(terminalId)
-    void this.request<void>('write', { terminalId, data: buffered }).then((result) => {
-      if (!result.success && result.code === 'NETWORK_ERROR') {
+    // Chunk 1: the unconfirmed one (same id) if its text still leads the
+    // buffer; chunk 2: whatever was buffered after it (a new id).
+    const prior = this.unconfirmedChunks.get(terminalId)
+    const first =
+      prior && buffered.startsWith(prior.data) ? prior : { commandId: randomUUID(), data: buffered }
+    const rest = buffered.slice(first.data.length)
+    void this.sendBufferedChunks(terminalId, first, rest)
+  }
+
+  private async sendBufferedChunks(
+    terminalId: string,
+    first: { commandId: string; data: string },
+    rest: string
+  ): Promise<void> {
+    const chunks = rest ? [first, { commandId: randomUUID(), data: rest }] : [first]
+    for (const chunk of chunks) {
+      const result = await this.request<void>(
+        'write',
+        { terminalId, data: chunk.data },
+        chunk.commandId
+      )
+      if (result.success) {
+        this.unconfirmedChunks.delete(terminalId)
+        continue
+      }
+      if (
+        result.code === 'NETWORK_ERROR' ||
+        result.code === COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS
+      ) {
         const tracker = this.trackers.get(terminalId)
         if (!tracker || tracker.exited || tracker.disconnected || !tracker.claim) return
+        // At-least-once becomes exactly-once: the chunk is resent under its
+        // own id, so a first run that did reach the PTY is not typed twice.
+        this.unconfirmedChunks.set(terminalId, chunk)
+        const unsent = chunks
+          .slice(chunks.indexOf(chunk))
+          .map((c) => c.data)
+          .join('')
         const arrived = this.inputBuffers.get(terminalId) ?? ''
-        this.inputBuffers.set(terminalId, buffered + arrived)
+        this.inputBuffers.set(terminalId, unsent + arrived)
         // Story 10: durable failure log — the replay write failed and the
-        // payload was re-buffered (at-least-once). Error code only; the
-        // replayed input is terminal keystrokes and is never logged.
+        // payload was re-buffered. Error code only; the replayed input is
+        // terminal keystrokes and is never logged.
         void logFrontendError({
           level: 'warn',
           source: 'WebTerminalClient.flushInputBuffer',
-          message: `buffered-input replay failed (NETWORK_ERROR) — input re-buffered for the next re-attach`
+          message: `buffered-input replay failed (${result.code}) — input re-buffered for the next re-attach`
         })
-      } else if (!result.success) {
-        // A non-network replay failure drops the buffered input (the buffer
-        // entry was already removed) — data loss, so log it. Code only.
-        void logFrontendError({
-          level: 'warn',
-          source: 'WebTerminalClient.flushInputBuffer',
-          message: `buffered-input replay failed (${result.code ?? 'UNKNOWN_ERROR'}) — buffered input dropped`
-        })
+        return
       }
-    })
+      // A non-network replay failure drops the buffered input (the buffer
+      // entry was already removed) — data loss, so log it. Code only.
+      this.unconfirmedChunks.delete(terminalId)
+      void logFrontendError({
+        level: 'warn',
+        source: 'WebTerminalClient.flushInputBuffer',
+        message: `buffered-input replay failed (${result.code ?? 'UNKNOWN_ERROR'}) — buffered input dropped`
+      })
+      return
+    }
   }
 
   private getOrCreate(terminalId: string): TerminalTracker {
@@ -839,6 +916,7 @@ export class WebTerminalClient {
     if (tracker) tracker.exited = true
     // Story 10: an exited terminal never resumes — drop its buffer.
     this.inputBuffers.delete(terminalId)
+    this.unconfirmedChunks.delete(terminalId)
   }
 
   onData(callback: TerminalDataCallback): () => void {
@@ -875,6 +953,7 @@ export class WebTerminalClient {
     this.rejectPending()
     // Story 10: dispose drops every buffered input (in-memory only).
     this.inputBuffers.clear()
+    this.unconfirmedChunks.clear()
     this.socket?.close()
   }
 
@@ -1207,6 +1286,14 @@ export class WebTerminalClient {
   }
 }
 
+function isInProgressReceipt(data: unknown): boolean {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { receipt?: unknown }).receipt === IN_PROGRESS_RECEIPT
+  )
+}
+
 function failure(code: string, error: unknown): IpcResult<never> {
   return {
     success: false,
@@ -1217,23 +1304,61 @@ function failure(code: string, error: unknown): IpcResult<never> {
 
 const client = new WebTerminalClient()
 
+/** Kill under a journaled id: a lost reply is resent, a repeat kill answers ok. */
+function killTerminal(terminalId: string): Promise<IpcResult<void>> {
+  return runIpcCommand<void>({
+    kind: 'terminal_kill',
+    entityKey: terminalId,
+    send: (commandId) => client.request<void>('kill', { terminalId }, commandId)
+  })
+}
+
+/**
+ * A rotate whose first run applied but whose reply (the new claim) is gone:
+ * `list_preserved` re-issues a claim for the terminal and the client adopts it.
+ * Needs the project the terminal was spawned for; otherwise the failure stands.
+ */
+async function recoverRotatedClaim(
+  terminalId: string,
+  unknown: IpcResult<RotatedClaim>
+): Promise<IpcResult<RotatedClaim>> {
+  const projectId = client.terminalProject(terminalId)
+  if (!projectId) return unknown
+  const listed = await listPreservedAndAdoptClaims(projectId)
+  const entry = listed.success ? listed.data.find((item) => item.id === terminalId) : undefined
+  if (!entry?.claim) return unknown
+  client.severClaim(terminalId, entry.claim)
+  return { success: true, data: { claim: entry.claim } }
+}
+
 export function createWebTerminalApi(): TerminalApi {
   return {
     async spawn(options: TerminalSpawnOptions = {}): Promise<IpcResult<SpawnedTerminal>> {
-      const result = await client.request<SpawnedTerminal>(
-        'spawn',
-        options as Record<string, unknown>
-      )
+      // One id per spawn intent, minted + journaled here (every call site goes
+      // through this facade). A lost reply is resent under the SAME id: the host
+      // answers with the existing PTY and a FRESH claim, never a second PTY.
+      const result = await runIpcCommand<SpawnedTerminal>({
+        kind: 'terminal_spawn',
+        // A new terminal is a new intent: never answer it with the PTY an earlier,
+        // unconfirmed spawn of the same project/cwd/program made. (An in-call
+        // resend still reuses its id.)
+        fresh: true,
+        entityKey: `${options.projectId ?? ''}|${options.cwd ?? ''}|${options.program ?? options.shell ?? ''}`,
+        send: (commandId) =>
+          client.request<SpawnedTerminal>('spawn', options as Record<string, unknown>, commandId)
+      })
       if (result.success) {
+        client.noteTerminalProject(result.data.id, options.projectId)
         if (result.data.claim) {
           // Adopt the issued credential, then attach with it so output flows
           // immediately. Reconnect re-attach afterwards reuses the stored claim.
+          // A replayed spawn carries a FRESH claim: the attach uses it too.
           client.adoptClaim(result.data.id, result.data.claim)
           const attachResult = await client.attach(result.data.id, result.data.claim)
           if (!attachResult.success) {
             // Attach failed — the PTY exists but we can't receive output.
             // Kill it to avoid orphaning, and return the attach failure.
-            void client.request('kill', { terminalId: result.data.id })
+            void killTerminal(result.data.id)
             client.removeTracker(result.data.id)
             return { success: false, error: attachResult.error, code: attachResult.code }
           }
@@ -1251,17 +1376,33 @@ export function createWebTerminalApi(): TerminalApi {
     attach: (terminalId, claim, lastSeq, logEpoch) =>
       client.attachWithCursor(terminalId, claim, lastSeq, logEpoch),
     async rotateClaim(terminalId: string, claim: string): Promise<IpcResult<RotatedClaim>> {
-      const result = await client.request<RotatedClaim>('rotate_claim', { terminalId, claim })
+      const result = await runIpcCommand<RotatedClaim>({
+        kind: 'terminal_rotate_claim',
+        entityKey: terminalId,
+        send: (commandId) =>
+          client.request<RotatedClaim>('rotate_claim', { terminalId, claim }, commandId)
+      })
       if (result.success) {
         // Teardown (amendment R1): the server detached this connection's
         // attachment and authorization. Adopt the fresh credential and force
         // a re-verified attach for any outstanding refs.
         client.severClaim(terminalId, result.data.claim)
+        return result
+      }
+      // The rotation ran but its reply was lost, and the new credential was
+      // never kept host-side: list the project's preserved terminals, which
+      // re-issues a claim for each.
+      if (result.code === COMMAND_RESULT_CODES.OUTCOME_UNKNOWN) {
+        return recoverRotatedClaim(terminalId, result)
       }
       return result
     },
     async revokeClaim(terminalId: string, claim: string): Promise<IpcResult<void>> {
-      const result = await client.request<void>('revoke_claim', { terminalId, claim })
+      const result = await runIpcCommand<void>({
+        kind: 'terminal_revoke_claim',
+        entityKey: terminalId,
+        send: (commandId) => client.request<void>('revoke_claim', { terminalId, claim }, commandId)
+      })
       if (result.success) {
         // Teardown (amendment R1): output stream + write/resize access gone.
         client.severClaim(terminalId)
@@ -1274,7 +1415,7 @@ export function createWebTerminalApi(): TerminalApi {
     write: (terminalId, data) => client.write(terminalId, data),
     resize: (terminalId, cols, rows) => client.request('resize', { terminalId, cols, rows }),
     async kill(terminalId): Promise<IpcResult<void>> {
-      const result = await client.request<void>('kill', { terminalId })
+      const result = await killTerminal(terminalId)
       // The server authorizes kill BEFORE any existence check: an unknown or
       // foreign id returns the generic UNAUTHORIZED (an already-dead terminal
       // this connection still owns is idempotent success).

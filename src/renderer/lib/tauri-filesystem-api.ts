@@ -6,6 +6,7 @@ import type {
   FileInfo,
   FilesystemApi,
   FsScopeGrantSummary,
+  FsWriteExpected,
   IpcResult,
   SearchFileHit
 } from '@shared/types/ipc.types'
@@ -836,11 +837,18 @@ export function createTauriFilesystemApi(): FilesystemApi {
       return () => cleanupTauriListener(unlisten)
     },
 
-    async writeFile(filePath: string, content: string): Promise<IpcResult<void>> {
+    async writeFile(
+      filePath: string,
+      content: string,
+      options?: { expected?: FsWriteExpected }
+    ): Promise<IpcResult<void>> {
       // Web/remote mode: route through the same-origin server (`POST /fs/write`,
       // which truncates+overwrites — matches desktop `writeTextFile`).
+      // `options.expected` is a web-host precondition; the desktop writes
+      // through `plugin-fs` (a process boundary with no lost-reply window), so
+      // it carries none.
       if (!isTauriContext()) {
-        return webServerFilesystem.writeFile(filePath, content)
+        return webServerFilesystem.writeFile(filePath, content, options)
       }
       try {
         await writeTextFile(filePath, content)

@@ -14,6 +14,12 @@ export interface FileContent {
   encoding: string
   size: number
   modifiedAt: number
+  /**
+   * Lower-case sha256 hex of the file's bytes (web `GET /fs/read`). Send it back
+   * as the `expected` precondition of the next write. Absent on desktop reads
+   * (`plugin-fs`), which carry no precondition.
+   */
+  contentHash?: string
 }
 
 export interface FileInfo {

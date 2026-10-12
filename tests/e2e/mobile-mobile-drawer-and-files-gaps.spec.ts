@@ -139,11 +139,15 @@ async function createProject(
     })
     if (!registered.ok()) throw new Error(`project registration failed: ${registered.status()}`)
     for (const [relative, content] of Object.entries(files)) {
+      // /fs/write is ledgered: the host refuses it without a command id.
       const written = await api.post(`${E2E_BASE_URL}/fs/write`, {
-        headers: AUTH_HEADERS,
+        headers: { ...AUTH_HEADERS, 'X-Command-Id': randomUUID() },
         data: { path: join(path, relative), content }
       })
-      if (!written.ok()) throw new Error(`fs/write ${relative} failed: ${written.status()}`)
+      const writtenBody = (await written.json()) as { success?: boolean }
+      if (!written.ok() || !writtenBody.success) {
+        throw new Error(`fs/write ${relative} failed: ${written.status()}`)
+      }
     }
   } finally {
     await api.dispose()

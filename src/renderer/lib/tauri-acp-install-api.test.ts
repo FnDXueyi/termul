@@ -28,7 +28,8 @@ describe('createTauriAcpInstallApi', () => {
     const result = await api.installAgent('opencode')
 
     expect(invokeMock).toHaveBeenCalledWith('acp_install_agent', {
-      request: { agentId: 'opencode' }
+      request: { agentId: 'opencode' },
+      commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
     })
     expect(result.success).toBe(true)
     expect(result.data).toEqual(outcome)
