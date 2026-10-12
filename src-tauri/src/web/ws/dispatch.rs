@@ -318,6 +318,11 @@ pub(super) async fn handle_request(
             )
             .await
         }
+        // Per-project fs watch (`fs_changed` goes only to subscribed
+        // connections): refcounted in `relay.fs_watches()`, released on
+        // `unwatch_project`, connection close, or project archive/remove.
+        "watch_project" => handle_watch_project(id, &req.payload, relay, registry, out_tx),
+        "unwatch_project" => handle_unwatch_project(id, &req.payload, relay, out_tx),
         // Explicit host-default change (Epic 7 — cross-client continuity).
         // Distinct from `switch_project` (per-connection): updates the host's
         // `default_project_id`, persists to `FileProjectRegistry` (VPS, with
