@@ -46,7 +46,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::acp::atomic_file;
+use crate::acp::atomic_file::{self, NewerSchema};
 use crate::acp_registry_snapshot::{
     self, AcpRegistrySnapshot, ResolvedSnapshot, SnapshotFetchOutcome,
 };
@@ -305,6 +305,11 @@ pub struct AcpCatalogService {
     /// catalog resolution (each time the 60s probe cache expires). Forced
     /// refreshes always bypass the gate; a success clears it.
     snapshot_fetch_gate: Mutex<Option<Instant>>,
+    /// Cached OpenCode 2 PATH/`~/.opencode/bin` probe. `None` inside the pair
+    /// means the last probe found no v2 binary. Shares [`PROBE_TTL`] with the
+    /// catalog probe cache so a catalog list does not spawn `--version` on
+    /// every call.
+    opencode_probe: Mutex<Option<(Instant, Option<PathBuf>)>>,
 }
 
 impl AcpCatalogService {
@@ -348,6 +353,7 @@ impl AcpCatalogService {
             cache: RwLock::new(None),
             snapshot_fetch: snapshot_fetcher(production_snapshot_delegate),
             snapshot_fetch_gate: Mutex::new(None),
+            opencode_probe: Mutex::new(None),
         }))
     }
 
@@ -391,6 +397,47 @@ impl AcpCatalogService {
             computed_at: Instant::now(),
         });
         Ok(catalog)
+    }
+
+    /// When OpenCode has no Termul-managed install, attach a v2 binary found
+    /// on PATH or under `~/.opencode/bin`. A managed install already in
+    /// `installed` wins and this probe does not run.
+    pub async fn apply_external_opencode(&self, catalog: &mut AcpCatalog) {
+        let needs_probe = catalog
+            .agents
+            .iter()
+            .any(|agent| agent.id == "opencode" && agent.installed.is_none());
+        if !needs_probe {
+            return;
+        }
+        let binary = self.cached_external_opencode().await;
+        apply_external_opencode_binary(catalog, binary.as_deref());
+    }
+
+    async fn cached_external_opencode(&self) -> Option<PathBuf> {
+        {
+            let guard = self.opencode_probe.lock();
+            if let Some((probed_at, cached)) = guard.as_ref() {
+                if probed_at.elapsed() < PROBE_TTL {
+                    return cached.clone();
+                }
+            }
+        }
+        let probed = match tokio::task::spawn_blocking(
+            crate::acp::opencode_version::probe_external_opencode_v2,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(_) => {
+                log::warn!("[acp-catalog] opencode probe task failed");
+                tracing::warn!("[acp-catalog] opencode probe task failed");
+                None
+            }
+        };
+        let mut guard = self.opencode_probe.lock();
+        *guard = Some((Instant::now(), probed.clone()));
+        probed
     }
 
     /// Fetch the CDN registry snapshot through this host's shared snapshot
@@ -473,8 +520,10 @@ impl AcpCatalogService {
     }
 
     /// Read the opt-in flag. Returns `false` when the file is missing (the
-    /// default — CDN augmentation is off) or when the file is corrupt (backed
-    /// up + treated as fresh, mirroring `WorkspaceManifestService`).
+    /// default — CDN augmentation is off) or when the file is corrupt / older
+    /// (backed up + treated as fresh, mirroring `WorkspaceManifestService`). A
+    /// NEWER-schema file also reads as `false` but is logged and left untouched;
+    /// [`Self::set_opt_in`] refuses to overwrite it.
     pub fn is_opt_in(&self) -> bool {
         match self.read_opt_in_blocking() {
             Ok(enabled) => enabled,
@@ -490,6 +539,19 @@ impl AcpCatalogService {
     /// read-back is backed up + treated as fresh.
     pub fn set_opt_in(&self, enabled: bool) -> Result<(), CatalogError> {
         let path = self.config_path();
+        // Never overwrite a config a newer host wrote (AD-18).
+        match fs::read(&path) {
+            Ok(existing) => {
+                if let Err(newer) =
+                    NewerSchema::check(&path, &existing, CATALOG_CONFIG_SCHEMA_VERSION)
+                {
+                    log::error!("[acp-catalog] opt-in write refused: {newer}");
+                    return Err(CatalogError::NewerSchema(newer));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let envelope = CatalogConfigFile {
             schema_version: CATALOG_CONFIG_SCHEMA_VERSION,
             opt_in_cdn: enabled,
@@ -518,11 +580,17 @@ impl AcpCatalogService {
             }
             Err(error) => return Err(error.into()),
         };
+        // AD-18: a config written by a NEWER host is refused (typed error,
+        // file untouched) — never backed up and replaced by a fresh one.
+        if let Err(newer) = NewerSchema::check(&path, &bytes, CATALOG_CONFIG_SCHEMA_VERSION) {
+            log::error!("[acp-catalog] opt-in config refused: {newer}");
+            return Err(CatalogError::NewerSchema(newer));
+        }
         match serde_json::from_slice::<CatalogConfigFile>(&bytes) {
             Ok(file) if file.schema_version == CATALOG_CONFIG_SCHEMA_VERSION => Ok(file.opt_in_cdn),
             Ok(file) => {
                 log::warn!(
-                    "[acp-catalog] opt-in bad schema_version expected={} found={} — backing up + fresh start",
+                    "[acp-catalog] opt-in older schema_version expected={} found={} — backing up + fresh start",
                     CATALOG_CONFIG_SCHEMA_VERSION,
                     file.schema_version
                 );
@@ -689,6 +757,9 @@ pub enum CatalogError {
     BundledParse(serde_json::Error),
     /// Filesystem read/write failure (permission, disk full, …).
     Io(io::Error),
+    /// The opt-in config was written by a NEWER Termul (AD-18): refused, the
+    /// file is left untouched.
+    NewerSchema(NewerSchema),
 }
 
 impl std::fmt::Display for CatalogError {
@@ -698,6 +769,7 @@ impl std::fmt::Display for CatalogError {
                 write!(f, "bundled catalog parse failed: {error}")
             }
             Self::Io(error) => write!(f, "acp-catalog io error: {error}"),
+            Self::NewerSchema(newer) => write!(f, "acp-catalog: {newer}"),
         }
     }
 }
@@ -707,6 +779,7 @@ impl std::error::Error for CatalogError {
         match self {
             Self::BundledParse(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::NewerSchema(newer) => Some(newer),
         }
     }
 }
@@ -947,6 +1020,35 @@ fn is_https_archive_url(url: &str) -> bool {
     }
     let path = url.split(['?', '#']).next().unwrap_or(url).to_lowercase();
     path.ends_with(".zip") || path.ends_with(".tar.gz") || path.ends_with(".tgz")
+}
+
+/// Fill the OpenCode catalog row from an external v2 binary.
+///
+/// A row that already has `installed` (the Termul install manifest) is left
+/// alone. `binary == None` leaves an install-required row unchanged. The
+/// reported `version` is the catalog pin, so a newer PATH binary does not
+/// show as a downgrade against that pin.
+pub(crate) fn apply_external_opencode_binary(catalog: &mut AcpCatalog, binary: Option<&Path>) {
+    let Some(binary) = binary else {
+        return;
+    };
+    let Some(agent) = catalog
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == "opencode")
+    else {
+        return;
+    };
+    if agent.installed.is_some() {
+        return;
+    }
+    let version = agent.version.clone();
+    agent.status = SupportedAcpAgentStatus::Ready;
+    agent.installed = Some(InstalledCatalogInfo {
+        command: binary.to_string_lossy().into_owned(),
+        args: vec!["acp".to_string()],
+        version,
+    });
 }
 
 /// Overlay host-installed state onto a resolved catalog. For each catalog

@@ -23,6 +23,10 @@ fn metadata() -> SessionMetadata {
         discovered: false,
         worktree_path: Some("/work/project/.termul/worktrees/chat/abc123".to_string()),
         worktree_branch: Some("chat/abc123".to_string()),
+        model_id: None,
+        model_name: None,
+        worktree_branch_source: None,
+        worktree_launch_branch: None,
     }
 }
 
@@ -652,6 +656,32 @@ fn all_completed_prompts_yield_no_open_turn() {
     assert_eq!(open_turn_from_records(&records), None);
 }
 
+/// ACPM-F1: a host terminator (`error` / `timeout` / `crashed`
+/// `prompt_complete`, matched by turn id) closes the turn exactly like an ACP
+/// stop reason — reopening shows no open turn and the session is not busy.
+#[test]
+fn host_terminators_close_the_open_turn_on_reopen() {
+    for stop_reason in ["error", "timeout", "crashed"] {
+        let records = vec![
+            user_prompt(1, Some("turn-1"), "ran into trouble"),
+            chunk(2, "agent", "partial"),
+            record(
+                3,
+                "prompt_complete",
+                json!({"sessionId": "session-1", "turnId": "turn-1", "stopReason": stop_reason}),
+            ),
+        ];
+        assert_eq!(open_turn_from_records(&records), None, "{stop_reason}");
+        let payload = materialize_session_payload(&metadata(), &records);
+        assert!(!payload.metadata.turn_active, "{stop_reason}");
+        // Without the terminator the same log IS open (the pre-fix state).
+        assert_eq!(
+            open_turn_from_records(&records[..2]).as_deref(),
+            Some("turn-1")
+        );
+    }
+}
+
 #[test]
 fn null_turn_id_prompt_is_unnameable_not_uncloseable() {
     // Producers serialize `Option<String>` inside `json!`, so a client that
@@ -697,4 +727,123 @@ fn closed_status_never_reports_turn_active() {
     meta.status = PersistedSessionStatus::Closed;
     let payload = materialize_session_payload(&meta, &records);
     assert!(!payload.metadata.turn_active);
+}
+
+fn tool_record(seq: u64, type_: &str, tool: Value) -> PersistedEventRecord {
+    let key = if type_ == "tool_call" {
+        "toolCall"
+    } else {
+        "update"
+    };
+    record(
+        seq,
+        type_,
+        json!({"agentId": "runtime-1", "sessionId": "session-1", key: tool}),
+    )
+}
+
+#[test]
+fn tool_call_summaries_fold_latest_field_wins_with_first_seq() {
+    let records = vec![
+        user_prompt(1, Some("turn-1"), "edit"),
+        // UPDATE_DIFF: the call carries the path, the update the counts.
+        tool_record(
+            2,
+            "tool_call",
+            json!({"toolCallId": "e1", "kind": "edit", "status": "pending",
+                "locations": [{"path": "/w/a.ts"}]}),
+        ),
+        chunk(3, "agent", "working"),
+        tool_record(
+            4,
+            "tool_call_update",
+            json!({"toolCallId": "e1", "status": "completed",
+                "locations": [{"path": "/w/a.ts"}], "diffStat": {"added": 3, "removed": 1}}),
+        ),
+        // A later update without the summary fields keeps the earlier ones.
+        tool_record(
+            5,
+            "tool_call_update",
+            json!({"toolCallId": "e1", "status": "failed"}),
+        ),
+        // REFRESH: a second edit on the same file stays its own summary (the
+        // panel aggregates per path).
+        tool_record(
+            6,
+            "tool_call",
+            json!({"toolCallId": "e2", "kind": "edit", "status": "completed",
+                "locations": [{"path": "/w/a.ts"}], "diffStat": {"added": 2, "removed": 0}}),
+        ),
+        // READ_CALL: never a summary.
+        tool_record(
+            7,
+            "tool_call",
+            json!({"toolCallId": "r1", "kind": "read", "locations": [{"path": "/w/a.ts"}]}),
+        ),
+        // LEGACY: an edit without summary fields yields nothing.
+        tool_record(
+            8,
+            "tool_call",
+            json!({"toolCallId": "old", "kind": "edit", "status": "completed"}),
+        ),
+        // An update for an unknown id is dropped (renderer recovery parity).
+        tool_record(
+            9,
+            "tool_call_update",
+            json!({"toolCallId": "ghost", "kind": "edit",
+                "locations": [{"path": "/w/ghost.ts"}]}),
+        ),
+        // A call re-kinded by a later update follows the latest kind.
+        tool_record(
+            10,
+            "tool_call",
+            json!({"toolCallId": "m1", "kind": "other", "locations": [{"path": "/w/m.ts"}]}),
+        ),
+        tool_record(
+            11,
+            "tool_call_update",
+            json!({"toolCallId": "m1", "kind": "move", "locations": [{"path": "/w/n.ts"}]}),
+        ),
+        prompt_complete(12, "turn-1"),
+    ];
+    let payload = materialize_session_payload(&metadata(), &records);
+    let value = serde_json::to_value(&payload).unwrap();
+    assert_eq!(
+        value["toolCalls"],
+        json!([
+            {"toolCallId": "e1", "kind": "edit", "status": "failed",
+                "locations": [{"path": "/w/a.ts"}], "diffStat": {"added": 3, "removed": 1},
+                "seq": 2, "timestamp": 102, "restoredSummary": true},
+            {"toolCallId": "e2", "kind": "edit", "status": "completed",
+                "locations": [{"path": "/w/a.ts"}], "diffStat": {"added": 2, "removed": 0},
+                "seq": 6, "timestamp": 106, "restoredSummary": true},
+            {"toolCallId": "m1", "kind": "move",
+                "locations": [{"path": "/w/n.ts"}],
+                "seq": 10, "timestamp": 110, "restoredSummary": true},
+        ])
+    );
+    // The message fold is untouched by the summaries.
+    let ids: Vec<&str> = payload.messages.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["turn:turn-1", "snapshot:agent:3"]);
+}
+
+#[test]
+fn tool_call_summaries_skip_malformed_fields_and_always_serialize() {
+    let records = vec![
+        tool_record(
+            1,
+            "tool_call",
+            json!({"toolCallId": "e1", "kind": "edit",
+                "locations": [{"path": ""}, {"line": 3}, "bogus"],
+                "diffStat": {"added": -1, "removed": 2}}),
+        ),
+        tool_record(2, "tool_call", json!({"kind": "edit"})),
+        record(3, "tool_call", json!({"toolCall": "not-an-object"})),
+    ];
+    let payload = materialize_session_payload(&metadata(), &records);
+    assert!(payload.tool_calls.is_empty());
+    // Absent summaries still serialize as `[]` (byte-identical shape on
+    // both transports).
+    let empty = serde_json::to_value(materialize_session_payload(&metadata(), &[])).unwrap();
+    assert_eq!(empty["toolCalls"], json!([]));
 }

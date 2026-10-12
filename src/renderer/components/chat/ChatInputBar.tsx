@@ -1,12 +1,10 @@
 import type { Editor } from '@tiptap/core'
-import { BorderBeam } from 'border-beam'
 import { useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { Folder, FolderGit2, GitBranch, Paperclip } from '@/components/icons'
+import { Paperclip } from '@/components/icons'
 import { useAgentSkills } from '@/hooks/use-agent-skills'
 import { useAttachmentDropZone } from '@/hooks/use-attachment-drop-zone'
-import { useChatIsolationContext } from '@/hooks/use-chat-isolation-context'
 import { useMentionRecents } from '@/hooks/use-mention-recents'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
@@ -32,6 +30,8 @@ import { AttachFilesButton } from './AttachFilesButton'
 import { AttachmentPreviewGroup } from './AttachmentPreviewGroup'
 import { AgentModelSelector } from './agent-model-selector/AgentModelSelector'
 import { useCurrentAgentConfigId } from './agent-model-selector/use-agent-switch'
+import { ChatContextStrip } from './ChatContextStrip'
+import { ComposerBeamShell } from './ComposerBeamShell'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { attachmentToBlock, dedupeAttachmentBlocks } from './chat-attachments'
 import {
@@ -45,7 +45,7 @@ import { ChatComposerEditor } from './composer/ChatComposerEditor'
 import { ComposerAddSheet } from './composer/ComposerAddSheet'
 import { ComposerSendButton } from './composer/ComposerSendButton'
 import { blurComposerEditor, insertComposerTrigger } from './composer/insert-composer-trigger'
-import { FileMentionMenu } from './FileMentionMenu'
+import { FileMentionMenu, MENTION_EMPTY_LABEL, MENTION_SEARCHING_LABEL } from './FileMentionMenu'
 import { McpBadge } from './McpBadge'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PromptQueuePanel } from './PromptQueuePanel'
@@ -140,13 +140,6 @@ export function ChatInputBar({
   const usableConfigOptions = configOptions.filter(
     (option) => option.type === 'boolean' || (option.options?.length ?? 0) > 0
   )
-  // CAP-6: worktree/branch indicator, shared with the mobile shell subtitle.
-  const { isWorktree, isolationModeLabel, isolationModeTitle, isolationBranch, isDetachedHead } =
-    useChatIsolationContext({
-      projectId: session.projectId,
-      worktreePath: session.worktreePath,
-      worktreeBranch: session.worktreeBranch
-    })
   const {
     model,
     thoughtLevel,
@@ -258,7 +251,7 @@ export function ChatInputBar({
   }, [])
   const mentionSections = mentions.sections
   const mentionMenuRef = mentions.menuRef
-  const emptyLabel = mentions.loading ? 'Searching files…' : 'No files match. Try another name.'
+  const emptyLabel = mentions.loading ? MENTION_SEARCHING_LABEL : MENTION_EMPTY_LABEL
   const resetMentions = mentions.reset
   const onMentionSelect = useComposerMentionSelect({
     value,
@@ -589,7 +582,12 @@ export function ChatInputBar({
           </div>
         )}
         {queue.length > 0 && onRemoveQueued && onSendQueuedNow && (
-          <PromptQueuePanel items={queue} onRemove={onRemoveQueued} onSendNow={onSendQueuedNow} />
+          <PromptQueuePanel
+            items={queue}
+            onRemove={onRemoveQueued}
+            onSendNow={onSendQueuedNow}
+            defaultOpen={!isMobileShell}
+          />
         )}
         {slashOpen && (
           <SlashCommandMenu
@@ -612,10 +610,14 @@ export function ChatInputBar({
           {/* biome-ignore lint/a11y/noStaticElementInteractions: drop zone for attachments; the file picker button is the accessible path */}
           <div
             data-chat-composer="true"
+            // Mobile: a programmatic focus target so focus returns here, not to
+            // the editor (and the OSK), after an approval prompt resolves.
+            tabIndex={isMobileShell ? -1 : undefined}
             className={cn(
               'relative rounded-2xl border border-border/60 bg-card transition-[border-color,box-shadow]',
               'focus-within:border-border focus-within:ring-1 focus-within:ring-inset focus-within:ring-foreground/20',
-              dragActive && 'border-primary/70'
+              dragActive && 'border-primary/70',
+              isMobileShell && 'outline-none'
             )}
             onDragEnter={dropProps.onDragEnter}
             onDragLeave={dropProps.onDragLeave}
@@ -629,7 +631,7 @@ export function ChatInputBar({
                 </span>
               </div>
             )}
-            {permission && <PermissionPrompt permission={permission} />}
+            {permission && <PermissionPrompt permission={permission} isVisible={isVisible} />}
             <AttachmentPreviewGroup attachments={attachments} onRemove={removeAttachment} />
             <div className="flex items-start gap-1 px-4 pb-1.5 pt-3.5">
               {/* Tiptap rich-text editor — the skill "pill" is a real inline
@@ -756,66 +758,8 @@ export function ChatInputBar({
             </div>
           </div>
         </ComposerBeamShell>
-        {!isMobileShell && (
-          <div
-            data-chat-composer-context-strip="true"
-            className="relative z-0 mx-auto -mt-4 flex w-[calc(100%-2.75rem)] min-w-0 items-center gap-2 rounded-2xl border border-t-0 border-border/60 bg-card/60 px-2 pb-1 pt-5 text-xs text-muted-foreground"
-          >
-            <span
-              className="inline-flex shrink-0 items-center gap-1.5 px-2.5"
-              title={isolationModeTitle}
-            >
-              {isWorktree ? (
-                <FolderGit2 size={13} className="shrink-0" aria-hidden="true" />
-              ) : (
-                <Folder size={13} className="shrink-0" aria-hidden="true" />
-              )}
-              <span className="sr-only">Workspace: </span>
-              {isolationModeLabel}
-            </span>
-            {(isolationBranch || isDetachedHead) && (
-              <span
-                className="ml-auto inline-flex min-w-0 items-center justify-end gap-1.5 px-2.5"
-                title={isolationBranch ?? 'HEAD is not on a branch'}
-              >
-                <GitBranch size={13} className="shrink-0" aria-hidden="true" />
-                <span className="sr-only">Branch: </span>
-                <span className="truncate">{isolationBranch ?? 'Detached HEAD'}</span>
-              </span>
-            )}
-          </div>
-        )}
+        {!isMobileShell && <ChatContextStrip session={session} />}
       </div>
     </div>
-  )
-}
-
-/**
- * BorderBeam only when motion is allowed. Under prefers-reduced-motion the beam
- * wrapper is omitted entirely (no keyframes / data-active), not merely paused.
- */
-function ComposerBeamShell({
-  busy,
-  reduced,
-  children
-}: {
-  busy: boolean
-  reduced: boolean
-  children: React.ReactNode
-}): React.JSX.Element {
-  if (reduced) {
-    return <div className="relative z-10 w-full">{children}</div>
-  }
-  return (
-    <BorderBeam
-      size="md"
-      colorVariant="mono"
-      theme="auto"
-      borderRadius={16}
-      active={busy}
-      className="relative z-10 w-full"
-    >
-      {children}
-    </BorderBeam>
   )
 }

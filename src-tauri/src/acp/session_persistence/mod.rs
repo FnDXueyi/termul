@@ -46,13 +46,19 @@ const WRITER_CAPACITY: usize = 1024;
 /// pathological; the caller falls back to a full replay beyond it.
 const TAIL_DEEPEN_MAX_LINES: usize = 16_384;
 
+mod diff_stat;
 mod jsonl;
+mod model;
 mod normalize;
 mod types;
+mod worktree_branch;
 mod writer;
 
 use jsonl::*;
 use writer::*;
+
+pub(crate) use model::snapshot_from_model_state;
+pub(crate) use worktree_branch::AutoRenameRefusal;
 
 pub use normalize::*;
 pub use types::*;
@@ -326,6 +332,10 @@ impl SessionPersistence {
         let cwd = strip_verbatim_prefix(&canonical.to_string_lossy()).into_owned();
         let storage_key = Uuid::new_v4().to_string();
         let now = now_millis();
+        let launch_branch = registration.worktree_branch.clone();
+        let creator = registration.worktree_created
+            && registration.worktree_path.is_some()
+            && launch_branch.is_some();
         let metadata = SessionMetadata {
             schema_version: SESSION_SCHEMA_VERSION,
             storage_key,
@@ -346,6 +356,11 @@ impl SessionPersistence {
             discovered: false,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: registration.model.as_ref().map(|m| m.model_id.clone()),
+            model_name: registration.model.map(|m| m.model_name),
+            // Story 16: provenance is recorded only for the creating session.
+            worktree_branch_source: creator.then_some(WorktreeBranchSource::Auto),
+            worktree_launch_branch: if creator { launch_branch } else { None },
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -447,6 +462,10 @@ impl SessionPersistence {
             discovered: true,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: None,
+            model_name: None,
+            worktree_branch_source: None,
+            worktree_launch_branch: None,
         };
         if let Err(error) = self.persist_metadata(&metadata) {
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
@@ -512,6 +531,10 @@ impl SessionPersistence {
             discovered: false,
             worktree_path: registration.worktree_path,
             worktree_branch: registration.worktree_branch,
+            model_id: None,
+            model_name: None,
+            worktree_branch_source: None,
+            worktree_launch_branch: None,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -1188,12 +1211,26 @@ impl SessionPersistence {
     /// invisible to the tail read itself; it heals on the `replay_after`
     /// fallback or the next scroll-back read.)
     pub fn replay_tail(&self, session_id: &str, limit: usize) -> Result<Vec<PersistedEventRecord>> {
+        self.replay_tail_with_tool_records(session_id, limit)
+            .map(|replay| replay.records)
+    }
+
+    /// [`replay_tail`] plus the session's WHOLE seq-sorted tool-call log
+    /// (`tool-calls.jsonl`, already fully loaded for boundary detection) so
+    /// the tail payload can materialize file-change summaries for the entire
+    /// session, not just the tail window. On the full-replay fallback the
+    /// tool records are the full replay's tool events.
+    pub(crate) fn replay_tail_with_tool_records(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<TailReplay> {
         self.read_with_salvage(session_id, "replay_tail", |persistence| {
             persistence.replay_tail_inner(session_id, limit)
         })
     }
 
-    fn replay_tail_inner(&self, session_id: &str, limit: usize) -> Result<Vec<PersistedEventRecord>> {
+    fn replay_tail_inner(&self, session_id: &str, limit: usize) -> Result<TailReplay> {
         let metadata = self.metadata(session_id)?;
         let dir = self.session_dir(&metadata.storage_key)?;
         let messages_path = dir.join(MESSAGES_FILE);
@@ -1206,7 +1243,8 @@ impl SessionPersistence {
         // = 500), so reading all of them once is cheap. They are needed
         // beyond the window because a `tool_call` just outside it is the
         // boundary that may end an open chunk run.
-        let tool_calls = load_jsonl(&tool_calls_path, session_id, false)?;
+        let mut tool_calls = load_jsonl(&tool_calls_path, session_id, false)?;
+        tool_calls.sort_by_key(|record| record.seq);
         loop {
             let tail = load_jsonl_tail(&messages_path, session_id, max_lines)?;
             // Merge the message tail with every tool-call record so boundary
@@ -1266,7 +1304,10 @@ impl SessionPersistence {
                     records.len(),
                     oldest_tail_seq
                 );
-                return Ok(records);
+                return Ok(TailReplay {
+                    records,
+                    tool_records: tool_calls,
+                });
             }
             if max_lines >= TAIL_DEEPEN_MAX_LINES {
                 log::info!(
@@ -1276,7 +1317,16 @@ impl SessionPersistence {
                     limit,
                     max_lines
                 );
-                return self.replay_after(session_id, 0);
+                let records = self.replay_after(session_id, 0)?;
+                let tool_records = records
+                    .iter()
+                    .filter(|record| is_tool_event(&record.type_))
+                    .cloned()
+                    .collect();
+                return Ok(TailReplay {
+                    records,
+                    tool_records,
+                });
             }
             max_lines = (max_lines.saturating_mul(2)).min(TAIL_DEEPEN_MAX_LINES);
             log::debug!(
@@ -1296,9 +1346,21 @@ impl SessionPersistence {
         session_id: String,
         limit: usize,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.replay_tail_with_tool_records_async(session_id, limit)
+            .await
+            .map(|replay| replay.records)
+    }
+
+    /// Async wrapper for [`replay_tail_with_tool_records`] on Tokio's
+    /// blocking pool (same test hook as [`replay_tail_async`]).
+    pub(crate) async fn replay_tail_with_tool_records_async(
+        self: &Arc<Self>,
+        session_id: String,
+        limit: usize,
+    ) -> Result<TailReplay> {
         let persistence = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            let records = persistence.replay_tail(&session_id, limit);
+            let records = persistence.replay_tail_with_tool_records(&session_id, limit);
             #[cfg(test)]
             if let Some(hook) = persistence.replay_hook.lock().clone() {
                 hook.wait();
@@ -1398,9 +1460,14 @@ impl SessionPersistence {
         self.flush_session(session_id).await?;
         let metadata = self.metadata(session_id)?;
         let records = self.replay_after_async(session_id.to_string(), 0).await?;
-        Ok(crate::acp::session_payload::materialize_session_payload(
-            &metadata, &records,
-        ))
+        let payload = crate::acp::session_payload::materialize_session_payload(&metadata, &records);
+        log::info!(
+            "[acp-history] session_payload session_id={} messages={} tool_summaries={}",
+            crate::logging::redact_session_id(session_id),
+            payload.messages.len(),
+            payload.tool_calls.len()
+        );
+        Ok(payload)
     }
 
     /// Tail-first variant of [`session_payload_async`]: reads only the last
@@ -1413,6 +1480,11 @@ impl SessionPersistence {
     /// trivial, or the heuristic under-read missed records). The metadata's
     /// `messageCount` reflects the tail slice so the renderer knows how many
     /// messages it received.
+    ///
+    /// `toolCalls` (file-change summaries) always cover the WHOLE session:
+    /// the tail path folds them from the full `tool-calls.jsonl`, and the
+    /// fallback keeps every summary of the full payload (never trimmed to the
+    /// kept message slice, unlike `switches`).
     pub async fn session_payload_tail_async(
         self: &Arc<Self>,
         session_id: &str,
@@ -1420,11 +1492,17 @@ impl SessionPersistence {
     ) -> Result<crate::acp::session_payload::MaterializedSessionPayload> {
         self.flush_session(session_id).await?;
         let metadata = self.metadata(session_id)?;
-        let records = self
-            .replay_tail_async(session_id.to_string(), limit)
+        let TailReplay {
+            records,
+            tool_records,
+        } = self
+            .replay_tail_with_tool_records_async(session_id.to_string(), limit)
             .await?;
         let mut payload =
             crate::acp::session_payload::materialize_session_payload(&metadata, &records);
+        // The tail window drops tool records older than its oldest message;
+        // summaries must still cover the whole session.
+        payload.tool_calls = crate::acp::session_payload::fold_tool_call_summaries(&tool_records);
         // If the tail fold produced fewer than `limit` messages AND the
         // session has more on disk (metadata.message_count > tail len), the
         // heuristic under-read (the 4× line ratio wasn't enough). Fall back
@@ -1450,7 +1528,16 @@ impl SessionPersistence {
                 // KEPT seq is read AFTER the split (the slice's head).
                 let oldest_kept_seq = full.messages.first().map_or(0, |message| message.seq);
                 full.switches.retain(|switch| switch.seq >= oldest_kept_seq);
+                // `toolCalls` summaries are whole-session: never trimmed.
             }
+            log::info!(
+                "[acp-history] session_payload_tail session_id={} limit={} \
+                 messages={} tool_summaries={} source=full",
+                crate::logging::redact_session_id(session_id),
+                limit,
+                full.messages.len(),
+                full.tool_calls.len()
+            );
             return Ok(full);
         }
         if payload.messages.len() > limit {
@@ -1461,6 +1548,14 @@ impl SessionPersistence {
                 .switches
                 .retain(|switch| switch.seq >= oldest_kept_seq);
         }
+        log::info!(
+            "[acp-history] session_payload_tail session_id={} limit={} \
+             messages={} tool_summaries={} source=tail",
+            crate::logging::redact_session_id(session_id),
+            limit,
+            payload.messages.len(),
+            payload.tool_calls.len()
+        );
         Ok(payload)
     }
 
@@ -1904,4 +1999,10 @@ pub(crate) fn last_unmatched_user_prompt(
 }
 
 #[cfg(test)]
+mod diff_stat_tests;
+#[cfg(test)]
+mod model_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worktree_branch_tests;

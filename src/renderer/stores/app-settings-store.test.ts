@@ -1,21 +1,13 @@
-import { renderHook } from '@testing-library/react'
+import { act, renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 import {
   useAppearanceMode,
   useAppSettingsStore,
   useColorTheme,
+  useTerminalScreenReaderMode,
   useTerminalUrlOpenMode
 } from './app-settings-store'
-
-function assertUpdateSettingsRejectsPanelVisibility(
-  updateSettings: ReturnType<typeof useAppSettingsStore.getState>['updateSettings']
-): void {
-  // @ts-expect-error Panel visibility changes must go through useUpdatePanelVisibility.
-  updateSettings({ sidebarVisible: false })
-}
-
-void assertUpdateSettingsRejectsPanelVisibility
 
 describe('app-settings-store', () => {
   beforeEach(() => {
@@ -146,9 +138,6 @@ describe('app-settings-store', () => {
         orphanDetectionTimeout: 600000,
         confirmTerminalClose: true,
         terminalUrlOpenMode: 'termul' as const,
-        sidebarVisible: false,
-        fileExplorerVisible: true,
-        sshPanelVisible: true,
         remoteBindMode: 'localhost' as const,
         colorTheme: 'dracula',
         appearanceMode: 'dark' as const,
@@ -180,9 +169,6 @@ describe('app-settings-store', () => {
           orphanDetectionTimeout: 300000,
           confirmTerminalClose: false,
           terminalUrlOpenMode: 'termul',
-          sidebarVisible: false,
-          fileExplorerVisible: false,
-          sshPanelVisible: false,
           remoteBindMode: 'all' as const,
           colorTheme: 'nord',
           appearanceMode: 'light' as const,
@@ -199,25 +185,49 @@ describe('app-settings-store', () => {
     })
   })
 
-  describe('panel visibility settings', () => {
-    it('should default sidebar and file explorer visibility to true', () => {
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.sidebarVisible).toBe(true)
-      expect(settings.fileExplorerVisible).toBe(true)
+  describe('terminal screen reader mode (L-28)', () => {
+    it('defaults to off', () => {
+      expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(false)
+      expect(DEFAULT_APP_SETTINGS.terminalScreenReaderMode).toBe(false)
+
+      const { result } = renderHook(() => useTerminalScreenReaderMode())
+      expect(result.current).toBe(false)
     })
 
-    it('should update sidebar visibility setting', () => {
-      const { updateSetting } = useAppSettingsStore.getState()
-      updateSetting('sidebarVisible', false)
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.sidebarVisible).toBe(false)
+    it('selects true only after the setting is turned on', () => {
+      const { result } = renderHook(() => useTerminalScreenReaderMode())
+      expect(result.current).toBe(false)
+
+      act(() => {
+        useAppSettingsStore.getState().updateSetting('terminalScreenReaderMode', true)
+      })
+      expect(result.current).toBe(true)
+
+      act(() => {
+        useAppSettingsStore.getState().updateSetting('terminalScreenReaderMode', false)
+      })
+      expect(result.current).toBe(false)
     })
 
-    it('should update file explorer visibility setting', () => {
-      const { updateSetting } = useAppSettingsStore.getState()
-      updateSetting('fileExplorerVisible', false)
-      const { settings } = useAppSettingsStore.getState()
-      expect(settings.fileExplorerVisible).toBe(false)
+    it('treats a corrupt persisted value as off (strict true only)', () => {
+      const { result } = renderHook(() => useTerminalScreenReaderMode())
+      act(() => {
+        useAppSettingsStore.setState((state) => ({
+          settings: {
+            ...state.settings,
+            terminalScreenReaderMode: 'true' as unknown as boolean
+          }
+        }))
+      })
+      expect(result.current).toBe(false)
+    })
+
+    it('resetToDefaults returns it to false', () => {
+      useAppSettingsStore.getState().updateSetting('terminalScreenReaderMode', true)
+      expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(true)
+
+      useAppSettingsStore.getState().resetToDefaults()
+      expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(false)
     })
   })
 

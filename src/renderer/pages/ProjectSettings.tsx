@@ -568,7 +568,7 @@ export function ProjectSettingsModal() {
                               setHasChanges(true)
                             }}
                             placeholder="KEY"
-                            className="w-full bg-transparent border-none text-sm font-mono text-primary focus:ring-0 px-2 py-1"
+                            className="w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono text-primary focus:ring-0 px-2 py-1"
                           />
                         </div>
                         <div className="bg-card p-2 relative group">
@@ -583,7 +583,7 @@ export function ProjectSettingsModal() {
                             }}
                             placeholder="Value"
                             className={cn(
-                              'w-full bg-transparent border-none text-sm font-mono focus:ring-0 px-2 py-1',
+                              'w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono focus:ring-0 px-2 py-1',
                               envVar.isSecret ? 'text-muted-foreground' : 'text-success'
                             )}
                           />

@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::acp::SpawnOutcome;
-use crate::web::permissions::{PermissionRendezvous, QuestionRendezvous};
+use crate::web::permissions::{PermissionRendezvous, QuestionRendezvous, TurnClaim};
 use std::collections::HashSet;
 
 #[tokio::test]
@@ -308,6 +308,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
             dispatch_connection_text(
                 r#"{"id":"prompt-long","type":"send_prompt","payload":{"agentId":"agent-long","sessionId":"session-long","text":"long","turnId":"turn-long"}}"#,
                 &mut authed,
+                &mut None,
                 None,
                 &acp,
                 &relay,
@@ -337,6 +338,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
         dispatch_connection_text(
             r#"{"id":"ping-1","type":"ping","payload":{}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -379,6 +381,26 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
     assert!(!concurrent.ok);
     assert_eq!(concurrent.err.expect("busy error").code, "rate_limited");
 
+    // Same turnId resent while the turn is running (a dropped reply): a
+    // receipt, never rate_limited.
+    let resend_in_flight = handle_send_prompt(
+        "prompt-resend".to_string(),
+        &json!({
+            "agentId": "agent-long",
+            "sessionId": "session-long",
+            "text": "long",
+            "turnId": "turn-long"
+        }),
+        &acp,
+        &relay,
+    )
+    .await;
+    assert!(resend_in_flight.ok, "{:?}", resend_in_flight.err);
+    assert_eq!(
+        resend_in_flight.payload,
+        Some(json!({"receipt": "in_progress"}))
+    );
+
     let _ = release.send(());
     let completed = match rx.recv().await.expect("prompt reply") {
         Outbound::Reply(reply) => reply,
@@ -386,9 +408,11 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
     };
     assert!(completed.ok);
     assert_eq!(completed.id, "prompt-long");
+    assert_eq!(completed.payload, Some(json!("end_turn")));
 
-    let stale = handle_send_prompt(
-        "prompt-stale".to_string(),
+    // Same turnId after completion: `accepted`, never stale.
+    let resend_done = handle_send_prompt(
+        "prompt-done-resend".to_string(),
         &json!({
             "agentId": "agent-long",
             "sessionId": "session-long",
@@ -399,8 +423,8 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
         &relay,
     )
     .await;
-    assert!(!stale.ok);
-    assert_eq!(stale.err.expect("stale error").code, "stale");
+    assert!(resend_done.ok, "{:?}", resend_done.err);
+    assert_eq!(resend_done.payload, Some(json!({"receipt": "accepted"})));
 
     let next = handle_send_prompt(
         "prompt-next".to_string(),
@@ -438,6 +462,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
             dispatch_connection_text(
                 r#"{"id":"prompt-ordered","type":"send_prompt","payload":{"agentId":"agent-ordered-cancel","sessionId":"session-ordered-cancel","text":"start then cancel","turnId":"turn-ordered"}}"#,
                 &mut authed,
+                &mut None,
                 None,
                 &acp,
                 &relay,
@@ -461,6 +486,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
             dispatch_connection_text(
                 r#"{"id":"cancel-ordered","type":"cancel_prompt","payload":{"agentId":"agent-ordered-cancel","sessionId":"session-ordered-cancel"}}"#,
                 &mut authed,
+                &mut None,
                 None,
                 &acp,
                 &relay,
@@ -587,6 +613,7 @@ async fn accepted_prompt_survives_disconnect_and_persists_completion_for_reconne
             dispatch_connection_text(
                 r#"{"id":"prompt-resume","type":"send_prompt","payload":{"agentId":"agent-resume","sessionId":"session-resume","text":"continue after disconnect","turnId":"turn-resume"}}"#,
                 &mut authed,
+                &mut None,
                 None,
                 &acp,
                 &relay,
@@ -669,6 +696,7 @@ async fn handle_request_with_catalog(
     handle_request(
         text,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -772,6 +800,7 @@ async fn handle_request_without_catalog(text: &str) -> WsReply {
     handle_request(
         text,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -877,6 +906,7 @@ async fn handle_request_with_store(text: &str, store: &Arc<WebStore>) -> WsReply
     handle_request(
         text,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -901,7 +931,7 @@ async fn handle_request_with_store(text: &str, store: &Arc<WebStore>) -> WsReply
 async fn store_write_then_read_roundtrips() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
 
     let write = handle_request_with_store(
         r#"{"id":"r1","type":"store_write","payload":{"key":"settings","value":{"theme":"dark"}}}"#,
@@ -923,7 +953,7 @@ async fn store_write_then_read_roundtrips() {
 
     // A second open (fresh connection) still sees the value — server-side
     // persistence, not per-connection memory.
-    let reopened = Arc::new(WebStore::open(dir.join("store.json")));
+    let reopened = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     let read2 = handle_request_with_store(
         r#"{"id":"r3","type":"store_read","payload":{"key":"settings"}}"#,
         &reopened,
@@ -940,7 +970,7 @@ async fn store_write_then_read_roundtrips() {
 async fn store_read_missing_key_returns_null_value() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-miss-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     let reply = handle_request_with_store(
         r#"{"id":"r1","type":"store_read","payload":{"key":"nope"}}"#,
         &store,
@@ -958,7 +988,7 @@ async fn store_read_missing_key_returns_null_value() {
 async fn store_delete_removes_and_reports_existed() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-del-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("k", json!("v"), None).unwrap();
 
     let del = handle_request_with_store(
@@ -1013,7 +1043,7 @@ async fn store_handlers_degraded_return_unavailable() {
 async fn store_empty_key_is_validation_error() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-empty-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("keep", json!(1), None).unwrap();
     for frame in [
         r#"{"id":"r1","type":"store_read","payload":{"key":""}}"#,
@@ -1066,7 +1096,7 @@ async fn store_empty_key_is_validation_error() {
 async fn store_write_rejects_value_over_256kib() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-big-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("keep", json!(1), None).unwrap();
 
     // 256 KiB + 1 char of string content → serialized size 256 KiB + 3
@@ -1103,7 +1133,7 @@ async fn store_write_rejects_value_over_256kib() {
 async fn store_malformed_payload_returns_validation_error() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-bad-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     // Missing `key` fails the payload serde.
     let reply =
         handle_request_with_store(r#"{"id":"r1","type":"store_read","payload":{}}"#, &store).await;
@@ -1324,12 +1354,16 @@ fn project_switch_outcomes_and_failure_event_serialize_camel_case() {
         session_id: SessionId("s-new".to_string()),
         cwd: "/work/p2".to_string(),
         mcp_server_count: 2,
+        agent_id: AgentId("a-1".to_string()),
+        previous_session_id: SessionId("s-old".to_string()),
     };
     let completed = serde_json::to_value(completed).expect("completed serde");
     assert_eq!(completed["status"], "completed");
     assert_eq!(completed["projectId"], "p-2");
     assert_eq!(completed["sessionId"], "s-new");
     assert_eq!(completed["mcpServerCount"], 2);
+    assert_eq!(completed["agentId"], "a-1");
+    assert_eq!(completed["previousSessionId"], "s-old");
 
     let queued = SwitchProjectOutcome::Queued {
         project_id: "p-3".to_string(),
@@ -1431,7 +1465,7 @@ fn handle_request_pre_auth_rejects_non_authenticate() {
 fn handle_request_authenticate_marks_authed() {
     let mut authed = false;
     let reply = handle_sync(
-        r#"{"id":"r1","type":"authenticate","payload":{"token":"any"}}"#,
+        &auth_frame("r1", Some("any")),
         &mut authed,
     );
     assert!(reply.ok);
@@ -1440,6 +1474,18 @@ fn handle_request_authenticate_marks_authed() {
 /// Like `handle_sync` but with the web auth gate threaded through
 /// (`Some(&gate)` = gated server; `None` = legacy ungated behavior).
 fn handle_sync_with_auth(text: &str, authed: &mut bool, web_auth: Option<&WebAuth>) -> WsReply {
+    let mut identity = None;
+    handle_sync_with_identity(text, authed, &mut identity, web_auth)
+}
+
+/// Like `handle_sync_with_auth` but exposes the per-connection identity
+/// out-param so tests can assert what the handshake recorded.
+fn handle_sync_with_identity(
+    text: &str,
+    authed: &mut bool,
+    identity: &mut Option<ClientIdentity>,
+    web_auth: Option<&WebAuth>,
+) -> WsReply {
     let relay = Arc::new(WsRelaySink::new());
     let acp = Arc::new(AcpManager::new(vec![]));
     let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
@@ -1456,6 +1502,7 @@ fn handle_sync_with_auth(text: &str, authed: &mut bool, web_auth: Option<&WebAut
         .block_on(handle_request(
             text,
             authed,
+            identity,
             web_auth,
             &acp,
             &relay,
@@ -1475,6 +1522,25 @@ fn handle_sync_with_auth(text: &str, authed: &mut bool, web_auth: Option<&WebAut
         ))
 }
 
+/// A `/ws` `authenticate` frame carrying a valid handshake (current
+/// protocol version + fixed identity) and an optional token.
+fn auth_frame(id: &str, token: Option<&str>) -> String {
+    let mut payload = json!({
+        "protocolVersion": WS_PROTOCOL_VERSION,
+        "deviceId": "device-a",
+        "clientInstanceId": "tab-1",
+    });
+    if let Some(token) = token {
+        payload["token"] = json!(token);
+    }
+    json!({"id": id, "type": "authenticate", "payload": payload}).to_string()
+}
+
+/// An `authenticate` frame with a caller-built payload.
+fn auth_frame_with(id: &str, payload: Value) -> String {
+    json!({"id": id, "type": "authenticate", "payload": payload}).to_string()
+}
+
 fn test_gate() -> WebAuth {
     WebAuth::new(crate::web::auth::WebAuthToken::new("s3cret-token").expect("non-empty"))
 }
@@ -1485,7 +1551,7 @@ fn gated_authenticate_rejects_wrong_token() {
     let gate = test_gate();
     let mut authed = false;
     let reply = handle_sync_with_auth(
-        r#"{"id":"r1","type":"authenticate","payload":{"token":"WRONG"}}"#,
+        &auth_frame("r1", Some("WRONG")),
         &mut authed,
         Some(&gate),
     );
@@ -1499,7 +1565,7 @@ fn gated_authenticate_rejects_missing_token() {
     let gate = test_gate();
     let mut authed = false;
     let reply = handle_sync_with_auth(
-        r#"{"id":"r1","type":"authenticate","payload":{}}"#,
+        &auth_frame("r1", None),
         &mut authed,
         Some(&gate),
     );
@@ -1513,7 +1579,7 @@ fn gated_authenticate_accepts_correct_token() {
     let gate = test_gate();
     let mut authed = false;
     let reply = handle_sync_with_auth(
-        r#"{"id":"r1","type":"authenticate","payload":{"token":"s3cret-token"}}"#,
+        &auth_frame("r1", Some("s3cret-token")),
         &mut authed,
         Some(&gate),
     );
@@ -1535,13 +1601,13 @@ fn gated_retry_after_wrong_token_succeeds_on_same_connection() {
     let gate = test_gate();
     let mut authed = false;
     let wrong = handle_sync_with_auth(
-        r#"{"id":"r1","type":"authenticate","payload":{"token":"WRONG"}}"#,
+        &auth_frame("r1", Some("WRONG")),
         &mut authed,
         Some(&gate),
     );
     assert!(!wrong.ok);
     let right = handle_sync_with_auth(
-        r#"{"id":"r2","type":"authenticate","payload":{"token":"s3cret-token"}}"#,
+        &auth_frame("r2", Some("s3cret-token")),
         &mut authed,
         Some(&gate),
     );
@@ -1562,12 +1628,203 @@ fn ungated_authenticate_accepts_any_token() {
     // to the pre-gate behavior.
     let mut authed = false;
     let reply = handle_sync_with_auth(
-        r#"{"id":"r1","type":"authenticate","payload":{"token":"WRONG"}}"#,
+        &auth_frame("r1", Some("WRONG")),
         &mut authed,
         None,
     );
     assert!(reply.ok, "ungated server accepts any token");
     assert!(authed);
+}
+
+fn err_code(reply: &WsReply) -> &str {
+    &reply.err.as_ref().expect("err present").code
+}
+
+#[test]
+fn authenticate_success_records_identity_and_reports_protocol_version() {
+    let mut authed = false;
+    let mut identity = None;
+    let reply = handle_sync_with_identity(
+        &auth_frame("r1", Some("any")),
+        &mut authed,
+        &mut identity,
+        None,
+    );
+    assert!(reply.ok);
+    assert!(authed);
+    assert_eq!(
+        identity,
+        Some(ClientIdentity {
+            device_id: "device-a".to_string(),
+            client_instance_id: "tab-1".to_string(),
+        })
+    );
+    let payload = reply.payload.expect("auth reply payload");
+    assert_eq!(payload["protocolVersion"], json!(WS_PROTOCOL_VERSION));
+    assert!(payload.get("historyMode").is_some());
+    assert!(payload.get("runtimePolicy").is_some());
+}
+
+#[test]
+fn authenticate_version_missing_or_wrong_is_refused_pre_auth() {
+    for gate in [None, Some(test_gate())] {
+        for payload in [
+            json!({"deviceId": "d", "clientInstanceId": "c", "token": "s3cret-token"}),
+            json!({"protocolVersion": 0, "deviceId": "d", "clientInstanceId": "c", "token": "s3cret-token"}),
+            json!({"protocolVersion": WS_PROTOCOL_VERSION + 1, "deviceId": "d", "clientInstanceId": "c", "token": "s3cret-token"}),
+            json!({"protocolVersion": "1", "deviceId": "d", "clientInstanceId": "c", "token": "s3cret-token"}),
+            json!({"protocolVersion": null, "deviceId": "d", "clientInstanceId": "c", "token": "s3cret-token"}),
+        ] {
+            let mut authed = false;
+            let mut identity = None;
+            let reply = handle_sync_with_identity(
+                &auth_frame_with("r1", payload.clone()),
+                &mut authed,
+                &mut identity,
+                gate.as_ref(),
+            );
+            assert!(!reply.ok, "{payload}");
+            assert_eq!(err_code(&reply), "protocol_version_mismatch", "{payload}");
+            assert!(!authed, "mismatch must stay pre-auth: {payload}");
+            assert!(identity.is_none(), "mismatch must not record identity");
+        }
+    }
+}
+
+#[test]
+fn authenticate_bad_identity_is_refused_pre_auth() {
+    let oversized = "x".repeat(MAX_CLIENT_ID_LEN + 1);
+    // 65 two-byte characters: 65 chars but 130 bytes — the limit is in bytes.
+    let oversized_bytes = "\u{e9}".repeat(MAX_CLIENT_ID_LEN / 2 + 1);
+    let cases = [
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": oversized_bytes, "clientInstanceId": "c"}),
+        // Control characters could forge log lines.
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d\nforged log line", "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": "c\u{7}"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "", "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": 7, "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": oversized, "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": ""}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": ["c"]}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": oversized}),
+    ];
+    for payload in cases {
+        let mut authed = false;
+        let mut identity = None;
+        let reply = handle_sync_with_identity(
+            &auth_frame_with("r1", payload.clone()),
+            &mut authed,
+            &mut identity,
+            None,
+        );
+        assert!(!reply.ok, "{payload}");
+        assert_eq!(err_code(&reply), "invalid_client_identity", "{payload}");
+        assert!(!authed);
+        assert!(identity.is_none());
+    }
+}
+
+#[test]
+fn authenticate_accepts_identity_at_the_length_limit_verbatim() {
+    let max = "é".repeat(MAX_CLIENT_ID_LEN / 2);
+    assert_eq!(max.len(), MAX_CLIENT_ID_LEN);
+    let mut authed = false;
+    let mut identity = None;
+    let reply = handle_sync_with_identity(
+        &auth_frame_with(
+            "r1",
+            json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": max, "clientInstanceId": " tab "}),
+        ),
+        &mut authed,
+        &mut identity,
+        None,
+    );
+    assert!(reply.ok);
+    let identity = identity.expect("identity recorded");
+    assert_eq!(identity.device_id, max);
+    assert_eq!(identity.client_instance_id, " tab ", "ids stored as received");
+}
+
+#[test]
+fn authenticate_checks_version_then_identity_then_token() {
+    let gate = test_gate();
+    // Wrong token AND bad version: the stale tab hears about the version.
+    let mut authed = false;
+    let reply = handle_sync_with_auth(
+        &auth_frame_with(
+            "r1",
+            json!({"deviceId": "", "clientInstanceId": "", "token": "WRONG"}),
+        ),
+        &mut authed,
+        Some(&gate),
+    );
+    assert_eq!(err_code(&reply), "protocol_version_mismatch");
+    // The version-mismatch refusal never echoes the presented token.
+    let mismatch_serialized = serde_json::to_string(&reply).expect("serialize");
+    assert!(!mismatch_serialized.contains("WRONG"));
+    // Valid version, bad identity, wrong token: identity beats token.
+    let reply = handle_sync_with_auth(
+        &auth_frame_with(
+            "r2",
+            json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "", "clientInstanceId": "c", "token": "WRONG"}),
+        ),
+        &mut authed,
+        Some(&gate),
+    );
+    assert_eq!(err_code(&reply), "invalid_client_identity");
+    // Valid handshake, wrong token: unchanged unauthorized.
+    let reply = handle_sync_with_auth(&auth_frame("r3", Some("WRONG")), &mut authed, Some(&gate));
+    assert_eq!(err_code(&reply), "unauthorized");
+    assert!(!authed);
+    // The unauthorized refusal never echoes the presented token either.
+    let serialized = serde_json::to_string(&reply).expect("serialize");
+    assert!(!serialized.contains("WRONG"));
+}
+
+#[test]
+fn post_auth_authenticate_is_idempotent_ok_without_revalidation() {
+    let mut authed = true;
+    let reply = handle_sync(r#"{"id":"r1","type":"authenticate","payload":{}}"#, &mut authed);
+    assert!(reply.ok);
+    assert!(authed);
+}
+
+#[test]
+fn ws_error_code_wire_strings_for_handshake_and_reserved_codes() {
+    for (code, wire) in [
+        (WsErrorCode::ProtocolVersionMismatch, "protocol_version_mismatch"),
+        (WsErrorCode::InvalidClientIdentity, "invalid_client_identity"),
+        (WsErrorCode::TerminalLimit, "terminal_limit"),
+        (WsErrorCode::ProjectBusy, "project_busy"),
+        (WsErrorCode::OutcomeUnknown, "outcome_unknown"),
+        (WsErrorCode::DestructiveOpBlocked, "destructive_op_blocked"),
+        (WsErrorCode::ProviderQuotaExceeded, "provider_quota_exceeded"),
+        (WsErrorCode::ProviderSessionLimit, "provider_session_limit"),
+        (WsErrorCode::ProviderRequestRejected, "provider_request_rejected"),
+    ] {
+        assert_eq!(code.as_str(), wire);
+    }
+}
+
+#[test]
+fn ws_request_parses_command_id_and_reply_skips_unset_visible_at() {
+    let with: WsRequest = serde_json::from_str(
+        r#"{"id":"r1","type":"write","payload":{},"command_id":"cmd-1"}"#,
+    )
+    .expect("parse");
+    assert_eq!(with.command_id.as_deref(), Some("cmd-1"));
+    let without: WsRequest =
+        serde_json::from_str(r#"{"id":"r1","type":"ping","payload":{}}"#).expect("parse");
+    assert_eq!(without.command_id, None);
+
+    let plain = serde_json::to_value(WsReply::ok("r1", None)).expect("serialize");
+    assert!(plain.get("visible_at").is_none());
+    let mut stamped = WsReply::ok("r1", None);
+    stamped.visible_at = Some(json!(42));
+    let stamped = serde_json::to_value(&stamped).expect("serialize");
+    assert_eq!(stamped["visible_at"], json!(42));
 }
 
 #[test]
@@ -1813,6 +2070,7 @@ async fn handle_list_agents_returns_identity_summaries() {
     let reply = handle_request(
         r#"{"id":"r1","type":"list_agents","payload":{}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2043,6 +2301,7 @@ async fn handle_resume_session_ok_reply_carries_null_replay_snapshot() {
     let reply = handle_request(
             r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-1","sessionId":"sess-1","cwd":"/tmp"}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -2315,6 +2574,7 @@ async fn install_acp_agent_unknown_agent_returns_catalog_agent_not_found() {
     let reply = handle_request(
         r#"{"id":"r1","type":"install_acp_agent","payload":{"agentId":"does-not-exist"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2595,6 +2855,7 @@ fn handle_respond_permission_malformed_payload_is_unsupported() {
         .block_on(handle_request(
             r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1"}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -2683,6 +2944,7 @@ fn handle_respond_permission_wrong_agent_is_permission_denied() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a2","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2737,6 +2999,7 @@ fn handle_respond_permission_not_subscribed_is_not_found() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-A","optionId":"allow"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2776,6 +3039,7 @@ fn handle_respond_permission_resolves_then_second_is_stale() {
     let ok_reply = block_on(handle_request(
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2798,6 +3062,7 @@ fn handle_respond_permission_resolves_then_second_is_stale() {
     let stale_reply = block_on(handle_request(
         r#"{"id":"r2","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2836,6 +3101,7 @@ fn handle_respond_permission_invalid_option_is_permission_denied() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"escalate"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2928,6 +3194,7 @@ fn handle_answer_question_malformed_payload_is_unsupported() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -2965,6 +3232,7 @@ fn handle_answer_question_wrong_agent_is_permission_denied() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a2","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3017,6 +3285,7 @@ fn handle_answer_question_not_subscribed_is_not_found() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-A","values":["plan-a"]}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3055,6 +3324,7 @@ fn handle_answer_question_resolves_then_second_is_stale() {
     let ok_reply = block_on(handle_request(
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3076,6 +3346,7 @@ fn handle_answer_question_resolves_then_second_is_stale() {
     let stale_reply = block_on(handle_request(
         r#"{"id":"r2","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3113,6 +3384,7 @@ fn handle_answer_question_invalid_option_is_permission_denied() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["escalate"]}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3180,6 +3452,7 @@ fn handle_subscribe_ok_and_stale() {
         .block_on(handle_request(
             r#"{"id":"sub1","type":"subscribe","payload":{"sessionId":"s1","lastSeq":0}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -3209,6 +3482,7 @@ fn handle_subscribe_ok_and_stale() {
         .block_on(handle_request(
             r#"{"id":"sub2","type":"subscribe","payload":{"sessionId":"fresh"}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -3237,6 +3511,7 @@ fn handle_subscribe_ok_and_stale() {
         .block_on(handle_request(
             r#"{"id":"sub3","type":"subscribe","payload":{"sessionId":"fresh"}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -3266,6 +3541,7 @@ fn handle_subscribe_ok_and_stale() {
         .block_on(handle_request(
             r#"{"id":"sub4","type":"subscribe","payload":{"sessionId":"s1"}}"#,
             &mut authed,
+            &mut None,
             None,
             &acp,
             &relay,
@@ -3522,6 +3798,7 @@ fn handle_switch_project_cold_tab_is_deferred_select() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3583,6 +3860,7 @@ fn handle_switch_project_cold_tab_unknown_id_is_not_found() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"missing"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3701,6 +3979,7 @@ fn handle_switch_project_unknown_id_is_not_found() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"missing"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3754,6 +4033,7 @@ fn handle_switch_project_agent_without_session_degrades_to_select() {
     let reply = block_on(handle_request(
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -3781,6 +4061,148 @@ fn handle_switch_project_agent_without_session_degrades_to_select() {
     assert_eq!(current_project.lock().as_deref(), Some("p-1"));
     // The host default is UNCHANGED (per-connection switch — Epic 7).
     assert_eq!(registry.snapshot().default_project_id, None);
+}
+
+/// Regression: `close_session` failing must still clear the connection's
+/// `current_session`/`current_project` trackers. The capability gate fails
+/// BEFORE contacting the agent on `close=false` agents (e.g. devin — the
+/// observed "agent does not support session/close"), and the renderer drops
+/// the session locally on every close. A stale tracker made the next
+/// `switch_project` take the Completed path, minting a session the client
+/// could not attribute ("Completed project switch has no tracked agent").
+#[tokio::test]
+async fn close_session_failure_clears_tracker_so_switch_selects() {
+    let relay = Arc::new(WsRelaySink::new());
+    let acp = Arc::new(AcpManager::new(vec![]));
+    // Default capabilities advertise no `sessionCapabilities.close`, so the
+    // gate errors with "agent does not support session/close".
+    acp.install_test_agent_with_sessions(crate::acp::AgentId("a-1".to_string()), HashSet::new());
+    let registry = Arc::new(ProjectRegistry::new());
+    registry.set(
+        vec![crate::web::project_registry::ProjectSummary {
+            id: "p-1".to_string(),
+            name: "Proj p-1".to_string(),
+            color: "blue".to_string(),
+            path: Some("/a".to_string()),
+            is_archived: false,
+            is_default: false,
+        }],
+        None,
+    );
+    let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
+    let mut subs = Vec::new();
+    let mut authed = true;
+    let mut current_agent: Option<crate::acp::AgentId> =
+        Some(crate::acp::AgentId("a-1".to_string()));
+    let current_session = Arc::new(parking_lot::Mutex::new(Some(crate::acp::SessionId(
+        "s-1".to_string(),
+    ))));
+    let current_project = Arc::new(parking_lot::Mutex::new(Some("p-old".to_string())));
+    let switch_queue = Arc::new(tokio::sync::Mutex::new(ProjectSwitchQueue::default()));
+
+    let reply = handle_request(
+        r#"{"id":"c1","type":"close_session","payload":{"agentId":"a-1","sessionId":"s-1"}}"#,
+        &mut authed,
+        &mut None,
+        None,
+        &acp,
+        &relay,
+        &registry,
+        None,
+        None,
+        &tx,
+        &mut subs,
+        &mut current_agent,
+        &current_session,
+        &current_project,
+        &switch_queue,
+        HistoryMode::LiveOnly,
+        None,
+        None,
+        None,
+    )
+    .await;
+    // The capability miss still surfaces as an error reply — the fix is in the
+    // tracker bookkeeping, not the client-visible outcome.
+    assert!(!reply.ok);
+    assert!(current_session.lock().is_none());
+    assert!(current_project.lock().is_none());
+
+    // The follow-up switch must now take the cold-tab `selected` path instead
+    // of minting a session the client cannot attribute.
+    let reply = handle_request(
+        r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
+        &mut authed,
+        &mut None,
+        None,
+        &acp,
+        &relay,
+        &registry,
+        None,
+        None,
+        &tx,
+        &mut subs,
+        &mut current_agent,
+        &current_session,
+        &current_project,
+        &switch_queue,
+        HistoryMode::LiveOnly,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(reply.ok, "switch must succeed: {:?}", reply.err);
+    let payload = reply.payload.expect("selected payload");
+    assert_eq!(payload["status"], "selected");
+    assert_eq!(payload["projectId"], "p-1");
+}
+
+/// A failed `close_session` for a session this connection is NOT tracking
+/// leaves the tracker alone — the `== closing` guard keeps a genuinely
+/// current session pointed at.
+#[tokio::test]
+async fn close_session_failure_on_untracked_session_keeps_tracker() {
+    let relay = Arc::new(WsRelaySink::new());
+    let acp = Arc::new(AcpManager::new(vec![]));
+    acp.install_test_agent_with_sessions(crate::acp::AgentId("a-1".to_string()), HashSet::new());
+    let registry = Arc::new(ProjectRegistry::new());
+    let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
+    let mut subs = Vec::new();
+    let mut authed = true;
+    let mut current_agent: Option<crate::acp::AgentId> =
+        Some(crate::acp::AgentId("a-1".to_string()));
+    let current_session = Arc::new(parking_lot::Mutex::new(Some(crate::acp::SessionId(
+        "s-live".to_string(),
+    ))));
+    let current_project = Arc::new(parking_lot::Mutex::new(Some("p-here".to_string())));
+    let switch_queue = Arc::new(tokio::sync::Mutex::new(ProjectSwitchQueue::default()));
+
+    let reply = handle_request(
+        r#"{"id":"c1","type":"close_session","payload":{"agentId":"a-1","sessionId":"s-other"}}"#,
+        &mut authed,
+        &mut None,
+        None,
+        &acp,
+        &relay,
+        &registry,
+        None,
+        None,
+        &tx,
+        &mut subs,
+        &mut current_agent,
+        &current_session,
+        &current_project,
+        &switch_queue,
+        HistoryMode::LiveOnly,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(!reply.ok);
+    assert_eq!(current_session.lock().as_ref().unwrap().0, "s-live");
+    assert_eq!(current_project.lock().as_deref(), Some("p-here"));
 }
 
 /// Host-owned history (CAP-2): `list_persisted_sessions` serves the
@@ -4719,6 +5141,7 @@ async fn switch_project_cold_tab_does_not_fan_out_to_other_clients() {
     let reply_a = handle_request(
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -4872,7 +5295,7 @@ async fn execute_project_switch_returns_early_when_already_on_project() {
         project_id,
         session_id,
         cwd,
-        mcp_server_count: _,
+        ..
     } = outcome
     else {
         panic!("expected Completed (early return), got {:?}", outcome);
@@ -4916,6 +5339,7 @@ async fn handle_resume_session_rejected_mid_turn_maps_to_session_owned_by_other(
     let reply = handle_request(
         r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-duplicate","sessionId":"sess-mid","cwd":"/tmp"}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,
@@ -4971,6 +5395,7 @@ async fn handle_list_agents_reports_owned_sessions() {
     let reply = handle_request(
         r#"{"id":"r1","type":"list_agents","payload":{}}"#,
         &mut authed,
+        &mut None,
         None,
         &acp,
         &relay,

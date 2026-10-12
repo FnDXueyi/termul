@@ -11,6 +11,7 @@
 //!
 //! This is a CONSOLE server — do NOT add `windows_subsystem = "windows"`.
 
+use termul_manager_lib::data_lock::StandalonePaths;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -23,10 +24,14 @@ use termul_manager_lib::server_update::{
 };
 use termul_manager_lib::web::auth::{resolve as resolve_web_auth, WebAuthResolution};
 use termul_manager_lib::web::config::ParseCliError;
+use termul_manager_lib::web::permissions::{
+    DEFAULT_PERMISSION_RECONNECT_GRACE, DEFAULT_PERMISSION_TIMEOUT,
+};
 use termul_manager_lib::web::{
     seed_from_file, serve, PermissionRendezvous, ProjectRegistry, QuestionRendezvous, ServerConfig,
     WsRelaySink,
 };
+use termul_manager_lib::web::store::WebStore;
 use termul_manager_lib::{
     AcpCatalogService, AcpInstallService, AcpManager, CwdTracker, ExitCodeTracker,
     FileProjectRegistry, GitTracker, PtyManager, SessionPersistence, TerminalEventHub,
@@ -98,6 +103,27 @@ fn main() -> ExitCode {
     };
 
     init_tracing();
+    // Tracing is only live now, so removed-flag warnings queued during
+    // `ServerConfig::from_args` are emitted here, one per flag.
+    for warning in &cfg.deprecation_warnings {
+        warn!("{warning}");
+    }
+
+    // AD-14: one host per durable path. Lock the state dir and every store
+    // path (sessions, projects, workspace manifests, acp catalog, store file)
+    // BEFORE anything opens or writes them — including the web-auth token
+    // file below. A held lock means another Termul host (desktop app or
+    // termul-server) owns the path: refuse to start, never share it. The
+    // locks live until `main` returns.
+    let data_paths = StandalonePaths::resolve(&cfg);
+    let _data_locks = match data_paths.lock() {
+        Ok(locks) => locks,
+        Err(error) => {
+            error!("termul-server: refusing to start: {error}");
+            eprintln!("termul-server: {error}");
+            return ExitCode::from(1);
+        }
+    };
 
     // QA remediation Story 1 (CAP-1 interim): resolve the web auth gate
     // BEFORE any binding/serving setup. Fail-closed: a public bind whose
@@ -242,6 +268,18 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|| "(none)".to_string()),
             cfg.service_account_state_dir().display()
         );
+        // AD-14/AD-18: the web store is opened here, after the data locks are
+        // held. A newer-schema file (or a legacy file that cannot be backed
+        // up before migration) refuses startup visibly instead of degrading;
+        // the file is left untouched.
+        let store = match WebStore::open(data_paths.store_file.clone()) {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                error!("termul-server: refusing to start: {error}");
+                eprintln!("termul-server: {error}");
+                return ExitCode::from(1);
+            }
+        };
         let persistence = match SessionPersistence::open(sessions_dir).await {
             Ok(persistence) => persistence,
             Err(error) => {
@@ -255,10 +293,7 @@ fn main() -> ExitCode {
         // host on the same machine (two processes on one JSONL store would
         // corrupt both). Defaults to `<state dir>/workspace-manifests`; the
         // explicit `--workspace-manifests-dir` flag overrides.
-        let workspace_manifests_dir = cfg
-            .workspace_manifests_dir
-            .clone()
-            .unwrap_or_else(|| cfg.service_account_state_dir().join("workspace-manifests"));
+        let workspace_manifests_dir = data_paths.workspace_manifests_dir.clone();
         let workspace_manifest = match WorkspaceManifestService::open(workspace_manifests_dir).await
         {
             Ok(service) => Some(service),
@@ -270,10 +305,7 @@ fn main() -> ExitCode {
         // CAP-6 / Story 8: open the host-owned ACP catalog root. The
         // standalone binary owns its own root — NEVER shared with a desktop
         // host on the same machine. Defaults to `<state dir>/acp-catalog`.
-        let acp_catalog_dir = cfg
-            .acp_catalog_dir
-            .clone()
-            .unwrap_or_else(|| cfg.service_account_state_dir().join("acp-catalog"));
+        let acp_catalog_dir = data_paths.acp_catalog_dir.clone();
         let acp_catalog = match AcpCatalogService::open(acp_catalog_dir).await {
             Ok(service) => Some(service),
             Err(error) => {
@@ -321,8 +353,8 @@ fn main() -> ExitCode {
         // `acp_respond_permission` Tauri command directly).
         let rendezvous = Arc::new(PermissionRendezvous::with_policy(
             Arc::clone(&acp),
-            Duration::from_secs(cfg.permission_timeout_secs),
-            Duration::from_secs(cfg.permission_reconnect_grace_secs),
+            DEFAULT_PERMISSION_TIMEOUT,
+            DEFAULT_PERMISSION_RECONNECT_GRACE,
         ));
         ws_relay.set_rendezvous(rendezvous);
         // Issue #411: attach the server-side question rendezvous (bounded
@@ -336,8 +368,8 @@ fn main() -> ExitCode {
         // still pending instead of instantly cancelled.
         let question_rendezvous = Arc::new(QuestionRendezvous::with_policy(
             Arc::clone(&acp),
-            Duration::from_secs(cfg.permission_timeout_secs),
-            Duration::from_secs(cfg.permission_reconnect_grace_secs),
+            DEFAULT_PERMISSION_TIMEOUT,
+            DEFAULT_PERMISSION_RECONNECT_GRACE,
         ));
         ws_relay.set_question_rendezvous(question_rendezvous);
         // Story 4.1: the in-memory project registry. In VPS mode the
@@ -430,6 +462,7 @@ fn main() -> ExitCode {
             workspace_manifest,
             acp_catalog,
             acp_install,
+            store,
             web_auth,
             canvas_pool,
         )
@@ -729,13 +762,37 @@ OPTIONS:
   Tuning:
     --event-log-capacity <N>      Per-session event-log ring capacity.
                                   [default: 4096]
-    --permission-timeout <SECS>   Permission rendezvous timeout. On expiry the
-                                  pending permission resolves as deny.
-                                  [default: 60]
-    --permission-reconnect-grace <SECS>
-                                  Grace after last subscriber disconnect before
-                                  pending permissions are denied.
-                                  [default: 60]
+    --agent-idle-window-secs <SECS>
+                                  Idle window after which an idle agent is
+                                  reaped. Positive integer.
+                                  [env: TERMUL_AGENT_IDLE_REAP_SECS]
+                                  [default: 900]
+    --overflow-tolerance <N>      Reliable-queue overflow tolerance per client.
+                                  Positive integer. Reserved: the host
+                                  validates it but does not read it yet.
+                                  [default: 15]
+    --receipt-retention-secs <SECS>
+                                  How long a command receipt is retained.
+                                  Positive integer. Reserved: the host
+                                  validates it but does not read it yet.
+                                  [default: 600]
+    --partition-gc-age-secs <SECS>
+                                  Age after which an unused device partition
+                                  is garbage collected. Positive integer.
+                                  Reserved: the host validates it but does
+                                  not read it yet.
+                                  [env: TERMUL_PARTITION_GC_AGE_SECS]
+                                  [default: unset]
+    --partition-byte-budget <BYTES>
+                                  Per-device partition byte budget. Positive
+                                  integer. Reserved: the host validates it
+                                  but does not read it yet.
+                                  [env: TERMUL_PARTITION_BYTE_BUDGET]
+                                  [default: unset]
+    --permission-timeout <SECS>, --permission-reconnect-grace <SECS>
+                                  Removed. Still accepted so existing launch
+                                  commands keep starting, but ignored (a
+                                  warning is logged at startup).
 
   Security & updates:
     --allow-remote-writes         Admit non-loopback peers on all guarded write

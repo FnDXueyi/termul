@@ -65,7 +65,9 @@ const RUNNING: RemoteStatus = {
   port: 5123,
   bindMode: 'localhost',
   bindHost: '127.0.0.1',
-  tunnelUrl: 'https://foo-bar.trycloudflare.com'
+  // The host appends the bearer token as a `#token=` fragment (the form
+  // web-auth-token.ts reads); the QR and copy-link carry it verbatim.
+  tunnelUrl: 'https://foo-bar.trycloudflare.com#token=abc123'
 }
 
 function renderPopover(): ReturnType<typeof render> {

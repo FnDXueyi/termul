@@ -1,6 +1,23 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { useRef, useState } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  _resetSheetFocusReturnForTests,
+  recordSheetOpener,
+  setSheetFocusDestination
+} from '@/lib/sheet-focus-return'
+import {
+  armMobileOverlayBackStack,
+  pressSystemBack,
+  settleOverlayBackStack,
+  waitForSentinelDepth
+} from '@/lib/test-utils/overlay-back-stack'
+import {
+  readOverlaySentinelDepth,
+  useOverlayRegistration,
+  useOverlayStackStore
+} from '@/stores/overlay-stack-store'
 import {
   buildFolderCrumbs,
   MobileFileExplorer,
@@ -917,6 +934,209 @@ describe('MobileFileExplorer', () => {
     expect(within(nav).getByText('lib').className).toContain('text-foreground')
   })
 
+  describe('a Windows-hosted termul-server (verbatim paths, L-20)', () => {
+    it('shows real segments for a persisted verbatim folder under a plain drive root', async () => {
+      const nav = await openAtFolder('C:/proj', '//?/C:/proj/src/lib', [['C:/proj/src/lib', []]])
+
+      expect(crumbLabels(nav)).toEqual(['proj', 'src'])
+      expect(within(nav).getByText('lib')).toHaveAttribute('aria-current', 'page')
+      expect(nav.textContent).toBe('projsrclib')
+      expect(screen.getByRole('heading', { name: 'lib' })).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeEnabled()
+    })
+
+    it('drills through verbatim entries, taps an ancestor and steps Back one level at a time', async () => {
+      mockExplorerState.rootPath = 'C:/proj'
+      mockExplorerState.directoryContents = new Map([
+        ['C:/proj', [entry('src', 'directory', '//?/C:/proj/src')]],
+        ['C:/proj/src', [entry('lib', 'directory', '//?/C:/proj/src/lib')]],
+        ['C:/proj/src/lib', [entry('deep', 'directory', '//?/C:/proj/src/lib/deep')]],
+        ['C:/proj/src/lib/deep', []]
+      ])
+      mockProjectId = 'proj-1'
+      mockPersistenceRead.mockResolvedValue({ success: false })
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+
+      fireEvent.click(await screen.findByText('src'))
+      fireEvent.click(await screen.findByText('lib'))
+      fireEvent.click(await screen.findByText('deep'))
+
+      // The breadcrumb is real segments, not the garbled fallback path.
+      const nav = await screen.findByRole('navigation', { name: 'Folder path' })
+      expect(crumbLabels(nav)).toEqual(['proj', 'src', 'lib'])
+      expect(within(nav).getByText('deep')).toHaveAttribute('aria-current', 'page')
+      expect(mockPersistenceWrite).toHaveBeenLastCalledWith(
+        'mobile-file-explorer/proj-1',
+        'C:/proj/src/lib/deep'
+      )
+
+      // Back goes up exactly one level, not to the root.
+      fireEvent.click(screen.getByLabelText('Back to parent folder'))
+      expect(await screen.findByRole('heading', { name: 'lib' })).toBeInTheDocument()
+      expect(mockPersistenceWrite).toHaveBeenLastCalledWith(
+        'mobile-file-explorer/proj-1',
+        'C:/proj/src/lib'
+      )
+      expect(crumbLabels(screen.getByRole('navigation', { name: 'Folder path' }))).toEqual([
+        'proj',
+        'src'
+      ])
+
+      // Tapping an ancestor navigates there.
+      fireEvent.click(
+        within(screen.getByRole('navigation', { name: 'Folder path' })).getByRole('button', {
+          name: 'src'
+        })
+      )
+      expect(await screen.findByRole('heading', { name: 'src' })).toBeInTheDocument()
+      expect(mockPersistenceWrite).toHaveBeenLastCalledWith(
+        'mobile-file-explorer/proj-1',
+        'C:/proj/src'
+      )
+
+      // And Back from there lands on the root.
+      fireEvent.click(screen.getByLabelText('Back to parent folder'))
+      expect(await screen.findByText('Project files')).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
+    })
+
+    it('maps a verbatim UNC folder onto a plain UNC root', async () => {
+      const nav = await openAtFolder('//srv/share', '//?/UNC/srv/share/p/q', [
+        ['//srv/share/p/q', []]
+      ])
+
+      expect(crumbLabels(nav)).toEqual(['share', 'p'])
+      expect(within(nav).getByText('q')).toHaveAttribute('aria-current', 'page')
+    })
+
+    it('hands the raw listing path, unchanged, to file operations', async () => {
+      mockExplorerState.rootPath = 'C:/proj'
+      mockExplorerState.directoryContents = new Map([
+        ['C:/proj', [entry('a.txt', 'file', '//?/C:/proj/a.txt')]]
+      ])
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+
+      fireEvent.click(await screen.findByText('a.txt'))
+
+      await waitFor(() => expect(mockOpenFile).toHaveBeenCalledWith('//?/C:/proj/a.txt'))
+      expect(mockSelectPath).toHaveBeenCalledWith('//?/C:/proj/a.txt')
+      expect(mockAddEditorTab).toHaveBeenCalledWith('//?/C:/proj/a.txt')
+    })
+
+    it('still groups plain paths exactly as before', async () => {
+      const nav = await openAtFolder('/proj', '/proj/src/lib', [['/proj/src/lib', []]])
+
+      expect(crumbLabels(nav)).toEqual(['proj', 'src'])
+    })
+  })
+
+  describe('a breadcrumb wider than the header (clipped ancestors, L-35)', () => {
+    type Report = Array<{ target: Element; isIntersecting: boolean }>
+
+    class FakeObserver {
+      static instances: FakeObserver[] = []
+      observed: Element[] = []
+      disconnected = false
+
+      constructor(
+        readonly callback: (entries: Report) => void,
+        readonly options: IntersectionObserverInit
+      ) {
+        FakeObserver.instances.push(this)
+      }
+
+      observe(element: Element): void {
+        this.observed.push(element)
+      }
+
+      disconnect(): void {
+        this.disconnected = true
+      }
+    }
+
+    const latest = (): FakeObserver => {
+      const observer = FakeObserver.instances.at(-1)
+      if (!observer) throw new Error('no observer was created')
+      return observer
+    }
+
+    beforeEach(() => {
+      FakeObserver.instances = []
+    })
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('observes every ancestor against the path row; all start tabbable', async () => {
+      vi.stubGlobal('IntersectionObserver', FakeObserver)
+      const nav = await openAtFolder('/proj', '/proj/src/lib/deep', [['/proj/src/lib/deep', []]])
+
+      await waitFor(() => expect(FakeObserver.instances.length).toBeGreaterThan(0))
+      const buttons = within(nav).getAllByRole('button')
+      expect(latest().options.root).toBe(nav)
+      expect(latest().observed).toEqual(buttons)
+      for (const button of buttons) expect(button).not.toHaveAttribute('tabindex')
+    })
+
+    it('takes a fully clipped ancestor out of the tab order, and puts it back once visible', async () => {
+      vi.stubGlobal('IntersectionObserver', FakeObserver)
+      const nav = await openAtFolder('/proj', '/proj/src/lib/deep', [['/proj/src/lib/deep', []]])
+      await waitFor(() => expect(FakeObserver.instances.length).toBeGreaterThan(0))
+      const [root, src, lib] = within(nav).getAllByRole('button')
+
+      act(() =>
+        latest().callback([
+          { target: root, isIntersecting: false },
+          { target: src, isIntersecting: false },
+          { target: lib, isIntersecting: true }
+        ])
+      )
+      expect(root).toHaveAttribute('tabindex', '-1')
+      expect(src).toHaveAttribute('tabindex', '-1')
+      expect(lib).not.toHaveAttribute('tabindex')
+      // The Back button still steps up a level, so nothing is unreachable.
+      expect(screen.getByLabelText('Back to parent folder')).toBeEnabled()
+
+      act(() => latest().callback([{ target: src, isIntersecting: true }]))
+      expect(src).not.toHaveAttribute('tabindex')
+      expect(root).toHaveAttribute('tabindex', '-1')
+    })
+
+    it('observes the new ancestors after navigating, and drops a segment that left', async () => {
+      vi.stubGlobal('IntersectionObserver', FakeObserver)
+      const nav = await openAtFolder('/proj', '/proj/src/lib/deep', [
+        ['/proj/src/lib/deep', []],
+        ['/proj/src', []]
+      ])
+      await waitFor(() => expect(FakeObserver.instances.length).toBeGreaterThan(0))
+      const lib = within(nav).getByRole('button', { name: 'lib' })
+      act(() => latest().callback([{ target: lib, isIntersecting: false }]))
+      expect(lib).toHaveAttribute('tabindex', '-1')
+
+      fireEvent.click(within(nav).getByRole('button', { name: 'src' }))
+      expect(await screen.findByRole('heading', { name: 'src' })).toBeInTheDocument()
+
+      const updated = screen.getByRole('navigation', { name: 'Folder path' })
+      await waitFor(() => expect(latest().options.root).toBe(updated))
+      expect(latest().observed).toEqual(within(updated).getAllByRole('button'))
+      for (const button of within(updated).getAllByRole('button')) {
+        expect(button).not.toHaveAttribute('tabindex')
+      }
+    })
+
+    it('without IntersectionObserver every segment stays tabbable', async () => {
+      vi.stubGlobal('IntersectionObserver', undefined)
+      const nav = await openAtFolder('/proj', '/proj/src/lib/deep', [['/proj/src/lib/deep', []]])
+
+      expect(within(nav).getAllByRole('button')).toHaveLength(3)
+      for (const button of within(nav).getAllByRole('button')) {
+        expect(button).not.toHaveAttribute('tabindex')
+      }
+      expect(FakeObserver.instances).toHaveLength(0)
+    })
+  })
+
   describe('navigateTo guard', () => {
     it('ignores a target outside the root and logs a warning', () => {
       expect(resolveBreadcrumbTarget('/other/sub', '/proj', '/proj/sub')).toBeNull()
@@ -985,6 +1205,332 @@ describe('MobileFileExplorer', () => {
         ],
         currentLabel: 'lib'
       })
+    })
+  })
+})
+
+/**
+ * Focus return (a11y floor). Radix returns focus on close only to a
+ * Dialog.Trigger, and these sheets are opened by plain buttons, so focus used
+ * to fall to <body>. The explorer's sheets now return it to the recorded opener,
+ * or to the destination the shell hands over once a file opened.
+ */
+describe('MobileFileExplorer focus return', () => {
+  /** Mirrors the shell: a "Browse files" opener, a header title, and the explorer. */
+  function Harness({ withDestination = true }: { withDestination?: boolean }) {
+    const [open, setOpen] = useState(false)
+    const titleRef = useRef<HTMLHeadingElement>(null)
+    return (
+      <>
+        <button
+          type="button"
+          onClick={(event) => {
+            recordSheetOpener('files-sheet', event.currentTarget)
+            setOpen(true)
+          }}
+        >
+          Browse files
+        </button>
+        <h1 ref={titleRef} tabIndex={-1}>
+          Header title
+        </h1>
+        <MobileFileExplorer
+          open={open}
+          onOpenChange={setOpen}
+          onFileOpened={
+            withDestination
+              ? () => setSheetFocusDestination('files-sheet', titleRef.current)
+              : undefined
+          }
+        />
+      </>
+    )
+  }
+
+  async function openFiles(): Promise<HTMLElement> {
+    const opener = screen.getByRole('button', { name: 'Browse files' })
+    fireEvent.click(opener)
+    await screen.findByRole('dialog')
+    return opener
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    // A sheet the previous test left mounted is unmounted by cleanup, and Radix
+    // fires its close-focus handler in a setTimeout(0). Let that run before this
+    // test records its own opener, which the handler would otherwise consume.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    _resetSheetFocusReturnForTests()
+    mockProjectId = undefined
+    mockPersistenceRead.mockReset()
+    mockPersistenceWrite.mockReset()
+    mockReducedMotion = false
+    mockOpenFile.mockResolvedValue(true)
+    mockCopyFile.mockResolvedValue({ success: true, data: undefined })
+    mockEditorStore.openFiles.clear()
+    ;(document.activeElement as HTMLElement | null)?.blur()
+  })
+
+  it('returns focus to the opener when the sheet closes via its Close button', async () => {
+    setRoot([entry('a.txt', 'file')])
+    render(<Harness />)
+    const opener = await openFiles()
+    await screen.findByText('a.txt')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+  })
+
+  it('returns focus to the opener when Escape closes the sheet', async () => {
+    setRoot([entry('a.txt', 'file')])
+    render(<Harness />)
+    const opener = await openFiles()
+    await screen.findByText('a.txt')
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+  })
+
+  it('moves focus to the destination, not the opener, when a file opened', async () => {
+    setRoot([entry('a.txt', 'file')])
+    render(<Harness />)
+    await openFiles()
+
+    fireEvent.click(await screen.findByText('a.txt'))
+
+    await waitFor(() => expect(mockAddEditorTab).toHaveBeenCalledWith('/proj/a.txt'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Header title' }))
+    )
+  })
+
+  it('falls back to the opener when no destination is handed over', async () => {
+    setRoot([entry('a.txt', 'file')])
+    render(<Harness withDestination={false} />)
+    const opener = await openFiles()
+
+    fireEvent.click(await screen.findByText('a.txt'))
+
+    await waitFor(() => expect(mockAddEditorTab).toHaveBeenCalled())
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+  })
+
+  it('does not call onFileOpened when opening the file fails', async () => {
+    setRoot([entry('a.txt', 'file')])
+    mockOpenFile.mockRejectedValue(new Error('boom'))
+    const onFileOpened = vi.fn()
+    render(<MobileFileExplorer open onOpenChange={vi.fn()} onFileOpened={onFileOpened} />)
+
+    fireEvent.click(await screen.findByText('a.txt'))
+
+    await waitFor(() => expect(mockToastError).toHaveBeenCalled())
+    expect(onFileOpened).not.toHaveBeenCalled()
+  })
+
+  describe('file-actions sheet', () => {
+    it('returns focus to the row Actions button when it is dismissed', async () => {
+      setRoot([entry('note.txt', 'file')])
+      render(<Harness />)
+      await openFiles()
+      const actions = await screen.findByLabelText('Actions for note.txt')
+
+      fireEvent.click(actions)
+      await screen.findByText('Duplicate')
+      fireEvent.keyDown(document, { key: 'Escape' })
+
+      await waitFor(() => expect(screen.queryByText('Duplicate')).not.toBeInTheDocument())
+      await waitFor(() => expect(document.activeElement).toBe(actions))
+      // The Files sheet itself is still open underneath.
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+    })
+
+    it('returns focus to the row Actions button when Duplicate is chosen', async () => {
+      setRoot([entry('note.txt', 'file')])
+      render(<Harness />)
+      await openFiles()
+      const actions = await screen.findByLabelText('Actions for note.txt')
+
+      fireEvent.click(actions)
+      fireEvent.click(await screen.findByText('Duplicate'))
+
+      await waitFor(() => expect(mockCopyFile).toHaveBeenCalled())
+      await waitFor(() => expect(screen.queryByText('Duplicate')).not.toBeInTheDocument())
+      await waitFor(() => expect(document.activeElement).toBe(actions))
+    })
+
+    it('leaves focus in the delete confirm when Delete is chosen', async () => {
+      setRoot([entry('doomed.txt', 'file')])
+      render(<Harness />)
+      await openFiles()
+
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      fireEvent.click(await screen.findByText('Delete'))
+
+      const confirm = await screen.findByRole('alertdialog')
+      // Radix fires the actions sheet's onCloseAutoFocus in a setTimeout(0);
+      // wait it out and check that the confirm kept focus rather than the
+      // actions button taking it back.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(confirm.contains(document.activeElement)).toBe(true)
+    })
+
+    it('leaves focus on the rename input when Rename is chosen', async () => {
+      setRoot([entry('note.txt', 'file')])
+      render(<Harness />)
+      await openFiles()
+
+      fireEvent.click(await screen.findByLabelText('Actions for note.txt'))
+      fireEvent.click(await screen.findByText('Rename'))
+
+      const input = await screen.findByLabelText('Rename note.txt')
+      await waitFor(() => expect(screen.queryByText('Duplicate')).not.toBeInTheDocument())
+      // Radix fires onCloseAutoFocus in a setTimeout(0); wait it out and check
+      // that the autofocused input kept focus.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(document.activeElement).toBe(input)
+    })
+  })
+})
+
+describe('MobileFileExplorer overlay back stack', () => {
+  let cleanup: () => void
+
+  /** Registers the Files sheet the way MobileChatShell does (own state + close). */
+  function FilesSheetHarness(): React.JSX.Element {
+    const [open, setOpen] = useState(true)
+    useOverlayRegistration('files-sheet', open, () => setOpen(false))
+    return <MobileFileExplorer open={open} onOpenChange={setOpen} />
+  }
+
+  const stackIds = (): string[] => useOverlayStackStore.getState().stack.map((entry) => entry.id)
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockProjectId = undefined
+    mockReducedMotion = false
+    mockEditorStore.openFiles.clear()
+    mockDeletePath.mockResolvedValue({ success: true, data: undefined })
+    mockRenameFile.mockResolvedValue({ success: true, data: undefined })
+    setRoot([entry('doomed.txt', 'file')])
+    // A route entry below the base entry, so a route back has somewhere to go.
+    window.history.replaceState(null, '', '#/route-a')
+    window.history.pushState(null, '', '#/base')
+    cleanup = armMobileOverlayBackStack()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  describe('mobile shell', () => {
+    it('registers the row actions above the Files sheet and back closes only the row actions', async () => {
+      render(<FilesSheetHarness />)
+      await waitForSentinelDepth(1)
+
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      expect(await screen.findByText('Rename')).toBeInTheDocument()
+      expect(stackIds()).toEqual(['files-sheet', 'mobile-file-actions'])
+      await waitForSentinelDepth(2)
+
+      await pressSystemBack()
+
+      await waitFor(() => expect(screen.queryByText('Rename')).not.toBeInTheDocument())
+      expect(stackIds()).toEqual(['files-sheet'])
+      expect(screen.getByRole('heading', { name: 'proj' })).toBeInTheDocument()
+      expect(location.hash).toBe('#/base')
+      expect(readOverlaySentinelDepth(history.state)).toBe(1)
+    })
+
+    it('Delete swaps the row actions for the confirm without a traversal, then two backs leave no dead press', async () => {
+      render(<FilesSheetHarness />)
+      await waitForSentinelDepth(1)
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      await waitForSentinelDepth(2)
+      const backSpy = vi.spyOn(history, 'back')
+      const goSpy = vi.spyOn(history, 'go')
+      const pushSpy = vi.spyOn(history, 'pushState')
+
+      fireEvent.click(await screen.findByText('Delete'))
+
+      expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
+      await settleOverlayBackStack()
+      expect(stackIds()).toHaveLength(2)
+      expect(stackIds()[0]).toBe('files-sheet')
+      expect(stackIds()[1]).toMatch(/^alert-dialog:/)
+      expect(backSpy).not.toHaveBeenCalled()
+      expect(goSpy).not.toHaveBeenCalled()
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(readOverlaySentinelDepth(history.state)).toBe(2)
+
+      // First back: only the delete confirm closes.
+      await pressSystemBack()
+      await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+      expect(screen.getByRole('heading', { name: 'proj' })).toBeInTheDocument()
+      expect(mockDeletePath).not.toHaveBeenCalled()
+      expect(stackIds()).toEqual(['files-sheet'])
+
+      // Second back: the Files sheet closes. Neither press was dead.
+      await pressSystemBack()
+      await waitFor(() =>
+        expect(screen.queryByRole('heading', { name: 'proj' })).not.toBeInTheDocument()
+      )
+      expect(stackIds()).toEqual([])
+      expect(location.hash).toBe('#/base')
+      expect(readOverlaySentinelDepth(history.state)).toBe(0)
+    })
+
+    it('a row action that closes the row sheet (Rename) consumes its sentinel', async () => {
+      render(<FilesSheetHarness />)
+      await waitForSentinelDepth(1)
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      await waitForSentinelDepth(2)
+
+      fireEvent.click(await screen.findByText('Rename'))
+
+      expect(await screen.findByLabelText('Rename doomed.txt')).toBeInTheDocument()
+      await waitForSentinelDepth(1)
+      expect(stackIds()).toEqual(['files-sheet'])
+    })
+
+    it('does not keep a phantom row-actions overlay when the Files sheet closes under it', async () => {
+      const { rerender } = render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      expect(await screen.findByText('Rename')).toBeInTheDocument()
+      expect(stackIds()).toEqual(['mobile-file-actions'])
+      await waitForSentinelDepth(1)
+
+      // The parent closes the Files sheet; the nested row sheet unmounts with it.
+      rerender(<MobileFileExplorer open={false} onOpenChange={vi.fn()} />)
+
+      await waitFor(() => expect(stackIds()).toEqual([]))
+      await waitForSentinelDepth(0)
+    })
+  })
+
+  describe('desktop shell', () => {
+    it('is inert: the row sheet is not registered and nothing is pushed or traversed', async () => {
+      useOverlayStackStore.getState().setMobileShell(false)
+      const pushSpy = vi.spyOn(history, 'pushState')
+      const backSpy = vi.spyOn(history, 'back')
+      const goSpy = vi.spyOn(history, 'go')
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+
+      fireEvent.click(await screen.findByLabelText('Actions for doomed.txt'))
+      expect(await screen.findByText('Rename')).toBeInTheDocument()
+      expect(stackIds()).toEqual([])
+      fireEvent.click(screen.getByText('Rename'))
+      await settleOverlayBackStack()
+
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(backSpy).not.toHaveBeenCalled()
+      expect(goSpy).not.toHaveBeenCalled()
     })
   })
 })

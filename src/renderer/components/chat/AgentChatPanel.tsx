@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useAcpStoreVisible } from '@/hooks/use-acp-visible-store'
 import { buildPromptWithLoadedSkills, useAgentSkills } from '@/hooks/use-agent-skills'
+import { useDockClearance } from '@/hooks/use-dock-clearance'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
 import type { AvailableCommand, ContentBlock, PlanEntry, SessionId, ToolCall } from '@/lib/acp-api'
@@ -24,7 +25,7 @@ import {
   stripAllCommandTokens
 } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { getDefaultCwdForProject, getProjectRootPath } from '@/lib/worktree-context'
+import { getProjectRootPath } from '@/lib/worktree-context'
 import {
   type ChatMessage,
   prepareChatKey,
@@ -35,10 +36,9 @@ import {
 import { isLaunchPlaceholderSessionId } from '@/stores/acp-store/live-turn'
 import { useConsentCardHost } from '@/stores/browser-consent-card-store'
 import { useIsConsentStripHosting } from '@/stores/browser-consent-strip-store'
-import {
-  isAgentDeadError,
-  isSendPromptOutcomeUnknownError
-} from '@/stores/prompt-queue-orchestration'
+import { useGitSheetStore } from '@/stores/git-sheet-store'
+import { useProjectStore } from '@/stores/project-store'
+import { isAgentDeadError } from '@/stores/prompt-queue-orchestration'
 import { agentChatTabId, findPaneContainingTab, useWorkspaceStore } from '@/stores/workspace-store'
 import { AgentConnectionLamp } from './AgentConnectionLamp'
 import { AskUserQuestion } from './AskUserQuestion'
@@ -54,6 +54,9 @@ import { ElicitationPrompt } from './ElicitationPrompt'
 import { PendingRestartBanner } from './PendingRestartBanner'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanPanel } from './PlanPanel'
+import { PromptReconcileNotice } from './PromptReconcileNotice'
+import { useApprovalDock } from './use-approval-dock'
+import { usePermissionDenialNotice } from './use-permission-denial-notice'
 
 /** Concatenate the text blocks of a message into a single string. */
 function messageText(blocks: ContentBlock[]): string {
@@ -206,6 +209,7 @@ export function AgentChatPanel({
   // session-level `isClosed && isOpeningHistory` banner). Desktop Tauri never
   // uses the WS transport, so this stays `false` there.
   const transportReconnecting = useAcpStore((s) => s.transportReconnecting)
+  const promptUnconfirmed = useAcpStore((s) => Boolean(s.pendingPromptReconcile[sessionId]))
 
   // Story 5.3 (AC1): OSK awareness on mobile web. On Tauri desktop, the hook
   // returns a no-OSK default and `useMobileWebShell()` is always false — the
@@ -309,17 +313,6 @@ export function AgentChatPanel({
     (queueId: string) => {
       void sendQueuedPromptNow(sessionId, queueId).catch((err) => {
         if (isAgentDeadError(err)) return
-        // #844: a timed-out send_prompt is "outcome unknown", not "send
-        // failed" — the server may still complete the turn and deliver
-        // prompt_complete on replay. Log transiently instead of toasting.
-        if (isSendPromptOutcomeUnknownError(err)) {
-          void logFrontendError({
-            level: 'info',
-            source: 'acp.sendPromptOutcomeUnknown',
-            message: `Queued prompt send timed out on session ${sessionId}; awaiting replay reconciliation`
-          })
-          return
-        }
         toast.error('Could not send the queued message. Try again.')
       })
     },
@@ -330,15 +323,6 @@ export function AgentChatPanel({
     (text: string) => {
       void sendPrompt(sessionId, text).catch((err) => {
         if (isAgentDeadError(err)) return
-        // #844: see handleSendQueuedNow — a timeout is not a send failure.
-        if (isSendPromptOutcomeUnknownError(err)) {
-          void logFrontendError({
-            level: 'info',
-            source: 'acp.sendPromptOutcomeUnknown',
-            message: `Prompt send timed out on session ${sessionId}; awaiting replay reconciliation`
-          })
-          return
-        }
         toast.error('Could not send your message. Try again.')
       })
     },
@@ -349,15 +333,6 @@ export function AgentChatPanel({
     (blocks: ContentBlock[], displayBlocks?: ContentBlock[]) => {
       void sendPromptBlocks(sessionId, blocks, { displayBlocks }).catch((err) => {
         if (isAgentDeadError(err)) return
-        // #844: see handleSendQueuedNow — a timeout is not a send failure.
-        if (isSendPromptOutcomeUnknownError(err)) {
-          void logFrontendError({
-            level: 'info',
-            source: 'acp.sendPromptOutcomeUnknown',
-            message: `Block prompt send timed out on session ${sessionId}; awaiting replay reconciliation`
-          })
-          return
-        }
         toast.error('Could not send your message. Try again.')
       })
     },
@@ -571,17 +546,20 @@ export function AgentChatPanel({
     session?.lastError
   ])
 
+  // Desktop + web parity: the open-in-editor chain is transport-agnostic —
+  // where `/fs/info` is loopback-guarded on remote peers, resolution falls
+  // back to the deliberately unguarded `/fs/read` open path (the same one
+  // ChatChangedFilesPanel uses). Local-image reads stay Tauri-only inside
+  // `TermulMarkdownImage` (alt-chip fallback).
+  const projects = useProjectStore((state) => state.projects)
   const filePathContext = useMemo(
-    () =>
-      isTauriContext()
-        ? {
-            cwd: session?.cwd,
-            projectRoot: session
-              ? getDefaultCwdForProject(session.projectId) || session.cwd
-              : undefined
-          }
-        : undefined,
-    [session]
+    () => ({
+      cwd: session?.cwd,
+      projectRoot: session
+        ? projects.find((p) => p.id === session.projectId)?.path || session.cwd
+        : undefined
+    }),
+    [session, projects]
   )
   const timeline = useMemo(() => {
     const items = consolidateThoughtGroups(buildTimeline(messages, toolCalls, agentSwitches))
@@ -615,6 +593,31 @@ export function AgentChatPanel({
   // the inner message-scroller viewport and scroll the latest message into
   // view (T2.2).
   const rootRef = useRef<HTMLDivElement>(null)
+
+  // Mobile dock around approvals: compact the plan / changed-files bars while
+  // the keyboard is up with an approval pending, and return focus to the
+  // composer card when a prompt that held focus resolves. The ids mirror the
+  // render gates below (a closed session renders no prompt). Above the early
+  // returns so the hook order never changes.
+  const approvalsLive = session != null && session.status !== 'closed'
+  const { compactDock, onFocus, onBlur } = useApprovalDock({
+    rootRef,
+    enabled: isMobileShell && isVisible,
+    oskOpen: osk.isOskOpen,
+    permissionId: approvalsLive ? (pendingPermission?.requestId ?? null) : null,
+    questionId: approvalsLive ? (pendingQuestion?.questionId ?? null) : null,
+    elicitationId: approvalsLive ? (pendingElicitation?.requestId ?? null) : null
+  })
+  const openGitSheet = useGitSheetStore((s) => s.openGitSheet)
+  // A permission the server denied because this device disconnected (L-09).
+  const { message: denialMessage, dismiss: dismissDenial } = usePermissionDenialNotice(sessionId)
+  // The mobile dock (prompts, or the changed-files bar plus the composer)
+  // reports its top edge so the toast stack clears it. The wrapper is a plain
+  // box on the mobile shell and `display: contents` on desktop, so desktop
+  // layout (the starters' `flex-1`) is unchanged. The hook is also above the
+  // early returns: the wrapper may mount long after the first render.
+  const dockRef = useDockClearance(isMobileShell && isVisible)
+  const dockClassName = isMobileShell ? 'flex shrink-0 flex-col' : 'contents'
 
   if (isRestoringChat) return <ChatRestorePreload />
 
@@ -701,8 +704,11 @@ export function AgentChatPanel({
   }
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: onFocus / onBlur only observe bubbled focus to track approval prompts; the root is not itself interactive
     <div
       ref={rootRef}
+      onFocus={onFocus}
+      onBlur={onBlur}
       className="@container flex h-full flex-col bg-terminal-bg"
       // Story 5.3 (T2.1): apply OSK spacer as bottom padding so the sticky
       // composer card stays visible above the on-screen keyboard. iOS Safari
@@ -782,6 +788,9 @@ export function AgentChatPanel({
           <span>Reconnecting…</span>
         </div>
       )}
+      {/* No Retry: the agent has to ask again. Cleared by the store when the
+          session's next turn starts. */}
+      <ChatErrorNotice message={denialMessage} onDismiss={dismissDenial} />
       <ChatErrorNotice
         message={activeError}
         onRetry={canOfferRetry ? handleRetry : undefined}
@@ -792,7 +801,12 @@ export function AgentChatPanel({
         }
         onDismiss={() => setDismissedError(session.lastError)}
       />
-      <PlanPanel key={`plan-${session.id}`} entries={plan} />
+      <PlanPanel
+        key={`plan-${session.id}`}
+        entries={plan}
+        defaultCollapsed={isMobileShell}
+        forceCollapsed={compactDock}
+      />
       <ChatMessageList
         items={timeline}
         sessionId={session.id}
@@ -801,6 +815,16 @@ export function AgentChatPanel({
         onEditMessage={seedComposer}
         onRetry={canOfferRetry ? handleRetry : undefined}
       />
+      {promptUnconfirmed && session.activeTurn && (
+        // AD-6: the host has not yet confirmed the last prompt (the connection
+        // dropped before the reply). Not an error — the same turn is resent.
+        // In flow above the composer so it never covers the transcript.
+        <div className={`${CHAT_GUTTER_X} pb-1 pt-2`}>
+          <div className="mx-auto w-full max-w-3xl">
+            <PromptReconcileNotice />
+          </div>
+        </div>
+      )}
       {/* Browser-automation consent (CAP-5): the in-chat card is the fallback
           surface for any non-browser focus — mounted once so it shows both
           next to the composer and while a structured question is pending.
@@ -817,24 +841,43 @@ export function AgentChatPanel({
           dialog — the composer, changed-files strip, and queued prompts all
           hide until the prompt resolves. */}
       {!isClosed && (pendingElicitation || pendingQuestion) ? (
-        <>
+        <div ref={dockRef} data-chat-dock="true" className={dockClassName}>
           {pendingElicitation && (
-            <ElicitationPrompt key={pendingElicitation.requestId} request={pendingElicitation} />
+            <ElicitationPrompt
+              key={pendingElicitation.requestId}
+              request={pendingElicitation}
+              autoFocusHeading={isMobileShell && isVisible}
+            />
           )}
           {pendingPermission && (
             <div className={`${CHAT_GUTTER_X} pb-2 pt-3`}>
               <div className="mx-auto w-full max-w-3xl">
-                <PermissionPrompt permission={pendingPermission} embedded={false} />
+                <PermissionPrompt
+                  permission={pendingPermission}
+                  embedded={false}
+                  isVisible={isVisible}
+                />
               </div>
             </div>
           )}
           {pendingQuestion && (
-            <AskUserQuestion key={pendingQuestion.questionId} question={pendingQuestion} />
+            <AskUserQuestion
+              key={pendingQuestion.questionId}
+              question={pendingQuestion}
+              autoFocusFirstOption={isMobileShell && isVisible}
+            />
           )}
-        </>
+        </div>
       ) : (
-        <>
-          <ChatChangedFilesPanel cwd={session.cwd} toolCalls={toolCalls} />
+        <div ref={dockRef} data-chat-dock="true" className={dockClassName}>
+          <ChatChangedFilesPanel
+            cwd={session.cwd}
+            toolCalls={toolCalls}
+            forceCollapsed={compactDock}
+            onOpenGitChanges={
+              isMobileShell ? (opener) => openGitSheet(session.cwd, opener) : undefined
+            }
+          />
           <ChatInputBar
             session={composerSession ?? session}
             projectRoot={skillsProjectRoot}
@@ -868,7 +911,7 @@ export function AgentChatPanel({
               <ChatStarters onPick={seedComposer} />
             </div>
           ) : null}
-        </>
+        </div>
       )}
     </div>
   )

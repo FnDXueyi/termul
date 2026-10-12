@@ -32,6 +32,8 @@ use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub}
 use crate::web::catalog_api;
 use crate::web::fs_api;
 use crate::web::git_api;
+use crate::web::git_diff_stat_api;
+use crate::web::git_hunk_api;
 use crate::web::install_api;
 use crate::web::log_api;
 use crate::web::mcp_oauth_api;
@@ -48,6 +50,7 @@ use crate::web::store::WebStore;
 use crate::web::terminal_ws::terminal_ws_upgrade;
 use crate::web::workspace_api;
 use crate::web::worktree_api;
+use crate::web::worktree_rename_api;
 use crate::web::ws::{ws_upgrade, AppState, HistoryMode};
 
 use super::assets;
@@ -179,6 +182,8 @@ pub fn router(
         .route("/git/diff", post(git_api::get_diff))
         .route("/git/stage", post(git_api::stage))
         .route("/git/unstage", post(git_api::unstage))
+        .route("/git/stage-hunk", post(git_hunk_api::stage_hunk))
+        .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
         .route("/git/commit", post(git_api::commit))
@@ -194,6 +199,7 @@ pub fn router(
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
         .route("/git/branch-create", post(git_api::branch_create))
+        .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         // Project icon resolution (spec-project-icon). Mirrors the desktop
         // `project_icon_resolve` command — same shared resolver, read-route
         // posture (boundary check, no write guard).
@@ -242,7 +248,7 @@ pub fn router(
         // desktop `#[tauri::command] worktree_*` handler; see
         // `web/worktree_api.rs`. Registered AHEAD of the static fallback so the
         // SPA mount cannot shadow them. Write routes (`create`/`remove`/
-        // `copy-include-files`) are loopback-guarded inside the handler; read
+        // `copy-include-files`/`rename-branch`) are loopback-guarded inside the handler; read
         // routes (`list`/`branches`/`check-dirty`/`resolve-base-branch`)
         // enforce containment only. Only the 7 launch-flow routes ship here;
         // the 8 advanced ops are deferred (see deferred-work.md).
@@ -258,6 +264,10 @@ pub fn router(
         .route(
             "/worktree/copy-include-files",
             post(worktree_api::copy_include_files),
+        )
+        .route(
+            "/worktree/rename-branch",
+            post(worktree_rename_api::rename_branch),
         );
     // CAP-1: `project_root` arrives already wrapped in the shared
     // `Arc<RwLock<PathBuf>>` created by `serve_router` (one per server —
@@ -515,6 +525,8 @@ pub fn router_with_static(
         .route("/git/diff", post(git_api::get_diff))
         .route("/git/stage", post(git_api::stage))
         .route("/git/unstage", post(git_api::unstage))
+        .route("/git/stage-hunk", post(git_hunk_api::stage_hunk))
+        .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
         .route("/git/commit", post(git_api::commit))
@@ -530,6 +542,7 @@ pub fn router_with_static(
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
         .route("/git/branch-create", post(git_api::branch_create))
+        .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         .route("/project/icon", post(project_icon_api::resolve_icon))
         .route("/search/rg-info", get(search_api::rg_info))
         .route("/search/content", post(search_api::content))
@@ -557,6 +570,10 @@ pub fn router_with_static(
         .route(
             "/worktree/copy-include-files",
             post(worktree_api::copy_include_files),
+        )
+        .route(
+            "/worktree/rename-branch",
+            post(worktree_rename_api::rename_branch),
         )
         .route(
             "/acp/factory-key",

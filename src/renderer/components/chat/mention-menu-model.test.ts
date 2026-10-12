@@ -3,6 +3,7 @@ import {
   activeMentionToken,
   buildMentionSections,
   isMentionTrigger,
+  MAX_FOLDER_RESULTS,
   type MentionMatch,
   spliceMentionToken
 } from './mention-menu-model'
@@ -159,5 +160,66 @@ describe('buildMentionSections', () => {
     expect(item.ignored).toBe(true)
     expect(item.key).toBe('/root/node_modules/pkg/index.js')
     expect(item.payload.absPath).toBe('/root/node_modules/pkg/index.js')
+  })
+})
+
+const dirMatch = (relPath: string, ignored = false): MentionMatch => ({
+  relPath,
+  absPath: `/root/${relPath}/`,
+  name: relPath.split(/[\\/]/).pop() ?? relPath,
+  ignored,
+  kind: 'dir'
+})
+
+describe('buildMentionSections — folders (gh-896)', () => {
+  it('lists Files then Folders for a non-empty query', () => {
+    const sections = buildMentionSections({
+      matches: [dirMatch('src/components'), match('src/components.ts')],
+      recents: [],
+      filter: 'components'
+    })
+    expect(sections.map((s) => s.id)).toEqual(['files', 'folders'])
+    expect(sections[1].heading).toBe('Folders')
+    expect(sections[1].items[0].kind).toBe('dir')
+    expect(sections[0].items[0].kind).toBe('file')
+  })
+
+  it('shows only a Folders section when only folders match', () => {
+    const sections = buildMentionSections({
+      matches: [dirMatch('src/components')],
+      recents: [],
+      filter: 'comp'
+    })
+    expect(sections.map((s) => s.id)).toEqual(['folders'])
+  })
+
+  it('keeps a folder and a same-named file as distinct rows', () => {
+    const sections = buildMentionSections({
+      matches: [match('src/search'), dirMatch('src/search')],
+      recents: [],
+      filter: 'search'
+    })
+    expect(sections.flatMap((s) => s.items)).toHaveLength(2)
+  })
+
+  it('caps the Folders section at MAX_FOLDER_RESULTS', () => {
+    const matches = Array.from({ length: MAX_FOLDER_RESULTS + 10 }, (_, i) => dirMatch(`d/f${i}`))
+    const sections = buildMentionSections({ matches, recents: [], filter: 'f' })
+    expect(sections[0].items).toHaveLength(MAX_FOLDER_RESULTS)
+  })
+
+  it('mixes folders into Recents', () => {
+    const sections = buildMentionSections({
+      matches: [],
+      recents: [dirMatch('src/components'), match('README.md')],
+      filter: ''
+    })
+    expect(sections).toHaveLength(1)
+    expect(sections[0].items.map((i) => i.kind)).toEqual(['dir', 'file'])
+  })
+
+  it('treats a match without kind as a file', () => {
+    const sections = buildMentionSections({ matches: [match('a.ts')], recents: [], filter: 'a' })
+    expect(sections[0].items[0].kind).toBe('file')
   })
 })

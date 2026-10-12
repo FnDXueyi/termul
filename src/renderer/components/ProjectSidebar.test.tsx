@@ -1,32 +1,18 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SessionIndexEntry } from '@/lib/acp-history-persistence'
-import { useAcpStore } from '@/stores/acp-store'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useGitStatusStore } from '@/stores/git-status-store'
 import { useProjectStore } from '@/stores/project-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
 import { ProjectSidebar } from './ProjectSidebar'
 
 const {
   mockGetAvailableShells,
-  mockSpawnTerminalInPane,
-  mockActivateAndOpenTerminal,
-  mockOpenTerminalAtCwd,
-  mockAddAgentChatTab,
-  mockOpenHistorySession,
-  mockDeleteHistorySession,
   mockUseProjectsWithActivity,
   mockUseProjectsWithErrors,
   mockUseProjectsWithActiveAgentChat
 } = vi.hoisted(() => ({
   mockGetAvailableShells: vi.fn(),
-  mockSpawnTerminalInPane: vi.fn(),
-  mockActivateAndOpenTerminal: vi.fn(),
-  mockOpenTerminalAtCwd: vi.fn(),
-  mockAddAgentChatTab: vi.fn(),
-  mockOpenHistorySession: vi.fn(),
-  mockDeleteHistorySession: vi.fn(),
   mockUseProjectsWithActivity: vi.fn(),
   mockUseProjectsWithErrors: vi.fn(),
   mockUseProjectsWithActiveAgentChat: vi.fn()
@@ -66,12 +52,6 @@ vi.mock('@/stores/acp-store', async () => {
     useProjectsWithActiveAgentChat: () => mockUseProjectsWithActiveAgentChat()
   }
 })
-
-vi.mock('@/lib/terminal-spawn', () => ({
-  spawnTerminalInPane: mockSpawnTerminalInPane,
-  activateAndOpenTerminal: mockActivateAndOpenTerminal,
-  openTerminalAtCwd: mockOpenTerminalAtCwd
-}))
 
 vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual('@/lib/utils')
@@ -245,17 +225,6 @@ vi.mock('@/components/ui/context-menu', async () => {
 // Setup mock data
 beforeEach(() => {
   mockGetAvailableShells.mockReset()
-  mockSpawnTerminalInPane.mockReset()
-  mockSpawnTerminalInPane.mockResolvedValue({ success: true, data: { id: 'term-1' } })
-  mockActivateAndOpenTerminal.mockReset()
-  mockActivateAndOpenTerminal.mockResolvedValue({ status: 'opened', terminalId: 'term-1' })
-  mockOpenTerminalAtCwd.mockReset()
-  mockOpenTerminalAtCwd.mockResolvedValue({ status: 'opened', terminalId: 'term-1' })
-  mockAddAgentChatTab.mockReset()
-  mockOpenHistorySession.mockReset()
-  mockOpenHistorySession.mockResolvedValue(undefined)
-  mockDeleteHistorySession.mockReset()
-  mockDeleteHistorySession.mockResolvedValue(undefined)
   mockGetAvailableShells.mockResolvedValue({
     success: true,
     data: {
@@ -273,18 +242,6 @@ beforeEach(() => {
   mockUseProjectsWithActiveAgentChat.mockReturnValue([])
   mockUseProjectsWithErrors.mockReset()
   mockUseProjectsWithErrors.mockReturnValue(new Set())
-  // Reset chat-history store state to a clean baseline. ProjectChatList reads
-  // `sessionIndex` + the open/delete actions; drive them through spies so the
-  // integration tests stay deterministic without exercising the real reopen.
-  useAcpStore.setState({
-    sessionIndex: [],
-    openHistorySession: mockOpenHistorySession,
-    deleteHistorySession: mockDeleteHistorySession
-  })
-  useWorkspaceStore.setState({
-    activePaneId: 'pane-1',
-    addAgentChatTab: mockAddAgentChatTab
-  })
 })
 
 const mockProjects: Project[] = [
@@ -310,15 +267,6 @@ const renderWithRouter = (props = {}) => {
       <ProjectSidebar {...defaultProps} {...props} />
     </MemoryRouter>
   )
-}
-
-// The project chat list is collapsed by default and only expands via the
-// chevron, so tests that assert on chat rows must open the section first.
-// `getAllByLabelText` because every project now shows a chevron; [0] is the
-// first project in render order.
-const expandChats = () => {
-  const chevrons = screen.getAllByLabelText('Expand chats')
-  fireEvent.click(chevrons[0])
 }
 
 describe('ProjectSidebar Context Menu', () => {
@@ -538,13 +486,6 @@ describe('ProjectSidebar', () => {
     expect(screen.getByText('Project Two')).toBeInTheDocument()
   })
 
-  it('renders the sidebar visibility toggle in the Projects header on web', () => {
-    // jsdom has no __TAURI_INTERNALS__, so isTauriContext() is false (web).
-    renderWithRouter()
-
-    expect(screen.getByRole('button', { name: 'Hide sidebar' })).toBeInTheDocument()
-  })
-
   it('should call onSelectProject when project is clicked', () => {
     const onSelectProject = vi.fn()
     renderWithRouter({ onSelectProject })
@@ -554,34 +495,16 @@ describe('ProjectSidebar', () => {
     expect(onSelectProject).toHaveBeenCalledWith('2')
   })
 
-  it('should call onNewProject when header + button is clicked', () => {
-    const onNewProject = vi.fn()
-    renderWithRouter({ onNewProject })
-
-    // Use data-testid for robust button selection
-    const headerButton = screen.getByTestId('header-new-project')
-    fireEvent.click(headerButton)
-
-    expect(onNewProject).toHaveBeenCalled()
-  })
-
-  it('should show version label in the footer at the bottom', () => {
-    renderWithRouter({})
-
-    const footer = screen.getByTestId('sidebar-footer')
-    expect(footer).toHaveTextContent(/^Termul/)
-    // The hardcoded release string is gone; the version comes from the helper.
-    expect(footer).not.toHaveTextContent('v0.4.21')
-  })
-
-  it('renders the Projects panel flat on bg-background with a label-panel header', () => {
+  it('renders the Projects section flat on bg-background with a label-panel header', () => {
     const { container } = renderWithRouter({})
 
-    const aside = container.querySelector('aside')
-    expect(aside).toHaveClass('bg-background', 'w-64', 'rounded-xl')
-    expect(aside).not.toHaveClass('bg-sidebar')
+    const root = container.firstElementChild
+    expect(root).toHaveClass('bg-background')
+    expect(root).not.toHaveClass('bg-sidebar')
     expect(screen.getByText('Projects')).toHaveClass('label-panel')
-    expect(screen.getByTestId('header-new-project')).toHaveClass('size-7')
+    expect(screen.getByRole('button', { name: 'Add project or folder group' })).toHaveClass(
+      'size-7'
+    )
   })
 
   it('marks the active project row with keycap and idle rows with a hover wash', () => {
@@ -589,7 +512,7 @@ describe('ProjectSidebar', () => {
 
     const activeRow = screen.getByTestId('project-item-1').querySelector('[role="button"]')
     const idleRow = screen.getByTestId('project-item-2').querySelector('[role="button"]')
-    expect(activeRow).toHaveClass('keycap', 'h-8', 'rounded-md')
+    expect(activeRow).toHaveClass('keycap', 'h-8', 'rounded-lg')
     expect(activeRow).not.toHaveClass('bg-sidebar-accent')
     expect(idleRow).not.toHaveClass('keycap')
     expect(idleRow).toHaveClass('hover:bg-foreground/[0.03]')
@@ -675,7 +598,7 @@ describe('ProjectSidebar Name Truncation', () => {
 })
 
 describe('ProjectSidebar Project Icons', () => {
-  it('shows the project identity glyph on active projects, stable across chat expansion', () => {
+  it('shows the project identity glyph on active projects', () => {
     renderWithRouter()
 
     const projectRow = screen.getByTestId('project-item-1')
@@ -685,10 +608,6 @@ describe('ProjectSidebar Project Icons', () => {
     expect(monogram).toBeInTheDocument()
     expect(monogram).toHaveTextContent('P')
     expect(projectRow.querySelector('svg[data-termul-icon="Folder"]')).not.toBeInTheDocument()
-
-    expandChats()
-
-    expect(projectRow.querySelector('[data-project-color="blue"]')).toBeInTheDocument()
     expect(projectRow.querySelector('svg[data-termul-icon="FolderOpen"]')).not.toBeInTheDocument()
   })
 
@@ -897,71 +816,7 @@ describe('ProjectSidebar Activity Indicator', () => {
   })
 })
 
-describe('ProjectSidebar Project Chat List', () => {
-  const chatEntry = (overrides: Partial<SessionIndexEntry> = {}): SessionIndexEntry => ({
-    id: 'chat-1',
-    agentId: 'agent-1',
-    title: 'Refactor sidebar',
-    cwd: '/repo/main',
-    projectId: '1',
-    createdAt: 1000,
-    lastActivityAt: 2000,
-    messageCount: 5,
-    status: 'active',
-    ...overrides
-  })
-
-  const projectWithChats: Project[] = [
-    { id: '1', name: 'Project One', color: 'blue', gitBranch: 'main' }
-  ]
-
-  it('renders the per-project chat search and chat rows when expanded', () => {
-    useAcpStore.setState({ sessionIndex: [chatEntry()] })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    expect(screen.getByLabelText('Search chats')).toBeInTheDocument()
-    expect(screen.getByText('Refactor sidebar')).toBeInTheDocument()
-  })
-
-  it('shows the empty state when the project has no chats', () => {
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    expect(
-      screen.getByText('No chats yet. Start one with the New chat button.')
-    ).toBeInTheDocument()
-  })
-
-  it('opens/resumes the chat when a chat row is clicked (no active-worktree sync)', async () => {
-    useAcpStore.setState({ sessionIndex: [chatEntry()] })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    fireEvent.click(screen.getByText('Refactor sidebar'))
-
-    await waitFor(() => {
-      expect(mockOpenHistorySession).toHaveBeenCalledWith('chat-1')
-      expect(mockAddAgentChatTab).toHaveBeenCalledWith('chat-1')
-    })
-    // Chat row click must not route through the worktree terminal path.
-    expect(mockActivateAndOpenTerminal).not.toHaveBeenCalled()
-  })
-
-  it('opens a terminal at the chat cwd via openTerminalAtCwd when the terminal icon is clicked', async () => {
-    useAcpStore.setState({ sessionIndex: [chatEntry({ cwd: '/repo/main' })] })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    fireEvent.click(screen.getByLabelText('Open terminal for chat Refactor sidebar'))
-
-    await waitFor(() => {
-      expect(mockOpenTerminalAtCwd).toHaveBeenCalledWith('1', '/repo/main')
-    })
-    // The chat terminal icon must not sync activeWorktreeId (no activateAndOpenTerminal).
-    expect(mockActivateAndOpenTerminal).not.toHaveBeenCalled()
-  })
-
+describe('ProjectSidebar Project Context Menu actions', () => {
   it('keeps the New Worktree action on the project header context menu', async () => {
     const projectGit: Project[] = [
       { id: '1', name: 'Project One', color: 'blue', gitBranch: 'main', isGitRepo: true }
@@ -970,219 +825,6 @@ describe('ProjectSidebar Project Chat List', () => {
 
     fireEvent.contextMenu(screen.getByText('Project One'))
     expect(screen.getByText('New Worktree')).toBeInTheDocument()
-  })
-})
-
-describe('ProjectSidebar Project Search', () => {
-  // 8 projects crosses the PROJECT_SEARCH_THRESHOLD so the search UI renders.
-  const manyProjects: Project[] = Array.from({ length: 8 }, (_, i) => ({
-    id: String(i + 1),
-    name: `Project ${i + 1}`,
-    color: 'blue' as const,
-    gitBranch: i === 7 ? 'feature/special' : 'main'
-  }))
-
-  const fewProjects: Project[] = [
-    { id: '1', name: 'Alpha', color: 'blue', gitBranch: 'main' },
-    { id: '2', name: 'Beta', color: 'green', gitBranch: 'main' }
-  ]
-
-  it('hides the search box when the project count is below the threshold', () => {
-    renderWithRouter({ projects: fewProjects, activeProjectId: '1' })
-    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
-  })
-
-  it('shows the search box once the project count reaches the threshold', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-    expect(screen.getByTestId('project-search-input')).toBeInTheDocument()
-  })
-
-  it('filters the visible projects by name', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-
-    expect(screen.getByText('Project 8')).toBeInTheDocument()
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-    expect(screen.queryByText('Project 2')).not.toBeInTheDocument()
-  })
-
-  it('matches on git branch as well as name', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'feature/special' }
-    })
-
-    expect(screen.getByText('Project 8')).toBeInTheDocument()
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-  })
-
-  it('shows an empty state when nothing matches', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'no-such-project' }
-    })
-
-    expect(screen.getByTestId('project-search-empty')).toBeInTheDocument()
-    expect(screen.getByText('No projects found')).toBeInTheDocument()
-  })
-
-  it('clears the query when the clear button is clicked', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    const input = screen.getByTestId('project-search-input') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'Project 8' } })
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByTestId('project-search-clear'))
-
-    expect(input.value).toBe('')
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-  })
-
-  it('clears the query when Escape is pressed in the search box', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    const input = screen.getByTestId('project-search-input') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'Project 8' } })
-    fireEvent.keyDown(input, { key: 'Escape' })
-
-    expect(input.value).toBe('')
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-  })
-
-  it('keeps the Ctrl+1 shortcut badge tied to the unfiltered position while searching', () => {
-    renderWithRouter({ projects: manyProjects, activeProjectId: '1' })
-
-    // Project 1 is index 0 -> Ctrl+1. Search for it; the badge must stay Ctrl+1.
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 1' }
-    })
-
-    expect(screen.getByText('Project 1')).toBeInTheDocument()
-    expect(screen.getByText('Ctrl+1')).toBeInTheDocument()
-  })
-
-  it('clears a lingering query when the search box drops below the threshold', () => {
-    const { rerender } = render(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-    expect(screen.queryByText('Project 1')).not.toBeInTheDocument()
-
-    // Drop below the threshold so the search box unmounts.
-    rerender(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={fewProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    // No stuck filter: the search box is gone and the remaining projects are visible.
-    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
-    expect(screen.getByText('Alpha')).toBeInTheDocument()
-    expect(screen.getByText('Beta')).toBeInTheDocument()
-  })
-
-  it('clears the search when the active project is not in the filtered results', () => {
-    const { rerender } = render(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="1" />
-      </MemoryRouter>
-    )
-
-    // Filter to a single project that is NOT the active one.
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project 8' }
-    })
-    expect(screen.queryByText('Project 2')).not.toBeInTheDocument()
-
-    // Active project switches to one hidden by the query (e.g. Ctrl+2 or a new project).
-    rerender(
-      <MemoryRouter>
-        <ProjectSidebar {...defaultProps} projects={manyProjects} activeProjectId="2" />
-      </MemoryRouter>
-    )
-
-    // Search self-clears so the now-active project is visible again.
-    expect((screen.getByTestId('project-search-input') as HTMLInputElement).value).toBe('')
-    expect(screen.getByText('Project 2')).toBeInTheDocument()
-  })
-
-  it('disables the archived toggle while searching', () => {
-    const withArchived: Project[] = [
-      ...manyProjects,
-      { id: '99', name: 'Old Project', color: 'gray', gitBranch: 'main', isArchived: true }
-    ]
-    renderWithRouter({ projects: withArchived, activeProjectId: '1' })
-
-    fireEvent.change(screen.getByTestId('project-search-input'), {
-      target: { value: 'Project' }
-    })
-
-    const toggle = screen.getByLabelText(/Archived projects/)
-    expect(toggle).toBeDisabled()
-  })
-})
-
-describe('ProjectSidebar Chat Search', () => {
-  const projectWithChats: Project[] = [
-    { id: '1', name: 'Project One', color: 'blue', gitBranch: 'main' }
-  ]
-
-  const chats: SessionIndexEntry[] = Array.from({ length: 3 }, (_, i) => ({
-    id: `chat-${i}`,
-    agentId: 'agent-1',
-    title: `Chat ${i}`,
-    cwd: '/repo/main',
-    projectId: '1',
-    createdAt: 1000 + i,
-    lastActivityAt: 2000 + i,
-    messageCount: i,
-    status: 'active' as const
-  }))
-
-  it('shows the per-project chat search box once a project is expanded', () => {
-    useAcpStore.setState({ sessionIndex: chats })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    expect(screen.getByLabelText('Search chats')).toBeInTheDocument()
-  })
-
-  it('filters this project chats by title', () => {
-    useAcpStore.setState({ sessionIndex: chats })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    fireEvent.change(screen.getByLabelText('Search chats'), {
-      target: { value: 'Chat 1' }
-    })
-
-    expect(screen.getByText('Chat 1')).toBeInTheDocument()
-    expect(screen.queryByText('Chat 0')).not.toBeInTheDocument()
-    expect(screen.queryByText('Chat 2')).not.toBeInTheDocument()
-  })
-
-  it('clears the chat query on Escape', () => {
-    useAcpStore.setState({ sessionIndex: chats })
-    renderWithRouter({ projects: projectWithChats, activeProjectId: '1' })
-    expandChats()
-
-    const input = screen.getByLabelText('Search chats') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'Chat 1' } })
-    fireEvent.keyDown(input, { key: 'Escape' })
-
-    expect(input.value).toBe('')
-    expect(screen.getByText('Chat 0')).toBeInTheDocument()
   })
 })
 
@@ -1237,8 +879,8 @@ describe('ProjectSidebar Folder Grouping', () => {
         {
           id: 'group-1',
           name: 'My Folder',
-          projectIds: ['1'],
-          isCollapsed: false,
+          projectIds: [],
+          isCollapsed: true,
           color: 'purple'
         }
       ]
@@ -1246,8 +888,410 @@ describe('ProjectSidebar Folder Grouping', () => {
 
     renderWithRouter()
 
-    const folderHeader = screen.getByRole('button', { name: /My Folder/i })
-    const iconContainer = folderHeader.querySelector('.text-project-purple')
+    const iconContainer = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('.text-project-purple')
     expect(iconContainer).toBeInTheDocument()
+  })
+})
+
+describe('ProjectSidebar rail rows', () => {
+  const gitProjects: Project[] = [
+    { id: '1', name: 'Project One', color: 'blue', path: '/repo/one', isGitRepo: true },
+    { id: '2', name: 'Project Two', color: 'green', path: '/repo/two', isGitRepo: true },
+    { id: '3', name: 'Plain Folder', color: 'red', path: '/repo/plain', isGitRepo: false }
+  ]
+  const unwatch = vi.fn()
+  const watchDiffStat = vi.fn(() => unwatch)
+  const refreshDiffStat = vi.fn(() => Promise.resolve())
+  const originalGitState = useGitStatusStore.getState()
+
+  beforeEach(() => {
+    unwatch.mockClear()
+    watchDiffStat.mockClear()
+    refreshDiffStat.mockClear()
+    useGitStatusStore.setState({
+      diffStats: {},
+      watchDiffStat,
+      refreshDiffStat
+    })
+  })
+
+  afterEach(() => {
+    useGitStatusStore.setState({
+      diffStats: originalGitState.diffStats,
+      watchDiffStat: originalGitState.watchDiffStat,
+      refreshDiffStat: originalGitState.refreshDiffStat
+    })
+  })
+
+  it('has no chat chevrons, chat lists or version footer, and one + menu', () => {
+    renderWithRouter({ projects: gitProjects })
+
+    expect(screen.queryByLabelText('Expand chats')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Collapse chats')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sidebar-footer')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    expect(screen.queryByLabelText('Create new group folder')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Create new project from header')).not.toBeInTheDocument()
+    expect(screen.getByText('Projects')).toBeInTheDocument()
+  })
+
+  it('has no panel toggle in the Projects header (the Rail header owns them)', () => {
+    // jsdom is web: the old web-only Rail toggle used to render here.
+    renderWithRouter({ projects: gitProjects })
+
+    expect(screen.queryByRole('button', { name: 'Expand or collapse projects' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Hide sidebar' })).toBeNull()
+  })
+
+  it('the + menu offers New project and New folder group', async () => {
+    const onNewProject = vi.fn()
+    renderWithRouter({ projects: gitProjects, onNewProject })
+
+    const trigger = screen.getByRole('button', { name: 'Add project or folder group' })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'New project' }))
+    expect(onNewProject).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'New folder group' }))
+    expect(await screen.findByText('Create New Group')).toBeInTheDocument()
+  })
+
+  it('shows +N −M from the git-status store at rest, and gear + chip on hover', () => {
+    useGitStatusStore.setState({ diffStats: { '/repo/two': { added: 3, removed: 1 } } })
+    renderWithRouter({ projects: gitProjects })
+
+    const row = screen.getByTestId('project-item-2')
+    const stat = within(row).getByTestId('project-diff-stat')
+    expect(stat).toHaveTextContent('+3 −1')
+    // The stat gives way to the settings gear on hover or focus.
+    expect(stat.parentElement).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
+    const gear = within(row).getByLabelText('Settings for Project Two')
+    expect(gear.parentElement).toHaveClass('hidden', 'group-hover:flex', 'group-focus-within:flex')
+  })
+
+  it('shows one side only for a one-sided stat and nothing for a clean tree', () => {
+    useGitStatusStore.setState({
+      diffStats: { '/repo/one': { added: 2, removed: 0 }, '/repo/two': { added: 0, removed: 0 } }
+    })
+    renderWithRouter({ projects: gitProjects })
+
+    expect(
+      within(screen.getByTestId('project-item-1')).getByTestId('project-diff-stat')
+    ).toHaveTextContent(/^\+2$/)
+    expect(
+      within(screen.getByTestId('project-item-2')).queryByTestId('project-diff-stat')
+    ).not.toBeInTheDocument()
+  })
+
+  it('keeps the always-visible gear and chip on an active row with no stat', () => {
+    renderWithRouter({ projects: gitProjects, activeProjectId: '1' })
+
+    const gear = within(screen.getByTestId('project-item-1')).getByLabelText(
+      'Settings for Project One'
+    )
+    expect(gear.parentElement).toHaveClass('flex', 'opacity-100')
+    expect(gear.parentElement).not.toHaveClass('hidden')
+  })
+
+  it('watches each git project, refreshes right after, and unwatches on unmount', () => {
+    const { unmount } = renderWithRouter({ projects: gitProjects })
+
+    expect(watchDiffStat).toHaveBeenCalledTimes(2)
+    expect(watchDiffStat).toHaveBeenCalledWith('/repo/one')
+    expect(watchDiffStat).toHaveBeenCalledWith('/repo/two')
+    expect(refreshDiffStat).toHaveBeenCalledWith('/repo/one')
+    expect(refreshDiffStat).toHaveBeenCalledWith('/repo/two')
+    expect(watchDiffStat.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshDiffStat.mock.invocationCallOrder[0]
+    )
+
+    unmount()
+    expect(unwatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not watch a non-git project and shows no stat for it', () => {
+    useGitStatusStore.setState({ diffStats: { '/repo/plain': { added: 9, removed: 9 } } })
+    renderWithRouter({ projects: gitProjects })
+
+    expect(watchDiffStat).not.toHaveBeenCalledWith('/repo/plain')
+    expect(
+      within(screen.getByTestId('project-item-3')).queryByTestId('project-diff-stat')
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows nothing and keeps the row when the stat is missing (failed refresh)', () => {
+    renderWithRouter({ projects: gitProjects })
+
+    expect(screen.queryByTestId('project-diff-stat')).not.toBeInTheDocument()
+    expect(screen.getByText('Project One')).toBeInTheDocument()
+  })
+
+  it('does not run the worktree reconciler (the Rail container owns it)', async () => {
+    const reconciler = await import('@/lib/worktree-reconciler')
+    const spy = vi
+      .spyOn(reconciler, 'reconcileProjectWorktrees')
+      .mockResolvedValue(undefined as never)
+    try {
+      renderWithRouter({ projects: gitProjects })
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe('ProjectSidebar: Mono-style alignment and groups', () => {
+  const railProjects: Project[] = Array.from({ length: 10 }, (_, i) => ({
+    id: String(i + 1),
+    name: `Rail Project ${i + 1}`,
+    color: 'blue' as const,
+    path: `/repo/rail-${i + 1}`,
+    isGitRepo: false
+  }))
+  const group = (isCollapsed: boolean, ids = ['1', '2']) => ({
+    id: 'group-1',
+    name: 'My Folder',
+    projectIds: ids,
+    isCollapsed
+  })
+
+  beforeEach(() => {
+    useProjectStore.setState({ groups: [] })
+  })
+
+  it('has no project search in the Rail, however many projects there are', () => {
+    renderWithRouter({ projects: railProjects })
+    expect(screen.queryByTestId('project-search-input')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Search projects')).not.toBeInTheDocument()
+  })
+
+  it('puts project rows and their icons on the shared Rail column', () => {
+    renderWithRouter({ projects: railProjects.slice(0, 2) })
+
+    const row = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(row).toHaveClass('gap-2', 'px-2', 'rounded-lg')
+    const iconColumn = row.querySelector('[data-rail-icon-column]')
+    expect(iconColumn).toHaveClass('size-4', 'shrink-0')
+  })
+
+  it('shows the folder icon at rest and a chevron on hover or focus', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    expect(row).toHaveClass('group')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    // The group's folder icon stands for it, not a child project's icon.
+    expect(icon?.querySelector('svg[data-termul-icon="Folder"]')).toBeInTheDocument()
+    expect(icon?.querySelector('[data-project-color]')).toBeNull()
+    expect(icon).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
+    expect(chevron).toHaveClass(
+      'hidden',
+      'group-hover:inline-flex',
+      'group-focus-within:inline-flex'
+    )
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronRight"]')).toBeInTheDocument()
+    // The row is one button that toggles the group.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    // The shared inset must not override the right padding that keeps the label
+    // clear of the absolute-positioned actions button.
+    expect(within(row).getByRole('button', { name: 'My Folder' })).toHaveClass('px-2', 'pr-8')
+  })
+
+  it('shows a neutral folder icon for an empty group', () => {
+    useProjectStore.setState({ groups: [group(true, [])] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const icon = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('[data-rail-group-icon]')
+    expect(icon?.querySelector('svg[data-termul-icon="Folder"]')).toBeInTheDocument()
+  })
+
+  it('keeps the chevron-down visible when expanded and wraps the group in one surface', () => {
+    useProjectStore.setState({ groups: [group(false)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const row = screen.getByTestId('rail-group-row-group-1')
+    const icon = row.querySelector('[data-rail-group-icon]')
+    const chevron = row.querySelector('[data-rail-group-chevron]')
+    expect(icon).toHaveClass('hidden')
+    expect(icon).not.toHaveClass('group-hover:hidden')
+    expect(chevron).toHaveClass('inline-flex')
+    expect(chevron).not.toHaveClass('hidden')
+    expect(chevron?.querySelector('svg[data-termul-icon="ChevronDown"]')).toBeInTheDocument()
+
+    const container = screen.getByTestId('rail-group-group-1')
+    expect(container).toHaveClass('rounded-lg', 'bg-foreground/[0.03]')
+    // Children sit in the same icon column; the container gives the grouping, not indentation.
+    const groupList = container.querySelector('[data-group-container-id="group-1"]')
+    expect(groupList).not.toHaveClass('pl-4')
+    const childRow = within(screen.getByTestId('project-item-1')).getByRole('button', {
+      name: /Project: Rail Project 1/
+    })
+    expect(childRow).toHaveClass('gap-2', 'px-2')
+  })
+
+  it('has no container surface on a collapsed group', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    expect(screen.getByTestId('rail-group-group-1')).not.toHaveClass('bg-foreground/[0.03]')
+  })
+
+  it('toggles the group from the row button', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'My Folder' }))
+
+    expect(useProjectStore.getState().groups?.[0].isCollapsed).toBe(false)
+  })
+
+  it('reveals a Tab-reachable more button that opens the group menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const more = screen.getByRole('button', { name: 'Group actions for My Folder' })
+    expect(more).toHaveClass(
+      'opacity-0',
+      'group-hover:opacity-100',
+      'group-focus-within:opacity-100'
+    )
+    expect(more).not.toHaveAttribute('tabindex', '-1')
+
+    fireEvent.click(more)
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+    expect(screen.getByText('Delete Group (Keep Projects)')).toBeInTheDocument()
+  })
+
+  it('opens the same group menu on right-click', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.contextMenu(screen.getByText('My Folder'))
+
+    expect(screen.getByText('Rename Group')).toBeInTheDocument()
+  })
+
+  it('renames a group inline from the menu', () => {
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Group actions for My Folder' }))
+    fireEvent.click(screen.getByText('Rename Group'))
+    const input = screen.getByRole('textbox', { name: 'Rename group My Folder' })
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(useProjectStore.getState().groups?.[0].name).toBe('Renamed')
+  })
+
+  it('colours the folder icon with the group colour', () => {
+    useProjectStore.setState({ groups: [{ ...group(true), color: 'green' }] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    const folder = screen
+      .getByTestId('rail-group-row-group-1')
+      .querySelector('[data-rail-group-icon] svg[data-termul-icon="Folder"]')
+    expect(folder).toHaveClass('text-project-green')
+  })
+
+  describe('section headers', () => {
+    it('shows only the Projects header, with its + menu, when there is no group', () => {
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByText('Projects')).toBeInTheDocument()
+      expect(screen.queryByText('Groups')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('rail-section-groups')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'New group' })).not.toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    })
+
+    it('shows Groups and Projects headers once a group exists', () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByRole('heading', { name: 'Groups' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Projects' })).toBeInTheDocument()
+      // One Projects header: the sidebar's own steps aside.
+      expect(screen.getAllByText('Projects')).toHaveLength(1)
+      expect(screen.getByRole('button', { name: 'New group' })).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Add project or folder group' })).toHaveLength(1)
+    })
+
+    it('puts grouped projects under Groups and ungrouped ones under Projects', () => {
+      useProjectStore.setState({ groups: [group(false)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      const precedes = (a: Node, b: Node): boolean =>
+        Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+      const groupsHeader = screen.getByTestId('rail-section-groups')
+      const projectsHeader = screen.getByTestId('rail-section-projects')
+      const grouped = screen.getByTestId('grouped-projects-container')
+      const ungrouped = screen.getByTestId('ungrouped-projects-container')
+
+      expect(precedes(groupsHeader, grouped)).toBe(true)
+      expect(precedes(grouped, projectsHeader)).toBe(true)
+      expect(precedes(projectsHeader, ungrouped)).toBe(true)
+      expect(within(grouped).getByTestId('project-item-1')).toBeInTheDocument()
+      expect(within(grouped).getByTestId('project-item-2')).toBeInTheDocument()
+      expect(within(grouped).queryByTestId('project-item-3')).not.toBeInTheDocument()
+      expect(within(ungrouped).getByTestId('project-item-3')).toBeInTheDocument()
+    })
+
+    it('keeps the Projects header when every project is grouped', () => {
+      useProjectStore.setState({ groups: [group(false, ['1', '2', '3'])] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      expect(screen.getByTestId('rail-section-projects')).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'Add project or folder group' })
+      ).toBeInTheDocument()
+    })
+
+    it('opens the New group dialog from the Groups +', async () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      fireEvent.click(screen.getByRole('button', { name: 'New group' }))
+
+      expect(await screen.findByText('Create New Group')).toBeInTheDocument()
+    })
+
+    it('adds a project from the Projects +', async () => {
+      const onNewProject = vi.fn()
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3), onNewProject })
+
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Add project or folder group' }), {
+        key: 'Enter'
+      })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'New project' }))
+
+      expect(onNewProject).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps both header buttons Tab-reachable and the headers out of the tab order', () => {
+      useProjectStore.setState({ groups: [group(true)] })
+      renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+      for (const id of ['rail-section-groups', 'rail-section-projects']) {
+        const header = screen.getByTestId(id)
+        expect(header).not.toHaveAttribute('tabindex')
+        const button = within(header).getByRole('button')
+        expect(button).not.toHaveAttribute('tabindex', '-1')
+      }
+    })
   })
 })

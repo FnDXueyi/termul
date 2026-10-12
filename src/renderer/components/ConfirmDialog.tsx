@@ -1,7 +1,15 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { type KeyboardEvent, useCallback, useEffect } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useId } from 'react'
 import { AlertTriangle } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
+
+/**
+ * Prefix of the id each open `ConfirmDialog` registers on the overlay stack, so
+ * a caller can tell from the store that a confirm is (still) open
+ * (`lib/confirm-focus-return`).
+ */
+export const CONFIRM_DIALOG_OVERLAY_PREFIX = 'confirm-dialog:'
 
 interface ConfirmDialogProps {
   isOpen: boolean
@@ -33,6 +41,10 @@ export function ConfirmDialog({
   onConfirm,
   onCancel
 }: ConfirmDialogProps): React.JSX.Element {
+  // Mobile web shell: system back cancels this dialog (inert on desktop).
+  const overlayId = `${CONFIRM_DIALOG_OVERLAY_PREFIX}${useId()}`
+  useOverlayRegistration(overlayId, isOpen, onCancel, { mobileShellOnly: true })
+
   // Handle Escape key to close dialog
   useEffect(() => {
     if (!isOpen) return

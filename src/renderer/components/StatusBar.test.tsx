@@ -1,12 +1,14 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { openAgentChatInOwnProject } from '@/lib/open-agent-chat'
+import { normalizePath, type WorkingCopy } from '@/lib/working-copy'
 import { useAcpStore } from '@/stores/acp-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useContextBarSettingsStore } from '@/stores/context-bar-settings-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useGitStatusStore } from '@/stores/git-status-store'
 import type { Project } from '@/types/project'
-import { DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
+import { type ContextBarSettings, DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
 import { StatusBar } from './StatusBar'
 
 const { signalsRef } = vi.hoisted(() => ({
@@ -19,6 +21,39 @@ const { signalsRef } = vi.hoisted(() => ({
   }
 }))
 
+const {
+  wcRef,
+  updateProjectMock,
+  updateTerminalGitBranchMock,
+  refreshWorkingCopyMock,
+  pickerProps,
+  terminalRef
+} = vi.hoisted(() => ({
+  wcRef: { current: null as unknown },
+  updateProjectMock: vi.fn(),
+  updateTerminalGitBranchMock: vi.fn(),
+  refreshWorkingCopyMock: vi.fn(async () => {}),
+  pickerProps: { current: null as Record<string, unknown> | null },
+  terminalRef: { current: {} as Record<string, unknown> }
+}))
+
+vi.mock('@/hooks/use-active-working-copy', () => ({
+  useActiveWorkingCopy: () => wcRef.current
+}))
+
+// Keep the real picker but capture the props StatusBar hands it.
+vi.mock('@/components/GitBranchPicker', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/GitBranchPicker')>()
+  return {
+    GitBranchPicker: (props: Record<string, unknown>) => {
+      pickerProps.current = props
+      return actual.GitBranchPicker(props as never)
+    }
+  }
+})
+
+vi.mock('@/lib/open-agent-chat', () => ({ openAgentChatInOwnProject: vi.fn() }))
+
 vi.mock('@/hooks/use-agent-chat-attention', () => ({
   useAgentChatProjectSignals: () => signalsRef.current
 }))
@@ -27,6 +62,7 @@ vi.mock('@/hooks/use-agent-chat-attention', () => ({
 vi.mock('@/stores/terminal-store', () => ({
   useActiveTerminal: vi.fn(() => ({
     id: 'test-terminal',
+    projectId: 'test-project',
     cwd: '/home/user/project',
     gitBranch: 'feature-branch',
     gitStatus: {
@@ -35,12 +71,13 @@ vi.mock('@/stores/terminal-store', () => ({
       staged: 1,
       untracked: 3
     },
-    lastExitCode: 0
+    lastExitCode: 0,
+    ...terminalRef.current
   })),
   useTerminalStore: vi.fn((selector: (state: unknown) => unknown) =>
     selector({
       activeTerminalId: 'test-terminal',
-      updateTerminalGitBranch: vi.fn()
+      updateTerminalGitBranch: updateTerminalGitBranchMock
     })
   )
 }))
@@ -48,7 +85,7 @@ vi.mock('@/stores/terminal-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: vi.fn((selector: (state: unknown) => unknown) =>
     selector({
-      updateProject: vi.fn()
+      updateProject: updateProjectMock
     })
   )
 }))
@@ -94,7 +131,49 @@ const mockApi = {
   }
 }
 
+const WT_PATH = '/home/user/project'
+
+function resolvedWorktree(path = WT_PATH): WorkingCopy {
+  return { state: 'resolved', kind: 'worktree', key: normalizePath(path), path, worktreeId: 'w1' }
+}
+
+function seedGit(path: string, branch: string | null = 'feature-branch'): void {
+  const key = normalizePath(path)
+  useGitStatusStore.setState({
+    refreshWorkingCopy: refreshWorkingCopyMock,
+    commitContexts: {
+      [key]: {
+        branch,
+        hasUpstream: true,
+        ahead: 4,
+        behind: 5,
+        stagedCount: 1,
+        hasHead: true,
+        lastSubject: '',
+        lastBody: ''
+      }
+    },
+    statuses: {
+      [key]: [
+        { path: 'a.ts', status: 'modified', staged: false },
+        { path: 'b.ts', status: 'modified', staged: false },
+        { path: 'c.ts', status: 'added', staged: true },
+        { path: 'u1', status: 'untracked', staged: false },
+        { path: 'u2', status: 'untracked', staged: false },
+        { path: 'u3', status: 'untracked', staged: false }
+      ]
+    }
+  })
+}
+
 beforeEach(() => {
+  wcRef.current = resolvedWorktree()
+  seedGit(WT_PATH)
+  refreshWorkingCopyMock.mockClear()
+  updateProjectMock.mockClear()
+  updateTerminalGitBranchMock.mockClear()
+  pickerProps.current = null
+  terminalRef.current = {}
   vi.stubGlobal('api', mockApi)
   // Reset store to defaults before each test
   useContextBarSettingsStore.setState({
@@ -113,6 +192,17 @@ const mockProject: Project = {
   path: '/home/user/test-project',
   color: 'blue',
   gitBranch: 'main'
+}
+
+function showSettings(overrides: Partial<ContextBarSettings> = {}): void {
+  useContextBarSettingsStore.setState({
+    settings: {
+      ...DEFAULT_CONTEXT_BAR_SETTINGS,
+      showProjectName: true,
+      showGitStatus: true,
+      ...overrides
+    }
+  })
 }
 
 // Helper to render with required providers
@@ -140,6 +230,7 @@ describe('StatusBar', () => {
     })
 
     it('should render git status when showGitStatus is true and has changes', () => {
+      showSettings()
       renderWithProviders(<StatusBar project={mockProject} />)
 
       // Check for modified count (2)
@@ -147,9 +238,7 @@ describe('StatusBar', () => {
     })
 
     it('should not render git status when showGitStatus is false', () => {
-      useContextBarSettingsStore.setState({
-        settings: { ...DEFAULT_CONTEXT_BAR_SETTINGS, showGitStatus: false }
-      })
+      showSettings({ showGitStatus: false })
 
       renderWithProviders(<StatusBar project={mockProject} />)
 
@@ -189,9 +278,28 @@ describe('StatusBar', () => {
       expect(screen.queryByText('Exit 0')).toBeNull()
     })
 
+    it('hides project name and file counts by default but keeps branch, directory and exit code', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+
+      expect(screen.queryByText('test-project')).toBeNull()
+      expect(screen.queryByText('2')).toBeNull()
+      expect(screen.getByText('feature-branch')).toBeDefined()
+      expect(screen.getByText('~/project')).toBeDefined()
+      expect(screen.getByText('Exit 0')).toBeDefined()
+    })
+
+    it('shows the project name and file counts when switched on', () => {
+      showSettings()
+      renderWithProviders(<StatusBar project={mockProject} />)
+
+      expect(screen.getByText('test-project')).toBeDefined()
+      expect(screen.getByText('2')).toBeDefined()
+    })
+
     it('should hide all optional elements when all settings are false', () => {
       useContextBarSettingsStore.setState({
         settings: {
+          showProjectName: false,
           showGitBranch: false,
           showGitStatus: false,
           showWorkingDirectory: false,
@@ -201,11 +309,150 @@ describe('StatusBar', () => {
 
       renderWithProviders(<StatusBar project={mockProject} />)
 
-      // Only project name should be visible
-      expect(screen.getByText('test-project')).toBeDefined()
+      expect(screen.queryByText('test-project')).toBeNull()
       expect(screen.queryByText('feature-branch')).toBeNull()
       expect(screen.queryByText('~/project')).toBeNull()
       expect(screen.queryByText('Exit 0')).toBeNull()
+    })
+  })
+
+  describe('working copy (CAP-7)', () => {
+    beforeEach(() => {
+      showSettings()
+    })
+
+    const projectFolder = (): WorkingCopy => ({
+      state: 'resolved',
+      kind: 'project',
+      key: normalizePath(mockProject.path),
+      path: mockProject.path,
+      worktreeId: null
+    })
+
+    it('reads branch, ahead/behind and counts from the git cache of the working copy', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('feature-branch')).toBeDefined()
+      expect(pickerProps.current).toMatchObject({
+        repoPath: WT_PATH,
+        currentBranch: 'feature-branch',
+        ahead: 4,
+        behind: 5
+      })
+      // 2 modified, 1 staged, 3 untracked
+      expect(screen.getByText('2')).toBeDefined()
+      expect(screen.getByText('1')).toBeDefined()
+      expect(screen.getByText('3')).toBeDefined()
+    })
+
+    it('counts a file that is both staged and modified once per bucket', () => {
+      useGitStatusStore.setState({
+        statuses: {
+          [normalizePath(WT_PATH)]: [
+            { path: 'a.ts', status: 'modified', staged: true },
+            { path: 'a.ts', status: 'modified', staged: false }
+          ]
+        }
+      })
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getAllByText('1')).toHaveLength(2)
+      expect(screen.queryByText('2')).toBeNull()
+    })
+
+    it('tracks the working copy through refreshWorkingCopy', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(refreshWorkingCopyMock).toHaveBeenCalledWith(WT_PATH)
+    })
+
+    it('falls back to project.gitBranch only for the project folder', () => {
+      wcRef.current = projectFolder()
+      useGitStatusStore.setState({ commitContexts: {} })
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('main')).toBeDefined()
+    })
+
+    it('does not fall back to project.gitBranch for a worktree', () => {
+      useGitStatusStore.setState({ commitContexts: {} })
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.queryByText('main')).toBeNull()
+      expect(screen.getByText('detached')).toBeDefined()
+    })
+
+    it('shows no branch picker and no counts when the working copy is unresolved', () => {
+      wcRef.current = {
+        state: 'unresolved',
+        key: '/home/user/test-project/.termul/worktrees/gone',
+        path: '/home/user/test-project/.termul/worktrees/gone'
+      }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.queryByLabelText('Switch git branch')).toBeNull()
+      expect(screen.queryByText('feature-branch')).toBeNull()
+      expect(screen.queryByText('main')).toBeNull()
+      expect(screen.queryByText('2')).toBeNull()
+      expect(refreshWorkingCopyMock).not.toHaveBeenCalled()
+    })
+
+    it('shows the unresolved path instead of the project folder', () => {
+      wcRef.current = {
+        state: 'unresolved',
+        key: '/home/user/test-project/.termul/worktrees/gone',
+        path: '/home/user/test-project/.termul/worktrees/gone'
+      }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('~/test-project/.termul/worktrees/gone')).toBeDefined()
+      expect(screen.queryByText('~/test-project')).toBeNull()
+    })
+
+    it('keeps a detached HEAD instead of falling back to project.gitBranch', () => {
+      wcRef.current = projectFolder()
+      seedGit(mockProject.path, null)
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('detached')).toBeDefined()
+      expect(screen.queryByText('main')).toBeNull()
+    })
+
+    it('hides the branch picker for a non-git project folder', () => {
+      wcRef.current = projectFolder()
+      renderWithProviders(<StatusBar project={{ ...mockProject, isGitRepo: false }} />)
+      expect(screen.queryByLabelText('Switch git branch')).toBeNull()
+      expect(pickerProps.current).toBeNull()
+      expect(refreshWorkingCopyMock).not.toHaveBeenCalled()
+    })
+
+    it('shows the project path with no resolved working copy', () => {
+      wcRef.current = null
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByText('~/test-project')).toBeDefined()
+    })
+
+    it('refreshes the cache and leaves project.gitBranch alone after a worktree branch change', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+      refreshWorkingCopyMock.mockClear()
+      ;(pickerProps.current?.onBranchChanged as (branch: string) => void)('other')
+      expect(refreshWorkingCopyMock).toHaveBeenCalledWith(WT_PATH)
+      expect(updateProjectMock).not.toHaveBeenCalled()
+      expect(updateTerminalGitBranchMock).not.toHaveBeenCalled()
+    })
+
+    it('still records the branch on the project for a project-folder checkout', () => {
+      wcRef.current = projectFolder()
+      terminalRef.current = { cwd: mockProject.path }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      ;(pickerProps.current?.onBranchChanged as (branch: string) => void)('other')
+      expect(updateProjectMock).toHaveBeenCalledWith('test-project', { gitBranch: 'other' })
+      expect(updateTerminalGitBranchMock).toHaveBeenCalledWith('test-terminal', 'other')
+    })
+
+    it('does not touch a terminal outside the checked-out working copy or project', () => {
+      wcRef.current = projectFolder()
+      renderWithProviders(<StatusBar project={mockProject} />)
+      const change = pickerProps.current?.onBranchChanged as (branch: string) => void
+      // Terminal cwd (/home/user/project) is another folder than the working copy.
+      change('other')
+      expect(updateTerminalGitBranchMock).not.toHaveBeenCalled()
+      terminalRef.current = { cwd: mockProject.path, projectId: 'someone-else' }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      ;(pickerProps.current?.onBranchChanged as (branch: string) => void)('other')
+      expect(updateTerminalGitBranchMock).not.toHaveBeenCalled()
     })
   })
 
@@ -228,11 +475,13 @@ describe('StatusBar', () => {
     })
 
     it('carries the project colour in the glyph', () => {
+      showSettings()
       const { container } = renderWithProviders(<StatusBar project={mockProject} />)
       expect(container.querySelector('[data-project-color="blue"]')).not.toBeNull()
     })
 
     it('renders the project item as a static label (no hover wash)', () => {
+      showSettings()
       renderWithProviders(<StatusBar project={mockProject} />)
       const item = screen.getByText('test-project').parentElement
       expect(item?.className).toContain('cursor-default')
@@ -246,10 +495,11 @@ describe('StatusBar', () => {
     })
   })
 
-  describe('project name always visible', () => {
-    it('should always render project name regardless of settings', () => {
+  describe('project name visibility', () => {
+    it('renders the project name when showProjectName is on, whatever else is off', () => {
       useContextBarSettingsStore.setState({
         settings: {
+          showProjectName: true,
           showGitBranch: false,
           showGitStatus: false,
           showWorkingDirectory: false,
@@ -332,18 +582,24 @@ describe('StatusBar', () => {
           'session-1': { title: 'Fix login' } as never
         }
       })
-      const addAgentChatTab = vi.fn()
-      const prevAdd = useWorkspaceStore.getState().addAgentChatTab
-      useWorkspaceStore.setState({ addAgentChatTab })
-      try {
-        renderWithProviders(<StatusBar project={mockProject} />)
-        const pill = screen.getByRole('button', { name: 'Fix login needs you' })
-        expect(pill.className).toContain('bg-warning/10')
-        fireEvent.click(pill)
-        expect(addAgentChatTab).toHaveBeenCalledWith('session-1')
-      } finally {
-        useWorkspaceStore.setState({ addAgentChatTab: prevAdd })
-      }
+      renderWithProviders(<StatusBar project={mockProject} />)
+      const pill = screen.getByRole('button', { name: 'Fix login needs you' })
+      expect(pill.className).toContain('bg-warning/10')
+      fireEvent.click(pill)
+      // Opens in the chat's own project (switching when it is another one).
+      expect(openAgentChatInOwnProject).toHaveBeenCalledWith('session-1', 'StatusBar.NeedsYouPill')
+    })
+  })
+
+  describe('Terminal button', () => {
+    it('is shown for an open project', () => {
+      renderWithProviders(<StatusBar project={mockProject} />)
+      expect(screen.getByRole('button', { name: `Open terminal at ${WT_PATH}` })).toBeTruthy()
+    })
+
+    it('is absent without a project', () => {
+      renderWithProviders(<StatusBar project={undefined} />)
+      expect(screen.queryByRole('button', { name: /Open terminal at/ })).toBeNull()
     })
   })
 })

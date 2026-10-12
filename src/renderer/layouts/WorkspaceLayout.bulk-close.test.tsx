@@ -25,7 +25,6 @@ const {
   mockUnwatchDirectory,
   mockKeyboardOnShortcut,
   mockUpdatePanelVisibility,
-  mockWaitForPendingAppSettingsPersistence,
   mockWaitForPendingSessionIndexWrite,
   mockFlushSessionHistory,
   mockToastError,
@@ -95,6 +94,7 @@ const {
   },
   mockFileExplorerStoreState: {
     setRootPath: vi.fn(),
+    setWorktreeRoot: vi.fn(),
     setRootLoadError: vi.fn(),
     toggleVisibility: vi.fn()
   },
@@ -109,7 +109,6 @@ const {
   mockUnwatchDirectory: vi.fn(async () => ({ success: true })),
   mockKeyboardOnShortcut: vi.fn(() => vi.fn()),
   mockUpdatePanelVisibility: vi.fn(async () => undefined),
-  mockWaitForPendingAppSettingsPersistence: vi.fn(async () => undefined),
   mockWaitForPendingSessionIndexWrite: vi.fn(async () => undefined),
   mockFlushSessionHistory: vi.fn(async () => undefined),
   mockToastError: vi.fn(),
@@ -130,6 +129,10 @@ vi.mock('@/stores/connection-status-store', async (importOriginal) => {
   const actual = await importOriginal<typeof connectionStatusStoreModule>()
   return { ...actual, wireConnectionStatusTracking: mockWireConnectionStatusTracking }
 })
+
+// The shell resolves its working copy through the (heavily mocked) stores;
+// these suites exercise layout behaviour, so resolve to the project folder.
+vi.mock('@/hooks/use-active-working-copy', () => ({ useActiveWorkingCopy: () => null }))
 
 vi.mock('@/stores/project-store', () => ({
   useProjectsLoaded: () => true,
@@ -199,6 +202,10 @@ vi.mock('@/stores/browser-session-store', () => ({
   )
 }))
 
+// The shell unread tracker reads the real pane tree and acp store; this suite
+// mocks the workspace store wholesale and does not exercise it.
+vi.mock('@/hooks/use-shell-unread-tracker', () => ({ useShellUnreadTracker: () => {} }))
+
 vi.mock('@/stores/workspace-store', () => {
   const useWorkspaceStore = (selector?: (s: typeof mockWorkspaceStoreState) => unknown) =>
     selector ? selector(mockWorkspaceStoreState) : mockWorkspaceStoreState
@@ -244,6 +251,8 @@ vi.mock('@/stores/keyboard-shortcuts-store', () => ({
 }))
 
 vi.mock('@/stores/app-settings-store', () => ({
+  useAppSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({ settings: { shellLayout: 'classic' }, isLoaded: true }),
   useTerminalFontSize: () => 14,
   useUiZoomLevel: () => 1,
   useDefaultShell: () => 'bash',
@@ -276,8 +285,7 @@ vi.mock('@/hooks/use-command-history', () => ({
 vi.mock('@/hooks/use-app-settings', () => ({
   useUpdateAppSetting: () => vi.fn(),
   useUpdateAppSettings: () => vi.fn(),
-  useUpdatePanelVisibility: () => mockUpdatePanelVisibility,
-  waitForPendingAppSettingsPersistence: mockWaitForPendingAppSettingsPersistence
+  useUpdatePanelVisibility: () => mockUpdatePanelVisibility
 }))
 
 vi.mock('@/lib/acp-history-persistence', () => ({
@@ -308,8 +316,21 @@ vi.mock('@/components/workspace/WorkspaceConflictBanner', () => ({
   WorkspaceConflictBanner: () => <div data-testid="workspace-conflict-banner" />
 }))
 
-vi.mock('@/components/ProjectSidebar', () => ({
-  ProjectSidebar: () => <div data-testid="project-sidebar" />
+// The desktop frame is stubbed to its two slots: these suites exercise the
+// close flows wired in WorkspaceLayout, not the Rail / Side panel chrome.
+vi.mock('@/components/shell/ShellFrame', () => ({
+  ShellFrame: ({
+    workspaceMain,
+    appModals
+  }: {
+    workspaceMain: React.ReactNode
+    appModals: React.ReactNode
+  }) => (
+    <div data-testid="shell-frame">
+      {workspaceMain}
+      {appModals}
+    </div>
+  )
 }))
 
 vi.mock('@/components/workspace/PaneRenderer', () => ({
@@ -322,20 +343,8 @@ vi.mock('@/components/workspace/PaneRenderer', () => ({
   }
 }))
 
-vi.mock('@/components/file-explorer/FileExplorer', () => ({
-  FileExplorer: () => <div data-testid="file-explorer" />
-}))
-
 vi.mock('@/components/StatusBar', () => ({
   StatusBar: () => <div data-testid="status-bar" />
-}))
-
-vi.mock('@/components/TitleBar', () => ({
-  TitleBar: () => <div data-testid="title-bar" />
-}))
-
-vi.mock('@/components/ActivityRail', () => ({
-  ActivityRail: () => <div data-testid="activity-rail" />
 }))
 
 vi.mock('@/components/NewProjectModal', () => ({
@@ -535,7 +544,6 @@ describe('WorkspaceLayout aggregate bulk close', () => {
     mockTerminalKill.mockResolvedValue({ success: true })
     mockFlushPendingWrites.mockResolvedValue({ success: true, data: undefined })
     mockUpdatePanelVisibility.mockResolvedValue(undefined)
-    mockWaitForPendingAppSettingsPersistence.mockResolvedValue(undefined)
     mockWaitForPendingSessionIndexWrite.mockResolvedValue(undefined)
     mockFlushSessionHistory.mockResolvedValue(undefined)
     mockCloseRequested.mockImplementation(() => vi.fn())

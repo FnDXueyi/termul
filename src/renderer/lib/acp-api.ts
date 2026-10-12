@@ -48,7 +48,31 @@ export type StopReason =
   | 'refusal'
   | 'cancelled'
   | 'interrupted'
+  // Host-written terminators for a failed turn (AD-5): RPC error, idle/hard
+  // timeout, agent exit. Always accompanied by an `agent_error` / crash event.
+  | 'error'
+  | 'timeout'
+  | 'crashed'
   | string
+
+/**
+ * Non-terminal reply to a same-`turnId` prompt resend (AD-5/AD-6): the host
+ * already holds that turn. `in_progress` = still running (the stop reason
+ * arrives as `prompt_complete`); `accepted` = already finished (the terminator
+ * is on the session log/replay). A receipt resolves the COMMAND, never ends the
+ * turn view.
+ */
+export interface PromptReceipt {
+  receipt: 'in_progress' | 'accepted'
+}
+
+/** `send_prompt` / `acp_send_prompt` result: a stop reason or a receipt. */
+export type PromptDispatchResult = StopReason | PromptReceipt
+
+export function isPromptReceipt(value: unknown): value is PromptReceipt {
+  if (typeof value !== 'object' || value === null || !('receipt' in value)) return false
+  return value.receipt === 'in_progress' || value.receipt === 'accepted'
+}
 
 export interface SessionMode {
   id: string
@@ -161,6 +185,13 @@ export interface ToolCall {
   timestamp?: number
   /** Monotonic arrival sequence (stamped in the store) for timeline ordering. */
   seq?: number
+  /** Host-computed `+N −N` line counts from the durable file-change summary.
+   * Present on restored/recovered calls whose diff `content` is not persisted;
+   * live calls derive counts from `content` instead. */
+  diffStat?: { added: number; removed: number }
+  /** True for a restored durable file-change summary (payload `toolCalls`):
+   * feeds the Changed files panel but never renders as a timeline card. */
+  restoredSummary?: boolean
   [k: string]: unknown
 }
 
@@ -173,6 +204,8 @@ export interface ToolCallUpdate {
   locations?: ToolCallLocation[]
   rawInput?: unknown
   rawOutput?: unknown
+  /** See {@link ToolCall.diffStat} — carried by durable recovery records. */
+  diffStat?: { added: number; removed: number }
   [k: string]: unknown
 }
 
@@ -519,6 +552,11 @@ export interface AgentErrorEvent {
   agentId: AgentId
   sessionId?: SessionId | null
   message: string
+  /** gh-821: JSON-RPC error code when the failure was an agent RPC error.
+   * Absent for non-RPC failures (timeouts, flush failures) and older hosts. */
+  code?: number
+  /** gh-821: JSON-RPC error `data` (structured; also folded into `message`). */
+  data?: unknown
 }
 /** Story 1.9 FR26: the agent subprocess crashed mid-turn (a typed event
  * distinct from `agent_error` (non-fatal) + `agent_disconnected` (always)).
@@ -527,6 +565,30 @@ export interface AgentCrashedEvent {
   agentId: AgentId
   sessionId?: SessionId | null
   message: string
+  /** gh-821: JSON-RPC code of the connection-ending error, when it was one. */
+  code?: number
+  /** gh-821: JSON-RPC `data` of the connection-ending error, when present. */
+  data?: unknown
+}
+
+/** gh-821: structured JSON-RPC detail of an `agent_error` / `agent_crashed`. */
+export interface AcpErrorDetail {
+  code?: number
+  data?: unknown
+}
+
+/**
+ * Tolerantly extract the JSON-RPC `code` / `data` from an `agent_error` or
+ * `agent_crashed` payload. Old payloads (`{ agentId, message }`) yield `{}`; a
+ * non-integer `code` is ignored; `data` passes through verbatim when present.
+ */
+export function parseAcpErrorDetail(payload: unknown): AcpErrorDetail {
+  if (typeof payload !== 'object' || payload === null) return {}
+  const { code, data } = payload as { code?: unknown; data?: unknown }
+  const detail: AcpErrorDetail = {}
+  if (typeof code === 'number' && Number.isInteger(code)) detail.code = code
+  if (data !== undefined && data !== null) detail.data = data
+  return detail
 }
 export interface AgentDisconnectedEvent {
   agentId: AgentId
@@ -535,11 +597,30 @@ export interface SessionClosedEvent {
   agentId: AgentId
   sessionId: SessionId
 }
+/** OpenCode 2 compaction marker from `session_info_update` `_meta`. */
+export interface OpenCodeCompactionNotice {
+  status: 'started' | 'completed' | 'failed'
+  messageId?: string
+  reason?: string
+  errorMessage?: string
+}
+
+/** OpenCode 2 retry marker from `session_info_update` `_meta`. */
+export interface OpenCodeRetryNotice {
+  attempt: number
+  nextRetryAt?: string
+  errorMessage?: string
+}
+
 export interface SessionInfoUpdateEvent {
   agentId: AgentId
   sessionId: SessionId
   /** Agent-provided title; `null` when explicitly cleared, `undefined` when absent. */
   title?: string | null
+  /** Present when OpenCode reported compaction. `completed` clears the line. */
+  compaction?: OpenCodeCompactionNotice
+  /** Present to set a retry line. `null` clears it. Absent means no change. */
+  retry?: OpenCodeRetryNotice | null
 }
 
 /**
@@ -949,7 +1030,7 @@ export async function acpSendPrompt(
   text: string,
   turnId?: string,
   displayContent?: ContentBlock[]
-): Promise<StopReason> {
+): Promise<PromptDispatchResult> {
   return getAcpTransport().sendPrompt(agentId, sessionId, text, turnId, displayContent)
 }
 
@@ -959,7 +1040,7 @@ export async function acpSendPromptBlocks(
   content: ContentBlock[],
   turnId?: string,
   displayContent?: ContentBlock[]
-): Promise<StopReason> {
+): Promise<PromptDispatchResult> {
   return getAcpTransport().sendPromptBlocks(agentId, sessionId, content, turnId, displayContent)
 }
 

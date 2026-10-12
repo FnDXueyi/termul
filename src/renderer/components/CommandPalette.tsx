@@ -295,7 +295,7 @@ export function CommandPalette({
           ]
         : []),
       // No shortcut menu is mounted on the mobile web shell (it lives in the
-      // desktop ActivityRail only), so the command is hidden there as
+      // desktop Rail footer only), so the command is hidden there as
       // open-canvas is. Pinned and Recent derive from this list.
       ...(onOpenShortcutMenu && !isMobile
         ? [

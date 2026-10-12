@@ -2,7 +2,7 @@ import { act, render, waitFor } from '@testing-library/react'
 import type { Editor } from '@tiptap/core'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { displayOffsetToDocOffset, SKILL_PAD_DEFAULT } from '@/lib/composer/doc-to-prompt'
-import { skillToken } from '@/lib/skill-tokens'
+import { fileToken, skillToken } from '@/lib/skill-tokens'
 import { ChatComposerEditor } from '../ChatComposerEditor'
 import { getComposerValue, setComposerValue } from '../chat-composer-test-helpers'
 
@@ -191,6 +191,65 @@ describe('ChatComposerEditor keymap ordering (patch 13)', () => {
     // No new paragraph was inserted (StarterKit's splitBlock did NOT run) —
     // the doc still has exactly one paragraph.
     expect(editor.state.doc.content.childCount).toBe(1)
+  })
+})
+
+describe('ChatComposerEditor Escape contract (mobile back stack L-32)', () => {
+  // The AgentLauncher overlay wrapper in `PaneContent` hides the launcher only
+  // for an Esc that is not `defaultPrevented`. A host that consumes Esc through
+  // `onBeforeEditorKeyDown` (the slash/mention menu close, Escape→hide) does not
+  // call `preventDefault()` itself: ProseMirror does it when `handleKeyDown`
+  // returns true. That is the signal the wrapper relies on to leave a
+  // menu-consumed Esc alone, and no other test mounts the real composer.
+  it('marks an Escape the host consumed as defaultPrevented without the host preventing it', async () => {
+    const hostSawPrevented = vi.fn()
+    const { getByEditor } = mountEditor({
+      onBeforeEditorKeyDown: (event) => {
+        if (event.key !== 'Escape') return false
+        hostSawPrevented(event.defaultPrevented)
+        return true
+      }
+    })
+    await waitFor(() => expect(getByEditor()).toBeTruthy())
+
+    const escapeKey = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true
+    })
+    act(() => {
+      getByEditor().view.dom.dispatchEvent(escapeKey)
+    })
+
+    expect(hostSawPrevented).toHaveBeenCalledTimes(1)
+    expect(hostSawPrevented).toHaveBeenCalledWith(false)
+    expect(escapeKey.defaultPrevented).toBe(true)
+  })
+})
+
+describe('file pill icon (gh-896)', () => {
+  it('renders a Folder icon for a folder token (trailing-slash absPath) and not File', async () => {
+    const { getByEditor } = mountEditor()
+    await waitFor(() => expect(getByEditor()).toBeTruthy())
+
+    setComposerValue(`see ${fileToken('src/x/', '/work/src/x/')} `)
+
+    await waitFor(() => expect(document.querySelector('[data-file-pill="true"]')).toBeTruthy())
+    const pill = document.querySelector('[data-file-pill="true"]') as HTMLElement
+    expect(pill.querySelector('svg[data-termul-icon="Folder"]')).not.toBeNull()
+    expect(pill.querySelector('svg[data-termul-icon="File"]')).toBeNull()
+  })
+
+  it('still renders the File icon for a file token', async () => {
+    const { getByEditor } = mountEditor()
+    await waitFor(() => expect(getByEditor()).toBeTruthy())
+
+    setComposerValue(`see ${fileToken('a.ts', '/work/src/a.ts')} `)
+
+    await waitFor(() => expect(document.querySelector('[data-file-pill="true"]')).toBeTruthy())
+    const pill = document.querySelector('[data-file-pill="true"]') as HTMLElement
+    expect(pill.querySelector('svg[data-termul-icon="File"]')).not.toBeNull()
+    expect(pill.querySelector('svg[data-termul-icon="Folder"]')).toBeNull()
   })
 })
 

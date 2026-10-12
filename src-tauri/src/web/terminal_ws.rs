@@ -1,19 +1,21 @@
 //! Dedicated interactive terminal websocket.
 //!
-//! This endpoint intentionally stays separate from the ACP relay. When the
+//! This endpoint intentionally stays separate from the ACP relay. A fresh
+//! connection is never implicitly authed: it must send
+//! `authenticate{protocolVersion, deviceId, clientInstanceId, token?}` before
+//! any other request, gated or not. The version/identity checks run first
+//! (`PROTOCOL_VERSION_MISMATCH` / `INVALID_CLIENT_IDENTITY`); then, when the
 //! server runs with the web auth gate (`AppState.web_auth = Some` — public
-//! bind or explicit token, see `web::auth::resolve`), a fresh connection must
-//! send `authenticate{token}` before any other request; every pre-auth op is
-//! refused with the single generic `UNAUTHORIZED` and spawns no PTY. An
-//! ungated server treats `authenticate` as a no-op success (new-client /
-//! old-server tolerance) and admits all operations, exactly as before the
-//! gate existed. Beyond the connection gate, all operations are
+//! bind or explicit token, see `web::auth::resolve`), the token must match.
+//! Every pre-auth op is refused with the single generic `UNAUTHORIZED` and
+//! spawns no PTY; an ungated server accepts any token once the handshake
+//! checks pass. Beyond the connection gate, all operations are
 //! project-scoped: a connection may only interact with terminals whose
 //! `project_id` it has been authorized for via spawn or explicit attach.
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -25,8 +27,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::pty::manager::SpawnOptions;
-use crate::web::ws::AppState;
+use crate::pty::manager::{PtyManager, SpawnOptions};
+use crate::web::ws::{validate_authenticate_handshake, AppState, ClientIdentity};
 
 const MAX_RECONNECT_FRAMES: usize = 64;
 /// #851: sequential per-connection id source for the size-owner marker.
@@ -69,12 +71,12 @@ async fn run(socket: WebSocket, state: AppState) {
     // logs. Never exposed to the peer.
     let client_id = format!("termconn-{}", NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed));
     // Per-terminal output forwarding tasks.
-    let attachments: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let attachments: HashMap<String, Attachment> = HashMap::new();
 
     if state.web_auth.is_some() {
-        info!("[terminal-ws] client connected (web auth gate ON — authenticate required)");
+        info!("[terminal-ws] client connected (web auth gate ON — token + handshake required)");
     } else {
-        info!("[terminal-ws] client connected (ungated)");
+        info!("[terminal-ws] client connected (ungated — handshake required)");
     }
 
     let event_tx = tx.clone();
@@ -110,8 +112,10 @@ async fn run(socket: WebSocket, state: AppState) {
     let mut ctx = ConnectionContext {
         authorized: authorized.clone(),
         attachments,
-        // The connection starts authed exactly when the server is ungated.
-        authed: state.web_auth.is_none(),
+        // Every connection starts un-authed, gated or not; only a valid
+        // `authenticate` handshake flips it.
+        authed: false,
+        identity: None,
         // #851: opaque per-connection id for the size-owner marker.
         client_id,
     };
@@ -145,16 +149,7 @@ async fn run(socket: WebSocket, state: AppState) {
 
     // Cleanup: abort all output forwarding tasks. PTYs are preserved.
     event_task.abort();
-    for (attached_id, task) in ctx.attachments.iter() {
-        task.abort();
-        // Aborted forwarder tasks never reach their release path — release
-        // the live-attachment accounting here so a later `list_preserved`
-        // can reissue claims for this connection's terminals (CodeRabbit:
-        // preserve live attachments when reissuing claims).
-        if let Some(instance) = state.pty.get(attached_id) {
-            instance.remove_web_attachment();
-        }
-    }
+    ctx.release_all(&state);
     info!(
         "[terminal-ws] client disconnected; {} PTY(s) preserved",
         ctx.authorized.read().len()
@@ -163,15 +158,72 @@ async fn run(socket: WebSocket, state: AppState) {
     let _ = write_task.await;
 }
 
+/// A live output-forwarding attachment: the forwarder task plus the one-shot
+/// release of its `web_attachments` count. Every path that ends an attachment
+/// (forwarder exit, re-attach replacement, detach/rotate/revoke, connection
+/// cleanup) goes through [`AttachmentRelease::release`], so the count is
+/// decremented exactly once per attach — never twice for a forwarder that
+/// self-released before cleanup ran, and never for another viewer's attach.
+struct Attachment {
+    task: tokio::task::JoinHandle<()>,
+    release: AttachmentRelease,
+}
+
+impl Attachment {
+    /// Abort the forwarder and release its attachment count (idempotent).
+    fn end(self, pty: &PtyManager, terminal_id: &str) {
+        self.task.abort();
+        self.release.release(pty, terminal_id);
+    }
+}
+
+/// Exactly-once release flag shared between an [`Attachment`] and its
+/// forwarder task.
+#[derive(Clone, Default)]
+struct AttachmentRelease(Arc<AtomicBool>);
+
+impl AttachmentRelease {
+    fn release(&self, pty: &PtyManager, terminal_id: &str) {
+        if !self.0.swap(true, Ordering::AcqRel) {
+            if let Some(instance) = pty.get(terminal_id) {
+                instance.remove_web_attachment();
+            }
+        }
+    }
+}
+
+/// Owns a freshly taken `web_attachments` count between `add_web_attachment`
+/// and the moment the forwarder's [`Attachment`] is registered. Dropping it
+/// while still armed (early error return, failed replay send, or the
+/// connection task being cancelled mid-`await`) releases the count through the
+/// shared exactly-once [`AttachmentRelease`].
+struct PendingAttachCount {
+    release: AttachmentRelease,
+    pty: Arc<PtyManager>,
+    terminal_id: String,
+    armed: bool,
+}
+
+impl Drop for PendingAttachCount {
+    fn drop(&mut self) {
+        if self.armed {
+            self.release.release(&self.pty, &self.terminal_id);
+        }
+    }
+}
+
 struct ConnectionContext {
     /// Terminal IDs this connection is authorized to operate on.
     authorized: Arc<RwLock<HashSet<String>>>,
-    /// Per-terminal output forwarding tasks (terminal_id -> task).
-    attachments: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// Whether this connection has passed the web auth gate (`authenticate`
-    /// request). Initialized to `true` on ungated servers so legacy behavior
-    /// is byte-identical; a gated server starts every connection un-authed.
+    /// Per-terminal output forwarding attachments (terminal_id -> attachment).
+    attachments: HashMap<String, Attachment>,
+    /// Whether this connection has completed a valid `authenticate`
+    /// handshake. Every connection starts un-authed, gated or not; only a
+    /// valid `authenticate` flips it.
     authed: bool,
+    /// Identity validated by the `authenticate` handshake (AD-4), kept
+    /// exactly as received.
+    identity: Option<ClientIdentity>,
     /// #851: opaque per-connection id (see `NEXT_CONNECTION_ID`) used for
     /// the single-size-owner marker on write/resize.
     client_id: String,
@@ -212,17 +264,23 @@ impl ConnectionContext {
     }
 
     fn detach(&mut self, terminal_id: &str, state: &AppState) {
-        if let Some(task) = self.attachments.remove(terminal_id) {
-            task.abort();
-            // The aborted forwarder never reaches its release path —
-            // release the live-attachment accounting here (rotate/revoke
-            // tear-down path; the claim is already invalid, but accounting
-            // must stay balanced for `list_preserved` skip decisions).
-            if let Some(instance) = state.pty.get(terminal_id) {
-                instance.remove_web_attachment();
-            }
+        // The aborted forwarder never reaches its own release path — end()
+        // releases the live-attachment accounting (rotate/revoke tear-down;
+        // the claim is already invalid, but accounting must stay balanced
+        // for `list_preserved` skip decisions).
+        if let Some(attachment) = self.attachments.remove(terminal_id) {
+            attachment.end(&state.pty, terminal_id);
         }
         self.authorized.write().remove(terminal_id);
+    }
+
+    /// Connection teardown: end every attachment, releasing each exactly once
+    /// so a later `list_preserved` can reissue claims for this connection's
+    /// terminals (CodeRabbit: preserve live attachments when reissuing claims).
+    fn release_all(&mut self, state: &AppState) {
+        for (terminal_id, attachment) in self.attachments.drain() {
+            attachment.end(&state.pty, &terminal_id);
+        }
     }
 }
 
@@ -235,28 +293,44 @@ async fn handle(
     match connection_gate(ctx.authed, request.type_.as_str()) {
         ConnectionGate::Refuse => Err(("UNAUTHORIZED", "Unauthorized".to_string())),
         ConnectionGate::Authenticate => {
-            match state.web_auth.as_ref() {
-                // Gated + not yet authed: validate the presented token
-                // (constant-time). A wrong or absent token refuses with the
-                // single generic UNAUTHORIZED and leaves the connection
-                // un-authed (retry allowed) — the same collapse the terminal
-                // claim/attach paths use.
-                Some(gate) if !ctx.authed => {
-                    let presented = request.payload["token"].as_str().unwrap_or("");
-                    if gate.accepts(presented) {
-                        ctx.authed = true;
-                        info!("[terminal-ws] connection authenticated");
-                        Ok(json!({}))
-                    } else {
-                        warn!("[terminal-ws] authenticate rejected (bad token)");
-                        Err(("UNAUTHORIZED", "Unauthorized".to_string()))
-                    }
-                }
-                // Ungated server or already-authed connection: no-op success
-                // so new clients stay compatible with pre-gate servers
-                // (and re-auth is idempotent).
-                _ => Ok(json!({})),
+            // Already authed: idempotent success, no re-validation.
+            if ctx.authed {
+                return Ok(json!({}));
             }
+            // Handshake checks run FIRST (gated and ungated alike) so a stale
+            // tab learns it must reload even when its token is also wrong.
+            let identity = validate_authenticate_handshake(&request.payload).map_err(|refusal| {
+                warn!(
+                    "[terminal-ws] authenticate rejected id={} check={} code={}",
+                    request.id,
+                    refusal.check,
+                    refusal.terminal_code()
+                );
+                (refusal.terminal_code(), refusal.message)
+            })?;
+            // Gated: validate the presented token (constant-time). A wrong
+            // or absent token refuses with the single generic UNAUTHORIZED
+            // and leaves the connection un-authed (retry allowed) — the same
+            // collapse the terminal claim/attach paths use. Ungated servers
+            // admit any token once the handshake checks pass.
+            if let Some(gate) = state.web_auth.as_ref() {
+                let presented = request.payload["token"].as_str().unwrap_or("");
+                if !gate.accepts(presented) {
+                    warn!(
+                        "[terminal-ws] authenticate rejected id={} (bad token)",
+                        request.id
+                    );
+                    return Err(("UNAUTHORIZED", "Unauthorized".to_string()));
+                }
+            }
+            ctx.authed = true;
+            let identity = ctx.identity.insert(identity);
+            info!(
+                "[terminal-ws] connection authenticated device_id={} client_instance_id={}",
+                ClientIdentity::log_label(&identity.device_id),
+                ClientIdentity::log_label(&identity.client_instance_id)
+            );
+            Ok(json!({}))
         }
         ConnectionGate::Allow => match request.type_.as_str() {
             "spawn" => {
@@ -405,7 +479,27 @@ async fn handle(
                 // one's credential. The forwarder task below releases on exit.
                 // #851b: an attach IS a web listing — stamp it so the
                 // web-listed reaper window restarts for this terminal.
+                // A re-attach on this connection replaces its previous
+                // attachment. Count the new one BEFORE ending the old one so
+                // the count never touches zero mid-swap (a zero would let
+                // another connection's `list_preserved` reissue the claim and
+                // invalidate the generation this new forwarder holds).
                 instance.add_web_attachment();
+                // The count taken above is owned by this guard until the
+                // forwarder's `Attachment` is registered: an early return, a
+                // failed reply send, or this connection task being cancelled
+                // at the replay `.await` below drops it and releases the
+                // count — it can never leak a live attachment.
+                let release = AttachmentRelease::default();
+                let mut pending = PendingAttachCount {
+                    release: release.clone(),
+                    pty: state.pty.clone(),
+                    terminal_id: terminal_id.clone(),
+                    armed: true,
+                };
+                if let Some(previous) = ctx.attachments.remove(&terminal_id) {
+                    previous.end(&state.pty, &terminal_id);
+                }
                 instance.mark_web_listed();
                 // Sequenced replay: only unseen chunks, with gap detection.
                 let replay = instance.subscribe_from(last_seq);
@@ -423,6 +517,13 @@ async fn handle(
                         })
                     })
                     .collect();
+                // NOTE: the previous attachment is ended BEFORE this send, on
+                // purpose. Ending it after would leave the old forwarder
+                // streaming into the same socket while the new one is
+                // subscribed, delivering the chunks between the replay
+                // snapshot and the swap twice. A failed send here means this
+                // connection's outbound channel is closed (socket gone), so
+                // keeping the old attachment alive would protect nothing.
                 send_json(
                     tx,
                     json!({
@@ -437,13 +538,10 @@ async fn handle(
                 .await
                 .map_err(|e| ("NETWORK_ERROR", e))?;
 
-                // Replace prior attachment task if any.
-                if let Some(previous) = ctx.attachments.remove(&terminal_id) {
-                    previous.abort();
-                }
                 let output_tx = tx.clone();
                 let attached_id = terminal_id.clone();
                 let pty = state.pty.clone();
+                let task_release = release.clone();
                 let task = tokio::spawn(async move {
                     let mut receiver = replay.receiver;
                     let mut current_seq = replay.latest_seq;
@@ -502,11 +600,13 @@ async fn handle(
                     // Release this connection's live-attachment accounting so a
                     // later `list_preserved` may reissue the claim (CodeRabbit:
                     // preserve live attachments when reissuing claims).
-                    if let Some(instance) = pty.get(&attached_id) {
-                        instance.remove_web_attachment();
-                    }
+                    task_release.release(&pty, &attached_id);
                 });
-                ctx.attachments.insert(terminal_id.clone(), task);
+                ctx.attachments
+                    .insert(terminal_id.clone(), Attachment { task, release });
+                // Registered: the attachment (and the forwarder's own release)
+                // owns the count from here.
+                pending.armed = false;
                 // Shared attach result — byte-identical camelCase shape to the
                 // desktop `terminal_attach` response (no claim key, ever).
                 serde_json::to_value(attach_result).map_err(|e| ("NETWORK_ERROR", e.to_string()))

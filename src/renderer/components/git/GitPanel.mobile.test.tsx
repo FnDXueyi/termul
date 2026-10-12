@@ -102,6 +102,11 @@ vi.mock('@/hooks/use-mobile-web-shell', () => ({
 
 import { GitPanel } from './GitPanel'
 
+// Write controls are gated on a read-only server; these tests cover the admitted path.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
 function resetState() {
   vi.clearAllMocks()
   mobileRef.current = true
@@ -144,6 +149,26 @@ describe('GitPanel mobile branch', () => {
     expect(screen.queryByTestId('git-diff-view')).not.toBeInTheDocument()
     // Mobile file list is full-width, not the desktop `w-80` sidebar.
     expect(container.querySelector('.w-80')).toBeNull()
+  })
+
+  it('keeps the filter field at 16px on a coarse pointer so iOS does not zoom', () => {
+    render(<GitPanel cwd="/work" isVisible />)
+
+    expect(screen.getByPlaceholderText('Filter changes')).toHaveClass('pointer-coarse:text-base')
+  })
+
+  it('reserves the sheet close target on the right of both header rows', () => {
+    // The sheet close box is absolute at the top right (44px on coarse pointers),
+    // so the header rows must keep clear of it; without pr-14 it covers the
+    // Stash changes button.
+    const { unmount } = render(<GitPanel cwd="/work" isVisible />)
+    const stash = screen.getByTitle('Stash changes')
+    expect(stash.closest('.pr-14')).not.toBeNull()
+    unmount()
+
+    gitState.selectedFile = 'a.ts'
+    render(<GitPanel cwd="/work" isVisible />)
+    expect(screen.getByLabelText('Back to file list').closest('.pr-14')).not.toBeNull()
   })
 
   it('swaps to the diff view with a back button when a file is selected', () => {
@@ -316,7 +341,11 @@ describe('GitPanel desktop branch (regression — byte-identical layout)', () =>
     // Desktop keeps the `w-80` file-list sidebar AND the diff view side-by-side.
     expect(container.querySelector('.w-80')).not.toBeNull()
     expect(screen.getByTestId('git-diff-view')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('Filter changes')).toBeInTheDocument()
+    // The desktop twin keeps its 12px size for a fine pointer and still takes the coarse token.
+    expect(screen.getByPlaceholderText('Filter changes')).toHaveClass(
+      'text-xs',
+      'pointer-coarse:text-base'
+    )
     // Desktop never renders the mobile back button.
     expect(screen.queryByLabelText('Back to file list')).not.toBeInTheDocument()
   })

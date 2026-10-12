@@ -9,6 +9,7 @@ import {
   LAUNCHER_EXIT_REDUCED_MS,
   LAUNCHER_EXIT_WINDOW_MS
 } from '@/components/agents/launcher/launcher-motion'
+import { usePaneTopRow } from '@/components/shell/top-row-context'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
@@ -39,6 +40,7 @@ const ConnectedTerminal = lazy(() =>
 const EditorPanel = lazy(() =>
   import('@/components/editor/EditorPanel').then((m) => ({ default: m.EditorPanel }))
 )
+const DiffTab = lazy(() => import('@/components/git/DiffTab').then((m) => ({ default: m.DiffTab })))
 const GitHistoryPanel = lazy(() =>
   import('@/components/git/GitHistoryPanel').then((m) => ({ default: m.GitHistoryPanel }))
 )
@@ -99,6 +101,9 @@ export function PaneContent({
       setActivePane: state.setActivePane
     }))
   )
+
+  // Flagged shell only: this pane's part of the window top row (null otherwise).
+  const topRow = usePaneTopRow(pane.id)
 
   const hasMultiplePanes = useWorkspaceStore((state) => getAllLeafPanes(state.root).length > 1)
 
@@ -252,6 +257,7 @@ export function PaneContent({
           onCloseEditorTab={onCloseEditorTab}
           onCloseTabs={onCloseTabs}
           defaultShell={defaultShell}
+          topRow={topRow ?? undefined}
         />
       )}
 
@@ -473,6 +479,27 @@ export function PaneContent({
               })}
 
             {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'diff' } => t.type === 'diff')
+              .map((tab) => {
+                const isVisible = activeTab?.id === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <DiffTab
+                        cwd={tab.cwd}
+                        path={tab.path}
+                        staged={tab.staged}
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'agent-chat' } => t.type === 'agent-chat')
               .map((tab) => {
                 const isVisible = activeTab?.id === tab.id
@@ -543,7 +570,12 @@ export function PaneContent({
         {agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
           <motion.div
             key={`agent-launcher-overlay-${pane.id}`}
-            className="pointer-events-none absolute inset-0 z-30 flex flex-col"
+            className={cn(
+              'pointer-events-none absolute z-30 flex flex-col',
+              // A top-edge pane keeps its whole top row (tabs, drag space,
+              // window controls) uncovered.
+              topRow?.topEdge ? 'inset-x-0 bottom-0 top-10' : 'inset-0'
+            )}
             role="dialog"
             aria-modal="true"
             aria-label="Agent launcher"
@@ -552,7 +584,16 @@ export function PaneContent({
             exit={{ opacity: 0 }}
             transition={launcherExitTransition}
             onKeyDown={(e) => {
-              if (e.key === 'Escape') useWorkspaceStore.getState().hideAgentLauncher()
+              // An Esc that bubbles out of a portaled selector (Radix prevents the
+              // Esc it consumes; any other React-tree portal sits outside this
+              // wrapper) belongs to that layer, not to the launcher.
+              if (
+                e.key === 'Escape' &&
+                !e.defaultPrevented &&
+                e.currentTarget.contains(e.target as Node)
+              ) {
+                useWorkspaceStore.getState().hideAgentLauncher()
+              }
             }}
           >
             <AgentLauncher paneId={pane.id} />

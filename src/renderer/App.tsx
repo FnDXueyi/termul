@@ -22,6 +22,7 @@ import { useCwd } from './hooks/use-cwd'
 import { useExitCode } from './hooks/use-exit-code'
 import { useGitBranch } from './hooks/use-git-branch'
 import { useGitStatus } from './hooks/use-git-status'
+import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useProjectGitBranch } from './hooks/use-project-git-branch'
 import { useProjectIcon } from './hooks/use-project-icon'
 import { useRemoteProjects } from './hooks/use-remote-projects'
@@ -50,6 +51,7 @@ function RouteFallback(): React.JSX.Element {
 
 import { isWindows } from '@/lib/platform'
 import { isTauriContext, primeServerCapability } from '@/lib/tauri-runtime'
+import { ensureClientIdentity } from '@/lib/web-client-identity'
 import { useUpdateToast } from './components/UpdateAvailableToast'
 import { useAcpAgents } from './hooks/use-acp-agents'
 import { useAcpHistory } from './hooks/use-acp-history'
@@ -63,10 +65,12 @@ import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
 import { usePreventNativeContextMenu } from './hooks/use-prevent-native-context-menu'
 import { useProjectsAutoSave, useProjectsLoader } from './hooks/use-projects-persistence'
+import { useShellLayoutHydration } from './hooks/use-shell-layout-hydration'
 import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
 import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
 import { useVisibilityState } from './hooks/use-visibility-state'
+import { useWorktreeBranchRenamed } from './hooks/use-worktree-branch-renamed'
 
 // Hook to prevent Alt key from showing the default browser menu bar.
 // Only needed on Windows — on macOS, Alt/Option is used for typing special characters.
@@ -116,6 +120,13 @@ const queryClient = new QueryClient()
 // usePreventNativeContextMenu is ported for parity (portal regression defense).
 // usePreventAltMenu stays (web-only).
 function AppEffects(): null {
+  // Versioned handshake identity (AD-4, AD-15): mint `deviceId` (localStorage)
+  // and `clientInstanceId` (sessionStorage) at boot, before the first WS
+  // handshake. Both roots call this — keep them in parity.
+  useEffect(() => {
+    ensureClientIdentity()
+  }, [])
+
   usePreventAltMenu()
   // Background Update Check: advisory only, never auto-applies (Q8/Q10).
   // Same cadence as the desktop root; failures are silent on both surfaces.
@@ -137,6 +148,7 @@ function AppEffects(): null {
   useCwd()
   useGitBranch()
   useProjectGitBranch()
+  useGitStatusRefresh()
   useProjectIcon()
   useGitStatus()
   useExitCode()
@@ -147,6 +159,7 @@ function AppEffects(): null {
   useKeyboardShortcutsLoader()
   useProjectsLoader()
   useProjectsAutoSave()
+  useShellLayoutHydration()
   useMenuUpdaterListener()
   useUpdateCheck()
   useUpdateToast()
@@ -159,6 +172,8 @@ function AppEffects(): null {
   useAcpAgents()
   useAgentIdleShutdown()
   useAcpHistory()
+  // Story 16: host worktree branch renames reconcile + refresh (both roots).
+  useWorktreeBranchRenamed()
   useAcpSessionResume()
   // #853: chat notifications (turn finished / permission waiting / question
   // waiting), gated on the user not already watching the chat. Mounted on

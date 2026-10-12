@@ -165,6 +165,19 @@ const {
 
 vi.mock('@/lib/tauri-runtime', () => ({ isTauriContext: mockIsTauri }))
 
+// The context strip's branch picker gates its write controls on the server's
+// write admission; covered in `ChatContextStrip.test.tsx`.
+vi.mock('@/hooks/use-server-admits-remote-writes', () => ({
+  useServerAdmitsRemoteWrites: () => true
+}))
+
+// Mobile dock tests flip this; every other suite runs the desktop shell.
+const { mobileRef } = vi.hoisted(() => ({ mobileRef: { current: false } }))
+vi.mock('@/hooks/use-mobile-web-shell', async (importActual) => ({
+  ...(await importActual<typeof import('@/hooks/use-mobile-web-shell')>()),
+  useMobileWebShell: () => mobileRef.current
+}))
+
 vi.mock('sonner', () => ({
   toast: { error: mockToastError, success: vi.fn() }
 }))
@@ -407,7 +420,9 @@ describe('ChatInputBar config controls', () => {
     expect(contextStrip).toBeInTheDocument()
     expect(composer).not.toContainElement(contextStrip)
     expect(screen.getByText('Worktree')).toBeInTheDocument()
-    expect(screen.getByText('chat/abcd1234')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+      'chat/abcd1234'
+    )
     expect(screen.queryByText(/Shift\+Enter/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/to send|to queue|newline/i)).not.toBeInTheDocument()
   })
@@ -424,27 +439,30 @@ describe('ChatInputBar config controls', () => {
       })
     }
 
-    it('shows the project branch in Local mode', () => {
+    it('shows the project branch in the branch picker for a current-checkout chat', () => {
       seedProject({ gitBranch: 'main', isGitRepo: true })
       renderInputBar()
 
-      expect(screen.getByText('Local')).toBeInTheDocument()
-      expect(screen.getByText('main')).toBeInTheDocument()
+      expect(screen.getByText('Current checkout')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent('main')
     })
 
     it('shows Detached HEAD when a git project has no branch', () => {
       seedProject({ isGitRepo: true })
       renderInputBar()
 
-      expect(screen.getByText('Detached HEAD')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Switch git branch' })).toHaveTextContent(
+        'Detached HEAD'
+      )
     })
 
-    it('shows no branch for a project that is not a git repo', () => {
+    it('keeps the plain read-only strip for a project that is not a git repo', () => {
       seedProject({ isGitRepo: false })
       renderInputBar()
 
-      expect(screen.getByText('Local')).toBeInTheDocument()
+      expect(screen.getByText('Current checkout')).toBeInTheDocument()
       expect(screen.queryByText('Detached HEAD')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Switch git branch' })).not.toBeInTheDocument()
     })
   })
 
@@ -1755,5 +1773,154 @@ describe('ChatInputBar skill chips (inline tokens)', () => {
     // The editor re-parses the tokens into pill nodes; the chip text renders.
     await waitFor(() => expect(screen.getByText('git-worktree')).toBeInTheDocument())
     await waitFor(() => expect(getComposerValue()).toBe(seeded))
+  })
+})
+
+// Mobile dock: the composer card is a programmatic focus target, the queue
+// starts collapsed, and the embedded permission prompt is touch sized and
+// guarded. Desktop keeps the baseline for each.
+describe('ChatInputBar mobile dock', () => {
+  const dockPermission = {
+    requestId: 'permission-1',
+    agentId: 'agent-1',
+    sessionId: 'session-1',
+    toolCall: { title: 'npm test' },
+    options: [
+      { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'reject-once', name: 'Decline', kind: 'reject_once' }
+    ]
+  } as NonNullable<ComponentProps<typeof ChatInputBar>['permission']>
+
+  const queue = [
+    { id: 'q1', createdAt: 1, blocks: [{ type: 'text', text: 'first queued' }] },
+    { id: 'q2', createdAt: 2, blocks: [{ type: 'text', text: 'second queued' }] }
+  ] as never
+
+  const bar = (props: Partial<ComponentProps<typeof ChatInputBar>> = {}) => {
+    const s = session()
+    return (
+      <TooltipProvider>
+        <ChatInputBar
+          session={s}
+          busy={false}
+          disabled={false}
+          onSend={vi.fn()}
+          onSendBlocks={vi.fn()}
+          onCancel={vi.fn()}
+          commands={[]}
+          configOptions={[]}
+          modes={s.modes}
+          onSetConfig={mockSetConfig}
+          onSetMode={mockSetMode}
+          onSetModel={mockSetModel}
+          {...props}
+        />
+      </TooltipProvider>
+    )
+  }
+  const composerCard = (): HTMLElement =>
+    document.querySelector<HTMLElement>('[data-chat-composer="true"]') as HTMLElement
+
+  beforeEach(() => {
+    mockRespondPermission.mockClear()
+    mobileRef.current = true
+  })
+
+  afterEach(() => {
+    mobileRef.current = false
+    vi.useRealTimers()
+  })
+
+  it('makes the composer card a focus target without an outline on the mobile shell', () => {
+    render(bar())
+    expect(composerCard()).toHaveAttribute('tabindex', '-1')
+    expect(composerCard()).toHaveClass('outline-none')
+  })
+
+  it('leaves the composer card out of the tab order and outline untouched on desktop', () => {
+    mobileRef.current = false
+    render(bar())
+    expect(composerCard()).not.toHaveAttribute('tabindex')
+    expect(composerCard()).not.toHaveClass('outline-none')
+  })
+
+  it('collapses the queue by default on mobile and keeps it expanded on desktop', () => {
+    const props = { queue, onRemoveQueued: vi.fn(), onSendQueuedNow: vi.fn() }
+    const mobile = render(bar(props))
+    expect(screen.getByRole('button', { name: '2 Queued' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    mobile.unmount()
+
+    mobileRef.current = false
+    render(bar(props))
+    expect(screen.getByRole('button', { name: '2 Queued' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+  })
+
+  it('renders the embedded permission options at touch size', () => {
+    render(bar({ permission: dockPermission }))
+
+    for (const name of ['Allow once', 'Decline']) {
+      const button = screen.getByRole('button', { name })
+      expect(button).toHaveClass('h-11')
+      expect(button).not.toHaveClass('h-8')
+      expect(button).not.toHaveClass('text-xs')
+    }
+    expect(screen.getByTestId('permission-prompt')).not.toHaveAttribute('aria-live')
+  })
+
+  it('ignores a permission tap within 400ms of the prompt appearing, then answers once', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] })
+    render(bar({ permission: dockPermission }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(mockRespondPermission).not.toHaveBeenCalled()
+
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(mockRespondPermission).toHaveBeenCalledTimes(1)
+    expect(mockRespondPermission).toHaveBeenCalledWith('permission-1', 'allow-once')
+  })
+
+  it('starts the permission guard when a hidden pane turns visible', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] })
+    const { rerender } = render(bar({ permission: dockPermission, isVisible: false }))
+    act(() => {
+      vi.advanceTimersByTime(5000)
+    })
+
+    rerender(bar({ permission: dockPermission, isVisible: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(mockRespondPermission).not.toHaveBeenCalled()
+
+    act(() => {
+      vi.advanceTimersByTime(400)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Allow once' }))
+    expect(mockRespondPermission).toHaveBeenCalledTimes(1)
+    expect(mockRespondPermission).toHaveBeenCalledWith('permission-1', 'allow-once')
+  })
+
+  it('does not move focus out of the editor when a permission appears', async () => {
+    const { rerender } = render(bar())
+    await act(async () => {})
+    // jsdom does not treat a bare contenteditable as focusable; give the real
+    // editor surface a tabindex so it can hold focus like it does in a browser.
+    const editorSurface = composerCard().querySelector<HTMLElement>('[contenteditable="true"]')
+    expect(editorSurface).not.toBeNull()
+    editorSurface?.setAttribute('tabindex', '0')
+    act(() => editorSurface?.focus())
+    expect(editorSurface).toHaveFocus()
+
+    rerender(bar({ permission: dockPermission }))
+
+    expect(screen.getByTestId('permission-prompt')).toBeInTheDocument()
+    expect(editorSurface).toHaveFocus()
   })
 })

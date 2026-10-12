@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use crate::acp::{AcpCatalogService, AcpInstallService, ClaudeAgentService, ClaudeAuthMode};
+use crate::data_lock::DataLocks;
 use crate::web::ServerConfig;
 
 /// Dispatch `termul-server claude <args...>`. Handled by the binary before any
@@ -70,7 +71,11 @@ pub fn run(args: &[String]) -> ExitCode {
                     );
                     println!(
                         "API key stored in OS keychain: {}",
-                        yes_no(status.api_key_configured)
+                        if status.keychain_available {
+                            yes_no(status.api_key_configured)
+                        } else {
+                            "unavailable (OS keychain not reachable)"
+                        }
                     );
                     ExitCode::SUCCESS
                 }
@@ -150,6 +155,12 @@ pub fn run(args: &[String]) -> ExitCode {
             }
         }
         [action] if action == "install" => {
+            // `install` opens the live state dir's catalog + install stores.
+            // AD-14: refuse (instead of racing a running host) when another
+            // Termul host holds the data-dir lock; hold it until we exit.
+            let Some(_data_lock) = lock_state_dir(&state_dir) else {
+                return ExitCode::from(1);
+            };
             let runtime = match tokio::runtime::Runtime::new() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -179,6 +190,25 @@ pub fn run(args: &[String]) -> ExitCode {
         _ => {
             eprintln!("{}", usage());
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Take the AD-14 data-dir lock for `termul-server claude install`. `None`
+/// after printing why it was refused.
+fn lock_state_dir(state_dir: &std::path::Path) -> Option<DataLocks> {
+    let mut locks = DataLocks::new();
+    match locks.lock_dir(state_dir) {
+        Ok(()) => Some(locks),
+        Err(error) if error.is_busy() => {
+            eprintln!(
+                "termul-server claude: install refused — a Termul host (termul-server or the desktop app) is running on this state directory: {error}"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!("termul-server claude: cannot lock the state directory: {error}");
+            None
         }
     }
 }

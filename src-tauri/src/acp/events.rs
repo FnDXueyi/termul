@@ -170,6 +170,11 @@ pub const EVENT_SESSION_INFO_UPDATE: &str = "acp:session_info_update";
 /// synthetically by the host after the `agent_switch` record is durable —
 /// the record is the transcript authority, the event is live-only delivery.
 pub const EVENT_AGENT_SWITCH: &str = "acp:agent_switch";
+/// Event name: a worktree's branch was renamed by the host (story 16,
+/// CAP-5). Agent-level (`sid = None`); the payload is
+/// [`WorktreeBranchRenamedEvent`]. Every client reconciles worktrees and
+/// refreshes the session index.
+pub const EVENT_WORKTREE_BRANCH_RENAMED: &str = "acp:worktree_branch_renamed";
 /// Event name: the agent reported context window utilization (and optional cost).
 pub const EVENT_USAGE_UPDATE: &str = "acp:usage_update";
 /// Event name: the agent tried to open a browser URL on a headless host and
@@ -620,13 +625,50 @@ pub struct QuestionOption {
     pub cardinality: Option<String>,
 }
 
+/// Host-authored turn terminators (story 1 / AD-5): a turn that ends without
+/// an ACP stop reason still gets exactly one durable `prompt_complete`.
+/// Serialized lowercase (`error`, `timeout`, `crashed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnFailureStop {
+    /// The agent RPC failed, or the turn could not be started after the host
+    /// accepted it.
+    Error,
+    /// The idle or hard turn deadline elapsed.
+    Timeout,
+    /// The agent connection ended with the turn still active.
+    Crashed,
+}
+
+/// `acp:prompt_complete` stop reason: an ACP stop reason (unchanged wire
+/// shape, e.g. `end_turn`) or a host terminator ([`TurnFailureStop`]).
+/// Untagged so existing ACP stop reasons serialize byte-identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum PromptStopReason {
+    Acp(StopReason),
+    Host(TurnFailureStop),
+}
+
+impl From<StopReason> for PromptStopReason {
+    fn from(value: StopReason) -> Self {
+        Self::Acp(value)
+    }
+}
+
+impl From<TurnFailureStop> for PromptStopReason {
+    fn from(value: TurnFailureStop) -> Self {
+        Self::Host(value)
+    }
+}
+
 /// `acp:prompt_complete`
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptCompleteEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
-    pub stop_reason: StopReason,
+    pub stop_reason: PromptStopReason,
     /// Story 1.8 T3.2 (FR11): the client turn-id echoed back so the renderer's
     /// `seenTurnIds` dedup fires (no duplicate completion on reconnect replay).
     /// `None` for the desktop path + older clients (dedup is a no-op). Serialized
@@ -637,6 +679,123 @@ pub struct PromptCompleteEvent {
     pub turn_id: Option<String>,
 }
 
+/// An error flattened for the manager's `Err(String)` / event boundaries while
+/// keeping the JSON-RPC `code` and `data` of an `agent_client_protocol::Error`.
+///
+/// `message` is exactly the prior `Error::to_string()` (`Display`, which already
+/// appends pretty `data`), so user-visible text is unchanged. `code` / `data`
+/// are `None` for non-RPC failures (timeouts, flush failures, plain strings).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpErrorDetail {
+    pub message: String,
+    pub code: Option<i32>,
+    pub data: Option<serde_json::Value>,
+    /// Typed marker for an idle/hard turn deadline (set only by
+    /// `From<TurnTimeout>`); the turn terminator is `timeout` instead of
+    /// `error`. Never derived from the message text.
+    pub timed_out: bool,
+    /// Typed marker for a request that failed because the agent's transport
+    /// closed before it answered (the SDK's `is_incoming_transport_closed`
+    /// discriminator, not message text): the agent went away mid-turn, so the
+    /// terminator is `crashed`.
+    pub connection_closed: bool,
+}
+
+impl From<&agent_client_protocol::Error> for AcpErrorDetail {
+    fn from(error: &agent_client_protocol::Error) -> Self {
+        Self {
+            message: error.to_string(),
+            code: Some(i32::from(error.code)),
+            data: error.data.clone(),
+            timed_out: false,
+            connection_closed: agent_client_protocol::is_incoming_transport_closed(error),
+        }
+    }
+}
+
+impl From<agent_client_protocol::Error> for AcpErrorDetail {
+    fn from(error: agent_client_protocol::Error) -> Self {
+        Self::from(&error)
+    }
+}
+
+impl From<String> for AcpErrorDetail {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+            data: None,
+            timed_out: false,
+            connection_closed: false,
+        }
+    }
+}
+
+impl AcpErrorDetail {
+    /// Replace the message with a generic one and drop the structured
+    /// `code` / `data` (used when failure details must not reach the renderer).
+    #[must_use]
+    pub fn masked(self, generic_message: &str) -> Self {
+        Self {
+            message: generic_message.to_string(),
+            code: None,
+            data: None,
+            timed_out: self.timed_out,
+            connection_closed: self.connection_closed,
+        }
+    }
+
+    /// The host terminator for a turn that ended with this error.
+    #[must_use]
+    pub fn turn_stop(&self) -> TurnFailureStop {
+        if self.timed_out {
+            TurnFailureStop::Timeout
+        } else if self.connection_closed {
+            TurnFailureStop::Crashed
+        } else {
+            TurnFailureStop::Error
+        }
+    }
+
+    /// Build the `acp:agent_error` payload for this error.
+    #[must_use]
+    pub fn into_agent_error(
+        self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> AgentErrorEvent {
+        AgentErrorEvent {
+            agent_id,
+            session_id,
+            message: self.message,
+            code: self.code,
+            data: self.data,
+        }
+    }
+
+    /// Build the `acp:agent_crashed` payload for this error.
+    #[must_use]
+    pub fn into_agent_crashed(
+        self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> AgentCrashedEvent {
+        AgentCrashedEvent {
+            agent_id,
+            session_id,
+            message: self.message,
+            code: self.code,
+            data: self.data,
+        }
+    }
+}
+
+impl std::fmt::Display for AcpErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// `acp:agent_error`
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -645,6 +804,14 @@ pub struct AgentErrorEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
     pub message: String,
+    /// JSON-RPC error `code` when the failure is an agent RPC error; absent
+    /// on the wire for non-RPC failures (timeouts, flush failures, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// JSON-RPC error `data` (already part of `message` via `Display`, kept
+    /// structured here); absent on the wire when the error carried none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 /// `acp:agent_crashed` (Story 1.9 FR26)
@@ -662,6 +829,13 @@ pub struct AgentCrashedEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
     pub message: String,
+    /// JSON-RPC error `code` of the connection-ending error, when it was an
+    /// RPC error. Absent on the wire otherwise (and for masked failures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// JSON-RPC error `data` of the connection-ending error, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 /// `acp:agent_disconnected`
@@ -682,18 +856,168 @@ pub struct SessionClosedEvent {
     pub session_id: SessionId,
 }
 
+/// OpenCode compaction marker carried on `session_info_update` `_meta`.
+///
+/// OpenCode 2 sends this when the client does not advertise
+/// `session.compaction`. `status` is `started`, `completed`, or `failed`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeCompactionNotice {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// OpenCode retry marker carried on `session_info_update` `_meta`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeRetryNotice {
+    pub attempt: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Notices parsed from OpenCode `_meta` keys on a session-info update.
+///
+/// `retry == None` means the key was absent (no change). `retry == Some(None)`
+/// means OpenCode sent `null` and the client should clear the retry line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OpenCodeNotices {
+    pub compaction: Option<OpenCodeCompactionNotice>,
+    pub retry: Option<Option<OpenCodeRetryNotice>>,
+}
+
+fn notice_error_message(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .map(str::to_string)
+}
+
+/// Read OpenCode compaction and retry markers from ACP `_meta`.
+///
+/// Unknown shapes are dropped with a warning. The raw payload is not logged.
+pub(crate) fn opencode_notices(meta: Option<&Meta>) -> OpenCodeNotices {
+    let Some(meta) = meta else {
+        return OpenCodeNotices::default();
+    };
+    let compaction = match meta.get("opencode/compaction") {
+        None => None,
+        Some(value) => match compaction_notice(value) {
+            Ok(notice) => Some(notice),
+            Err(reason) => {
+                log::warn!("[acp] opencode compaction marker dropped reason={reason}");
+                None
+            }
+        },
+    };
+    let retry = match meta.get("opencode/retry") {
+        None => None,
+        Some(value) if value.is_null() => Some(None),
+        Some(value) => match retry_notice(value) {
+            Ok(notice) => Some(Some(notice)),
+            Err(reason) => {
+                log::warn!("[acp] opencode retry marker dropped reason={reason}");
+                None
+            }
+        },
+    };
+    OpenCodeNotices { compaction, retry }
+}
+
+fn compaction_notice(value: &serde_json::Value) -> Result<OpenCodeCompactionNotice, &'static str> {
+    let status = value
+        .get("status")
+        .and_then(|status| status.as_str())
+        .ok_or("missing-status")?;
+    if !matches!(status, "started" | "completed" | "failed") {
+        return Err("unknown-status");
+    }
+    Ok(OpenCodeCompactionNotice {
+        status: status.to_string(),
+        message_id: value
+            .get("messageId")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
+        reason: value
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .map(str::to_string),
+        error_message: notice_error_message(value),
+    })
+}
+
+fn retry_notice(value: &serde_json::Value) -> Result<OpenCodeRetryNotice, &'static str> {
+    let attempt = value
+        .get("attempt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing-attempt")?;
+    Ok(OpenCodeRetryNotice {
+        attempt,
+        next_retry_at: value
+            .get("nextRetryAt")
+            .and_then(|at| at.as_str())
+            .map(str::to_string),
+        error_message: notice_error_message(value),
+    })
+}
+
 /// `acp:session_info_update`
 ///
 /// Emitted when the agent updates session metadata (e.g. an auto-generated
-/// title) via the ACP `session_info_update` notification. `title` is `None`
-/// when the agent explicitly cleared it (serialized as `"title": null` on the
-/// wire), and `Some(String)` when set.
+/// title) via the ACP `session_info_update` notification.
+///
+/// `title` is tri-state on the wire: omitted when the agent did not send a
+/// title, `"title": null` when the agent cleared it, and a string when set.
+/// The outer `Option` is the omit case (`None`); `Some(None)` is the clear.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfoUpdateEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
-    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<OpenCodeCompactionNotice>,
+    /// `None` omits the field. `Some(None)` serializes as `null` (clear).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Option<OpenCodeRetryNotice>>,
+}
+
+impl SessionInfoUpdateEvent {
+    /// Title-only update. `title == None` clears the title (`"title": null`).
+    pub(crate) fn title_only(
+        agent_id: AgentId,
+        session_id: SessionId,
+        title: Option<String>,
+    ) -> Self {
+        Self {
+            agent_id,
+            session_id,
+            title: Some(title),
+            compaction: None,
+            retry: None,
+        }
+    }
+}
+
+/// `acp:worktree_branch_renamed` (story 16, CAP-5) — emitted once, agent-level,
+/// after the host renamed a worktree's git branch and rewrote every session on
+/// that worktree. Carries paths and branch names; it is a wire event only,
+/// never logged above `debug`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeBranchRenamedEvent {
+    pub worktree_path: String,
+    pub old_branch: String,
+    pub new_branch: String,
 }
 
 /// `acp:agent_switch` (CAP-2) — the live fan-out of a durable agent-switch

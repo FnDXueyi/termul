@@ -1363,9 +1363,13 @@ describe('Parity Checklist Automation', () => {
           new RegExp(`\\b${method}\\s*\\(`)
         )
       }
-      // The 7 launch-flow methods must reference `webServerWorktree` (the web branch).
+      // The 7 launch-flow methods + `renameBranch` (story 16) reference
+      // `webServerWorktree` (the web branch).
       const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(launchFlowRefs, '7 launch-flow methods should reference webServerWorktree').toBe(7)
+      expect(
+        launchFlowRefs,
+        '7 launch-flow methods + renameBranch should reference webServerWorktree'
+      ).toBe(8)
     })
 
     it('facade keeps the 8 advanced methods as WEB_UNSUPPORTED (no webServerWorktree ref)', () => {
@@ -1375,9 +1379,10 @@ describe('Parity Checklist Automation', () => {
           new RegExp(`\\b${method}\\s*:`)
         )
       }
-      // Exactly 7 webServerWorktree refs (not 8) — the advanced methods do NOT branch.
+      // Exactly 8 webServerWorktree refs (7 launch-flow + story 16 `renameBranch`) —
+      // the advanced methods do NOT branch.
       const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(launchFlowRefs).toBe(7)
+      expect(launchFlowRefs).toBe(8)
     })
 
     it('router.rs registers the 7 /worktree/* routes ahead of the static fallback', () => {
@@ -1438,6 +1443,105 @@ describe('Parity Checklist Automation', () => {
         expect(content, `commands module should define ${cmd}`).toMatch(
           new RegExp(`\\b${cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
         )
+      }
+    })
+  })
+
+  // Folder @-mention parity (gh-896): the renderer-side contract strings that
+  // both transports share. The Rust-side source strings are intentionally not
+  // asserted here.
+  describe('Folder mention parity (gh-896)', () => {
+    const readLib = (rel: string): string => readFileSync(join(LIB_DIR, rel), 'utf-8')
+
+    it('the web adapter hit type carries the optional dir kind', () => {
+      expect(readLib('web-server-api.ts')).toMatch(/kind\?: 'file' \| 'dir'/)
+    })
+
+    it('the shared SearchFileHit contract carries the optional dir kind', () => {
+      const shared = join(LIB_DIR, '..', '..', 'shared', 'types', 'filesystem.types.ts')
+      expect(readFileSync(shared, 'utf-8')).toMatch(/kind\?: 'file' \| 'dir'/)
+    })
+
+    it('the web facade fans hits through the shared batch emitter without re-shaping them', () => {
+      expect(readLib('tauri-filesystem-api.ts')).toMatch(/files: data\.files/)
+    })
+
+    it('folder tokens reuse the file token with a trailing-slash dir marker', () => {
+      const tokens = readLib('skill-tokens.ts')
+      expect(tokens).toMatch(/export function isFolderTokenPath/)
+      expect(tokens).toMatch(/absPath\.endsWith\('\/'\)/)
+    })
+
+    it('the picker model renders a separate Folders section after Files', () => {
+      const model = readFileSync(
+        join(LIB_DIR, '..', 'components', 'chat', 'mention-menu-model.ts'),
+        'utf-8'
+      )
+      expect(model).toMatch(/heading: 'Folders'/)
+      expect(model).toMatch(/MAX_FOLDER_RESULTS/)
+    })
+  })
+
+  // Git hunk staging parity: per-hunk stage/unstage ships on THREE transports
+  // (Tauri `git_stage_hunk`/`git_unstage_hunk`, HTTP `/git/stage-hunk` |
+  // `/git/unstage-hunk`, and the `gitApi` facade branching on
+  // `isTauriContext()`), all reusing the same `git_tracker` functions.
+  describe('Git hunk staging parity', () => {
+    const SrcTauri = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+    const Facade = join(LIB_DIR, 'git-api.ts')
+    const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+    const RouterRust = join(SrcTauri, 'web', 'router.rs')
+    const HunkApiRust = join(SrcTauri, 'web', 'git_hunk_api.rs')
+    const CommandsGitRust = join(SrcTauri, 'commands', 'git.rs')
+    const LibRust = join(SrcTauri, 'lib.rs')
+
+    const ROUTES = ['/git/stage-hunk', '/git/unstage-hunk'] as const
+
+    it('gitApi.stageHunk/unstageHunk branch on isTauriContext() between invoke and webServerGit', () => {
+      const content = readFileSync(Facade, 'utf-8')
+      expect(content).toMatch(
+        /stageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_stage_hunk'[\s\S]*?webServerGit\.stageHunk\(/
+      )
+      expect(content).toMatch(
+        /unstageHunk:[\s\S]*?isTauriContext\(\)[\s\S]*?invoke<void>\('git_unstage_hunk'[\s\S]*?webServerGit\.unstageHunk\(/
+      )
+      expect(content).not.toMatch(/desktop-only/i)
+    })
+
+    it('webServerGit hits both hunk routes with { cwd, path, hunkPatch }', () => {
+      const content = readFileSync(WebAdapter, 'utf-8')
+      for (const route of ROUTES) {
+        expect(content, `webServerGit should hit ${route}`).toContain(`'${route}'`)
+      }
+      expect(content).toMatch(/async stageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+      expect(content).toMatch(/async unstageHunk\(cwd: string, path: string, hunkPatch: string\)/)
+    })
+
+    it('router.rs registers both hunk routes in BOTH router tables', () => {
+      const content = readFileSync(RouterRust, 'utf-8')
+      for (const route of ROUTES) {
+        const matches = content.match(new RegExp(`"${route}"`, 'g')) ?? []
+        expect(matches.length, `${route} should be registered in both router tables`).toBe(2)
+      }
+    })
+
+    it('git_hunk_api.rs defines both handlers behind the resolve_cwd write guard', () => {
+      expect(existsSync(HunkApiRust), 'git_hunk_api.rs should exist').toBe(true)
+      const content = readFileSync(HunkApiRust, 'utf-8')
+      expect(content).toMatch(/pub async fn stage_hunk\b/)
+      expect(content).toMatch(/pub async fn unstage_hunk\b/)
+      expect(content).toMatch(/resolve_cwd::<\(\)>\([^)]*Some\(peer\),\s*true\)/)
+      expect(content).toMatch(/git_tracker::git_stage_hunk/)
+      expect(content).toMatch(/git_tracker::git_unstage_hunk/)
+      expect(content).toMatch(/classify_hunk_error/)
+    })
+
+    it('desktop Tauri commands exist and stay registered', () => {
+      const commands = readFileSync(CommandsGitRust, 'utf-8')
+      const lib = readFileSync(LibRust, 'utf-8')
+      for (const cmd of ['git_stage_hunk', 'git_unstage_hunk']) {
+        expect(commands).toMatch(new RegExp(`\\bfn ${cmd}\\b`))
+        expect(lib).toMatch(new RegExp(`commands::${cmd}\\b`))
       }
     })
   })
@@ -1838,8 +1942,10 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeCanvas/)
 
       // The workspace store owns the singleton-per-project tab id helper.
-      const workspaceStore = join(LIB_DIR, '..', 'stores', 'workspace-store.ts')
-      expect(readFileSync(workspaceStore, 'utf-8')).toMatch(/export function canvasTabId/)
+      const workspaceStoreTree = join(LIB_DIR, '..', 'stores', 'workspace-store', 'tree.ts')
+      expect(readFileSync(workspaceStoreTree, 'utf-8')).toMatch(/export function canvasTabId/)
+      const workspaceStoreIndex = join(LIB_DIR, '..', 'stores', 'workspace-store', 'index.ts')
+      expect(readFileSync(workspaceStoreIndex, 'utf-8')).toMatch(/canvasTabId/)
     })
 
     it('MCP upsert goes through the serialized acp-store mcp slice (never the persistence key)', () => {
@@ -1928,5 +2034,163 @@ describe('Web FS watcher parity (#856)', () => {
     expect(content).toMatch(/'acp:fs_changed'/)
     // watchDirectory on web is a success no-op (the server owns watching).
     expect(content).toMatch(/isTauriContext\(\)\) \{\s*$/m)
+  })
+})
+
+// Diff stat host operation (CAP-1 project-row +N -M). Source-grep checks pin that
+// one shared Rust function backs the Tauri command AND the web read route, and
+// that the renderer facade reaches both.
+describe('Git diff stat parity (shell revamp story 8)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const GitApiFacade = join(LIB_DIR, 'git-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'git_diff_stat_api.rs')
+  const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'diff_stat.rs')
+  const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+
+  it('git-api.ts branches getDiffStat on isTauriContext() between invoke and webServerGit', () => {
+    const content = readFileSync(GitApiFacade, 'utf-8')
+    expect(content).toMatch(/getDiffStat: async/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    expect(content).toMatch(/invokeIpc<GitDiffStat>\('git_get_diff_stat'/)
+    expect(content).toMatch(/webServerGit\.getDiffStat\(/)
+  })
+
+  it('web-server-api.ts exposes webServerGit.getDiffStat hitting /git/diff-stat', () => {
+    const content = readFileSync(WebAdapter, 'utf-8')
+    expect(content).toMatch(/async getDiffStat\(/)
+    expect(content).toMatch(/\/git\/diff-stat/)
+  })
+
+  it('router.rs registers /git/diff-stat in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = (content.match(/"\/git\/diff-stat"/g) ?? []).length
+    expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+  })
+
+  it('git_diff_stat_api.rs is a READ route through resolve_cwd and the shared service', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/pub async fn get_diff_stat/)
+    // Read path: containment only, no remote-write gate.
+    expect(content).toMatch(/resolve_cwd::<GitDiffStat>\(&req\.cwd, &state, None, false\)/)
+    expect(content).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/spawn_blocking/)
+    expect(content).toMatch(/tracing/)
+  })
+
+  it('the Tauri command is defined and registered in lib.rs over the same shared service', () => {
+    const command = readFileSync(CommandsGitRust, 'utf-8')
+    expect(command).toMatch(/pub async fn git_get_diff_stat/)
+    expect(command).toMatch(/git_tracker::git_get_diff_stat/)
+    expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::git_get_diff_stat,/)
+  })
+
+  it('the shared service returns DiffStatError with a stable code', () => {
+    const content = readFileSync(ServiceRust, 'utf-8')
+    expect(content).toMatch(/pub fn git_get_diff_stat/)
+    expect(content).toMatch(/GIT_DIFF_STAT_ERROR/)
+  })
+})
+
+describe('Worktree branch rename parity (shell revamp story 16)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const WorktreeFacade = join(LIB_DIR, 'worktree-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'worktree_rename_api.rs')
+  const ManagerRust = join(SRC_TAURI, 'acp', 'manager', 'worktree_branch.rs')
+  const CommandsWorktreeRust = join(SRC_TAURI, 'commands', 'worktree.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+  const ProtocolTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
+  const SinkRust = join(SRC_TAURI, 'web', 'sink.rs')
+
+  it('worktree-api.ts branches renameBranch on isTauriContext() between invoke and webServerWorktree', () => {
+    const content = readFileSync(WorktreeFacade, 'utf-8')
+    expect(content).toMatch(/renameBranch: \(/)
+    expect(content).toMatch(/isTauriContext\(\)/)
+    expect(content).toMatch(/invoke<IpcResult<void>>\('worktree_rename_branch'/)
+    expect(content).toMatch(/webServerWorktree\.renameBranch\(/)
+    // Write route: the facade documents the S19 gating contract for callers.
+    expect(content).toMatch(/useServerAdmitsRemoteWrites/)
+  })
+
+  it('web-server-api.ts exposes webServerWorktree.renameBranch hitting /worktree/rename-branch', () => {
+    const content = readFileSync(WebAdapter, 'utf-8')
+    expect(content).toMatch(/async renameBranch\(/)
+    expect(content).toMatch(/\/worktree\/rename-branch/)
+  })
+
+  it('router.rs registers /worktree/rename-branch in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = (content.match(/"\/worktree\/rename-branch"/g) ?? []).length
+    expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+  })
+
+  it('worktree_rename_api.rs is a WRITE route through resolve_project_path and the shared manager op', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/pub async fn rename_branch/)
+    // Write path: loopback / --allow-remote-writes / shared-live guard + containment.
+    expect(content).toMatch(
+      /resolve_project_path::<\(\)>\(&req\.worktree_path, &state, Some\(peer\), true\)/
+    )
+    expect(content).toMatch(/rename_worktree_branch/)
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/tracing/)
+  })
+
+  it('the shared host function renames, records and fans out (no transport git logic)', () => {
+    const content = readFileSync(ManagerRust, 'utf-8')
+    expect(content).toMatch(/pub\(crate\) async fn rename_and_record/)
+    expect(content).toMatch(/WorktreeManager::rename_branch/)
+    expect(content).toMatch(/EVENT_WORKTREE_BRANCH_RENAMED/)
+    expect(readFileSync(RouteRust, 'utf-8')).not.toMatch(/Command::new|run_git/)
+  })
+
+  it('the Tauri command is defined and registered in lib.rs over the same manager op', () => {
+    const command = readFileSync(CommandsWorktreeRust, 'utf-8')
+    expect(command).toMatch(/pub async fn worktree_rename_branch/)
+    expect(command).toMatch(/rename_worktree_branch/)
+    expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::worktree_rename_branch,/)
+  })
+
+  it('the worktree_branch_renamed event is in the protocol registry and the history refetch list', () => {
+    const protocol = readFileSync(ProtocolTypes, 'utf-8')
+    expect(protocol).toMatch(/'worktree_branch_renamed'/)
+    expect(protocol).toMatch(/worktree_branch_renamed: WS_RELAY_TIERS\.RELIABLE/)
+    expect(readFileSync(SinkRust, 'utf-8')).toMatch(/"worktree_branch_renamed"/)
+  })
+
+  it('both renderer roots mount useWorktreeBranchRenamed next to useAcpHistory', () => {
+    for (const root of ['TauriApp.tsx', 'App.tsx']) {
+      const content = readFileSync(join(LIB_DIR, '..', root), 'utf-8')
+      expect(content, root).toMatch(/useWorktreeBranchRenamed\(\)/)
+    }
+  })
+})
+
+// Story 2 / AD-4, AD-15: the versioned `authenticate` handshake identity is
+// minted at boot on BOTH renderer roots, and every WS client builds its
+// handshake through the one shared payload builder.
+describe('Client identity boot parity (AD-4)', () => {
+  it('both renderer roots call ensureClientIdentity() at boot', () => {
+    for (const root of ['TauriApp.tsx', 'App.tsx']) {
+      const content = readFileSync(join(LIB_DIR, '..', root), 'utf-8')
+      expect(content, root).toMatch(/from '@\/lib\/web-client-identity'/)
+      expect(content, root).toMatch(/ensureClientIdentity\(\)/)
+    }
+  })
+
+  it('all three WS clients build the handshake via buildAuthenticatePayload()', () => {
+    for (const client of [
+      join('acp-transport', 'ws-transport.ts'),
+      'web-terminal-api.ts',
+      'web-persistence-api.ts'
+    ]) {
+      const content = readFileSync(join(LIB_DIR, client), 'utf-8')
+      expect(content, client).toMatch(/buildAuthenticatePayload\(/)
+    }
   })
 })

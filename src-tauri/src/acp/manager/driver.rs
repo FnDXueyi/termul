@@ -95,6 +95,22 @@ pub(super) fn run_agent(
         }));
     }
 
+    // The SDK dropped the command loop and every spawned turn task when the
+    // connection closed, so a turn that was still active never reached its own
+    // terminator. Append one `crashed` `prompt_complete` per active turn
+    // BEFORE the writers are finalized, so reopen never reports the turn open
+    // (ACPM-F1). On process shutdown the `interrupted` marker owns that role
+    // (`SessionPersistence::shutdown` scans for the unterminated turn), so the
+    // markers are only drained.
+    if persistence
+        .as_ref()
+        .is_some_and(|persistence| persistence.is_process_shutdown())
+    {
+        driver_state.lock().drain_active_turns();
+    } else {
+        emit_crash_terminators(&driver_state, &sinks, &agent_id);
+    }
+
     // Self-reap: remove our own registry entry so a crashed/EOFed agent does
     // not linger in `list_agents` with a dead command channel. We do NOT join
     // our own handle here (a thread cannot join itself); `kill`/`kill_all` may
@@ -118,8 +134,8 @@ pub(super) fn run_agent(
     // must run regardless of `was_spawned`/`intentional_kill` (those gate only
     // the renderer-facing lifecycle events).
     if !was_spawned {
-        if let Err(message) = &result {
-            *start_error.lock() = Some(message.clone());
+        if let Err(detail) = &result {
+            *start_error.lock() = Some(detail.message.clone());
         }
     }
 
@@ -198,7 +214,7 @@ pub(super) fn run_agent(
             );
         }
 
-        if let Err(message) = result {
+        if let Err(detail) = result {
             // Story 1.9 FR26: emit the typed `AgentCrashed` event BEFORE
             // `agent_error` (back-compat) + `agent_disconnected`. The renderer
             // distinguishes "crash" (→ `status: 'error'` + manual restart) from
@@ -206,25 +222,18 @@ pub(super) fn run_agent(
             if profile.mask_failure_details {
                 // The renderer gets the generic message (agents may echo env
                 // values); the host log keeps the specific detail.
-                log::warn!("[acp] Factory Droid connection failed: {message}");
+                log::warn!("[acp] Factory Droid connection failed: {}", detail.message);
             }
-            let message = if profile.mask_failure_details {
-                "Factory Droid connection failed".to_string()
+            // Masking hides details: drop the structured code/data too.
+            let detail = if profile.mask_failure_details {
+                detail.masked("Factory Droid connection failed")
             } else {
-                message
+                detail
             };
-            let crashed = AgentCrashedEvent {
-                agent_id: agent_id.clone(),
-                session_id: None,
-                message: message.clone(),
-            };
+            let crashed = detail.clone().into_agent_crashed(agent_id.clone(), None);
             events::fan_out(&sinks, None, events::EVENT_AGENT_CRASHED, &crashed);
 
-            let event = AgentErrorEvent {
-                agent_id: agent_id.clone(),
-                session_id: None,
-                message,
-            };
+            let event = detail.into_agent_error(agent_id.clone(), None);
             // Teardown error is agent-level (no session) → sid = None.
             events::fan_out(&sinks, None, events::EVENT_AGENT_ERROR, &event);
         }
@@ -281,27 +290,62 @@ pub(super) async fn handle_session_notification(
     // AD-8: gate native `session_info_update` fan-out. When the host already
     // owns a higher-precedence title (`BackgroundGenerated` from a prior
     // background-gen flow, or a future `LocalAlias`), suppress the agent's
-    // `session_info_update` so the background title survives in the renderer.
-    // The durable defense in `append_record` is the second layer; this is the
-    // fan-out defense.
-    let is_protected_info_update = matches!(
-        &notification.update,
-        agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(_)
-    ) && is_protected_title_source(
+    // title so the background title survives in the renderer. OpenCode
+    // compaction and retry markers travel on the same notification; those
+    // still fan out, with the title field omitted. The durable defense in
+    // `append_record` is the second layer; this is the fan-out defense.
+    let protected_title = is_protected_title_source(
         persistence
             .and_then(|p| p.metadata(&session_id).ok())
             .and_then(|m| m.title_source)
             .as_ref(),
     );
-    if is_protected_info_update {
+    if protected_title
+        && matches!(
+            &notification.update,
+            agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(_)
+        )
+    {
+        let notices = session_info_notices(&notification.update);
+        if notices.compaction.is_none() && notices.retry.is_none() {
+            log::debug!(
+                "[acp] session {}: suppressed native session_info_update (title_source is BackgroundGenerated/LocalAlias)",
+                crate::logging::redact_session_id(&session_id)
+            );
+            return Ok(());
+        }
         log::debug!(
-            "[acp] session {}: suppressed native session_info_update (title_source is BackgroundGenerated/LocalAlias)",
+            "[acp] session {}: forwarded opencode markers without the protected title",
             crate::logging::redact_session_id(&session_id)
+        );
+        let event = crate::acp::events::SessionInfoUpdateEvent {
+            agent_id: agent_id.clone(),
+            session_id: crate::acp::SessionId::new(session_id.clone()),
+            title: None,
+            compaction: notices.compaction,
+            retry: notices.retry,
+        };
+        crate::acp::events::fan_out(
+            sinks,
+            Some(event.session_id.0.as_str()),
+            crate::acp::events::EVENT_SESSION_INFO_UPDATE,
+            &event,
         );
         return Ok(());
     }
     client::emit_session_update(sinks, agent_id, notification);
     Ok(())
+}
+
+fn session_info_notices(
+    update: &agent_client_protocol::schema::v1::SessionUpdate,
+) -> crate::acp::events::OpenCodeNotices {
+    match update {
+        agent_client_protocol::schema::v1::SessionUpdate::SessionInfoUpdate(info) => {
+            crate::acp::events::opencode_notices(info.meta.as_ref())
+        }
+        _ => crate::acp::events::OpenCodeNotices::default(),
+    }
 }
 
 /// History variants replayed by `session/load` (and sometimes, incorrectly,
@@ -330,7 +374,7 @@ pub(super) async fn drive_connection(
     driver_state: Arc<Mutex<DriverState>>,
     persistence: Option<Arc<SessionPersistence>>,
     profile: AgentRuntimeProfile,
-) -> Result<(), String> {
+) -> Result<(), events::AcpErrorDetail> {
     // Forward the agent subprocess's stdio to the log at `debug` (opt-in via
     // `RUST_LOG`). stderr is where agents print auth/login prompts and runtime
     // errors, so it is logged verbatim. stdin/stdout carry the JSON-RPC protocol
@@ -905,5 +949,5 @@ pub(super) async fn drive_connection(
         crate::acp::browser_shim::remove_shim(&agent_id);
     }
 
-    connection_result.map_err(|e| e.to_string())
+    connection_result.map_err(events::AcpErrorDetail::from)
 }

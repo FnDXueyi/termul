@@ -1,9 +1,15 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ComponentProps } from 'react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { _resetSheetFocusReturnForTests, sheetCloseAutoFocus } from '@/lib/sheet-focus-return'
 import { useOverlayStackStore } from '@/stores/overlay-stack-store'
+import {
+  _resetShellAnnouncerForTests,
+  useShellAnnouncerStore
+} from '@/stores/shell-announcer-store'
 import { MobileChatShell } from './MobileChatShell'
+import type { MobileShellDrawer } from './MobileShellDrawer'
 
 interface TestTerminal {
   id: string
@@ -13,21 +19,19 @@ interface TestTerminal {
 }
 
 const {
-  mockNavigate,
   projectRef,
   extraProjectsRef,
   tauriRef,
   workspaceRef,
-  editorRef,
-  mockRemoveBrowserTab,
   browserTabsRef,
   terminalsRef,
   sessionsRef,
   sessionIndexRef,
   mockAttentionCount,
-  mockRequestCloseAgentChat
+  mockRequestCloseAgentChat,
+  drawerPropsRef,
+  drawerModalRef
 } = vi.hoisted(() => ({
-  mockNavigate: vi.fn(),
   // Mutable so individual tests can flip the active project (name, path, git
   // branch) and the shell into web/remote mode (where the project sheet, Files
   // and the web-only ⋯ items are mounted).
@@ -47,8 +51,8 @@ const {
     }>
   },
   tauriRef: { current: true as boolean },
-  // Mutable workspace state so Story 6 tests can seed every tab type
-  // (terminal, editor, git, git-history, browser) in the drawer.
+  // Mutable workspace state so tests can seed every tab type whose name the
+  // header shows (terminal, editor, git, git-history, browser, chat, canvas).
   workspaceRef: {
     current: {
       leaves: [] as Array<{
@@ -64,12 +68,6 @@ const {
       clearFullscreenPane: vi.fn()
     }
   },
-  editorRef: {
-    current: {
-      openFiles: new Map<string, { isDirty: boolean }>()
-    }
-  },
-  mockRemoveBrowserTab: vi.fn(),
   browserTabsRef: { current: new Map<string, unknown>() },
   terminalsRef: {
     current: [] as Array<{
@@ -82,16 +80,13 @@ const {
   sessionsRef: { current: {} as Record<string, Record<string, unknown>> },
   sessionIndexRef: { current: [] as Array<{ id: string; title: string }> },
   mockAttentionCount: vi.fn(),
-  mockRequestCloseAgentChat: vi.fn()
+  mockRequestCloseAgentChat: vi.fn(),
+  // The last props the shell handed to the (stubbed) drawer.
+  drawerPropsRef: { current: null as null | ComponentProps<typeof MobileShellDrawer> },
+  // Opt-in: render the stubbed drawer as a real modal Radix sheet, for the one
+  // test that needs Radix `hideOthers` to run (the shell live region).
+  drawerModalRef: { current: false }
 }))
-
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
-  return {
-    ...actual,
-    useNavigate: () => mockNavigate
-  }
-})
 
 vi.mock('@/stores/project-store', () => ({
   useActiveProject: () => projectRef.current,
@@ -108,9 +103,7 @@ vi.mock('@/stores/workspace-store', () => ({
     vi.fn((sel: (s: unknown) => unknown) =>
       sel({
         root: { leaves: workspaceRef.current.leaves },
-        activePaneId: workspaceRef.current.activePaneId,
-        removeTab: workspaceRef.current.removeTab,
-        setActiveTab: workspaceRef.current.setActiveTab
+        activePaneId: workspaceRef.current.activePaneId
       })
     ),
     { getState: () => workspaceRef.current }
@@ -126,22 +119,9 @@ vi.mock('@/stores/terminal-store', () => ({
   )
 }))
 
-vi.mock('@/stores/editor-store', () => ({
-  useEditorStore: Object.assign(
-    vi.fn((sel: (s: { openFiles: Map<string, { isDirty: boolean }> }) => unknown) =>
-      sel({ openFiles: editorRef.current.openFiles })
-    ),
-    { getState: () => ({ openFiles: editorRef.current.openFiles }) }
-  )
-}))
-
 vi.mock('@/stores/browser-session-store', () => ({
-  useBrowserSessionStore: Object.assign(
-    vi.fn((sel: (s: { tabs: Map<string, unknown>; removeTab: unknown }) => unknown) =>
-      sel({ tabs: browserTabsRef.current, removeTab: mockRemoveBrowserTab })
-    ),
-    { getState: () => ({ tabs: browserTabsRef.current, removeTab: mockRemoveBrowserTab }) }
-  )
+  useBrowserSessionStore: (sel: (s: { tabs: Map<string, unknown> }) => unknown) =>
+    sel({ tabs: browserTabsRef.current })
 }))
 
 vi.mock('@/stores/acp-store', () => ({
@@ -159,13 +139,46 @@ vi.mock('@/hooks/use-agent-idle-shutdown', () => ({
   requestCloseAgentChat: mockRequestCloseAgentChat
 }))
 
-vi.mock('@/components/chat/ChatHistoryTab', () => ({
-  ChatHistoryTab: ({ onSessionOpened }: { onSessionOpened?: () => void }) => (
-    <button type="button" onClick={() => onSessionOpened?.()}>
-      Open history chat
-    </button>
+// Stub the drawer so the shell test focuses on the opener wiring and the props
+// threaded through (☰ and the pill → drawerOpen → `open`; `onOpenChange` closes
+// it). It carries the real drawer's id, so the `aria-controls` of ☰ and the pill
+// resolves to an element. The drawer's own layout, focus handling and rows are
+// covered in MobileShellDrawer.test.tsx, MobileRecentsList.test.tsx and
+// MobileDrawerSectionList.test.tsx.
+// With `drawerModalRef` set it wraps the same content in a real modal Sheet.
+vi.mock('./MobileShellDrawer', async () => {
+  const { Sheet, SheetContent, SheetDescription, SheetTitle } = await import(
+    '@/components/ui/sheet'
   )
-}))
+  return {
+    MobileShellDrawer: (props: ComponentProps<typeof MobileShellDrawer>) => {
+      drawerPropsRef.current = props
+      const content = (
+        <>
+          <span>shell-drawer</span>
+          <button type="button" onClick={() => props.onOpenChange(false)}>
+            close-shell-drawer
+          </button>
+          <button type="button" onClick={props.onOpenProjects}>
+            stub-open-projects
+          </button>
+        </>
+      )
+      if (drawerModalRef.current) {
+        return (
+          <Sheet open={props.open} onOpenChange={props.onOpenChange}>
+            <SheetContent side="left" id="mobile-shell-drawer">
+              <SheetTitle>Chats</SheetTitle>
+              <SheetDescription className="sr-only">Stub drawer</SheetDescription>
+              {content}
+            </SheetContent>
+          </Sheet>
+        )
+      }
+      return props.open ? <div id="mobile-shell-drawer">{content}</div> : null
+    }
+  }
+})
 
 // Stub the project sheet so the shell test focuses on the trigger wiring
 // (subtitle → projectsOpen → sheet `open` prop → onOpenChange close) and on the
@@ -179,6 +192,7 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
       open,
       onOpenChange,
       onAddProject,
+      onOpenProjectSettings,
       side,
       id,
       onCloseAutoFocus
@@ -186,6 +200,7 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
       open: boolean
       onOpenChange: (open: boolean) => void
       onAddProject?: () => void
+      onOpenProjectSettings?: () => void
       side?: string
       id?: string
       onCloseAutoFocus?: (event: Event) => void
@@ -214,6 +229,17 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
               add-project
             </button>
           )}
+          {onOpenProjectSettings && (
+            <button
+              type="button"
+              onClick={() => {
+                onOpenChange(false)
+                onOpenProjectSettings()
+              }}
+            >
+              project-settings
+            </button>
+          )}
         </div>
       ) : null
     }
@@ -223,14 +249,17 @@ vi.mock('@/components/chat/ProjectSwitcherDrawer', async () => {
 // Stub the file-explorer drawer so the shell test focuses on the trigger
 // wiring (button → filesOpen → drawer `open` prop → onOpenChange close).
 // The drawer's own open/close + file-management is covered in
-// MobileFileExplorer.test.tsx.
+// MobileFileExplorer.test.tsx. "open-file" mirrors a successful file open:
+// `onFileOpened` first, then the close.
 vi.mock('./MobileFileExplorer', () => ({
   MobileFileExplorer: ({
     open,
-    onOpenChange
+    onOpenChange,
+    onFileOpened
   }: {
     open: boolean
     onOpenChange: (open: boolean) => void
+    onFileOpened?: () => void
   }) =>
     open ? (
       <div>
@@ -238,9 +267,32 @@ vi.mock('./MobileFileExplorer', () => ({
         <button type="button" onClick={() => onOpenChange(false)}>
           close-files
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            onFileOpened?.()
+            onOpenChange(false)
+          }}
+        >
+          open-file
+        </button>
       </div>
     ) : null
 }))
+
+// The real hook subscribes to the acp and connection stores, and this file
+// mocks `@/stores/acp-store` with a selector-only stub (no `subscribe`). Keep
+// the part the shell render needs, registering the live region so `announce`
+// works, and leave the subscriptions to use-shell-announcements.test.tsx.
+vi.mock('@/hooks/use-shell-announcements', async () => {
+  const { useEffect } = await import('react')
+  const { useShellAnnouncerStore } = await import('@/stores/shell-announcer-store')
+  return {
+    useShellAnnouncements: () => {
+      useEffect(() => useShellAnnouncerStore.getState().registerRegion(), [])
+    }
+  }
+})
 
 vi.mock('@/lib/tauri-runtime', () => ({
   isTauriContext: () => tauriRef.current
@@ -280,6 +332,11 @@ function seedTabs(tabs: Array<Record<string, unknown>>, activeTabId: string | nu
   }
 }
 
+function drawerProps(): ComponentProps<typeof MobileShellDrawer> {
+  if (!drawerPropsRef.current) throw new Error('drawer stub never rendered')
+  return drawerPropsRef.current
+}
+
 function seedActiveTerminal(terminal: Partial<TestTerminal> = {}): void {
   seedTabs([{ type: 'terminal', id: 'term-t1', terminalId: 't1' }], 'term-t1')
   terminalsRef.current = [{ id: 't1', name: 'zsh — dev server', ...terminal }]
@@ -312,8 +369,9 @@ async function openHeaderSheet(): Promise<HTMLElement> {
 
 describe('MobileChatShell', () => {
   beforeEach(() => {
-    mockNavigate.mockReset()
-    mockRemoveBrowserTab.mockReset()
+    _resetShellAnnouncerForTests()
+    _resetSheetFocusReturnForTests()
+    drawerModalRef.current = false
     mockAttentionCount.mockReset()
     mockAttentionCount.mockReturnValue(0)
     mockRequestCloseAgentChat.mockReset()
@@ -323,16 +381,16 @@ describe('MobileChatShell', () => {
     workspaceRef.current.removeTab.mockReset()
     workspaceRef.current.setActiveTab.mockReset()
     workspaceRef.current.clearFullscreenPane.mockReset()
+    workspaceRef.current.fullscreenPaneId = null
+    drawerPropsRef.current = null
     tauriRef.current = true
     projectRef.current = { id: 'p1', name: 'Demo', path: '/demo' }
     extraProjectsRef.current = []
     sessionsRef.current = { s1: { title: 'Hello chat' } }
     sessionIndexRef.current = []
     terminalsRef.current = []
-    // Default leaf: one agent-chat tab (the pre-Story-6 drawer shape).
+    // Default leaf: one agent-chat tab.
     seedTabs([{ type: 'agent-chat', id: 'tab-1', sessionId: 's1' }], 'tab-1')
-    workspaceRef.current.fullscreenPaneId = null
-    editorRef.current.openFiles = new Map()
     browserTabsRef.current = new Map()
     useOverlayStackStore.setState({ stack: [] })
     stubNarrowViewport(false)
@@ -652,7 +710,7 @@ describe('MobileChatShell', () => {
         const { unmount } = renderShell()
 
         fireEvent.click(screen.getByRole('button', { name: '2 other chats need you' }))
-        expect(await screen.findByText('Open history chat')).toBeInTheDocument()
+        expect(await screen.findByText('shell-drawer')).toBeInTheDocument()
         expect(screen.getByLabelText('2 other chats need you')).toHaveAttribute(
           'aria-expanded',
           'true'
@@ -666,7 +724,7 @@ describe('MobileChatShell', () => {
 
         renderShell()
         fireEvent.click(screen.getByLabelText('Open menu'))
-        expect(await screen.findByText('Open history chat')).toBeInTheDocument()
+        expect(await screen.findByText('shell-drawer')).toBeInTheDocument()
         expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'true')
         expect(screen.getByLabelText('Open menu')).toHaveAttribute(
           'aria-controls',
@@ -684,7 +742,7 @@ describe('MobileChatShell', () => {
         expect(menu.querySelector('span[aria-hidden="true"]')?.className).toContain('bg-warning')
 
         fireEvent.click(menu)
-        expect(await screen.findByText('Open history chat')).toBeInTheDocument()
+        expect(await screen.findByText('shell-drawer')).toBeInTheDocument()
       })
     })
 
@@ -871,8 +929,34 @@ describe('MobileChatShell', () => {
         'Files',
         'Command palette',
         'New terminal',
-        'Project settings'
+        'Project settings',
+        'Close tab'
       ])
+    })
+
+    it('closes an editor tab through its dirty guard, not removeTab', async () => {
+      seedTabs(
+        [{ type: 'editor', id: 'edit-/demo/a.ts', filePath: '/demo/a.ts' }],
+        'edit-/demo/a.ts'
+      )
+      const onCloseEditorTab = vi.fn(() => true)
+      renderWeb({ onCloseEditorTab })
+      await openHeaderSheet()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close tab' }))
+
+      expect(onCloseEditorTab).toHaveBeenCalledWith('/demo/a.ts')
+      expect(workspaceRef.current.removeTab).not.toHaveBeenCalled()
+    })
+
+    it('offers Close tab for a Git History tab, through the plain removeTab', async () => {
+      seedTabs([{ type: 'git-history', id: 'gh1', cwd: '/demo' }], 'gh1')
+      renderWeb()
+      await openHeaderSheet()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close tab' }))
+
+      expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('gh1')
     })
 
     it('closes when the active tab changes underneath it, and stays closed on return', async () => {
@@ -989,6 +1073,20 @@ describe('MobileChatShell', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     })
 
+    it('focuses the header title, not ⋯, after a row was chosen', async () => {
+      seedActiveTerminal()
+      renderTerminal()
+      await openTerminalSheet()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Restart terminal' }))
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      await waitFor(() =>
+        expect(document.activeElement).toBe(document.getElementById('mobile-shell-title'))
+      )
+      expect(document.activeElement).not.toBe(screen.getByLabelText('Terminal actions'))
+    })
+
     it('Command history calls onOpenCommandHistory() and closes', async () => {
       seedActiveTerminal()
       const { callbacks } = renderTerminal()
@@ -1027,6 +1125,220 @@ describe('MobileChatShell', () => {
       await waitFor(() =>
         expect(document.activeElement).toBe(screen.getByLabelText('Terminal actions'))
       )
+    })
+
+    describe('navigation rows (web mode)', () => {
+      function renderWebTerminal(props: Partial<ShellProps> = {}) {
+        tauriRef.current = false
+        seedActiveTerminal()
+        const navigation = {
+          onOpenGitChanges: vi.fn(),
+          onOpenCommandPalette: vi.fn(),
+          onOpenProjectSettings: vi.fn()
+        }
+        const view = renderTerminal({ ...navigation, ...props })
+        return { ...view, navigation }
+      }
+
+      function terminalSheetRows(): string[] {
+        const sheet = document.getElementById('mobile-terminal-actions-sheet')
+        return Array.from(sheet?.querySelectorAll('button') ?? [])
+          .map((button) => button.textContent?.trim() ?? '')
+          .filter((text) => text.length > 0 && text !== 'Close')
+      }
+
+      function closeEvent(): Event {
+        return new Event('focusScope.autoFocusOnUnmount', { cancelable: true })
+      }
+
+      /** Lets the terminal sheet hand focus to the title, then drops it to `<body>`. */
+      async function settleAfterTerminalSheetCloses(): Promise<void> {
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        await waitFor(() =>
+          expect(document.activeElement).toBe(document.getElementById('mobile-shell-title'))
+        )
+        act(() => {
+          ;(document.activeElement as HTMLElement | null)?.blur()
+        })
+        expect(document.activeElement).toBe(document.body)
+      }
+
+      it('lists the header sheet rows after Command history and before Close terminal', async () => {
+        renderWebTerminal()
+        await openTerminalSheet()
+
+        expect(terminalSheetRows()).toEqual([
+          'Rename terminal',
+          'Restart terminal',
+          'Command history',
+          'Git changes',
+          'Files',
+          'Command palette',
+          'Project settings',
+          'Close terminal'
+        ])
+        expect(screen.getByRole('button', { name: 'Close terminal' }).className).toContain(
+          'text-destructive'
+        )
+      })
+
+      it('has no New terminal row even when the shell can create one', async () => {
+        renderWebTerminal({ onNewTerminal: vi.fn() })
+        await openTerminalSheet()
+
+        expect(screen.queryByRole('button', { name: 'New terminal' })).not.toBeInTheDocument()
+        // The header pencil is New terminal in a terminal.
+        expect(screen.getByLabelText('New terminal')).toBeInTheDocument()
+      })
+
+      it.each([
+        ['Git changes', 'onOpenGitChanges'],
+        ['Command palette', 'onOpenCommandPalette'],
+        ['Project settings', 'onOpenProjectSettings']
+      ] as const)('"%s" runs exactly its callback once, closes and focuses the title', async (label, key) => {
+        const { navigation, callbacks } = renderWebTerminal()
+        await openTerminalSheet()
+
+        fireEvent.click(screen.getByRole('button', { name: label }))
+
+        expect(navigation[key]).toHaveBeenCalledTimes(1)
+        for (const [name, callback] of Object.entries(navigation)) {
+          if (name !== key) expect(callback, name).not.toHaveBeenCalled()
+        }
+        expect(callbacks.onRestartTerminal).not.toHaveBeenCalled()
+        expect(callbacks.onCloseTerminal).not.toHaveBeenCalled()
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        // The destination changed, so focus lands on the title, not the more button.
+        await waitFor(() =>
+          expect(document.activeElement).toBe(document.getElementById('mobile-shell-title'))
+        )
+      })
+
+      it('"Files" opens the existing Files sheet and closes the terminal sheet', async () => {
+        renderWebTerminal()
+        await openTerminalSheet()
+        expect(screen.queryByText('files-drawer')).not.toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+
+        expect(await screen.findByText('files-drawer')).toBeInTheDocument()
+        await waitFor(() =>
+          expect(document.getElementById('mobile-terminal-actions-sheet')).not.toBeInTheDocument()
+        )
+      })
+
+      it('records the more button as the Git sheet opener and still opens it', async () => {
+        const { navigation } = renderWebTerminal()
+        const more = screen.getByLabelText('Terminal actions')
+        await openTerminalSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'Git changes' }))
+
+        expect(navigation.onOpenGitChanges).toHaveBeenCalledTimes(1)
+        await settleAfterTerminalSheetCloses()
+        sheetCloseAutoFocus('git-sheet')(closeEvent())
+
+        expect(document.activeElement).toBe(more)
+      })
+
+      it('records the more button as the Files sheet opener', async () => {
+        renderWebTerminal()
+        const more = screen.getByLabelText('Terminal actions')
+        await openTerminalSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+        expect(await screen.findByText('files-drawer')).toBeInTheDocument()
+        await settleAfterTerminalSheetCloses()
+
+        const event = closeEvent()
+        sheetCloseAutoFocus('files-sheet')(event)
+
+        expect(event.defaultPrevented).toBe(true)
+        expect(document.activeElement).toBe(more)
+      })
+
+      it('keeps the Tauri gates: no Git changes, Files or Command palette, but Project settings', async () => {
+        tauriRef.current = true
+        seedActiveTerminal()
+        renderTerminal({
+          onOpenGitChanges: vi.fn(),
+          onOpenCommandPalette: vi.fn(),
+          onOpenProjectSettings: vi.fn()
+        })
+        await openTerminalSheet()
+
+        expect(terminalSheetRows()).toEqual([
+          'Rename terminal',
+          'Restart terminal',
+          'Command history',
+          'Project settings',
+          'Close terminal'
+        ])
+      })
+
+      it('omits Git changes when the project has no path', async () => {
+        projectRef.current = { id: 'p1', name: 'Demo' }
+        renderWebTerminal()
+        await openTerminalSheet()
+
+        expect(terminalSheetRows()).toEqual([
+          'Rename terminal',
+          'Restart terminal',
+          'Command history',
+          'Files',
+          'Command palette',
+          'Project settings',
+          'Close terminal'
+        ])
+      })
+
+      it('omits Project settings when there is no active project', async () => {
+        projectRef.current = undefined
+        renderWebTerminal()
+        await openTerminalSheet()
+
+        expect(screen.queryByRole('button', { name: 'Project settings' })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Git changes' })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Files' })).toBeInTheDocument()
+      })
+
+      it('omits rows whose callback is not threaded', async () => {
+        tauriRef.current = false
+        seedActiveTerminal()
+        renderTerminal()
+        await openTerminalSheet()
+
+        expect(terminalSheetRows()).toEqual([
+          'Rename terminal',
+          'Restart terminal',
+          'Command history',
+          'Files',
+          'Close terminal'
+        ])
+      })
+
+      it('offers the same navigation rows as the header sheet does for a chat', async () => {
+        const view = renderWebTerminal()
+        await openTerminalSheet()
+        const navigationLabels = ['Git changes', 'Files', 'Command palette', 'Project settings']
+        const fromTerminal = terminalSheetRows().filter((row) => navigationLabels.includes(row))
+        fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+        seedTabs([{ type: 'agent-chat', id: 'tab-1', sessionId: 's1' }], 'tab-1')
+        rerenderShell(view, {
+          onOpenGitChanges: view.navigation.onOpenGitChanges,
+          onOpenCommandPalette: view.navigation.onOpenCommandPalette,
+          onOpenProjectSettings: view.navigation.onOpenProjectSettings
+        })
+        await openHeaderSheet()
+        const fromHeader = Array.from(
+          document.getElementById('mobile-header-more-sheet')?.querySelectorAll('button') ?? []
+        )
+          .map((button) => button.textContent?.trim() ?? '')
+          .filter((text) => navigationLabels.includes(text))
+
+        expect(fromTerminal).toEqual(navigationLabels)
+        expect(fromHeader).toEqual(fromTerminal)
+      })
     })
 
     it('titles the sheet "Terminal" when the terminal name is empty', async () => {
@@ -1161,6 +1473,20 @@ describe('MobileChatShell', () => {
       await waitFor(() => expect(document.activeElement).toBe(subtitle))
     })
 
+    it('returns focus to the subtitle when it was opened from the drawer project row', async () => {
+      tauriRef.current = false
+      renderShell()
+      const subtitle = screen.getByRole('button', { name: /switch project/ })
+      fireEvent.click(screen.getByLabelText('Open menu'))
+      fireEvent.click(screen.getByText('stub-open-projects'))
+      expect(await screen.findByText('project-drawer')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByText('close-drawer'))
+
+      expect(screen.queryByText('project-drawer')).not.toBeInTheDocument()
+      await waitFor(() => expect(document.activeElement).toBe(subtitle))
+    })
+
     it('hands onNewProject to the sheet as its Add project action', async () => {
       tauriRef.current = false
       const onNewProject = vi.fn()
@@ -1181,6 +1507,29 @@ describe('MobileChatShell', () => {
 
       expect(await screen.findByTestId('project-sheet')).toBeInTheDocument()
       expect(screen.queryByText('add-project')).not.toBeInTheDocument()
+    })
+
+    it('hands onOpenProjectSettings to the sheet as its Project settings action', async () => {
+      tauriRef.current = false
+      const onOpenProjectSettings = vi.fn()
+      renderShell({ onOpenProjectSettings })
+
+      fireEvent.click(screen.getByRole('button', { name: /switch project/ }))
+      fireEvent.click(await screen.findByText('project-settings'))
+
+      expect(onOpenProjectSettings).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('project-sheet')).not.toBeInTheDocument()
+    })
+
+    it('offers no Project settings action when there is no active project', async () => {
+      tauriRef.current = false
+      projectRef.current = undefined
+      renderShell({ onOpenProjectSettings: vi.fn() })
+
+      fireEvent.click(screen.getByRole('button', { name: /switch project/ }))
+
+      expect(await screen.findByTestId('project-sheet')).toBeInTheDocument()
+      expect(screen.queryByText('project-settings')).not.toBeInTheDocument()
     })
 
     it('does not mount the project sheet in Tauri (desktop) mode', () => {
@@ -1263,397 +1612,541 @@ describe('MobileChatShell', () => {
     })
   })
 
-  it('opens the chat drawer and closes it after selecting a session', async () => {
-    renderShell()
+  describe('drawer opener', () => {
+    it('mounts the drawer closed, with no aria-controls on the opener', () => {
+      renderShell()
 
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'true')
-    expect(await screen.findByText('Open history chat')).toBeInTheDocument()
-    expect(screen.getByText('New chat')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByText('Open history chat'))
-    expect(screen.queryByText('Open history chat')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  it('navigates to /snapshots from the drawer', () => {
-    tauriRef.current = false
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByLabelText('Snapshots'))
-    expect(mockNavigate).toHaveBeenCalledWith('/snapshots')
-    // The drawer closes after navigating.
-    expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  it('hides the Git history button in Tauri (desktop) mode', () => {
-    tauriRef.current = true
-    renderShell({ onOpenGitHistory: vi.fn() })
-    // Desktop never shows the mobile Git History entry (the ActivityRail owns
-    // it there). The drawer button must not leak into the mobile shell.
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    expect(screen.queryByLabelText('Git history')).not.toBeInTheDocument()
-  })
-
-  it('mounts the Git history trigger in web mode and invokes onOpenGitHistory', () => {
-    tauriRef.current = false
-    const onOpenGitHistory = vi.fn()
-    renderShell({ onOpenGitHistory })
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    const btn = screen.getByLabelText('Git history')
-    expect(btn).not.toBeDisabled()
-    fireEvent.click(btn)
-    expect(onOpenGitHistory).toHaveBeenCalledTimes(1)
-    // The drawer closes after invoking the handler.
-    expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  it('disables the Git history button when no active project path', () => {
-    tauriRef.current = false
-    projectRef.current = { id: 'p1', name: 'Demo' }
-    renderShell({ onOpenGitHistory: vi.fn() })
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    expect(screen.getByLabelText('Git history')).toBeDisabled()
-  })
-
-  // ── Story 6: drawer lists ALL pane tabs (QA F3 navigation traps) ─────────
-
-  function seedAllTabTypes(): void {
-    seedTabs(
-      [
-        { type: 'terminal', id: 'term-t1', terminalId: 't1' },
-        { type: 'editor', id: 'edit-/proj/a.ts', filePath: '/proj/a.ts' },
-        { type: 'git', id: 'git-/proj', cwd: '/proj' },
-        { type: 'git-history', id: 'git-history-/proj', cwd: '/proj' },
-        { type: 'browser', id: 'browser-b1', browserTabId: 'b1' },
-        { type: 'agent-chat', id: 'tab-1', sessionId: 's1' }
-      ],
-      'tab-1'
-    )
-    browserTabsRef.current = new Map([
-      ['b1', { id: 'b1', url: 'https://example.com/page', title: 'Example Site' }]
-    ])
-  }
-
-  it('drawer lists every non-terminal pane tab with a close affordance', () => {
-    seedAllTabTypes()
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-
-    // Every tab type is listed in the drawer's Tabs section.
-    expect(screen.getByText('a.ts')).toBeInTheDocument()
-    expect(screen.getAllByText('Git Changes').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('Git History').length).toBeGreaterThan(0)
-    expect(screen.getByText('Example Site')).toBeInTheDocument()
-    // Editor rows expose a close affordance routed through the dirty guard.
-    expect(screen.getByRole('button', { name: 'Close a.ts' })).toBeInTheDocument()
-  })
-
-  it('drawer shows the editor dirty dot for dirty files', () => {
-    seedAllTabTypes()
-    editorRef.current.openFiles = new Map([['/proj/a.ts', { isDirty: true }]])
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    expect(screen.getByTestId('editor-dirty-dot')).toBeInTheDocument()
-  })
-
-  it('drawer omits the editor dirty dot when the file is clean', () => {
-    seedAllTabTypes()
-    editorRef.current.openFiles = new Map([['/proj/a.ts', { isDirty: false }]])
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    expect(screen.queryByTestId('editor-dirty-dot')).not.toBeInTheDocument()
-  })
-
-  it('drawer close on a dirty editor tab routes through the dirty guard, not removeTab', () => {
-    seedAllTabTypes()
-    const onCloseEditorTab = vi.fn()
-    renderShell({ onCloseEditorTab })
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Close a.ts' }))
-
-    expect(onCloseEditorTab).toHaveBeenCalledWith('/proj/a.ts')
-    expect(workspaceRef.current.removeTab).not.toHaveBeenCalled()
-  })
-
-  it('drawer close on a terminal tab routes through the existing terminal close flow', () => {
-    seedAllTabTypes()
-    const onCloseTerminal = vi.fn()
-    renderShell({ onCloseTerminal })
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    // The terminal-store mock has no terminal records, so the row label
-    // falls back to the plain "terminal" display name.
-    fireEvent.click(screen.getByRole('button', { name: 'Close terminal' }))
-
-    expect(onCloseTerminal).toHaveBeenCalledWith('t1', 'term-t1')
-    expect(workspaceRef.current.removeTab).not.toHaveBeenCalled()
-  })
-
-  it('drawer close on git and git-history tabs removes the tab directly', () => {
-    seedAllTabTypes()
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Close git changes' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Close git history' }))
-
-    expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('git-/proj')
-    expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('git-history-/proj')
-  })
-
-  it('drawer close on a browser tab tears down the session tab and the workspace tab', () => {
-    seedAllTabTypes()
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Close Example Site' }))
-
-    expect(mockRemoveBrowserTab).toHaveBeenCalledWith('b1')
-    expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('browser-b1')
-  })
-
-  it('drawer close on an agent-chat tab closes the chat and removes the tab', () => {
-    seedAllTabTypes()
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Close Hello chat' }))
-
-    expect(mockRequestCloseAgentChat).toHaveBeenCalledWith('s1', expect.any(Function))
-    expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('tab-1')
-  })
-
-  it('drawer close on an editor tab falls back to removeTab when no guard is threaded', () => {
-    seedAllTabTypes()
-    renderShell()
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Close a.ts' }))
-
-    expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('edit-/proj/a.ts')
-  })
-
-  // ── FIX 10: choosing a tab from /snapshots returns to the workspace ──────
-
-  function renderShellAt(path: string): void {
-    render(
-      <MemoryRouter initialEntries={[path]}>
-        <MobileChatShell onNewChat={vi.fn()} canNewChat>
-          <div>chat body</div>
-        </MobileChatShell>
-      </MemoryRouter>
-    )
-  }
-
-  const NON_CHAT_ROWS = [
-    { label: 'terminal', rowName: 'Terminal', tabId: 'term-t1' },
-    { label: 'editor', rowName: 'a.ts', tabId: 'edit-/proj/a.ts' },
-    { label: 'git', rowName: 'Git Changes', tabId: 'git-/proj' },
-    { label: 'git-history', rowName: 'Git History', tabId: 'git-history-/proj' },
-    { label: 'browser', rowName: 'Example Site', tabId: 'browser-b1' }
-  ]
-
-  it.each(
-    NON_CHAT_ROWS
-  )('on /snapshots, tapping the $label row activates the tab, closes the drawer and returns to /', ({
-    rowName,
-    tabId
-  }) => {
-    seedAllTabTypes()
-    renderShellAt('/snapshots')
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: rowName }))
-
-    expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-1', tabId)
-    expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'false')
-    expect(mockNavigate).toHaveBeenCalledTimes(1)
-    expect(mockNavigate).toHaveBeenCalledWith('/')
-  })
-
-  it('on /snapshots, an agent-chat row does not navigate to / (setActiveTab owns /c/<id>)', () => {
-    seedAllTabTypes()
-    renderShellAt('/snapshots')
-
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Hello chat' }))
-
-    expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-1', 'tab-1')
-    expect(mockNavigate).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    '/',
-    '/c/s1'
-  ])('on the workspace route %s, tapping any drawer row never navigates', (path) => {
-    seedAllTabTypes()
-    renderShellAt(path)
-
-    for (const { rowName } of NON_CHAT_ROWS) {
-      fireEvent.click(screen.getByLabelText('Open menu'))
-      fireEvent.click(screen.getByRole('button', { name: rowName }))
-    }
-    fireEvent.click(screen.getByLabelText('Open menu'))
-    fireEvent.click(screen.getByRole('button', { name: 'Hello chat' }))
-
-    expect(workspaceRef.current.setActiveTab).toHaveBeenCalledTimes(NON_CHAT_ROWS.length + 1)
-    expect(mockNavigate).not.toHaveBeenCalled()
-  })
-
-  describe('a row in another pane on /snapshots', () => {
-    let pendingFrames: FrameRequestCallback[]
-    let raf: { mockRestore: () => void }
-
-    beforeEach(() => {
-      // Capture the deferred activation instead of running it, so each test
-      // decides when the frame fires. Restored in afterEach so a failing
-      // assertion cannot leak the stub into later tests.
-      pendingFrames = []
-      raf = vi
-        .spyOn(window, 'requestAnimationFrame')
-        .mockImplementation((callback: FrameRequestCallback) => {
-          pendingFrames.push(callback)
-          return pendingFrames.length
-        })
-      workspaceRef.current = {
-        ...workspaceRef.current,
-        leaves: [
-          { type: 'leaf', id: 'pane-1', tabs: [], activeTabId: null },
-          {
-            type: 'leaf',
-            id: 'pane-2',
-            tabs: [{ type: 'git', id: 'git-/proj', cwd: '/proj' }],
-            activeTabId: null
-          }
-        ],
-        activePaneId: 'pane-1'
-      }
+      const menu = screen.getByLabelText('Open menu')
+      expect(drawerProps().open).toBe(false)
+      expect(screen.queryByText('shell-drawer')).not.toBeInTheDocument()
+      expect(menu).toHaveAttribute('aria-expanded', 'false')
+      expect(menu).not.toHaveAttribute('aria-controls')
     })
 
-    afterEach(() => {
-      raf.mockRestore()
+    it('opens the drawer from ☰ and points aria-controls at #mobile-shell-drawer', () => {
+      renderShell()
+      const menu = screen.getByLabelText('Open menu')
+
+      fireEvent.click(menu)
+
+      expect(screen.getByText('shell-drawer')).toBeInTheDocument()
+      expect(drawerProps().open).toBe(true)
+      expect(menu).toHaveAttribute('aria-expanded', 'true')
+      expect(menu).toHaveAttribute('aria-controls', 'mobile-shell-drawer')
     })
 
-    it('still returns to / after its deferred activation', () => {
-      renderShellAt('/snapshots')
+    it.each([
+      ['☰', 0, 'Open menu'],
+      ['the attention pill', 2, '2 other chats need you']
+    ])('%s: aria-controls resolves to the drawer element', (_name, attentionCount, label) => {
+      mockAttentionCount.mockReturnValue(attentionCount)
+      renderShell()
+      const control = screen.getByRole('button', { name: label })
 
-      fireEvent.click(screen.getByLabelText('Open menu'))
-      fireEvent.click(screen.getByRole('button', { name: 'Git Changes' }))
-      for (const frame of pendingFrames) frame(0)
+      fireEvent.click(control)
 
-      expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-2', 'git-/proj')
-      expect(mockNavigate).toHaveBeenCalledTimes(1)
-      expect(mockNavigate).toHaveBeenCalledWith('/')
+      const target = document.getElementById(control.getAttribute('aria-controls') ?? '')
+      expect(target).not.toBeNull()
+      expect(target?.id).toBe('mobile-shell-drawer')
+      expect(target).toContainElement(screen.getByText('shell-drawer'))
     })
 
-    it('navigates only after the tab is active, never before the frame fires', () => {
-      renderShellAt('/snapshots')
+    it('records ☰ as the opener: dismissing the drawer returns focus to it', () => {
+      renderShell()
+      const menu = screen.getByLabelText('Open menu')
+      fireEvent.click(menu)
 
+      sheetCloseAutoFocus('mobile-drawer')(new Event('focusScope.autoFocusOnUnmount'))
+
+      expect(document.activeElement).toBe(menu)
+    })
+
+    it('records the attention pill as the opener when it opened the drawer', () => {
+      mockAttentionCount.mockReturnValue(2)
+      renderShell()
+      const pill = screen.getByRole('button', { name: '2 other chats need you' })
+      fireEvent.click(pill)
+
+      sheetCloseAutoFocus('mobile-drawer')(new Event('focusScope.autoFocusOnUnmount'))
+
+      expect(document.activeElement).toBe(pill)
+      expect(document.activeElement).not.toBe(screen.getByLabelText('Open menu'))
+    })
+
+    it('falls back to ☰ when the pill that opened the drawer is gone', () => {
+      mockAttentionCount.mockReturnValue(2)
+      const view = renderShell()
+      const pill = screen.getByRole('button', { name: '2 other chats need you' })
+      fireEvent.click(pill)
+
+      // Nothing needs the user any more, so the pill unmounts behind the drawer.
+      mockAttentionCount.mockReturnValue(0)
+      rerenderShell(view)
+      expect(pill.isConnected).toBe(false)
+      sheetCloseAutoFocus('mobile-drawer')(new Event('focusScope.autoFocusOnUnmount'))
+
+      expect(document.activeElement).toBe(screen.getByLabelText('Open menu'))
+    })
+
+    it('records the opener again on every open', () => {
+      mockAttentionCount.mockReturnValue(2)
+      renderShell()
+      const menu = screen.getByLabelText('Open menu')
+      fireEvent.click(screen.getByRole('button', { name: '2 other chats need you' }))
+      fireEvent.click(screen.getByText('close-shell-drawer'))
+
+      fireEvent.click(menu)
+      sheetCloseAutoFocus('mobile-drawer')(new Event('focusScope.autoFocusOnUnmount'))
+
+      expect(document.activeElement).toBe(menu)
+    })
+
+    it('closes the drawer when it calls onOpenChange(false)', () => {
+      renderShell()
       fireEvent.click(screen.getByLabelText('Open menu'))
-      fireEvent.click(screen.getByRole('button', { name: 'Git Changes' }))
 
-      // The drawer closes at once, but neither the activation nor the route
-      // change has happened yet: the workspace route must not paint the
-      // previously active leaf while the activation is still pending.
+      fireEvent.click(screen.getByText('close-shell-drawer'))
+
+      expect(screen.queryByText('shell-drawer')).not.toBeInTheDocument()
       expect(screen.getByLabelText('Open menu')).toHaveAttribute('aria-expanded', 'false')
-      expect(pendingFrames).toHaveLength(1)
-      expect(workspaceRef.current.setActiveTab).not.toHaveBeenCalled()
-      expect(mockNavigate).not.toHaveBeenCalled()
+      expect(screen.getByLabelText('Open menu')).not.toHaveAttribute('aria-controls')
+    })
 
-      for (const frame of pendingFrames) frame(0)
+    it('registers with the overlay back stack while open', () => {
+      renderShell()
+      expect(overlayIds()).not.toContain('mobile-drawer')
 
-      const [activation] = workspaceRef.current.setActiveTab.mock.invocationCallOrder
-      const [navigation] = mockNavigate.mock.invocationCallOrder
-      expect(activation).toBeLessThan(navigation)
+      fireEvent.click(screen.getByLabelText('Open menu'))
+      expect(overlayIds()).toContain('mobile-drawer')
+
+      fireEvent.click(screen.getByText('close-shell-drawer'))
+      expect(overlayIds()).not.toContain('mobile-drawer')
+    })
+
+    it('opens the project sheet from the drawer project row', () => {
+      tauriRef.current = false
+      renderShell()
+      fireEvent.click(screen.getByLabelText('Open menu'))
+
+      fireEvent.click(screen.getByText('stub-open-projects'))
+
+      expect(screen.getByText('project-drawer')).toBeInTheDocument()
+    })
+
+    it('threads the active chat and the shell handlers into the drawer', () => {
+      const handlers = {
+        onNewChat: vi.fn(),
+        onNewTerminal: vi.fn(),
+        onCloseTerminal: vi.fn(),
+        onRenameTerminal: vi.fn(),
+        onCloseEditorTab: vi.fn(),
+        onOpenGitHistory: vi.fn()
+      }
+      renderShell(handlers)
+
+      const props = drawerProps()
+      expect(props.activeTabId).toBe('tab-1')
+      expect(props.activeSessionId).toBe('s1')
+      expect(props.canNewChat).toBe(true)
+      expect(props.onNewChat).toBe(handlers.onNewChat)
+      // New terminal and Git history are wrapped (they also leave /snapshots);
+      // the wrappers call the originals.
+      props.onNewTerminal?.()
+      expect(handlers.onNewTerminal).toHaveBeenCalledTimes(1)
+      props.onOpenGitHistory?.()
+      expect(handlers.onOpenGitHistory).toHaveBeenCalledTimes(1)
+      expect(props.onCloseTerminal).toBe(handlers.onCloseTerminal)
+      expect(props.onRenameTerminal).toBe(handlers.onRenameTerminal)
+      expect(props.onCloseEditorTab).toBe(handlers.onCloseEditorTab)
+      expect(typeof props.onOpenProjects).toBe('function')
+    })
+
+    it('has no active chat when a terminal tab is active', () => {
+      seedTabs(
+        [
+          { type: 'terminal', id: 'term-t1', terminalId: 't1' },
+          { type: 'agent-chat', id: 'tab-1', sessionId: 's1' }
+        ],
+        'term-t1'
+      )
+      renderShell()
+
+      expect(drawerProps().activeTabId).toBe('term-t1')
+      expect(drawerProps().activeSessionId).toBeNull()
+    })
+
+    it('defaults canNewChat to false', () => {
+      renderShell({ canNewChat: undefined })
+
+      expect(drawerProps().canNewChat).toBe(false)
     })
   })
 
-  describe('while a pane is fullscreen', () => {
-    let raf: { mockRestore: () => void }
+  // ── a11y floor: shell live region ───────────────────────────────────────
 
-    beforeEach(() => {
-      // Run the deferred cross-pane activation at once; restored in afterEach
-      // so a failing assertion cannot leak the stub into later tests.
-      raf = vi
-        .spyOn(window, 'requestAnimationFrame')
-        .mockImplementation((callback: FrameRequestCallback) => {
-          callback(0)
-          return 1
-        })
-      workspaceRef.current = {
-        ...workspaceRef.current,
-        leaves: [
-          {
-            type: 'leaf',
-            id: 'pane-1',
-            tabs: [{ type: 'git', id: 'git-/a', cwd: '/a' }],
-            activeTabId: 'git-/a'
-          },
-          {
-            type: 'leaf',
-            id: 'pane-2',
-            tabs: [{ type: 'git-history', id: 'git-history-/b', cwd: '/b' }],
-            activeTabId: 'git-history-/b'
-          }
-        ],
-        activePaneId: 'pane-1',
-        fullscreenPaneId: 'pane-1'
-      }
-    })
-
-    afterEach(() => {
-      raf.mockRestore()
-    })
-
-    function tapRow(name: string): void {
-      renderShellAt('/')
-      fireEvent.click(screen.getByLabelText('Open menu'))
-      fireEvent.click(screen.getByRole('button', { name }))
+  describe('shell live region', () => {
+    function liveRegion(): HTMLElement {
+      const regions = document.querySelectorAll<HTMLElement>('[data-shell-live-region]')
+      expect(regions).toHaveLength(1)
+      return regions[0]
     }
 
-    it('leaves fullscreen before activating a tab in another leaf, so the view follows it', () => {
-      tapRow('Git History')
+    async function announceAndWait(text: string): Promise<void> {
+      act(() => {
+        useShellAnnouncerStore.getState().announce(text)
+      })
+      await waitFor(() => expect(liveRegion().textContent).toBe(text))
+    }
 
-      expect(workspaceRef.current.clearFullscreenPane).toHaveBeenCalledTimes(1)
-      expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-2', 'git-history-/b')
-      // Cleared first: with fullscreen still set, setActiveTab would keep
-      // activePaneId on the fullscreen leaf.
-      const [clearing] = workspaceRef.current.clearFullscreenPane.mock.invocationCallOrder
-      const [activation] = workspaceRef.current.setActiveTab.mock.invocationCallOrder
-      expect(clearing).toBeLessThan(activation)
+    it('mounts exactly one empty polite status region as a direct child of the shell root', () => {
+      renderShell()
+      const region = liveRegion()
+
+      expect(region).toHaveAttribute('role', 'status')
+      expect(region).toHaveAttribute('aria-live', 'polite')
+      expect(region).toHaveAttribute('aria-atomic', 'true')
+      expect(region.classList.contains('sr-only')).toBe(true)
+      expect(region.textContent).toBe('')
+      expect(region.parentElement).toBe(document.querySelector('[data-mobile-chat-shell]'))
     })
 
-    it('keeps fullscreen when the row belongs to the fullscreen leaf', () => {
-      tapRow('Git Changes')
-
-      expect(workspaceRef.current.clearFullscreenPane).not.toHaveBeenCalled()
-      expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-1', 'git-/a')
+    it('renders the announced text once the delay elapses', async () => {
+      renderShell()
+      await announceAndWait('Turn finished')
+      expect(screen.getByRole('status', { name: '' })).toBe(liveRegion())
     })
 
-    it('leaves a fullscreen leaf that is not the active one, even for a row in the active leaf', () => {
-      // `loadProjectWorkspace` can keep a stale fullscreenPaneId, which would
-      // otherwise hand activePaneId back to the fullscreen leaf.
-      workspaceRef.current.fullscreenPaneId = 'pane-2'
-      tapRow('Git Changes')
+    it('keeps the same node through a drawer open and close, outside Radix hideOthers', async () => {
+      drawerModalRef.current = true
+      renderShell()
+      const region = liveRegion()
+      await announceAndWait('Turn finished')
 
-      expect(workspaceRef.current.clearFullscreenPane).toHaveBeenCalledTimes(1)
-      expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-1', 'git-/a')
+      fireEvent.click(screen.getByLabelText('Open menu'))
+      expect(await screen.findByText('shell-drawer')).toBeInTheDocument()
+
+      // The modal sheet ran hideOthers: the shell body is aria-hidden now ...
+      expect(screen.getByText('chat body').closest('[aria-hidden="true"]')).not.toBeNull()
+      // ... but the region is not, and is still the very same node.
+      expect(liveRegion()).toBe(region)
+      expect(region.closest('[aria-hidden="true"]')).toBeNull()
+      expect(region.textContent).toBe('Turn finished')
+
+      // It still announces while the drawer is open.
+      await announceAndWait('Approval needed')
+
+      fireEvent.click(screen.getByText('close-shell-drawer'))
+      expect(screen.queryByText('shell-drawer')).not.toBeInTheDocument()
+      expect(liveRegion()).toBe(region)
+      expect(region.textContent).toBe('Approval needed')
     })
 
-    it('never touches fullscreen when no pane is fullscreen', () => {
-      workspaceRef.current.fullscreenPaneId = null
-      tapRow('Git History')
+    it('is never mounted holding text: a remount starts empty', async () => {
+      const { unmount } = renderShell()
+      await announceAndWait('Turn finished')
 
-      expect(workspaceRef.current.clearFullscreenPane).not.toHaveBeenCalled()
-      expect(workspaceRef.current.setActiveTab).toHaveBeenCalledWith('pane-2', 'git-history-/b')
+      unmount()
+      expect(useShellAnnouncerStore.getState().message).toBe('')
+
+      renderShell()
+      expect(liveRegion().textContent).toBe('')
+    })
+
+    it('replaces the old message with the newest one', async () => {
+      renderShell()
+      await announceAndWait('Turn finished')
+      await announceAndWait('Approval needed')
+      expect(liveRegion().textContent).toBe('Approval needed')
+    })
+  })
+
+  // ── a11y floor: focus return wiring ─────────────────────────────────────
+  //
+  // The Files and Git sheets open from the header ⋯ sheet, so ⋯ is the control
+  // each one returns focus to. The Files sheet is stubbed (it owns no focus
+  // handling in this file) and the Git sheet lives in WorkspaceLayout, so the
+  // tests call the same `sheetCloseAutoFocus(id)` handler those sheets pass to
+  // `onCloseAutoFocus`.
+
+  describe('focus return wiring', () => {
+    function closeEvent(): Event {
+      return new Event('focusScope.autoFocusOnUnmount', { cancelable: true })
+    }
+
+    /**
+     * Lets the ⋯ sheet finish its own close (it hands focus to the title when a
+     * row was chosen), then drops focus to `<body>` the way a closing Files or
+     * Git sheet leaves it once its content unmounts.
+     */
+    async function settleAfterMoreSheetCloses(): Promise<void> {
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      await waitFor(() =>
+        expect(document.activeElement).toBe(document.getElementById('mobile-shell-title'))
+      )
+      act(() => {
+        ;(document.activeElement as HTMLElement | null)?.blur()
+      })
+      expect(document.activeElement).toBe(document.body)
+    }
+
+    it('makes the header title programmatically focusable without a visual change', () => {
+      tauriRef.current = false
+      renderShell()
+      const heading = screen.getByRole('heading', { level: 1 })
+
+      expect(heading).toHaveAttribute('tabindex', '-1')
+      // The programmatic focus must not draw the browser's default focus ring.
+      expect(heading.className).toContain('focus:outline-none')
+      expect(heading.textContent).toBe('Hello chat')
+    })
+
+    it('records ⋯ as the files sheet opener', async () => {
+      tauriRef.current = false
+      renderShell()
+      const more = screen.getByLabelText('More')
+      await openHeaderSheet()
+      fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+      expect(await screen.findByText('files-drawer')).toBeInTheDocument()
+      await settleAfterMoreSheetCloses()
+
+      const event = closeEvent()
+      sheetCloseAutoFocus('files-sheet')(event)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(document.activeElement).toBe(more)
+    })
+
+    it('records ⋯ as the git sheet opener and still opens it', async () => {
+      tauriRef.current = false
+      const onOpenGitChanges = vi.fn()
+      renderShell({ onOpenGitChanges })
+      const more = screen.getByLabelText('More')
+      await openHeaderSheet()
+      fireEvent.click(screen.getByRole('button', { name: 'Git changes' }))
+
+      expect(onOpenGitChanges).toHaveBeenCalledTimes(1)
+      await settleAfterMoreSheetCloses()
+      sheetCloseAutoFocus('git-sheet')(closeEvent())
+
+      expect(document.activeElement).toBe(more)
+    })
+
+    it('sends focus to the header title, not ⋯, when a file opened', async () => {
+      tauriRef.current = false
+      renderShell()
+      await openHeaderSheet()
+      fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+      fireEvent.click(await screen.findByText('open-file'))
+      expect(screen.queryByText('files-drawer')).not.toBeInTheDocument()
+      await settleAfterMoreSheetCloses()
+
+      sheetCloseAutoFocus('files-sheet')(closeEvent())
+
+      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }))
+      expect(document.activeElement).not.toBe(screen.getByLabelText('More'))
+    })
+
+    it('returns to ⋯ when the files sheet closes without opening a file', async () => {
+      tauriRef.current = false
+      renderShell()
+      const more = screen.getByLabelText('More')
+      await openHeaderSheet()
+      fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+      fireEvent.click(await screen.findByText('close-files'))
+      await settleAfterMoreSheetCloses()
+
+      sheetCloseAutoFocus('files-sheet')(closeEvent())
+
+      expect(document.activeElement).toBe(more)
+    })
+  })
+
+  // ── L-15: entry points that create or activate a tab leave /snapshots ──
+
+  describe('drawer sections', () => {
+    it('has no bottom bar on the main screen: header and content only', () => {
+      seedActiveTerminal({ ptyId: 'pty-1' })
+      renderShell()
+
+      expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+      // The terminal key bar follows the content directly: the bottom edge again.
+      const keyBar = screen.getByRole('group', { name: 'Terminal keys' }).parentElement
+      expect(screen.getByText('chat body').parentElement?.nextElementSibling).toBe(keyBar)
+    })
+
+    it.each([
+      ['a chat', [{ type: 'agent-chat', id: 'tab-1', sessionId: 's1' }], 'tab-1', 'chats'],
+      [
+        'a terminal',
+        [{ type: 'terminal', id: 'term-t1', terminalId: 't1' }],
+        'term-t1',
+        'terminals'
+      ],
+      ['an editor', [{ type: 'editor', id: 'e1', filePath: '/demo/a.ts' }], 'e1', 'editors'],
+      ['Git Changes', [{ type: 'git', id: 'g1', cwd: '/demo' }], 'g1', 'editors'],
+      ['Git History', [{ type: 'git-history', id: 'gh1', cwd: '/demo' }], 'gh1', null],
+      ['no tab', [], null, null]
+    ])('preselects the drawer section of %s', (_label, tabs, activeTabId, section) => {
+      seedTabs(tabs, activeTabId)
+      renderShell()
+
+      expect(drawerProps().section).toBe(section)
+    })
+
+    it('hands the drawer the attention count for its Chats badge', () => {
+      mockAttentionCount.mockReturnValue(3)
+      renderShell()
+
+      expect(drawerProps().attentionCount).toBe(3)
+    })
+
+    it('hands the drawer Browse files on web, which opens the Files sheet', () => {
+      tauriRef.current = false
+      renderShell()
+
+      act(() => drawerProps().onOpenFiles?.())
+
+      expect(screen.getByText('files-drawer')).toBeInTheDocument()
+    })
+  })
+
+  describe('returning to the workspace route', () => {
+    function RouteProbe(): React.JSX.Element {
+      return <span data-testid="route">{useLocation().pathname}</span>
+    }
+
+    function renderShellAt(path: string, props: Partial<ShellProps> = {}) {
+      tauriRef.current = false
+      return render(
+        <MemoryRouter initialEntries={[path]}>
+          <MobileChatShell onNewChat={vi.fn()} canNewChat {...props}>
+            <div>chat body</div>
+          </MobileChatShell>
+          <RouteProbe />
+        </MemoryRouter>
+      )
+    }
+
+    const route = (): string | null => screen.getByTestId('route').textContent
+
+    describe('on /snapshots', () => {
+      it('leaves for / after the drawer footer Git history, once the history tab is requested', () => {
+        let routeWhenCalled: string | null = null
+        const onOpenGitHistory = vi.fn(() => {
+          routeWhenCalled = route()
+        })
+        renderShellAt('/snapshots', { onOpenGitHistory })
+
+        act(() => drawerProps().onOpenGitHistory?.())
+
+        expect(onOpenGitHistory).toHaveBeenCalledTimes(1)
+        // The tab is created first, then the route changes.
+        expect(routeWhenCalled).toBe('/snapshots')
+        expect(route()).toBe('/')
+      })
+
+      it('leaves for / after the Terminals New terminal button (the drawer handler)', () => {
+        const onNewTerminal = vi.fn()
+        renderShellAt('/snapshots', { onNewTerminal })
+
+        act(() => drawerProps().onNewTerminal?.())
+
+        expect(onNewTerminal).toHaveBeenCalledTimes(1)
+        expect(route()).toBe('/')
+      })
+
+      it('leaves for / after the header ✎ New terminal in a terminal tab', () => {
+        seedActiveTerminal()
+        const onNewTerminal = vi.fn()
+        renderShellAt('/snapshots', { onNewTerminal })
+
+        fireEvent.click(screen.getByLabelText('New terminal'))
+
+        expect(onNewTerminal).toHaveBeenCalledTimes(1)
+        expect(route()).toBe('/')
+      })
+
+      it('leaves for / after the ⋯ sheet New terminal row', async () => {
+        const onNewTerminal = vi.fn()
+        renderShellAt('/snapshots', { onNewTerminal })
+        await openHeaderSheet()
+
+        fireEvent.click(screen.getByRole('button', { name: 'New terminal' }))
+
+        expect(onNewTerminal).toHaveBeenCalledTimes(1)
+        expect(route()).toBe('/')
+      })
+
+      it('leaves for / after a file opened from the Files sheet, and still points focus at the title', async () => {
+        renderShellAt('/snapshots')
+        await openHeaderSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+
+        fireEvent.click(await screen.findByText('open-file'))
+
+        expect(route()).toBe('/')
+        expect(screen.queryByText('files-drawer')).not.toBeInTheDocument()
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        act(() => {
+          ;(document.activeElement as HTMLElement | null)?.blur()
+        })
+        sheetCloseAutoFocus('files-sheet')(
+          new Event('focusScope.autoFocusOnUnmount', { cancelable: true })
+        )
+        expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }))
+      })
+
+      it('stays on /snapshots when the Files sheet closes without opening a file', async () => {
+        renderShellAt('/snapshots')
+        await openHeaderSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+
+        fireEvent.click(await screen.findByText('close-files'))
+
+        expect(route()).toBe('/snapshots')
+      })
+    })
+
+    describe.each(['/', '/c/s1'])('on the workspace route %s', (path) => {
+      it('does not navigate for Git history, New terminal (drawer, ⋯) or an opened file', async () => {
+        const onOpenGitHistory = vi.fn()
+        const onNewTerminal = vi.fn()
+        renderShellAt(path, { onOpenGitHistory, onNewTerminal })
+
+        act(() => drawerProps().onOpenGitHistory?.())
+        act(() => drawerProps().onNewTerminal?.())
+        await openHeaderSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'New terminal' }))
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        await openHeaderSheet()
+        fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+        fireEvent.click(await screen.findByText('open-file'))
+
+        expect(onOpenGitHistory).toHaveBeenCalledTimes(1)
+        expect(onNewTerminal).toHaveBeenCalledTimes(2)
+        expect(route()).toBe(path)
+      })
+    })
+
+    it('keeps a missing handler missing, so the controls stay hidden', async () => {
+      renderShellAt('/snapshots')
+
+      expect(drawerProps().onNewTerminal).toBeUndefined()
+      expect(drawerProps().onOpenGitHistory).toBeUndefined()
+      await openHeaderSheet()
+      expect(screen.queryByRole('button', { name: 'New terminal' })).not.toBeInTheDocument()
+    })
+
+    it('passes the close handlers through untouched so their return value reaches the drawer', () => {
+      const onCloseTerminal = vi.fn(() => true)
+      const onCloseEditorTab = vi.fn(() => false)
+      renderShellAt('/snapshots', { onCloseTerminal, onCloseEditorTab })
+
+      expect(drawerProps().onCloseTerminal).toBe(onCloseTerminal)
+      expect(drawerProps().onCloseEditorTab).toBe(onCloseEditorTab)
+      expect(drawerProps().onCloseTerminal?.('t1', 'term-t1')).toBe(true)
+      expect(drawerProps().onCloseEditorTab?.('/a.ts')).toBe(false)
+      expect(route()).toBe('/snapshots')
     })
   })
 })

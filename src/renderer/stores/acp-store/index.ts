@@ -92,6 +92,7 @@ import {
   trimLiveToolCalls
 } from './helpers'
 import { setLaunchPlaceholderNotedListener, setLiveLaunchSessionLookup } from './live-turn'
+import { attachPermissionDenialTracking } from './permission-denial'
 import {
   historySeqWatermarks,
   isCurrentRecoveryGeneration,
@@ -104,6 +105,7 @@ import { createLaunchSlice } from './slices/launch'
 import { createMcpSlice } from './slices/mcp'
 import { createMiscSlice } from './slices/misc'
 import { createPromptSlice } from './slices/prompt'
+import { reconcilePromptAfterRecovery, resendPendingPrompts } from './slices/prompt-reconcile'
 import { createSessionSlice, recoverNotedLaunchChats } from './slices/session'
 import { createSwitchSlice } from './slices/switch'
 import { appendBlocks, createTranscriptSlice } from './slices/transcript'
@@ -125,15 +127,14 @@ export * from './helpers'
 export * from './live-turn'
 // Test + cross-module helpers living beside the slices (spec-04 PR B).
 export {
-  _acceptedServerPromptTurnIdsForTesting,
   _addEphemeralSessionIdForTesting,
   _handoffOnlyTurnIdsForTesting,
-  _resetAcceptedServerPromptTurnIdsForTesting,
   _resetEphemeralSessionIdsForTesting,
   _resetHistorySeqWatermarksForTesting,
   _resetInFlightPreparedForTesting,
   _resetInFlightPromotionsForTesting,
   _resetLiveSwitchSourcesForTesting,
+  _resetPromptReconcileForTesting,
   isEphemeralAcpSession,
   persistComposerOptions
 } from './shared-state'
@@ -414,6 +415,8 @@ async function installTransportRecovery(
         : current.sessions
     }
   })
+  // AD-6: a prompt that lost its reply resolves from the recovered log.
+  reconcilePromptAfterRecovery(recovery.sessionId, recovery.events)
 }
 
 /** Test-only: drive the transport recovery path without wiring listeners. */
@@ -477,7 +480,7 @@ export function initAcpEventListeners(): () => void {
         )
       )
     ],
-    setReconnecting: (reconnecting) => {
+    setReconnecting: (reconnecting, recovered) => {
       useAcpStore.setState({ transportReconnecting: reconnecting })
       if (!reconnecting) {
         if (historyRetryTimer) {
@@ -486,6 +489,11 @@ export function initAcpEventListeners(): () => void {
         }
         historyRetryAttempt = 0
         refetchHistoryAfterReconnect()
+        // AD-6: the socket is back — resend every prompt command that lost its
+        // reply, with the same turn id (the host answers with a receipt). Only
+        // on a REAL recovery: the token-halt path also ends the reconnect
+        // cycle (`recovered === false`) but the host is unreachable then.
+        if (recovered === true) resendPendingPrompts()
       }
     }
   })
@@ -493,7 +501,6 @@ export function initAcpEventListeners(): () => void {
   const applyCompletedProjectSwitch = (event: ProjectSwitchCompletedEvent): void => {
     const state = useAcpStore.getState()
     const previous = state.sessions[event.previousSessionId]
-    if (!previous) return
     // Stale queued-switch guard: a queued (turn-active) switch completes
     // AFTER the user already moved on to a DIFFERENT project. Applying the
     // late outcome would re-run selectProject + reattach against the
@@ -513,6 +520,25 @@ export function initAcpEventListeners(): () => void {
     if (activeProjectId !== event.projectId && !queuedForThisProject) {
       if (state.queuedProjectSwitchId != null) {
         useAcpStore.setState({ queuedProjectSwitchId: null })
+      }
+      return
+    }
+    // `event.agentId` is the owning agent — server-authoritative. Local
+    // records are the fallback for older events carrying no agentId.
+    const agentId = event.agentId ?? previous?.agentId ?? state.sessions[event.sessionId]?.agentId
+    if (!agentId) {
+      // No attributable agent: old server event and no local record. The
+      // switch committed server-side — clear the queued marker (never leave
+      // the badge spinning) and mirror a deferred select; the session stays
+      // reachable via the history index.
+      if (state.queuedProjectSwitchId != null) {
+        useAcpStore.setState({ queuedProjectSwitchId: null })
+        useProjectStore.getState().selectProject(event.projectId)
+        void logFrontendError({
+          level: 'warn',
+          source: 'acp-store.projectSwitchCompleted',
+          message: `Queued switch to ${event.projectId} completed but session ${event.sessionId} has no attributable agent`
+        })
       }
       return
     }
@@ -544,17 +570,17 @@ export function initAcpEventListeners(): () => void {
           ...s.sessions,
           [event.sessionId]: {
             id: event.sessionId,
-            agentId: previous.agentId,
+            agentId,
             cwd: event.cwd,
             projectId: event.projectId,
             status: 'active',
-            title: existing?.title ?? previous.title,
+            title: existing?.title ?? previous?.title ?? null,
             activeTurn: false,
             mcpServerCount: event.mcpServerCount,
             openTurnId: null,
-            modes: existing?.modes ?? previous.modes,
-            models: existing?.models ?? previous.models ?? null,
-            configOptions: existing?.configOptions ?? previous.configOptions,
+            modes: existing?.modes ?? previous?.modes ?? null,
+            models: existing?.models ?? previous?.models ?? null,
+            configOptions: existing?.configOptions ?? previous?.configOptions ?? [],
             lastError: existing?.lastError ?? null,
             createdAt: existing?.createdAt ?? Date.now(),
             replaying: null
@@ -576,6 +602,7 @@ export function initAcpEventListeners(): () => void {
     toast.error(event.message || 'Project switch failed')
   }
   teardown = [
+    attachPermissionDenialTracking(useAcpStore),
     transport.onEvent<ProjectSwitchCompletedEvent>(
       'project_switch_completed',
       applyCompletedProjectSwitch

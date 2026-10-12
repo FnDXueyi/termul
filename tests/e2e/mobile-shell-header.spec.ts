@@ -66,8 +66,23 @@ test.use({
 
 test.setTimeout(120_000)
 
-/** The drawer's ☰ and pill both point `aria-controls` here (drawer goal renames the id). */
+/** The drawer's ☰ and pill both point `aria-controls` here. */
 const DRAWER_ID = 'mobile-shell-drawer'
+
+/** The drawer is the full-screen left sheet named "Termul". */
+function drawerOf(page: Page): Locator {
+  return page.getByRole('dialog', { name: 'Termul', exact: true })
+}
+
+/**
+ * One open-chat row in the drawer. Its name is the chat title, followed by
+ * ", <status>" while a status shows (Working, Needs you, New activity), so a
+ * plain exact match on the title would miss a chat with a live status.
+ */
+function chatRow(drawer: Locator, chatTitle: string): Locator {
+  const escaped = chatTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return drawer.getByRole('button', { name: new RegExp(`^${escaped}(, .+)?$`) })
+}
 
 /** Server store key holding the web client's last selected project (issue #855). */
 const ACTIVE_PROJECT_KEY = 'web-active-project'
@@ -488,12 +503,12 @@ test('header is three 44px icon slots plus the title block, with no sideways scr
   // ☰ opens the drawer and reports it.
   await expect(menu).toHaveAttribute('aria-expanded', 'false')
   await menu.tap()
-  await expect(page.getByRole('dialog', { name: 'Chats' })).toBeVisible()
+  await expect(drawerOf(page)).toBeVisible()
   const openMenu = headerButton(page, 'Open menu')
   await expect(openMenu).toHaveAttribute('aria-expanded', 'true')
   await expect(openMenu).toHaveAttribute('aria-controls', DRAWER_ID)
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('dialog', { name: 'Chats' })).toBeHidden()
+  await expect(drawerOf(page)).toBeHidden()
 
   // At 360px with no chat asking for attention there is no dot: the name stays
   // plain and the header still fits.
@@ -543,12 +558,59 @@ test('subtitle shows project · branch · Local and opens the bottom project she
   await expect(sheet.getByRole('button', { name: 'Add project' })).toBeVisible()
   await expectRowsAtLeast44(sheet.getByRole('button', { name: /^shdr-/ }))
 
+  // ⌂ "Set as host default" (V-13) sits beside every row that is not the host
+  // default, at the touch floor. The current project shows it too unless it
+  // already is the host default, which the row's Default badge says.
+  const flatDefault = sheet.getByRole('button', { name: 'Set "shdr-flat" as host default' })
+  await expect(flatDefault).toBeVisible()
+  const flatDefaultBox = await box(flatDefault)
+  expect(flatDefaultBox.width).toBeGreaterThanOrEqual(44)
+  expect(flatDefaultBox.height).toBeGreaterThanOrEqual(44)
+  const currentRow = sheet.getByRole('listitem').filter({ hasText: 'shdr-git' })
+  const currentIsDefault = (await currentRow.locator('[title^="Host default"]').count()) > 0
+  await expect(
+    currentRow.getByRole('button', { name: 'Set "shdr-git" as host default' })
+  ).toHaveCount(currentIsDefault ? 0 : 1)
+  // A row that carries the Default badge never offers the control.
+  for (const row of await sheet
+    .getByRole('listitem')
+    .filter({ has: page.locator('[title^="Host default"]') })
+    .all()) {
+    await expect(row.getByRole('button', { name: /as host default$/ })).toHaveCount(0)
+  }
+
   // Switching closes the sheet, updates the subtitle and returns focus to it.
   await sheet.getByRole('button', { name: 'shdr-flat', exact: true }).tap()
   await expect(sheet).toBeHidden()
   await expect(subtitle(page)).toHaveText('shdr-flat')
   await expect(subtitle(page)).toHaveAccessibleName('shdr-flat, switch project')
   await expect(subtitle(page)).toBeFocused()
+})
+
+test('the project sheet ⌂ control calls the default-project route for its own project only', async ({
+  page,
+  request
+}) => {
+  await createProject(request, 'shdr-home')
+  await createProject(request, 'shdr-other')
+  await openMobileWorkspace(page, 'shdr-home')
+  // The host default is shared by every suite on this server: the route is
+  // stubbed, so the tap proves the request without changing it.
+  const bodies: unknown[] = []
+  await page.route('**/projects/default', async (route) => {
+    bodies.push(route.request().postDataJSON())
+    await route.fulfill({ json: { success: true } })
+  })
+
+  await subtitle(page).tap()
+  const sheet = page.getByRole('dialog', { name: 'Projects' })
+  await expect(sheet).toBeVisible()
+  await sheet.getByRole('button', { name: 'Set "shdr-other" as host default' }).tap()
+
+  await expect(page.getByText('"shdr-other" is now the host default')).toBeVisible()
+  expect(bodies).toEqual([{ projectId: 'e2e-shdr-other' }])
+  // Setting a default is not a switch: the current project is unchanged.
+  await expect(sheet.getByRole('button', { name: /^shdr-home Current/ })).toBeDisabled()
 })
 
 test('project sheet returns focus on Escape and hardware back, and Add project opens the creation flow', async ({
@@ -684,8 +746,8 @@ test('a worktree chat shows its chat/ branch and Worktree; another chat shows Lo
 
   // Back to the worktree chat through the drawer: the subtitle follows the chat.
   await headerButton(page, 'Open menu').tap()
-  const drawer = page.getByRole('dialog', { name: 'Chats' })
-  await drawer.getByRole('button', { name: worktreePrompt, exact: true }).tap()
+  const drawer = drawerOf(page)
+  await chatRow(drawer, worktreePrompt).tap()
   await expect(drawer).toBeHidden()
   await expect(title(page)).toHaveText(worktreePrompt)
   await expect(subtitle(page)).toHaveText(/^shdr-tree · chat\/[0-9a-f]+ · Worktree$/)
@@ -720,7 +782,7 @@ test('an editor tab is titled by its file, keeps the project subtitle and has no
   await expect(subtitle(page)).toHaveText('shdr-edit · main · Local')
   await expect(headerButton(page, 'New chat')).toBeVisible()
 
-  // The header ⋯ sheet drops the chat-only row.
+  // The header ⋯ sheet drops the chat-only row; Close tab closes the editor.
   await headerButton(page, 'More').tap()
   const sheet = page.getByRole('dialog', { name: 'notes.md' })
   await expect(sheet).toBeVisible()
@@ -730,17 +792,16 @@ test('an editor tab is titled by its file, keeps the project subtitle and has no
     'Files',
     'Command palette',
     'New terminal',
-    'Project settings'
+    'Project settings',
+    'Close tab'
   ])
+  await expect(sheet.getByRole('button', { name: 'Close chat' })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expect(sheet).toBeHidden()
 
   // A Git History tab (drawer action) is titled "Git History".
   await headerButton(page, 'Open menu').tap()
-  await page
-    .getByRole('dialog', { name: 'Chats' })
-    .getByRole('button', { name: 'Git history', exact: true })
-    .tap()
+  await drawerOf(page).getByRole('button', { name: 'Git history', exact: true }).tap()
   await expect(title(page)).toHaveText('Git History')
 })
 
@@ -918,10 +979,17 @@ test('terminal context swaps ✎ to New terminal and ⋯ to the terminal actions
   await expect(sheet.getByText('Last exit code 0')).toBeVisible()
   await expect(sheet).toHaveAccessibleDescription('Last exit code 0')
   const rows = sheet.getByRole('button').filter({ hasNotText: /^Close$/ })
+  // The project has a path, so the header sheet's navigation rows sit between
+  // Command history and the destructive Close terminal (no New terminal: the
+  // header ✎ is New terminal in a terminal).
   await expect(rows).toHaveText([
     'Rename terminal',
     'Restart terminal',
     'Command history',
+    'Git changes',
+    'Files',
+    'Command palette',
+    'Project settings',
     'Close terminal'
   ])
   await expectRowsAtLeast44(rows)
@@ -1109,7 +1177,7 @@ test('attention pill counts the other chats that need you, opens the drawer, and
     expect(await buttonAt(page, pillCenterX, y)).toBe('2 other chats need you')
   }
   await plural.tap()
-  const drawer = page.getByRole('dialog', { name: 'Chats' })
+  const drawer = drawerOf(page)
   await expect(drawer).toBeVisible()
   for (const control of [plural, headerButton(page, 'Open menu')]) {
     await expect(control).toHaveAttribute('aria-expanded', 'true')
@@ -1137,7 +1205,7 @@ test('attention pill counts the other chats that need you, opens the drawer, and
 
   // Landing in chat A drops A from the count and keeps B: the pill reads 1 again.
   await menu.tap()
-  await drawer.getByRole('button', { name: alpha, exact: true }).tap()
+  await chatRow(drawer, alpha).tap()
   await expect(drawer).toBeHidden()
   await expect(title(page)).toHaveText(alpha)
   await expect(pillIn('1 other chat needs you')).toHaveText('1')

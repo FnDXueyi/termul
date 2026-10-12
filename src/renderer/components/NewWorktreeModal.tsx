@@ -7,9 +7,10 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { toast } from '@/hooks/use-toast'
 import { worktreeApi } from '@/lib/api'
-import { activateAndOpenTerminal } from '@/lib/terminal-spawn'
+import { openTerminalAtCwd } from '@/lib/terminal-spawn'
 import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
+import { reconcileProjectWorktrees } from '@/lib/worktree-reconciler'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 import type { Worktree } from '@/types/project'
@@ -23,7 +24,7 @@ interface NewWorktreeModalProps {
 export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModalProps) {
   const project = useProjectStore((state) => state.projects.find((p) => p.id === projectId))
   const isWorktreeOperationLocked = useProjectStore((state) => state.isWorktreeOperationLocked)
-  const { addWorktree, setWorktreeOperationLock } = useProjectActions()
+  const { setWorktreeOperationLock } = useProjectActions()
 
   // Form state
   const [branchType, setBranchType] = useState<'existing' | 'new'>('new')
@@ -243,14 +244,9 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
       }
 
       if (result.success && result.data) {
-        const newWorktree: Worktree = {
-          id: randomUUID(),
-          name: result.data.name,
-          branch: result.data.branch,
-          path: result.data.path,
-          createdAt: new Date().toISOString()
-        }
-        addWorktree(projectId, newWorktree)
+        // Register through the single-flight reconciler (the only writer of
+        // `project.worktrees`). The switcher pick is not touched.
+        await reconcileProjectWorktrees(projectId)
 
         // Create symlinks for enabled directories
         const enabledDirs = Array.from(enabledSymlinkDirs)
@@ -297,9 +293,9 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
           })
         }
 
-        // Land the user inside the new worktree: activate it and open a terminal there.
+        // Open a terminal in the new worktree (the switcher pick is unchanged).
         // Best-effort — a spawn failure must not block the (already successful) creation.
-        const outcome = await activateAndOpenTerminal(projectId, newWorktree.id, result.data.path)
+        const outcome = await openTerminalAtCwd(projectId, result.data.path)
         if (outcome.status === 'no-pane') {
           toast({
             title: 'Worktree ready — terminal not opened',
@@ -344,7 +340,6 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
     startRef,
     projectPath,
     projectId,
-    addWorktree,
     setWorktreeOperationLock,
     onClose,
     enabledSymlinkDirs,

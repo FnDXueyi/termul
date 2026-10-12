@@ -38,6 +38,7 @@ describe('useContextBarSettings', () => {
 
   it('restores persisted settings on startup', async () => {
     const persistedSettings: ContextBarSettings = {
+      showProjectName: false,
       showGitBranch: false,
       showGitStatus: false,
       showWorkingDirectory: true,
@@ -63,6 +64,50 @@ describe('useContextBarSettings', () => {
       expect(useContextBarSettingsStore.getState().settings).toEqual(DEFAULT_CONTEXT_BAR_SETTINGS)
       expect(useContextBarSettingsStore.getState().isLoaded).toBe(true)
     })
+
+    const { settings } = useContextBarSettingsStore.getState()
+    expect(settings.showProjectName).toBe(false)
+    expect(settings.showGitStatus).toBe(false)
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
+  })
+
+  it('loads a legacy blob without showProjectName with the project name shown', async () => {
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        showGitBranch: true,
+        showGitStatus: true,
+        showWorkingDirectory: false,
+        showExitCode: true
+      }
+    })
+
+    renderHook(() => useContextBarSettings())
+
+    await waitFor(() => {
+      expect(useContextBarSettingsStore.getState().settings).toEqual({
+        showProjectName: true,
+        showGitBranch: true,
+        showGitStatus: true,
+        showWorkingDirectory: false,
+        showExitCode: true
+      })
+    })
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
+  })
+
+  it('lets a saved showProjectName choice win over the legacy default', async () => {
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: { ...DEFAULT_CONTEXT_BAR_SETTINGS, showProjectName: false }
+    })
+
+    renderHook(() => useContextBarSettings())
+
+    await waitFor(() => {
+      expect(useContextBarSettingsStore.getState().isLoaded).toBe(true)
+    })
+    expect(useContextBarSettingsStore.getState().settings.showProjectName).toBe(false)
   })
 
   it('keeps defaults when loading settings throws', async () => {
@@ -94,6 +139,7 @@ describe('useContextBarSettings', () => {
     await waitFor(() => {
       expect(useContextBarSettingsStore.getState().settings).toEqual({
         ...DEFAULT_CONTEXT_BAR_SETTINGS,
+        showProjectName: true,
         showGitBranch: false,
         showExitCode: false
       })
@@ -121,11 +167,11 @@ describe('useUpdateContextBarSetting', () => {
 
     expect(useContextBarSettingsStore.getState().settings).toEqual({
       ...DEFAULT_CONTEXT_BAR_SETTINGS,
-      showGitStatus: false
+      showGitStatus: true
     })
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(CONTEXT_BAR_SETTINGS_KEY, {
       ...DEFAULT_CONTEXT_BAR_SETTINGS,
-      showGitStatus: false
+      showGitStatus: true
     })
   })
 })

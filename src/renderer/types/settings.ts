@@ -1,15 +1,18 @@
 ﻿// Context bar visibility settings
 export interface ContextBarSettings {
+  showProjectName: boolean
   showGitBranch: boolean
   showGitStatus: boolean
   showWorkingDirectory: boolean
   showExitCode: boolean
 }
 
-// Default settings with all elements visible
+// Default settings for users with no saved blob: project name and file counts
+// (`showGitStatus`) are hidden; branch, directory and exit code are shown.
 export const DEFAULT_CONTEXT_BAR_SETTINGS: ContextBarSettings = {
+  showProjectName: false,
   showGitBranch: true,
-  showGitStatus: true,
+  showGitStatus: false,
   showWorkingDirectory: true,
   showExitCode: true
 }
@@ -48,6 +51,7 @@ export interface AppSettings {
   terminalFontSize: number
   terminalBufferSize: number // Scrollback buffer size in lines
   terminalRenderer: 'auto' | 'webgl' | 'dom'
+  terminalScreenReaderMode: boolean // xterm screenReaderMode for new terminals (off by default)
   defaultShell: string
   defaultProjectColor: string // Default color for new projects (from PROJECT_COLORS)
   maxTerminalsPerProject: number // Maximum terminals allowed per project
@@ -55,9 +59,6 @@ export interface AppSettings {
   orphanDetectionTimeout: number | null // Timeout in ms, null = disabled
   confirmTerminalClose: boolean // Show a confirmation dialog before closing a terminal
   terminalUrlOpenMode: TerminalUrlOpenMode // Controls how Ctrl/Cmd+Click terminal URLs are opened
-  sidebarVisible: boolean
-  fileExplorerVisible: boolean
-  sshPanelVisible: boolean
   /** Remote server bind: localhost (127.0.0.1) or all interfaces (0.0.0.0). */
   remoteBindMode: RemoteBindMode
   /** App-wide color theme family id (without `-light` suffix). */
@@ -102,12 +103,7 @@ export const UI_ZOOM_MIN = 0.5
 export const UI_ZOOM_MAX = 3.0
 export const UI_ZOOM_STEP = 0.1
 
-export type AppPanelVisibilitySettingKey =
-  | 'sidebarVisible'
-  | 'fileExplorerVisible'
-  | 'sshPanelVisible'
-
-export type AppSettingsUpdate = Partial<Omit<AppSettings, AppPanelVisibilitySettingKey>>
+export type AppSettingsUpdate = Partial<AppSettings>
 
 // Terminal buffer size options
 export const BUFFER_SIZE_OPTIONS = [
@@ -255,6 +251,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   terminalFontSize: 14,
   terminalBufferSize: 10000,
   terminalRenderer: 'auto',
+  terminalScreenReaderMode: false,
   defaultShell: '',
   defaultProjectColor: 'blue',
   maxTerminalsPerProject: 10,
@@ -262,9 +259,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   orphanDetectionTimeout: 600000, // 10 minutes
   confirmTerminalClose: true,
   terminalUrlOpenMode: 'system',
-  sidebarVisible: true,
-  fileExplorerVisible: true,
-  sshPanelVisible: true,
   remoteBindMode: 'localhost',
   colorTheme: 'termul',
   appearanceMode: 'dark',
@@ -371,8 +365,8 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
   },
   sidebarToggle: {
     id: 'sidebarToggle',
-    label: 'Toggle Sidebar',
-    description: 'Show or hide the project sidebar',
+    label: 'Toggle Projects',
+    description: 'Expand or collapse projects',
     defaultKey: 'ctrl+shift+b'
   },
   closeTab: {
@@ -389,8 +383,8 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
   },
   toggleFileExplorer: {
     id: 'toggleFileExplorer',
-    label: 'Toggle File Explorer',
-    description: 'Show or hide the file explorer panel',
+    label: 'Toggle Side Panel',
+    description: 'Show or hide side panel',
     defaultKey: 'ctrl+b'
   },
   fileExplorerRename: {
@@ -417,13 +411,13 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
     id: 'worktreeSwitchNext',
     label: 'Switch to Next Worktree',
     description: 'Cycle to the next worktree in the sidebar',
-    defaultKey: 'ctrl+shift+downarrow'
+    defaultKey: 'ctrl+shift+arrowdown'
   },
   worktreeSwitchPrev: {
     id: 'worktreeSwitchPrev',
     label: 'Switch to Previous Worktree',
     description: 'Cycle to the previous worktree in the sidebar',
-    defaultKey: 'ctrl+shift+uparrow'
+    defaultKey: 'ctrl+shift+arrowup'
   },
   worktreeOpenTerminal: {
     id: 'worktreeOpenTerminal',
@@ -460,6 +454,12 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcutsConfig = {
     label: 'Change Color Theme',
     description: 'Open the color theme picker with live preview',
     defaultKey: 'ctrl+alt+t'
+  },
+  settings: {
+    id: 'settings',
+    label: 'Settings',
+    description: 'Open app settings',
+    defaultKey: 'ctrl+,'
   }
 }
 
@@ -485,7 +485,8 @@ const WEB_DEFAULT_KEY_OVERRIDES: Record<string, string> = {
   commandHistory: '',
   zoomIn: 'alt+=',
   zoomOut: 'alt+-',
-  zoomReset: 'alt+0'
+  zoomReset: 'alt+0',
+  settings: 'alt+,'
 }
 
 /** Platform-aware default bindings. See `WEB_DEFAULT_KEY_OVERRIDES`. */

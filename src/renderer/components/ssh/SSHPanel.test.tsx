@@ -62,8 +62,8 @@ vi.mock('./SSHProfileForm', () => ({
 // composeEventHandlers({ checkForDefaultPrevented: true }) so F1-type
 // regressions surface), renders `<ContextMenuContent>` only while open, closes
 // on Escape, and surfaces `<ContextMenuItem>` as a `<button>` so tests can
-// assert presence + click wiring. Mirrors the ProjectChatList /
-// ProjectSidebar stub pattern.
+// assert presence + click wiring. Mirrors the ProjectSidebar
+// stub pattern.
 vi.mock('@/components/ui/context-menu', async () => {
   const React = await import('react')
   const MenuCtx = React.createContext<{ open: boolean; setOpen: (o: boolean) => void }>({

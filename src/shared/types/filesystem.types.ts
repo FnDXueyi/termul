@@ -49,6 +49,8 @@ export interface FileSearchResult {
 export interface SearchFileHit {
   path: string
   ignored: boolean
+  /** Absent means `'file'`. `'dir'` hits carry a root-relative path with no trailing slash. */
+  kind?: 'file' | 'dir'
 }
 
 export interface FileSearchResponse {

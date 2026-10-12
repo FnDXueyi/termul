@@ -1,5 +1,6 @@
 import { act, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { useAgentChatUnreadTracker } from '@/hooks/use-agent-chat-unread-tracker'
 import {
   _addEphemeralSessionIdForTesting,
   _resetEphemeralSessionIdsForTesting,
@@ -7,13 +8,17 @@ import {
 } from '@/stores/acp-store'
 import { FRESH, seedOptionsSession } from '@/stores/acp-store/testkit'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
+import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { agentChatTabId } from '@/stores/workspace-store'
 import { AgentChatTabInline } from './agent-chat-tab'
 
 /**
  * Spec: agent-chat-tab-activity-indicator. The lamp slot is now a
  * turn-lifecycle cue — a Working spinner while `sessionTurnBusy`, then an
- * ephemeral unread dot when a turn finishes while the tab is inactive. The
+ * unread dot when a turn finishes while the tab is inactive. The unread flag
+ * lives in `useAgentChatUnreadStore`, driven by the shell-level tracker, so the
+ * harness below mounts `useAgentChatUnreadTracker` the way `WorkspaceLayout`
+ * does (the pane's active chat is the tab's `isActive`). The
  * tests seed the real `useAcpStore` / `useAgentChatLifetimeStore` (the
  * WorkspaceTabBar suite mocks `useAcpStore` away, so it cannot cover this)
  * and drive busy + `isActive` transitions through rerender/`setState`.
@@ -32,7 +37,9 @@ const BASE_PROPS = {
   onDrop: () => {}
 } as const
 
-function chipElement(isActive: boolean, sessionId = 's1') {
+/** Stand-in for the shell: the one tracker mount plus the chip it serves. */
+function ChipWithShellTracker({ isActive, sessionId }: { isActive: boolean; sessionId: string }) {
+  useAgentChatUnreadTracker(isActive ? [sessionId] : [])
   return (
     <AgentChatTabInline
       tab={{ type: 'agent-chat', id: agentChatTabId(sessionId), sessionId }}
@@ -40,6 +47,10 @@ function chipElement(isActive: boolean, sessionId = 's1') {
       {...BASE_PROPS}
     />
   )
+}
+
+function chipElement(isActive: boolean, sessionId = 's1') {
+  return <ChipWithShellTracker isActive={isActive} sessionId={sessionId} />
 }
 
 function renderChip(isActive: boolean, sessionId = 's1') {
@@ -110,6 +121,7 @@ beforeEach(() => {
     focusSessionByProject: {},
     closingSessionIds: {}
   })
+  useAgentChatUnreadStore.setState({ unread: {} })
 })
 
 describe('AgentChatTabInline activity indicator', () => {
@@ -277,7 +289,7 @@ describe('AgentChatTabInline activity indicator', () => {
     expect(chipRoot(container)).toHaveAttribute('aria-label', 'My Chat')
   })
 
-  it('resets the unread state when the chip remounts', () => {
+  it('keeps the unread dot when the chip remounts (the store owns Done)', () => {
     seedChat()
     const first = renderChip(false)
 
@@ -288,7 +300,37 @@ describe('AgentChatTabInline activity indicator', () => {
     first.unmount()
     renderChip(false)
     expect(screen.queryByTitle(WORKING)).not.toBeInTheDocument()
+    expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
+  })
+
+  it('reads Done from the unread store so a card and the tab agree', () => {
+    seedChat()
+    const { container } = render(
+      <AgentChatTabInline
+        tab={{ type: 'agent-chat', id: agentChatTabId('s1'), sessionId: 's1' }}
+        isActive={false}
+        {...BASE_PROPS}
+      />
+    )
     expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+
+    act(() => useAgentChatUnreadStore.getState().markUnread('s1'))
+    expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
+    expect(chipRoot(container)).toHaveAttribute('aria-label', 'My Chat, New activity')
+
+    act(() => useAgentChatUnreadStore.getState().clearUnread('s1'))
+    expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+  })
+
+  it('keeps the Done flag but hides the dot while the session is closed', () => {
+    seedChat('s1', 'My Chat', true)
+    renderChip(false)
+    setTurn('s1', false)
+    expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
+
+    setSessionStatus('s1', 'closed')
+    expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+    expect(useAgentChatUnreadStore.getState().unread).toEqual({ s1: true })
   })
 
   it('shows no activity indicators for an ephemeral session', () => {
@@ -357,6 +399,27 @@ describe('AgentChatTabInline activity indicator', () => {
     setTurn('s1', false)
     expect(screen.getByTitle(NEEDS_YOU)).toBeInTheDocument()
     expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+    expect(chipRoot(container)).toHaveAttribute('aria-label', 'My Chat, Needs you')
+  })
+
+  it('reads Needs you in the tab chrome for a pending elicitation', () => {
+    seedChat()
+    useAcpStore.setState({
+      pendingElicitations: {
+        'elicit-1': {
+          requestId: 'elicit-1',
+          agentId: 'agent-1',
+          sessionId: 's1',
+          mode: 'form',
+          message: 'Pick a branch',
+          fields: []
+        }
+      }
+    })
+
+    const { container } = renderChip(false)
+
+    expect(screen.getByTitle(NEEDS_YOU)).toBeInTheDocument()
     expect(chipRoot(container)).toHaveAttribute('aria-label', 'My Chat, Needs you')
   })
 })

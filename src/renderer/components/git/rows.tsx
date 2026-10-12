@@ -9,6 +9,7 @@ import {
   PANEL_FIELD_ICON_CLASS,
   QUIET_ICON_BUTTON_CLASS
 } from '@/components/ui/panel-styles'
+import { WriteGate } from '@/components/ui/write-gate'
 import { GIT_STATUS_LETTER, GIT_STATUS_TEXT_CLASS } from '@/lib/git-status-display'
 import { cn } from '@/lib/utils'
 
@@ -105,25 +106,31 @@ export function SectionAction({
   label,
   onClick,
   disabled,
+  gated,
   variant
 }: {
   icon: React.ReactNode
   label: string
   onClick: () => void
   disabled?: boolean
+  /** Write control on a server that refuses writes: disabled, with the
+      read-only reason exposed on hover and focus. */
+  gated?: boolean
   variant?: 'danger'
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(actionButtonClass(variant), 'size-6')}
-    >
-      {icon}
-    </button>
+    <WriteGate gated={!!gated}>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        disabled={disabled || gated}
+        onClick={onClick}
+        className={cn(actionButtonClass(variant), 'size-6')}
+      >
+        {icon}
+      </button>
+    </WriteGate>
   )
 }
 
@@ -132,6 +139,7 @@ export function RowAction({
   label,
   onClick,
   disabled,
+  gated,
   touch,
   variant
 }: {
@@ -139,6 +147,8 @@ export function RowAction({
   label: string
   onClick: () => void
   disabled?: boolean
+  /** Write control on a server that refuses writes (see `SectionAction`). */
+  gated?: boolean
   /** Story 10: mobile rows pass `touch` — grows the hit area to the 44px
       floor via hit-slop (32px visual + −inset-1.5 ≈ 48×48 tappable);
       desktop rows stay 24×24. */
@@ -152,19 +162,21 @@ export function RowAction({
     onClick()
   }
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={handleClick}
-      className={cn(
-        actionButtonClass(variant),
-        touch ? "relative size-8 after:absolute after:-inset-1.5 after:content-['']" : 'h-6 w-6'
-      )}
-    >
-      {icon}
-    </button>
+    <WriteGate gated={!!gated}>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        disabled={disabled || gated}
+        onClick={handleClick}
+        className={cn(
+          actionButtonClass(variant),
+          touch ? "relative size-8 after:absolute after:-inset-1.5 after:content-['']" : 'h-6 w-6'
+        )}
+      >
+        {icon}
+      </button>
+    </WriteGate>
   )
 }
 

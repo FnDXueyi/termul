@@ -63,6 +63,12 @@ import type { QueuedPrompt } from '../prompt-queue-orchestration'
 
 export type AgentStatus = 'idle' | 'spawning' | 'connected' | 'error'
 export type SessionStatus = 'initializing' | 'active' | 'error' | 'closed'
+
+/** Live OpenCode 2 status for the active turn. `null` fields are cleared. */
+export interface OpenCodeSessionNotice {
+  compaction: 'started' | 'failed' | null
+  retryAttempt: number | null
+}
 export type MessageRole = 'user' | 'agent' | 'thought'
 
 /**
@@ -116,6 +122,11 @@ export interface AcpSession {
   projectId: string
   status: SessionStatus
   title: string | null
+  /**
+   * Live OpenCode compaction / retry line. Ephemeral: a finished prompt
+   * clears it, and it is not written to the session index.
+   */
+  opencodeNotice?: OpenCodeSessionNotice
   /** True while a prompt turn is in flight (UI spinners, cancel). */
   activeTurn: boolean
   /** Project-scoped MCP attachments active for this session when known. */
@@ -131,6 +142,13 @@ export interface AcpSession {
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
   lastError: string | null
+  /** gh-821: JSON-RPC code of the error behind `lastError`, when it was an
+   * agent RPC error (`null`/absent otherwise). Only set by the `agent_error` /
+   * `agent_crashed` reducers: other `lastError` writers do not touch it, so
+   * read it only while the `lastError` it accompanies is the event's message. */
+  lastErrorCode?: number | null
+  /** gh-821: JSON-RPC `data` of the error behind `lastError`, when present. */
+  lastErrorData?: unknown
   createdAt: number
   /**
    * Set while a `session/load` replay may still deliver history chunks.
@@ -244,6 +262,17 @@ export interface PendingPermission {
   sessionId: SessionId
   options: PermissionOption[]
   toolCall: unknown
+}
+
+/**
+ * A permission the server denied because this device disconnected (L-09). The
+ * server emits no event for it, so the store infers it: a request that was
+ * pending at a transport loss and later left `pendingPermissions` without the
+ * user answering. `tool` is the request's tool title for the notice copy.
+ */
+export interface PermissionDenialNotice {
+  requestId: string
+  tool: string
 }
 
 /** A pending structured question (issue #411), keyed by `questionId`. */
@@ -430,6 +459,12 @@ export interface AcpState {
   pendingPermissions: Record<string, PendingPermission> // P3 renders, keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
+  /**
+   * Per-session notice that a permission was denied by a disconnect (see
+   * `PermissionDenialNotice`). Set by `attachPermissionDenialTracking`; cleared
+   * when the session's next turn starts or the session goes away.
+   */
+  permissionDenialNotices: Record<SessionId, PermissionDenialNotice>
   /** Pending user prompts keyed by session (sent FIFO when the turn ends). */
   promptQueues: Record<SessionId, QueuedPrompt[]>
   /**
@@ -439,6 +474,12 @@ export interface AcpState {
   turnEndNotices: Record<SessionId, TurnEndNotice>
   /** Sessions whose auto-flush is suppressed during cancel+send-now. */
   suppressQueueFlush: Record<SessionId, true>
+  /**
+   * AD-6: sessions whose in-flight prompt command lost its reply to a
+   * transport drop (outcome unknown). The chat shows a non-error "Waiting to
+   * confirm" state while the same `turnId` is resent; never a failure.
+   */
+  pendingPromptReconcile: Record<SessionId, true>
 
   /**
    * Story 5.3 (AC3): WS transport-level reconnect flag. True while the WS
@@ -455,6 +496,12 @@ export interface AcpState {
   queuedProjectSwitchId: string | null
   /** Target project whose switch just failed (transient inline indicator). */
   failedProjectSwitchId: string | null
+  /**
+   * Target project of a `switchProject` call that is awaiting the transport.
+   * Null otherwise. The only store-visible signal for an in-flight switch;
+   * the mobile shell announcer derives "Switching to {project}…" from it.
+   */
+  switchingProjectId: string | null
 
   // Actions — lifecycle
   spawnAgent: (config: Parameters<typeof acpApi.spawnAgent>[0]) => Promise<AgentId>

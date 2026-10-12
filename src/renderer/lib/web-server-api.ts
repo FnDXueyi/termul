@@ -25,6 +25,7 @@ import type {
   FileInfo,
   GitCommit,
   GitCommitContext,
+  GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
   IpcResult,
@@ -206,6 +207,13 @@ export const webServerGit = {
     return res.data
   },
 
+  /** Working-tree `+added -removed` stat via `POST /git/diff-stat` (read route). */
+  async getDiffStat(cwd: string): Promise<GitDiffStat> {
+    const res = await postJson<GitDiffStat>('/git/diff-stat', { cwd })
+    if (!res.success) throw new Error(res.error)
+    return res.data
+  },
+
   async getDiff(cwd: string, path: string, staged = false): Promise<string> {
     const res = await postJson<string>('/git/diff', { cwd, path, staged })
     if (!res.success) throw new Error(res.error)
@@ -219,6 +227,16 @@ export const webServerGit = {
 
   async unstage(cwd: string, path: string): Promise<void> {
     const res = await postJson<void>('/git/unstage', { cwd, path })
+    if (!res.success) throw new Error(res.error)
+  },
+
+  async stageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/stage-hunk', { cwd, path, hunkPatch })
+    if (!res.success) throw new Error(res.error)
+  },
+
+  async unstageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
+    const res = await postJson<void>('/git/unstage-hunk', { cwd, path, hunkPatch })
     if (!res.success) throw new Error(res.error)
   },
 
@@ -515,13 +533,13 @@ export const webServerSearch = {
     query: string,
     includeIgnored?: boolean
   ): Promise<{
-    files: Array<{ path: string; ignored: boolean }>
+    files: Array<{ path: string; ignored: boolean; kind?: 'file' | 'dir' }>
     truncated: boolean
   }> {
     const params = new URLSearchParams({ root, query })
     if (includeIgnored) params.set('includeIgnored', 'true')
     const res = await getJson<{
-      files: Array<{ path: string; ignored: boolean }>
+      files: Array<{ path: string; ignored: boolean; kind?: 'file' | 'dir' }>
       truncated: boolean
     }>(`/search/file-names?${params.toString()}`)
     if (!res.success) throw new Error(res.error)
@@ -606,6 +624,19 @@ export const webServerWorktree = {
     force: boolean
   ): Promise<IpcResult<void>> {
     return postJson<void>('/worktree/remove', { projectPath, worktreePath, force })
+  },
+
+  /**
+   * Rename a worktree's branch by hand (story 16). WRITE route: refused with
+   * `FORBIDDEN` on a read-only server (non-loopback peer without
+   * `--allow-remote-writes`, or shared-live).
+   */
+  async renameBranch(
+    worktreePath: string,
+    oldBranch: string,
+    newBranch: string
+  ): Promise<IpcResult<void>> {
+    return postJson<void>('/worktree/rename-branch', { worktreePath, oldBranch, newBranch })
   },
 
   async branches(projectPath: string): Promise<IpcResult<BranchInfo[]>> {

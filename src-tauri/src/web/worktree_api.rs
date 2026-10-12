@@ -41,6 +41,7 @@ use serde::Deserialize;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{error, info, warn};
 
+use self::scope::WebWorktreeEntry;
 use crate::web::fs_api::{check_local_only, resolve_request_path, IpcBody};
 use crate::web::git_api::ensure_within_project_boundary;
 use crate::web::ws::AppState;
@@ -48,6 +49,8 @@ use crate::worktree::{
     BaseBranchInfo, BranchEntry, DirtyStatus, GitWorktreeEntry, IncludeCopyResult, WorktreeError,
     WorktreeManager,
 };
+
+mod scope;
 
 /// `POST /worktree/list { projectPath }` body.
 #[derive(Debug, Deserialize)]
@@ -118,7 +121,7 @@ type RouteErr<T> = (StatusCode, Json<IpcBody<T>>);
 /// (`Some` on write routes, `None` on read routes). Mirrors
 /// `git_api::resolve_cwd` — kept self-contained so the worktree module does not
 /// depend on git_api's private helpers.
-fn resolve_project_path<T>(
+pub(super) fn resolve_project_path<T>(
     req_path: &str,
     state: &AppState,
     peer: Option<SocketAddr>,
@@ -165,7 +168,7 @@ fn resolve_project_path<T>(
 /// `validate_project_path` behavior of stripping the Windows verbatim (`\\?\`)
 /// prefix so `git.exe` receives a path it understands. Returns an `IpcBody::err`
 /// (`INVALID_PATH_ENCODING`) when the path resolves to empty.
-fn path_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
+pub(super) fn path_string<T>(resolved: &std::path::Path) -> Result<String, RouteErr<T>> {
     let lossy = resolved.to_string_lossy();
     let simplified = crate::path_validation::strip_verbatim_prefix(&lossy).into_owned();
     if simplified.is_empty() {
@@ -189,58 +192,42 @@ fn worktree_err<T>(e: WorktreeError) -> IpcBody<T> {
 // ============================ Route handlers ============================
 
 /// `POST /worktree/list` — list all worktrees for a git repo (read-only).
-/// Mirrors `worktree_list` → `WorktreeManager::list`.
+/// Mirrors `worktree_list` → `WorktreeManager::list`. Worktrees outside the
+/// project folder are returned flagged `outsideProjectRoot` (AD-9), not dropped;
+/// act routes still enforce containment (see `scope`).
 pub async fn list(
     State(state): State<AppState>,
     Json(req): Json<WorktreeProjectPathRequest>,
 ) -> impl IntoResponse {
     let resolved =
-        match resolve_project_path::<Vec<GitWorktreeEntry>>(&req.project_path, &state, None, false)
+        match resolve_project_path::<Vec<WebWorktreeEntry>>(&req.project_path, &state, None, false)
         {
             Ok(p) => p,
             Err(resp) => return resp,
         };
-    let project_path = match path_string::<Vec<GitWorktreeEntry>>(&resolved) {
+    let project_path = match path_string::<Vec<WebWorktreeEntry>>(&resolved) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
     let path_for_log = project_path.clone();
-    // Normalize the project root for the info-leak filter: strip the Windows
-    // verbatim (`\\?\`) prefix so `starts_with` matches git's output (which
-    // carries no verbatim prefix). Both sides must share the same non-verbatim
-    // representation or a logically-matching path would be rejected on Windows.
-    let project_root_for_filter =
-        crate::path_validation::strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned();
+    let project_root = project_path.clone();
     let result = tokio::task::spawn_blocking(move || WorktreeManager::list(&project_path))
         .await
         .map_err(|e| format!("worktree list task failed: {e}"));
     let body = match result {
         Ok(Ok(entries)) => {
-            // Info-leak guard: filter out any worktree whose path is outside the
-            // resolved project root. A worktree checked out to an arbitrary
-            // outside path would otherwise disclose that path to the web client.
-            // The `WorktreeManager::list` call runs git on the project root;
-            // the returned entries should all be within the boundary, but a
-            // pre-existing worktree created outside (e.g. via the desktop
-            // client's custom targetPath) would slip through. Filter defensively.
-            let filtered: Vec<GitWorktreeEntry> = entries
-                .into_iter()
-                .filter(|e| {
-                    let entry = crate::path_validation::strip_verbatim_prefix(&e.path);
-                    std::path::Path::new(entry.as_ref()).starts_with(&project_root_for_filter)
-                })
-                .collect();
-            let kept = filtered.len();
-            info!(path = %path_for_log, count = kept, "worktree list ok");
-            IpcBody::ok(filtered)
+            let scoped = scope::scope_entries(entries, &project_root);
+            let outside = scoped.iter().filter(|e| e.outside_project_root).count();
+            info!(path = %path_for_log, count = scoped.len(), outside, "worktree list ok");
+            IpcBody::ok(scoped)
         }
         Ok(Err(e)) => {
             warn!(path = %path_for_log, error = %e, "worktree list failed");
-            worktree_err::<Vec<GitWorktreeEntry>>(e)
+            worktree_err::<Vec<WebWorktreeEntry>>(e)
         }
         Err(e) => {
             error!(path = %path_for_log, error = %e, "worktree list task panicked");
-            IpcBody::<Vec<GitWorktreeEntry>>::err(
+            IpcBody::<Vec<WebWorktreeEntry>>::err(
                 format!("worktree list task failed: {e}"),
                 "WORKTREE_LIST_ERROR",
             )
@@ -414,10 +401,9 @@ fn create_streaming(
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             error!(path = %panic_path, name = %panic_name, branch = %panic_branch, is_new_branch = %is_new_branch, start_ref = ?panic_start_ref, target_path = ?panic_target_path, error = %e, "worktree create task panicked");
-            let body =
-                worktree_err::<GitWorktreeEntry>(WorktreeError::IoError(e.to_string()));
-            let _ = panic_tx
-                .send(serde_json::json!({"type": "result", "result": body}).to_string());
+            let body = worktree_err::<GitWorktreeEntry>(WorktreeError::IoError(e.to_string()));
+            let _ =
+                panic_tx.send(serde_json::json!({"type": "result", "result": body}).to_string());
         }
     });
     let stream = UnboundedReceiverStream::new(rx).map(|line| {

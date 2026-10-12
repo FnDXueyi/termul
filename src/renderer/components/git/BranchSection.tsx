@@ -15,6 +15,8 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
+import { WriteGate, WriteGateReason } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
 
 interface BranchSectionProps {
@@ -35,6 +37,7 @@ export function BranchSection({
   onCreateBranch,
   onSwitchBranch
 }: BranchSectionProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   const isMobile = variant === 'mobile'
   return (
     <DropdownMenu>
@@ -53,26 +56,37 @@ export function BranchSection({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56 max-h-[300px] overflow-y-auto z-50">
-        <DropdownMenuItem
-          onClick={onCreateBranch}
-          className="flex items-center gap-2 text-xs cursor-pointer"
-        >
-          <Plus size={12} />
-          Create new branch...
-        </DropdownMenuItem>
+        <WriteGate gated={!admitted} focusable={false} className="flex w-full">
+          <DropdownMenuItem
+            onClick={() => {
+              if (admitted) onCreateBranch()
+            }}
+            disabled={!admitted}
+            className="flex w-full items-center gap-2 text-xs cursor-pointer"
+          >
+            <Plus size={12} />
+            Create new branch...
+            {!admitted && <WriteGateReason />}
+          </DropdownMenuItem>
+        </WriteGate>
         <DropdownMenuSeparator />
         {branches.length === 0 ? (
           <div className="px-2 py-1.5 text-xs text-muted-foreground">No branches found</div>
         ) : (
           branches.map((b) => (
-            <DropdownMenuItem
-              key={b}
-              onClick={() => onSwitchBranch(b)}
-              className="flex items-center justify-between text-xs cursor-pointer"
-            >
-              <span className="truncate">{b}</span>
-              {b === currentBranch && <Check size={12} className="shrink-0 text-foreground" />}
-            </DropdownMenuItem>
+            <WriteGate key={b} gated={!admitted} focusable={false} className="flex w-full">
+              <DropdownMenuItem
+                onClick={() => {
+                  if (admitted) onSwitchBranch(b)
+                }}
+                disabled={!admitted}
+                className="flex w-full items-center justify-between text-xs cursor-pointer"
+              >
+                <span className="truncate">{b}</span>
+                {b === currentBranch && <Check size={12} className="shrink-0 text-foreground" />}
+                {!admitted && <WriteGateReason />}
+              </DropdownMenuItem>
+            </WriteGate>
           ))
         )}
       </DropdownMenuContent>

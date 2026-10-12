@@ -15,12 +15,16 @@ export function useContextBarSettings(): void {
   useEffect(() => {
     async function loadSettings(): Promise<void> {
       try {
-        const result = await persistenceApi.read<ContextBarSettings>(CONTEXT_BAR_SETTINGS_KEY)
+        const result =
+          await persistenceApi.read<Partial<ContextBarSettings>>(CONTEXT_BAR_SETTINGS_KEY)
 
         if (result.success && result.data) {
-          // Merge with defaults to handle any new settings added in future versions
+          // Merge with defaults to handle any new settings added in future versions.
+          // A saved blob predating `showProjectName` keeps today's always-on
+          // project name; blobs written since carry the key and win.
           const mergedSettings: ContextBarSettings = {
             ...DEFAULT_CONTEXT_BAR_SETTINGS,
+            showProjectName: true,
             ...result.data
           }
           setSettings(mergedSettings)

@@ -254,34 +254,44 @@ async fn corrupt_file_on_load_backed_up_and_returns_none() {
     let _ = fs::remove_dir_all(root);
 }
 
-// ---- I/O matrix row 10: Bad schema version on load → backup + Ok(None) ----
+// ---- I/O matrix row 10: NEWER schema version → refuse, file untouched ----
 #[tokio::test]
-async fn bad_schema_version_on_load_backed_up_and_returns_none() {
+async fn newer_schema_version_is_refused_and_the_file_is_left_untouched() {
     let root = temp_dir("bad-schema");
     let store = root.join("store");
     fs::create_dir_all(&store).unwrap();
     let path = store.join("project-1.json");
-    // Valid JSON, schema_version != 1.
-    let bytes = br#"{"schemaVersion":99,"manifest":{"projectId":"project-1","revision":1,"updatedAt":0,"terminals":[],"editors":[]}}"#;
+    // Valid JSON, schemaVersion newer than this build understands (the rest
+    // of the shape is a "future" shape on purpose).
+    let bytes = br#"{"schemaVersion":99,"manifest":{"projectId":"project-1","revision":1,"updatedAt":0,"terminals":[],"editors":[]},"futureField":{}}"#;
     fs::write(&path, bytes).unwrap();
 
     let service = WorkspaceManifestService::open(store.clone()).await.unwrap();
-    let loaded = service.load("project-1").await.unwrap();
-    assert!(loaded.is_none(), "bad schema version => fresh start");
+    let err = service
+        .load("project-1")
+        .await
+        .expect_err("newer schema => refuse, not fresh");
+    assert!(
+        matches!(err, WorkspaceManifestError::BadSchemaVersion { expected: 1, found: 99 }),
+        "got {err:?}"
+    );
+    // A write must not clobber it either.
+    let err = service
+        .write("project-1", None, sample_manifest("project-1"))
+        .await
+        .expect_err("write over a newer schema is refused");
+    assert!(matches!(
+        err,
+        WorkspaceManifestError::BadSchemaVersion { found: 99, .. }
+    ));
 
-    // Backup exists.
-    let backups: Vec<_> = fs::read_dir(&store)
+    assert_eq!(fs::read(&path).unwrap(), bytes, "file byte-identical");
+    let extra: Vec<_> = fs::read_dir(&store)
         .unwrap()
         .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|n| n.contains("corrupt-"))
-                .unwrap_or(false)
-        })
+        .filter(|entry| entry.file_name().to_str().is_some_and(|n| n != "project-1.json"))
         .collect();
-    assert_eq!(backups.len(), 1);
+    assert!(extra.is_empty(), "no backup/temp artefacts: {extra:?}");
     let _ = fs::remove_dir_all(root);
 }
 

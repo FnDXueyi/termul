@@ -10,6 +10,8 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
 
 interface StashSectionProps {
@@ -49,6 +51,7 @@ export function StashSection({
   onPop,
   onDrop
 }: StashSectionProps) {
+  const admitted = useServerAdmitsRemoteWrites()
   if (stashes.length === 0) {
     return null
   }
@@ -102,22 +105,23 @@ export function StashSection({
                 // `touch` buttons (44px floor). Drop is destructive.
                 <div className="flex shrink-0 items-center gap-1">
                   {actions.map(({ label, Icon, onClick, variant: tone }) => (
-                    <Button
-                      key={label}
-                      type="button"
-                      variant="ghost"
-                      size="touch"
-                      className={cn(
-                        'w-11 text-muted-foreground',
-                        tone === 'danger' && 'hover:bg-destructive/10 hover:text-destructive'
-                      )}
-                      aria-label={label}
-                      title={label}
-                      disabled={isMutating || isGenerating}
-                      onClick={onClick}
-                    >
-                      <Icon size={16} />
-                    </Button>
+                    <WriteGate key={label} gated={!admitted}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="touch"
+                        className={cn(
+                          'w-11 text-muted-foreground',
+                          tone === 'danger' && 'hover:bg-destructive/10 hover:text-destructive'
+                        )}
+                        aria-label={label}
+                        title={label}
+                        disabled={isMutating || isGenerating || !admitted}
+                        onClick={onClick}
+                      >
+                        <Icon size={16} />
+                      </Button>
+                    </WriteGate>
                   ))}
                 </div>
               ) : (
@@ -129,6 +133,7 @@ export function StashSection({
                       label={label}
                       variant={tone}
                       disabled={isMutating || isGenerating}
+                      gated={!admitted}
                       onClick={onClick}
                     />
                   ))}

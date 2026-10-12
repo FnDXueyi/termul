@@ -58,6 +58,22 @@ pub const ENV_TOKEN: &str = "TERMUL_PLAN_TOKEN";
 pub const ENV_SESSION_ID: &str = "TERMUL_PLAN_SESSION_ID";
 pub const ENV_AGENT_ID: &str = "TERMUL_PLAN_AGENT_ID";
 
+/// Server `instructions` returned in the child's MCP `initialize` result.
+/// Agents that connect the injected `termul` server surface this guidance in
+/// model context, so it doubles as the advertisement for the chat renderer's
+/// markdown affordances: inline images (`![alt](path)`) and file references
+/// that open in Termul's built-in editor (`[label](path)` and bare paths).
+/// Keep it static and surface-honest — where a URL form is unreadable the
+/// renderer's existing fallbacks apply (alt chip / plain text).
+pub const TERMUL_CHAT_INSTRUCTIONS: &str = "Termul renders your markdown replies in a rich chat UI. \
+Embed images inline with `![alt](path)` — https URLs render everywhere; paths relative to the \
+session working directory, absolute paths, and `file://` URLs render in the desktop app and \
+fall back to alt text elsewhere (use this for generated charts, screenshots, diagrams). \
+Reference files as markdown links `[label](path)`: Termul renders them as buttons that open \
+the file in its built-in editor — absolute and cwd-relative paths inside the session workspace \
+roots work, a `:line` suffix (or `#L<line>` on the link target) positions the cursor, and \
+bare multi-segment file paths in prose become open-in-editor links too.";
+
 /// Input the agent sends to `plan` (the `arguments` of `tools/call`).
 /// Also re-used as the parent–child TCP frame body (one todo per plan entry).
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -72,6 +88,11 @@ pub struct TermulPlanInput {
 pub struct TermulSetTitleInput {
     /// Concise title for the current chat session.
     pub title: String,
+    /// Optional short kebab-case slug naming this chat's git branch (for
+    /// example `fix-login-redirect`): lowercase letters, digits and single
+    /// hyphens, at most 48 characters. Honoured on the first call only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// One todo item. `status`/`priority` are optional strings (the agent may omit
@@ -285,6 +306,10 @@ pub struct FrameRequest {
     pub todos: Vec<TermulPlanTodo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Branch slug from `set_session_title` (story 16). Only meaningful on a
+    /// `SetTitle` frame; validated and applied host-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

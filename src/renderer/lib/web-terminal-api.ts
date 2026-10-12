@@ -16,29 +16,31 @@ import type {
   TerminalSpawnOptions,
   TerminalStateSnapshot
 } from '@shared/types/ipc.types'
-import type {
-  WebTerminalEventPayload,
-  WebTerminalFrame,
-  WebTerminalReply,
-  WebTerminalRequestType
+import {
+  WEB_TERMINAL_ERROR_CODES,
+  type WebTerminalEventPayload,
+  type WebTerminalFrame,
+  type WebTerminalReply,
+  type WebTerminalRequestType
 } from '@shared/types/web-terminal-protocol.types'
 import type { AcpConnectionState } from './acp-transport'
+import {
+  HANDSHAKE_TIMEOUT_MS,
+  jitteredBackoffMs,
+  RECONNECT_STABLE_MS
+} from './acp-transport/ws-transport-timing'
 import { logFrontendError } from './log-api'
 
 import { getWebAuthToken } from './web-auth-token'
+import { buildAuthenticatePayload } from './web-client-identity'
+import { clearProtocolMismatchLatch, handleProtocolVersionMismatch } from './web-protocol-reload'
 
 const REQUEST_TIMEOUT_MS = 15_000
-/** Bound on the WS handshake (socket create → `onopen`). The 15s request
- * timeout arms only AFTER `connect()` resolves, so without this a spawn
- * against a stalled `/terminal/ws` upgrade would hang forever. Tunable. */
-const CONNECT_TIMEOUT_MS = 10_000
 /** Per-terminal cap (characters) on input buffered while `/terminal/ws` is
  * down. Bounded so an outage can never grow memory without limit; overflow
  * refuses new input with INPUT_BLOCKED (buffered data is never silently
  * truncated). */
 const INPUT_BUFFER_MAX_CHARS = 8_192
-const RECONNECT_BASE_MS = 500
-const RECONNECT_MAX_MS = 8_000
 const RECONNECT_MAX_ATTEMPTS = 10
 /** How long the page must stay hidden before a return triggers a proactive
  * reconnect. Mobile browsers suspend JS in backgrounded tabs, so the server's
@@ -108,9 +110,19 @@ export class WebTerminalClient {
   /** Latched when the retry budget exhausts; cleared by user re-arm or a
    *  successful connection (finishConnect). */
   private reconnectExhausted = false
+  /**
+   * AD-15: the host refused `authenticate` with `PROTOCOL_VERSION_MISMATCH`
+   * or `INVALID_CLIENT_IDENTITY`. Neither can succeed on retry, so the
+   * reconnect loop stays dormant and `connect()` keeps refusing for the rest
+   * of the page (a version mismatch reloads the page once via the shared
+   * helper, which replaces this client). Cleared by a successful handshake.
+   */
+  private handshakeHalted: Error | null = null
   /** Story 10 (F9): handshake bound for the in-flight `connect()` — torn
    * down socket's timer is cleared on open/error/close/forceReconnect. */
   private connectTimer: ReturnType<typeof setTimeout> | null = null
+  /** Resets `reconnectAttempt` once the connection has been stable `RECONNECT_STABLE_MS`. */
+  private stableTimer: ReturnType<typeof setTimeout> | null = null
   /** When the page became hidden (epoch-ms), or null while visible. Drives the
    * visibility-triggered proactive reconnect on mobile idle/background resume. */
   private lastHiddenAt: number | null = null
@@ -209,6 +221,22 @@ export class WebTerminalClient {
     }
   }
 
+  /** Arm the 60 s stability timer: only a connection that survives it resets the backoff counter. */
+  private startStableTimer(): void {
+    this.clearStableTimer()
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null
+      this.reconnectAttempt = 0
+    }, RECONNECT_STABLE_MS)
+  }
+
+  private clearStableTimer(): void {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer)
+      this.stableTimer = null
+    }
+  }
+
   private emitConnectionState(state: AcpConnectionState): void {
     this.connectionState = state
     this.onConnectionStateChange?.(state)
@@ -254,6 +282,7 @@ export class WebTerminalClient {
 
   connect(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error('Terminal client disposed'))
+    if (this.handshakeHalted) return Promise.reject(this.handshakeHalted)
     this.attachVisibilityListeners()
     // The in-flight handshake promise FIRST: while the socket is OPEN but the
     // `authenticate` reply is still pending, the OPEN fast path below would
@@ -288,7 +317,7 @@ export class WebTerminalClient {
         void logFrontendError({
           level: 'warn',
           source: 'WebTerminalClient.connect',
-          message: `terminal websocket handshake timed out after ${CONNECT_TIMEOUT_MS}ms`
+          message: `terminal websocket handshake timed out after ${HANDSHAKE_TIMEOUT_MS}ms`
         })
         socket.onopen = null
         socket.onmessage = null
@@ -305,46 +334,54 @@ export class WebTerminalClient {
         this.rejectPending('Terminal websocket connect timed out')
         this.scheduleReconnect()
         reject(new Error('Terminal websocket connect timed out'))
-      }, CONNECT_TIMEOUT_MS)
+      }, HANDSHAKE_TIMEOUT_MS)
       socket.onopen = () => {
-        this.clearConnectTimer()
-        // CAP-1 interim gate: when a web auth token is known, authenticate the
-        // connection BEFORE any terminal op (a gated server refuses every
-        // pre-auth request with UNAUTHORIZED and spawns no PTY). The
+        // The handshake timer keeps running through `authenticate`: it is
+        // cleared in finishConnect/failConnect, so one ~10 s budget covers the
+        // upgrade AND the token handshake.
+        // Versioned handshake (AD-15): ALWAYS authenticate before any
+        // terminal op — the host no longer treats an ungated connection as
+        // implicitly authed. The payload carries the protocol version and
+        // client identity; the token is added only when one is known. The
         // authenticate frame goes out via its OWN pending entry — never
         // request(), which awaits connect() (this very in-flight promise) and
         // would deadlock, same as WsAcpTransport's auth_required handling.
-        const token = getWebAuthToken()
-        if (token) {
-          const authId = `terminal-${++this.nextId}`
-          const authTimer = setTimeout(() => {
-            this.pending.delete(authId)
-            this.failConnect(socket, reject, new Error('Terminal authenticate timed out'))
-          }, REQUEST_TIMEOUT_MS)
-          this.pending.set(authId, {
-            timer: authTimer,
-            resolve: (reply) => {
-              if (reply.success || reply.code === 'NOT_IMPLEMENTED') {
-                // success: the gate accepted the token. NOT_IMPLEMENTED: a
-                // pre-gate server without the authenticate arm — proceed with
-                // legacy behavior.
-                this.finishConnect(socket, resolve)
-                return
-              }
-              // UNAUTHORIZED (or any other refusal): connect() rejects, so
-              // request() maps it to NETWORK_ERROR; the re-attach loop never
-              // runs on a refused connection.
-              this.failConnect(
-                socket,
-                reject,
-                new Error(reply.error || 'Terminal authenticate failed')
-              )
+        const authId = `terminal-${++this.nextId}`
+        const authTimer = setTimeout(() => {
+          this.pending.delete(authId)
+          this.failConnect(socket, reject, new Error('Terminal authenticate timed out'))
+        }, HANDSHAKE_TIMEOUT_MS)
+        this.pending.set(authId, {
+          timer: authTimer,
+          resolve: (reply) => {
+            if (reply.success) {
+              this.finishConnect(socket, resolve)
+              return
             }
+            if (
+              reply.code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH ||
+              reply.code === WEB_TERMINAL_ERROR_CODES.INVALID_CLIENT_IDENTITY
+            ) {
+              this.haltHandshake(socket, reject, reply.code, reply.error)
+              return
+            }
+            // UNAUTHORIZED (or any other refusal): connect() rejects, so
+            // request() maps it to NETWORK_ERROR; the re-attach loop never
+            // runs on a refused connection.
+            this.failConnect(
+              socket,
+              reject,
+              new Error(reply.error || 'Terminal authenticate failed')
+            )
+          }
+        })
+        socket.send(
+          JSON.stringify({
+            id: authId,
+            type: 'authenticate',
+            payload: buildAuthenticatePayload(getWebAuthToken())
           })
-          socket.send(JSON.stringify({ id: authId, type: 'authenticate', payload: { token } }))
-          return
-        }
-        this.finishConnect(socket, resolve)
+        )
       }
       socket.onmessage = (event) => this.handleFrame(String(event.data))
       socket.onerror = () => {
@@ -355,6 +392,7 @@ export class WebTerminalClient {
       }
       socket.onclose = () => {
         this.clearConnectTimer()
+        this.clearStableTimer()
         this.connecting = null
         this.connectingReject = null
         this.socket = null
@@ -371,13 +409,17 @@ export class WebTerminalClient {
    * connect().
    */
   private finishConnect(socket: WebSocket, resolve: () => void): void {
-    // The reconnect retry budget clears ONLY here — socket open AND the web
-    // auth handshake complete. Resetting in `onopen` (transport-level) would
-    // let a gate-REFUSED connection zero the budget on every retry: each
-    // failed authenticate would schedule the next attempt at minimum backoff
+    // The reconnect retry budget clears ONLY after the connection has stayed up
+    // `RECONNECT_STABLE_MS` (socket open AND the web auth handshake complete
+    // AND stable). Resetting on open or on handshake completion would let a
+    // gate-REFUSED or immediately-dropping connection zero the budget on every
+    // retry: each failure would schedule the next attempt at minimum backoff
     // forever, never reaching RECONNECT_MAX_ATTEMPTS.
-    this.reconnectAttempt = 0
+    this.startStableTimer()
     this.reconnectExhausted = false
+    this.clearConnectTimer()
+    this.handshakeHalted = null
+    clearProtocolMismatchLatch()
     this.connecting = null
     this.connectingReject = null
     this.emitConnectionState('connected')
@@ -445,9 +487,64 @@ export class WebTerminalClient {
           }
         }
         // NETWORK_ERROR keeps the claim for the next reconnect attempt.
+        // D8-F1: when this socket is still the live OPEN channel the attach
+        // reply was lost/late. `attachedSocket` is stale, so every `write()`
+        // would buffer forever and no output subscription exists. Recycle the
+        // connection so the normal reconnect cycle re-runs this attach (the
+        // backoff ladder keeps climbing, so a persistent stall exhausts the
+        // budget and surfaces 'disconnected' instead of looping silently).
+        if (
+          r.code === 'NETWORK_ERROR' &&
+          this.socket === socket &&
+          socket.readyState === this.WebSocketImpl.OPEN
+        ) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'WebTerminalClient.finishConnect',
+            message: `terminal re-attach timed out on an open channel — recycling the connection: terminal ${terminalId.slice(
+              0,
+              8
+            )}`
+          })
+          this.forceReconnect('terminal re-attach timed out', false)
+        }
       })
     }
     resolve()
+  }
+
+  /**
+   * AD-15: the host refused the handshake in a way no retry can fix. Latch
+   * the halt (no reconnect, `connect()` refuses), surface 'disconnected'
+   * through the connection-status path, and — for a version mismatch — hand
+   * off to the shared reload-once helper (its loop latch logs the clear
+   * terminal error when a reload already happened). Never logs the token.
+   */
+  private haltHandshake(
+    socket: WebSocket,
+    reject: (error: Error) => void,
+    code: string,
+    message: string
+  ): void {
+    const error = new Error(message || `Terminal authenticate refused (${code})`)
+    this.handshakeHalted = error
+    this.reconnectAttempt = 0
+    // No input can ever be delivered on a halted client: mark every tracked
+    // terminal disconnected and drop buffered keystrokes so write() stops
+    // reporting success for input that never reaches the host.
+    for (const tracker of this.trackers.values()) tracker.disconnected = true
+    this.inputBuffers.clear()
+    this.failConnect(socket, reject, error)
+    this.emitConnectionState('disconnected')
+    if (code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH) {
+      handleProtocolVersionMismatch('WebTerminalClient')
+    } else {
+      void logFrontendError({
+        level: 'error',
+        source: 'WebTerminalClient.handshake',
+        message: `terminal authenticate refused (${code}); reconnecting is stopped`
+      })
+    }
   }
 
   /**
@@ -456,6 +553,7 @@ export class WebTerminalClient {
    * the refused socket so onclose drives the normal reconnect bookkeeping.
    */
   private failConnect(socket: WebSocket, reject: (error: Error) => void, error: Error): void {
+    this.clearConnectTimer()
     this.connecting = null
     this.connectingReject = null
     reject(error)
@@ -754,6 +852,7 @@ export class WebTerminalClient {
     this.disposed = true
     this.detachVisibilityListeners()
     this.clearConnectTimer()
+    this.clearStableTimer()
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.rejectPending()
     // Story 10: dispose drops every buffered input (in-memory only).
@@ -907,6 +1006,8 @@ export class WebTerminalClient {
 
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer) return
+    // AD-15: a protocol/identity refusal never recovers by retrying.
+    if (this.handshakeHalted) return
     // An exhausted budget stays latched off until the user re-arms (a
     // keystroke via ensureReconnectArmed, or a fresh user-driven connect) —
     // otherwise the refused socket's own close event would restart the loop
@@ -949,7 +1050,7 @@ export class WebTerminalClient {
     // Story 10: a reconnect attempt is scheduled — the channel is actively
     // recovering (buffered input flushes on the next successful re-attach).
     this.emitConnectionState('reconnecting')
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.reconnectAttempt++, RECONNECT_MAX_MS)
+    const delay = jitteredBackoffMs(this.reconnectAttempt++)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       void this.connect().catch(() => this.scheduleReconnect())
@@ -1013,8 +1114,13 @@ export class WebTerminalClient {
     const hiddenFor = Date.now() - hiddenAt
     const socketDown = this.socket?.readyState !== this.WebSocketImpl.OPEN
     if (hiddenFor > VISIBILITY_STALE_THRESHOLD_MS || socketDown) {
+      // `resetBackoff=false`: only 60 s of stable connection resets the ladder
+      // (a flapping host must not be hammered at the base delay by every
+      // focus). The terminal protocol has no ping/round-trip request, so a
+      // held socket cannot be probed first — the forced reconnect stays.
       this.forceReconnect(
-        socketDown ? 'socket closed while page was hidden' : 'visibility return after idle'
+        socketDown ? 'socket closed while page was hidden' : 'visibility return after idle',
+        false
       )
     }
   }
@@ -1023,11 +1129,12 @@ export class WebTerminalClient {
    * Force a clean reconnect, bypassing the `connect()` fast path that trusts
    * `readyState === OPEN`. Tears down the suspect socket (detaching its
    * handlers so its eventual close does not double-fire `scheduleReconnect`),
-   * resets `reconnectAttempt` so AFK never strands the terminal at the backoff
-   * ceiling, clears any pending reconnect timer, then reuses `scheduleReconnect`
+   * resets `reconnectAttempt` (unless `resetBackoff` is false — the re-attach
+   * and visibility-return paths must keep climbing the backoff ladder; only
+   * the 60 s stability timer resets it), clears any pending reconnect timer, then reuses `scheduleReconnect`
    * so the existing backoff + `onopen` re-attach machinery runs unchanged.
    */
-  private forceReconnect(reason: string): void {
+  private forceReconnect(reason: string, resetBackoff = true): void {
     if (this.disposed) return
     const old = this.socket
     // Capture the in-flight connect promise's reject BEFORE nulling so it can
@@ -1040,12 +1147,13 @@ export class WebTerminalClient {
     this.connecting = null
     this.connectingReject = null
     this.clearConnectTimer()
+    this.clearStableTimer()
     this.rejectPending(reason)
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    this.reconnectAttempt = 0
+    if (resetBackoff) this.reconnectAttempt = 0
     if (old) {
       // Detach ALL handlers (incl. onopen) so a late CONNECTING→open on the
       // torn-down socket doesn't fire `onopen` against shared `this` state

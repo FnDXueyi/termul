@@ -134,7 +134,9 @@ fn load_rejects_bad_schema_version() {
         .to_string(),
     );
 
+    let before = fs::read(&file).unwrap();
     let err = FileProjectRegistry::load(&file).expect_err("bad schema => Err");
+    assert_eq!(fs::read(&file).unwrap(), before, "refused file untouched");
     assert!(
         matches!(
             err,
@@ -323,6 +325,7 @@ fn v1_migrates_to_v3_with_empty_mcp_configuration() {
     // The serde alias deserializes v1's `activeProjectId` into
     // `default_project_id` transparently.
     assert_eq!(reg.default_project_id(), Some("p-1"));
+    let original = fs::read(&file).unwrap();
     reg.save_atomic(&file).expect("save v3");
     let saved: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(saved["schemaVersion"], 3);
@@ -331,6 +334,80 @@ fn v1_migrates_to_v3_with_empty_mcp_configuration() {
         saved.get("activeProjectId").is_none(),
         "v3 must serialize under the new field name"
     );
+    // The first migration write preserved the v1 bytes verbatim; a second
+    // save (file already v3) adds no further backup.
+    let backups = pre_migration_backups(&dir);
+    assert_eq!(backups.len(), 1, "one pre-v3 backup: {backups:?}");
+    assert_eq!(fs::read(&backups[0]).unwrap(), original);
+    reg.save_atomic(&file).expect("re-save v3");
+    assert_eq!(pre_migration_backups(&dir).len(), 1);
+    cleanup(&dir);
+}
+
+fn pre_migration_backups(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("projects.json.pre-v3-") && n.ends_with(".bak"))
+        })
+        .collect()
+}
+
+#[test]
+fn save_atomic_rejects_an_unmigratable_older_schema_like_load_does() {
+    let dir = tempdir_like("save-v0");
+    let file = dir.join("projects.json");
+    let old = br#"{"schemaVersion":0,"projects":[]}"#;
+    fs::write(&file, old).unwrap();
+
+    let err = FileProjectRegistry::empty()
+        .save_atomic(&file)
+        .expect_err("v0 has no migration path");
+    assert!(
+        matches!(err, ProjectRegistryError::BadSchemaVersion { found: 0, .. }),
+        "got {err:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), old, "file untouched");
+    assert!(pre_migration_backups(&dir).is_empty());
+    cleanup(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_backup_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir_like("migrate-backup-mode");
+    let file = dir.join("projects.json");
+    fs::write(&file, br#"{"schemaVersion":1,"projects":[]}"#).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    FileProjectRegistry::empty().save_atomic(&file).expect("save");
+    let backups = pre_migration_backups(&dir);
+    assert_eq!(backups.len(), 1);
+    let mode = fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    cleanup(&dir);
+}
+
+#[test]
+fn save_atomic_refuses_to_overwrite_a_newer_schema_file() {
+    let dir = tempdir_like("save-newer");
+    let file = dir.join("projects.json");
+    let newer = br#"{"schemaVersion":99,"projects":[],"futureField":true}"#;
+    fs::write(&file, newer).unwrap();
+
+    let err = FileProjectRegistry::empty()
+        .save_atomic(&file)
+        .expect_err("newer schema must not be overwritten");
+    assert!(
+        matches!(err, ProjectRegistryError::BadSchemaVersion { found: 99, .. }),
+        "got {err:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), newer, "file untouched");
+    assert!(pre_migration_backups(&dir).is_empty());
     cleanup(&dir);
 }
 

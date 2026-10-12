@@ -2,6 +2,10 @@ use super::*;
 
 use std::collections::BTreeMap;
 
+use crate::acp::legacy_models::{
+    advertises_model_config_option, resolve_models, send_with_legacy_models,
+    LEGACY_MODEL_SWITCH_UNSUPPORTED,
+};
 use crate::acp::session::PendingElicitation;
 
 /// The agent driver's main loop: complete `initialize`, then service commands
@@ -138,16 +142,33 @@ pub(super) async fn run_command_loop(
                     log::debug!(
                         "[acp] {req_agent_id} session/new sent, awaiting reply (timeout {timeout:?})"
                     );
-                    match tokio::time::timeout(timeout, req_cx.send_request(request).block_task())
+                    match tokio::time::timeout(timeout, send_with_legacy_models(&req_cx, request))
                         .await
                     {
-                        Ok(Ok(response)) => {
+                        Ok(Ok(sent)) => {
+                            // Issue #822: `response` is the typed result parsed from
+                            // the raw JSON-RPC value; `legacy` is the top-level
+                            // `models` field the typed schema drops.
+                            let response = sent.response;
+                            let resolved =
+                                resolve_models(response.config_options.as_deref(), sent.legacy);
                             let session_id = SessionId::from(response.session_id);
                             // Story 8: the registration metadata is built once —
                             // durable sessions register immediately; ephemeral
                             // sessions stash it on the driver state so a later
                             // `promote_session` registers it without trusting
                             // client-supplied fields.
+                            // Story 16 (CAP-5): the session that CREATED its
+                            // worktree consumes the host's launch note (once,
+                            // branch must match). A model-switch session, a
+                            // retry or a later chat in the same worktree never
+                            // does, so only the creator may auto-rename.
+                            let worktree_created = !ephemeral
+                                && matches!(
+                                    (worktree_path.as_deref(), worktree_branch.as_deref()),
+                                    (Some(path), Some(branch))
+                                        if crate::worktree::take_launch_created(path, branch)
+                                );
                             let registration = SessionRegistration {
                                 session_id: session_id.0.clone(),
                                 stable_agent_namespace,
@@ -156,6 +177,10 @@ pub(super) async fn run_command_loop(
                                 cwd: PathBuf::from(&cwd),
                                 worktree_path,
                                 worktree_branch,
+                                worktree_created,
+                                model: resolved.models.as_ref().map(
+                                    crate::acp::session_persistence::snapshot_from_model_state,
+                                ),
                             };
                             if !ephemeral {
                                 if let Some(persistence) = req_persistence {
@@ -206,14 +231,15 @@ pub(super) async fn run_command_loop(
                                     .lock()
                                     .set_model_config_id(session_id.0.clone(), id);
                             }
+                            if resolved.legacy_only {
+                                req_state.lock().mark_legacy_models(session_id.0.clone());
+                            }
 
                             let event = SessionCreatedEvent {
                                 agent_id: req_agent_id,
                                 session_id: session_id.clone(),
                                 modes: response.modes.clone(),
-                                models: events::models_from_config_options(
-                                    response.config_options.as_deref(),
-                                ),
+                                models: resolved.models.clone(),
                                 config_options: response.config_options.clone(),
                             };
                             events::fan_out(
@@ -227,9 +253,7 @@ pub(super) async fn run_command_loop(
                                 Ok(NewSessionOutcome {
                                     session_id,
                                     modes: response.modes,
-                                    models: events::models_from_config_options(
-                                        response.config_options.as_deref(),
-                                    ),
+                                    models: resolved.models,
                                     config_options: response.config_options,
                                 }),
                             );
@@ -346,9 +370,14 @@ pub(super) async fn run_command_loop(
                         &session_id.0,
                         &cwd,
                         &req_state,
-                        req_cx.send_request(request).block_task(),
+                        send_with_legacy_models(&req_cx, request),
                     )
                     .await;
+                    if let (Ok(outcome), Some(persistence)) = (&result, &req_persistence) {
+                        persistence
+                            .record_session_model(&session_id.0, outcome.models.as_ref())
+                            .await;
+                    }
                     send_reply(&task_slot, result);
                 });
             }
@@ -428,9 +457,14 @@ pub(super) async fn run_command_loop(
                         &session_id.0,
                         &cwd,
                         &req_state,
-                        req_cx.send_request(request).block_task(),
+                        send_with_legacy_models(&req_cx, request),
                     )
                     .await;
+                    if let (Ok(outcome), Some(persistence)) = (&result, &req_persistence) {
+                        persistence
+                            .record_session_model(&session_id.0, outcome.models.as_ref())
+                            .await;
+                    }
                     send_reply(&task_slot, result);
                 });
             }
@@ -517,6 +551,7 @@ pub(super) async fn run_command_loop(
                 session_id,
                 content,
                 turn_id,
+                on_accept,
                 accepted,
                 reply,
             } => {
@@ -545,6 +580,19 @@ pub(super) async fn run_command_loop(
                 };
                 let cancel_rx = handles.cancel_rx;
                 let mut idle_rx = handles.idle_rx;
+                driver_state
+                    .lock()
+                    .set_active_turn_id(&session_id.0, turn_id.clone());
+                // Sequence + fan out the carrier's `user_prompt` NOW — the
+                // driver has accepted the prompt and nothing of its turn has
+                // been emitted yet, so the record can never trail one of its
+                // own chunks. A rejected prompt returned above without
+                // running the hook.
+                let hook_ran = on_accept.is_some();
+                if let Some(hook) = on_accept {
+                    hook();
+                }
+                let spawn_turn_id = turn_id.clone();
 
                 let slot = reply_slot(reply);
                 let task_slot = slot.clone();
@@ -576,14 +624,14 @@ pub(super) async fn run_command_loop(
                     let cancel_state = turn_state.clone();
                     let cancel_session = session_id.clone();
                     let cancel_cx = turn_cx.clone();
-                    let outcome: Result<StopReason, String> = race_turn(
+                    let outcome: Result<StopReason, events::AcpErrorDetail> = race_turn(
                         async {
                             turn_cx
                                 .send_request(PromptRequest::new(&session_id, content))
                                 .block_task()
                                 .await
                                 .map(|r| r.stop_reason)
-                                .map_err(|e| e.to_string())
+                                .map_err(events::AcpErrorDetail::from)
                         },
                         cancel_rx,
                         &mut idle_rx,
@@ -646,24 +694,33 @@ pub(super) async fn run_command_loop(
                     }
 
                     let is_ephemeral = turn_state.lock().is_ephemeral(&session_id.0);
+                    // Exactly one session-scoped terminator per accepted turn
+                    // (AD-5): the ACP stop reason, or `error`/`timeout` for a
+                    // failed turn. The `agent_error` event still goes out
+                    // first for the failure cases. The driver teardown owns
+                    // the `crashed` terminator when this task is dropped, and
+                    // on process shutdown the `interrupted` marker owns a
+                    // transport-closed turn (same rule as the teardown).
+                    if outcome_owned_by_process_shutdown(turn_persistence.as_ref(), &outcome) {
+                        log::info!(
+                            "[acp] session {} turn ended by shutdown: terminator left to the interrupted marker",
+                            crate::logging::redact_session_id(&log_session.0)
+                        );
+                    } else {
+                        emit_turn_outcome(
+                            &turn_sinks,
+                            &turn_agent_id,
+                            &session_id,
+                            turn_turn_id.clone(),
+                            &outcome,
+                        );
+                    }
                     match outcome {
                         Ok(stop_reason) => {
-                            let event = PromptCompleteEvent {
-                                agent_id: turn_agent_id,
-                                session_id,
-                                stop_reason,
-                                turn_id: turn_turn_id.clone(),
-                            };
-                            events::fan_out(
-                                &turn_sinks,
-                                Some(event.session_id.0.as_str()),
-                                events::EVENT_PROMPT_COMPLETE,
-                                &event,
-                            );
                             if !is_ephemeral {
                                 if let Some(persistence) = &turn_persistence {
                                     if let Err(error) =
-                                        persistence.flush_session(&event.session_id.0).await
+                                        persistence.flush_session(&session_id.0).await
                                     {
                                         send_reply(
                                             &task_slot,
@@ -677,33 +734,20 @@ pub(super) async fn run_command_loop(
                             }
                             send_reply(&task_slot, Ok(stop_reason));
                         }
-                        Err(message) => {
-                            let event = AgentErrorEvent {
-                                agent_id: turn_agent_id,
-                                session_id: Some(session_id),
-                                message: message.clone(),
-                            };
-                            // Turn-scoped error → sid is the session id.
-                            events::fan_out(
-                                &turn_sinks,
-                                event.session_id.as_ref().map(|s| s.0.as_str()),
-                                events::EVENT_AGENT_ERROR,
-                                &event,
-                            );
+                        Err(detail) => {
+                            let message = detail.message;
                             if !is_ephemeral {
                                 if let Some(persistence) = &turn_persistence {
-                                    if let Some(session_id) = event.session_id.as_ref() {
-                                        if let Err(error) =
-                                            persistence.flush_session(&session_id.0).await
-                                        {
-                                            send_reply(
-                                                &task_slot,
-                                                Err(format!(
-                                                    "{message}; history flush failed: {error}"
-                                                )),
-                                            );
-                                            return Ok(());
-                                        }
+                                    if let Err(error) =
+                                        persistence.flush_session(&session_id.0).await
+                                    {
+                                        send_reply(
+                                            &task_slot,
+                                            Err(format!(
+                                                "{message}; history flush failed: {error}"
+                                            )),
+                                        );
+                                        return Ok(());
                                     }
                                 }
                             }
@@ -718,6 +762,18 @@ pub(super) async fn run_command_loop(
                     host_plan_server.end_turn(&agent_id.0, &turn_session.0);
                     driver_state.lock().finish_turn(&turn_session.0);
                     let error = format!("failed to start prompt turn: {e}");
+                    // The accept hook already published a durable
+                    // `user_prompt`: close that turn with an `error`
+                    // terminator so reopen never reports it as open.
+                    if hook_ran {
+                        emit_turn_terminator(
+                            &sinks,
+                            &agent_id,
+                            &turn_session,
+                            spawn_turn_id,
+                            events::TurnFailureStop::Error.into(),
+                        );
+                    }
                     let _ = accepted.send(Err(error.clone()));
                     send_reply(&slot, Err(error));
                 } else {
@@ -774,11 +830,11 @@ pub(super) async fn run_command_loop(
                                 &req_sinks,
                                 Some(session_id.0.as_str()),
                                 events::EVENT_SESSION_INFO_UPDATE,
-                                &events::SessionInfoUpdateEvent {
-                                    agent_id: req_agent_id.clone(),
-                                    session_id: session_id.clone(),
-                                    title: outcome.title.clone(),
-                                },
+                                &events::SessionInfoUpdateEvent::title_only(
+                                    req_agent_id.clone(),
+                                    session_id.clone(),
+                                    outcome.title.clone(),
+                                ),
                             );
                         }
                     }
@@ -992,10 +1048,28 @@ pub(super) async fn run_command_loop(
                     // the agent's `config_options`), falling back to the `"model"`
                     // convention when the agent didn't advertise one. `model_id` is
                     // the option value id the renderer picked.
-                    let config_id = req_state
-                        .lock()
-                        .model_config_id(&session_id.0)
-                        .unwrap_or_else(|| "model".to_string());
+                    //
+                    // Issue #822: a session whose models came only from the legacy
+                    // `models` field is read-only. The pinned schema defines no
+                    // `session/set_model`, and a config-option call with the
+                    // guessed id `"model"` would only yield an agent error, so
+                    // fail fast without sending anything.
+                    let (config_id, legacy_only) = {
+                        let state = req_state.lock();
+                        (
+                            state.model_config_id(&session_id.0),
+                            state.is_legacy_models(&session_id.0),
+                        )
+                    };
+                    if legacy_only {
+                        log::info!(
+                            "[acp] session {} set_model rejected: models are legacy-only (read-only)",
+                            crate::logging::redact_session_id(&session_id.0)
+                        );
+                        send_reply(&task_slot, Err(LEGACY_MODEL_SWITCH_UNSUPPORTED.to_string()));
+                        return;
+                    }
+                    let config_id = config_id.unwrap_or_else(|| "model".to_string());
                     let request = SetSessionConfigOptionRequest::new(
                         &session_id,
                         config_id,
@@ -1072,6 +1146,13 @@ pub(super) async fn run_command_loop(
                                 req_state
                                     .lock()
                                     .set_model_config_id(session_id.0.clone(), id);
+                            }
+                            // A Model `select` option supersedes a legacy-only
+                            // model list. Same rule as `resolve_models` (first
+                            // Model-category option must be a `select`), so a
+                            // non-select Model option keeps the legacy marker.
+                            if advertises_model_config_option(Some(config_options.as_slice())) {
+                                req_state.lock().clear_legacy_models(&session_id.0);
                             }
                             let event = ConfigOptionsUpdateEvent {
                                 agent_id: req_agent_id,

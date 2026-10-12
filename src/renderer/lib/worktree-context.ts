@@ -1,13 +1,18 @@
 /**
- * Worktree context utilities for terminal and file explorer integration.
+ * Worktree context utilities.
  *
- * `getDefaultCwdForProject` resolves the main project root for new terminals
- * and ACP sessions; worktree-isolated chats override their cwd explicitly.
- * The remaining helpers power the worktree indicator and file-explorer root.
+ * `getProjectRootPath` / `getDefaultCwdForProject` resolve the main project
+ * root for ACP sessions, skills and terminal restore; worktree-isolated chats
+ * override their cwd explicitly. The Explorer root, git tab, Status bar and
+ * new-terminal cwd follow the active working copy instead
+ * (`lib/active-working-copy.ts`). The remaining helpers power the worktree
+ * indicator and symlink setup.
  */
 
+import { activeWorktreeOf } from '@/lib/active-worktree'
 import { worktreeApi } from '@/lib/api'
 import { useProjectStore } from '@/stores/project-store'
+import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project, Worktree } from '@/types/project'
 
 /**
@@ -28,7 +33,7 @@ export function getProjectRootPath(projectId: string): string {
  * project root. The active-worktree binding does NOT redirect new sessions:
  * worktree-isolated agent chats override `launchCwd` explicitly (AgentLauncher
  * worktree-mode), and resumed sessions use `session.cwd` directly. Only the
- * worktree indicator/file-explorer root read `activeWorktreeId` (via
+ * worktree indicator/file-explorer root read the switcher pick (via
  * `getActiveWorktreeForProject`/`getActiveWorktreeRoot`), not this helper.
  */
 export function getDefaultCwdForProject(projectId: string): string {
@@ -36,13 +41,18 @@ export function getDefaultCwdForProject(projectId: string): string {
   return project?.path ?? ''
 }
 
+/** The Workspace-switcher pick for a project, read from the shell-layout store. */
+function pickOf(projectId: string): string | undefined {
+  return useShellLayoutStore.getState().worktreePickByProject[projectId]
+}
+
 /**
- * Get the active worktree for a project, if any.
+ * Get the active worktree for a project, if any: the worktree the switcher
+ * pick resolves to (a pruned or disabled pick resolves as the project folder).
  */
 export function getActiveWorktreeForProject(projectId: string): Worktree | undefined {
   const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
-  if (!project?.activeWorktreeId) return undefined
-  return project.worktrees?.find((w) => w.id === project.activeWorktreeId)
+  return activeWorktreeOf(project, pickOf(projectId))
 }
 
 /**
@@ -50,10 +60,7 @@ export function getActiveWorktreeForProject(projectId: string): Worktree | undef
  * Format: "project-name / worktree-name" or "project-name / Root"
  */
 export function getWorktreeContextLabel(project: Project): string {
-  if (!project.activeWorktreeId) {
-    return `${project.name} / Root`
-  }
-  const worktree = project.worktrees?.find((w) => w.id === project.activeWorktreeId)
+  const worktree = activeWorktreeOf(project, pickOf(project.id))
   if (worktree) {
     return `${project.name} / ${worktree.name}`
   }
@@ -67,18 +74,6 @@ export function getWorktreeContextLabel(project: Project): string {
 export function getWorktreeTabContext(projectId: string): string | null {
   const worktree = getActiveWorktreeForProject(projectId)
   return worktree?.name ?? null
-}
-
-/**
- * Get the active worktree root path for a project, if any.
- * Returns the worktree path if an active worktree is set, or null if on project root.
- * This is useful for the file explorer to root at the worktree path.
- */
-export function getActiveWorktreeRoot(projectId: string): string | null {
-  const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
-  if (!project?.activeWorktreeId) return null
-  const worktree = project.worktrees?.find((w) => w.id === project.activeWorktreeId)
-  return worktree?.path ?? null
 }
 
 /**
@@ -102,9 +97,8 @@ function _isWorktreePathStale(_worktreePath: string): boolean {
 export async function ensureWorktreeSymlinks(projectId: string): Promise<void> {
   const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
   if (!project?.path || !project.isGitRepo) return
-  if (!project.activeWorktreeId) return
 
-  const worktree = project.worktrees?.find((w) => w.id === project.activeWorktreeId)
+  const worktree = activeWorktreeOf(project, pickOf(projectId))
   if (!worktree) return
 
   const symlinkDirs = project.symlinkDirs

@@ -8,6 +8,7 @@ import { applyTerminalStream, type TerminalStreamFields } from '@/components/cha
 import type {
   ContentBlock,
   SessionId,
+  SessionInfoUpdateEvent,
   SessionMode,
   SessionUsage,
   ToolCall,
@@ -44,7 +45,7 @@ import {
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
-  acceptedServerPromptTurnIds,
+  activeWirePromptTurns,
   commitMessageCollectors,
   handoffOnlyTurnIds,
   historySeqWatermarks,
@@ -58,7 +59,44 @@ import {
   rejectTerminalAssistCollector,
   terminalAssistCollectors
 } from '../shared-state'
-import type { AcpState, ChatMessage, MessageRole } from '../types'
+import type { AcpState, ChatMessage, MessageRole, OpenCodeSessionNotice } from '../types'
+import { clearPromptReconcile, clearPromptReconcileForTurn } from './prompt-reconcile'
+import { createFlushClock, type FlushTier } from './transcript-flush-clock'
+
+function sameOpencodeNotice(
+  left: OpenCodeSessionNotice | undefined,
+  right: OpenCodeSessionNotice | undefined
+): boolean {
+  if (left == null && right == null) return true
+  if (left == null || right == null) return false
+  return left.compaction === right.compaction && left.retryAttempt === right.retryAttempt
+}
+
+/** Apply one session-info marker. Absent fields keep the previous notice. */
+export function nextOpencodeNotice(
+  prev: OpenCodeSessionNotice | undefined,
+  event: Pick<SessionInfoUpdateEvent, 'compaction' | 'retry'>
+): OpenCodeSessionNotice | undefined {
+  let compaction = prev?.compaction ?? null
+  let retryAttempt = prev?.retryAttempt ?? null
+  let changed = false
+  if (event.compaction) {
+    changed = true
+    if (event.compaction.status === 'completed') compaction = null
+    else if (event.compaction.status === 'started') compaction = 'started'
+    else if (event.compaction.status === 'failed') compaction = 'failed'
+  }
+  if (event.retry === null) {
+    changed = true
+    retryAttempt = null
+  } else if (event.retry) {
+    changed = true
+    retryAttempt = event.retry.attempt
+  }
+  if (!changed) return prev
+  if (compaction == null && retryAttempt == null) return undefined
+  return { compaction, retryAttempt }
+}
 
 /**
  * Slack (in messages) for the streaming-prefix twin rule, measured as
@@ -78,7 +116,7 @@ const TWIN_SEAM_SLACK = 4
  * rAF flush: the FIRST text append of a flush takes a private copy of the
  * trailing block (cheap — the text string is shared by reference) and buffers
  * the chunk text; every later append of the same flush pushes its suffix onto
- * that buffer. {@link sealPendingTextDeltas} (end of `flushCoalesced`) joins
+ * that buffer. {@link sealPendingTextDeltas} (end of `flushCoalescedTier`) joins
  * the buffered parts into the copy's `text` exactly once, so a frame's chunk
  * burst costs O(total delta) instead of O(N × full text) full-text copies —
  * and because the first append copies, no previously committed object (an
@@ -621,6 +659,10 @@ export function dropSessionTranscriptState(
   // (a recreated session must re-establish its own; a resolving probe must not
   // resurrect a pin).
   backfillCounts.delete(sessionId)
+  // A pending (unconfirmed) prompt command — its reconcile timer, store flag and
+  // wire-turn tracking — dies with the session: nothing may resend into it.
+  clearPromptReconcile(sessionId)
+  activeWirePromptTurns.delete(sessionId)
   loadingOlderSessions.delete(sessionId)
   historySeqWatermarks.delete(sessionId)
   inFlightDurabilityProbes.delete(sessionId)
@@ -660,18 +702,25 @@ interface CoalescedUpdate {
 
 let coalescedBuffer: CoalescedUpdate[] = []
 
-let coalesceRafId: number | null = null
-let coalesceTimerId: ReturnType<typeof setTimeout> | null = null
-
 /**
- * Max delay the coalesced buffer may sit undrained when rAF is suspended.
- * WebView2 keeps the rAF callback armed but never fires it while the window
- * is occluded/minimized — the PTY sibling (`use-terminal-detached-output`)
- * carries the same 250 ms backstop for the same reason. Without it a hidden-
- * but-streaming session buffers chunk updates unboundedly (F-1, the #133
- * memory-growth class) until the next repaint.
+ * Tiered flush clock (see `transcript-flush-clock.ts`): the watched session
+ * flushes on rAF at most every ~30 ms, background sessions on a ~100 ms timer,
+ * and a 250 ms timer backstop drains everything when rAF is suspended
+ * (WebView2 keeps the callback armed but never fires it while the window is
+ * occluded/minimized — without the backstop a hidden-but-streaming session
+ * buffers chunk updates unboundedly: F-1, the #133 memory-growth class).
  */
-const COALESCE_BACKSTOP_MS = 250
+const coalesceClock = createFlushClock({
+  isWatched: (sessionId) => useAcpStore.getState().activeSessionId === sessionId,
+  flush: (tier) => flushCoalescedTier(tier),
+  hasPending: (tier) => coalescedBuffer.some((update) => tierMatches(tier, update.sessionId))
+})
+
+function tierMatches(tier: FlushTier, sessionId: SessionId): boolean {
+  if (tier === 'all') return true
+  const watched = useAcpStore.getState().activeSessionId === sessionId
+  return tier === 'watched' ? watched : !watched
+}
 
 /** Sessions whose `loadOlderMessages` is in flight (prevents concurrent loads). */
 const loadingOlderSessions = new Set<SessionId>()
@@ -691,28 +740,6 @@ export function _resetBackfillForTesting(): void {
   backfillCounts.clear()
 }
 
-function cancelCoalesceSchedule(): void {
-  if (coalesceRafId !== null) {
-    cancelAnimationFrame(coalesceRafId)
-    coalesceRafId = null
-  }
-  if (coalesceTimerId !== null) {
-    clearTimeout(coalesceTimerId)
-    coalesceTimerId = null
-  }
-}
-
-function scheduleCoalesceFlush(): void {
-  if (coalesceRafId !== null || coalesceTimerId !== null) return
-  // rAF stays the primary scheduler; the timer only covers the suspended-rAF
-  // case (occluded/minimized WebView). Whichever fires first drains the
-  // buffer and clears both. When rAF is unavailable the 16 ms timer simply
-  // replicates the per-frame cadence.
-  coalesceRafId =
-    typeof requestAnimationFrame === 'function' ? requestAnimationFrame(flushCoalesced) : null
-  coalesceTimerId = setTimeout(flushCoalesced, coalesceRafId === null ? 16 : COALESCE_BACKSTOP_MS)
-}
-
 /**
  * Drain the coalesced buffer and apply a single merged `set()`. Each buffered
  * update is applied sequentially against a working copy so the second event
@@ -720,10 +747,14 @@ function scheduleCoalesceFlush(): void {
  * trimmed for affected sessions after all updates are merged; buffered text
  * deltas are sealed into their blocks BEFORE the `set()` returns its patch.
  */
-function flushCoalesced(): void {
-  cancelCoalesceSchedule()
-  const updates = coalescedBuffer
-  coalescedBuffer = []
+function flushCoalescedTier(tier: FlushTier): void {
+  const updates: CoalescedUpdate[] = []
+  const remaining: CoalescedUpdate[] = []
+  for (const update of coalescedBuffer) {
+    if (tierMatches(tier, update.sessionId)) updates.push(update)
+    else remaining.push(update)
+  }
+  coalescedBuffer = remaining
   if (updates.length === 0) return
   useAcpStore.setState((s) => {
     let working = s
@@ -763,9 +794,13 @@ function flushCoalesced(): void {
   })
 }
 
-/** Cancel any pending schedule and flush synchronously (turn-complete / disconnect). */
+/**
+ * Cancel any pending schedule and flush every session synchronously
+ * (turn-complete / disconnect / approval / question / visibilitychange).
+ */
 export function flushCoalescedSync(): void {
-  flushCoalesced()
+  coalesceClock.cancel()
+  flushCoalescedTier('all')
   // Defensive: a seal cannot survive a flush (sealPendingTextDeltas ran inside
   // the setState updater), but never leave buffered deltas dangling if an
   // updater threw before reaching the seal.
@@ -779,14 +814,14 @@ export function _flushCoalescedForTesting(): void {
 
 /** Test-only: reset coalescing state (clear buffer + cancel pending schedule). */
 export function _resetCoalesceForTesting(): void {
-  cancelCoalesceSchedule()
+  coalesceClock.cancel()
   coalescedBuffer = []
   textDeltaParts.clear()
 }
 
 /** Test-only: check whether a coalesce flush is pending. */
 export function _isCoalescePendingForTesting(): boolean {
-  return coalesceRafId !== null || coalesceTimerId !== null || coalescedBuffer.length > 0
+  return coalesceClock.isArmed() || coalescedBuffer.length > 0
 }
 
 /** Test-only: clear the loading-older guard set. */
@@ -802,7 +837,13 @@ export function _clampedToolCallIdsSizeForTesting(): number {
 /** Queue a streaming update for rAF-batched `set()`. */
 function coalesceSet(sessionId: SessionId, apply: (s: AcpState) => Partial<AcpState>): void {
   coalescedBuffer.push({ sessionId, apply })
-  scheduleCoalesceFlush()
+  coalesceClock.note(sessionId)
+}
+
+// Everything buffered flushes the moment the page is shown or hidden: a hidden
+// page's frames/timers throttle, and a returning user must see current text.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', flushCoalescedSync)
 }
 
 type TranscriptSliceState = Pick<
@@ -988,12 +1029,10 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   _onUserPrompt: (e, eventSeq) => {
     // CAP-3 replay contract: drop events the installed payload already covers.
     if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
-    // Issue #846: an echo citing a turn id is the server's proof the prompt
-    // was accepted (and persisted) BEFORE the agent dispatch. Record it so a
-    // later transport drop during the turn resolves as "outcome unknown" in
-    // `runPromptTurn`'s catch — resubscribe, never blind re-send. Cleared
-    // when the dispatch settles.
-    if (e.turnId) acceptedServerPromptTurnIds.add(e.turnId)
+    // AD-6: an echo citing a turn id is the host's proof it ACCEPTED that
+    // command (the driver sequences it on acceptance), so a prompt that lost
+    // its reply stops waiting to confirm and is never resent.
+    if (e.turnId) clearPromptReconcileForTurn(e.sessionId, e.turnId)
     // Story 3: the echo of a summary-only handoff turn (no draft → no
     // optimistic user bubble) carries the summary wire text; it must not
     // render as a user bubble. The dispatch closure registered the turn id.
@@ -1219,7 +1258,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       ) {
         // `own` = coalesced path: appendBlocks amortizes the text merge per
         // flush (copy-on-first-touch + buffered deltas sealed in
-        // flushCoalesced) instead of copying the full text per chunk. User
+        // flushCoalescedTier) instead of copying the full text per chunk. User
         // runs keep the RAW wire text here too — `wireBlocksToDisplay` runs
         // once in `finalizeStreaming` against the fully-joined text, so it
         // never sees a partial framing (and the amortized delta buffer never
@@ -1314,6 +1353,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       const merged = clampLiveToolCallFields(e.sessionId, {
         ...list[idx],
         ...stamped,
+        // A live event turns a restored summary into a real timeline card.
+        restoredSummary: undefined,
         timestamp: list[idx].timestamp,
         seq: list[idx].seq
       })
@@ -1349,7 +1390,12 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       const stream = boundTerminalStream(applyTerminalStream(list[idx], e.update))
       const clampedUpdate = clampLiveToolCallFields(e.sessionId, { ...e.update, ...stream })
       if (!clampedUpdate) return {}
-      const merged = clampLiveToolCallFields(e.sessionId, { ...list[idx], ...clampedUpdate })
+      // A live update turns a restored summary into a real timeline card.
+      const merged = clampLiveToolCallFields(e.sessionId, {
+        ...list[idx],
+        ...clampedUpdate,
+        restoredSummary: undefined
+      })
       if (!merged) return {}
       const next = [...list]
       next[idx] = merged
@@ -1466,19 +1512,32 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
     // `title` is `undefined` when the field is absent (no change), `null` when
     // the agent explicitly cleared it, or a string when set. An omitted title
     // must leave the existing title (and the persisted index) untouched.
-    if (e.title === undefined) return
-    const nextTitle = e.title
+    // OpenCode compaction / retry markers can arrive with no title.
+    const session = get().sessions[e.sessionId]
+    if (!session) return
+    const titleUpdate = e.title !== undefined
+    const nextNotice = nextOpencodeNotice(session.opencodeNotice, e)
+    const noticeChanged = !sameOpencodeNotice(session.opencodeNotice, nextNotice)
+    if (!titleUpdate && !noticeChanged) return
     set((s) => {
-      const session = s.sessions[e.sessionId]
-      if (!session) return {}
+      const current = s.sessions[e.sessionId]
+      if (!current) return {}
       return {
-        sessions: { ...s.sessions, [e.sessionId]: { ...session, title: nextTitle } }
+        sessions: {
+          ...s.sessions,
+          [e.sessionId]: {
+            ...current,
+            title: titleUpdate ? (e.title ?? null) : current.title,
+            opencodeNotice: nextNotice
+          }
+        }
       }
     })
     // Gate on sessionIndex membership so an un-promoted (ephemeral) pooled
     // session is never persisted by an event before `startChat` promotes it
-    // (matches the prompt/error reducers).
+    // (matches the prompt/error reducers). Notice-only updates stay in memory.
     if (
+      titleUpdate &&
       get().sessions[e.sessionId] &&
       get().sessionIndex.some((entry) => entry.id === e.sessionId)
     ) {

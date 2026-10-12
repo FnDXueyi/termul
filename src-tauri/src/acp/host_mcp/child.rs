@@ -15,13 +15,13 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::service::serve_server;
-use rmcp::{tool, tool_router};
+use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crate::acp::host_mcp::{
     FrameKind, FrameReply, FrameRequest, TermulBrowserInput, TermulPlanInput, TermulSetTitleInput,
-    ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN,
+    ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN, TERMUL_CHAT_INSTRUCTIONS,
 };
 
 /// Env-derived configuration for the child. Extracted so the arg parser is
@@ -107,10 +107,11 @@ struct TermulPlanServer {
 /// `inputSchema`. We re-export the shared `TermulPlanInput` (defined in
 /// `host_mcp::mod`) — it already derives `JsonSchema`.
 ///
-/// `server_handler` on `#[tool_router]` auto-generates the `ServerHandler` impl
-/// (no separate `impl ServerHandler` block needed — adding one would duplicate
-/// the impl + fail to compile).
-#[tool_router(server_handler)]
+/// The `ServerHandler` impl lives in its own block below (not the
+/// `server_handler` flag) so `get_info` can attach `TERMUL_CHAT_INSTRUCTIONS`
+/// to the `initialize` result — the channel that advertises the chat
+/// renderer's markdown image + open-in-editor affordances to the agent.
+#[tool_router]
 impl TermulPlanServer {
     #[tool(
         name = "plan",
@@ -123,6 +124,7 @@ impl TermulPlanServer {
             kind: FrameKind::Plan,
             todos: input.todos,
             title: None,
+            branch: None,
             browser_action: None,
             browser_args: None,
             browser_element: None,
@@ -144,6 +146,7 @@ impl TermulPlanServer {
             kind: FrameKind::Browser,
             todos: Vec::new(),
             title: None,
+            branch: None,
             browser_action: Some(input.action),
             browser_args: Some(input.args),
             browser_element: input.element,
@@ -169,7 +172,7 @@ impl TermulPlanServer {
 
     #[tool(
         name = "set_session_title",
-        description = "Set a concise title for the current Termul chat session. Call this EXACTLY ONCE per session, during the first turn, as soon as the user's intent is clear. Do not call it again for the same session — subsequent calls are ignored."
+        description = "Set a concise title for the current Termul chat session. Call this EXACTLY ONCE per session, during the first turn, as soon as the user's intent is clear. Do not call it again for the same session — subsequent calls are ignored. Also pass `branch`: a short kebab-case slug for this chat's git branch (lowercase letters, digits and single hyphens, at most 48 characters, for example `fix-login-redirect`); Termul uses it to name the chat's worktree branch."
     )]
     async fn set_session_title(
         &self,
@@ -181,6 +184,7 @@ impl TermulPlanServer {
             kind: FrameKind::SetTitle,
             todos: Vec::new(),
             title: Some(input.title),
+            branch: input.branch,
             browser_action: None,
             browser_args: None,
             browser_element: None,
@@ -189,6 +193,22 @@ impl TermulPlanServer {
             Ok(msg) => msg,
             Err(e) => format!("set_session_title error: {e}"),
         }
+    }
+}
+
+/// `#[tool_handler]` fills `call_tool`/`list_tools`/`get_tool` from the router
+/// and skips `get_info` because it is provided here: the returned
+/// `instructions` land in the MCP `initialize` result so agents learn they can
+/// embed images in markdown replies and link files for open-in-editor.
+#[tool_handler]
+impl ServerHandler for TermulPlanServer {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::model::ServerConfig::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+        .with_instructions(TERMUL_CHAT_INSTRUCTIONS.to_string())
     }
 }
 

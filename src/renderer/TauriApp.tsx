@@ -16,6 +16,7 @@ import { usePreventNativeContextMenu } from '@/hooks/use-prevent-native-context-
 import { useWindowState } from '@/hooks/use-window-state'
 import { primeServerCapability } from '@/lib/tauri-runtime'
 import { getCurrentWindow } from '@/lib/tauri-window'
+import { ensureClientIdentity } from '@/lib/web-client-identity'
 import { useUpdateToast } from './components/UpdateAvailableToast'
 import { WhatsNewModal } from './components/WhatsNewModal'
 import { useAcpAgents } from './hooks/use-acp-agents'
@@ -34,6 +35,7 @@ import { useCwd } from './hooks/use-cwd'
 import { useExitCode } from './hooks/use-exit-code'
 import { useGitBranch } from './hooks/use-git-branch'
 import { useGitStatus } from './hooks/use-git-status'
+import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useKeyboardShortcutsLoader } from './hooks/use-keyboard-shortcuts'
 import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
@@ -41,6 +43,7 @@ import { useProjectGitBranch } from './hooks/use-project-git-branch'
 import { useProjectIcon } from './hooks/use-project-icon'
 import { useProjectsAutoSave, useProjectsLoader } from './hooks/use-projects-persistence'
 import { useRemoteProjects } from './hooks/use-remote-projects'
+import { useShellLayoutHydration } from './hooks/use-shell-layout-hydration'
 import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
 import { useTerminalDetachedOutput } from './hooks/use-terminal-detached-output'
 import { useTerminalExitNotification } from './hooks/use-terminal-exit-notification'
@@ -50,6 +53,7 @@ import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
 import { useVisibilityState } from './hooks/use-visibility-state'
 import { useWhatsNew } from './hooks/use-whats-new'
+import { useWorktreeBranchRenamed } from './hooks/use-worktree-branch-renamed'
 import { useTerminalAutoSave } from './hooks/useTerminalAutoSave'
 import WorkspaceLayout from './layouts/WorkspaceLayout'
 import { initNotificationPermissions } from './lib/tauri-notification-api'
@@ -61,6 +65,13 @@ const queryClient = new QueryClient()
 
 // Component to handle app-level effects like auto-save
 function AppEffects(): null {
+  // Versioned handshake identity (AD-4, AD-15): mint `deviceId` (localStorage)
+  // and `clientInstanceId` (sessionStorage) at boot, before the first WS
+  // handshake. Both roots call this — keep them in parity.
+  useEffect(() => {
+    ensureClientIdentity()
+  }, [])
+
   useTerminalAutoSave()
   useTerminalRestore()
   useCrashRecovery()
@@ -68,6 +79,7 @@ function AppEffects(): null {
   useCwd()
   useGitBranch()
   useProjectGitBranch()
+  useGitStatusRefresh()
   useProjectIcon()
   useGitStatus()
   useExitCode()
@@ -78,6 +90,7 @@ function AppEffects(): null {
   useKeyboardShortcutsLoader()
   useProjectsLoader()
   useProjectsAutoSave()
+  useShellLayoutHydration()
   useMenuUpdaterListener()
   useUpdateCheck()
   useUpdateToast()
@@ -90,6 +103,8 @@ function AppEffects(): null {
   useAcpAgents()
   useAgentIdleShutdown()
   useAcpHistory()
+  // Story 16: host worktree branch renames reconcile + refresh (both roots).
+  useWorktreeBranchRenamed()
   useAcpSessionResume()
   // #853: chat notifications (turn finished / permission waiting / question
   // waiting), gated on the user not already watching the chat. Mounted on

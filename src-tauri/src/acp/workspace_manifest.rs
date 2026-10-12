@@ -49,12 +49,13 @@ use parking_lot::Mutex as PlMutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::acp::atomic_file;
+use crate::acp::atomic_file::{self, NewerSchema};
 
 /// Current on-disk manifest envelope schema version. Bump when the
 /// [`WorkspaceManifest`] shape changes; future versions route through a
-/// `migrate` hook (today: reject as `BadSchemaVersion` and treat the file as
-/// fresh — Story 5 has no migration path yet, the workspace reloads fresh).
+/// `migrate` hook. A file with a NEWER version is refused (AD-18:
+/// [`WorkspaceManifestError::BadSchemaVersion`], file untouched); there is no
+/// older version to migrate from yet.
 pub const WORKSPACE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -242,9 +243,9 @@ pub enum WorkspaceManifestError {
     /// [`WorkspaceManifestFile`] shape (a `.corrupt-<nanos>.bak` copy is
     /// stashed alongside before this is returned on load — see [`load`]).
     Parse(serde_json::Error),
-    /// The file's `schemaVersion` does not equal
-    /// [`WORKSPACE_MANIFEST_SCHEMA_VERSION`]. Story 5 treats this as a fresh
-    /// start (backup + `Ok(None)`) — there is no migration path yet.
+    /// The file's `schemaVersion` is NEWER than
+    /// [`WORKSPACE_MANIFEST_SCHEMA_VERSION`] (AD-18): the host refuses to
+    /// load or overwrite it and leaves the file untouched.
     BadSchemaVersion {
         /// Expected ([`WORKSPACE_MANIFEST_SCHEMA_VERSION`]).
         expected: u32,
@@ -477,14 +478,10 @@ impl WorkspaceManifestService {
 
     /// Load a project's manifest. Returns `Ok(None)` when the file is
     /// missing (the success path — a workspace reload starts fresh) OR when
-    /// the file is corrupt / wrong schema version (backed up to
-    /// `<file>.corrupt-<nanos>.bak` first, then treated as fresh). Returns
-    /// `Err` only on a real I/O failure (permission, disk error).
-    ///
-    /// Story 5 has no migration path — a future schema version is backed up +
-    /// `Ok(None)` (the workspace reloads fresh). The `BadSchemaVersion` error
-    /// is exposed for callers that want to distinguish, but `load` itself
-    /// collapses it to the fresh-start path.
+    /// the file is corrupt (backed up to `<file>.corrupt-<nanos>.bak` first,
+    /// then treated as fresh). A file written by a NEWER schema is refused
+    /// with `Err(BadSchemaVersion)` and left untouched (AD-18). Returns `Err`
+    /// on a real I/O failure (permission, disk error) too.
     pub async fn load(self: &Arc<Self>, project_id: &str) -> Result<Option<WorkspaceManifest>> {
         let root = Arc::clone(self);
         let project_id = project_id.to_string();
@@ -500,8 +497,8 @@ impl WorkspaceManifestService {
 
     /// Blocking load implementation (mirrors `SessionPersistence::recover`'s
     /// `decode_versioned` pattern). A missing file is `Ok(None)`; a corrupt
-    /// file is backed up + `Ok(None)`; a wrong schema version is backed up +
-    /// `Ok(None)` (Story 5 has no migration path — fresh start).
+    /// file is backed up + `Ok(None)`; a NEWER schema version is refused with
+    /// `Err(BadSchemaVersion)` (logged, file untouched).
     fn load_blocking(&self, project_id: &str) -> Result<Option<WorkspaceManifest>> {
         let path = self.project_path(project_id)?;
         let bytes = match fs::read(&path) {
@@ -512,9 +509,21 @@ impl WorkspaceManifestService {
             }
             Err(error) => return Err(error.into()),
         };
-
+        // A newer host wrote this file: refuse before any decode attempt (a
+        // future shape may not even fit today's structs), never back it up or
+        // rewrite it. The caller logs/propagates the typed error.
+        if let Err(newer) = NewerSchema::check(&path, &bytes, WORKSPACE_MANIFEST_SCHEMA_VERSION)
+        {
+            log::error!(
+                "[workspace-manifest] load refused project_id={project_id}: {newer}"
+            );
+            return Err(WorkspaceManifestError::BadSchemaVersion {
+                expected: WORKSPACE_MANIFEST_SCHEMA_VERSION,
+                found: newer.found,
+            });
+        }
         // Schema-versioned envelope decode (mirrors `decode_versioned` in
-        // session_persistence). A parse failure OR a bad schema version is
+        // session_persistence). A parse failure OR an older schema version is
         // backed up + treated as fresh — the workspace reloads, the operator
         // can recover the corrupt file from the backup.
         match serde_json::from_slice::<WorkspaceManifestFile>(&bytes) {
@@ -628,18 +637,30 @@ impl WorkspaceManifestService {
         path: &Path,
     ) -> Result<WriteOutcome> {
         // Read current on-disk state. A missing file = revision `None`
-        // (initial write). A corrupt / wrong-schema file is backed up +
+        // (initial write). A corrupt / older-schema file is backed up +
         // treated as fresh — the write then proceeds as the initial write
-        // (the corrupt state is recoverable, not fatal). A real I/O error
-        // propagates.
+        // (the corrupt state is recoverable, not fatal). A NEWER schema is
+        // refused and never overwritten. A real I/O error propagates.
         let current: Option<WorkspaceManifest> = match fs::read(path) {
-            Ok(bytes) => match serde_json::from_slice::<WorkspaceManifestFile>(&bytes) {
-                Ok(file) if file.schema_version == WORKSPACE_MANIFEST_SCHEMA_VERSION => {
+            Ok(bytes) => match (
+                NewerSchema::check(path, &bytes, WORKSPACE_MANIFEST_SCHEMA_VERSION),
+                serde_json::from_slice::<WorkspaceManifestFile>(&bytes),
+            ) {
+                (Err(newer), _) => {
+                    log::error!(
+                        "[workspace-manifest] write refused project_id={project_id}: {newer}"
+                    );
+                    return Err(WorkspaceManifestError::BadSchemaVersion {
+                        expected: WORKSPACE_MANIFEST_SCHEMA_VERSION,
+                        found: newer.found,
+                    });
+                }
+                (Ok(()), Ok(file)) if file.schema_version == WORKSPACE_MANIFEST_SCHEMA_VERSION => {
                     Some(file.manifest)
                 }
-                Ok(file) => {
+                (Ok(()), Ok(file)) => {
                     log::warn!(
-                        "[workspace-manifest] write encountered bad schema_version project_id={} expected={} found={} — backing up + treating as fresh",
+                        "[workspace-manifest] write encountered older schema_version project_id={} expected={} found={} — backing up + treating as fresh",
                         project_id,
                         WORKSPACE_MANIFEST_SCHEMA_VERSION,
                         file.schema_version
@@ -647,10 +668,9 @@ impl WorkspaceManifestService {
                     let _ = atomic_file::backup_corrupt(path, &bytes);
                     None
                 }
-                Err(error) => {
+                (Ok(()), Err(error)) => {
                     log::warn!(
-                        "[workspace-manifest] write encountered corrupt file project_id={} error={error} — backing up + treating as fresh",
-                        project_id
+                        "[workspace-manifest] write encountered corrupt file project_id={project_id} error={error} — backing up + treating as fresh"
                     );
                     let _ = atomic_file::backup_corrupt(path, &bytes);
                     None

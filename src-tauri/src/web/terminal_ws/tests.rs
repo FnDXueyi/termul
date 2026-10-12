@@ -27,9 +27,9 @@ fn context_authorize_and_detach_roundtrip() {
     let mut ctx = ConnectionContext {
         authorized: Arc::new(RwLock::new(HashSet::new())),
         attachments: HashMap::new(),
-        // Tests exercise post-gate behavior; the ungated posture starts
-        // every connection authed.
+        // Tests exercise post-gate behavior on an already-authed connection.
         authed: true,
+        identity: None,
         client_id: "test-conn-1".to_string(),
     };
     ctx.authorize("t1");
@@ -150,6 +150,7 @@ fn gate_test_ctx(authed: bool) -> ConnectionContext {
         authorized: Arc::new(RwLock::new(HashSet::new())),
         attachments: HashMap::new(),
         authed,
+        identity: None,
         client_id: format!("test-conn-{authed}"),
     }
 }
@@ -187,7 +188,7 @@ async fn gated_handle_refuses_pre_auth_spawn_and_validates_token() {
     assert!(!ctx.authed, "refused spawn must not authenticate");
 
     let wrong = handle(
-        gate_request("r2", "authenticate", json!({"token": "WRONG"})),
+        gate_request("r2", "authenticate", auth_payload(Some("WRONG"))),
         &state,
         &tx,
         &mut ctx,
@@ -197,7 +198,7 @@ async fn gated_handle_refuses_pre_auth_spawn_and_validates_token() {
     assert!(!ctx.authed, "wrong token must not authenticate");
 
     let missing = handle(
-        gate_request("r3", "authenticate", json!({})),
+        gate_request("r3", "authenticate", auth_payload(None)),
         &state,
         &tx,
         &mut ctx,
@@ -207,7 +208,7 @@ async fn gated_handle_refuses_pre_auth_spawn_and_validates_token() {
     assert!(!ctx.authed);
 
     let ok = handle(
-        gate_request("r4", "authenticate", json!({"token": "s3cret"})),
+        gate_request("r4", "authenticate", auth_payload(Some("s3cret"))),
         &state,
         &tx,
         &mut ctx,
@@ -231,17 +232,39 @@ async fn gated_handle_refuses_pre_auth_spawn_and_validates_token() {
     );
 }
 
+fn auth_payload(token: Option<&str>) -> Value {
+    let mut payload = json!({
+        "protocolVersion": crate::web::ws::WS_PROTOCOL_VERSION,
+        "deviceId": "device-a",
+        "clientInstanceId": "tab-1",
+    });
+    if let Some(token) = token {
+        payload["token"] = json!(token);
+    }
+    payload
+}
+
 #[tokio::test]
-async fn ungated_handle_treats_authenticate_as_noop_success() {
-    // New-client/old-server tolerance: an ungated server accepts
-    // `authenticate` as a no-op success, so clients that always send it
-    // keep working on pre-gate deployments.
+async fn ungated_connection_is_authed_only_after_valid_handshake() {
+    // Ungated hosts no longer admit connections implicitly: requests before
+    // a valid `authenticate` are refused UNAUTHORIZED, and any token passes
+    // once the handshake checks succeed.
     let state = gate_test_state(None);
     let (tx, _rx) = mpsc::channel(8);
-    // run() initializes ungated connections authed: true.
-    let mut ctx = gate_test_ctx(true);
+    let mut ctx = gate_test_ctx(false);
+
+    let refused = handle(
+        gate_request("r0", "spawn", json!({"projectId": "p"})),
+        &state,
+        &tx,
+        &mut ctx,
+    )
+    .await;
+    assert_eq!(refused, Err(("UNAUTHORIZED", "Unauthorized".to_string())));
+    assert!(!ctx.authed);
+
     let reply = handle(
-        gate_request("r1", "authenticate", json!({"token": "anything"})),
+        gate_request("r1", "authenticate", auth_payload(Some("anything"))),
         &state,
         &tx,
         &mut ctx,
@@ -249,6 +272,55 @@ async fn ungated_handle_treats_authenticate_as_noop_success() {
     .await;
     assert_eq!(reply, Ok(json!({})));
     assert!(ctx.authed);
+    let identity = ctx.identity.as_ref().expect("identity recorded");
+    assert_eq!(identity.device_id, "device-a");
+    assert_eq!(identity.client_instance_id, "tab-1");
+
+    // Re-auth on an authed connection is an idempotent no-op success.
+    let again = handle(
+        gate_request("r2", "authenticate", json!({})),
+        &state,
+        &tx,
+        &mut ctx,
+    )
+    .await;
+    assert_eq!(again, Ok(json!({})));
+}
+
+#[tokio::test]
+async fn authenticate_refuses_bad_version_and_identity_with_screaming_codes() {
+    let oversized = "x".repeat(crate::web::ws::MAX_CLIENT_ID_LEN + 1);
+    for token in [None, Some("s3cret")] {
+        let state = gate_test_state(token);
+        let (tx, _rx) = mpsc::channel(8);
+        for (payload, code) in [
+            // Missing version, wrong version, non-numeric version.
+            (json!({"deviceId": "d", "clientInstanceId": "c", "token": "s3cret"}), "PROTOCOL_VERSION_MISMATCH"),
+            (json!({"protocolVersion": 99, "deviceId": "d", "clientInstanceId": "c", "token": "s3cret"}), "PROTOCOL_VERSION_MISMATCH"),
+            (json!({"protocolVersion": "1", "deviceId": "d", "clientInstanceId": "c", "token": "s3cret"}), "PROTOCOL_VERSION_MISMATCH"),
+            // Version wins over a bad identity AND a wrong token.
+            (json!({"deviceId": "", "clientInstanceId": "", "token": "WRONG"}), "PROTOCOL_VERSION_MISMATCH"),
+            // Identity beats a wrong token.
+            (json!({"protocolVersion": crate::web::ws::WS_PROTOCOL_VERSION, "deviceId": "", "clientInstanceId": "c", "token": "WRONG"}), "INVALID_CLIENT_IDENTITY"),
+            (json!({"protocolVersion": crate::web::ws::WS_PROTOCOL_VERSION, "deviceId": 5, "clientInstanceId": "c", "token": "s3cret"}), "INVALID_CLIENT_IDENTITY"),
+            (json!({"protocolVersion": crate::web::ws::WS_PROTOCOL_VERSION, "deviceId": "d", "token": "s3cret"}), "INVALID_CLIENT_IDENTITY"),
+            (json!({"protocolVersion": crate::web::ws::WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": oversized, "token": "s3cret"}), "INVALID_CLIENT_IDENTITY"),
+        ] {
+            let mut ctx = gate_test_ctx(false);
+            let reply = handle(
+                gate_request("r1", "authenticate", payload.clone()),
+                &state,
+                &tx,
+                &mut ctx,
+            )
+            .await;
+            let (got, message) = reply.expect_err("handshake must be refused");
+            assert_eq!(got, code, "{payload}");
+            assert!(!message.contains("WRONG") && !message.contains("s3cret"));
+            assert!(!ctx.authed, "refusal stays pre-auth: {payload}");
+            assert!(ctx.identity.is_none());
+        }
+    }
 }
 
 #[test]
@@ -279,9 +351,9 @@ async fn connection_detach_aborts_attachment_and_clears_authorization() {
     let mut ctx = ConnectionContext {
         authorized: Arc::new(RwLock::new(HashSet::new())),
         attachments: HashMap::new(),
-        // Tests exercise post-gate behavior; the ungated posture starts
-        // every connection authed.
+        // Tests exercise post-gate behavior on an already-authed connection.
         authed: true,
+        identity: None,
         client_id: "test-conn-2".to_string(),
     };
     ctx.authorize("t1");
@@ -292,7 +364,13 @@ async fn connection_detach_aborts_attachment_and_clears_authorization() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
-    ctx.attachments.insert("t1".to_string(), task);
+    ctx.attachments.insert(
+        "t1".to_string(),
+        Attachment {
+            task,
+            release: AttachmentRelease::default(),
+        },
+    );
 
     assert!(ctx.is_authorized("t1"));
     let state = gate_test_state(None);
@@ -661,7 +739,7 @@ async fn list_preserved_refuses_unauthed_and_leaks_no_existence() {
     // projectId: now VALIDATION_ERROR (structural) — the gate is the
     // only existence boundary.
     let auth = handle(
-        gate_request("auth", "authenticate", json!({"token": "s3cret"})),
+        gate_request("auth", "authenticate", auth_payload(Some("s3cret"))),
         &state,
         &tx,
         &mut unauthed,
@@ -874,4 +952,283 @@ async fn list_preserved_live_attachment_offers_shared_claim_and_second_device_at
         &mut owner,
     )
     .await;
+}
+
+async fn attach_terminal(
+    state: &crate::web::ws::AppState,
+    tx: &mpsc::Sender<Message>,
+    ctx: &mut ConnectionContext,
+    terminal_id: &str,
+    claim: &str,
+) {
+    let attached = handle(
+        gate_request(
+            "attach",
+            "attach",
+            json!({"terminalId": terminal_id, "claim": claim, "lastSeq": 0}),
+        ),
+        state,
+        tx,
+        ctx,
+    )
+    .await;
+    assert!(attached.is_ok(), "attach: {attached:?}");
+}
+
+fn live_attachments(state: &crate::web::ws::AppState, terminal_id: &str) -> usize {
+    state
+        .pty
+        .get(terminal_id)
+        .expect("terminal exists")
+        .web_attachments
+        .load(Ordering::Acquire)
+}
+
+/// PTY-F1: attaching the same terminal twice on ONE connection used to leak a
+/// `web_attachments` count (the replaced forwarder was aborted without its
+/// release), so the terminal reported a live attachment forever after the
+/// socket closed and was never auto-reaped.
+#[tokio::test]
+async fn audit_f1_reattach_same_connection_leaks_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, _rx) = mpsc::channel(256);
+    let mut conn = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "audit-f1"})),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+    assert_eq!(
+        live_attachments(&state, &id),
+        1,
+        "re-attach replaces the forwarder: exactly one live attachment"
+    );
+
+    // Socket closes: cleanup releases the single live attachment.
+    conn.release_all(&state);
+    assert_eq!(live_attachments(&state, &id), 0);
+    assert!(!state.pty.get(&id).unwrap().has_web_attachment());
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// A re-attach on one connection swaps its attachment: the new one is counted
+/// before the old one is released, so another connection's `list_preserved`
+/// can never observe zero live attachments mid-swap (which would reissue the
+/// claim and sever the fresh forwarder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reattach_swap_never_exposes_a_zero_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut conn = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "reattach-swap"})),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+
+    let instance = state.pty.get(&id).expect("terminal exists");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Start barrier: the observer raises `polling` right before its first
+    // sample, and the first re-attach only starts once it is up — otherwise
+    // the whole swap loop could finish before the observer ever ran.
+    let polling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer = {
+        let (instance, stop, polling) = (instance.clone(), stop.clone(), polling.clone());
+        tokio::task::spawn_blocking(move || {
+            let (mut samples, mut zero_seen, mut max_count) = (0u64, false, 0usize);
+            polling.store(true, Ordering::Release);
+            while !stop.load(Ordering::Acquire) {
+                let count = instance.web_attachments.load(Ordering::Acquire);
+                samples += 1;
+                zero_seen |= count == 0;
+                max_count = max_count.max(count);
+            }
+            (samples, zero_seen, max_count)
+        })
+    };
+    while !polling.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let mut reattaches = 0u32;
+    for _ in 0..300 {
+        attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+        reattaches += 1;
+    }
+    stop.store(true, Ordering::Release);
+    let (samples, zero_seen, max_count) = observer.await.unwrap();
+    assert!(reattaches > 0, "swaps were exercised");
+    assert!(samples > 0, "the observer sampled the count while swapping");
+    assert!(max_count >= 1, "the observer saw the live attachment");
+    assert!(
+        !zero_seen,
+        "the attachment count touched zero during a re-attach swap \
+         ({samples} samples, {reattaches} re-attaches, max count {max_count})"
+    );
+    assert_eq!(live_attachments(&state, &id), 1);
+
+    conn.release_all(&state);
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// An attach whose reply cannot be sent (outbound receiver already dropped)
+/// fails with `NETWORK_ERROR` and releases the attachment count it took — no
+/// forwarder exists, so a leaked count would pin the terminal forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_with_dead_reply_channel_releases_its_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, rx) = mpsc::channel(1024);
+    let mut conn = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "attach-dead-reply"})),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+    let before = live_attachments(&state, &id);
+    assert_eq!(before, 0);
+
+    drop(rx);
+    let attached = handle(
+        gate_request(
+            "attach",
+            "attach",
+            json!({"terminalId": id, "claim": claim, "lastSeq": 0}),
+        ),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await;
+    assert_eq!(attached.unwrap_err().0, "NETWORK_ERROR");
+    assert_eq!(live_attachments(&state, &id), before);
+    assert!(conn.attachments.is_empty(), "no forwarder registered");
+
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// The connection task being cancelled at the replay `send` (outbound queue
+/// full, reader gone slow) must not leak the attachment count either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_attach_during_replay_send_releases_its_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, _rx) = mpsc::channel(1);
+    let mut conn = gate_test_ctx(true);
+    // Spawn needs room for its own reply only; fill the queue afterwards.
+    let (setup_tx, _setup_rx) = mpsc::channel(1024);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "attach-cancelled"})),
+        &state,
+        &setup_tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+    tx.send(Message::Text("fill".into())).await.unwrap();
+
+    let attach = handle(
+        gate_request(
+            "attach",
+            "attach",
+            json!({"terminalId": id, "claim": claim, "lastSeq": 0}),
+        ),
+        &state,
+        &tx,
+        &mut conn,
+    );
+    // Parked on the full queue; the timeout drops (cancels) the future.
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), attach).await;
+    assert!(outcome.is_err(), "the replay send must be pending");
+    assert_eq!(live_attachments(&state, &id), 0);
+    assert!(conn.attachments.is_empty());
+
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// PTY-F1 / Q2: a connection whose socket dies has its forwarder self-release
+/// on the failed send; the connection cleanup that follows must NOT release
+/// that attachment a second time (it would clear another viewer's live
+/// attachment and let `list_preserved` replace the claim under their stream).
+#[tokio::test]
+async fn audit_f1_dead_socket_releases_once_and_never_another_viewers_attachment() {
+    let state = gate_test_state(None);
+    let (tx_a, rx_a) = mpsc::channel(256);
+    let (tx_b, _rx_b) = mpsc::channel(256);
+    let mut a = gate_test_ctx(true);
+    let mut b = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "audit-f1-dead"})),
+        &state,
+        &tx_a,
+        &mut a,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim_a = spawned["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx_a, &mut a, &id, &claim_a).await;
+
+    // Second viewer joins through list_preserved's shared claim.
+    let listed = handle(
+        gate_request("lp", "list_preserved", json!({"projectId": "audit-f1-dead"})),
+        &state,
+        &tx_b,
+        &mut b,
+    )
+    .await
+    .expect("list");
+    let claim_b = listed["terminals"][0]["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx_b, &mut b, &id, &claim_b).await;
+    assert_eq!(live_attachments(&state, &id), 2);
+
+    // A's socket dies (receiver gone); PTY output makes A's forwarder fail
+    // its send and self-release.
+    drop(rx_a);
+    handle(
+        gate_request("w", "write", json!({"terminalId": id, "data": "echo hi\r"})),
+        &state,
+        &tx_b,
+        &mut b,
+    )
+    .await
+    .expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while live_attachments(&state, &id) != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "A's forwarder never self-released (count={})",
+            live_attachments(&state, &id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Connection A's cleanup runs afterwards: B's attachment must survive.
+    a.release_all(&state);
+    assert_eq!(
+        live_attachments(&state, &id),
+        1,
+        "cleanup double-released A's attachment and cleared B's"
+    );
+    b.release_all(&state);
+    assert_eq!(live_attachments(&state, &id), 0);
+    let _ = state.pty.force_kill(&id).await;
 }

@@ -221,6 +221,45 @@ export async function startSeededServer(opts: {
   }
 }
 
+const APP_SETTINGS_STORE_KEY = 'settings/app'
+
+/**
+ * Which shell the web client boots with. `classic` pins `shellLayout:
+ * 'classic'` in the server-side app settings (what every pre-revamp spec was
+ * written against); `default` removes the stored flag so the code default
+ * applies (the revamped shell since story 30).
+ */
+export type ShellSeed = 'classic' | 'default'
+
+/**
+ * Read-modify-write of `settings/app`: only `shellLayout` changes, so any
+ * other setting a spec seeded survives. Call before the page loads — the
+ * shell is captured once per load.
+ */
+export async function seedShellLayout(shell: ShellSeed): Promise<void> {
+  const reply = await wsRequest<{ value?: unknown } | null>(E2E_BASE_URL, 'store_read', {
+    key: APP_SETTINGS_STORE_KEY
+  })
+  const raw = reply?.value ?? null
+  const stored =
+    raw !== null && typeof raw === 'object' && '_version' in raw
+      ? (raw as { data?: unknown }).data
+      : raw
+  const current: Record<string, unknown> =
+    stored !== null && typeof stored === 'object' ? { ...(stored as Record<string, unknown>) } : {}
+  if (shell === 'classic') {
+    if (current.shellLayout === 'classic') return
+    current.shellLayout = 'classic'
+  } else {
+    if (!('shellLayout' in current)) return
+    delete current.shellLayout
+  }
+  await wsRequest(E2E_BASE_URL, 'store_write', {
+    key: APP_SETTINGS_STORE_KEY,
+    value: { _version: 1, data: current }
+  })
+}
+
 /** SIGTERM → SIGKILL → wait for the process to actually exit. */
 async function killAndWait(child: ChildProcess, termGraceMs = 3_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return
