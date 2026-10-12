@@ -195,6 +195,14 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
         }],
         Some("p-harness".to_string()),
     );
+    let data_dir = tempfile::tempdir().expect("scratch data dir");
+    let data = crate::remote::host::SharedLiveData {
+        store: Arc::new(
+            crate::web::store::WebStore::open(data_dir.path().join("store.json"))
+                .expect("open the scratch store"),
+        ),
+        data_dir: data_dir.path().to_path_buf(),
+    };
     let host = RemoteServerState::new();
     let status = host
         .start(
@@ -203,6 +211,8 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
             relay,
             registry,
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
