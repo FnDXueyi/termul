@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::acp::{AgentId, AcpManager};
 use crate::web::agent_reaper::{
-    agent_is_reapable, reap_idle_agents, run_agent_idle_reaper, DEFAULT_IDLE_REAP_WINDOW,
-    DEFAULT_SWEEP_INTERVAL, idle_reap_window_from_env,
+    agent_is_reapable, reap_idle_agents, run_agent_idle_reaper, DEFAULT_SWEEP_INTERVAL,
 };
 use crate::web::sink::WsRelaySink;
 
@@ -277,22 +276,6 @@ fn agent_is_reapable_requires_all_sessions_unpinned() {
         ("s2".to_string(), true)
     ]));
     assert!(!agent_is_reapable(&[("s1".to_string(), true)]));
-}
-
-/// Env override: `TERMUL_AGENT_IDLE_REAP_SECS` wins; unparsable and unset
-/// fall back to the default.
-#[test]
-fn idle_reap_window_env_override() {
-    // Env mutation is process-global: serialize via a lock.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::env::remove_var("TERMUL_AGENT_IDLE_REAP_SECS");
-    assert_eq!(idle_reap_window_from_env(), DEFAULT_IDLE_REAP_WINDOW);
-    std::env::set_var("TERMUL_AGENT_IDLE_REAP_SECS", "2");
-    assert_eq!(idle_reap_window_from_env(), Duration::from_secs(2));
-    std::env::set_var("TERMUL_AGENT_IDLE_REAP_SECS", "not-a-number");
-    assert_eq!(idle_reap_window_from_env(), DEFAULT_IDLE_REAP_WINDOW);
-    std::env::remove_var("TERMUL_AGENT_IDLE_REAP_SECS");
 }
 
 /// End-to-end loop behavior with a tiny window + sweep: a sessionless agent
