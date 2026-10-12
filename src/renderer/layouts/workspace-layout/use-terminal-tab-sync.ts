@@ -19,7 +19,8 @@ export function useTerminalTabSync({
   activeProjectId
 }: UseTerminalTabSyncOptions): void {
   // Ensure tabs exist for currently visible project terminals.
-  // Project workspace loading/removal is owned by persistence + restore flows.
+  // Project workspace loading/removal is owned by the project-switch
+  // coordinator (it commits the target's tree, parked or hydrated).
   // Debounce: rapid terminal store mutations (addTerminal → setTerminalPtyId →
   // addTabToPane) settle before syncTerminalTabs runs, preventing the MOUNT/UNMOUNT
   // cascade where intermediate states look like "orphaned" tabs.
@@ -27,6 +28,10 @@ export function useTerminalTabSync({
   const lastEnsuredTerminalIdsRef = useRef<string[]>([])
   const lastEnsuredProjectIdRef = useRef<string>('')
   const syncDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // The project whose tree the workspace store currently shows. `activeProjectId`
+  // (the project-store intent) runs ahead of it while a switch is loading.
+  const committedProjectId = useWorkspaceStore((state) => state.activeProjectId)
 
   useEffect(() => {
     const terminalIds = terminals.map((terminal) => terminal.id)
@@ -37,18 +42,22 @@ export function useTerminalTabSync({
       syncDebounceTimerRef.current = null
     }
 
-    // If we switched projects, we should wait for the persistence layer (useEditorPersistence)
-    // to finish its job of replacing the entire workspace tree.
-    // Forcing a sync on the WRONG tree (the old project's tree) causes "leaking" tabs.
-    if (activeProjectId !== lastEnsuredProjectIdRef.current) {
-      lastEnsuredTerminalIdsRef.current = terminalIds
-      lastEnsuredProjectIdRef.current = activeProjectId
-      // We skip the sync here because useEditorPersistence will handle the initial layout.
-      return
-    }
+    // While a switch is loading, the visible tree still belongs to the OLD
+    // project: syncing the new project's terminals into it would leak their
+    // tabs there. Do nothing until the coordinator commits the target.
+    if (committedProjectId !== activeProjectId) return
 
+    // First look at a committed project (just switched, visited or fresh):
+    // the commit already reconciled its tree, but terminals may have been
+    // created while the switch was loading — sync once regardless of whether
+    // the id list differs from the previous project's.
+    const projectChanged = activeProjectId !== lastEnsuredProjectIdRef.current
     const prevIds = lastEnsuredTerminalIdsRef.current
-    if (terminalIds.length === prevIds.length && terminalIds.every((id, i) => id === prevIds[i])) {
+    if (
+      !projectChanged &&
+      terminalIds.length === prevIds.length &&
+      terminalIds.every((id, i) => id === prevIds[i])
+    ) {
       return
     }
 
@@ -58,6 +67,7 @@ export function useTerminalTabSync({
     // ConnectedTerminal unmount and a restore re-trigger.
     syncDebounceTimerRef.current = setTimeout(() => {
       lastEnsuredTerminalIdsRef.current = terminalIds
+      lastEnsuredProjectIdRef.current = activeProjectId
       const ensureId = `ensure-${ensureCallCountRef.current++}-${Date.now().toString().slice(-6)}`
 
       console.log(`[WorkspaceLayout] syncTerminalTabs CALL [${ensureId}]`, {
@@ -78,7 +88,7 @@ export function useTerminalTabSync({
         syncDebounceTimerRef.current = null
       }
     }
-  }, [terminals, activeProjectId])
+  }, [terminals, activeProjectId, committedProjectId])
 
   // Sync legacy stores (activeTerminalId, activeFilePath) from workspace pane tree
   useEffect(() => {

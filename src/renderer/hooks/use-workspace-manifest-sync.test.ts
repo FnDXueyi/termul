@@ -65,6 +65,7 @@ import { useWorkspaceStore } from '@/stores/workspace-store'
 // Import AFTER mocks are registered.
 import {
   buildPortableManifest,
+  fetchManifestWorkspace,
   loadWorkspaceManifest,
   performManifestWrite,
   rebuildTopologyFromManifest,
@@ -84,6 +85,8 @@ function resetSyncStore(): void {
 
 function resetWorkspaceStore(): void {
   useWorkspaceStore.getState().resetLayout()
+  // The manifest writer only writes for the committed project.
+  useWorkspaceStore.setState({ activeProjectId: 'proj-1', parkedTrees: {} })
 }
 
 function makeManifest(overrides: Partial<WorkspaceManifest> = {}): WorkspaceManifest {
@@ -116,6 +119,44 @@ afterEach(() => {
   // fake timers into the next test.
   vi.useRealTimers()
   cleanup()
+})
+
+describe('fetchManifestWorkspace', () => {
+  it('rebuilds the topology without writing any store', async () => {
+    getManifestMock.mockResolvedValue({
+      success: true,
+      data: makeManifest({
+        revision: 9,
+        topology: {
+          type: 'leaf',
+          id: 'leaf-F',
+          terminalIds: [],
+          editorIds: ['edit-/f.ts'],
+          activeTabId: null
+        },
+        activePaneId: 'leaf-F',
+        editors: [{ editorId: 'edit-/f.ts', filePath: '/f.ts' }]
+      })
+    })
+    const rootBefore = useWorkspaceStore.getState().root
+
+    const fetched = await fetchManifestWorkspace('proj-1')
+
+    expect(fetched).toMatchObject({ revision: 9, activePaneId: 'leaf-F' })
+    expect(fetched?.root.id).toBe('leaf-F')
+    expect(fetched?.editors).toEqual([{ editorId: 'edit-/f.ts', filePath: '/f.ts' }])
+    expect(useWorkspaceStore.getState().root).toBe(rootBefore)
+    expect(useWorkspaceManifestSyncStore.getState().getBasedRevision('proj-1')).toBeNull()
+    expect(useEditorStore.getState().openFiles.size).toBe(0)
+  })
+
+  it('returns null for no manifest and for a failed read', async () => {
+    getManifestMock.mockResolvedValueOnce({ success: true, data: null })
+    expect(await fetchManifestWorkspace('proj-1')).toBeNull()
+
+    getManifestMock.mockResolvedValueOnce({ success: false, code: 'NETWORK_ERROR', error: 'down' })
+    expect(await fetchManifestWorkspace('proj-1')).toBeNull()
+  })
 })
 
 describe('loadWorkspaceManifest', () => {
@@ -379,12 +420,20 @@ describe('performManifestWrite', () => {
     expect(writeManifestMock).not.toHaveBeenCalled()
   })
 
+  it('skips the write for a project whose tree is not the committed one', async () => {
+    useWorkspaceStore.setState({ activeProjectId: 'proj-other' })
+
+    await expect(performManifestWrite('proj-1')).resolves.toBe('skipped')
+    expect(writeManifestMock).not.toHaveBeenCalled()
+  })
+
   it('P8: a restore on project A does NOT block writes for project B (per-project guard)', async () => {
     writeManifestMock.mockResolvedValue({
       success: true,
       data: { status: 'updated', revision: 2, updatedAt: 9 }
     })
     setManifestRestoreInProgress('proj-A', true)
+    useWorkspaceStore.setState({ activeProjectId: 'proj-B' })
 
     await performManifestWrite('proj-B')
 

@@ -65,6 +65,7 @@ vi.mock('@/stores/ssh-store', () => ({
 }))
 
 import { logFrontendError } from '@/lib/log-api'
+import { projectSwitch } from '@/lib/project-switch/coordinator'
 import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -106,6 +107,20 @@ describe('openAgentChatInOwnProject', () => {
     const lifetime = useAgentChatLifetimeStore.getState()
     expect(lifetime.retainedByProject.pb).toEqual(['s-b'])
     expect(lifetime.focusSessionByProject.pb).toBe('s-b')
+  })
+
+  it('issues an explicit open request whose afterCommit activates the tab on the owner tree', () => {
+    const request = vi.spyOn(projectSwitch, 'request').mockResolvedValue('committed')
+
+    openAgentChatInOwnProject('s-b', 'test')
+
+    expect(request).toHaveBeenCalledTimes(1)
+    const req = request.mock.calls[0][0]
+    expect(req).toMatchObject({ kind: 'open', projectId: 'pb' })
+    expect(mockAddAgentChatTab).not.toHaveBeenCalled()
+    req.afterCommit?.()
+    expect(mockAddAgentChatTab).toHaveBeenCalledWith('s-b')
+    request.mockRestore()
   })
 
   it("drops the previous project's tab-focus pointer when it switches to the owner", () => {

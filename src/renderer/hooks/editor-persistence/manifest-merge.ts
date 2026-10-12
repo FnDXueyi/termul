@@ -18,7 +18,7 @@
 import { logFrontendError } from '@/lib/log-api'
 import { isWorkspaceTabKind, WORKSPACE_TAB_KIND_TRAITS } from '@/lib/workspace-tab-kinds'
 import type { WorkspaceTab } from '@/stores/workspace-store'
-import { browserTabId, getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
+import { browserTabId, getAllLeafPanes } from '@/stores/workspace-store'
 import type { LeafNode, PaneNode } from '@/types/workspace.types'
 import { deserializePaneTree } from './pane-tree'
 import type { PersistedPaneNodeInput, PersistedTabRef } from './types'
@@ -88,21 +88,23 @@ function appendToLeaves(
 }
 
 /**
- * Append the layout's non-portable tabs to the live (manifest-built) tree: to
- * the leaf with the same id, else the active pane (else the first leaf).
- * Commits only when something was added. Returns the number of tabs added.
+ * Append the layout's non-portable tabs to a manifest-built tree: to the leaf
+ * with the same id, else the active pane (else the first leaf). Pure over the
+ * tree — it returns the merged root (the SAME `root` when nothing was added)
+ * and the number of tabs added; the caller decides where the result goes.
  */
 export function mergeNonPortableTabs(
+  root: PaneNode,
+  activePaneId: string | null,
   layout: PersistedPaneNodeInput | undefined,
   projectId: string
-): number {
+): { root: PaneNode; added: number } {
   const slices = collectLeafSlices(layout)
-  if (slices.length === 0) return 0
+  if (slices.length === 0) return { root, added: 0 }
 
-  const { root, activePaneId } = useWorkspaceStore.getState()
   const leaves = getAllLeafPanes(root)
   const fallbackLeaf = leaves.find((leaf) => leaf.id === activePaneId) ?? leaves[0]
-  if (!fallbackLeaf) return 0
+  if (!fallbackLeaf) return { root, added: 0 }
 
   const seen = collectTabIds(root)
   const additions = new Map<string, { tabs: WorkspaceTab[]; persistedActiveTabId: string | null }>()
@@ -128,13 +130,12 @@ export function mergeNonPortableTabs(
     additions.set(targetId, entry)
     added += tabs.length
   }
-  if (added === 0) return 0
+  if (added === 0) return { root, added: 0 }
 
-  useWorkspaceStore.getState().loadProjectWorkspace(appendToLeaves(root, additions), activePaneId)
   void logFrontendError({
     level: 'info',
     source: SOURCE,
     message: `Merged ${added} non-portable tab(s) from editor-state into the manifest restore for project ${projectId}`
   })
-  return added
+  return { root: appendToLeaves(root, additions), added }
 }

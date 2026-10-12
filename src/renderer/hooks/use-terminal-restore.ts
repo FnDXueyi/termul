@@ -5,6 +5,7 @@ import { getBuiltInAgent } from '@/lib/agents/agent-registry'
 import { loadCustomAgents } from '@/lib/agents/custom-agents'
 import { terminalApi } from '@/lib/api'
 import { resolveEnvForSpawn } from '@/lib/env-parser'
+import { whenProjectSwitchSettled } from '@/lib/project-switch/status-store'
 import { shellApi } from '@/lib/shell-api'
 import {
   beginProjectContinuityCorrelation,
@@ -419,6 +420,14 @@ export function useTerminalRestore(): void {
           const layout = await loadPersistedTerminals(projectIdToRestore)
           if (isCancelled()) {
             debugLog('useTerminalRestore', `CANCELLED [${callId}] after live layout load`)
+            return
+          }
+
+          // The visible pane tree belongs to the project being left until the
+          // switch commits: wait, or these tabs would land in the wrong tree.
+          await whenProjectSwitchSettled(projectIdToRestore)
+          if (isCancelled()) {
+            debugLog('useTerminalRestore', `CANCELLED [${callId}] after project switch settled`)
             return
           }
 
@@ -1257,6 +1266,9 @@ async function restoreFromLayout(
     terminalStore.setTerminals([...existingTerminals, ...newTerminals])
 
     if (idMap.size > 0) {
+      // Remap rewrites the visible tree: wait until the switch toward this
+      // project has committed so it is the tree being rewritten.
+      await whenProjectSwitchSettled(projectId)
       useWorkspaceStore.getState().remapTerminalTabs(Object.fromEntries(idMap))
     }
 

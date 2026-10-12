@@ -57,7 +57,13 @@ export interface AddTabOptions {
   focus?: boolean
 }
 
-export interface WorkspaceState {
+/**
+ * One project's whole pane workspace: the five fields the store exposes flat
+ * for the ACTIVE project. Parked (non-visible) projects keep exactly this
+ * shape in `parkedTrees`, so switching moves object references and never
+ * re-parses or clones a tree.
+ */
+export interface ProjectWorkspace {
   root: PaneNode
   activePaneId: string
   fullscreenPaneId: string | null
@@ -69,6 +75,29 @@ export interface WorkspaceState {
    * manifest; re-validated against the pane tree on every open.
    */
   agentBrowserPaneId: string | null
+}
+
+export interface WorkspaceState extends ProjectWorkspace {
+  /**
+   * The project whose tree is the flat fields above ('' until the first
+   * commit by the project-switch coordinator). Persisted-state writers refuse
+   * to write for any other project.
+   */
+  activeProjectId: string
+  /** Trees of visited, non-active projects, keyed by project id. */
+  parkedTrees: Record<string, ProjectWorkspace>
+  /**
+   * Make `projectId` the active project: park the current flat fields under
+   * the previous active project (same object references), then load
+   * `parkedTrees[projectId] ?? tree ?? a fresh single-leaf workspace`.
+   */
+  activateProject: (projectId: string, tree?: ProjectWorkspace) => void
+  /** True when `projectId` is active or has a parked tree. */
+  hasProjectTree: (projectId: string) => boolean
+  /** The tree of an active or parked project (a snapshot of the flat fields when active). */
+  getProjectTree: (projectId: string) => ProjectWorkspace | undefined
+  /** Forget a parked tree (project deleted). The active tree is never dropped. */
+  dropProjectTree: (projectId: string) => void
   showAgentLauncher: (paneId: string) => void
   hideAgentLauncher: () => void
 

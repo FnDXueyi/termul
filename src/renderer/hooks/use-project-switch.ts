@@ -6,8 +6,9 @@ import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
 
 /**
- * How a `switchTo` call ended. `selected`: the project is now active on this
- * client. `ignored`: nothing changed because the target is unknown, archived
+ * How a `switchTo` call ended. `selected`: the project is now the active
+ * choice on this client (its workspace is committed by the project-switch
+ * coordinator). `ignored`: nothing changed because the target is unknown, archived
  * or already active.
  */
 export type ProjectSwitchStatus = 'selected' | 'ignored'
@@ -18,9 +19,9 @@ export interface ProjectSwitch {
 }
 
 /**
- * Asks the workspace restore to reopen the project's most recent persisted
- * chat when the project has none on screen to come back to (switch-back
- * restore). A chat the user left open there keeps winning, so this only fills
+ * Asks the project switch's commit (chat reattach) to reopen the project's
+ * most recent persisted chat when the project has none on screen to come back
+ * to (switch-back restore). A chat the user left open there keeps winning, so this only fills
  * the gap. Returns the requested session id, or `null` when nothing was asked.
  */
 function requestMostRecentChat(projectId: string): string | null {
@@ -50,6 +51,13 @@ function requestMostRecentChat(projectId: string): string | null {
  * no request is sent, so sessions and PTYs, here and on every other device,
  * are untouched. Chats are bound to their project by the host when they are
  * created (`create_session.projectId`).
+ *
+ * `selected` means the project-store intent flipped immediately; the workspace
+ * follows asynchronously — `useEditorPersistence`'s effect hands the pick to
+ * the project-switch coordinator (latest wins), which persists the project
+ * being left, hydrates the target off-store and commits it atomically. The
+ * outcome (including a rolled-back failure) is observable in
+ * `useProjectSwitchStatus`, not in this return value.
  *
  * `source` names the caller in the log line.
  */
