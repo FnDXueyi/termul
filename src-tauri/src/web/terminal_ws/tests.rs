@@ -292,7 +292,13 @@ async fn connection_detach_aborts_attachment_and_clears_authorization() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
-    ctx.attachments.insert("t1".to_string(), task);
+    ctx.attachments.insert(
+        "t1".to_string(),
+        Attachment {
+            task,
+            release: AttachmentRelease::default(),
+        },
+    );
 
     assert!(ctx.is_authorized("t1"));
     let state = gate_test_state(None);
@@ -874,4 +880,203 @@ async fn list_preserved_live_attachment_offers_shared_claim_and_second_device_at
         &mut owner,
     )
     .await;
+}
+
+async fn attach_terminal(
+    state: &crate::web::ws::AppState,
+    tx: &mpsc::Sender<Message>,
+    ctx: &mut ConnectionContext,
+    terminal_id: &str,
+    claim: &str,
+) {
+    let attached = handle(
+        gate_request(
+            "attach",
+            "attach",
+            json!({"terminalId": terminal_id, "claim": claim, "lastSeq": 0}),
+        ),
+        state,
+        tx,
+        ctx,
+    )
+    .await;
+    assert!(attached.is_ok(), "attach: {attached:?}");
+}
+
+fn live_attachments(state: &crate::web::ws::AppState, terminal_id: &str) -> usize {
+    state
+        .pty
+        .get(terminal_id)
+        .expect("terminal exists")
+        .web_attachments
+        .load(Ordering::Acquire)
+}
+
+/// PTY-F1: attaching the same terminal twice on ONE connection used to leak a
+/// `web_attachments` count (the replaced forwarder was aborted without its
+/// release), so the terminal reported a live attachment forever after the
+/// socket closed and was never auto-reaped.
+#[tokio::test]
+async fn audit_f1_reattach_same_connection_leaks_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, _rx) = mpsc::channel(256);
+    let mut conn = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "audit-f1"})),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+    assert_eq!(
+        live_attachments(&state, &id),
+        1,
+        "re-attach replaces the forwarder: exactly one live attachment"
+    );
+
+    // Socket closes: cleanup releases the single live attachment.
+    conn.release_all(&state);
+    assert_eq!(live_attachments(&state, &id), 0);
+    assert!(!state.pty.get(&id).unwrap().has_web_attachment());
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// A re-attach on one connection swaps its attachment: the new one is counted
+/// before the old one is released, so another connection's `list_preserved`
+/// can never observe zero live attachments mid-swap (which would reissue the
+/// claim and sever the fresh forwarder).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reattach_swap_never_exposes_a_zero_attachment_count() {
+    let state = gate_test_state(None);
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut conn = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "reattach-swap"})),
+        &state,
+        &tx,
+        &mut conn,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim = spawned["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+
+    let instance = state.pty.get(&id).expect("terminal exists");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Start barrier: the observer raises `polling` right before its first
+    // sample, and the first re-attach only starts once it is up — otherwise
+    // the whole swap loop could finish before the observer ever ran.
+    let polling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer = {
+        let (instance, stop, polling) = (instance.clone(), stop.clone(), polling.clone());
+        tokio::task::spawn_blocking(move || {
+            let (mut samples, mut zero_seen, mut max_count) = (0u64, false, 0usize);
+            polling.store(true, Ordering::Release);
+            while !stop.load(Ordering::Acquire) {
+                let count = instance.web_attachments.load(Ordering::Acquire);
+                samples += 1;
+                zero_seen |= count == 0;
+                max_count = max_count.max(count);
+            }
+            (samples, zero_seen, max_count)
+        })
+    };
+    while !polling.load(Ordering::Acquire) {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let mut reattaches = 0u32;
+    for _ in 0..300 {
+        attach_terminal(&state, &tx, &mut conn, &id, &claim).await;
+        reattaches += 1;
+    }
+    stop.store(true, Ordering::Release);
+    let (samples, zero_seen, max_count) = observer.await.unwrap();
+    assert!(reattaches > 0, "swaps were exercised");
+    assert!(samples > 0, "the observer sampled the count while swapping");
+    assert!(max_count >= 1, "the observer saw the live attachment");
+    assert!(
+        !zero_seen,
+        "the attachment count touched zero during a re-attach swap \
+         ({samples} samples, {reattaches} re-attaches, max count {max_count})"
+    );
+    assert_eq!(live_attachments(&state, &id), 1);
+
+    conn.release_all(&state);
+    let _ = state.pty.force_kill(&id).await;
+}
+
+/// PTY-F1 / Q2: a connection whose socket dies has its forwarder self-release
+/// on the failed send; the connection cleanup that follows must NOT release
+/// that attachment a second time (it would clear another viewer's live
+/// attachment and let `list_preserved` replace the claim under their stream).
+#[tokio::test]
+async fn audit_f1_dead_socket_releases_once_and_never_another_viewers_attachment() {
+    let state = gate_test_state(None);
+    let (tx_a, rx_a) = mpsc::channel(256);
+    let (tx_b, _rx_b) = mpsc::channel(256);
+    let mut a = gate_test_ctx(true);
+    let mut b = gate_test_ctx(true);
+    let spawned = handle(
+        gate_request("s", "spawn", json!({"projectId": "audit-f1-dead"})),
+        &state,
+        &tx_a,
+        &mut a,
+    )
+    .await
+    .expect("spawn");
+    let id = spawned["id"].as_str().unwrap().to_string();
+    let claim_a = spawned["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx_a, &mut a, &id, &claim_a).await;
+
+    // Second viewer joins through list_preserved's shared claim.
+    let listed = handle(
+        gate_request("lp", "list_preserved", json!({"projectId": "audit-f1-dead"})),
+        &state,
+        &tx_b,
+        &mut b,
+    )
+    .await
+    .expect("list");
+    let claim_b = listed["terminals"][0]["claim"].as_str().unwrap().to_string();
+    attach_terminal(&state, &tx_b, &mut b, &id, &claim_b).await;
+    assert_eq!(live_attachments(&state, &id), 2);
+
+    // A's socket dies (receiver gone); PTY output makes A's forwarder fail
+    // its send and self-release.
+    drop(rx_a);
+    handle(
+        gate_request("w", "write", json!({"terminalId": id, "data": "echo hi\r"})),
+        &state,
+        &tx_b,
+        &mut b,
+    )
+    .await
+    .expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while live_attachments(&state, &id) != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "A's forwarder never self-released (count={})",
+            live_attachments(&state, &id)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Connection A's cleanup runs afterwards: B's attachment must survive.
+    a.release_all(&state);
+    assert_eq!(
+        live_attachments(&state, &id),
+        1,
+        "cleanup double-released A's attachment and cleared B's"
+    );
+    b.release_all(&state);
+    assert_eq!(live_attachments(&state, &id), 0);
+    let _ = state.pty.force_kill(&id).await;
 }

@@ -103,7 +103,7 @@ async fn reaper_keeps_agent_with_subscribed_durable_session() {
 async fn reaper_removes_agent_with_idle_durable_session() {
     let manager = Arc::new(AcpManager::new(vec![]));
     let relay = Arc::new(WsRelaySink::new());
-    manager.install_test_agent_with_reap_state(
+    let record = manager.install_test_agent_with_reap_state(
         AgentId("agent-idle-durable".to_string()),
         set(&["sess-chat"]),
         false,
@@ -125,6 +125,58 @@ async fn reaper_removes_agent_with_idle_durable_session() {
     .await;
     assert_eq!(reaped.len(), 1);
     assert!(manager.list_agents().is_empty(), "idle durable owner reaped");
+    // Durable sessions are never disposed (the driver would refuse with
+    // `session is not ephemeral`); the process stop alone reaps them.
+    assert!(record.disposed.lock().is_empty());
+    let_fake_driver_drain().await;
+    assert!(*record.shut_down.lock());
+}
+
+/// The pre-kill re-check sees pin state that changed AFTER the sweep's first
+/// evaluation: a subscriber attaching later flips the agent to "pinned", and an
+/// agent that vanished is never "unpinned" (nothing to kill).
+#[tokio::test]
+async fn still_unpinned_recheck_observes_late_pins() {
+    use crate::web::agent_reaper::agent_still_unpinned;
+    let manager = Arc::new(AcpManager::new(vec![]));
+    let relay = Arc::new(WsRelaySink::new());
+    let agent_id = AgentId("agent-late-pin".to_string());
+    manager.install_test_agent_with_reap_state(agent_id.clone(), set(&["sess-chat"]), false, false);
+    relay.seed_session_for_test("sess-chat");
+
+    assert!(agent_still_unpinned(&manager, &relay, &agent_id, &[]).await);
+    let keep = relay.subscribe("sess-chat", None).await;
+    assert!(
+        !agent_still_unpinned(&manager, &relay, &agent_id, &[]).await,
+        "a subscriber that arrived after the first pin check pins the agent"
+    );
+    std::mem::drop(keep);
+
+    let missing = AgentId("agent-missing".to_string());
+    assert!(!agent_still_unpinned(&manager, &relay, &missing, &[]).await);
+}
+
+/// A session disposed during the sweep leaves the fresh ownership listing, so a
+/// subscriber that attached to it meanwhile must still pin the agent through
+/// the sweep's own session ids.
+#[tokio::test]
+async fn still_unpinned_recheck_sees_subscriber_on_disposed_session() {
+    use crate::web::agent_reaper::agent_still_unpinned;
+    let manager = Arc::new(AcpManager::new(vec![]));
+    let relay = Arc::new(WsRelaySink::new());
+    let agent_id = AgentId("agent-disposed".to_string());
+    // The ephemeral session is already gone from the manager's ownership set.
+    manager.install_test_agent_with_reap_state(agent_id.clone(), set(&[]), false, false);
+    relay.seed_session_for_test("sess-gone");
+    let swept = vec!["sess-gone".to_string()];
+
+    assert!(agent_still_unpinned(&manager, &relay, &agent_id, &swept).await);
+    let keep = relay.subscribe("sess-gone", None).await;
+    assert!(
+        !agent_still_unpinned(&manager, &relay, &agent_id, &swept).await,
+        "a subscriber on a disposed session still pins the agent"
+    );
+    std::mem::drop(keep);
 }
 
 /// A mid-turn session pins the agent even when the session is ephemeral (a

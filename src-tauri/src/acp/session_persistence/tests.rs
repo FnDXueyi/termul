@@ -514,6 +514,346 @@ async fn torn_final_tail_repairs_but_middle_corruption_quarantines() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// ACPM-F7: a valid final record left WITHOUT its newline (death between the
+/// record and the newline) must be terminated by the restart repair, so the
+/// next append lands on its own line and replay returns every record. Before
+/// the fix the repair left the tail alone and the next append fused onto it
+/// into one unparseable line (`CorruptSession` on every read).
+#[tokio::test]
+async fn unterminated_valid_tail_is_terminated_on_restart_and_next_append_replays() {
+    let root = temp_dir("unterminated-valid-tail");
+    let (persistence, metadata) = registered(&root).await;
+    persistence
+        .enqueue_event(record(1, "message_chunk"))
+        .unwrap();
+    persistence.flush_session("session-1").await.unwrap();
+    persistence.shutdown().await.unwrap();
+    let log = root
+        .join("store")
+        .join(&metadata.storage_key)
+        .join(MESSAGES_FILE);
+    let len = fs::metadata(&log).unwrap().len();
+    assert_eq!(fs::read(&log).unwrap().last(), Some(&b'\n'));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_len(len - 1)
+        .unwrap();
+
+    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    assert_eq!(
+        fs::read(&log).unwrap().last(),
+        Some(&b'\n'),
+        "restart repair terminates the intact tail record"
+    );
+    reopened.reopen_writer("session-1").await.unwrap();
+    reopened
+        .enqueue_event(record(2, "message_chunk"))
+        .unwrap();
+    reopened.flush_session("session-1").await.unwrap();
+    assert_eq!(
+        reopened
+            .replay_after("session-1", 0)
+            .unwrap()
+            .iter()
+            .map(|record| record.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(corrupt_backups(log.parent().unwrap()).is_empty());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// ACPM-F7: an unterminated valid tail longer than the 4 KiB repair window
+/// (no newline anywhere in the last block) is terminated, never mistaken for a
+/// torn fragment and truncated away.
+#[tokio::test]
+async fn oversized_unterminated_valid_tail_is_terminated_not_truncated() {
+    let root = temp_dir("unterminated-big-tail");
+    let (persistence, metadata) = registered(&root).await;
+    persistence
+        .enqueue_event(record(1, "message_chunk"))
+        .unwrap();
+    let mut big = record(2, "message_chunk");
+    big.payload["content"]["text"] = Value::String("x".repeat(9000));
+    persistence.enqueue_event(big).unwrap();
+    persistence.flush_session("session-1").await.unwrap();
+    persistence.shutdown().await.unwrap();
+    let log = root
+        .join("store")
+        .join(&metadata.storage_key)
+        .join(MESSAGES_FILE);
+    let len = fs::metadata(&log).unwrap().len();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_len(len - 1)
+        .unwrap();
+
+    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    assert_eq!(
+        reopened
+            .replay_after("session-1", 0)
+            .unwrap()
+            .iter()
+            .map(|record| record.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the 9 KB tail record survives the restart repair"
+    );
+    assert_eq!(fs::read(&log).unwrap().last(), Some(&b'\n'));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// ACPM-F7 (in-process ENOSPC / failed-rollback shape): a live writer that
+/// finds an unterminated tail repairs it inline instead of wedging until the
+/// next restart — an intact record is terminated, a torn fragment is
+/// quarantined and truncated — and the append never concatenates onto it.
+#[tokio::test]
+async fn append_record_repairs_unterminated_tail_inline_instead_of_wedging() {
+    let root = temp_dir("append-unterminated");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+    let seqs = |log: &Path| -> Vec<u64> {
+        fs::read(log)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice::<PersistedEventRecord>(l).unwrap().seq)
+            .collect()
+    };
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+
+    // Intact record without its newline: terminated in place, then appended.
+    let tail = serde_json::to_vec(&record(1, "message_chunk")).unwrap();
+    fs::write(&log, &tail).unwrap();
+    append_record(&store, &shared, &mut TailState::default(), record(2, "message_chunk")).unwrap();
+    assert_eq!(seqs(&log), vec![1, 2]);
+    assert!(corrupt_backups(log.parent().unwrap()).is_empty());
+
+    // Torn fragment (failed rollback of a partial write): quarantined and
+    // truncated, the intact records stay, and the next append lands cleanly.
+    let mut torn = fs::read(&log).unwrap();
+    torn.extend_from_slice(b"{\"schemaVersion\":1,\"sessionId\":\"sess");
+    fs::write(&log, &torn).unwrap();
+    append_record(&store, &shared, &mut TailState::default(), record(3, "message_chunk")).unwrap();
+    assert_eq!(seqs(&log), vec![1, 2, 3]);
+    assert_eq!(corrupt_backups(log.parent().unwrap()).len(), 1);
+    assert_eq!(fs::read(&log).unwrap().last(), Some(&b'\n'));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// ACPM-F7: the repair never reads the whole file for an oversized last line —
+/// a >1 MiB unterminated valid record (many scan blocks, no newline inside) is
+/// terminated and kept; a >1 MiB torn fragment is quarantined and truncated back
+/// to the last terminated record. Neither is truncated to zero.
+#[tokio::test]
+async fn repair_handles_last_line_larger_than_scan_blocks() {
+    let root = temp_dir("repair-huge-tail");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let log = root
+        .join("store")
+        .join(&metadata.storage_key)
+        .join(MESSAGES_FILE);
+    let first = serde_json::to_vec(&record(1, "message_chunk")).unwrap();
+    let mut huge = record(2, "message_chunk");
+    huge.payload["content"]["text"] = Value::String("y".repeat(1_200_000));
+    let huge_bytes = serde_json::to_vec(&huge).unwrap();
+    assert!(huge_bytes.len() > 1024 * 1024);
+
+    // Intact huge record without its newline: preserved + terminated.
+    let mut content = first.clone();
+    content.push(b'\n');
+    content.extend_from_slice(&huge_bytes);
+    fs::write(&log, &content).unwrap();
+    assert_eq!(repair_jsonl_torn_tail(&log), Some(2));
+    let repaired = fs::read(&log).unwrap();
+    assert_eq!(repaired.len(), content.len() + 1);
+    assert_eq!(
+        &repaired[..content.len()],
+        &content[..],
+        "the repaired prefix is byte-identical to the original content"
+    );
+    assert_eq!(repaired.last(), Some(&b'\n'));
+    assert!(corrupt_backups(log.parent().unwrap()).is_empty());
+
+    // Huge torn fragment (cut mid-record): truncated back to record 1.
+    let mut content = first.clone();
+    content.push(b'\n');
+    content.extend_from_slice(&huge_bytes[..huge_bytes.len() - 10]);
+    fs::write(&log, &content).unwrap();
+    assert_eq!(repair_jsonl_torn_tail(&log), None);
+    let mut expected = first;
+    expected.push(b'\n');
+    assert_eq!(fs::read(&log).unwrap(), expected);
+    assert_eq!(corrupt_backups(log.parent().unwrap()).len(), 1);
+
+    // A single huge unterminated line with NO prior newline (scan reaches the
+    // start of the file) is still preserved, not truncated to zero.
+    fs::write(&log, &huge_bytes).unwrap();
+    assert_eq!(repair_jsonl_torn_tail(&log), Some(2));
+    let repaired = fs::read(&log).unwrap();
+    assert_eq!(repaired.len(), huge_bytes.len() + 1);
+    assert_eq!(&repaired[..huge_bytes.len()], &huge_bytes[..]);
+    assert_eq!(repaired.last(), Some(&b'\n'));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The inline repair of an intact-but-unterminated tail record advances the
+/// writer's `last_seq` past it, so neither the append that triggered the repair
+/// nor a later interrupted marker can reuse that sequence.
+#[tokio::test]
+async fn inline_repair_advances_last_seq_past_preserved_tail_record() {
+    let root = temp_dir("append-preserved-seq");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+
+    let mut content = serde_json::to_vec(&record(1, "message_chunk")).unwrap();
+    content.push(b'\n');
+    content.extend_from_slice(&serde_json::to_vec(&record(5, "message_chunk")).unwrap());
+    fs::write(&log, &content).unwrap();
+    assert_eq!(shared.lock().last_seq, 0, "bookkeeping is stale");
+
+    // seq 3 passes the stale check, but the preserved tail is seq 5: the
+    // append must be refused (never written out of order) while last_seq
+    // moves to 5.
+    let result = append_record(
+        &store,
+        &shared,
+        &mut TailState::default(),
+        record(3, "message_chunk"),
+    );
+    assert!(matches!(result, Err(SessionPersistenceError::CorruptSession)));
+    assert_eq!(shared.lock().last_seq, 5);
+    let seqs: Vec<u64> = fs::read(&log)
+        .unwrap()
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_slice::<PersistedEventRecord>(l).unwrap().seq)
+        .collect();
+    assert_eq!(seqs, vec![1, 5]);
+    assert_eq!(fs::read(&log).unwrap().last(), Some(&b'\n'));
+    append_record(
+        &store,
+        &shared,
+        &mut TailState::default(),
+        record(6, "message_chunk"),
+    )
+    .unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Shutdown marker after a failed append that left an intact unterminated
+/// `user_prompt` on disk: the marker sequences after it (never reuses its seq).
+#[tokio::test]
+async fn interrupted_marker_never_reuses_seq_of_unterminated_tail() {
+    let root = temp_dir("marker-preserved-seq");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+
+    let mut content = serde_json::to_vec(&record(1, "user_prompt")).unwrap();
+    content.push(b'\n');
+    content.extend_from_slice(&serde_json::to_vec(&record(2, "message_chunk")).unwrap());
+    fs::write(&log, &content).unwrap();
+    shared.lock().last_seq = 1; // the chunk's append "failed": bookkeeping lags
+
+    writer::append_interrupted_marker_if_open(&store, &shared, &mut TailState::default());
+    let seqs: Vec<(u64, String)> = fs::read(&log)
+        .unwrap()
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let r = serde_json::from_slice::<PersistedEventRecord>(l).unwrap();
+            (r.seq, r.type_)
+        })
+        .collect();
+    assert_eq!(
+        seqs,
+        vec![
+            (1, "user_prompt".to_string()),
+            (2, "message_chunk".to_string()),
+            (3, "prompt_complete".to_string()),
+        ]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// A replay-triggered salvage atomically replaces the live log with a SHORTER
+/// file while the writer's cached tail offset still names the old length. The
+/// cache must be revalidated against the file: the next append lands on the
+/// replaced file cleanly (no zero-filled gap, parseable log) and the cache is
+/// re-synced to the new length.
+#[tokio::test]
+async fn tail_cache_is_revalidated_after_salvage_replaces_the_log() {
+    let root = temp_dir("append-tail-cache-salvage");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+    let mut tails = TailState::default();
+    for seq in 1..=3 {
+        append_record(&store, &shared, &mut tails, record(seq, "message_chunk")).unwrap();
+    }
+    let stale_len = fs::metadata(&log).unwrap().len();
+    assert_eq!(tails.messages, Some(stale_len));
+
+    // Salvage-like rewrite: only record 1 survives (atomic replace).
+    let mut kept = serde_json::to_vec(&record(1, "message_chunk")).unwrap();
+    kept.push(b'\n');
+    crate::acp::atomic_file::replace(&log, &kept).unwrap();
+    assert!((kept.len() as u64) < stale_len);
+
+    append_record(&store, &shared, &mut tails, record(4, "message_chunk")).unwrap();
+    let bytes = fs::read(&log).unwrap();
+    assert!(!bytes.contains(&0u8), "no zero-filled bytes in the log");
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    let seqs: Vec<u64> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_slice::<PersistedEventRecord>(l).unwrap().seq)
+        .collect();
+    assert_eq!(seqs, vec![1, 4]);
+    assert_eq!(tails.messages, Some(bytes.len() as u64), "cache re-synced");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Hot path: after a successful append the writer knows the tail is terminated
+/// (and where it ends), so consecutive appends need no per-append tail probe and
+/// still produce a well-formed log.
+#[tokio::test]
+async fn consecutive_appends_track_the_terminated_tail_end() {
+    let root = temp_dir("append-tail-cache");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+    let mut tails = TailState::default();
+    for seq in 1..=3 {
+        append_record(&store, &shared, &mut tails, record(seq, "message_chunk")).unwrap();
+        assert_eq!(
+            tails.messages,
+            Some(fs::metadata(&log).unwrap().len()),
+            "cached end offset matches the file after append {seq}"
+        );
+    }
+    assert!(tails.tool_calls.is_none(), "tool log untouched");
+    assert_eq!(shared.lock().last_seq, 3);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn corrupt_metadata_isolated_from_other_session() {
     let root = temp_dir("metadata-isolation");

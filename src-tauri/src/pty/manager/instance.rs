@@ -69,7 +69,20 @@ impl TerminalInstance {
     }
 
     /// Release a web attachment (connection teardown / detach).
+    ///
+    /// Releasing also re-stamps `last_web_listed`: a terminal that was
+    /// observable until this instant gets a fresh web-listed window from the
+    /// moment of detach. Without the re-stamp the stamp still carried the
+    /// attach time, so a PTY attached for longer than the window was reaped
+    /// on the very next sweep after its last viewer closed the tab.
+    ///
+    /// The stamp is written BEFORE the decrement: a concurrent sweep that
+    /// observes the count reach zero (Acquire, paired with the AcqRel
+    /// decrement) is then guaranteed to also observe the fresh stamp. Stamping
+    /// after the decrement left a window where the sweep saw zero attachments
+    /// together with the stale, possibly already expired, stamp.
     pub fn remove_web_attachment(&self) {
+        self.mark_web_listed();
         // fetch_update always returns Ok (closure never fails); the result
         // value carries the previous count, which is not needed here.
         // Deprecated in Rust 1.99 for `try_update`, but try_update requires

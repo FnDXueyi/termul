@@ -94,6 +94,37 @@ async fn session_pins_agent(
         .unwrap_or(true) // unknown turn state: assume busy, never kill mid-turn
 }
 
+/// Fresh pin evaluation for one agent, from a freshly listed session set (so a
+/// session created since the sweep's snapshot is covered too). `false` when the
+/// agent is gone (nothing left to stop) or any owned session is pinned.
+///
+/// `swept_sessions` are the sessions the sweep saw before it disposed any
+/// ephemeral ones. A disposed session no longer appears in the fresh listing,
+/// so a subscriber that registered on it during disposal is checked here by id.
+pub(crate) async fn agent_still_unpinned(
+    acp: &Arc<AcpManager>,
+    relay: &Arc<WsRelaySink>,
+    agent_id: &AgentId,
+    swept_sessions: &[String],
+) -> bool {
+    if swept_sessions
+        .iter()
+        .any(|session_id| relay.session_subscriber_count(session_id) > 0)
+    {
+        return false;
+    }
+    let summaries = acp.list_agent_summaries_with_ownership().await;
+    let Some(summary) = summaries.iter().find(|summary| summary.id == *agent_id) else {
+        return false;
+    };
+    for session_id in &summary.owns_session {
+        if session_pins_agent(acp, relay, agent_id, session_id).await {
+            return false;
+        }
+    }
+    true
+}
+
 /// One reaper sweep: evaluate every live agent, stop the ones whose owned
 /// sessions have all been unpinned for the window. `unpinned_since` carries
 /// the first instant each agent was seen unpinned (survives across sweeps).
@@ -123,13 +154,34 @@ pub(crate) async fn reap_idle_agents(
             continue;
         }
         // Reap: dispose every owned ephemeral session, then stop the agent.
-        // A disposal failure means the session's state changed after the pin
-        // check (a prompt arrived, or an ephemeral session was promoted to
-        // durable) — do NOT kill the agent in that case; the next sweep
-        // re-evaluates it with fresh pin state (CodeRabbit: kill on
-        // disposal failure can stop a newly active agent).
+        // Durable sessions have nothing to dispose (the driver answers
+        // `session is not ephemeral`), so they are skipped — the process stop
+        // alone releases them (SINK-F2). A disposal failure of an ephemeral
+        // session means its state changed after the pin check (a prompt
+        // arrived, or it was promoted to durable) — do NOT kill the agent in
+        // that case; the next sweep re-evaluates it with fresh pin state
+        // (CodeRabbit: kill on disposal failure can stop a newly active agent).
         let mut disposal_failed = false;
         for session_id in &summary.owns_session {
+            match acp
+                .is_ephemeral_session(&agent_id, SessionId(session_id.clone()))
+                .await
+            {
+                Ok(true) => {}
+                // Durable: nothing to dispose.
+                Ok(false) => continue,
+                Err(error) => {
+                    disposal_failed = true;
+                    warn!(
+                        target: "termul::web::agent_reaper",
+                        agent_id = %agent_id.0,
+                        session_id = %session_id,
+                        error = %error,
+                        "idle reaper: ephemeral check failed; deferring the agent stop to the next sweep"
+                    );
+                    continue;
+                }
+            }
             if let Err(error) = acp
                 .dispose_ephemeral_session(&agent_id, SessionId(session_id.clone()))
                 .await
@@ -145,6 +197,15 @@ pub(crate) async fn reap_idle_agents(
             }
         }
         if disposal_failed {
+            unpinned_since.remove(&agent_id);
+            continue;
+        }
+        // Last-moment re-check: the pin evaluation above is a snapshot, and the
+        // ephemeral probes/disposals awaited since then give a prompt, a
+        // subscriber or a new session time to land. Killing on the stale
+        // snapshot would stop a now-active agent mid-turn. The next sweep
+        // re-evaluates from a fresh idle window.
+        if !agent_still_unpinned(acp, relay, &agent_id, &summary.owns_session).await {
             unpinned_since.remove(&agent_id);
             continue;
         }
