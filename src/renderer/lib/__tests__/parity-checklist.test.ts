@@ -852,9 +852,9 @@ describe('Parity Checklist Automation', () => {
 
   // CAP-2 (spec-in-chat-agent-switch): the durable agent-switch marker must
   // land on BOTH transports with one fold. The host is the sole author: the
-  // Tauri command AND the WS route write ONE durable `agent_switch` record
-  // through SessionPersistence (writer-assigned seq), then fan the synthetic
-  // `acp:agent_switch` event live-only. This block pins the fold arm, the
+  // Tauri command AND the WS route author ONE `agent_switch` record: the
+  // relay's single seq allocator numbers it, appends it durably and delivers
+  // it live under the same seq. This block pins the fold arm, the
   // `switches` field on both the Rust materialized payload and the TS
   // SessionPayload, both host routes, the WS request-type entry, and the
   // renderer wiring (event name + transport facade + store slice + timeline
@@ -869,16 +869,6 @@ describe('Parity Checklist Automation', () => {
       'src',
       'acp',
       'session_payload.rs'
-    )
-    const SessionPersistenceRust = join(
-      LIB_DIR,
-      '..',
-      '..',
-      '..',
-      'src-tauri',
-      'src',
-      'acp',
-      'session_persistence'
     )
     const ManagerRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'manager')
     const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'commands.rs')
@@ -900,20 +890,7 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/pub switches: Vec<MaterializedAgentSwitch>/)
     })
 
-    it('acp/session_persistence owns the sole durable write (ONE record per switch)', () => {
-      expect(
-        existsSync(SessionPersistenceRust),
-        'acp/session_persistence module should exist'
-      ).toBe(true)
-      const content = readRustModule(SessionPersistenceRust)
-      expect(content).toMatch(/AppendAgentSwitch/)
-      expect(content).toMatch(/pub async fn append_agent_switch/)
-      // The live fan-out event is excluded from the relay's durable path —
-      // the writer command is the sole durable author.
-      expect(content).toMatch(/\| "agent_switch"/)
-    })
-
-    it('acp/manager hosts record_agent_switch (persist → flush → fan_out)', () => {
+    it('acp/manager hosts record_agent_switch', () => {
       expect(existsSync(ManagerRust), 'acp/manager module should exist').toBe(true)
       const content = readRustModule(ManagerRust)
       expect(content).toMatch(/fn record_agent_switch/)
@@ -2102,7 +2079,7 @@ describe('Worktree branch rename parity (shell revamp story 16)', () => {
   const CommandsWorktreeRust = join(SRC_TAURI, 'commands', 'worktree.rs')
   const LibRust = join(SRC_TAURI, 'lib.rs')
   const ProtocolTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
-  const SinkRust = join(SRC_TAURI, 'web', 'sink.rs')
+  const SinkRust = join(SRC_TAURI, 'web', 'sink', 'watch_bridge.rs')
 
   it('worktree-api.ts branches renameBranch on isTauriContext() between invoke and webServerWorktree', () => {
     const content = readFileSync(WorktreeFacade, 'utf-8')

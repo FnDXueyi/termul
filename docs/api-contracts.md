@@ -552,6 +552,10 @@ Desktop prompt persistence mirrors the WS `send_prompt` handler so a transport f
 
 A reopened chat materializes the user bubble (from the durable `user_prompt` record) and derives the title, even for agents (e.g. OpenCode) that do not reliably send a live `session_info_update` title.
 
+### One seq authority per session log
+
+`WsRelaySink` (`src-tauri/src/web/sink/`) numbers every record of a session log. Relay events and host-authored records (`local_title_generated` for a background title, `agent_switch`) take seqs from the same counter; the session writer never assigns one. Assign + durable enqueue + ring append + per-client enqueue run in one critical section, so a subscription never has a gap between its replay and its live events and receives each event it is given in seq order, once. Replay skips seqs that are absent from disk (events that are not durable); the cursor work that follows adds drop handling for slow peers. The critical section only queues the durable write: the disk write is asynchronous and never ordered before delivery. A replay or snapshot that reads from disk first waits for the writer queue (the writer barrier) and registers under the same lock; subscriptions without persistence read the in-memory log only. The shutdown `interrupted` marker takes its seq from the relay through `SeqAuthority`. A host record is durable and live under one seq (`record_host_event`); `local_title_generated` is relay-only (desktop keeps getting the `session_info_update` twin).
+
 ## Notes
 
 - This is an **internal desktop IPC API**, not a third-party/public integration API.

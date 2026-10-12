@@ -253,7 +253,8 @@ pub(super) async fn handle_get_session_payload_tail(
 }
 
 /// `record_agent_switch` request payload (CAP-2). Mirrors the Tauri command
-/// args and the durable record's payload shape byte-for-byte.
+/// args; the durable record's payload is the `AgentSwitchEvent` built from it
+/// (these five camelCase fields plus the runtime `agentId`).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RecordAgentSwitchPayload {
@@ -266,9 +267,10 @@ pub(super) struct RecordAgentSwitchPayload {
 
 /// `record_agent_switch` — durably record an agent-switch marker (CAP-2).
 /// Desktop parity with the `acp_record_agent_switch` Tauri command: the host
-/// is the sole author of the marker. Persists the `agent_switch` record
-/// through `SessionPersistence` (writer-assigned seq) + flush, then fans the
-/// synthetic `acp:agent_switch` event through the manager's sinks. Unknown
+/// is the sole author of the marker. The relay numbers ONE `agent_switch`
+/// record (single seq authority), appends it durably and delivers the same
+/// event live under that seq (other sinks get it too); the handler then
+/// flushes for the durability boundary. Unknown
 /// session → `not_found`; storage failure → `unsupported` (fail closed — no
 /// partial state). Boundary logging carries ids only, never the summary.
 pub(super) async fn handle_record_agent_switch(
@@ -341,7 +343,7 @@ pub(super) async fn handle_record_agent_switch(
         Err(error) => {
             // A catalog-known session whose writer runtime is gone (a
             // post-restart recovered session: metadata check above passed,
-            // but `append_agent_switch` hits SessionNotFound) surfaces as a
+            // but the relay's host record hits SessionNotFound) surfaces as a
             // typed `not_found` so the client can distinguish "unknown
             // session" from a real storage failure.
             if error.contains("session not found")
@@ -402,7 +404,7 @@ pub(super) async fn handle_recover_session_snapshot(
         return WsReply::err(id, WsErrorCode::Unsupported, "sessionId is required");
     }
     let prior_clients = subscribed_clients.clients_for(&parsed.session_id);
-    let (client_id, rx, events, watermark) =
+    let (client_id, rx, events, head) =
         match relay.subscribe_snapshot(&parsed.session_id).await {
             Ok(result) => result,
             Err(error) => {
@@ -441,7 +443,7 @@ pub(super) async fn handle_recover_session_snapshot(
         id,
         Some(json!({
             "sessionId": parsed.session_id,
-            "watermark": watermark,
+            "watermark": head.head_seq,
             "events": events,
         })),
     )

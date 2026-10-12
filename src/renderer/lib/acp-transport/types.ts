@@ -188,8 +188,8 @@ export interface AcpTransport {
   }): Promise<PersistedSessionSummary>
   /**
    * CAP-2 (spec-in-chat-agent-switch): durably record an agent-switch
-   * marker. Host is the sole author — one durable `agent_switch` record,
-   * then the synthetic `acp:agent_switch` event fans out to live clients.
+   * marker. Host is the sole author — one `agent_switch` record that the
+   * relay numbers, persists and delivers live under the same seq.
    * Tauri: `acp_record_agent_switch`; WS: `record_agent_switch`. Throws on
    * a host write failure (no partial state).
    */

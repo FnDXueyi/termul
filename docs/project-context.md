@@ -84,7 +84,7 @@ optimized_for_llm: false
 This project ships a **shared-live dual-target architecture**. The desktop app and the standalone `termul-server` share code — changes to one side MUST be checked against the other.
 
 - **Two binaries, one crate** (`termul_manager_lib`): desktop `src-tauri/src/main.rs` (`termul-manager`, `default-run`) and standalone `src-tauri/src/server_main.rs` (`termul-server`, feature `standalone-server`, path **outside** `src/bin/` so the Tauri bundler doesn't re-add it). The standalone is a **console** subsystem (no `windows_subsystem = "windows"`).
-- **Shared `web` module** (`src-tauri/src/web/`: `router.rs`, `ws.rs`, `fs_api.rs`, `project_registry.rs`, `projects_api.rs`, `config.rs`, `permissions.rs`, `chat_history_cache.rs`, `assets.rs`, `sink.rs`) is consumed by BOTH:
+- **Shared `web` module** (`src-tauri/src/web/`: `router.rs`, `ws.rs`, `fs_api.rs`, `project_registry.rs`, `projects_api.rs`, `config.rs`, `permissions.rs`, `chat_history_cache.rs`, `assets.rs`, `sink/`) is consumed by BOTH:
   - Desktop in-process via `web::serve_router` (driven by `remote/host.rs` `RemoteServerState`) — **never kills agents**.
   - Standalone via `web::serve` (in `server_main.rs`) — **calls `AcpManager::kill_all` after Axum drains**.
   - ⚠️ **Kill-all hazard:** the desktop shared-live path MUST use `serve_router` (never `serve`). Stopping the shared-live server must NOT kill the desktop's live agents.

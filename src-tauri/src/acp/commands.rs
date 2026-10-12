@@ -461,12 +461,13 @@ pub(crate) async fn send_prompt_core(
 }
 
 /// `acp_record_agent_switch` — durably record an agent-switch marker (CAP-2)
-/// on BOTH transports. The host is the sole author of the marker: the command
-/// writes the durable `agent_switch` record through `SessionPersistence`
-/// (writer-assigned seq), flushes, then broadcasts the synthetic
-/// `acp:agent_switch` event to live clients. Mirrors the WS
-/// `record_agent_switch` handler payload byte-for-byte
-/// (`{sessionId, fromConfigId, toConfigId, newSessionId, summaryText}`).
+/// on BOTH transports. The host is the sole author of the marker: the relay
+/// numbers it (one seq authority), appends the durable `agent_switch` record
+/// and delivers `acp:agent_switch` to live clients under that same seq, and
+/// the command flushes for the durability boundary. Mirrors the WS
+/// `record_agent_switch` handler; both take
+/// `{sessionId, fromConfigId, toConfigId, newSessionId, summaryText}` and
+/// record the `AgentSwitchEvent` payload (those fields plus `agentId`).
 ///
 /// Boundary logging carries session ids + config ids only — never the
 /// summary text (it may quote user content).

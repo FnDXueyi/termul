@@ -22,6 +22,14 @@ impl EventSink for CapturingSink {
     }
 }
 
+/// The relay that numbers host-authored records (title) for `persistence`.
+fn relay_for(persistence: &Arc<SessionPersistence>) -> Arc<dyn EventSink> {
+    Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(persistence),
+    ))
+}
+
 async fn connect_and_send(port: u16, frame: &serde_json::Value) -> serde_json::Value {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut buf = serde_json::to_vec(frame).unwrap();
@@ -640,7 +648,10 @@ fn bound_title_call_persists_and_broadcasts() {
             .await
             .unwrap();
         let sink = Arc::new(CapturingSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&persistence)],
+            Some(Arc::clone(&persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -695,7 +706,10 @@ fn second_title_call_same_session_is_success_noop() {
             .await
             .unwrap();
         let sink = Arc::new(CapturingSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&persistence)],
+            Some(Arc::clone(&persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -765,7 +779,10 @@ fn title_per_session_flag_survives_a_new_turn() {
             .await
             .unwrap();
         let sink = Arc::new(CapturingSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&persistence)],
+            Some(Arc::clone(&persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -930,7 +947,10 @@ fn first_title_call_with_branch_renames_the_worktree_branch() {
     runtime.block_on(async move {
         let fx = worktree_fixture().await;
         let sink = Arc::new(RenamedSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&fx.persistence)],
+            Some(Arc::clone(&fx.persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -964,7 +984,10 @@ fn branch_rename_runs_even_when_the_title_call_fails() {
     runtime.block_on(async move {
         let fx = worktree_fixture().await;
         let sink = Arc::new(RenamedSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&fx.persistence)],
+            Some(Arc::clone(&fx.persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -992,7 +1015,10 @@ fn branch_is_processed_on_the_first_title_call_only() {
     runtime.block_on(async move {
         let fx = worktree_fixture().await;
         let sink = Arc::new(RenamedSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&fx.persistence)],
+            Some(Arc::clone(&fx.persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -1024,7 +1050,10 @@ fn unregister_session_clears_the_branch_attempt_flag() {
     runtime.block_on(async move {
         let fx = worktree_fixture().await;
         let sink = Arc::new(RenamedSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&fx.persistence)],
+            Some(Arc::clone(&fx.persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");
@@ -1067,7 +1096,10 @@ fn invalid_branch_slug_keeps_the_branch_and_the_title_still_lands() {
     runtime.block_on(async move {
         let fx = worktree_fixture().await;
         let sink = Arc::new(RenamedSink::default());
-        let server = HostPlanServer::start(vec![sink.clone()], Some(Arc::clone(&fx.persistence)));
+        let server = HostPlanServer::start(
+            vec![sink.clone(), relay_for(&fx.persistence)],
+            Some(Arc::clone(&fx.persistence)),
+        );
         let (port, token, provisional) = server.register_session("agent-1");
         server.bind_session(&token, "sess-real");
         server.begin_turn("agent-1", "sess-real");

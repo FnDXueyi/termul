@@ -11,10 +11,26 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
+/// Stand-in for the relay's seq authority: the next seq after what is on disk.
+struct FloorSeqAuthority;
+
+impl SeqAuthority for FloorSeqAuthority {
+    fn allocate_after(&self, _session_id: &str, floor: u64) -> u64 {
+        floor + 1
+    }
+}
+
+/// Open a store whose shutdown marker takes its seq from [`FloorSeqAuthority`].
+async fn open_with_authority(root: &Path) -> Arc<SessionPersistence> {
+    let persistence = SessionPersistence::open(root.to_path_buf()).await.unwrap();
+    persistence.set_seq_authority(Arc::new(FloorSeqAuthority));
+    persistence
+}
+
 async fn registered(root: &Path) -> (Arc<SessionPersistence>, SessionMetadata) {
     let cwd = root.join("cwd");
     fs::create_dir_all(&cwd).unwrap();
-    let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
+    let persistence = open_with_authority(&root.join("store")).await;
     let metadata = persistence
         .register_session(SessionRegistration {
             session_id: "session-1".to_string(),
@@ -73,7 +89,7 @@ async fn register_discovered_session_is_metadata_only_agent_supplied_and_idempot
     let root = temp_dir("discovered");
     let cwd = root.join("cwd");
     fs::create_dir_all(&cwd).unwrap();
-    let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
+    let persistence = open_with_authority(&root.join("store")).await;
     let registration = SessionRegistration {
         session_id: "discovered-1".into(),
         stable_agent_namespace: Some("config:test".into()),
@@ -88,7 +104,7 @@ async fn register_discovered_session_is_metadata_only_agent_supplied_and_idempot
         .unwrap();
     assert_eq!(first.status, PersistedSessionStatus::Active);
     persistence.shutdown().await.unwrap();
-    let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
+    let persistence = open_with_authority(&root.join("store")).await;
     let second = persistence
         .register_discovered_session(registration.clone(), Some("Replacement".into()), Some(99))
         .await
@@ -152,7 +168,7 @@ async fn first_run_registers_and_round_trips_interleaved_replay() {
     );
     persistence.shutdown().await.unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(reopened.last_seq("session-1").unwrap(), 6);
     assert_eq!(
         reopened.metadata("session-1").unwrap().storage_key,
@@ -179,7 +195,7 @@ async fn register_session_strips_verbatim_cwd_prefix_on_windows() {
         canonical_cwd.to_string_lossy().starts_with(r"\\?\"),
         "sanity: canonicalize should produce a verbatim prefix on Windows"
     );
-    let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
+    let persistence = open_with_authority(&root.join("store")).await;
     let metadata = persistence
         .register_session(SessionRegistration {
             session_id: "session-verbatim".to_string(),
@@ -211,7 +227,7 @@ async fn register_session_strips_verbatim_cwd_prefix_on_windows() {
         let bytes = serde_json::to_vec_pretty(&corrupt).unwrap();
         std::fs::write(&metadata_path, &bytes).unwrap();
     }
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let healed = reopened.metadata("session-verbatim").unwrap();
     assert!(
         !healed.cwd.starts_with(r"\\?\"),
@@ -414,7 +430,7 @@ async fn completed_turn_ids_recover_after_restart() {
     complete.payload = json!({"sessionId":"session-1", "turnId":"turn-1", "stopReason":"end_turn"});
     persistence.enqueue_event(complete).unwrap();
     persistence.shutdown().await.unwrap();
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert!(reopened
         .completed_turn_ids("session-1")
         .unwrap()
@@ -475,7 +491,7 @@ async fn corrupt_index_is_backed_up_and_rebuilt() {
     persistence.shutdown().await.unwrap();
     let index = root.join("store").join(INDEX_FILE);
     fs::write(&index, b"bad json").unwrap();
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(reopened.list_sessions().len(), 1);
     let backups = fs::read_dir(root.join("store"))
         .unwrap()
@@ -505,11 +521,11 @@ async fn torn_final_tail_repairs_but_middle_corruption_quarantines() {
         .unwrap()
         .write_all(b"{torn")
         .unwrap();
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(reopened.last_seq("session-1").unwrap(), 1);
     reopened.shutdown().await.unwrap();
     fs::write(&log, b"bad\n{}\n").unwrap();
-    let quarantined = SessionPersistence::open(root.join("store")).await.unwrap();
+    let quarantined = open_with_authority(&root.join("store")).await;
     assert!(quarantined.list_sessions().is_empty());
     let _ = fs::remove_dir_all(root);
 }
@@ -541,7 +557,7 @@ async fn unterminated_valid_tail_is_terminated_on_restart_and_next_append_replay
         .set_len(len - 1)
         .unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         fs::read(&log).unwrap().last(),
         Some(&b'\n'),
@@ -592,7 +608,7 @@ async fn oversized_unterminated_valid_tail_is_terminated_not_truncated() {
         .set_len(len - 1)
         .unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened
             .replay_after("session-1", 0)
@@ -768,7 +784,12 @@ async fn interrupted_marker_never_reuses_seq_of_unterminated_tail() {
     fs::write(&log, &content).unwrap();
     shared.lock().last_seq = 1; // the chunk's append "failed": bookkeeping lags
 
-    writer::append_interrupted_marker_if_open(&store, &shared, &mut TailState::default());
+    writer::append_interrupted_marker_if_open(
+        &store,
+        &shared,
+        &mut TailState::default(),
+        Some(&FloorSeqAuthority),
+    );
     let seqs: Vec<(u64, String)> = fs::read(&log)
         .unwrap()
         .split(|b| *b == b'\n')
@@ -787,6 +808,43 @@ async fn interrupted_marker_never_reuses_seq_of_unterminated_tail() {
         ]
     );
     let _ = fs::remove_dir_all(root);
+}
+
+/// An installed authority numbers the shutdown marker (here: ahead of the
+/// durable floor); with none installed the marker is `last_seq + 1`.
+#[tokio::test]
+async fn interrupted_marker_seq_uses_authority_when_installed_else_floor() {
+    struct AheadAuthority;
+    impl SeqAuthority for AheadAuthority {
+        fn allocate_after(&self, _session_id: &str, floor: u64) -> u64 {
+            floor + 5
+        }
+    }
+    for (label, authority, expected) in [
+        ("with", Some(&AheadAuthority as &dyn SeqAuthority), 6u64),
+        ("without", None, 2u64),
+    ] {
+        let root = temp_dir(&format!("marker-authority-{label}"));
+        let (persistence, metadata) = registered(&root).await;
+        persistence.shutdown().await.unwrap();
+        let store = root.join("store");
+        let log = store.join(&metadata.storage_key).join(MESSAGES_FILE);
+        let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+        let mut tails = TailState::default();
+        append_record(&store, &shared, &mut tails, record(1, "user_prompt")).unwrap();
+
+        writer::append_interrupted_marker_if_open(&store, &shared, &mut tails, authority);
+        let last = fs::read(&log)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_slice::<PersistedEventRecord>(l).unwrap())
+            .next_back()
+            .unwrap();
+        assert_eq!(last.type_, "prompt_complete", "{label}");
+        assert_eq!(last.seq, expected, "{label}");
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 /// A replay-triggered salvage atomically replaces the live log with a SHORTER
@@ -879,7 +937,7 @@ async fn corrupt_metadata_isolated_from_other_session() {
         b"bad",
     )
     .unwrap();
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(reopened.list_sessions().len(), 1);
     assert_eq!(reopened.list_sessions()[0].storage_key, second.storage_key);
     assert!(!reopened.list_sessions()[0].resume_eligible);
@@ -1023,7 +1081,7 @@ async fn restart_downgrades_active_to_closed_without_writer() {
     );
     persistence.shutdown().await.unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let metadata = reopened.metadata("session-1").unwrap();
     assert_eq!(
         metadata.status,
@@ -1059,7 +1117,7 @@ async fn session_payload_survives_reopen_identically() {
     .unwrap();
     persistence.shutdown().await.unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let after =
         serde_json::to_value(reopened.session_payload_async("session-1").await.unwrap()).unwrap();
     // `status` is expected to differ (Active → Closed across restart); the
@@ -1495,7 +1553,7 @@ async fn restart_preserves_error_status_without_downgrade() {
         .unwrap();
     persistence.shutdown().await.unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened.metadata("session-1").unwrap().status,
         PersistedSessionStatus::Error,
@@ -1542,7 +1600,7 @@ async fn delete_session_removes_live_writer_directory_and_index_entry() {
     ));
     persistence.shutdown().await.unwrap();
     // Nothing must resurrect on reopen.
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert!(reopened.list_sessions().is_empty());
     let _ = fs::remove_dir_all(root);
 }
@@ -1573,7 +1631,7 @@ async fn find_most_recent_for_project_filters_and_orders() {
     let root = temp_dir("find-project");
     let cwd = root.join("cwd");
     fs::create_dir_all(&cwd).unwrap();
-    let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
+    let persistence = open_with_authority(&root.join("store")).await;
     for (session_id, project, namespace) in [
         ("a", Some("project-1"), Some("config:one")),
         ("b", Some("project-1"), Some("config:two")),
@@ -1637,7 +1695,7 @@ async fn unclean_exit_still_downgrades_active_on_restart() {
     persistence.flush_session("session-1").await.unwrap();
     drop(persistence);
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened.metadata("session-1").unwrap().status,
         PersistedSessionStatus::Closed,
@@ -1998,6 +2056,18 @@ async fn reopen_writer_session_not_found_for_unknown_session() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Enqueue the `agent_switch` record at an explicit seq (what the relay's
+/// single allocator hands the writer).
+fn enqueue_agent_switch(persistence: &SessionPersistence, seq: u64) {
+    persistence
+        .enqueue_event(payload_record(
+            seq,
+            "agent_switch",
+            serde_json::to_value(agent_switch_record()).unwrap(),
+        ))
+        .unwrap();
+}
+
 fn agent_switch_record() -> AgentSwitchRecord {
     AgentSwitchRecord {
         session_id: "session-1".to_string(),
@@ -2008,12 +2078,12 @@ fn agent_switch_record() -> AgentSwitchRecord {
     }
 }
 
-/// CAP-2: `append_agent_switch` writes ONE durable `agent_switch` record
-/// with a writer-assigned seq, the fold materializes it, and
+/// CAP-2: an `agent_switch` record enqueued at an explicit seq is durable
+/// exactly once, the fold materializes it, and
 /// `message_count` is unchanged (a switch is not a message). Round-trips
 /// through reopen.
 #[tokio::test]
-async fn append_agent_switch_is_durable_and_folds_once() {
+async fn agent_switch_record_is_durable_and_folds_once() {
     let root = temp_dir("switch-durable");
     let (persistence, _) = registered(&root).await;
     persistence
@@ -2030,14 +2100,7 @@ async fn append_agent_switch_is_durable_and_folds_once() {
     // baseline (enqueue is async; metadata lags until the writer runs).
     persistence.flush_session("session-1").await.unwrap();
     let message_count_before = persistence.metadata("session-1").unwrap().message_count;
-    let seq = persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
-    assert_eq!(
-        seq, 2,
-        "writer assigns the next seq (after the user prompt)"
-    );
+    enqueue_agent_switch(&persistence, 2);
     persistence.flush_session("session-1").await.unwrap();
     assert_eq!(persistence.last_seq("session-1").unwrap(), 2);
     // Switches are not messages: message_count must not move.
@@ -2073,27 +2136,26 @@ async fn append_agent_switch_is_durable_and_folds_once() {
     // Reopen round-trip: a fresh persistence over the same root reads the
     // same switch back (restart/reopen parity).
     persistence.shutdown().await.unwrap();
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let reopened_payload = reopened.session_payload_async("session-1").await.unwrap();
     assert_eq!(reopened_payload.switches, payload.switches);
     let _ = fs::remove_dir_all(root);
 }
 
-/// CAP-2: the synthetic live fan-out event is NOT durable —
-/// `is_durable_event("agent_switch")` is false, so `enqueue_event`
-/// (the `WsRelaySink::emit` path) drops it. ONE durable record per
-/// switch; the writer command is the sole durable author.
+/// CAP-2: a switch marker is a durable host record (the relay appends it
+/// once under its allocated seq), unlike transient relay-only events.
 #[test]
-fn agent_switch_live_event_is_not_durable() {
-    assert!(!is_durable_event("agent_switch"));
+fn agent_switch_is_a_durable_event() {
+    assert!(is_durable_event("agent_switch"));
     assert!(is_durable_event("message_chunk"));
     assert!(is_durable_event("user_prompt"));
+    assert!(!is_durable_event("permission_request"));
 }
 
-/// CAP-2: the writer-assigned seq cannot collide with queued records —
-/// a switch recorded between two message enqueues takes the next seq.
+/// CAP-2: a switch recorded between two message enqueues at its allocated
+/// seq leaves a hole-free log with exactly one switch.
 #[tokio::test]
-async fn append_agent_switch_assigns_monotonic_seq_between_queued_events() {
+async fn agent_switch_between_queued_events_leaves_no_holes() {
     let root = temp_dir("switch-seq");
     let (persistence, _) = registered(&root).await;
     persistence
@@ -2106,11 +2168,7 @@ async fn append_agent_switch_assigns_monotonic_seq_between_queued_events() {
             }),
         ))
         .unwrap();
-    let seq = persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
-    assert_eq!(seq, 2);
+    enqueue_agent_switch(&persistence, 2);
     // A subsequent enqueue lands after the switch (no collision).
     persistence
         .enqueue_event(payload_record(
@@ -2165,10 +2223,7 @@ async fn tail_payload_retains_switch_inside_window() {
             ))
             .unwrap();
     }
-    persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
+    enqueue_agent_switch(&persistence, 7);
     for turn in 4..=6 {
         persistence
             .enqueue_event(payload_record(
@@ -2257,10 +2312,7 @@ async fn replay_tail_treats_agent_switch_as_fold_boundary() {
             ))
             .unwrap();
     }
-    persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
+    enqueue_agent_switch(&persistence, 22);
     // Post-switch: a fresh agent run of 5 chunks.
     for seq in 23..=27 {
         persistence
@@ -2407,23 +2459,16 @@ async fn recover_bumps_stale_last_seq_to_the_jsonl_frontier() {
     )
     .unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened.last_seq("session-1").unwrap(),
         5,
         "recover() must heal a stale-low last_seq up to the durable tail"
     );
-    // The next writer-assigned seq must exceed every on-disk seq — no
-    // collision, no new duplicate-seq record.
+    // The next allocated seq (frontier + 1) is accepted: no collision, no
+    // new duplicate-seq record.
     reopened.reopen_writer("session-1").await.unwrap();
-    let seq = reopened
-        .append_local_title("session-1", "healed title".to_string())
-        .await
-        .unwrap();
-    assert_eq!(
-        seq, 6,
-        "writer-assigned seq must land above the durable frontier"
-    );
+    enqueue_local_title(&reopened, 6, "healed title");
     reopened.flush_session("session-1").await.unwrap();
     assert_eq!(
         reopened
@@ -2457,7 +2502,7 @@ async fn duplicate_seq_tail_record_heals_on_read_with_corrupt_backup() {
     // The stale-counter intruder: parseable, in-session, seq <= max.
     let intruder_bytes = append_raw_record(&messages_path, &record(2, "commands_update"));
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     // Healable corruption must not quarantine the session at startup.
     assert_eq!(reopened.list_sessions().len(), 1);
     let payload = reopened.session_payload_async("session-1").await.unwrap();
@@ -2506,7 +2551,7 @@ async fn unparseable_mid_file_line_still_fails_closed() {
     let messages_path = session_dir.join(MESSAGES_FILE);
     splice_after_line(&messages_path, 0, b"{definitely not json}\n");
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert!(
         matches!(
             reopened.replay_after("session-1", 0),
@@ -2540,7 +2585,7 @@ async fn zero_seq_record_is_quarantined_as_intruder() {
     zero.push(b'\n');
     splice_after_line(&messages_path, 0, &zero);
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened
             .replay_after("session-1", 0)
@@ -2577,7 +2622,7 @@ async fn duplicate_seq_inside_tail_window_heals_replay_tail() {
     // window `load_jsonl_tail` scans.
     append_raw_record(&messages_path, &record(4, "message_chunk"));
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let tail = reopened.replay_tail("session-1", 2).unwrap();
     assert_eq!(
         tail.iter().map(|record| record.seq).collect::<Vec<_>>(),
@@ -2614,7 +2659,7 @@ async fn recover_keeps_stale_high_last_seq_without_rewriting_logs() {
     )
     .unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened.last_seq("session-1").unwrap(),
         10,
@@ -2629,13 +2674,9 @@ async fn recover_keeps_stale_high_last_seq_without_rewriting_logs() {
     // The gap is harmless: the next append lands at 11 and every read
     // sees a strictly-increasing log.
     reopened.reopen_writer("session-1").await.unwrap();
-    assert_eq!(
-        reopened
-            .append_local_title("session-1", "title".to_string())
-            .await
-            .unwrap(),
-        11
-    );
+    enqueue_local_title(&reopened, 11, "title");
+    reopened.flush_session("session-1").await.unwrap();
+    assert_eq!(reopened.last_seq("session-1").unwrap(), 11);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2662,7 +2703,7 @@ async fn cross_file_duplicate_seq_still_fails_closed() {
     line.push(b'\n');
     fs::write(session_dir.join(TOOL_CALLS_FILE), &line).unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert!(matches!(
         reopened.replay_after("session-1", 0),
         Err(SessionPersistenceError::CorruptSession)
@@ -2712,7 +2753,7 @@ async fn recover_bumps_last_seq_when_frontier_record_exceeds_probe_block() {
     )
     .unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened.last_seq("session-1").unwrap(),
         5,
@@ -2745,7 +2786,7 @@ async fn duplicate_seq_in_tool_calls_heals_on_read() {
         &record(2, "tool_call_update"),
     );
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert_eq!(
         reopened
             .replay_after("session-1", 0)
@@ -2773,16 +2814,11 @@ async fn salvage_recount_excludes_agent_switch_markers() {
     let root = temp_dir("seq-intruder-agent-switch");
     let (persistence, metadata) = registered(&root).await;
     let agent_chunk = json!({"role": "agent", "content": {"type": "text", "text": "hi"}});
-    // The switch marker persists ONLY through `append_agent_switch`
-    // (`is_durable_event("agent_switch")` is false, so `enqueue_event`
-    // would silently skip it) — seq 2 lands between the two chunk runs.
+    // The switch marker takes seq 2, between the two chunk runs.
     persistence
         .enqueue_event(record_with_payload(1, "message_chunk", agent_chunk.clone()))
         .unwrap();
-    persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
+    enqueue_agent_switch(&persistence, 2);
     persistence
         .enqueue_event(record_with_payload(3, "message_chunk", agent_chunk.clone()))
         .unwrap();
@@ -2795,7 +2831,7 @@ async fn salvage_recount_excludes_agent_switch_markers() {
         &record_with_payload(1, "commands_update", json!({})),
     );
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     reopened.replay_after("session-1", 0).unwrap();
     let healed = reopened.metadata("session-1").unwrap();
     assert_eq!(
@@ -2821,7 +2857,7 @@ async fn torn_tail_fragment_alongside_intruder_still_heals() {
     // Reopen BEFORE corrupting: recover()'s torn-tail repair would quarantine
     // the fragment itself at startup — this test wants the read-path scan to
     // face both corruptions in one pass.
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let session_dir = persistence.session_dir(&metadata.storage_key).unwrap();
     let messages_path = session_dir.join(MESSAGES_FILE);
     append_raw_record(&messages_path, &record(2, "commands_update"));
@@ -2864,7 +2900,7 @@ async fn concurrent_reads_on_a_corrupt_session_both_heal() {
         &record(2, "commands_update"),
     );
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let first = {
         let persistence = Arc::clone(&reopened);
         std::thread::spawn(move || persistence.replay_after("session-1", 0))
@@ -2911,11 +2947,11 @@ async fn heal_serializes_against_a_live_writer() {
         &record(2, "commands_update"),
     );
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     reopened.reopen_writer("session-1").await.unwrap();
 
-    // Pause the salvage while it holds the catalog+entry locks, enqueue a
-    // writer-assigned append, then let the heal finish. The append must
+    // Pause the salvage while it holds the catalog+entry locks, enqueue an
+    // explicit-seq append, then let the heal finish. The append must
     // wait out the rewrite and then land above the healed frontier.
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let hook = ReplayTestHook::new(entered_tx);
@@ -2926,9 +2962,12 @@ async fn heal_serializes_against_a_live_writer() {
         std::thread::spawn(move || persistence.replay_after("session-1", 0))
     };
     entered_rx.recv().expect("salvage hook fired");
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.try_send(WriterCommand::AppendLocalTitle("raced title".into(), reply_tx))
-        .unwrap();
+    tx.try_send(WriterCommand::Append(payload_record(
+        6,
+        "local_title_generated",
+        json!({"sessionId":"session-1","title":"raced title"}),
+    )))
+    .unwrap();
     hook.release();
 
     let reader_seqs = reader
@@ -2946,11 +2985,7 @@ async fn heal_serializes_against_a_live_writer() {
         reader_seqs == [1, 2, 3, 4, 5] || reader_seqs == [1, 2, 3, 4, 5, 6],
         "the heal drops only the intruder (append may already be visible): {reader_seqs:?}"
     );
-    let assigned = reply_rx.await.unwrap().unwrap();
-    assert_eq!(
-        assigned, 6,
-        "the raced append lands above the healed frontier — never dropped, never reusing a seq"
-    );
+    reopened.flush_session("session-1").await.unwrap();
     assert!(
         reopened
             .replay_after("session-1", 0)
@@ -2995,7 +3030,7 @@ async fn residual_cross_file_duplicate_blocks_the_rewrite() {
     fs::write(session_dir.join(TOOL_CALLS_FILE), &tool_line).unwrap();
     let messages_before = fs::read(session_dir.join(MESSAGES_FILE)).unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     assert!(
         matches!(
             reopened.replay_after("session-1", 0),
@@ -3143,7 +3178,7 @@ async fn legacy_session_message_count_heals_on_reopen() {
     fs::write(&metadata_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
 
     // Reopen: the writer install runs the versioned heal.
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     reopened
         .reopen_writer("session-1")
         .await
@@ -3206,7 +3241,7 @@ async fn mid_stream_restart_does_not_double_count_the_open_run() {
         .remove("foldOpenRole");
     fs::write(&metadata_path, serde_json::to_vec_pretty(&stripped).unwrap()).unwrap();
 
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     reopened.reopen_writer("session-1").await.unwrap();
     // The resumed stream continues the SAME run: seq 3 must coalesce, not
     // open a second bubble.
@@ -3331,7 +3366,7 @@ async fn shutdown_marks_open_turn_with_interrupted_prompt_complete() {
 
     // Reopen: the marker is durable and only ONE marker exists (turn-1's
     // real completion is untouched).
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     let replayed = reopened.replay_after("session-1", 0).unwrap();
     assert_eq!(
         replayed
@@ -3536,7 +3571,7 @@ async fn shutdown_marks_null_turn_id_prompt_once() {
 
     // Reopen + shut down again: the marker closed the pending scan, so no
     // second marker accumulates.
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let reopened = open_with_authority(&root.join("store")).await;
     reopened.shutdown().await.unwrap();
     let replayed = reopened.replay_after("session-1", 0).unwrap();
     assert_eq!(
@@ -3597,10 +3632,7 @@ async fn shutdown_appends_no_marker_after_agent_switch() {
         ))
         .unwrap();
     persistence.flush_session("session-1").await.unwrap();
-    persistence
-        .append_agent_switch("session-1", agent_switch_record())
-        .await
-        .unwrap();
+    enqueue_agent_switch(&persistence, 2);
     persistence.shutdown().await.unwrap();
 
     let records = persistence.replay_after("session-1", 0).unwrap();

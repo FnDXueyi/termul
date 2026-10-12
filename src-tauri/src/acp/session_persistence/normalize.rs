@@ -15,13 +15,9 @@ pub(super) fn validate_and_sort(records: &mut [PersistedEventRecord]) -> Result<
 
 #[must_use]
 pub fn is_durable_event(type_: &str) -> bool {
-    // CAP-2: `agent_switch` is excluded because the ONLY durable write for a
-    // switch is the host-authored `WriterCommand::AppendAgentSwitch` record
-    // (the `record_local_title` precedent). The synthetic live fan-out event
-    // is excluded here so `WsRelaySink::emit` → `assign_and_append` →
-    // `enqueue_event` cannot append a SECOND durable record for the same
-    // switch (the fold would render two separators). The durable record
-    // itself flows through the writer command, never through this gate.
+    // CAP-2: an `agent_switch` marker is a durable host-authored record: the
+    // relay's `record_host_event` allocates its seq and appends it once, and
+    // the same event is its live fan-out (never a second record).
     !matches!(
         type_,
         "permission_request"
@@ -30,7 +26,6 @@ pub fn is_durable_event(type_: &str) -> bool {
             | "agent_disconnected"
             | "agent_crashed"
             | "projects_changed"
-            | "agent_switch"
     )
 }
 

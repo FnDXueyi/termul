@@ -166,10 +166,13 @@ pub const EVENT_SESSION_CLOSED: &str = "acp:session_closed";
 pub const EVENT_AGENT_DISCONNECTED: &str = "acp:agent_disconnected";
 /// Event name: the agent updated session metadata (e.g. title).
 pub const EVENT_SESSION_INFO_UPDATE: &str = "acp:session_info_update";
-/// Event name: a durable agent-switch marker was recorded (CAP-2). Emitted
-/// synthetically by the host after the `agent_switch` record is durable —
-/// the record is the transcript authority, the event is live-only delivery.
+/// Event name: a durable agent-switch marker was recorded (CAP-2). The host
+/// authors it once: the relay numbers it, appends it to the durable log and
+/// delivers it live under that same seq.
 pub const EVENT_AGENT_SWITCH: &str = "acp:agent_switch";
+/// Host-authored durable title record (relay-only: the desktop renderer gets
+/// the `acp:session_info_update` twin instead).
+pub const EVENT_LOCAL_TITLE_GENERATED: &str = "acp:local_title_generated";
 /// Event name: a worktree's branch was renamed by the host (story 16,
 /// CAP-5). Agent-level (`sid = None`); the payload is
 /// [`WorktreeBranchRenamedEvent`]. Every client reconciles worktrees and
@@ -1020,10 +1023,9 @@ pub struct WorktreeBranchRenamedEvent {
     pub new_branch: String,
 }
 
-/// `acp:agent_switch` (CAP-2) — the live fan-out of a durable agent-switch
-/// marker. Emitted only after `SessionPersistence::append_agent_switch`
-/// flushed the record; the durable record (not this event) is the transcript
-/// authority, so replay dedup is the watermark guard's job.
+/// `acp:agent_switch` (CAP-2) — a durable agent-switch marker. The relay
+/// numbers it, appends it to the durable log and delivers it live under the
+/// same seq (`record_host_event`), so replay dedup is the seq watermark's job.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSwitchEvent {

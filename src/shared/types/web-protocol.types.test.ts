@@ -26,8 +26,8 @@ import {
 import { WEB_TERMINAL_ERROR_CODES } from './web-terminal-protocol.types'
 
 describe('web-protocol.types — event/request type registries (AC2)', () => {
-  it('exports exactly 25 event types including durable user prompts, switch markers + worktree renames', () => {
-    expect(WS_EVENT_TYPES).toHaveLength(25)
+  it('exports exactly 26 event types including durable user prompts, host records, switch markers + worktree renames', () => {
+    expect(WS_EVENT_TYPES).toHaveLength(26)
     // The 16 from events.rs (prefix-dropped) + auth_required.
     const expected16FromEvents = [
       'agent_spawned',
@@ -60,6 +60,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_EVENT_TYPES).toContain('browser_open_request')
     // CAP-2 (spec-in-chat-agent-switch): durable agent-switch marker.
     expect(WS_EVENT_TYPES).toContain('agent_switch')
+    // Host-authored durable title record (occupies a session-log seq).
+    expect(WS_EVENT_TYPES).toContain('local_title_generated')
     // #856: server-side FS watcher change push (agent-level broadcast).
     expect(WS_EVENT_TYPES).toContain('fs_changed')
     expect(WS_EVENT_TYPES).toContain('fs_watch_ended')

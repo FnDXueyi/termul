@@ -625,10 +625,10 @@ export interface SessionInfoUpdateEvent {
 
 /**
  * `acp:agent_switch` (CAP-2, spec-in-chat-agent-switch) — the live fan-out of
- * a durable agent-switch marker. Emitted only after the host flushed the
- * durable `agent_switch` record; the record — not this event — is the
- * transcript authority. Mirrors the Rust `AgentSwitchEvent` struct
- * (camelCase wire shape) exactly.
+ * a durable agent-switch marker. The host numbers it once: the durable
+ * record and this event carry the same seq, and the record's payload is this
+ * event's payload. Mirrors the Rust `AgentSwitchEvent` struct (camelCase
+ * wire shape) exactly.
  */
 export interface AgentSwitchEvent {
   agentId: AgentId
@@ -1000,9 +1000,9 @@ export async function acpRegisterDiscoveredSession(input: {
 /**
  * CAP-2 (spec-in-chat-agent-switch): durably record an agent-switch marker.
  * Host is the sole author — the Tauri command (`acp_record_agent_switch`)
- * and the WS route (`record_agent_switch`) write ONE durable
- * `agent_switch` record (writer-assigned seq), flush, then fan the
- * synthetic `acp:agent_switch` event to live clients. Throws on a host
+ * and the WS route (`record_agent_switch`) author ONE `agent_switch`
+ * record: the host relay numbers it, persists it and delivers the same event
+ * live under that seq; the host then flushes. Throws on a host
  * write failure (record absent, no partial state — the caller surfaces it).
  */
 export async function acpRecordAgentSwitch(

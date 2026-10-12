@@ -106,6 +106,21 @@ impl SessionRuntime {
     }
 }
 
+/// The single allocator of per-session sequence numbers.
+///
+/// Every record in a session log (live fan-out, durable JSONL, replay)
+/// carries a seq handed out by exactly one authority — the live relay — so
+/// the durable log and the live stream can never disagree. The session
+/// writer only appends records that arrive with their seq; the one record it
+/// authors itself (the process-shutdown `interrupted` marker) asks the
+/// authority when one is installed instead of computing `last_seq + 1`.
+pub trait SeqAuthority: Send + Sync {
+    /// Allocate the next seq for `session_id`: strictly greater than both the
+    /// authority's own frontier and `floor` (the highest seq the writer found
+    /// durably on disk).
+    fn allocate_after(&self, session_id: &str, floor: u64) -> u64;
+}
+
 struct Inner {
     root: PathBuf,
     /// Active writer tasks only. Finalized sessions are removed from this map.
@@ -118,6 +133,10 @@ struct Inner {
     /// crash, or disconnect leaves this false so that teardown finalizes
     /// without an interrupted marker (#842 is process shutdown only).
     process_shutdown: AtomicBool,
+    /// The sole allocator of per-session sequence numbers (the live relay).
+    /// The writer never invents a seq: records it must author itself (the
+    /// shutdown `interrupted` marker) take theirs from here.
+    seq_authority: Mutex<Option<Arc<dyn SeqAuthority>>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -228,13 +247,6 @@ impl WriterGate {
 
 enum WriterCommand {
     Append(PersistedEventRecord),
-    AppendLocalTitle(String, oneshot::Sender<Result<u64>>),
-    /// Append a host-authored `agent_switch` durable record (CAP-2 marker).
-    /// The payload mirrors the wire event: `{sessionId, fromConfigId,
-    /// toConfigId, newSessionId, summaryText}` — `seq`/`recordedAt` come from
-    /// the record envelope the writer builds. Switches are NOT messages
-    /// (`message_count` stays unchanged).
-    AppendAgentSwitch(AgentSwitchRecord, oneshot::Sender<Result<u64>>),
     Flush(oneshot::Sender<Result<()>>),
     Finalize(PersistedSessionStatus, oneshot::Sender<Result<()>>),
     Shutdown(oneshot::Sender<Result<()>>),
@@ -256,8 +268,6 @@ impl WriterCommand {
             Self::Append(record) => {
                 format!("Append({} seq {})", record.type_, record.seq)
             }
-            Self::AppendLocalTitle(..) => "AppendLocalTitle".to_string(),
-            Self::AppendAgentSwitch(..) => "AppendAgentSwitch".to_string(),
             Self::Flush(..) => "Flush".to_string(),
             Self::Finalize(status, ..) => format!("Finalize({status:?})"),
             Self::Shutdown(..) => "Shutdown".to_string(),
@@ -283,6 +293,7 @@ impl SessionPersistence {
                 registration_lock: tokio::sync::Mutex::new(()),
                 index_lock: tokio::sync::Mutex::new(()),
                 process_shutdown: AtomicBool::new(false),
+                seq_authority: Mutex::new(None),
                 #[cfg(test)]
                 writer_gate_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -295,6 +306,13 @@ impl SessionPersistence {
         });
         service.recover().await?;
         Ok(service)
+    }
+
+    /// Install the sole seq authority (see [`SeqAuthority`]). Without one the
+    /// writer numbers its own marker above both the metadata and the on-disk
+    /// frontier.
+    pub fn set_seq_authority(&self, authority: Arc<dyn SeqAuthority>) {
+        *self.inner.seq_authority.lock() = Some(authority);
     }
 
     #[must_use]
@@ -616,19 +634,35 @@ impl SessionPersistence {
     }
 
     /// Hold this session's send lock across a critical section that both
-    /// assigns a sequence and enqueues it. Returns `None` when no writer is
-    /// installed (the caller falls through to the pre-registration buffer).
+    /// assigns a sequence and enqueues it. `arg` is handed to `body`; when no
+    /// writer is installed `body` does not run and `arg` comes back as
+    /// `Err(arg)` (the caller falls through to the pre-registration buffer).
     ///
     /// The lock is a `ReentrantMutex` because the section calls
     /// `enqueue_event`, which locks again on the same thread.
-    pub(crate) fn with_ordered_sender<R>(
+    pub(crate) fn with_ordered_sender<T, R>(
         &self,
         session_id: &str,
-        body: impl FnOnce() -> R,
-    ) -> Option<R> {
-        let runtime = self.runtime(session_id).ok()?;
+        arg: T,
+        body: impl FnOnce(T) -> R,
+    ) -> std::result::Result<R, T> {
+        let Ok(runtime) = self.runtime(session_id) else {
+            return Err(arg);
+        };
         let _order = runtime.send_lock.lock();
-        Some(body())
+        Ok(body(arg))
+    }
+
+    /// Fail when the session has no writer installed
+    /// ([`SessionPersistenceError::SessionNotFound`]) or its writer has turned
+    /// unhealthy ([`SessionPersistenceError::PersistenceUnhealthy`]): a record
+    /// that cannot persist must not be numbered or delivered.
+    pub(crate) fn ensure_writer_healthy(&self, session_id: &str) -> Result<()> {
+        let runtime = self.runtime(session_id)?;
+        if let Some(message) = runtime.unhealthy.lock().clone() {
+            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
+        }
+        Ok(())
     }
 
     /// Queue `command` under the session send lock, without ever blocking the
@@ -811,48 +845,6 @@ impl SessionPersistence {
                 return;
             }
         }
-    }
-
-    /// Append a normalized local-title event with a writer-assigned sequence.
-    /// The writer is the sole sequence authority, so a mid-turn title tool call
-    /// cannot race queued message chunks and reuse their sequence number.
-    pub async fn append_local_title(&self, session_id: &str, title: String) -> Result<u64> {
-        let runtime = self.runtime(session_id)?;
-        if let Some(message) = runtime.unhealthy.lock().clone() {
-            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
-        }
-        let (tx, rx) = oneshot::channel();
-        self.send_command(
-            &runtime,
-            session_id,
-            WriterCommand::AppendLocalTitle(title, tx),
-        )?;
-        rx.await
-            .map_err(|_| SessionPersistenceError::WriterStopped)?
-    }
-
-    /// Append a host-authored `agent_switch` durable marker record with a
-    /// writer-assigned sequence (CAP-2). Mirrors [`append_local_title`]: the
-    /// writer is the sole sequence authority, so a switch recorded between
-    /// queued message chunks cannot collide with their sequence numbers. The
-    /// record is NOT a message — `message_count` stays unchanged.
-    pub async fn append_agent_switch(
-        &self,
-        session_id: &str,
-        record: AgentSwitchRecord,
-    ) -> Result<u64> {
-        let runtime = self.runtime(session_id)?;
-        if let Some(message) = runtime.unhealthy.lock().clone() {
-            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
-        }
-        let (tx, rx) = oneshot::channel();
-        self.send_command(
-            &runtime,
-            session_id,
-            WriterCommand::AppendAgentSwitch(record, tx),
-        )?;
-        rx.await
-            .map_err(|_| SessionPersistenceError::WriterStopped)?
     }
 
     pub async fn flush_session(&self, session_id: &str) -> Result<()> {

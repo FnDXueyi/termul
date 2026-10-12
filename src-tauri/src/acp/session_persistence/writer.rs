@@ -38,54 +38,6 @@ pub(super) fn writer_loop(
         }
         let result = match command {
             WriterCommand::Append(record) => append_record(&inner.root, &metadata, &mut tails, record),
-            WriterCommand::AppendLocalTitle(title, reply) => {
-                let seq = metadata.lock().last_seq + 1;
-                let session_id = metadata.lock().session_id.clone();
-                let result = append_record(
-                    &inner.root,
-                    &metadata,
-                    &mut tails,
-                    PersistedEventRecord {
-                        schema_version: SESSION_SCHEMA_VERSION,
-                        session_id: session_id.clone(),
-                        seq,
-                        type_: "local_title_generated".to_string(),
-                        recorded_at: now_millis(),
-                        payload: serde_json::json!({
-                            "sessionId": session_id,
-                            "title": title,
-                        }),
-                    },
-                );
-                let reply_result = result.as_ref().map(|()| seq).map_err(|error| {
-                    SessionPersistenceError::PersistenceUnhealthy(error.to_string())
-                });
-                let _ = reply.send(reply_result);
-                result
-            }
-            WriterCommand::AppendAgentSwitch(switch, reply) => {
-                let seq = metadata.lock().last_seq + 1;
-                let session_id = metadata.lock().session_id.clone();
-                let result = append_record(
-                    &inner.root,
-                    &metadata,
-                    &mut tails,
-                    PersistedEventRecord {
-                        schema_version: SESSION_SCHEMA_VERSION,
-                        session_id: session_id.clone(),
-                        seq,
-                        type_: "agent_switch".to_string(),
-                        recorded_at: now_millis(),
-                        payload: serde_json::to_value(&switch)
-                            .unwrap_or_else(|_| serde_json::json!({ "sessionId": session_id })),
-                    },
-                );
-                let reply_result = result.as_ref().map(|()| seq).map_err(|error| {
-                    SessionPersistenceError::PersistenceUnhealthy(error.to_string())
-                });
-                let _ = reply.send(reply_result);
-                result
-            }
             WriterCommand::Flush(reply) => {
                 let result = sync_session_files(&inner.root, &metadata);
                 let _ = reply.send(result.clone_for_reply());
@@ -137,7 +89,8 @@ fn close_writer(
     reply: oneshot::Sender<Result<()>>,
 ) {
     if mark_interrupted {
-        append_interrupted_marker_if_open(&inner.root, metadata, tails);
+        let authority = inner.seq_authority.lock().clone();
+        append_interrupted_marker_if_open(&inner.root, metadata, tails, authority.as_deref());
     }
     let snapshot = {
         let mut current = metadata.lock();
@@ -155,13 +108,17 @@ fn close_writer(
 }
 
 /// Issue #842: append `prompt_complete { stopReason: "interrupted" }` when
-/// the last `user_prompt` has no matching completion. Sequence is assigned
-/// here, after the queue drain, so it cannot collide with a chunk that was
-/// still queued when shutdown began. Marker failures are logged and skipped.
+/// the last `user_prompt` has no matching completion. The seq comes from the
+/// session's [`SeqAuthority`] when one is installed (the relay is then the sole
+/// allocator), floored at the highest seq actually on disk so it cannot
+/// collide with a chunk that was still queued when shutdown began. With no
+/// authority (no relay, hence no second allocator) it is `last_seq + 1`. A
+/// marker failure is logged and skipped.
 pub(super) fn append_interrupted_marker_if_open(
     root: &Path,
     metadata: &Arc<Mutex<SessionMetadata>>,
     tails: &mut TailState,
+    authority: Option<&dyn SeqAuthority>,
 ) {
     let (session_id, storage_key) = {
         let current = metadata.lock();
@@ -188,7 +145,13 @@ pub(super) fn append_interrupted_marker_if_open(
     // whose record nevertheless reached the file): the marker must sequence
     // after the highest seq actually present, never reuse one.
     let on_disk_max = records.iter().map(|record| record.seq).max().unwrap_or(0);
-    let seq = metadata.lock().last_seq.max(on_disk_max) + 1;
+    let floor = metadata.lock().last_seq.max(on_disk_max);
+    // With a relay installed it is the sole allocator; without one (no live
+    // stream to disagree with) the durable frontier is the only authority.
+    let seq = match authority {
+        Some(authority) => authority.allocate_after(&session_id, floor),
+        None => floor + 1,
+    };
     let mut payload = serde_json::json!({
         "sessionId": session_id,
         "stopReason": "interrupted",
