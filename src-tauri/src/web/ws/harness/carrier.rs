@@ -49,7 +49,7 @@ struct Shared {
     pong_tx: mpsc::WeakUnboundedSender<Inbound>,
     drop_filter: parking_lot::Mutex<Option<DropFilter>>,
     dropped: AtomicUsize,
-    /// One-way relay→peer delivery delay in millis ([`Peer::delay_outbound`]).
+    /// One-way relay→peer delivery delay in microseconds ([`Peer::delay_outbound`]).
     /// Shared so the auto-pong is generated when the `Ping` reaches the peer,
     /// not when the relay writes it.
     outbound_delay_us: AtomicU64,

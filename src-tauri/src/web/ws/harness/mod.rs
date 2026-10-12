@@ -85,11 +85,15 @@ impl Host {
         let (done_tx, done) = watch::channel(false);
         let state = self.state.clone();
         let task = tokio::spawn(async move {
-            // Signals completion on every exit path, including a panic.
+            // Signals completion on a normal exit or a cancel, never on a panic.
             struct Finished(watch::Sender<bool>);
             impl Drop for Finished {
                 fn drop(&mut self) {
-                    let _ = self.0.send(true);
+                    // A panic is not a completion: the waiting test must
+                    // fail by timeout, not pass its reaping assertion.
+                    if !std::thread::panicking() {
+                        let _ = self.0.send(true);
+                    }
                 }
             }
             let _finished = Finished(done_tx);

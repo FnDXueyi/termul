@@ -146,8 +146,8 @@ async fn slow_wire_delays_the_pong_past_the_deadline() {
     healthy.peer.delay_outbound(PING_INTERVAL);
 
     let window = PONG_TIMEOUT + PING_INTERVAL;
-    slow.peer.read_for(window).await;
-    healthy.peer.read_for(window).await;
+    // Both peers run inside the same deadline window.
+    tokio::join!(slow.peer.read_for(window), healthy.peer.read_for(window));
     assert!(
         slow.relay_finished().await,
         "a peer whose Pongs arrive after the deadline was not reaped"
