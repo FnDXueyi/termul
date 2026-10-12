@@ -51,11 +51,15 @@ class FakeStoreSocket {
   onerror: ((ev: Event) => void) | null = null
   onclose: ((ev: CloseEvent) => void) | null = null
   sent: string[] = []
+  closed = false
+  /** Handshake stall injection: 'upgrade' never opens; 'authenticate' never answers. */
+  static stall: 'none' | 'upgrade' | 'authenticate' = 'none'
   store = new Map<string, unknown>()
   /** When set, every non-auth request replies with this error. */
   failCode: string | null = null
 
   constructor(public url: string) {
+    if (FakeStoreSocket.stall === 'upgrade') return
     queueMicrotask(() => {
       this.readyState = FakeStoreSocket.OPEN
       this.onopen?.(new Event('open'))
@@ -75,6 +79,7 @@ class FakeStoreSocket {
       payload: { key?: string; value?: unknown }
     }
     if (req.type === 'authenticate') {
+      if (FakeStoreSocket.stall === 'authenticate') return
       const refusal = forcedAuthRefusal ?? validateHandshake(req.payload as Record<string, unknown>)
       if (refusal) {
         this.emit({ id: req.id, ok: false, err: { code: refusal, message: refusal } })
@@ -106,7 +111,7 @@ class FakeStoreSocket {
   }
 
   close(): void {
-    /* no-op */
+    this.closed = true
   }
 }
 
@@ -266,6 +271,51 @@ describe('createWebPersistenceApi', () => {
       forcedAuthRefusal = null
       expect(await api.read('k')).toMatchObject({ success: false, code: 'KEY_NOT_FOUND' })
       expect(sockets.length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  // D8-F2: upgrade + authenticate share one ~10 s handshake bound; without it a
+  // stalled socket left `connecting` set forever and hung every caller,
+  // including `flushPendingWrites` on app close.
+  describe('handshake timeout', () => {
+    afterEach(() => {
+      FakeStoreSocket.stall = 'none'
+    })
+
+    for (const stall of ['upgrade', 'authenticate'] as const) {
+      it(`settles a read with WS_TIMEOUT at 10s when the ${stall} stalls, then recovers`, async () => {
+        vi.useFakeTimers()
+        FakeStoreSocket.stall = stall
+        let result: unknown
+        void api.read('k').then((r) => {
+          result = r
+        })
+        await vi.advanceTimersByTimeAsync(9_999)
+        expect(result).toBeUndefined()
+        await vi.advanceTimersByTimeAsync(1)
+        expect(result).toMatchObject({ success: false, code: 'WS_TIMEOUT' })
+        expect(sockets[0].closed).toBe(true)
+
+        // The hung attempt did not wedge `connecting`: the next call re-opens.
+        FakeStoreSocket.stall = 'none'
+        const retry = await api.read('k')
+        expect(retry).toMatchObject({ success: false, code: 'KEY_NOT_FOUND' })
+        expect(sockets).toHaveLength(2)
+      })
+    }
+
+    it('flushPendingWrites settles (with the timeout failure) instead of hanging', async () => {
+      vi.useFakeTimers()
+      FakeStoreSocket.stall = 'authenticate'
+      void api.writeDebounced('settings', { theme: 'dark' })
+      let flushed: unknown
+      void api.flushPendingWrites().then((r) => {
+        flushed = r
+      })
+      await vi.advanceTimersByTimeAsync(9_999)
+      expect(flushed).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(flushed).toMatchObject({ success: false, code: 'WS_TIMEOUT' })
     })
   })
 })
