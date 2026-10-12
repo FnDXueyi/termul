@@ -94,7 +94,7 @@ pub(super) const PING_PAYLOAD: &[u8] = b"keepalive";
 /// while a `background` signal is in effect (CAP-3). Extracted from the write
 /// task so the threshold semantics (strict `>`) are unit-testable without
 /// spinning up a real socket. The write task calls this with
-/// `last_activity.load()` + `elapsed_ms()` + the active ceiling on each tick.
+/// `last_activity.load()` + `elapsed_ms(epoch)` + the active ceiling on each tick.
 pub(super) fn watchdog_is_stale(last_activity_ms: u64, now_ms_value: u64, ceiling_ms: u64) -> bool {
     now_ms_value.saturating_sub(last_activity_ms) > ceiling_ms
 }

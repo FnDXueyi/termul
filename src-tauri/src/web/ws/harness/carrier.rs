@@ -52,7 +52,7 @@ struct Shared {
     /// One-way relay→peer delivery delay in millis ([`Peer::delay_outbound`]).
     /// Shared so the auto-pong is generated when the `Ping` reaches the peer,
     /// not when the relay writes it.
-    outbound_delay_ms: AtomicU64,
+    outbound_delay_us: AtomicU64,
 }
 
 /// The relay-facing half: `Stream<Item = Result<Message, axum::Error>>` plus
@@ -75,7 +75,7 @@ pub(crate) fn pair() -> (FaultCarrier, Peer) {
         pong_tx: inbound_tx.downgrade(),
         drop_filter: parking_lot::Mutex::new(None),
         dropped: AtomicUsize::new(0),
-        outbound_delay_ms: AtomicU64::new(0),
+        outbound_delay_us: AtomicU64::new(0),
     });
     (
         FaultCarrier {
@@ -135,7 +135,7 @@ impl Sink<Message> for FaultCarrier {
             // whole round trip). Whether the peer is half-open is decided at
             // delivery time too.
             let delay =
-                Duration::from_millis(this.shared.outbound_delay_ms.load(Ordering::Acquire));
+                Duration::from_micros(this.shared.outbound_delay_us.load(Ordering::Acquire));
             let shared = Arc::clone(&this.shared);
             let payload = payload.clone();
             if delay.is_zero() {
@@ -271,12 +271,12 @@ impl Peer {
     /// produced after the same delay, so keepalive round trips slow down too.
     pub(crate) fn delay_outbound(&mut self, delay: Duration) {
         self.shared
-            .outbound_delay_ms
-            .store(delay.as_millis() as u64, Ordering::Release);
+            .outbound_delay_us
+            .store(delay.as_micros() as u64, Ordering::Release);
     }
 
     fn outbound_delay(&self) -> Duration {
-        Duration::from_millis(self.shared.outbound_delay_ms.load(Ordering::Acquire))
+        Duration::from_micros(self.shared.outbound_delay_us.load(Ordering::Acquire))
     }
 
     /// Connection reset: the relay's next read yields an error.
