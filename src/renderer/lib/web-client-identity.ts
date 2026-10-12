@@ -50,7 +50,11 @@ const utf8 = new TextEncoder()
 /** The host limits ids by UTF-8 BYTES (`MAX_CLIENT_ID_LEN`), not UTF-16 units. */
 function isValidId(value: unknown): value is string {
   return (
-    typeof value === 'string' && value.length > 0 && utf8.encode(value).length <= MAX_CLIENT_ID_LEN
+    typeof value === 'string' &&
+    value.length > 0 &&
+    utf8.encode(value).length <= MAX_CLIENT_ID_LEN &&
+    // The host refuses control characters (`char::is_control`, Unicode Cc).
+    !/\p{Cc}/u.test(value)
   )
 }
 

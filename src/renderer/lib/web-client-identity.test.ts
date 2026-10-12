@@ -52,6 +52,13 @@ describe('web-client-identity', () => {
     expect(new TextEncoder().encode(device).length).toBeLessThanOrEqual(MAX_CLIENT_ID_LEN)
   })
 
+  it('replaces a stored id that contains control characters', () => {
+    window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, 'device\nforged log line')
+    const device = getDeviceId()
+    expect(device).not.toContain('\n')
+    expect(window.localStorage.getItem(DEVICE_ID_STORAGE_KEY)).toBe(device)
+  })
+
   it('adopts the persisted device id when a concurrent tab wrote first', () => {
     const winner = 'winner-device-id'
     const realSet = Storage.prototype.setItem
