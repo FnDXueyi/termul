@@ -97,6 +97,7 @@ const makeContext = (over: Partial<GitCommitContext> = {}): GitCommitContext => 
 
 beforeEach(() => {
   vi.clearAllMocks()
+  gitApi.getLog.mockResolvedValue([{ hash: 'a'.repeat(40) }])
   resetGitStatusStoreControlForTests()
   useGitStatusStore.setState({
     paths: {},
@@ -247,6 +248,15 @@ describe('git-status-store commit footer', () => {
 
     await useGitStatusStore.getState().commit(CWD, 's', '', false)
     expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false)
+  })
+
+  it('a HEAD that cannot be read fails the context fetch, so the footer cannot commit without a precondition', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockRejectedValue(new Error('locked'))
+
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+
+    expect(useGitStatusStore.getState().commitContexts[CWD]).toBeUndefined()
   })
 
   it('a superseded commit-context fetch does not record its HEAD', async () => {

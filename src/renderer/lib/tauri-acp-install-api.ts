@@ -46,7 +46,7 @@ export function createTauriAcpInstallApi(): AcpInstallApi {
       return invokeIpcCommand<InstallOutcome>(
         IPC_COMMANDS.INSTALL_AGENT,
         { request: { agentId } },
-        { kind: 'install_acp_agent', entityKey: agentId }
+        { kind: 'install_acp_agent', entityKey: agentId, needsReply: true }
       )
     }
   }

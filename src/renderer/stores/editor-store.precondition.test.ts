@@ -143,27 +143,50 @@ describe('editor-store save preconditions (web host)', () => {
     )
   })
 
-  it.each([
+  describe.each([
     'NETWORK_ERROR',
     'OUTCOME_UNKNOWN',
     'COMMAND_IN_PROGRESS'
-  ])('a save whose outcome is uncertain (%s) drops the hash, so the next save is not a false conflict', async (code) => {
-    open(readHash)
-    vi.mocked(filesystemApi.writeFile).mockResolvedValueOnce({
-      success: false,
-      error: 'lost',
-      code
+  ])('a save whose outcome is uncertain (%s)', (code) => {
+    const lost = { success: false as const, error: 'lost', code }
+
+    it('is saved when the file read back holds the saved content', async () => {
+      open(readHash)
+      vi.mocked(filesystemApi.writeFile).mockResolvedValueOnce(lost)
+      vi.mocked(filesystemApi.readFile).mockResolvedValueOnce({
+        success: true,
+        data: { content: 'edited' }
+      } as never)
+
+      expect(await useEditorStore.getState().saveFile(path)).toBe(true)
+
+      expect(useEditorStore.getState().openFiles.get(path)).toMatchObject({
+        isDirty: false,
+        externalConflict: false,
+        contentHash: sha256Hex('edited')
+      })
     })
 
-    expect(await useEditorStore.getState().saveFile(path)).toBe(false)
+    it('keeps the old hash when the file changed, so a retry never overwrites it', async () => {
+      open(readHash)
+      vi.mocked(filesystemApi.writeFile).mockResolvedValueOnce(lost)
+      vi.mocked(filesystemApi.readFile).mockResolvedValueOnce({
+        success: true,
+        data: { content: 'changed elsewhere' }
+      } as never)
 
-    const file = useEditorStore.getState().openFiles.get(path)
-    expect(file?.contentHash).toBeUndefined()
-    expect(file?.externalConflict).toBeFalsy()
-    expect(toast).not.toHaveBeenCalled()
-    vi.mocked(filesystemApi.writeFile).mockResolvedValue({ success: true, data: undefined })
-    await useEditorStore.getState().saveFile(path)
-    expect(filesystemApi.writeFile).toHaveBeenLastCalledWith(path, 'edited')
+      expect(await useEditorStore.getState().saveFile(path)).toBe(false)
+
+      const file = useEditorStore.getState().openFiles.get(path)
+      expect(file?.contentHash).toBe(readHash)
+      expect(file?.externalConflict).toBeFalsy()
+      expect(toast).not.toHaveBeenCalled()
+      vi.mocked(filesystemApi.writeFile).mockResolvedValue({ success: true, data: undefined })
+      await useEditorStore.getState().saveFile(path)
+      expect(filesystemApi.writeFile).toHaveBeenLastCalledWith(path, 'edited', {
+        expected: { sha256: readHash }
+      })
+    })
   })
 
   it('a file read without a hash (desktop) saves without a precondition', async () => {

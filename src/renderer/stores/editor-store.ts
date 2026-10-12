@@ -140,8 +140,7 @@ export interface EditorFileState {
   contentHash?: string
   /**
    * The host reports content hashes for this file (web): kept when `contentHash`
-   * is dropped (overwrite, uncertain write) so the next successful save
-   * re-establishes it.
+   * is dropped (overwrite) so the next successful save re-establishes it.
    */
   tracksHash?: true
   /** The host refused the last save (`PRECONDITION_FAILED`): the file changed on disk. */
@@ -351,26 +350,31 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ openFiles: newFiles })
 
       try {
-        const result = file.contentHash
+        let result = file.contentHash
           ? await filesystemApi.writeFile(path, snapshotContent, {
               expected: { sha256: file.contentHash }
             })
           : await filesystemApi.writeFile(path, snapshotContent)
+        // The reply was lost or its outcome is unknown: the host may or may not
+        // have applied the write. Read the file back. If it holds our content the
+        // write landed, so treat it as saved. Otherwise keep the hash this buffer
+        // was read at: the next save is checked against it, so it never
+        // overwrites a change made after the unknown write.
+        if (!result.success && file.tracksHash && UNCERTAIN_WRITE_CODES.has(result.code)) {
+          const disk = await filesystemApi.readFile(path)
+          if (disk.success && disk.data.content === snapshotContent) {
+            result = { success: true, data: undefined }
+          }
+        }
         if (!result.success) {
           const conflict = result.code === COMMAND_RESULT_CODES.PRECONDITION_FAILED
-          // The reply was lost or its outcome is unknown: the host may have
-          // applied the write, so the hash this buffer was read at is no longer
-          // trustworthy. Drop it, or the next save would report a conflict with
-          // our own write.
-          const uncertain = UNCERTAIN_WRITE_CODES.has(result.code)
           const resetFiles = new Map(get().openFiles)
           const current = resetFiles.get(path)
           if (current) {
             resetFiles.set(path, {
               ...current,
               operationStatus: 'idle',
-              ...(conflict ? { externalConflict: true } : {}),
-              ...(uncertain ? { contentHash: undefined } : {})
+              ...(conflict ? { externalConflict: true } : {})
             })
             set({ openFiles: resetFiles })
           }

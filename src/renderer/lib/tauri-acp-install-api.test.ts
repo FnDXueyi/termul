@@ -59,4 +59,13 @@ describe('createTauriAcpInstallApi', () => {
     expect(result.code).toBe('INVOKE_ERROR')
     expect(result.error).toContain('IPC panic')
   })
+
+  it('installAgent reports a failure, not an empty success, when the host only knows the install ran', async () => {
+    invokeMock.mockRejectedValueOnce('command_accepted: the command ran')
+
+    const api = createTauriAcpInstallApi()
+    const result = await api.installAgent('opencode')
+
+    expect(result.success).toBe(false)
+  })
 })

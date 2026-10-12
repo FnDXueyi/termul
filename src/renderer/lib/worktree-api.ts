@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 import type { Worktree } from '@/types/project'
 import { invokeIpcCommand, mapTauriVerdict } from './acp-transport/tauri-verdicts'
-import { runIpcCommand } from './ipc/http'
+import { entityKeyOf, runIpcCommand, worktreeCreateKey } from './ipc/http'
 import { isTauriContext } from './tauri-runtime'
 import { webServerWorktree } from './web-server-api'
 
@@ -131,7 +131,7 @@ export const worktreeApi = {
       const { onProgress: _onProgress, ...invokeArgs } = params
       return invokeIpcCommand<WorktreeInfo>('worktree_create', invokeArgs, {
         kind: 'worktree_create',
-        entityKey: `${params.projectPath}|${params.branch}|${params.name}|${params.targetPath ?? ''}`,
+        entityKey: worktreeCreateKey(params),
         invokeFailure: 'throw'
       })
     }
@@ -170,7 +170,7 @@ export const worktreeApi = {
     isTauriContext()
       ? runIpcCommand<void>({
           kind: 'worktree_rename_branch',
-          entityKey: `${worktreePath}|${oldBranch}|${newBranch}`,
+          entityKey: entityKeyOf(worktreePath, oldBranch, newBranch),
           send: (commandId) =>
             invoke<IpcResult<void>>('worktree_rename_branch', {
               worktreePath,

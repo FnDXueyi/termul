@@ -269,6 +269,12 @@ export async function runIpcCommand<T>(
      * before — an in-call resend, or an unresolved id from an earlier call).
      */
     onRun?: (run: { resent: boolean }) => void
+    /**
+     * The caller needs the reply data. When the host only knows the command ran
+     * (its reply was too large to keep), report a failure instead of a success
+     * with no data.
+     */
+    needsReply?: boolean
     /** Test seam: resend delays. */
     delaysMs?: readonly number[]
   }
@@ -285,7 +291,9 @@ export async function runIpcCommand<T>(
         throw new IpcFailureError(result)
       },
       // The command ran; its reply is not retained.
-      acceptedWithoutResult: () => ({ success: true, data: undefined as T })
+      ...(options.needsReply
+        ? {}
+        : { acceptedWithoutResult: () => ({ success: true as const, data: undefined as T }) })
     })
     options.onRun?.({ resent: run.resent })
     return run.result
@@ -305,7 +313,16 @@ const part = (body: object, key: string): string => {
   const value: unknown = Reflect.get(body, key)
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
-const pair = (a: string, b: string) => (body: object) => `${part(body, a)}|${part(body, b)}`
+/**
+ * The key an intent is retried under: its identifying fields as one JSON array,
+ * so two different field sets can never collapse into one key (a path can
+ * contain any separator character).
+ */
+export const entityKeyOf = (
+  ...fields: ReadonlyArray<string | number | boolean | null | undefined>
+) => JSON.stringify(fields.map((field) => field ?? ''))
+
+const pair = (a: string, b: string) => (body: object) => entityKeyOf(part(body, a), part(body, b))
 
 /**
  * The HTTP routes the host ledgers (`X-Command-Id` required), by path. Mirrors
@@ -329,7 +346,8 @@ const LEDGERED_ROUTES: Readonly<Record<string, LedgeredRoute>> = {
   '/worktree/create': { kind: 'worktree_create', entityKey: (b) => worktreeCreateKey(b) },
   '/worktree/rename-branch': {
     kind: 'worktree_rename_branch',
-    entityKey: (b) => `${part(b, 'worktreePath')}|${part(b, 'oldBranch')}|${part(b, 'newBranch')}`
+    entityKey: (b) =>
+      entityKeyOf(part(b, 'worktreePath'), part(b, 'oldBranch'), part(b, 'newBranch'))
   },
   '/acp/install': { kind: 'install_acp_agent', entityKey: (b) => part(b, 'agentId') }
 }
@@ -337,9 +355,17 @@ const LEDGERED_ROUTES: Readonly<Record<string, LedgeredRoute>> = {
 /** `POST /workspace/<projectId>/write`: the project id is in the path. */
 const WORKSPACE_WRITE = /^\/workspace\/([^/]+)\/write$/
 
-/** The key a worktree create is retried under (project, branch, name, target). */
+/** The key a worktree create is retried under: every field the host fingerprints. */
 export function worktreeCreateKey(body: object): string {
-  return `${part(body, 'projectPath')}|${part(body, 'branch')}|${part(body, 'name')}|${part(body, 'targetPath')}`
+  const flag: unknown = Reflect.get(body, 'isNewBranch')
+  return entityKeyOf(
+    part(body, 'projectPath'),
+    part(body, 'branch'),
+    part(body, 'name'),
+    part(body, 'targetPath'),
+    flag === true,
+    part(body, 'startRef')
+  )
 }
 
 function ledgeredRoute(path: string): LedgeredRoute | null {

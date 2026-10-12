@@ -379,11 +379,24 @@ describe('tauri-terminal-api', () => {
       })
     })
 
-    it('a spawn rejected with an unrelated error mints a NEW id on the next try', async () => {
+    it('a spawn the host refused mints a NEW id on the next try', async () => {
       const { api } = await loadApi()
       mockInvoke.mockResolvedValue({ success: false, error: 'no shell', code: 'SPAWN_FAILED' })
       await api.spawn({ projectId: 'p1' })
       await api.spawn({ projectId: 'p1' })
+      const ids = mockInvoke.mock.calls.map(
+        ([, args]) => (args as { options: { commandId: string } }).options.commandId
+      )
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).not.toBe(ids[0])
+    })
+
+    it('a spawn whose invoke rejects reports INVOKE_ERROR and mints a NEW id on the next try', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockRejectedValue(new Error('no such command'))
+      const first = await api.spawn({ projectId: 'p1' })
+      await api.spawn({ projectId: 'p1' })
+      expect(first).toMatchObject({ success: false, code: 'INVOKE_ERROR' })
       const ids = mockInvoke.mock.calls.map(
         ([, args]) => (args as { options: { commandId: string } }).options.commandId
       )

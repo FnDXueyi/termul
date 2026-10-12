@@ -50,8 +50,7 @@ pub(crate) fn stamp_ws_frame(frame: &mut serde_json::Value) {
     } else {
         return;
     };
-    let carries_id = frame.get("command_id").is_some() || frame.get("commandId").is_some();
-    if !carries_id {
+    if frame.get(field).is_none() {
         frame[field] = serde_json::Value::String(fresh_command_id());
     }
 }

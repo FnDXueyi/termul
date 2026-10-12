@@ -103,6 +103,7 @@ export function invokeIpcCommand<T>(
   args: Record<string, unknown> | ((commandId: string) => Record<string, unknown>),
   options: DomainCommandOptions & {
     invokeFailure?: 'result' | 'throw'
+    needsReply?: boolean
     onRun?: (run: { resent: boolean }) => void
   }
 ): Promise<IpcResult<T>> {

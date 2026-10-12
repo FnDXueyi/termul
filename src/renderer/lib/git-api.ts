@@ -8,6 +8,7 @@ import type {
 } from '@shared/types/ipc.types'
 import { invoke } from '@tauri-apps/api/core'
 import { runInvokeCommand } from './acp-transport/tauri-verdicts'
+import { entityKeyOf } from './ipc/http'
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
 import { webServerGit } from './web-server-api'
@@ -62,7 +63,7 @@ export const gitApi = {
     isTauriContext()
       ? runInvokeCommand<void>({
           kind: 'git_stage_hunk',
-          entityKey: `${cwd}|${path}`,
+          entityKey: entityKeyOf(cwd, path),
           fresh: true,
           send: (commandId) => invoke<void>('git_stage_hunk', { cwd, path, hunkPatch, commandId })
         })
@@ -72,7 +73,7 @@ export const gitApi = {
     isTauriContext()
       ? runInvokeCommand<void>({
           kind: 'git_unstage_hunk',
-          entityKey: `${cwd}|${path}`,
+          entityKey: entityKeyOf(cwd, path),
           fresh: true,
           send: (commandId) => invoke<void>('git_unstage_hunk', { cwd, path, hunkPatch, commandId })
         })
@@ -80,7 +81,7 @@ export const gitApi = {
 
   discard: (cwd: string, path: string) =>
     isTauriContext()
-      ? ledgeredInvoke('git_discard', `${cwd}|${path}`, { cwd, path })
+      ? ledgeredInvoke('git_discard', entityKeyOf(cwd, path), { cwd, path })
       : webServerGit.discard(cwd, path),
 
   getLog: (cwd: string, limit?: number) =>
@@ -159,7 +160,7 @@ export const gitApi = {
 
   createBranch: (cwd: string, branch: string, startRef?: string) =>
     isTauriContext()
-      ? ledgeredInvoke('git_create_branch', `${cwd}|${branch}`, { cwd, branch, startRef })
+      ? ledgeredInvoke('git_create_branch', entityKeyOf(cwd, branch), { cwd, branch, startRef })
       : webServerGit.createBranch(cwd, branch, startRef),
 
   stashSave: (cwd: string, message?: string, includeUntracked?: boolean) =>
@@ -174,17 +175,17 @@ export const gitApi = {
 
   stashApply: (cwd: string, index: number) =>
     isTauriContext()
-      ? ledgeredInvoke('git_stash_apply', `${cwd}|${index}`, { cwd, index })
+      ? ledgeredInvoke('git_stash_apply', entityKeyOf(cwd, index), { cwd, index })
       : webServerGit.stashApply(cwd, index),
 
   stashPop: (cwd: string, index: number) =>
     isTauriContext()
-      ? ledgeredInvoke('git_stash_pop', `${cwd}|${index}`, { cwd, index })
+      ? ledgeredInvoke('git_stash_pop', entityKeyOf(cwd, index), { cwd, index })
       : webServerGit.stashPop(cwd, index),
 
   stashDrop: (cwd: string, index: number) =>
     isTauriContext()
-      ? ledgeredInvoke('git_stash_drop', `${cwd}|${index}`, { cwd, index })
+      ? ledgeredInvoke('git_stash_drop', entityKeyOf(cwd, index), { cwd, index })
       : webServerGit.stashDrop(cwd, index),
 
   branchList: (cwd: string) =>

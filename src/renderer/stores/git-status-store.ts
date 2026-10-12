@@ -312,8 +312,12 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     const isCurrent = () => commitContextRequests[key] === token
     try {
       const context = await gitApi.getCommitContext(cwd)
-      if (isCurrent()) {
-        await rememberHead(key, cwd, context.hasHead)
+      // A HEAD that cannot be read fails the whole fetch (the catch below drops
+      // the context, so the footer disables commit) rather than leaving a commit
+      // with no precondition.
+      const head = isCurrent() ? await readHead(cwd, context.hasHead) : undefined
+      if (isCurrent() && head !== undefined) {
+        knownHeads[key] = head
       }
       if (isCurrent()) {
         set((state) => ({
@@ -624,22 +628,16 @@ const diffRequestVersions: Record<string, number> = {}
 const commitContextRequests: Record<string, number> = {}
 
 /** Full sha of HEAD (`''`: unborn branch) as of the last commit-context fetch,
- * per tracked path: the `expectedHead` of the next commit. Absent when it could
- * not be read (the commit then carries no precondition). Control metadata. */
+ * per tracked path: the `expectedHead` of the next commit. Absent before the first
+ * successful fetch and after a failed one. Control metadata. */
 const knownHeads: Record<string, string> = {}
 
-async function rememberHead(key: string, cwd: string, hasHead: boolean): Promise<void> {
-  if (!hasHead) {
-    knownHeads[key] = ''
-    return
-  }
-  try {
-    const [head] = await gitApi.getLog(cwd, 1)
-    if (head?.hash) knownHeads[key] = head.hash
-    else delete knownHeads[key]
-  } catch {
-    delete knownHeads[key]
-  }
+/** HEAD's full sha (`''` on an unborn branch); throws when it cannot be read. */
+async function readHead(cwd: string, hasHead: boolean): Promise<string> {
+  if (!hasHead) return ''
+  const [head] = await gitApi.getLog(cwd, 1)
+  if (!head?.hash) throw new Error('HEAD could not be read')
+  return head.hash
 }
 
 function isPreconditionFailed(error: unknown): boolean {

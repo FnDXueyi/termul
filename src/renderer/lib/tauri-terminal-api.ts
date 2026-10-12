@@ -16,6 +16,7 @@ import type {
 import { Channel } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { invokeIpcCommand } from './acp-transport/tauri-verdicts'
+import { entityKeyOf } from './ipc/http'
 import { invokeIpc } from './ipc/tauri'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
 import { terminalCursorEpoch } from './terminal-cursor'
@@ -411,7 +412,11 @@ export function createTauriTerminalApi(): TerminalApi {
           // unconfirmed spawn of the same project/cwd/program made. (An in-call
           // resend still reuses its id.)
           fresh: true,
-          entityKey: `${options?.projectId ?? ''}|${options?.cwd ?? ''}|${options?.program ?? options?.shell ?? ''}`,
+          entityKey: entityKeyOf(
+            options?.projectId,
+            options?.cwd,
+            options?.program ?? options?.shell
+          ),
           onRun: (run) => {
             replayed = run.resent
           }

@@ -30,7 +30,7 @@ import {
   jitteredBackoffMs,
   RECONNECT_STABLE_MS
 } from './acp-transport/ws-transport-timing'
-import { runIpcCommand } from './ipc/http'
+import { entityKeyOf, runIpcCommand } from './ipc/http'
 import { logFrontendError } from './log-api'
 import { terminalCursorEpoch } from './terminal-cursor'
 import { randomUUID } from './uuid'
@@ -1343,7 +1343,7 @@ export function createWebTerminalApi(): TerminalApi {
         // unconfirmed spawn of the same project/cwd/program made. (An in-call
         // resend still reuses its id.)
         fresh: true,
-        entityKey: `${options.projectId ?? ''}|${options.cwd ?? ''}|${options.program ?? options.shell ?? ''}`,
+        entityKey: entityKeyOf(options.projectId, options.cwd, options.program ?? options.shell),
         send: (commandId) =>
           client.request<SpawnedTerminal>('spawn', options as Record<string, unknown>, commandId)
       })
@@ -1470,6 +1470,7 @@ export async function listPreservedAndAdoptClaims(
   for (const entry of entries) {
     if (entry?.id && entry.claim) {
       client.adoptClaim(entry.id, entry.claim)
+      client.noteTerminalProject(entry.id, projectId)
     }
   }
   // Story 5: durable boundary log — counts only; ids/claims never logged.
