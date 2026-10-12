@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { UNASSIGNED_PROJECT_ID } from './web-projects.types'
+
 import {
   isHumanRelayedCap,
   isOsFulfilledCap,
@@ -24,8 +26,8 @@ import {
 import { WEB_TERMINAL_ERROR_CODES } from './web-terminal-protocol.types'
 
 describe('web-protocol.types — event/request type registries (AC2)', () => {
-  it('exports exactly 26 event types including durable user prompts, switch markers + worktree renames', () => {
-    expect(WS_EVENT_TYPES).toHaveLength(26)
+  it('exports exactly 24 event types including durable user prompts, switch markers + worktree renames', () => {
+    expect(WS_EVENT_TYPES).toHaveLength(24)
     // The 16 from events.rs (prefix-dropped) + auth_required.
     const expected16FromEvents = [
       'agent_spawned',
@@ -51,8 +53,6 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_EVENT_TYPES).toContain('auth_required')
     // Epic-4 bridge: desktop project-list live push (agent-level, seq 0).
     expect(WS_EVENT_TYPES).toContain('projects_changed')
-    expect(WS_EVENT_TYPES).toContain('project_switch_completed')
-    expect(WS_EVENT_TYPES).toContain('project_switch_failed')
     expect(WS_EVENT_TYPES).toContain('user_prompt')
     // Epic-4 bridge: desktop chat-history live push (agent-level, seq 0).
     expect(WS_EVENT_TYPES).toContain('chat_history_changed')
@@ -69,8 +69,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_REQUEST_TYPES).toContain('get_session_payload')
   })
 
-  it('exports exactly 44 request types including warm-pool promotion and host-owned session delete', () => {
-    expect(WS_REQUEST_TYPES).toHaveLength(44)
+  it('exports exactly 43 request types including warm-pool promotion and host-owned session delete', () => {
+    expect(WS_REQUEST_TYPES).toHaveLength(43)
     const expected = [
       'send_prompt',
       'cancel_prompt',
@@ -87,7 +87,6 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       // Story 8: promote a backend-ephemeral warm-pool session to durable.
       'promote_session',
 
-      'switch_project',
       'subscribe',
       'ping',
       'list_persisted_sessions',
@@ -142,9 +141,9 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
 })
 
 describe('web-protocol.types — error codes (AC2)', () => {
-  it('exports exactly 23 stable error codes', () => {
+  it('exports exactly 22 stable error codes', () => {
     const codes = new Set(Object.values(WS_ERROR_CODES))
-    expect(codes.size).toBe(23)
+    expect(codes.size).toBe(22)
     const expected = [
       'not_found',
       'unauthorized',
@@ -155,7 +154,6 @@ describe('web-protocol.types — error codes (AC2)', () => {
       'duplicate',
       'unsupported',
       'not_implemented',
-      'no_agent',
       'agent_auth_required',
       'session_owned_by_other',
       // Versioned handshake refusals.
@@ -187,8 +185,12 @@ describe('web-protocol.types — error codes (AC2)', () => {
 
 describe('web-protocol.types — versioned handshake contract (AD-15)', () => {
   it('pins the protocol version and client id length cap shared with the Rust host', () => {
-    expect(WS_PROTOCOL_VERSION).toBe(1)
+    expect(WS_PROTOCOL_VERSION).toBe(2)
     expect(MAX_CLIENT_ID_LEN).toBe(128)
+  })
+
+  it('pins the unassigned-project sentinel shared with the Rust host', () => {
+    expect(UNASSIGNED_PROJECT_ID).toBe('__unassigned__')
   })
 
   it('WsRequest/WsReply carry the optional command_id / visible_at envelope fields', () => {
@@ -257,8 +259,6 @@ describe('web-protocol.types — reliability tier registry (AC5)', () => {
       'usage_update',
       'auth_required',
       'projects_changed',
-      'project_switch_completed',
-      'project_switch_failed',
       'worktree_branch_renamed'
     ]
     for (const type of reliable) {

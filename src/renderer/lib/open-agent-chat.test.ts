@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
-  mockIsMobile,
   mockAddAgentChatTab,
   mockMoveTabToPane,
   mockMoveTabToNewSplit,
@@ -12,7 +11,6 @@ const {
   acpRef,
   wsRef
 } = vi.hoisted(() => ({
-  mockIsMobile: vi.fn(() => false),
   mockAddAgentChatTab: vi.fn(),
   mockMoveTabToPane: vi.fn(),
   mockMoveTabToNewSplit: vi.fn(),
@@ -24,9 +22,7 @@ const {
     current: {
       sessions: {} as Record<string, { projectId: string }>,
       sessionIndex: [] as Array<{ id: string; projectId: string }>,
-      openHistorySession: undefined as unknown as typeof mockOpenHistorySession,
-      switchProject: vi.fn(async () => ({ status: 'selected' })),
-      setFailedProjectSwitch: vi.fn()
+      openHistorySession: undefined as unknown as typeof mockOpenHistorySession
     }
   },
   wsRef: {
@@ -46,7 +42,6 @@ function leavesOf(node: FakePane): FakePane[] {
   return node.type === 'leaf' ? [node] : (node.children ?? []).flatMap(leavesOf)
 }
 
-vi.mock('@/hooks/use-mobile-web-shell', () => ({ isMobileWebShellViewport: mockIsMobile }))
 vi.mock('sonner', () => ({ toast: { info: mockToastInfo, error: mockToastError } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 vi.mock('@/stores/acp-store', () => ({ useAcpStore: { getState: () => acpRef.current } }))
@@ -70,6 +65,7 @@ vi.mock('@/stores/ssh-store', () => ({
 }))
 
 import { logFrontendError } from '@/lib/log-api'
+import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
 import { openAgentChatInOwnProject, openAgentChatPlaced } from './open-agent-chat'
@@ -77,7 +73,6 @@ import { openAgentChatInOwnProject, openAgentChatPlaced } from './open-agent-cha
 describe('openAgentChatInOwnProject', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockIsMobile.mockReturnValue(false)
     acpRef.current.sessions = { 's-a': { projectId: 'pa' }, 's-b': { projectId: 'pb' } }
     acpRef.current.sessionIndex = []
     wsRef.root = { type: 'leaf', id: 'pane-1', tabs: [], activeTabId: null }
@@ -96,6 +91,13 @@ describe('openAgentChatInOwnProject', () => {
     expect(mockAddAgentChatTab).toHaveBeenCalledWith('s-unknown')
   })
 
+  it('opens a chat stamped unassigned in place (it names no project to switch to)', () => {
+    acpRef.current.sessionIndex = [{ id: 's-stray', projectId: '__unassigned__' }]
+    expect(openAgentChatInOwnProject('s-stray', 'test')).toBe('opened')
+    expect(mockAddAgentChatTab).toHaveBeenCalledWith('s-stray')
+    expect(useProjectStore.getState().activeProjectId).toBe('pa')
+  })
+
   it('switches to the owning project instead of adding the tab here', () => {
     expect(openAgentChatInOwnProject('s-b', 'test')).toBe('switched-project')
     expect(mockAddAgentChatTab).not.toHaveBeenCalled()
@@ -106,18 +108,16 @@ describe('openAgentChatInOwnProject', () => {
     expect(lifetime.focusSessionByProject.pb).toBe('s-b')
   })
 
+  it("drops the previous project's tab-focus pointer when it switches to the owner", () => {
+    setTabFocusedSessionId('s-a')
+    openAgentChatInOwnProject('s-b', 'test')
+    expect(getTabFocusedSessionId()).toBeNull()
+  })
+
   it('resolves the owner from the history index for closed chats', () => {
     acpRef.current.sessionIndex = [{ id: 's-closed', projectId: 'pb' }]
     openAgentChatInOwnProject('s-closed', 'test')
     expect(useProjectStore.getState().activeProjectId).toBe('pb')
-  })
-
-  it('switches through the server session on the phone shell', () => {
-    mockIsMobile.mockReturnValue(true)
-    expect(openAgentChatInOwnProject('s-b', 'test')).toBe('switched-project')
-    expect(acpRef.current.switchProject).toHaveBeenCalledWith('pb')
-    expect(mockAddAgentChatTab).not.toHaveBeenCalled()
-    expect(useAgentChatLifetimeStore.getState().focusSessionByProject.pb).toBe('s-b')
   })
 
   describe('with a placement', () => {
@@ -193,7 +193,6 @@ describe('openAgentChatInOwnProject', () => {
 describe('openAgentChatPlaced', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockIsMobile.mockReturnValue(false)
     acpRef.current.sessions = { 's-a': { projectId: 'pa' }, 's-b': { projectId: 'pb' } }
     acpRef.current.sessionIndex = []
     acpRef.current.openHistorySession = mockOpenHistorySession

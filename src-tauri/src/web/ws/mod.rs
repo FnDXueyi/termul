@@ -48,13 +48,16 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::acp::config::AgentConfig;
-use crate::acp::{AcpManager, AgentId, FileProjectRegistry, SessionCreationContext, SessionId};
+use crate::acp::{AcpManager, FileProjectRegistry, SessionCreationContext};
+// Only the harness and the ws tests name these (through `super::*`).
+#[cfg(test)]
+use crate::acp::{AgentId, SessionId};
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use crate::web::auth::WebAuth;
 use crate::web::capabilities::{Carrier, CapabilityPolicy};
 use crate::web::permissions::DEFAULT_PERMISSION_RECONNECT_GRACE;
-use crate::web::project_registry::{ProjectRegistry, ProjectSwitchContext};
+use crate::web::project_registry::ProjectRegistry;
 use crate::web::sink::{
     broadcast_chat_history_changed, broadcast_projects_changed, ClientId, ReplayResult, WsRelaySink,
 };
@@ -167,7 +170,7 @@ pub fn tier_of(type_: &str) -> ReliabilityTier {
 
 /// The `authenticate` protocol version this host speaks. Mirrors the TS
 /// `WS_PROTOCOL_VERSION`. Bump it on any wire-contract change (AD-15).
-pub const WS_PROTOCOL_VERSION: u32 = 1;
+pub const WS_PROTOCOL_VERSION: u32 = 2;
 
 /// Longest accepted `deviceId` / `clientInstanceId`, in bytes.
 pub const MAX_CLIENT_ID_LEN: usize = 128;
@@ -372,9 +375,6 @@ pub enum WsErrorCode {
     Duplicate,
     Unsupported,
     NotImplemented,
-    /// `switch_project` was sent on a connection with no live agent yet
-    /// (cold web tab) — the server refuses to auto-spawn. Epic-4 bridge.
-    NoAgent,
     /// The agent rejected session entry (`session/new` / `session/load` /
     /// `session/resume`) with ACP `AuthRequired` (-32000) — the user must
     /// authenticate first. Additive (Story 7): receivers that ignore unknown
@@ -437,7 +437,6 @@ impl WsErrorCode {
             Self::Duplicate => "duplicate",
             Self::Unsupported => "unsupported",
             Self::NotImplemented => "not_implemented",
-            Self::NoAgent => "no_agent",
             Self::AgentAuthRequired => "agent_auth_required",
             Self::SessionOwnedByOther => "session_owned_by_other",
             Self::ProtocolVersionMismatch => "protocol_version_mismatch",
@@ -519,7 +518,7 @@ pub struct AppState {
     /// The live WS relay sink (owns per-session logs + seq counters + subs).
     pub relay: Arc<WsRelaySink>,
     /// In-memory, renderer-fed project registry — source for `GET /projects`
-    /// + `switch_project` cwd resolution. Empty on the standalone path.
+    /// + default-project resolution. Empty on the standalone path.
     pub registry: Arc<ProjectRegistry>,
     /// Optional writable VPS file registry + configured path. Desktop shared-live
     /// passes `None`, so switching there remains file-free.
@@ -722,6 +721,8 @@ pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsR
 
 #[cfg(test)]
 mod capability_tests;
+#[cfg(test)]
+mod project_binding_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

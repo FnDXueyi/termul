@@ -1,7 +1,7 @@
 import { toast } from 'sonner'
-import { isMobileWebShellViewport } from '@/hooks/use-mobile-web-shell'
 import { sessionOwnerProjectId } from '@/lib/acp-session-ownership'
 import { logFrontendError } from '@/lib/log-api'
+import { releaseFocusNotOwnedBy } from '@/lib/release-foreign-focus'
 import { useAcpStore } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -93,20 +93,8 @@ export function openAgentChatInOwnProject(
     source,
     message: `Opening chat ${sessionId} switches project ${activeProjectId} -> ${owner}`
   })
-  if (isMobileWebShellViewport()) {
-    // The phone shell switches through the shared server session (parity
-    // with its project sheet); it selects the project locally on success.
-    void acp.switchProject(owner).catch((error: unknown) => {
-      acp.setFailedProjectSwitch(owner)
-      void logFrontendError({
-        level: 'warn',
-        source,
-        message: `Project switch to ${owner} for chat ${sessionId} failed: ${String(error)}`
-      })
-    })
-    return 'switched-project'
-  }
-  // Desktop / desktop-style web: same as the sidebar's project select.
+  // Same as the sidebar's project select (client-only on every surface).
+  releaseFocusNotOwnedBy(owner)
   useProjectStore.getState().selectProject(owner)
   useSSHStore.getState().selectProfile(null)
   return 'switched-project'
