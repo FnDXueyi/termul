@@ -4,6 +4,7 @@ import { type KeyboardEvent, useCallback, useEffect, useState } from 'react'
 import { WorktreeCreationCard } from '@/components/chat/WorktreeCreationCard'
 import { AlertTriangle, GitBranch, Link2, Search, Terminal, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Spinner } from '@/components/ui/spinner'
 import { toast } from '@/hooks/use-toast'
 import { worktreeApi } from '@/lib/api'
@@ -410,7 +411,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
                   type="text"
                   value={project.name}
                   readOnly
-                  className="w-full bg-secondary/50 border border-border rounded px-3 py-1.5 text-sm text-muted-foreground cursor-not-allowed"
+                  className={`w-full bg-secondary/50 border border-border rounded px-3 py-1.5 text-sm text-muted-foreground cursor-not-allowed ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
 
@@ -422,7 +423,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
                   value={worktreeName}
                   onChange={(e) => setWorktreeName(e.target.value)}
                   placeholder="e.g. try-new-hero"
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 />
                 <p className="text-3xs text-muted-foreground mt-0.5">
                   A separate place to work. Your main project stays untouched.
@@ -500,7 +501,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
                               value={branchSearch}
                               onChange={(e) => setBranchSearch(e.target.value)}
                               placeholder="Search branches..."
-                              className="w-full bg-secondary border border-border rounded pl-7 pr-3 py-1 text-xs text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                              className={`w-full bg-secondary border border-border rounded pl-7 pr-3 py-1 text-xs text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                             />
                           </div>
                           {/* Remote toggle */}
@@ -564,7 +565,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
                           placeholder={
                             worktreeName ? sanitizeBranchName(worktreeName) : 'feature/my-feature'
                           }
-                          className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                          className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                         />
                         <p className="text-3xs text-muted-foreground mt-0.5">
                           {newBranchName && sanitizeBranchName(newBranchName) !== newBranchName
@@ -582,7 +583,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
                           value={startRef}
                           onChange={(e) => setStartRef(e.target.value)}
                           placeholder="HEAD, main, or a commit hash"
-                          className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                          className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                         />
                         <p className="text-3xs text-muted-foreground mt-0.5">
                           Defaults to HEAD if not specified

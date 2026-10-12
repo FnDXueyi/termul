@@ -9,6 +9,7 @@ import {
   useState
 } from 'react'
 import { MoreHorizontal, Search } from '@/components/icons'
+import { INNER_FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import type { SessionConfigOption, SessionUsage } from '@/lib/acp-api'
 import type { SupportedAcpAgentEntry } from '@/lib/agents/supported-acp-agents'
 import { cn } from '@/lib/utils'
@@ -504,7 +505,7 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
 
   return (
     <div data-testid="agent-model-selector-panel" className={cn('flex flex-col', !touch && 'w-80')}>
-      <div className={cn('flex items-center gap-2', touch ? 'h-12 px-5' : 'h-10 px-3')}>
+      <div className={cn('peer flex items-center gap-2', touch ? 'h-12 px-5' : 'h-10 px-3')}>
         <Search
           size={touch ? 16 : 14}
           aria-hidden="true"
@@ -523,7 +524,7 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
           placeholder="Search models…"
           aria-label="Search models and agents"
           className={cn(
-            'min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground',
+            `min-w-0 flex-1 bg-transparent text-foreground placeholder:text-muted-foreground ${INNER_FIELD_FOCUS_CLASS}`,
             touch ? 'text-base' : 'text-sm'
           )}
         />
@@ -531,7 +532,7 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
           <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{resultCount}</span>
         ) : null}
       </div>
-      <div className="h-px bg-border" />
+      <div className="h-px bg-border transition-colors duration-150 ease-out peer-focus-within:bg-ring" />
       {showTabs ? (
         <div className={cn(pad, touch ? 'pt-2' : 'pt-1')}>
           <SegmentedTrack

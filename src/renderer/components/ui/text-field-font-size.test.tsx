@@ -1,8 +1,15 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { readFileSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { cn } from '@/lib/utils'
+import {
+  findRawTagStarts,
+  findTextFieldTags,
+  listSourceFiles,
+  type RawFieldTag,
+  toRootPath
+} from './__tests__/raw-field-source'
 import { Command, CommandInput } from './command'
 import { Input } from './input'
 import { PANEL_FIELD_CLASS } from './panel-styles'
@@ -90,62 +97,10 @@ interface AllowRule {
   tagIncludes?: string
 }
 
-interface Offender {
-  line: number
-  tag: string
-}
-
-const NON_TEXT_TYPES = new Set([
-  'checkbox',
-  'radio',
-  'range',
-  'file',
-  'hidden',
-  'button',
-  'submit',
-  'reset',
-  'image',
-  'color'
-])
-
-/** A tag at the start of a line, or right after `&&`, `?`, `:`, `=>` or `(` in a JSX expression. */
-const TAG_START = /(?:^[ \t]*|(?:&&|\?|:|=>|\()[ \t]*)<(?:input|textarea|select)(?![\w-])/gm
 const POINTER_TOKEN = /(?<![\w:-])pointer-coarse:text-base(?![\w-])/
 const PLAIN_TEXT_BASE = /(?<![\w:-])text-base(?![\w-])/
 /** A breakpoint that drops a `text-base` field back under 16px: a landscape phone hits `md:text-sm`. */
 const BREAKPOINT_DOWNSIZE = /(?<![\w-])(?:sm|md|lg|xl|2xl):text-(?:xs|sm)(?![\w-])/
-const LITERAL_TYPE = /(?<![\w-])type=(?:"([^"]*)"|'([^']*)'|\{\s*["']([^"']*)["']\s*\})/
-
-/** Reads one opening tag from its `<` to its closing `>`, skipping `{}` bodies, quotes and comments. */
-function readTag(source: string, start: number): string {
-  let depth = 0
-  let quote: string | null = null
-  for (let i = start; i < source.length; i++) {
-    const char = source[i]
-    if (quote) {
-      if (char === '\\') i++
-      else if (char === quote) quote = null
-      continue
-    }
-    if (char === '/' && source[i + 1] === '/') {
-      const end = source.indexOf('\n', i)
-      if (end === -1) break
-      i = end
-      continue
-    }
-    if (char === '/' && source[i + 1] === '*') {
-      const end = source.indexOf('*/', i + 2)
-      if (end === -1) break
-      i = end + 1
-      continue
-    }
-    if (char === '"' || char === "'" || char === '`') quote = char
-    else if (char === '{') depth++
-    else if (char === '}') depth--
-    else if (char === '>' && depth === 0 && source[i - 1] !== '=') return source.slice(start, i + 1)
-  }
-  return source.slice(start)
-}
 
 /**
  * 16px on a coarse pointer: the `pointer-coarse:text-base` token, a plain `text-base` that no
@@ -166,20 +121,12 @@ function isSixteenPx(tag: string): boolean {
  * after a JSX expression opener, so comments and strings never match; the uppercase primitives are
  * covered by the tests above.
  */
-function findOffenders(source: string, allow: readonly AllowRule[] = []): Offender[] {
-  const offenders: Offender[] = []
-  for (const match of source.matchAll(TAG_START)) {
-    const start = match.index + match[0].indexOf('<')
-    const tag = readTag(source, start)
-    const type = LITERAL_TYPE.exec(tag)
-    if (type && NON_TEXT_TYPES.has(type[1] ?? type[2] ?? type[3])) continue
-    if (isSixteenPx(tag)) continue
-    if (allow.some((rule) => rule.tagIncludes === undefined || tag.includes(rule.tagIncludes))) {
-      continue
-    }
-    offenders.push({ line: source.slice(0, start).split('\n').length, tag })
-  }
-  return offenders
+function findOffenders(source: string, allow: readonly AllowRule[] = []): RawFieldTag[] {
+  return findTextFieldTags(source).filter(
+    ({ tag }) =>
+      !isSixteenPx(tag) &&
+      !allow.some((rule) => rule.tagIncludes === undefined || tag.includes(rule.tagIncludes))
+  )
 }
 
 describe('findOffenders', () => {
@@ -243,6 +190,20 @@ describe('findOffenders', () => {
     expect(
       findOffenders("<input type={secret ? 'password' : 'text'} className=\"text-sm\" />")
     ).toHaveLength(1)
+  })
+
+  it('finds a tag after return or another tag, and ignores a type mentioned in another attribute', () => {
+    expect(findOffenders('return <input className="text-sm" />')).toHaveLength(1)
+    expect(findOffenders('<div><input className="text-sm" /></div>')).toHaveLength(1)
+    expect(
+      findOffenders(
+        'return (\n  <div>\n    <p>Don\'t skip</p>\n    <input className="text-sm" />\n  </div>\n)'
+      )
+    ).toHaveLength(1)
+    expect(findOffenders('const value = useState<string>("")')).toEqual([])
+    expect(findOffenders('<input placeholder="type=checkbox" className="text-sm" />')).toHaveLength(
+      1
+    )
   })
 
   it('ignores commented-out tags', () => {
@@ -348,18 +309,7 @@ const DESKTOP_ONLY: ReadonlyArray<AllowRule & { file: string; reason: string }> 
 
 const RENDERER_ROOT = join(__dirname, '..', '..')
 
-function listSourceFiles(dir: string): string[] {
-  const files: string[] = []
-  for (const name of readdirSync(dir).sort()) {
-    if (name === 'node_modules') continue
-    const path = join(dir, name)
-    if (statSync(path).isDirectory()) files.push(...listSourceFiles(path))
-    else if (name.endsWith('.tsx') && !name.endsWith('.test.tsx')) files.push(path)
-  }
-  return files
-}
-
-const toRendererPath = (path: string): string => relative(RENDERER_ROOT, path).split(sep).join('/')
+const toRendererPath = (path: string): string => toRootPath(RENDERER_ROOT, path)
 
 describe('raw text fields in the renderer', () => {
   it('every allowlisted file exists', () => {
@@ -375,7 +325,7 @@ describe('raw text fields in the renderer', () => {
       const file = toRendererPath(path)
       const source = readFileSync(path, 'utf8')
       const allow = DESKTOP_ONLY.filter((entry) => entry.file === file)
-      scanned += [...source.matchAll(TAG_START)].length
+      scanned += findRawTagStarts(source).length
       for (const { line } of findOffenders(source, allow)) {
         report.push(`src/renderer/${file}:${line}`)
       }

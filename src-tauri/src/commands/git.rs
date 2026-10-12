@@ -1,6 +1,10 @@
 use super::{validate_project_path, IpcResult};
+use crate::acp::destructive_guard::{ensure_no_active_turn_in_checkout, start_ref_rewrites_tree};
+use crate::acp::AcpManager;
 use crate::trackers::git_tracker::{DiffStatError, GitDiffStat};
 use crate::trackers::{GitCommit, GitStatusDetail};
+use std::sync::Arc;
+use tauri::State;
 
 // ==================== Git Commands ====================
 
@@ -144,14 +148,30 @@ pub async fn git_init(cwd: String) -> Result<(), String> {
     .map_err(|e| format!("git init task failed: {e}"))?
 }
 
-/// Check out an existing local or remote-tracking branch.
+/// Check out an existing local or remote-tracking branch. Refused with a
+/// `destructive_op_blocked: …` error while a session working inside the work
+/// tree is mid-turn (identical text on the HTTP route).
 #[tauri::command]
 pub async fn git_checkout_branch(
+    manager: State<'_, Arc<AcpManager>>,
     cwd: String,
     branch: String,
     is_remote: Option<bool>,
 ) -> Result<(), String> {
-    let is_remote = is_remote.unwrap_or(false);
+    checkout_branch_guarded(&manager, cwd, branch, is_remote.unwrap_or(false)).await
+}
+
+/// Body of [`git_checkout_branch`] (guard, then checkout) taking the manager
+/// directly so tests can drive the desktop entry point without a Tauri app.
+pub(crate) async fn checkout_branch_guarded(
+    acp: &AcpManager,
+    cwd: String,
+    branch: String,
+    is_remote: bool,
+) -> Result<(), String> {
+    ensure_no_active_turn_in_checkout(acp, std::path::Path::new(&cwd))
+        .await
+        .map_err(|blocked| blocked.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::trackers::git_tracker::git_checkout_branch(&cwd, &branch, is_remote)
     })
@@ -160,12 +180,32 @@ pub async fn git_checkout_branch(
 }
 
 /// Create a new branch from `start_ref` (defaults to HEAD) and check it out.
+/// A start ref other than HEAD is refused with `destructive_op_blocked: …`
+/// while a session working inside the work tree is mid-turn.
 #[tauri::command]
 pub async fn git_create_branch(
+    manager: State<'_, Arc<AcpManager>>,
     cwd: String,
     branch: String,
     start_ref: Option<String>,
 ) -> Result<(), String> {
+    create_branch_guarded(&manager, cwd, branch, start_ref).await
+}
+
+/// Body of [`git_create_branch`], see [`checkout_branch_guarded`].
+pub(crate) async fn create_branch_guarded(
+    acp: &AcpManager,
+    cwd: String,
+    branch: String,
+    start_ref: Option<String>,
+) -> Result<(), String> {
+    // Branching from HEAD leaves the work tree alone; branching from another
+    // `start_ref` checks that ref out, which rewrites it.
+    if start_ref_rewrites_tree(start_ref.as_deref()) {
+        ensure_no_active_turn_in_checkout(acp, std::path::Path::new(&cwd))
+            .await
+            .map_err(|blocked| blocked.to_string())?;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         crate::trackers::git_tracker::git_create_branch(&cwd, &branch, start_ref.as_deref())
     })
@@ -365,9 +405,27 @@ pub async fn git_branch_list(cwd: String) -> Result<Vec<String>, String> {
     .map_err(|e| format!("git branch list task failed: {e}"))?
 }
 
+/// `git checkout <name>`. Refused with a `destructive_op_blocked: …` error
+/// while a session working inside the work tree is mid-turn.
 #[tauri::command]
-pub async fn git_branch_switch(cwd: String, name: String) -> Result<(), String> {
+pub async fn git_branch_switch(
+    manager: State<'_, Arc<AcpManager>>,
+    cwd: String,
+    name: String,
+) -> Result<(), String> {
+    branch_switch_guarded(&manager, cwd, name).await
+}
+
+/// Body of [`git_branch_switch`], see [`checkout_branch_guarded`].
+pub(crate) async fn branch_switch_guarded(
+    acp: &AcpManager,
+    cwd: String,
+    name: String,
+) -> Result<(), String> {
     let validated = validate_project_path(&cwd)?;
+    ensure_no_active_turn_in_checkout(acp, &validated)
+        .await
+        .map_err(|blocked| blocked.to_string())?;
     let validated_str = validated
         .to_str()
         .ok_or_else(|| "Path contains invalid UTF-8".to_string())?
@@ -412,3 +470,6 @@ pub async fn git_branch_create(cwd: String, name: String) -> Result<(), String> 
     .await
     .map_err(|e| format!("git branch create task failed: {e}"))?
 }
+
+#[cfg(test)]
+mod guard_tests;

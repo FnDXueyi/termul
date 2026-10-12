@@ -10,7 +10,7 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// Outbound frame on a connection's write loop (event or reply).
-pub(super) enum Outbound {
+pub(crate) enum Outbound {
     /// A sequenced event (server→client push).
     Event(SequencedEvent),
     /// A reply to a client request.
@@ -45,11 +45,19 @@ pub(super) fn auth_required_event() -> SequencedEvent {
 /// first-frame `authenticate` handling (`handle_request`), so a wrong token
 /// gets a structured `unauthorized` reply instead of a failed handshake. The
 /// default bind stays localhost per `web/config.rs`.
-pub async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+///
+/// The peer address (`ConnectInfo`) feeds the connection's capabilities,
+/// resolved at `authenticate`; the router MUST be served with
+/// `into_make_service_with_connect_info::<SocketAddr>()`.
+pub async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
     // The first frame is auth_required; the gate (when active) is enforced on
     // the `authenticate` request, not at upgrade time.
     ws.on_upgrade(move |socket| async move {
-        run_relay(socket, state).await;
+        run_relay(socket, state, peer).await;
     })
 }
 
@@ -137,7 +145,7 @@ pub(super) fn handle_lifecycle_signal(text: &str, authed: bool, backgrounded: &A
 /// Generic over the carrier so a host-level fault harness can drive the exact
 /// production loop over an in-memory duplex; axum's `WebSocket` satisfies
 /// both bounds, so the production path is unchanged.
-pub(super) async fn run_relay<S>(socket: S, state: AppState)
+pub(super) async fn run_relay<S>(socket: S, state: AppState, peer: SocketAddr)
 where
     S: Stream<Item = Result<Message, axum::Error>>
         + Sink<Message, Error = axum::Error>
@@ -170,7 +178,8 @@ where
     let web_auth = state.web_auth.clone();
     // Client ids registered via `subscribe` — unregistered on disconnect.
     let subscribed_clients = Arc::new(tokio::sync::Mutex::new(Vec::<(String, ClientId)>::new()));
-    let cleanup = ConnectionCleanup::new(Arc::clone(&relay), Arc::clone(&subscribed_clients));
+    let cleanup = ConnectionCleanup::new(Arc::clone(&relay), Arc::clone(&subscribed_clients))
+        .with_watch_conn(out_tx.clone());
     // Per-connection tracking for `switch_project` (Ask-First resolution): the
     // last agent + session this connection used. `switch_project` reuses the
     // agent rather than auto-spawning; a cold tab (no agent yet) → `NO_AGENT`.
@@ -344,8 +353,13 @@ where
     let read_backgrounded = Arc::clone(&backgrounded);
     let read_subscribed_clients = Arc::clone(&subscribed_clients);
     let read_relay = Arc::clone(&relay);
+    let capability_policy = CapabilityPolicy::for_connection(Carrier::Ws, peer, &state);
     let mut read_task = tokio::spawn(async move {
         let mut authed = false;
+        // Capabilities + presence registration live and die with this task
+        // (dropped on completion or abort), so presence is removed exactly
+        // when the connection goes away.
+        let mut access = ConnectionAccess::new(capability_policy);
         // Validated `authenticate` identity (AD-4), recorded once per
         // connection; later slices key presence and write stamps off it.
         let mut identity: Option<ClientIdentity> = None;
@@ -389,6 +403,7 @@ where
                         &t,
                         &mut authed,
                         &mut identity,
+                        &mut access,
                         web_auth.as_deref(),
                         &acp,
                         &read_relay,
@@ -446,8 +461,11 @@ where
         }
     });
 
-    // Drop the original sender so the write loop ends when the read task
-    // (which owns the only remaining sender clone) finishes.
+    // Drop the original sender. The read task and `ConnectionCleanup` (for its
+    // fs-watch identity) still hold clones, so the write loop does NOT end by
+    // channel close: the `select!` below aborts whichever task loses, and
+    // `cleanup.run()` then releases the clones. Never keep an `out_tx` clone
+    // alive past that cleanup.
     drop(out_tx);
     // Patch L: the `tokio::select!` completes the WINNING branch's JoinHandle
     // (it is polled to completion inside select). Re-awaiting the winner
@@ -471,6 +489,9 @@ where
 pub(super) struct ConnectionCleanup {
     relay: Arc<WsRelaySink>,
     subscribed_clients: Arc<tokio::sync::Mutex<Vec<(String, ClientId)>>>,
+    /// This connection's outbound channel, the identity its `watch_project`
+    /// subscriptions are keyed by; released with the rest of the cleanup.
+    watch_conn: Option<mpsc::UnboundedSender<Outbound>>,
     state: Arc<std::sync::atomic::AtomicU8>,
 }
 
@@ -482,7 +503,21 @@ impl ConnectionCleanup {
         Self {
             relay,
             subscribed_clients,
+            watch_conn: None,
             state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        }
+    }
+
+    pub(super) fn with_watch_conn(mut self, conn: mpsc::UnboundedSender<Outbound>) -> Self {
+        self.watch_conn = Some(conn);
+        self
+    }
+
+    /// Drop this connection's per-project fs watch subscriptions (sync; safe
+    /// from `Drop` outside a runtime).
+    fn release_watches(&self) {
+        if let Some(conn) = &self.watch_conn {
+            self.relay.fs_watches().unsubscribe_all(conn);
         }
     }
 
@@ -494,6 +529,7 @@ impl ConnectionCleanup {
         {
             return;
         }
+        self.release_watches();
         let relay = Arc::clone(&self.relay);
         let subscribed_clients = Arc::clone(&self.subscribed_clients);
         let state = Arc::clone(&self.state);
@@ -514,6 +550,7 @@ impl Drop for ConnectionCleanup {
         {
             return;
         }
+        self.release_watches();
         let relay = Arc::clone(&self.relay);
         let subscribed_clients = Arc::clone(&self.subscribed_clients);
         let state = Arc::clone(&self.state);
@@ -536,6 +573,7 @@ pub(super) async fn dispatch_connection_text(
     text: &str,
     authed: &mut bool,
     identity: &mut Option<ClientIdentity>,
+    access: &mut ConnectionAccess,
     web_auth: Option<&WebAuth>,
     acp: &Arc<AcpManager>,
     relay: &Arc<WsRelaySink>,
@@ -554,6 +592,13 @@ pub(super) async fn dispatch_connection_text(
     store: Option<&Arc<WebStore>>,
 ) -> bool {
     if let Some((id, payload)) = authenticated_send_prompt(text, *authed) {
+        // The fast path bypasses `handle_request`, so it runs the same
+        // required-capability check.
+        if let Some(reply) =
+            forbidden_reply(&id, "send_prompt", &payload, access, identity.as_ref())
+        {
+            return write_tx.send(Outbound::Reply(reply)).is_ok();
+        }
         return match accept_send_prompt(id, &payload, acp, relay).await {
             Ok(accepted) => {
                 let prompt_acp = Arc::clone(acp);
@@ -573,6 +618,7 @@ pub(super) async fn dispatch_connection_text(
         text,
         authed,
         identity,
+        access,
         web_auth,
         acp,
         relay,

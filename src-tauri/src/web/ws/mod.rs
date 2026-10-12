@@ -32,13 +32,14 @@
 //! binds the connection to a session log with optional `lastSeq` cursor
 //! replay. Unknown request types return `err.code: "not_implemented"`.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,7 @@ use crate::acp::{AcpManager, AgentId, FileProjectRegistry, SessionCreationContex
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use crate::web::auth::WebAuth;
+use crate::web::capabilities::{Carrier, CapabilityPolicy};
 use crate::web::permissions::DEFAULT_PERMISSION_RECONNECT_GRACE;
 use crate::web::project_registry::{ProjectRegistry, ProjectSwitchContext};
 use crate::web::sink::{
@@ -58,6 +60,7 @@ use crate::web::sink::{
 };
 use crate::web::store::WebStore;
 
+mod access;
 mod agents;
 mod dispatch;
 mod lifecycle;
@@ -67,10 +70,12 @@ mod relay;
 mod sessions;
 mod store;
 mod subscribe;
+mod watch;
 
 // Handler submodules expose their items as `pub(super)`; these private
 // glob re-exports keep bare-name lookups working for sibling submodules and
 // for `tests.rs`' `use super::*` without widening visibility past `ws`.
+use access::*;
 use agents::*;
 use dispatch::*;
 use lifecycle::*;
@@ -80,9 +85,11 @@ use relay::*;
 use sessions::*;
 use store::*;
 use subscribe::*;
+use watch::*;
 
 // The wire-contract `pub` surface stays reachable at `web::ws::*`.
 pub use relay::{ws_upgrade, AUTH_REQUIRED_TYPE, WS_BATCH_TYPE};
+pub(crate) use relay::Outbound;
 
 // ---------------------------------------------------------------------------
 // Sequenced event — the wire envelope (AC2 + AC3)
@@ -406,6 +413,14 @@ pub enum WsErrorCode {
     /// Reserved: the upstream provider rejected the request with a 4xx class
     /// error.
     ProviderRequestRejected,
+    /// The connection lacks the capability the request needs (view-only
+    /// connection attempting a mutation outside `device/<deviceId>/`).
+    Forbidden,
+    /// `respond_permission` / `answer_question` named a ticket that was
+    /// already resolved (by this or another connection, a timeout or a
+    /// disconnect deny). Tombstones are bounded: an older ticket reads
+    /// `stale`.
+    AlreadyResolved,
 }
 
 impl WsErrorCode {
@@ -434,6 +449,8 @@ impl WsErrorCode {
             Self::ProviderQuotaExceeded => "provider_quota_exceeded",
             Self::ProviderSessionLimit => "provider_session_limit",
             Self::ProviderRequestRejected => "provider_request_rejected",
+            Self::Forbidden => "forbidden",
+            Self::AlreadyResolved => "already_resolved",
         }
     }
 }
@@ -555,29 +572,6 @@ pub struct AppState {
     /// sets this `false` (its `--allow-remote-writes` opt-in is the
     /// admission path there). Closes the cloudflared loopback bypass.
     pub shared_live_writes_denied: bool,
-    /// PR-S4 / CAP-1: the project-root boundary for the routes that enforce it
-    /// (`/git/*`, `/skills`, `/search/content` via
-    /// `git_api::ensure_within_project_boundary`). The `/fs/*` routes are
-    /// intentionally NOT confined to this root (ADR-007 breadth); they reject
-    /// only `..` traversal (`PATH_TRAVERSAL`), not paths outside the root.
-    /// On the desktop shared-live path it is
-    /// derived from the `ProjectRegistry`'s default (active) project at start,
-    /// falling back to the user home dir when the registry is empty or its
-    /// default project path is invalid (fails canonicalization); on the
-    /// standalone `termul-server` path it comes from
-    /// `ServerConfig::project_root` (the `--project-root` CLI flag or the
-    /// env/home default).
-    ///
-    /// **CAP-1 (live rebind):** wrapped in `Arc<parking_lot::RwLock<PathBuf>>`
-    /// so switching the active project (via `remote_sync_projects` /
-    /// `set_default_project`) updates the boundary in place without a server
-    /// restart. The same `Arc` handle is registered with the
-    /// `ProjectRegistry` (see `set_project_root_handle`) so the registry's
-    /// `set` / `set_default_project` mutators recompute the canonical path
-    /// from the new default and write it here. Read sites lock-read the guard
-    /// for the duration of the `starts_with` containment check (no `.await`
-    /// under the guard).
-    pub project_root: Arc<parking_lot::RwLock<std::path::PathBuf>>,
     /// Pending MCP OAuth flows keyed by server URL. Used by the web OAuth
     /// callback route to complete the token exchange after the browser
     /// redirect. The desktop path doesn't use this (it runs the full flow
@@ -726,6 +720,8 @@ pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsR
     }
 }
 
+#[cfg(test)]
+mod capability_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

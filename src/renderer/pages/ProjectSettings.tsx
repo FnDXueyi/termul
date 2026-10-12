@@ -23,7 +23,7 @@ import {
 } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { Button } from '@/components/ui/button'
-import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
+import { FOCUS_RING_CLASS, PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
@@ -568,7 +568,7 @@ export function ProjectSettingsModal() {
                               setHasChanges(true)
                             }}
                             placeholder="KEY"
-                            className="w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono text-primary focus:ring-0 px-2 py-1"
+                            className={`w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono text-primary rounded px-2 py-1 ${FOCUS_RING_CLASS}`}
                           />
                         </div>
                         <div className="bg-card p-2 relative group">
@@ -583,7 +583,7 @@ export function ProjectSettingsModal() {
                             }}
                             placeholder="Value"
                             className={cn(
-                              'w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono focus:ring-0 px-2 py-1',
+                              `w-full bg-transparent border-none text-sm pointer-coarse:text-base font-mono rounded px-2 py-1 ${FOCUS_RING_CLASS}`,
                               envVar.isSecret ? 'text-muted-foreground' : 'text-success'
                             )}
                           />

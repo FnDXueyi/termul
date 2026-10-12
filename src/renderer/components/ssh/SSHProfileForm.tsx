@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { FolderOpen, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { dialogApi } from '@/lib/api'
 import { useSSHActions } from '@/stores/ssh-store'
 
@@ -115,7 +116,7 @@ export function SSHProfileForm({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="My Server"
-              className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+              className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
             />
           </div>
 
@@ -128,7 +129,7 @@ export function SSHProfileForm({
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
                 placeholder="192.168.1.100 or example.com"
-                className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+                className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
               />
             </div>
             <div className="w-20">
@@ -139,7 +140,7 @@ export function SSHProfileForm({
                 onChange={(e) => setPort(Number(e.target.value))}
                 min={1}
                 max={65535}
-                className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+                className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
               />
             </div>
           </div>
@@ -152,7 +153,7 @@ export function SSHProfileForm({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="root"
-              className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+              className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
             />
           </div>
 
@@ -162,7 +163,7 @@ export function SSHProfileForm({
             <select
               value={authMethod}
               onChange={(e) => setAuthMethod(e.target.value as SSHAuthMethod)}
-              className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+              className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
             >
               <option value="key">Private Key</option>
               <option value="password">Password</option>
@@ -180,7 +181,7 @@ export function SSHProfileForm({
                   value={privateKeyPath}
                   onChange={(e) => setPrivateKeyPath(e.target.value)}
                   placeholder="~/.ssh/id_rsa"
-                  className="flex-1 px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+                  className={`flex-1 px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
                 />
                 <button
                   type="button"
@@ -205,7 +206,7 @@ export function SSHProfileForm({
                 placeholder={
                   profile?.hasStoredPassphrase ? '••••••••' : 'Leave empty if no passphrase'
                 }
-                className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+                className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
               />
               {profile?.hasStoredPassphrase && (
                 <p className="mt-1 text-3xs text-muted-foreground">
@@ -224,7 +225,7 @@ export function SSHProfileForm({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={profile?.hasStoredPassword ? '••••••••' : 'Enter password'}
-                className="mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-ring"
+                className={`mt-1 w-full px-3 py-1.5 text-sm bg-muted border border-border rounded ${FIELD_FOCUS_CLASS}`}
               />
               <p className="mt-1 text-3xs text-muted-foreground">
                 {profile?.hasStoredPassword

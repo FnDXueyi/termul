@@ -22,7 +22,14 @@
 use std::collections::BTreeMap;
 use std::io::BufRead;
 
-use axum::{extract::Query, extract::State, http::StatusCode, response::IntoResponse, Json};
+use std::net::SocketAddr;
+
+use axum::{
+    extract::{ConnectInfo, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use serde::Deserialize;
 
 use crate::commands::search_dirs::start_dir_search;
@@ -32,7 +39,7 @@ use crate::commands::{
     FileSearchMatch, FileSearchResponse, FileSearchResult, RgInfoResponse,
     SearchContentCancelRequest, SearchContentRequest, SearchFileHit, MAX_SEARCH_QUERY_LEN,
 };
-use crate::web::fs_api::IpcBody;
+use crate::web::fs_api::{check_local_only, IpcBody};
 use crate::web::git_api::ensure_within_project_boundary;
 use crate::web::ws::AppState;
 
@@ -136,23 +143,15 @@ pub async fn content(
             );
         }
     };
-    // CAP-1: lock-read the live boundary (may have been rebound by a project
-    // switch). Scope the guard in a block so it is provably dropped before the
-    // `spawn_blocking` `.await` (the guard is `!Send` — keeping it alive across
-    // an `.await` would make the handler future `!Send`, failing axum's
-    // `Handler` trait). CAP-2: also check all registered project roots so a
-    // web client that switched to a non-default project can search.
-    let outside_err = {
-        let project_root = state.project_root.read();
-        crate::web::git_api::ensure_within_project_boundary::<FileSearchResponse>(
-            &canonical_root,
-            &project_root,
-            &state.registry,
-        )
-    };
-    if let Some(err) = outside_err {
+    // Registry boundary: the search root must be inside ANY registered,
+    // non-archived project (cached canonical roots; no lock is held across
+    // the `.await` below).
+    if let Some(err) = crate::web::git_api::ensure_within_project_boundary::<FileSearchResponse>(
+        &canonical_root,
+        &state.registry,
+    ) {
         tracing::warn!(
-            "[Security] Content search rejected: root '{}' outside project_root",
+            "[Security] Content search rejected: root '{}' outside every registered project",
             canonical_root.display()
         );
         return (StatusCode::OK, Json(err));
@@ -369,19 +368,13 @@ pub async fn file_names(
         }
     };
     // Same live-boundary check as `/search/content` (see the comment there):
-    // accepts the default `project_root` or any registered, non-archived
-    // project root; rejects `OUTSIDE_PROJECT_ROOT` otherwise.
-    let outside_err = {
-        let project_root = state.project_root.read();
-        ensure_within_project_boundary::<FileNameSearchResponse>(
-            &canonical_root,
-            &project_root,
-            &state.registry,
-        )
-    };
-    if let Some(err) = outside_err {
+    // accepts any registered, non-archived project root; rejects
+    // `OUTSIDE_PROJECT_ROOT` otherwise.
+    if let Some(err) =
+        ensure_within_project_boundary::<FileNameSearchResponse>(&canonical_root, &state.registry)
+    {
         tracing::warn!(
-            "[Security] File name search rejected: root outside project_root (len {})",
+            "[Security] File name search rejected: root outside every registered project (len {})",
             canonical_root.display().to_string().len()
         );
         return (StatusCode::OK, Json(err));
@@ -596,9 +589,20 @@ pub struct FileNameSearchResponse {
 /// functional once the deferred streaming `/search/ws` endpoint lands and
 /// registers its streaming rg children. Left wired now for protocol parity.
 pub async fn cancel(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<SearchContentCancelRequest>,
 ) -> impl IntoResponse {
+    // Cancelling kills a host `rg` child — a host-state side effect, so it
+    // takes the shared write predicate like every other write route.
+    if let Some(forbidden) = check_local_only::<()>(
+        peer,
+        state.allow_remote_writes,
+        state.shared_live_writes_denied,
+        "/search/cancel",
+    ) {
+        return (StatusCode::OK, Json(forbidden));
+    }
     let search_id = req.search_id;
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut guard = search_processes().lock().map_err(|e| e.to_string())?;

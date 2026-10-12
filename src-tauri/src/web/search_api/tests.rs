@@ -1,6 +1,5 @@
 use super::*;
 use crate::acp::AcpManager;
-use crate::web::project_registry::ProjectRegistry;
 use crate::web::sink::WsRelaySink;
 use crate::web::test_pty_manager;
 use axum::body::Body;
@@ -61,15 +60,14 @@ fn test_state() -> AppState {
         exit_code_tracker: pty.exit_code_tracker(),
         pty,
         relay: Arc::new(WsRelaySink::new()),
-        registry: Arc::new(ProjectRegistry::new()),
+        registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
+            &std::env::temp_dir()
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::temp_dir()),
+        ),
         registry_persistence: None,
         projects_file: None,
         history_mode: crate::web::ws::HistoryMode::LiveOnly,
-        project_root: Arc::new(parking_lot::RwLock::new(
-            std::env::temp_dir()
-                .canonicalize()
-                .unwrap_or_else(|_| std::env::temp_dir()),
-        )),
         workspace_manifest: None,
         acp_catalog: None,
         acp_install: None,
@@ -111,6 +109,16 @@ async fn post_json(
     uri: &str,
     body: &serde_json::Value,
 ) -> axum::http::Response<Body> {
+    post_json_from(state, uri, body, std::net::SocketAddr::from(([127, 0, 0, 1], 54321))).await
+}
+
+/// POST JSON as `peer` (the write routes need `ConnectInfo`).
+async fn post_json_from(
+    state: AppState,
+    uri: &str,
+    body: &serde_json::Value,
+    peer: std::net::SocketAddr,
+) -> axum::http::Response<Body> {
     let bytes = serde_json::to_vec(body).expect("serialize body");
     test_router(state)
         .oneshot(
@@ -118,6 +126,7 @@ async fn post_json(
                 .method("POST")
                 .uri(uri)
                 .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(peer))
                 .body(Body::from(bytes))
                 .expect("build request"),
         )
@@ -179,6 +188,24 @@ async fn cancel_unknown_search_id_returns_success() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: IpcBody<()> = body_as_json(resp.into_body()).await;
     assert!(body.success, "cancel of unknown id should succeed");
+}
+
+#[tokio::test]
+async fn cancel_is_refused_for_a_view_only_peer() {
+    let req = serde_json::json!({ "searchId": "any-id" });
+    let remote = std::net::SocketAddr::from(([192, 168, 1, 50], 40000));
+    let resp = post_json_from(test_state(), "/search/cancel", &req, remote).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<()> = body_as_json(resp.into_body()).await;
+    assert!(!body.success);
+    assert_eq!(body.code.as_deref(), Some("FORBIDDEN"));
+
+    let mut shared_live = test_state();
+    shared_live.shared_live_writes_denied = true;
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 54321));
+    let resp = post_json_from(shared_live, "/search/cancel", &req, loopback).await;
+    let body: IpcBody<()> = body_as_json(resp.into_body()).await;
+    assert_eq!(body.code.as_deref(), Some("FORBIDDEN"));
 }
 
 // ----- `GET /search/file-names` (issue #848) ---------------------------------

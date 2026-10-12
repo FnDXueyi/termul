@@ -20,6 +20,8 @@ mod relay_fault_tests;
 mod relay_liveness_tests;
 #[cfg(test)]
 mod relay_prompt_tests;
+#[cfg(test)]
+mod watch_tests;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -70,7 +72,6 @@ impl Host {
             web_auth: None,
             allow_remote_writes: false,
             shared_live_writes_denied: false,
-            project_root: Arc::new(parking_lot::RwLock::new(std::env::temp_dir())),
             pending_oauth_flows: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashMap::new(),
             )),
@@ -97,7 +98,9 @@ impl Host {
                 }
             }
             let _finished = Finished(done_tx);
-            run_relay(carrier, state).await;
+            // The harness peer is a local, write-capable connection.
+            let local_peer = SocketAddr::from(([127, 0, 0, 1], 0));
+            run_relay(carrier, state, local_peer).await;
         });
         Conn { peer, task, done }
     }

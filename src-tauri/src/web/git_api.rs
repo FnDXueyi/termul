@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::trackers::git_tracker::{
     self, GitCommit, GitCommitContext, GitStatusDetail, GitTracker,
 };
+use crate::acp::destructive_guard::{ensure_no_active_turn_under, DESTRUCTIVE_OP_BLOCKED};
 use crate::web::fs_api::{check_local_only, resolve_request_path, IpcBody};
 use crate::web::ws::AppState;
 
@@ -145,44 +146,27 @@ pub struct GitStashInfoDto {
     pub message: String,
 }
 
-/// Reject when the resolved cwd is outside `project_root`. Returns `None` when
-/// the cwd is within bounds; otherwise `Some(IpcBody::err(...,
-/// "OUTSIDE_PROJECT_ROOT"))`. Both `resolved` (from `resolve_request_path`) and
-/// `project_root` (from `AppState`, set via `resolve_and_validate_project_root`
-/// at startup) are canonicalized, so `starts_with` is a reliable containment
-/// check on every platform.
-pub(crate) fn ensure_within_project_root<T>(
+/// Reject when the resolved path is outside EVERY registered, non-archived
+/// project root. Returns `None` when within bounds; otherwise
+/// `Some(IpcBody::err(..., "OUTSIDE_PROJECT_ROOT"))`. `resolved` comes from
+/// `resolve_request_path` (canonical); the registry caches canonical roots, so
+/// `starts_with` is a reliable containment check on every platform and no
+/// request canonicalizes the whole project list.
+pub(crate) fn ensure_within_project_boundary<T>(
     resolved: &Path,
-    project_root: &Path,
+    registry: &crate::web::project_registry::ProjectRegistry,
 ) -> Option<IpcBody<T>> {
-    if resolved.starts_with(project_root) {
+    if registry.is_within_any_registered_root(resolved) {
         None
     } else {
         Some(IpcBody::<T>::err(
             format!(
-                "cwd '{}' is outside project_root '{}'",
-                resolved.display(),
-                project_root.display()
+                "path '{}' is outside every registered project root",
+                resolved.display()
             ),
             "OUTSIDE_PROJECT_ROOT",
         ))
     }
-}
-
-/// Reject when the resolved cwd is outside ALL authorized project roots. First
-/// checks the default `project_root` via `ensure_within_project_root` (fast
-/// path — single `starts_with`), then falls back to ALL registered project
-/// roots (handles a web client that switched to a non-default project via
-/// per-connection `switch_project` — the boundary follows any registered
-/// project, not just the host default). Returns `None` when within bounds;
-/// otherwise `Some(IpcBody::err(..., "OUTSIDE_PROJECT_ROOT"))`.
-pub(crate) fn ensure_within_project_boundary<T>(
-    resolved: &Path,
-    project_root: &Path,
-    registry: &crate::web::project_registry::ProjectRegistry,
-) -> Option<IpcBody<T>> {
-    ensure_within_project_root::<T>(resolved, project_root)
-        .filter(|_| !registry.is_within_any_registered_root(resolved))
 }
 
 /// Resolve + boundary-check the request `cwd`. On failure returns the
@@ -221,19 +205,9 @@ pub(super) fn resolve_cwd<T>(
             return Err((StatusCode::OK, Json(IpcBody::<T>::err(msg, code))));
         }
     };
-    // 3) project_root containment (web-server security boundary). CAP-1:
-    //    lock-read the RwLock for the duration of the `starts_with` check
-    //    (sync — no `.await` under the guard). The boundary may have been
-    //    rebound by a project switch since the last request. CAP-2: also
-    //    check ALL registered project roots so a web client that switched to
-    //    a non-default project (per-connection `switch_project`) can operate
-    //    on it — the boundary follows any registered project, not just the
-    //    host default.
-    let outside_err = {
-        let project_root = state.project_root.read();
-        ensure_within_project_boundary::<T>(&resolved, &project_root, &state.registry)
-    };
-    if let Some(err) = outside_err {
+    // 3) Registry boundary (web-server security boundary): the path must be
+    //    inside ANY registered, non-archived project (cached canonical roots).
+    if let Some(err) = ensure_within_project_boundary::<T>(&resolved, &state.registry) {
         return Err((StatusCode::OK, Json(err)));
     }
     Ok(resolved)
@@ -558,6 +532,11 @@ pub async fn checkout_branch(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // A checkout rewrites the whole working tree: refuse while a session
+    // working inside it is mid-turn.
+    if let Some(blocked) = checkout_refusal(&state, &resolved).await {
+        return blocked;
+    }
     let cwd_for_log = cwd.clone();
     let branch = req.branch;
     let branch_for_log = branch.clone();
@@ -602,6 +581,13 @@ pub async fn create_branch(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    // Branching from HEAD leaves the work tree alone; branching from another
+    // `start_ref` checks that ref out, which rewrites it.
+    if crate::acp::destructive_guard::start_ref_rewrites_tree(req.start_ref.as_deref()) {
+        if let Some(blocked) = checkout_refusal(&state, &resolved).await {
+            return blocked;
+        }
+    }
     let cwd_for_log = cwd.clone();
     let branch = req.branch;
     let branch_for_log = branch.clone();
@@ -843,6 +829,7 @@ pub async fn branch_switch(
         "checkout",
         "GIT_BRANCH_SWITCH_ERROR",
         run_simple_checkout,
+        true,
     )
     .await
 }
@@ -860,8 +847,39 @@ pub async fn branch_create(
         "checkout -b",
         "GIT_BRANCH_CREATE_ERROR",
         run_simple_checkout_b,
+        false,
     )
     .await
+}
+
+/// [`destructive_op_refusal`] for a checkout run from `cwd`: the target is the
+/// enclosing git work-tree root (a checkout rewrites all of it, whichever
+/// subdirectory the caller named).
+async fn checkout_refusal(
+    state: &AppState,
+    cwd: &std::path::Path,
+) -> Option<(StatusCode, Json<IpcBody<()>>)> {
+    let top = crate::acp::destructive_guard::git_toplevel(cwd).await;
+    destructive_op_refusal(state, &top).await
+}
+
+/// The shared destructive-operation guard as an HTTP refusal: `Some` when a
+/// session working inside `target` has an active turn (same code + message as
+/// the Tauri commands).
+pub(super) async fn destructive_op_refusal(
+    state: &AppState,
+    target: &std::path::Path,
+) -> Option<(StatusCode, Json<IpcBody<()>>)> {
+    match ensure_no_active_turn_under(&state.acp, target).await {
+        Ok(()) => None,
+        Err(blocked) => {
+            tracing::warn!(path = %target.display(), "destructive operation refused: active turn inside target");
+            Some((
+                StatusCode::OK,
+                Json(IpcBody::<()>::err(blocked.to_string(), DESTRUCTIVE_OP_BLOCKED)),
+            ))
+        }
+    }
 }
 
 // ============================ helpers ============================
@@ -963,6 +981,7 @@ async fn run_branch_name_write(
     label: &'static str,
     code: &'static str,
     runner: fn(&str, &str) -> Result<(), String>,
+    guard_active_turns: bool,
 ) -> (StatusCode, Json<IpcBody<()>>) {
     let resolved = match resolve_cwd::<()>(&req.cwd, state, Some(peer), true) {
         Ok(p) => p,
@@ -972,6 +991,11 @@ async fn run_branch_name_write(
         Ok(s) => s,
         Err((st, body)) => return (st, body),
     };
+    if guard_active_turns {
+        if let Some(blocked) = checkout_refusal(state, &resolved).await {
+            return blocked;
+        }
+    }
     let cwd_for_log = cwd.clone();
     let name = req.name;
     let name_for_log = name.clone();

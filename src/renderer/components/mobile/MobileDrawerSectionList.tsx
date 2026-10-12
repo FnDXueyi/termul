@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Edit2, FileDiff, GitBranch, Globe, Pencil, TerminalSquare, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { sectionForTab } from '@/hooks/use-mobile-section'
 import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
 import { logFrontendError } from '@/lib/log-api'
@@ -313,7 +314,7 @@ export function MobileDrawerSectionList({
                         e.preventDefault()
                         endRename(e.key === 'Enter' ? 'commit' : 'cancel', 'rename-button')
                       }}
-                      className="min-h-11 w-28 shrink-0 rounded-md border border-border bg-background px-2 text-base"
+                      className={`min-h-11 w-28 shrink-0 rounded-md border border-border bg-background px-2 text-base ${FIELD_FOCUS_CLASS}`}
                       autoFocus
                     />
                   ) : (

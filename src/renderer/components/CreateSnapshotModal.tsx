@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { type KeyboardEvent, useCallback, useEffect, useId, useState } from 'react'
 import { X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 
 interface CreateSnapshotModalProps {
@@ -116,7 +117,7 @@ export function CreateSnapshotModal({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Pre-deployment state"
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
 
@@ -129,7 +130,7 @@ export function CreateSnapshotModal({
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Describe the state of your workspace..."
                   rows={3}
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground resize-none"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground resize-none ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
             </div>

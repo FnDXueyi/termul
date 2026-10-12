@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight, Folder, MoreHorizontal } from '@/components/icons'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
-import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
+import { FIELD_FOCUS_CLASS, FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { getColorClasses } from '@/lib/colors'
 import { cn } from '@/lib/utils'
 import type { ProjectGroup } from '@/types/project'
@@ -77,7 +77,7 @@ export function RailGroupRow({
                 }}
                 onBlur={onCommitRename}
                 aria-label={`Rename group ${group.name}`}
-                className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs pointer-coarse:text-base text-foreground outline-none"
+                className={`h-6 min-w-0 flex-1 rounded border border-border bg-card px-1.5 text-xs pointer-coarse:text-base text-foreground ${FIELD_FOCUS_CLASS}`}
                 // biome-ignore lint/a11y/noAutofocus: the inline rename input appears on request and must take focus
                 autoFocus
               />

@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { FileQuestion } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Switch } from '@/components/ui/switch'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ElicitationField } from '@/lib/acp-api'
@@ -296,6 +297,7 @@ export function ElicitationPrompt({
                               ref={registerField}
                               className={cn(
                                 'w-full rounded-md border border-border bg-background px-2 py-1',
+                                FIELD_FOCUS_CLASS,
                                 isMobileShell
                                   ? 'min-h-11 text-base'
                                   : 'text-sm pointer-coarse:text-base'

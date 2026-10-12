@@ -309,6 +309,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
                 r#"{"id":"prompt-long","type":"send_prompt","payload":{"agentId":"agent-long","sessionId":"session-long","text":"long","turnId":"turn-long"}}"#,
                 &mut authed,
                 &mut None,
+                &mut test_access(),
                 None,
                 &acp,
                 &relay,
@@ -339,6 +340,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
             r#"{"id":"ping-1","type":"ping","payload":{}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -463,6 +465,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
                 r#"{"id":"prompt-ordered","type":"send_prompt","payload":{"agentId":"agent-ordered-cancel","sessionId":"session-ordered-cancel","text":"start then cancel","turnId":"turn-ordered"}}"#,
                 &mut authed,
                 &mut None,
+                &mut test_access(),
                 None,
                 &acp,
                 &relay,
@@ -487,6 +490,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
                 r#"{"id":"cancel-ordered","type":"cancel_prompt","payload":{"agentId":"agent-ordered-cancel","sessionId":"session-ordered-cancel"}}"#,
                 &mut authed,
                 &mut None,
+                &mut test_access(),
                 None,
                 &acp,
                 &relay,
@@ -614,6 +618,7 @@ async fn accepted_prompt_survives_disconnect_and_persists_completion_for_reconne
                 r#"{"id":"prompt-resume","type":"send_prompt","payload":{"agentId":"agent-resume","sessionId":"session-resume","text":"continue after disconnect","turnId":"turn-resume"}}"#,
                 &mut authed,
                 &mut None,
+                &mut test_access(),
                 None,
                 &acp,
                 &relay,
@@ -697,6 +702,7 @@ async fn handle_request_with_catalog(
         text,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -801,6 +807,7 @@ async fn handle_request_without_catalog(text: &str) -> WsReply {
         text,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -907,6 +914,7 @@ async fn handle_request_with_store(text: &str, store: &Arc<WebStore>) -> WsReply
         text,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -1439,6 +1447,23 @@ fn ws_reply_ok_and_err_shape() {
     );
 }
 
+/// A loopback, write-capable connection — what a standalone server's local
+/// browser gets. Tests that need a view-only peer build their own policy.
+pub(super) fn test_policy(peer: [u8; 4], allow_remote_writes: bool, shared_live_writes_denied: bool) -> CapabilityPolicy {
+    CapabilityPolicy {
+        carrier: Carrier::Ws,
+        peer: SocketAddr::from((peer, 40000)),
+        flags: crate::web::capabilities::WriteFlags {
+            allow_remote_writes,
+            shared_live_writes_denied,
+        },
+    }
+}
+
+pub(super) fn test_access() -> ConnectionAccess {
+    ConnectionAccess::granted(test_policy([127, 0, 0, 1], false, false))
+}
+
 /// Ungated wrapper over `handle_sync_with_auth` (no web auth gate).
 /// The no-op `AcpManager` (`vec![]` sinks) returns fast `Err`s for the ACP
 /// command methods (no agent spawned) which the handlers map to
@@ -1486,6 +1511,18 @@ fn handle_sync_with_identity(
     identity: &mut Option<ClientIdentity>,
     web_auth: Option<&WebAuth>,
 ) -> WsReply {
+    handle_sync_with_access(text, authed, identity, &mut test_access(), web_auth)
+}
+
+/// Like `handle_sync_with_identity` with an explicit per-connection access
+/// (capabilities + presence) — the view-only matrix tests pass a restricted one.
+pub(super) fn handle_sync_with_access(
+    text: &str,
+    authed: &mut bool,
+    identity: &mut Option<ClientIdentity>,
+    access: &mut ConnectionAccess,
+    web_auth: Option<&WebAuth>,
+) -> WsReply {
     let relay = Arc::new(WsRelaySink::new());
     let acp = Arc::new(AcpManager::new(vec![]));
     let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
@@ -1503,6 +1540,7 @@ fn handle_sync_with_identity(
             text,
             authed,
             identity,
+            access,
             web_auth,
             &acp,
             &relay,
@@ -1524,7 +1562,7 @@ fn handle_sync_with_identity(
 
 /// A `/ws` `authenticate` frame carrying a valid handshake (current
 /// protocol version + fixed identity) and an optional token.
-fn auth_frame(id: &str, token: Option<&str>) -> String {
+pub(super) fn auth_frame(id: &str, token: Option<&str>) -> String {
     let mut payload = json!({
         "protocolVersion": WS_PROTOCOL_VERSION,
         "deviceId": "device-a",
@@ -1792,7 +1830,7 @@ fn post_auth_authenticate_is_idempotent_ok_without_revalidation() {
 }
 
 #[test]
-fn ws_error_code_wire_strings_for_handshake_and_reserved_codes() {
+fn ws_error_code_wire_strings_for_handshake_capability_and_reserved_codes() {
     for (code, wire) in [
         (WsErrorCode::ProtocolVersionMismatch, "protocol_version_mismatch"),
         (WsErrorCode::InvalidClientIdentity, "invalid_client_identity"),
@@ -1803,6 +1841,8 @@ fn ws_error_code_wire_strings_for_handshake_and_reserved_codes() {
         (WsErrorCode::ProviderQuotaExceeded, "provider_quota_exceeded"),
         (WsErrorCode::ProviderSessionLimit, "provider_session_limit"),
         (WsErrorCode::ProviderRequestRejected, "provider_request_rejected"),
+        (WsErrorCode::Forbidden, "forbidden"),
+        (WsErrorCode::AlreadyResolved, "already_resolved"),
     ] {
         assert_eq!(code.as_str(), wire);
     }
@@ -2071,6 +2111,7 @@ async fn handle_list_agents_returns_identity_summaries() {
         r#"{"id":"r1","type":"list_agents","payload":{}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -2302,6 +2343,7 @@ async fn handle_resume_session_ok_reply_carries_null_replay_snapshot() {
             r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-1","sessionId":"sess-1","cwd":"/tmp"}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -2329,7 +2371,7 @@ async fn handle_resume_session_ok_reply_carries_null_replay_snapshot() {
 
 // ---- CAP-11: binary-frame protocol error (flush-then-Close(1003)) ----
 
-fn ws_test_app_state() -> AppState {
+pub(super) fn ws_test_app_state() -> AppState {
     let pty = crate::web::test_pty_manager();
     AppState {
         acp: Arc::new(AcpManager::new(vec![])),
@@ -2339,7 +2381,9 @@ fn ws_test_app_state() -> AppState {
         exit_code_tracker: pty.exit_code_tracker(),
         pty,
         relay: Arc::new(WsRelaySink::new()),
-        registry: Arc::new(ProjectRegistry::new()),
+        registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
+            &std::env::temp_dir(),
+        ),
         registry_persistence: None,
         projects_file: None,
         history_mode: HistoryMode::LiveOnly,
@@ -2350,7 +2394,6 @@ fn ws_test_app_state() -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
-        project_root: Arc::new(parking_lot::RwLock::new(std::env::temp_dir())),
         pending_oauth_flows: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         oauth_base_url: "http://127.0.0.1".to_string(),
     }
@@ -2358,7 +2401,7 @@ fn ws_test_app_state() -> AppState {
 
 /// Read exactly one server→client WS frame (unmasked per RFC 6455).
 /// Returns `(opcode, payload)`.
-async fn ws_read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+pub(super) async fn ws_read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
     use tokio::io::AsyncReadExt;
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).await.expect("frame header");
@@ -2384,7 +2427,7 @@ async fn ws_read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
 
 /// Write one masked client→server WS frame (RFC 6455 requires client
 /// masking). Test frames stay in the short (≤125-byte) form.
-async fn ws_write_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
+pub(super) async fn ws_write_frame(stream: &mut tokio::net::TcpStream, opcode: u8, payload: &[u8]) {
     use tokio::io::AsyncWriteExt;
     assert!(payload.len() <= 125, "test frames stay in the short form");
     let mask = [0x12u8, 0x34, 0x56, 0x78];
@@ -2406,7 +2449,10 @@ async fn binary_frame_receives_error_reply_then_close_1003() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app.into_make_service()).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        ).await;
     });
 
     let interaction = async {
@@ -2575,6 +2621,7 @@ async fn install_acp_agent_unknown_agent_returns_catalog_agent_not_found() {
         r#"{"id":"r1","type":"install_acp_agent","payload":{"agentId":"does-not-exist"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -2856,6 +2903,7 @@ fn handle_respond_permission_malformed_payload_is_unsupported() {
             r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1"}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -2945,6 +2993,7 @@ fn handle_respond_permission_wrong_agent_is_permission_denied() {
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a2","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -2966,11 +3015,11 @@ fn handle_respond_permission_wrong_agent_is_permission_denied() {
     assert_eq!(reply.err.unwrap().code, "permission_denied");
 }
 
-/// Story 1.7 (verification gap #2): a connection NOT subscribed to the
-/// permission's session is rejected `not_found` (NFR5 ownership check — no
-/// cross-session permission resolution; the code does not leak existence).
+/// Answer by ticket: a connection NOT subscribed to the permission's session
+/// (a fresh socket after a reconnect) resolves the pending approval — the
+/// ticket, not the subscription, authorizes the answer.
 #[test]
-fn handle_respond_permission_not_subscribed_is_not_found() {
+fn handle_respond_permission_needs_no_subscription() {
     // Register a permission on sess-A but subscribe the connection to sess-B.
     use crate::web::sink::{AcpEvent, EventSink};
     let relay = Arc::new(WsRelaySink::new());
@@ -3000,6 +3049,7 @@ fn handle_respond_permission_not_subscribed_is_not_found() {
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-A","optionId":"allow"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3017,16 +3067,16 @@ fn handle_respond_permission_not_subscribed_is_not_found() {
         None,
         None,
     ));
-    assert!(!reply.ok);
-    assert_eq!(reply.err.unwrap().code, "not_found");
+    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
 }
 
 /// Story 1.7 (verification gap #4 + happy path): a valid `respond_permission`
 /// from a subscribed connection resolves the ticket (ok); a second frame for
-/// the same requestId is rejected `stale` (handler-level first-response-wins,
-/// exercising the handler's `subscribed_clients` ClientId resolution).
+/// the same requestId is rejected `already_resolved` (handler-level
+/// first-response-wins; the resolved ticket is remembered by a bounded
+/// tombstone, even for a different connection).
 #[test]
-fn handle_respond_permission_resolves_then_second_is_stale() {
+fn handle_respond_permission_resolves_then_second_is_already_resolved() {
     let (relay, subs) = relay_with_subscribed_permission("a1", "sess-1", "perm-1", &["allow"]);
     let acp = Arc::new(AcpManager::new(vec![]));
     let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
@@ -3040,6 +3090,7 @@ fn handle_respond_permission_resolves_then_second_is_stale() {
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3058,11 +3109,12 @@ fn handle_respond_permission_resolves_then_second_is_stale() {
         None,
     ));
     assert!(ok_reply.ok, "first response wins: {:?}", ok_reply.err);
-    // Second frame for the same requestId → stale (ticket evicted).
+    // Second frame for the same requestId → already_resolved (tombstone).
     let stale_reply = block_on(handle_request(
         r#"{"id":"r2","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3081,7 +3133,7 @@ fn handle_respond_permission_resolves_then_second_is_stale() {
         None,
     ));
     assert!(!stale_reply.ok);
-    assert_eq!(stale_reply.err.unwrap().code, "stale");
+    assert_eq!(stale_reply.err.unwrap().code, "already_resolved");
 }
 
 /// Story 1.7 (verification gap: TOCTOU through the handler): an `optionId`
@@ -3102,6 +3154,7 @@ fn handle_respond_permission_invalid_option_is_permission_denied() {
         r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"escalate"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3195,6 +3248,7 @@ fn handle_answer_question_malformed_payload_is_unsupported() {
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3233,6 +3287,7 @@ fn handle_answer_question_wrong_agent_is_permission_denied() {
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a2","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3254,10 +3309,10 @@ fn handle_answer_question_wrong_agent_is_permission_denied() {
     assert_eq!(reply.err.unwrap().code, "permission_denied");
 }
 
-/// Issue #411: a connection NOT subscribed to the question's session is
-/// rejected `not_found` (NFR5 ownership check).
+/// Answer by ticket: a connection NOT subscribed to the question's session
+/// resolves it — the ticket, not the subscription, authorizes the answer.
 #[test]
-fn handle_answer_question_not_subscribed_is_not_found() {
+fn handle_answer_question_needs_no_subscription() {
     use crate::web::sink::{AcpEvent, EventSink};
     let relay = Arc::new(WsRelaySink::new());
     let acp = Arc::new(AcpManager::new(vec![]));
@@ -3286,6 +3341,7 @@ fn handle_answer_question_not_subscribed_is_not_found() {
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-A","values":["plan-a"]}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3303,15 +3359,14 @@ fn handle_answer_question_not_subscribed_is_not_found() {
         None,
         None,
     ));
-    assert!(!reply.ok);
-    assert_eq!(reply.err.unwrap().code, "not_found");
+    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
 }
 
 /// Issue #411: a valid `answer_question` from a subscribed connection
 /// resolves the ticket (ok); a second frame for the same questionId is
-/// rejected `stale` (handler-level first-response-wins).
+/// rejected `already_resolved` (handler-level first-response-wins).
 #[test]
-fn handle_answer_question_resolves_then_second_is_stale() {
+fn handle_answer_question_resolves_then_second_is_already_resolved() {
     let (relay, subs) = relay_with_subscribed_question("a1", "sess-1", "q-1", &["plan-a"]);
     let acp = Arc::new(AcpManager::new(vec![]));
     let (tx, _rx) = mpsc::unbounded_channel::<Outbound>();
@@ -3325,6 +3380,7 @@ fn handle_answer_question_resolves_then_second_is_stale() {
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3347,6 +3403,7 @@ fn handle_answer_question_resolves_then_second_is_stale() {
         r#"{"id":"r2","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3365,7 +3422,7 @@ fn handle_answer_question_resolves_then_second_is_stale() {
         None,
     ));
     assert!(!stale_reply.ok);
-    assert_eq!(stale_reply.err.unwrap().code, "stale");
+    assert_eq!(stale_reply.err.unwrap().code, "already_resolved");
 }
 
 /// Issue #411: an option value not in the original options is rejected
@@ -3385,6 +3442,7 @@ fn handle_answer_question_invalid_option_is_permission_denied() {
         r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["escalate"]}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3453,6 +3511,7 @@ fn handle_subscribe_ok_and_stale() {
             r#"{"id":"sub1","type":"subscribe","payload":{"sessionId":"s1","lastSeq":0}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -3483,6 +3542,7 @@ fn handle_subscribe_ok_and_stale() {
             r#"{"id":"sub2","type":"subscribe","payload":{"sessionId":"fresh"}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -3512,6 +3572,7 @@ fn handle_subscribe_ok_and_stale() {
             r#"{"id":"sub3","type":"subscribe","payload":{"sessionId":"fresh"}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -3542,6 +3603,7 @@ fn handle_subscribe_ok_and_stale() {
             r#"{"id":"sub4","type":"subscribe","payload":{"sessionId":"s1"}}"#,
             &mut authed,
             &mut None,
+            &mut test_access(),
             None,
             &acp,
             &relay,
@@ -3799,6 +3861,7 @@ fn handle_switch_project_cold_tab_is_deferred_select() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3861,6 +3924,7 @@ fn handle_switch_project_cold_tab_unknown_id_is_not_found() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"missing"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -3980,6 +4044,7 @@ fn handle_switch_project_unknown_id_is_not_found() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"missing"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -4034,6 +4099,7 @@ fn handle_switch_project_agent_without_session_degrades_to_select() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -4104,6 +4170,7 @@ async fn close_session_failure_clears_tracker_so_switch_selects() {
         r#"{"id":"c1","type":"close_session","payload":{"agentId":"a-1","sessionId":"s-1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -4134,6 +4201,7 @@ async fn close_session_failure_clears_tracker_so_switch_selects() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -4182,6 +4250,7 @@ async fn close_session_failure_on_untracked_session_keeps_tracker() {
         r#"{"id":"c1","type":"close_session","payload":{"agentId":"a-1","sessionId":"s-other"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -5142,6 +5211,7 @@ async fn switch_project_cold_tab_does_not_fan_out_to_other_clients() {
         r#"{"id":"r1","type":"switch_project","payload":{"projectId":"p-1"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -5340,6 +5410,7 @@ async fn handle_resume_session_rejected_mid_turn_maps_to_session_owned_by_other(
         r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-duplicate","sessionId":"sess-mid","cwd":"/tmp"}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -5396,6 +5467,7 @@ async fn handle_list_agents_reports_owned_sessions() {
         r#"{"id":"r1","type":"list_agents","payload":{}}"#,
         &mut authed,
         &mut None,
+        &mut test_access(),
         None,
         &acp,
         &relay,
@@ -5423,4 +5495,176 @@ async fn handle_list_agents_reports_owned_sessions() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["id"], "agent-1");
     assert_eq!(entries[0]["ownsSession"], json!(["sess-1"]));
+}
+
+// ---- watch_project / unwatch_project ----
+
+fn watch_fixture(
+    id: &str,
+) -> (
+    Arc<WsRelaySink>,
+    Arc<ProjectRegistry>,
+    std::path::PathBuf,
+    mpsc::UnboundedSender<Outbound>,
+    mpsc::UnboundedReceiver<Outbound>,
+) {
+    let dir = std::env::temp_dir()
+        .join(format!("termul-ws-watch-{id}-{}", std::process::id()))
+        .to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let registry = ProjectRegistry::seeded_for_test(&dir);
+    let (tx, rx) = mpsc::unbounded_channel::<Outbound>();
+    (Arc::new(WsRelaySink::new()), registry, dir, tx, rx)
+}
+
+fn reply_code(reply: &WsReply) -> Option<String> {
+    serde_json::to_value(reply)
+        .unwrap()
+        .get("err")
+        .and_then(|e| e.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn watch_and_unwatch_project_manage_the_connections_subscription() {
+    let (relay, registry, dir, tx, _rx) = watch_fixture("ok");
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+
+    let reply = handle_watch_project(
+        "w1".into(),
+        &json!({ "projectId": project }),
+        &relay,
+        &registry,
+        &tx,
+    );
+    assert!(reply.ok, "watch of a registered project succeeds");
+    assert_eq!(relay.fs_watches().subscriber_count(project), 1);
+
+    let reply = handle_unwatch_project("u1".into(), &json!({ "projectId": project }), &relay, &tx);
+    assert!(reply.ok);
+    assert_eq!(relay.fs_watches().watched_project_count(), 0);
+
+    // Idempotent for a registered project.
+    let again = handle_unwatch_project("u2".into(), &json!({ "projectId": project }), &relay, &tx);
+    assert!(again.ok);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn watch_refuses_unknown_archived_and_malformed_and_unwatch_is_idempotent() {
+    let (relay, registry, dir, tx, _rx) = watch_fixture("refuse");
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+
+    let unknown = json!({ "projectId": "nope" });
+    let w = handle_watch_project("w".into(), &unknown, &relay, &registry, &tx);
+    assert_eq!(reply_code(&w).as_deref(), Some("not_found"));
+    // Unwatch is idempotent: an id the connection never watched is a success.
+    let u = handle_unwatch_project("u".into(), &unknown, &relay, &tx);
+    assert!(u.ok);
+    assert!(registry.update(project, None, None, Some(true)));
+    let w = handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx);
+    assert_eq!(reply_code(&w).as_deref(), Some("not_found"), "archived project");
+
+    for payload in [json!({}), json!({ "projectId": "  " })] {
+        let w = handle_watch_project("w".into(), &payload, &relay, &registry, &tx);
+        assert_eq!(reply_code(&w).as_deref(), Some("unsupported"));
+        let u = handle_unwatch_project("u".into(), &payload, &relay, &tx);
+        assert_eq!(reply_code(&u).as_deref(), Some("unsupported"));
+    }
+    assert_eq!(relay.fs_watches().watched_project_count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Connection close releases the connection's watch through the same cleanup
+/// that reaps its session subscriptions — also when the cleanup is dropped
+/// without `run()`.
+#[tokio::test]
+async fn connection_cleanup_releases_fs_watch_subscriptions() {
+    let (relay, registry, dir, tx, _rx) = watch_fixture("cleanup");
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+    let subscribed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    for use_run in [true, false] {
+        let reply = handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx);
+        assert!(reply.ok);
+        assert_eq!(relay.fs_watches().subscriber_count(project), 1);
+        let cleanup = ConnectionCleanup::new(Arc::clone(&relay), Arc::clone(&subscribed))
+            .with_watch_conn(tx.clone());
+        if use_run {
+            cleanup.run().await;
+        } else {
+            drop(cleanup);
+        }
+        assert_eq!(relay.fs_watches().subscriber_count(project), 0);
+        assert_eq!(relay.fs_watches().watched_project_count(), 0);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A client that unwatches after its project was archived/removed (which
+/// already dropped the subscription) still gets a success.
+#[tokio::test]
+async fn unwatch_after_the_project_was_archived_succeeds() {
+    let (relay, registry, dir, tx, _rx) = watch_fixture("gone");
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+    assert!(handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx).ok);
+    // Archive only once the watcher is live, so a LIVE subscription is what
+    // gets dropped (not a task that finds the project gone on first lookup).
+    assert!(relay.fs_watches().wait_armed(project, Duration::from_secs(10)).await);
+    assert!(registry.update(project, None, None, Some(true)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while relay.fs_watches().watched_project_count() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(relay.fs_watches().watched_project_count(), 0);
+
+    let u = handle_unwatch_project("u".into(), &json!({ "projectId": project }), &relay, &tx);
+    assert!(u.ok, "unwatch after the project vanished must succeed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `watch_project` / `unwatch_project` request types reach their handlers
+/// through the real dispatch (`handle_request`), not just by direct call.
+#[tokio::test]
+async fn watch_requests_are_routed_by_handle_request() {
+    let (relay, registry, dir, tx, _rx) = watch_fixture("dispatch");
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+    let mut subs = Vec::new();
+    let mut current_agent: Option<AgentId> = None;
+    let current_session = Arc::new(parking_lot::Mutex::new(None::<SessionId>));
+    let current_project = Arc::new(parking_lot::Mutex::new(None::<String>));
+    let switch_queue = Arc::new(tokio::sync::Mutex::new(ProjectSwitchQueue::default()));
+    let mut authed = true;
+    for (type_, expect_subscribers) in [("watch_project", 1), ("unwatch_project", 0)] {
+        let frame = json!({ "id": type_, "type": type_, "payload": { "projectId": project } });
+        let reply = handle_request(
+            &frame.to_string(),
+            &mut authed,
+            &mut None,
+            &mut test_access(),
+            None,
+            &acp,
+            &relay,
+            &registry,
+            None,
+            None,
+            &tx,
+            &mut subs,
+            &mut current_agent,
+            &current_session,
+            &current_project,
+            &switch_queue,
+            HistoryMode::LiveOnly,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(reply.ok, "{type_} must be dispatched and succeed");
+        assert_eq!(relay.fs_watches().subscriber_count(project), expect_subscribers);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

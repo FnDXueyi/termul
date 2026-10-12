@@ -46,13 +46,12 @@ fn test_state(root: &std::path::Path) -> AppState {
         exit_code_tracker: pty.exit_code_tracker(),
         pty,
         relay: Arc::new(WsRelaySink::new()),
-        registry: Arc::new(ProjectRegistry::new()),
+        registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
+            &root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        ),
         registry_persistence: None,
         projects_file: None,
         history_mode: HistoryMode::LiveOnly,
-        project_root: Arc::new(parking_lot::RwLock::new(
-            root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-        )),
         workspace_manifest: None,
         acp_catalog: None,
         acp_install: None,
@@ -542,10 +541,9 @@ fn production_router(root: &std::path::Path) -> axum::Router {
         pty.git_tracker(),
         pty.exit_code_tracker(),
         Arc::new(WsRelaySink::new()),
-        Arc::new(ProjectRegistry::new()),
+        ProjectRegistry::seeded_for_test(&project_root),
         None,
         None,
-        std::sync::Arc::new(parking_lot::RwLock::new(project_root)),
         HistoryMode::LiveOnly,
         None,
         None,
@@ -928,4 +926,55 @@ async fn act_routes_still_refuse_an_outside_root_worktree() {
     let body: IpcBody<()> = body_as(resp.into_body()).await;
     assert!(!body.success, "remove of outside worktree must be refused");
     assert!(outside_wt.exists(), "outside worktree must be untouched");
+}
+
+#[tokio::test]
+async fn remove_is_blocked_while_a_session_in_the_worktree_is_mid_turn() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("rm-guard-active");
+    let parent = repo.path().parent().unwrap_or_else(|| std::path::Path::new("."));
+    let state = test_state(parent);
+    let resp = post_json(
+        state.clone(),
+        "/worktree/create",
+        &serde_json::json!({
+            "projectPath": repo.path().to_string_lossy(),
+            "name": "wt-guard",
+            "branch": "chat/wt-guard",
+            "isNewBranch": true
+        }),
+    )
+    .await;
+    let created: IpcBody<GitWorktreeEntry> = body_as(resp.into_body()).await;
+    let entry = created.data.expect("entry");
+    let worktree = std::path::PathBuf::from(&entry.path);
+    let remove_body = serde_json::json!({
+        "projectPath": repo.path().to_string_lossy(),
+        "worktreePath": entry.path,
+        "force": true
+    });
+
+    // A turn is running in a subdirectory of the worktree.
+    let nested = worktree.join("src");
+    std::fs::create_dir_all(&nested).expect("nested");
+    state.acp.install_test_agent_with_session_roots(
+        crate::acp::AgentId("agent-1".to_string()),
+        vec![("session-1".to_string(), nested, true)],
+    );
+    let resp = post_json(state.clone(), "/worktree/remove", &remove_body).await;
+    let body: IpcBody<()> = body_as(resp.into_body()).await;
+    assert!(!body.success);
+    assert_eq!(body.code.as_deref(), Some("destructive_op_blocked"));
+    assert!(worktree.exists(), "the worktree must survive a refused removal");
+
+    // The same session idle: removal proceeds.
+    state.acp.install_test_agent_with_session_roots(
+        crate::acp::AgentId("agent-1".to_string()),
+        vec![("session-1".to_string(), worktree.join("src"), false)],
+    );
+    let resp = post_json(state, "/worktree/remove", &remove_body).await;
+    let body: IpcBody<()> = body_as(resp.into_body()).await;
+    assert!(body.success, "idle session must not block: {:?}", body.error);
 }

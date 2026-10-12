@@ -149,7 +149,7 @@ export function GitHistoryPanel({
                 type="button"
                 aria-expanded={!collapsed}
                 onClick={onToggleCollapsed}
-                className="flex min-w-0 items-center gap-2 rounded text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+                className="flex min-w-0 items-center gap-2 rounded text-sm font-medium text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {title}
               </button>
