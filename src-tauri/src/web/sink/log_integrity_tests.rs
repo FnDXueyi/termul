@@ -108,6 +108,7 @@ async fn concurrent_host_record_and_relay_events_get_distinct_contiguous_seqs() 
         .map(|record| record.seq)
         .collect();
     assert_eq!(durable, live, "the durable log carries the same seqs");
+    persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -180,6 +181,7 @@ async fn snapshot_and_live_stream_partition_the_log_exactly() {
             .map(|record| record.seq)
             .collect::<Vec<_>>()
     );
+    persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 

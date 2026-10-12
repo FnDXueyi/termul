@@ -330,8 +330,8 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
       // already present on the OLD session (the `acp:agent_switch` fan-out
       // can beat the marker reply — EVENT_EARLY) rides the splice; otherwise
       // a fabricated marker joins the splice INPUT at the top of the old
-      // band (seq = maxPayloadSeq + 1, mirroring the host's relay-allocated
-      // next seq) so its re-stamped slot sits after every old record and
+      // band (seq = maxPayloadSeq + 1, the next renderer-visible seq; title
+      // records advance the host counter but not this projection) so its re-stamped slot sits after every old record and
       // before every target record. Fabrication is pure projection — it
       // never depends on the durable write having succeeded (markerWarned
       // path still renders the separator).

@@ -309,7 +309,8 @@ impl SessionPersistence {
     }
 
     /// Install the sole seq authority (see [`SeqAuthority`]). Without one the
-    /// writer numbers its own marker as `last_seq + 1`.
+    /// writer numbers its own marker above both the metadata and the on-disk
+    /// frontier.
     pub fn set_seq_authority(&self, authority: Arc<dyn SeqAuthority>) {
         *self.inner.seq_authority.lock() = Some(authority);
     }
