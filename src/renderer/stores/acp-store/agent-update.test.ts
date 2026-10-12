@@ -457,6 +457,43 @@ describe('applyAgentUpdate', () => {
       expect(useAcpStore.getState().sessions.claimed).toBeDefined()
     })
 
+    it('keeps an agent whose prepared chat is claimed while teardown awaits', async () => {
+      // The loop awaits per agent; a prepared chat claimed during that await
+      // is a live chat by the time its agent is judged, so it must survive.
+      const reuseKey2 = agentReuseKey('acp-registry:cursor', '/work2')
+      const prepareKey2 = prepareChatKey('acp-registry:cursor', '/work2', undefined)
+      _addEphemeralSessionIdForTesting('sess-prep2')
+      vi.mocked(invoke).mockImplementation((cmd, args) => {
+        if (cmd === 'acp_install_agent') {
+          return Promise.resolve({
+            success: true,
+            data: { command: '/opt/cursor-2', args: ['acp'] }
+          })
+        }
+        if (cmd === 'acp_kill_agent' && (args as { agentId: string }).agentId === 'warm-1') {
+          // Claim the second agent's prepared chat mid-teardown.
+          useAcpStore.setState((s) => {
+            const preparedSessions = { ...s.preparedSessions }
+            delete preparedSessions[prepareKey2]
+            return { preparedSessions }
+          })
+        }
+        return Promise.resolve(undefined)
+      })
+      useAcpStore.setState({
+        agentConfigs: [CURSOR_CONFIG],
+        configToLiveAgent: { [reuseKey]: 'warm-1', [reuseKey2]: 'warm-2' },
+        preparedSessions: { [prepareKey2]: 'sess-prep2' },
+        activeSessionId: null,
+        sessions: {
+          'sess-prep2': cursorSession('sess-prep2', { agentId: 'warm-2', cwd: '/work2' })
+        }
+      })
+      await useAcpStore.getState().applyAgentUpdate('acp-registry:cursor', CURSOR_UPDATE)
+      expect(invoke).toHaveBeenCalledWith('acp_kill_agent', { agentId: 'warm-1' })
+      expect(invoke).not.toHaveBeenCalledWith('acp_kill_agent', { agentId: 'warm-2' })
+    })
+
     it('keeps the old agent when it holds a live chat beside an unclaimed prepared chat', async () => {
       _addEphemeralSessionIdForTesting('sess-prep')
       useAcpStore.setState({

@@ -65,13 +65,16 @@ export async function teardownConfigForUpdate(
   configId: string
 ): Promise<void> {
   const { get, set, inFlightWarms, inFlightPrepared, invalidateOptionsCache } = deps
-  // Snapshot unclaimed warm-pool prepared sessions BEFORE the kill loop: the
-  // prepared-session teardown below (`cancelPreparedChat`) removes them.
-  const preparedSessionIds = new Set<SessionId>(Object.values(get().preparedSessions))
+  // Read prepared membership fresh at each decision: the loop awaits in-flight
+  // warm spawns, and a chat claimed during that await leaves `preparedSessions`
+  // and must then protect its agent. The prepared-session teardown below
+  // (`cancelPreparedChat`) only runs after the loop.
   const protectsAgent = (session: { id: SessionId; status: string }): boolean => {
     if (session.status === 'closed') return false
+    const state = get()
     const unclaimedPrepared =
-      preparedSessionIds.has(session.id) && session.id !== get().activeSessionId
+      Object.values(state.preparedSessions).includes(session.id) &&
+      session.id !== state.activeSessionId
     return !unclaimedPrepared
   }
   const reuseKeys = new Set<string>([

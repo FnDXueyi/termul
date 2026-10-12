@@ -14,12 +14,12 @@
 //! process starts is in the job and dies with it — including a browser or
 //! editor an agent (or a terminal command) opens when that app was not
 //! already running, and Node `detached: true` spawns, which do not leave the
-//! job. This matches the unix process-group kill. The job sets
-//! `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so the only escape hatch is a descendant
-//! that explicitly creates its child with `CREATE_BREAKAWAY_FROM_JOB`; without
-//! that limit such a `CreateProcess` call would fail with `ACCESS_DENIED`
-//! instead. The same policy applies to ConPTY terminals and ACP agents: a
-//! process that deliberately asks to outlive its parent is allowed to.
+//! job. This matches the unix process-group kill. ACP agent jobs set
+//! `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so a descendant that explicitly creates its
+//! child with `CREATE_BREAKAWAY_FROM_JOB` escapes (without that limit such a
+//! `CreateProcess` call fails with `ACCESS_DENIED`). ConPTY terminal jobs do
+//! not allow breakaway, so nothing launched from a terminal can outlive it
+//! (#281).
 
 /// Windows `CREATE_NO_WINDOW` process creation flag.
 #[cfg(windows)]
@@ -102,12 +102,21 @@ mod job {
         /// Create a kill-on-close job and assign `process` to it. `label`
         /// names the owner in logs (e.g. `"ConPTY"`, `"ACP agent"`).
         ///
+        /// `allow_breakaway` sets `JOB_OBJECT_LIMIT_BREAKAWAY_OK`: a descendant
+        /// that explicitly asks for `CREATE_BREAKAWAY_FROM_JOB` escapes instead
+        /// of failing to start. ACP agents allow it; ConPTY terminals do not,
+        /// so a terminal descendant can never outlive the terminal (#281).
+        ///
         /// Returns `None` (after one `warn` log naming the failing step) when
         /// the job cannot be created, configured, or assigned; the caller keeps
         /// the process running without tree-kill protection. Nested jobs are
         /// supported on Windows 8+, so assignment works even when the process
         /// already inherited a job (e.g. a CI runner or terminal job).
-        pub(crate) fn new_assigned(process: RawHandle, label: &str) -> Option<Self> {
+        pub(crate) fn new_assigned(
+            process: RawHandle,
+            label: &str,
+            allow_breakaway: bool,
+        ) -> Option<Self> {
             // SAFETY: plain Win32 calls on handles we own (`job`) or that the
             // caller guarantees refer to a live process (`process`). An invalid
             // process handle makes `AssignProcessToJobObject` fail, which is
@@ -126,10 +135,11 @@ mod job {
                 let job = Self { handle: job };
 
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                // BREAKAWAY_OK: a descendant that explicitly asks for
-                // CREATE_BREAKAWAY_FROM_JOB escapes instead of failing to start.
-                info.BasicLimitInformation.LimitFlags =
-                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+                info.BasicLimitInformation.LimitFlags = if allow_breakaway {
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                } else {
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                };
                 if SetInformationJobObject(
                     job.handle,
                     JobObjectExtendedLimitInformation,
@@ -186,43 +196,4 @@ mod job {
 }
 
 #[cfg(all(test, windows))]
-mod tests {
-    use super::{hide_console, KillOnCloseJob};
-
-    /// Prints the child's console window handle (0 = no visible console).
-    const PRINT_CONSOLE_WINDOW: &str = "$t = Add-Type -Name W -Namespace P -PassThru \
-        -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();'; \
-        [Console]::Out.Write($t::GetConsoleWindow().ToInt64())";
-
-    fn powershell_args() -> [&'static str; 4] {
-        [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            PRINT_CONSOLE_WINDOW,
-        ]
-    }
-
-    #[test]
-    fn hidden_std_command_has_no_console_window() {
-        let mut command = std::process::Command::new("powershell");
-        hide_console(&mut command).args(powershell_args());
-        let output = command.output().expect("spawn powershell");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
-    }
-
-    #[tokio::test]
-    async fn hidden_tokio_command_has_no_console_window() {
-        let mut command = tokio::process::Command::new("powershell");
-        hide_console(&mut command).args(powershell_args());
-        let output = command.output().await.expect("spawn powershell");
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
-    }
-
-    #[test]
-    fn job_assignment_failure_degrades_to_none() {
-        // An invalid process handle makes assignment fail; the caller keeps
-        // running the process without tree-kill instead of erroring.
-        assert!(KillOnCloseJob::new_assigned(std::ptr::null_mut(), "test").is_none());
-    }
-}
+mod tests;

@@ -20,8 +20,13 @@ const PID_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn fake_agent_args(tail: &str) -> Vec<String> {
+    fake_agent_args_after("", tail)
+}
+
+/// Like [`fake_agent_args`], but runs `gate` before starting the grandchild.
+fn fake_agent_args_after(gate: &str, tail: &str) -> Vec<String> {
     let script = format!(
-        "$p = Start-Process -FilePath ping.exe -ArgumentList '-n','60','127.0.0.1' \
+        "{gate}$p = Start-Process -FilePath ping.exe -ArgumentList '-n','60','127.0.0.1' \
          -WindowStyle Hidden -PassThru; \
          [Console]::Error.WriteLine('{PID_PREFIX}' + $p.Id); \
          [Console]::Error.Flush(); \
@@ -235,15 +240,26 @@ fn dropping_the_job_kills_the_whole_tree() {
     let mut command = std::process::Command::new("powershell.exe");
     hide_console(&mut command);
     let mut launcher = command
-        .args(fake_agent_args("Start-Sleep -Seconds 60"))
-        .stdin(std::process::Stdio::null())
+        // Gate the grandchild on a stdin line so it can only start after the
+        // job is assigned below (no spawn-to-assign race in this test).
+        .args(fake_agent_args_after(
+            "[void][Console]::In.ReadLine(); ",
+            "Start-Sleep -Seconds 60",
+        ))
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn fake agent");
     let launcher_pid = launcher.id();
     let _launcher_cleanup = KillOnFail(launcher_pid);
-    let job = KillOnCloseJob::new_assigned(launcher.as_raw_handle(), "test").expect("job assigned");
+    let job =
+        KillOnCloseJob::new_assigned(launcher.as_raw_handle(), "test", true).expect("job assigned");
+    {
+        use std::io::Write as _;
+        let mut stdin = launcher.stdin.take().expect("stdin");
+        writeln!(stdin).expect("release the fake agent gate");
+    }
 
     let stderr = std::io::BufReader::new(launcher.stderr.take().expect("stderr"));
     let grandchild = stderr

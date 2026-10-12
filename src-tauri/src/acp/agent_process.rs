@@ -348,7 +348,7 @@ mod windows {
         // exit path (including cancelling this future) tears the tree down via
         // the guard. A microsecond race remains between spawn and assignment;
         // agents create descendants after ms to seconds, so it is accepted.
-        let job = KillOnCloseJob::new_assigned(child.as_raw_handle(), "ACP agent");
+        let job = KillOnCloseJob::new_assigned(child.as_raw_handle(), "ACP agent", true);
         if job.is_some() {
             log::debug!("[acp] agent process {pid} assigned to a kill-on-close job");
         }

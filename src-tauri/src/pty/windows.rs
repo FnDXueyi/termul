@@ -399,7 +399,7 @@ pub fn spawn_conpty(
         // The raw job handle is owned by the terminal instance from here on
         // (null when the job could not be set up; the helper already warned).
         let job: *mut c_void =
-            crate::process_util::KillOnCloseJob::new_assigned(pi.hProcess.cast(), "ConPTY")
+            crate::process_util::KillOnCloseJob::new_assigned(pi.hProcess.cast(), "ConPTY", false)
                 .map_or(std::ptr::null_mut(), |job| job.into_raw().cast());
 
         // Resume the child only after it is in the job so no grandchild can
