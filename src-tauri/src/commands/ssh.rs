@@ -407,8 +407,9 @@ pub async fn ssh_create_askpass(password: String) -> Result<IpcResult<String>, S
     #[cfg(windows)]
     {
         // Mark the data file as hidden to reduce casual exposure
-        use std::process::Command;
-        let _ = Command::new("attrib")
+        let mut command = std::process::Command::new("attrib");
+        crate::process_util::hide_console(&mut command);
+        let _ = command
             .args(["+H", &password_path.to_string_lossy()])
             .output();
     }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp::agent_process::TreeKillAgent;
 
 /// Entry point for an agent's dedicated driver thread.
 ///
@@ -416,32 +417,33 @@ pub(super) async fn drive_connection(
         && std::env::var("TERMUL_ACP_TRACE_RAW")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-    let agent = agent_client_protocol::AcpAgent::new(config.to_mcp_server(shim_dir.as_deref()))
-        .with_debug(
-            move |line: &str, direction: LineDirection| match direction {
-                LineDirection::Stderr => {
-                    if redact_output {
-                        log::debug!("[acp] {debug_agent_id} stderr ({} bytes)", line.len());
-                    } else {
-                        log::debug!("[acp] {debug_agent_id} stderr {line}");
-                    }
+    // `TreeKillAgent` is `AcpAgent` on unix; on Windows it puts the agent in a
+    // kill-on-close Job Object so killing it also reaps self-spawned workers.
+    let agent = TreeKillAgent::new(config.to_mcp_server(shim_dir.as_deref())).with_debug(
+        move |line: &str, direction: LineDirection| match direction {
+            LineDirection::Stderr => {
+                if redact_output {
+                    log::debug!("[acp] {debug_agent_id} stderr ({} bytes)", line.len());
+                } else {
+                    log::debug!("[acp] {debug_agent_id} stderr {line}");
                 }
-                LineDirection::Stdin => {
-                    if trace_raw {
-                        log::debug!("[acp] {debug_agent_id} -> {line}");
-                    } else {
-                        log::debug!("[acp] {debug_agent_id} -> ({} bytes)", line.len());
-                    }
+            }
+            LineDirection::Stdin => {
+                if trace_raw {
+                    log::debug!("[acp] {debug_agent_id} -> {line}");
+                } else {
+                    log::debug!("[acp] {debug_agent_id} -> ({} bytes)", line.len());
                 }
-                LineDirection::Stdout => {
-                    if trace_raw {
-                        log::debug!("[acp] {debug_agent_id} <- {line}");
-                    } else {
-                        log::debug!("[acp] {debug_agent_id} <- ({} bytes)", line.len());
-                    }
+            }
+            LineDirection::Stdout => {
+                if trace_raw {
+                    log::debug!("[acp] {debug_agent_id} <- {line}");
+                } else {
+                    log::debug!("[acp] {debug_agent_id} <- ({} bytes)", line.len());
                 }
-            },
-        );
+            }
+        },
+    );
 
     // Per-handler clones (handlers must be `Send` and may be called repeatedly).
     // Each handler gets its own clone of the sink fan-out; `Arc` clones are

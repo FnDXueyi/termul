@@ -54,16 +54,29 @@ const inFlightAgentUpdates = new Map<string, Promise<'applied' | 'unchanged'>>()
  * Update Application follow-through: tear down a config's warm/prepared state
  * so the NEXT chat for this config spawns the applied version instead of
  * claiming a stale warm process (QA: a post-update new chat reused the old
- * binary and the pending-restart banner never cleared). Warm processes with NO
- * open sessions are killed outright; a live agent (open chat) keeps its
- * process — only the reuse mapping detaches, mirroring
- * `detachAgentForNewCredentials`, so the running chat is never interrupted.
+ * binary and the pending-restart banner never cleared). A process whose only
+ * sessions are closed or unclaimed warm-pool prepared sessions is killed
+ * outright. Any other session (a live chat, the active chat, or an ephemeral
+ * temporary such as a claimed chat whose promote failed) keeps its process —
+ * only the reuse mapping detaches, so a running chat is never interrupted.
  */
 export async function teardownConfigForUpdate(
   deps: AgentUpdateStoreDeps,
   configId: string
 ): Promise<void> {
   const { get, set, inFlightWarms, inFlightPrepared, invalidateOptionsCache } = deps
+  // Read prepared membership fresh at each decision: the loop awaits in-flight
+  // warm spawns, and a chat claimed during that await leaves `preparedSessions`
+  // and must then protect its agent. The prepared-session teardown below
+  // (`cancelPreparedChat`) only runs after the loop.
+  const protectsAgent = (session: { id: SessionId; status: string }): boolean => {
+    if (session.status === 'closed') return false
+    const state = get()
+    const unclaimedPrepared =
+      Object.values(state.preparedSessions).includes(session.id) &&
+      session.id !== state.activeSessionId
+    return !unclaimedPrepared
+  }
   const reuseKeys = new Set<string>([
     ...Object.keys(get().configToLiveAgent),
     ...inFlightWarms.keys()
@@ -73,8 +86,14 @@ export async function teardownConfigForUpdate(
     const pending = inFlightWarms.get(key)
     const agentId = pending ? await pending : get().configToLiveAgent[key]
     const mapped = get().configToLiveAgent[key]
+    // Closed sessions and unclaimed warm-pool prepared sessions do not protect
+    // the process. Counting the prepared one kept the old idle agent alive
+    // forever whenever the launcher held a prepared chat on it (orphaned agent
+    // processes on update). Every other session, including ephemeral
+    // temporaries that are not prepared, keeps the agent running.
     const hasOpenSession =
-      agentId != null && Object.values(get().sessions).some((s) => s.agentId === agentId)
+      agentId != null &&
+      Object.values(get().sessions).some((s) => s.agentId === agentId && protectsAgent(s))
     // Detach the reuse mapping unconditionally (an in-flight warm that never
     // registered leaves a dangling key; deleting a missing key is a no-op).
     if (mapped != null) {

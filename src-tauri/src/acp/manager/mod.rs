@@ -1430,6 +1430,7 @@ impl AcpManager {
             // Already gone — idempotent success.
             return Ok(());
         };
+        log::info!("[acp] killing agent {agent_id}");
 
         // Mark this as an intentional kill so the driver teardown stays silent
         // (no `acp:agent_disconnected` for a kill we initiated — L4).

@@ -17,6 +17,8 @@ mod commands;
 mod logging;
 mod migrations;
 mod path_validation;
+// Console-window hiding + Windows kill-on-close Job Objects for spawned processes.
+mod process_util;
 mod project_icon;
 mod pty;
 mod remote;
@@ -597,7 +599,9 @@ fn toggle_devtools<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<(), 
 
 #[cfg(target_os = "windows")]
 fn open_external_url(url: &str) -> Result<(), String> {
-    Command::new("cmd")
+    let mut command = Command::new("cmd");
+    crate::process_util::hide_console(&mut command);
+    command
         .args(["/C", "start", "", url])
         .spawn()
         .map(|_| ())
