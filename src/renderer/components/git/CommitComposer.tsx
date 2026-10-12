@@ -8,6 +8,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { WriteGate, WriteGateReason } from '@/components/ui/write-gate'
 import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { cn } from '@/lib/utils'
@@ -82,7 +83,7 @@ export function CommitComposer({
             type="text"
             aria-label="Commit summary"
             placeholder={amend ? 'Update commit message' : 'Summary (required)'}
-            className="w-full bg-secondary/50 border-none rounded-md py-2.5 pl-3 pr-12 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+            className={`w-full bg-secondary/50 border-none rounded-md py-2.5 pl-3 pr-12 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
             value={summary}
             onChange={(e) => onSummaryChange(e.target.value)}
             disabled={isCommitting || isGenerating}
@@ -116,7 +117,7 @@ export function CommitComposer({
           aria-label="Commit description"
           placeholder="Description (optional)"
           rows={3}
-          className="w-full resize-none bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+          className={`w-full resize-none bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
           value={description}
           onChange={(e) => onDescriptionChange(e.target.value)}
           disabled={isCommitting || isGenerating}
@@ -238,7 +239,7 @@ export function CommitComposer({
         type="text"
         aria-label="Commit summary"
         placeholder={amend ? 'Update commit message' : 'Summary (required)'}
-        className="w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+        className={`w-full bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
         value={summary}
         onChange={(e) => onSummaryChange(e.target.value)}
         disabled={isCommitting || isGenerating}
@@ -247,7 +248,7 @@ export function CommitComposer({
         aria-label="Commit description"
         placeholder="Description (optional)"
         rows={3}
-        className="w-full resize-none bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base focus:ring-1 focus:ring-primary outline-none"
+        className={`w-full resize-none bg-secondary/50 border-none rounded-md py-1.5 px-3 text-xs pointer-coarse:text-base ${FOCUS_RING_CLASS}`}
         value={description}
         onChange={(e) => onDescriptionChange(e.target.value)}
         disabled={isCommitting || isGenerating}

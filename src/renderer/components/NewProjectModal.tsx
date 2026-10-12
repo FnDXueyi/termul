@@ -7,6 +7,7 @@ import { basename } from '@/components/chat/chat-attachments'
 import { ChevronDown, ChevronRight, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Skeleton } from '@/components/ui/skeleton'
 import { dialogApi, filesystemApi, gitApi, shellApi } from '@/lib/api'
 import { availableColors, getColorClasses } from '@/lib/colors'
@@ -449,7 +450,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                     value={path}
                     onChange={(e) => handlePathChange(e.target.value)}
                     placeholder="No directory selected"
-                    className="flex-1 bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary outline-none placeholder-muted-foreground"
+                    className={`flex-1 bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                   />
                   <button
                     onClick={handleBrowse}
@@ -469,7 +470,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="My Project"
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 />
                 {nameWarning && (
                   <p
@@ -502,7 +503,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                           const tpl = BUILT_IN_TEMPLATES.find((t) => t.id === e.target.value)
                           if (tpl) handleSelectTemplate(tpl)
                         }}
-                        className="w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none cursor-pointer"
+                        className={`w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm pointer-coarse:text-base text-foreground cursor-pointer ${FIELD_FOCUS_CLASS}`}
                       >
                         {BUILT_IN_TEMPLATES.map((tpl) => (
                           <option key={tpl.id} value={tpl.id}>
@@ -571,7 +572,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                         <select
                           value={selectedShell}
                           onChange={(e) => setSelectedShell(e.target.value)}
-                          className="w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm pointer-coarse:text-base text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none cursor-pointer"
+                          className={`w-full appearance-none bg-secondary border border-border rounded px-3 py-1.5 pr-8 text-sm pointer-coarse:text-base text-foreground cursor-pointer ${FIELD_FOCUS_CLASS}`}
                         >
                           {shells?.available && shells.available.length > 0 ? (
                             shells.available.map((shell) => (
@@ -597,7 +598,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                         id="init-git"
                         checked={initGit}
                         onChange={(e) => setInitGit(e.target.checked)}
-                        className="rounded border-border text-primary bg-secondary focus:ring-primary h-3.5 w-3.5"
+                        className="rounded border-border text-primary bg-secondary h-3.5 w-3.5"
                       />
                       <label
                         htmlFor="init-git"

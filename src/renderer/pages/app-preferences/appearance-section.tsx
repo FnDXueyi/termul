@@ -1,5 +1,6 @@
 import { SettingsSection } from '@/components/settings/SettingsLayout'
 import { Label } from '@/components/ui/label'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Switch } from '@/components/ui/switch'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import {
@@ -105,7 +106,7 @@ export function AppearanceSection({
             <select
               value={fontFamily}
               onChange={(e) => handleFontFamilyChange(e.target.value)}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             >
               {FONT_FAMILY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -147,7 +148,7 @@ export function AppearanceSection({
             <select
               value={bufferSize}
               onChange={(e) => handleBufferSizeChange(parseInt(e.target.value, 10))}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             >
               {BUFFER_SIZE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -169,7 +170,7 @@ export function AppearanceSection({
             <select
               value={maxTerminals}
               onChange={(e) => handleMaxTerminalsChange(parseInt(e.target.value, 10))}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             >
               {MAX_TERMINALS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -190,7 +191,7 @@ export function AppearanceSection({
             <select
               value={terminalRenderer}
               onChange={(e) => handleRendererChange(e.target.value)}
-              className="w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-shadow"
+              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             >
               {TERMINAL_RENDERER_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>

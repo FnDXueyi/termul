@@ -5,6 +5,7 @@ import { ProjectIcon } from '@/components/ProjectIcon'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Kbd } from '@/components/ui/kbd'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/project'
 import { ProjectDiffStat } from '../shell/ProjectDiffStat'
@@ -106,7 +107,7 @@ export const ProjectItem = memo(function ProjectItem({
                 onChange={(e) => onEditNameChange(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onBlur={onSaveRename}
-                className="h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none"
+                className={`h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground ${FIELD_FOCUS_CLASS}`}
                 onClick={(e) => e.stopPropagation()}
               />
             ) : (

@@ -1,6 +1,7 @@
 import { AlertCircle, CheckCircle2, Download, ExternalLink } from '@/components/icons'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
 import { Button } from '@/components/ui/button'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import type { UpdateChannel } from '@/lib/tauri-updater-api'
 import { cn } from '@/lib/utils'
@@ -274,7 +275,7 @@ export function UpdatesSection({
               <button
                 onClick={() => handleAutoUpdateToggle(!autoUpdateEnabled)}
                 className={cn(
-                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2',
+                  `relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${FOCUS_RING_CLASS}`,
                   autoUpdateEnabled ? 'bg-primary-fill' : 'bg-input'
                 )}
               >

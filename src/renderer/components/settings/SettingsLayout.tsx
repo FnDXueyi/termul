@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from '@/components/icons'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { type SettingsSearchEntry, searchSettings } from '@/lib/settings-search'
 import { cn } from '@/lib/utils'
 
@@ -191,7 +192,7 @@ export function SettingsLayout({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search settings..."
               aria-label="Search settings"
-              className="w-full rounded-md border border-border bg-secondary/50 py-1.5 pl-8 pr-8 text-sm pointer-coarse:text-base text-foreground outline-none transition-shadow focus:ring-2 focus:ring-primary focus:border-transparent"
+              className={`w-full rounded-md border border-border bg-secondary/50 py-1.5 pl-8 pr-8 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
             />
             {query && (
               <button

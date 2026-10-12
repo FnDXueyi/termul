@@ -2,6 +2,7 @@ import { useCallback, useId, useState } from 'react'
 import { toast } from 'sonner'
 import { FileEdit, Save, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { sshApi } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { useOverlayRegistration } from '@/stores/overlay-stack-store'
@@ -98,7 +99,7 @@ export function SSHFileEditor({ connectionId }: SSHFileEditorProps): React.JSX.E
         <textarea
           value={editingContent}
           onChange={(e) => setStoreContent(e.target.value)}
-          className="flex-1 w-full p-3 text-xs font-mono bg-background resize-none focus:outline-none"
+          className={`flex-1 w-full p-3 text-xs font-mono bg-background resize-none focus-visible:ring-inset ${FOCUS_RING_CLASS}`}
           spellCheck={false}
         />
       </div>
