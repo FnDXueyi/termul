@@ -74,6 +74,7 @@ import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transpo
 import { logFrontendError } from '@/lib/log-api'
 import { wireBlocksToDisplay } from '@/lib/skills-wire-reverse'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
+import { attachAgentRosterWatch } from './agent-roster-watch'
 import {
   collectProjectsWithActiveAgentChat,
   dropHiddenToolCalls,
@@ -493,6 +494,11 @@ export function initAcpEventListeners(): () => void {
   connection.attach()
   teardown = [
     attachPermissionDenialTracking(useAcpStore),
+    // Web only: the agent roster arrives through the `agents` watch (the
+    // desktop listens to the Tauri `acp:agent_*` events below).
+    ...(transport.watches
+      ? [attachAgentRosterWatch(transport.watches, () => useAcpStore.getState())]
+      : []),
     acpApi.onEvent<AgentSpawnedEvent>(ACP_EVENTS.agentSpawned, (e) =>
       useAcpStore.getState()._onAgentSpawned(e)
     ),
