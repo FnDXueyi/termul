@@ -24,6 +24,7 @@ import {
   watchImmediate,
   writeTextFile
 } from '@tauri-apps/plugin-fs'
+import { useProjectStore } from '@/stores/project-store'
 import { getAcpTransport } from './acp-transport'
 import { sortDirectoryEntries } from './filesystem-sort'
 import { logFrontendError } from './log-api'
@@ -144,6 +145,41 @@ function dispatchTypedEvent(
 }
 
 const activeWatchers = new Map<string, () => void>()
+
+/**
+ * Web/remote watch bookkeeping: normalized watched directory → the registered
+ * project whose host watch serves it, and a refcount per project so the host
+ * `watch_project` / `unwatch_project` pair is sent once per project, not once
+ * per directory.
+ */
+const webWatchedDirs = new Map<string, string>()
+const webProjectWatchRefs = new Map<string, number>()
+
+function normalizeWatchPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized
+}
+
+/**
+ * The registered, non-archived project whose root contains `dirPath` (the
+ * longest matching root wins), or `null` when none does.
+ */
+function resolveWatchProjectId(dirPath: string): string | null {
+  const target = normalizeWatchPath(dirPath)
+  let bestId: string | null = null
+  let bestLength = -1
+  for (const project of useProjectStore.getState().projects) {
+    if (!project.path || project.isArchived) continue
+    const root = normalizeWatchPath(project.path)
+    const prefix = root.endsWith('/') ? root : `${root}/`
+    const contains = target === root || target.startsWith(prefix)
+    if (contains && root.length > bestLength) {
+      bestId = project.id
+      bestLength = root.length
+    }
+  }
+  return bestId
+}
 const activeCallbacks = new Map<string, TypedCallbackRegistry>()
 const globalCallbacks: TypedCallbackRegistry = new Map()
 
@@ -889,12 +925,12 @@ export function createTauriFilesystemApi(): FilesystemApi {
       // below — the facade dispatches them through the SAME
       // onFileChanged/onFileCreated/onFileDeleted chain this desktop
       // watcher feeds). There is nothing per-directory to set up on the
-      // client: the server watches the active project root and re-arms on
-      // switch. Report success so callers (WorkspaceLayout's project
-      // switch) complete the switch instead of treating the watcher as
-      // unavailable.
+      // client beyond asking the host to watch the project that contains the
+      // directory (`watch_project`, refcounted per project). A directory
+      // inside no registered project has no host watch (the explorer simply
+      // gets no live refresh) and still reports success.
       if (!isTauriContext()) {
-        return { success: true, data: undefined }
+        return watchWebDirectory(dirPath)
       }
       try {
         const normalizedDirPath = dirPath.replace(/\\/g, '/')
@@ -945,9 +981,10 @@ export function createTauriFilesystemApi(): FilesystemApi {
     },
 
     async unwatchDirectory(dirPath: string): Promise<IpcResult<void>> {
-      // Web/remote mode: nothing to unwatch (watchers are desktop-only).
+      // Web/remote mode: release the project's host watch when no watched
+      // directory needs it any more.
       if (!isTauriContext()) {
-        return { success: true, data: undefined }
+        return unwatchWebDirectory(dirPath)
       }
       try {
         const normalizedDirPath = dirPath.replace(/\\/g, '/')
@@ -1018,8 +1055,167 @@ export const tauriFilesystemApi = createTauriFilesystemApi()
 // onFileChanged/onFileCreated/onFileDeleted callback chain.
 // ---------------------------------------------------------------------------
 
-/** Payload of the control-WS `fs_changed` agent-level event (#856). */
+/**
+ * Per-project chain of host watch requests: a project's `watch_project` /
+ * `unwatch_project` run strictly in the order the refcount transitions
+ * happened, so an unwatch issued while a watch is still in flight cannot be
+ * lost (and vice versa).
+ */
+const webProjectHostOps = new Map<string, Promise<void>>()
+
+function enqueueProjectHostOp(
+  projectId: string,
+  op: () => Promise<void> | undefined
+): Promise<void> {
+  const previous = webProjectHostOps.get(projectId) ?? Promise.resolve()
+  const next = previous.catch(() => undefined).then(async () => op())
+  webProjectHostOps.set(projectId, next)
+  const settle = (): void => {
+    if (webProjectHostOps.get(projectId) === next) webProjectHostOps.delete(projectId)
+  }
+  next.then(settle, settle)
+  return next
+}
+
+function logWebWatchFailure(source: string, projectId: string, err: unknown): void {
+  void logFrontendError({
+    level: 'warn',
+    source: `tauri-filesystem-api.${source}`,
+    message: `Host watch request for project ${projectId} failed: ${
+      err instanceof Error ? err.message : String(err)
+    }`
+  })
+}
+
+/**
+ * Web live refresh is best-effort: a host watch that cannot be set up (project
+ * gone, socket down) is logged and the call still succeeds, so the explorer
+ * root loads without a live-refresh subscription. The directory and its
+ * refcount are claimed synchronously BEFORE the request, so concurrent calls
+ * for one directory cannot double-count and an `fs_changed` that races the
+ * reply is not dropped; a failed first request rolls the claims back.
+ */
+async function watchWebDirectory(dirPath: string): Promise<IpcResult<void>> {
+  const normalized = normalizeWatchPath(dirPath)
+  if (webWatchedDirs.has(normalized)) return { success: true, data: undefined }
+  const projectId = resolveWatchProjectId(dirPath)
+  if (!projectId) return { success: true, data: undefined }
+  const watchedBefore = webProjectWatchRefs.has(projectId)
+  claimWebWatch(normalized, projectId)
+  // Directories of this project whose host watch ended and are still wanted
+  // rejoin the active bookkeeping NOW, so unwatching this directory cannot
+  // release the project while they remain mounted.
+  const adopted = [...(webLostWatchDirs.get(projectId) ?? [])].filter(
+    (dir) => !webWatchedDirs.has(dir)
+  )
+  webLostWatchDirs.delete(projectId)
+  for (const dir of adopted) claimWebWatch(dir, projectId)
+  if (!watchedBefore) {
+    try {
+      await enqueueProjectHostOp(projectId, () => getAcpTransport().watchProject?.(projectId))
+    } catch (err) {
+      forgetWebProjectWatch(projectId)
+      // This directory and the adopted ones are still wanted: keep them for the
+      // next retry (an unwatch of any of them removes it from the set).
+      webLostWatchDirs.set(projectId, new Set([normalized, ...adopted]))
+      logWebWatchFailure('watchWebDirectory', projectId, err)
+      // A failed request emits no `fs_watch_ended`: schedule the retries here
+      // (unless the retry loop that made this call is already running).
+      if (!webRewatchActive.has(projectId)) scheduleRewatch(projectId, 0)
+    }
+  }
+  return { success: true, data: undefined }
+}
+
+function claimWebWatch(normalizedDir: string, projectId: string): void {
+  webWatchedDirs.set(normalizedDir, projectId)
+  webProjectWatchRefs.set(projectId, (webProjectWatchRefs.get(projectId) ?? 0) + 1)
+}
+
+async function unwatchWebDirectory(dirPath: string): Promise<IpcResult<void>> {
+  const normalized = normalizeWatchPath(dirPath)
+  for (const lost of webLostWatchDirs.values()) lost.delete(normalized)
+  const projectId = webWatchedDirs.get(normalized)
+  if (!projectId) return { success: true, data: undefined }
+  webWatchedDirs.delete(normalized)
+  const refs = (webProjectWatchRefs.get(projectId) ?? 1) - 1
+  if (refs > 0) {
+    webProjectWatchRefs.set(projectId, refs)
+    return { success: true, data: undefined }
+  }
+  webProjectWatchRefs.delete(projectId)
+  try {
+    await enqueueProjectHostOp(projectId, () => getAcpTransport().unwatchProject?.(projectId))
+  } catch (err) {
+    logWebWatchFailure('unwatchWebDirectory', projectId, err)
+  }
+  return { success: true, data: undefined }
+}
+
+/** Delays before each attempt to re-arm a watch the host ended (e.g. a root that vanished briefly). */
+const REWATCH_DELAYS_MS = [2_000, 10_000, 30_000]
+/** Directories whose host watch ended and are still wanted by the explorer, per project. */
+const webLostWatchDirs = new Map<string, Set<string>>()
+const webRewatchTimers = new Set<ReturnType<typeof setTimeout>>()
+/** Projects with a re-arm retry loop in flight (so a failure inside it does not start a second loop). */
+const webRewatchActive = new Set<string>()
+
+/**
+ * The host ended a project's watch (or the transport could not restore it
+ * after a reconnect): forget it, remember which directories were watched, and
+ * retry a few times with backoff so live refresh comes back when the project
+ * becomes watchable again. A directory unwatched meanwhile is not re-armed.
+ */
+function rearmEndedWatch(projectId: string): void {
+  const dirs = new Set<string>()
+  for (const [dir, id] of webWatchedDirs) {
+    if (id === projectId) dirs.add(dir)
+  }
+  forgetWebProjectWatch(projectId)
+  if (dirs.size === 0) return
+  webLostWatchDirs.set(projectId, dirs)
+  scheduleRewatch(projectId, 0)
+}
+
+function scheduleRewatch(projectId: string, attempt: number): void {
+  const delay = REWATCH_DELAYS_MS[attempt]
+  if (delay === undefined) {
+    webLostWatchDirs.delete(projectId)
+    webRewatchActive.delete(projectId)
+    return
+  }
+  webRewatchActive.add(projectId)
+  const timer = setTimeout(() => {
+    webRewatchTimers.delete(timer)
+    void (async () => {
+      const first = webLostWatchDirs.get(projectId)?.values().next().value
+      // Re-watched by a caller meanwhile (which adopted the lost directories),
+      // or nothing is wanted any more.
+      if (first === undefined) {
+        webLostWatchDirs.delete(projectId)
+        webRewatchActive.delete(projectId)
+        return
+      }
+      // Claims every lost directory of the project together.
+      await watchWebDirectory(first)
+      if (webProjectWatchRefs.has(projectId)) webRewatchActive.delete(projectId)
+      else scheduleRewatch(projectId, attempt + 1)
+    })()
+  }, delay)
+  webRewatchTimers.add(timer)
+}
+
+/** Drop all client bookkeeping for a project whose host watch ended. */
+function forgetWebProjectWatch(projectId: string): void {
+  webProjectWatchRefs.delete(projectId)
+  for (const [dir, id] of webWatchedDirs) {
+    if (id === projectId) webWatchedDirs.delete(dir)
+  }
+}
+
+/** Payload of the control-WS `fs_changed` agent-level event (per project). */
 interface FsChangedEventPayload {
+  projectId: string
   root: string
   paths: string[]
 }
@@ -1061,8 +1257,17 @@ function wireWebFsChangedBridge(): void {
   webFsChangedBridgeWired = true
   try {
     const transport = getAcpTransport()
+    // The host ended a watch (project archived/removed/root gone), or the
+    // transport could not re-establish it after a reconnect: forget it and
+    // re-arm the still-wanted directories with backoff.
+    transport.onEvent<{ projectId?: string }>('acp:fs_watch_ended', (payload) => {
+      if (payload?.projectId) rearmEndedWatch(payload.projectId)
+    })
     transport.onEvent<FsChangedEventPayload>('acp:fs_changed', (payload) => {
       if (!payload || !Array.isArray(payload.paths)) return
+      // Only projects this client asked to watch (the host already targets
+      // subscribed connections; this guards a stale/late event after unwatch).
+      if (!webProjectWatchRefs.has(payload.projectId)) return
       for (const event of fsChangedPathsToEvents(payload)) {
         // 'change' feeds every subscriber that registered for 'change';
         // the create/delete-typed subscribers are served by the desktop
@@ -1087,6 +1292,13 @@ function wireWebFsChangedBridge(): void {
  */
 export function _resetFilesystemStateForTesting() {
   activeWatchers.clear()
+  webWatchedDirs.clear()
+  webProjectWatchRefs.clear()
+  webProjectHostOps.clear()
+  for (const timer of webRewatchTimers) clearTimeout(timer)
+  webRewatchTimers.clear()
+  webRewatchActive.clear()
+  webLostWatchDirs.clear()
   activeCallbacks.clear()
   globalCallbacks.clear()
   webFileNameBatchCallbacks.clear()

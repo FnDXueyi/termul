@@ -252,7 +252,8 @@ async function toPersistedProject(
     envVars: redactedEnvVars,
     worktrees: project.worktrees?.map(toPersistedWorktree),
     isGitRepo: project.isGitRepo,
-    icon: project.icon
+    icon: project.icon,
+    isDefault: project.isDefault
   }
 }
 
@@ -298,7 +299,8 @@ async function fromPersistedProject(persisted: PersistedProject): Promise<Projec
     envVars: loadedEnvVars,
     worktrees: persisted.worktrees?.map(fromPersistedWorktree),
     isGitRepo: persisted.isGitRepo,
-    icon: persisted.icon
+    icon: persisted.icon,
+    isDefault: persisted.isDefault
   }
 }
 
@@ -308,36 +310,39 @@ async function fromPersistedProject(persisted: PersistedProject): Promise<Projec
  * the wire — redact-by-omission. Shared by the auto-save live-push path + the
  * `RemoteAccessPopover` server-start seed.
  *
- * In desktop-hosted mode the desktop's `activeProjectId` IS the host default
- * (the desktop user is the host operator), so the per-entry flag is
- * `isDefault` (the host default), not `isActive` (which is per-client and the
- * host cannot know). The param is named `defaultProjectId` because the value
- * the desktop renderer tracks (its active selection) is pushed as the default
- * for new web clients — the caller passes `state.activeProjectId` as the
- * `defaultProjectId` (P12: the param name now matches its wire semantics).
+ * The host default is each project's stored `isDefault` flag (the explicit
+ * set-default action) and nothing else: the desktop's active project is
+ * per-client navigation state and is never pushed as the default.
  */
-export function toProjectSummaries(
-  projects: Project[],
-  defaultProjectId: string
-): ProjectSummary[] {
-  // Derive the host default from each project's stored `isDefault` flag — NOT
-  // from `defaultProjectId`. At the autosave call site `defaultProjectId` is
-  // `state.activeProjectId`, but the active (per-connection) project and the
-  // host default are distinct: `handleSetDefault` flips the stored flags while
-  // `activeProjectId` still points at the switch target. Deriving from
-  // `activeProjectId` here would re-broadcast the active project as the host
-  // default and clobber an explicit `set_default_project`. Fall back to
-  // `defaultProjectId` only when no project carries a stored flag (legacy
-  // snapshots / initial load where the flag was never set).
-  const hasStoredDefault = projects.some((p) => p.isDefault === true)
+export function toProjectSummaries(projects: Project[]): ProjectSummary[] {
   return projects.map((p) => ({
     id: p.id,
     name: p.name,
     color: p.color,
     path: p.path ?? null,
     isArchived: p.isArchived ?? false,
-    isDefault: hasStoredDefault ? p.isDefault === true : p.id === defaultProjectId
+    isDefault: p.isDefault === true
   }))
+}
+
+/** `true` when two summary lists carry the same wire fields (navigation rebuilds the
+ * project array to flip `isActive`, which is not a list change). */
+function sameProjectSummaries(a: ProjectSummary[], b: ProjectSummary[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((p, i) => {
+      const q = b[i]
+      return (
+        q !== undefined &&
+        p.id === q.id &&
+        p.name === q.name &&
+        p.color === q.color &&
+        p.path === q.path &&
+        p.isArchived === q.isArchived &&
+        p.isDefault === q.isDefault
+      )
+    })
+  )
 }
 
 /**
@@ -577,6 +582,44 @@ export function useProjectsLoader(): void {
  * Hook to auto-save projects when the store changes
  * Subscribes to project store changes and triggers debounced writes
  */
+// The host default the latest project-list sync reply reported (`undefined`
+// until one arrived or after the server stopped), shared by the auto-save hook
+// and the server-start seed so a fallback change of the effective default is
+// detected against the right baseline. Replies are applied in request order:
+// IPC promises can resolve out of order, and a stale reply must not move it.
+let hostDefaultSeen: string | null | undefined
+let hostDefaultAppliedSeq = 0
+let syncRequestSeq = 0
+
+/** Number a project-list sync request (call before sending it). */
+export function nextSyncSeq(): number {
+  syncRequestSeq += 1
+  return syncRequestSeq
+}
+
+/**
+ * Record the host default a sync reply reported: `'changed'` when the
+ * effective default changed (or was unknown), `'same'` when it did not, and
+ * `'stale'` for a reply older than one already applied (ignored entirely — it
+ * must not trigger any further write).
+ */
+export function noteHostDefault(
+  seq: number,
+  hostDefault: string | null | undefined
+): 'changed' | 'same' | 'stale' {
+  if (seq < hostDefaultAppliedSeq) return 'stale'
+  hostDefaultAppliedSeq = seq
+  const changed = hostDefaultSeen !== hostDefault
+  hostDefaultSeen = hostDefault
+  return changed ? 'changed' : 'same'
+}
+
+/** Forget the host default (the server stopped; its registry was cleared). */
+export function resetHostDefault(): void {
+  hostDefaultSeen = undefined
+  hostDefaultAppliedSeq = syncRequestSeq
+}
+
 export function useProjectsAutoSave(): void {
   const hasInitialized = useRef(false)
 
@@ -707,30 +750,38 @@ export function useProjectsAutoSave(): void {
       // the new project list into the in-memory registry + broadcast
       // `projects_changed` so connected web clients refetch `GET /projects`.
       // Fire-and-forget (replaces the snapshot — idempotent); no env-var values.
-      if (useRemoteStatusStore.getState().status?.running) {
-        const projectSwitched =
-          state.activeProjectId !== prevState.activeProjectId ||
+      // Navigation (`activeProjectId`) is NOT a list change: switching the
+      // active project pushes nothing and moves no host default.
+      const summaries = toProjectSummaries(state.projects)
+      if (
+        useRemoteStatusStore.getState().status?.running &&
+        state.projects !== prevState.projects &&
+        !sameProjectSummaries(summaries, toProjectSummaries(prevState.projects))
+      ) {
+        const defaultChanged =
           state.projects.find((p) => p.isDefault === true)?.id !==
-            prevState.projects.find((p) => p.isDefault === true)?.id
-        syncProjects(
-          toProjectSummaries(state.projects, state.activeProjectId),
-          state.activeProjectId || null
-        )
+          prevState.projects.find((p) => p.isDefault === true)?.id
+        const syncSeq = nextSyncSeq()
+        syncProjects(summaries)
           .then((result) => {
             if (!result.success) {
               console.warn('[projects] remote sync unsuccessful:', result.error)
             }
-            // CAP-7: after the backend `ProjectRegistry` (and thus the resolved
-            // project root) reflects the new default, mirror the MCP registry to
-            // the new project's `.termul/mcp-servers.json`. Best-effort +
-            // non-fatal — the action logs failures and never throws, so a
-            // switch still completes even if the sync write fails. Only on a
-            // real project switch (not a projects/groups-only mutation), and
-            // only when the upstream sync succeeded (a failed syncProjects
-            // leaves the backend on the old default — syncing then would write
-            // to the wrong project's file).
-            if (projectSwitched && result.success) {
-              void useAcpStore.getState().syncMcpRegistryToProjectFile()
+            // CAP-7 interim bridge: the web MCP registry file lives under the
+            // host default project, so mirror the MCP registry when the host's
+            // EFFECTIVE default changed — the stored default flag moved (an
+            // explicit set-default) or the host fell back to another project —
+            // never on navigation. Best-effort + non-fatal; only after the
+            // sync landed. The first reply counts as a change (the file for the
+            // default the host picked has not been mirrored yet).
+            if (result.success) {
+              const outcome = noteHostDefault(syncSeq, result.data)
+              // A stale reply never writes: the newer reply already carries the
+              // effective default, and a second mirror could replace a file
+              // update made in between.
+              if (outcome !== 'stale' && (defaultChanged || outcome === 'changed')) {
+                void useAcpStore.getState().syncMcpRegistryToProjectFile()
+              }
             }
           })
           .catch((err: unknown) => {

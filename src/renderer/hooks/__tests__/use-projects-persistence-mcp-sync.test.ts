@@ -4,7 +4,7 @@ import { useProjectStore } from '@/stores/project-store'
 
 const { syncMcpRegistryToProjectFile, syncProjectsMock } = vi.hoisted(() => ({
   syncMcpRegistryToProjectFile: vi.fn(async () => undefined),
-  syncProjectsMock: vi.fn(async () => ({ success: true }))
+  syncProjectsMock: vi.fn(async () => ({ success: true, data: 'p1' as string | null }))
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -64,92 +64,197 @@ vi.mock('@/lib/web-server-api', () => ({
   webServerProjects: { list: vi.fn() }
 }))
 
-import { useProjectsAutoSave } from '../use-projects-persistence'
+import { resetHostDefault, useProjectsAutoSave } from '../use-projects-persistence'
 
-describe('useProjectsAutoSave MCP sync on project switch (CAP-7)', () => {
+describe('useProjectsAutoSave host sync vs navigation (CAP-7 interim bridge)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    syncProjectsMock.mockResolvedValue({ success: true })
+    resetHostDefault()
+    syncProjectsMock.mockResolvedValue({ success: true, data: 'p1' })
 
     useProjectStore.setState({
-      projects: [],
-      activeProjectId: 'warmup',
+      projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1' }],
+      activeProjectId: 'p1',
       isLoaded: true
     })
   })
 
-  it('calls syncMcpRegistryToProjectFile when activeProjectId changes', async () => {
-    const { unmount } = renderHook(() => useProjectsAutoSave())
-
+  async function initialize(): Promise<void> {
     // First state change initializes the hasInitialized ref (skipped by guard).
     await act(async () => {
-      useProjectStore.setState({ activeProjectId: 'warmup2' })
+      useProjectStore.setState({ activeProjectId: 'warmup' })
     })
+  }
 
-    // Second state change: real project switch.
-    await act(async () => {
-      useProjectStore.setState({
-        projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1' }],
-        activeProjectId: 'p1'
-      })
-    })
-
-    await waitFor(() => {
-      expect(syncProjectsMock).toHaveBeenCalled()
-    })
-
-    await waitFor(() => {
-      expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(1)
-    })
-
-    unmount()
-  })
-
-  it('does not call syncMcpRegistryToProjectFile when only projects change (no switch)', async () => {
+  it('pushes nothing and syncs no MCP file when only the active project changes', async () => {
     const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
 
     await act(async () => {
-      useProjectStore.setState({ activeProjectId: 'warmup2' })
+      useProjectStore.setState({ activeProjectId: 'p1' })
     })
-
     await act(async () => {
-      useProjectStore.setState({
-        projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1' }],
-        activeProjectId: 'warmup2'
-      })
+      await Promise.resolve()
     })
 
-    await waitFor(() => {
-      expect(syncProjectsMock).toHaveBeenCalled()
-    })
-
+    expect(syncProjectsMock).not.toHaveBeenCalled()
     expect(syncMcpRegistryToProjectFile).not.toHaveBeenCalled()
-
     unmount()
   })
 
-  it('does not call sync when syncProjects fails', async () => {
-    syncProjectsMock.mockResolvedValue({ success: false, error: 'boom' })
-
+  it('selectProject (navigation rebuilds the projects array) pushes nothing', async () => {
+    useProjectStore.setState({
+      projects: [
+        { id: 'p1', name: 'P1', color: 'blue', path: '/p1' },
+        { id: 'p2', name: 'P2', color: 'green', path: '/p2' }
+      ],
+      activeProjectId: 'p1'
+    })
     const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
 
     await act(async () => {
-      useProjectStore.setState({ activeProjectId: 'warmup2' })
+      useProjectStore.getState().selectProject('p2')
     })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(useProjectStore.getState().activeProjectId).toBe('p2')
+    expect(syncProjectsMock).not.toHaveBeenCalled()
+    expect(syncMcpRegistryToProjectFile).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('mirrors a project-list change without the active project in the payload', async () => {
+    const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
 
     await act(async () => {
       useProjectStore.setState({
-        projects: [{ id: 'p2', name: 'P2', color: 'green', path: '/p2' }],
+        projects: [
+          { id: 'p1', name: 'P1', color: 'blue', path: '/p1' },
+          { id: 'p2', name: 'P2', color: 'green', path: '/p2' }
+        ],
         activeProjectId: 'p2'
       })
     })
 
     await waitFor(() => {
-      expect(syncProjectsMock).toHaveBeenCalled()
+      expect(syncProjectsMock).toHaveBeenCalledTimes(1)
+    })
+    const [summaries, ...rest] = syncProjectsMock.mock.calls[0] as unknown as unknown[]
+    expect(rest).toEqual([])
+    expect(summaries).toEqual([
+      { id: 'p1', name: 'P1', color: 'blue', path: '/p1', isArchived: false, isDefault: false },
+      { id: 'p2', name: 'P2', color: 'green', path: '/p2', isArchived: false, isDefault: false }
+    ])
+    unmount()
+  })
+
+  it('mirrors the MCP registry when the stored default project changes', async () => {
+    const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
+
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1', isDefault: true }]
+      })
     })
 
-    expect(syncMcpRegistryToProjectFile).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(1)
+    })
+    unmount()
+  })
 
+  it('mirrors the MCP registry when the host falls back to a different effective default', async () => {
+    const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
+
+    // First reply: the host picked p1 (no stored flag) — mirrored once.
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [
+          { id: 'p1', name: 'P1', color: 'blue', path: '/p1' },
+          { id: 'p2', name: 'P2', color: 'green', path: '/p2' }
+        ]
+      })
+    })
+    await waitFor(() => {
+      expect(syncProjectsMock).toHaveBeenCalledTimes(1)
+    })
+    await waitFor(() => {
+      expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(1)
+    })
+
+    // p1 disappears: the host falls back to p2 without any stored flag moving.
+    syncProjectsMock.mockResolvedValue({ success: true, data: 'p2' })
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [{ id: 'p2', name: 'P2', color: 'green', path: '/p2' }]
+      })
+    })
+    await waitFor(() => {
+      expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(2)
+    })
+    unmount()
+  })
+
+  it('ignores a stale sync reply that resolves after a newer one', async () => {
+    const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
+    let releaseFirst: (value: { success: true; data: string }) => void = () => {}
+    syncProjectsMock.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseFirst = resolve)) as never
+    )
+
+    // Request 1 (slow) then request 2 (fast): 2 reports p2, then 1 reports p1.
+    await act(async () => {
+      useProjectStore.setState({
+        // A stored-default change: if its (stale) reply could write, it would mirror again.
+        projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1', isDefault: true }]
+      })
+    })
+    syncProjectsMock.mockResolvedValue({ success: true, data: 'p2' })
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [
+          { id: 'p1', name: 'P1', color: 'blue', path: '/p1' },
+          { id: 'p2', name: 'P2', color: 'green', path: '/p2' }
+        ]
+      })
+    })
+    await waitFor(() => {
+      expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(1)
+    })
+    await act(async () => {
+      releaseFirst({ success: true, data: 'p1' })
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // The stale p1 reply neither mirrors again nor rewinds the baseline.
+    expect(syncMcpRegistryToProjectFile).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('does not mirror the MCP registry when the default change sync fails', async () => {
+    syncProjectsMock.mockResolvedValue({ success: false, error: 'boom' })
+    const { unmount } = renderHook(() => useProjectsAutoSave())
+    await initialize()
+
+    await act(async () => {
+      useProjectStore.setState({
+        projects: [{ id: 'p1', name: 'P1', color: 'blue', path: '/p1', isDefault: true }]
+      })
+    })
+
+    await waitFor(() => {
+      expect(syncProjectsMock).toHaveBeenCalled()
+    })
+    expect(syncMcpRegistryToProjectFile).not.toHaveBeenCalled()
     unmount()
   })
 })

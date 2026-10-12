@@ -781,10 +781,6 @@ describe('Parity Checklist Automation', () => {
       const content = readFileSync(TauriRemoteApi, 'utf-8')
       expect(content).toMatch(/export\s+async\s+function\s+setHostDefaultProject\b/)
       expect(content).toMatch(/set_host_default_project/)
-      // syncProjects param renamed to defaultProjectId (desktop active IS the
-      // host default in desktop-hosted mode — same value, new param name).
-      expect(content).toMatch(/defaultProjectId:\s*string\s*\|\s*null/)
-      expect(content).not.toMatch(/activeProjectId:\s*string\s*\|\s*null/)
     })
 
     it('web-server-api.ts exposes setDefaultProject hitting POST /projects/default', () => {
@@ -2035,8 +2031,6 @@ describe('Web FS watcher parity (#856)', () => {
     const content = readFileSync(FsFacade, 'utf-8')
     expect(content).toMatch(/wireWebFsChangedBridge/)
     expect(content).toMatch(/'acp:fs_changed'/)
-    // watchDirectory on web is a success no-op (the server owns watching).
-    expect(content).toMatch(/isTauriContext\(\)\) \{\s*$/m)
   })
 })
 

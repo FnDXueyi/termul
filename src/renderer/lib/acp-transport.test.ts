@@ -73,6 +73,10 @@ class FakeWebSocket {
   static CLOSING = 2
   static CLOSED = 3
   static autoOpen = true
+  /** projectId → err.code the host answers `watch_project` with (all sockets). */
+  static watchProjectRefusals: Record<string, string> = {}
+  /** When true, `watch_project` replies are held back (never answered). */
+  static holdWatchProjectReplies = false
 
   readyState = FakeWebSocket.CONNECTING
   onopen: ((ev: Event) => void) | null = null
@@ -512,6 +516,18 @@ class FakeWebSocket {
     }
     if (req.type === 'set_config_option') {
       this.emitReply({ id: req.id, ok: true, payload: this.setConfigOptionReply })
+      return
+    }
+    if (req.type === 'watch_project' || req.type === 'unwatch_project') {
+      const projectId = (req.payload as { projectId?: string }).projectId ?? ''
+      if (req.type === 'watch_project' && FakeWebSocket.holdWatchProjectReplies) return
+      const refusal =
+        req.type === 'watch_project' ? FakeWebSocket.watchProjectRefusals[projectId] : undefined
+      if (refusal) {
+        this.emitReply({ id: req.id, ok: false, err: { code: refusal, message: 'refused' } })
+        return
+      }
+      this.emitReply({ id: req.id, ok: true, payload: req.payload })
       return
     }
     this.emitReply({
@@ -1636,6 +1652,23 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
+  it('watchProject / unwatchProject send the per-project watch requests', async () => {
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+    const lastFrame = () =>
+      JSON.parse(sock.sent.at(-1)!) as { type: string; payload: Record<string, string> }
+
+    await transport.watchProject?.('p-1')
+    expect(lastFrame()).toMatchObject({ type: 'watch_project', payload: { projectId: 'p-1' } })
+    await transport.unwatchProject?.('p-1')
+    expect(lastFrame()).toMatchObject({ type: 'unwatch_project', payload: { projectId: 'p-1' } })
+    transport.dispose()
+  })
+
   it('sendPrompt generates + sends a client turnId (Story 1.8 T3.1)', async () => {
     const transport = new WsAcpTransport({
       url: 'ws://test/ws',
@@ -2092,6 +2125,167 @@ describe('WsAcpTransport reconnect listener (Story 5.3)', () => {
     await transport.connect()
     // Initial connect must NOT fire the listener — only reconnect transitions.
     expect(states).toEqual([])
+    transport.dispose()
+  })
+})
+
+// Per-project fs watch: the host keeps no watch state across connections, so
+// the transport re-sends `watch_project` after a reconnect and reports watches
+// it cannot restore.
+describe('WsAcpTransport project watches across reconnects', () => {
+  afterEach(() => {
+    FakeWebSocket.watchProjectRefusals = {}
+    FakeWebSocket.holdWatchProjectReplies = false
+    vi.useRealTimers()
+  })
+
+  async function connectedWithWatch(projectId: string): Promise<WsAcpTransport> {
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    await transport.watchProject?.(projectId)
+    return transport
+  }
+
+  const watchFrames = (transport: WsAcpTransport): string[] =>
+    (transport as unknown as { socket: FakeWebSocket }).socket.sent
+      .map((frame) => JSON.parse(frame) as { type: string; payload: { projectId?: string } })
+      .filter((frame) => frame.type === 'watch_project')
+      .map((frame) => frame.payload.projectId ?? '')
+
+  async function dropAndReconnect(transport: WsAcpTransport): Promise<void> {
+    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
+    // Backoff doubles per consecutive drop (500 ms, 1 s, …); cover the second.
+    await vi.advanceTimersByTimeAsync(2500)
+    await vi.advanceTimersByTimeAsync(50) // let the off-critical-path re-watch settle
+  }
+
+  it('re-sends watch_project for every watched project on the fresh socket', async () => {
+    vi.useFakeTimers()
+    const transport = await connectedWithWatch('p-1')
+    await transport.watchProject?.('p-2')
+
+    await dropAndReconnect(transport)
+
+    expect(watchFrames(transport).sort()).toEqual(['p-1', 'p-2'])
+    transport.dispose()
+  })
+
+  it('drops a watch the host refuses after reconnect and reports it as ended', async () => {
+    vi.useFakeTimers()
+    const transport = await connectedWithWatch('p-gone')
+    const ended: unknown[] = []
+    transport.onEvent('acp:fs_watch_ended', (payload) => ended.push(payload))
+    FakeWebSocket.watchProjectRefusals['p-gone'] = 'not_found'
+
+    await dropAndReconnect(transport)
+
+    expect(ended).toEqual([{ projectId: 'p-gone', reason: 'rewatch_failed' }])
+    // It is no longer re-requested on later reconnects.
+    FakeWebSocket.watchProjectRefusals = {}
+    await dropAndReconnect(transport)
+    expect(watchFrames(transport)).toEqual([])
+    transport.dispose()
+  })
+
+  it('stops re-sending a watch the host ended (fs_watch_ended)', async () => {
+    vi.useFakeTimers()
+    const transport = await connectedWithWatch('p-1')
+    ;(transport as unknown as { socket: FakeWebSocket }).socket.emit({
+      sid: null,
+      seq: 0,
+      type: 'fs_watch_ended',
+      payload: { projectId: 'p-1', reason: 'project_unavailable' }
+    })
+    await vi.advanceTimersByTimeAsync(10)
+
+    await dropAndReconnect(transport)
+
+    expect(watchFrames(transport)).toEqual([])
+    transport.dispose()
+  })
+
+  it('a watch in flight when the socket drops is tracked and re-sent after reconnect', async () => {
+    vi.useFakeTimers()
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    FakeWebSocket.holdWatchProjectReplies = true
+    const pending = transport.watchProject?.('p-1')
+    const settled = pending?.then(
+      () => 'ok',
+      () => 'rejected'
+    )
+
+    // The socket drops while the reply is outstanding: the request rejects.
+    FakeWebSocket.holdWatchProjectReplies = false
+    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
+    await vi.advanceTimersByTimeAsync(2500)
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(await settled).toBe('rejected')
+    expect(watchFrames(transport)).toEqual(['p-1'])
+    transport.dispose()
+  })
+
+  it('keeps tracking a watch whose reply timed out, and untracks one the host refuses', async () => {
+    vi.useFakeTimers()
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    const tracked = () => (transport as unknown as { watchedProjects: Set<string> }).watchedProjects
+
+    // No reply ever arrives: the request times out, but the host may have
+    // registered the watch, so it stays tracked for the next reconnect.
+    FakeWebSocket.holdWatchProjectReplies = true
+    const timedOut = transport.watchProject?.('p-slow')?.then(
+      () => 'ok',
+      (error: unknown) => (error as { code?: string }).code
+    )
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(await timedOut).toBe('timeout')
+    expect(tracked().has('p-slow')).toBe(true)
+
+    // An explicit host refusal on a live socket untracks it.
+    FakeWebSocket.holdWatchProjectReplies = false
+    FakeWebSocket.watchProjectRefusals['p-gone'] = 'not_found'
+    await expect(transport.watchProject?.('p-gone')).rejects.toMatchObject({ code: 'not_found' })
+    expect(tracked().has('p-gone')).toBe(false)
+    transport.dispose()
+  })
+
+  it('a re-watch whose reply never arrives does not hold the reconnect', async () => {
+    vi.useFakeTimers()
+    const transport = await connectedWithWatch('p-1')
+    const states: boolean[] = []
+    transport.setReconnectListener((reconnecting) => states.push(reconnecting))
+    FakeWebSocket.holdWatchProjectReplies = true
+
+    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
+    await vi.advanceTimersByTimeAsync(600)
+
+    // Reconnected (and the re-watch request went out) while its reply is held.
+    expect(states[states.length - 1]).toBe(false)
+    expect(watchFrames(transport)).toEqual(['p-1'])
+    transport.dispose()
+  })
+
+  it('a failing re-watch never delays or fails the reconnect itself', async () => {
+    vi.useFakeTimers()
+    const transport = await connectedWithWatch('p-1')
+    const states: boolean[] = []
+    transport.setReconnectListener((reconnecting) => states.push(reconnecting))
+    FakeWebSocket.watchProjectRefusals['p-1'] = 'internal'
+
+    await dropAndReconnect(transport)
+
+    expect(states[states.length - 1]).toBe(false)
     transport.dispose()
   })
 })

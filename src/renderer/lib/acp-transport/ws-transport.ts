@@ -217,6 +217,8 @@ export class WsAcpTransport implements AcpTransport {
   private readonly lastSeq = new Map<string, number>()
   /** Sessions we should re-subscribe after reconnect. */
   private readonly subscribed = new Set<string>()
+  /** Projects whose `fs_changed` watch this connection must re-request after reconnect. */
+  private readonly watchedProjects = new Set<string>()
   /** Idempotent prompt_complete turn ids already delivered, scoped by session. */
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
@@ -774,6 +776,26 @@ export class WsAcpTransport implements AcpTransport {
         message: `promote_session succeeded for session ${sessionId} but the live subscribe failed; the next prompt will retry the subscribe: ${String(error)}`
       })
     }
+  }
+
+  async watchProject(projectId: string): Promise<void> {
+    // Tracked BEFORE the reply: if the socket drops or the reply times out
+    // (the host may have registered the watch), the reconnect re-sends it.
+    // Only an explicit host refusal untracks it.
+    this.watchedProjects.add(projectId)
+    try {
+      await this.request('watch_project', { projectId })
+    } catch (error) {
+      const ambiguous =
+        error instanceof AcpTransportError && (error.code === 'closed' || error.code === 'timeout')
+      if (!ambiguous) this.watchedProjects.delete(projectId)
+      throw error
+    }
+  }
+
+  async unwatchProject(projectId: string): Promise<void> {
+    this.watchedProjects.delete(projectId)
+    await this.request('unwatch_project', { projectId })
   }
 
   async loadSession(
@@ -1466,6 +1488,9 @@ export class WsAcpTransport implements AcpTransport {
           }
         }
       }
+      // Off the critical path: a slow or failing watch re-request must never
+      // delay or fail the reconnect (it handles its own errors).
+      void this.rewatchProjects()
       if (obsoleteSessions.length > 0) {
         void logFrontendError({
           level: 'warn',
@@ -1509,6 +1534,35 @@ export class WsAcpTransport implements AcpTransport {
       this.discardSocket('reconnect attempt failed')
       this.scheduleReconnect()
     }
+  }
+
+  /**
+   * The host keeps no watch state across connections, so re-request every
+   * project watch on the fresh socket, in parallel and each bounded by the
+   * resubscribe timeout. A watch the host refuses (project archived/removed
+   * while disconnected) or cannot confirm in time is dropped here AND reported
+   * to listeners as a local `fs_watch_ended`, so the filesystem facade forgets
+   * it and re-requests on its next `watchDirectory` instead of believing it is
+   * live. If the socket itself died, the watches are kept for the next
+   * reconnect pass. Never rejects.
+   */
+  private async rewatchProjects(): Promise<void> {
+    await Promise.all(
+      [...this.watchedProjects].map(async (projectId) => {
+        try {
+          await this.request('watch_project', { projectId }, RESUBSCRIBE_TIMEOUT_MS)
+        } catch (error) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'WsAcpTransport.rewatchProjects',
+            message: `Re-watching project ${projectId} after reconnect failed: ${String(error)}`
+          })
+          if (!this.isSocketLive()) return
+          this.watchedProjects.delete(projectId)
+          this.emitLocal('fs_watch_ended', { projectId, reason: 'rewatch_failed' })
+        }
+      })
+    )
   }
 
   /** One per-session retry attempt (see {@link SessionResubscribeRetry}). */
@@ -1622,6 +1676,11 @@ export class WsAcpTransport implements AcpTransport {
   }
 
   private async handleEvent(evt: WsEvent): Promise<void> {
+    // The host ended a project watch: stop re-requesting it after reconnects.
+    if (evt.type === 'fs_watch_ended') {
+      const endedProject = (evt.payload as { projectId?: unknown } | null)?.projectId
+      if (typeof endedProject === 'string') this.watchedProjects.delete(endedProject)
+    }
     // #907 / CodeQL hardening: validate the event type against the shared
     // protocol registry BEFORE branching on it — the token send is gated by
     // a registry-validated boolean plus connection state, never the raw
