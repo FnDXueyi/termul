@@ -34,6 +34,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -43,7 +44,8 @@ use crate::acp::session_persistence::{
 };
 use crate::web::ws::{tier_of, ReliabilityTier, SequencedEvent};
 
-use super::{ClientId, LogHead, ReplayResult, WsRelaySink};
+use super::fanout::Gaps;
+use super::{ClientId, EventStream, LogHead, ReplayResult, StreamItem, WsRelaySink};
 
 /// Per-session seq counter + append-only bounded ring (held under
 /// [`WsRelaySink::sessions`]).
@@ -576,20 +578,24 @@ impl WsRelaySink {
     /// takes a snapshot instead. Without a cursor the epoch is ignored; a
     /// cursor sent without one is checked against the head only.
     ///
-    /// Returns the new client id + the receiver the write loop drains.
+    /// Returns the new client id + the stream the connection's forwarder
+    /// drains: the replay (every `seq <= headSeq`) first, then the live items
+    /// over a bounded channel. `closing` ends the caller's connection if the
+    /// subscriber cannot keep up with a reliable event.
     pub async fn subscribe(
         &self,
         sid: &str,
         last_seq: Option<u64>,
         log_epoch: Option<&str>,
-    ) -> (
-        ClientId,
-        mpsc::UnboundedReceiver<SequencedEvent>,
-        ReplayResult,
-        Option<LogHead>,
-    ) {
+        closing: &CancellationToken,
+    ) -> (ClientId, EventStream, ReplayResult, Option<LogHead>) {
         let client_id = ClientId::new();
-        let (tx, rx) = mpsc::unbounded_channel::<SequencedEvent>();
+        let gaps = Gaps::default();
+        // The stream of a subscription that registered nothing: already ended.
+        let no_stream = || {
+            let (_tx, rx) = mpsc::channel::<StreamItem>(1);
+            EventStream::new(Vec::new(), rx, Gaps::default())
+        };
         let Some(cursor) = last_seq else {
             // Live-only: validate existence and register under the SAME
             // `sessions` lock `forget_session` removes under — a concurrent
@@ -598,11 +604,17 @@ impl WsRelaySink {
             // a silent empty subscription.
             let mut sessions = self.sessions.lock();
             if !self.session_known_locked(&sessions, sid) {
-                return (client_id, rx, ReplayResult::NotFound, None);
+                return (client_id, no_stream(), ReplayResult::NotFound, None);
             }
             let head = self.session_head_locked(&mut sessions, sid);
-            self.register(client_id, sid, tx);
-            return (client_id, rx, ReplayResult::Ok(0), Some(head));
+            let (tx, rx) = mpsc::channel::<StreamItem>(self.client_queue_capacity);
+            self.register(client_id, sid, tx, Arc::clone(&gaps), closing);
+            return (
+                client_id,
+                EventStream::new(Vec::new(), rx, gaps),
+                ReplayResult::Ok(0),
+                Some(head),
+            );
         };
 
         // Cursor path: cheap early-out so an unknown id routes to `not_found`
@@ -610,7 +622,7 @@ impl WsRelaySink {
         // `stale`). The authoritative check re-runs under the `sessions` lock
         // at registration below, closing the `forget_session` race.
         if !self.knows_session(sid) {
-            return (client_id, rx, ReplayResult::NotFound, None);
+            return (client_id, no_stream(), ReplayResult::NotFound, None);
         }
         // A cursor from another epoch cannot be replayed: answer before any
         // disk read. Re-checked under the lock at registration.
@@ -620,7 +632,7 @@ impl WsRelaySink {
                     "[ws] subscribe cursor under a stale log epoch for session {}",
                     crate::logging::redact_session_id(sid)
                 );
-                return (client_id, rx, ReplayResult::Stale, None);
+                return (client_id, no_stream(), ReplayResult::Stale, None);
             }
         }
 
@@ -637,14 +649,14 @@ impl WsRelaySink {
                 // enqueued before it is on disk. The JSONL scan itself runs
                 // on spawn_blocking.
                 if persistence.flush_session(sid).await.is_err() {
-                    return (client_id, rx, ReplayResult::Stale, None);
+                    return (client_id, no_stream(), ReplayResult::Stale, None);
                 }
                 let durable = match persistence
                     .replay_after_async(sid.to_string(), cursor)
                     .await
                 {
                     Ok(records) => records,
-                    Err(_) => return (client_id, rx, ReplayResult::Stale, None),
+                    Err(_) => return (client_id, no_stream(), ReplayResult::Stale, None),
                 };
                 // Lazily restore the completed-turn watermark from the
                 // replayed records so `claim_turn` rejects already-completed
@@ -712,7 +724,7 @@ impl WsRelaySink {
                         .is_some_and(|next| next < state.base_seq)
                 })
             {
-                return (client_id, rx, ReplayResult::Stale, None);
+                return (client_id, no_stream(), ReplayResult::Stale, None);
             }
             for event in ring {
                 by_seq.insert(event.seq, event);
@@ -734,7 +746,7 @@ impl WsRelaySink {
             let missing = missing_seq_ranges(cursor, frontier, &by_seq);
             if !missing.is_empty() {
                 if self.persistence.is_none() || base_seq <= cursor.saturating_add(1) {
-                    return (client_id, rx, ReplayResult::Stale, None);
+                    return (client_id, no_stream(), ReplayResult::Stale, None);
                 }
                 if passes >= REPLAY_MAX_PASSES {
                     warn!(
@@ -765,7 +777,7 @@ impl WsRelaySink {
             // Re-validate under the still-held `sessions` lock: the session may
             // have been forgotten while the durable replay was in flight.
             if !self.session_known_locked(&sessions, sid) {
-                return (client_id, rx, ReplayResult::NotFound, None);
+                return (client_id, no_stream(), ReplayResult::NotFound, None);
             }
             let head = self.session_head_locked(&mut sessions, sid);
             if log_epoch.is_some_and(|epoch| epoch != head.log_epoch) || cursor > head.head_seq {
@@ -775,18 +787,19 @@ impl WsRelaySink {
                     crate::logging::redact_session_id(sid),
                     head.head_seq
                 );
-                return (client_id, rx, ReplayResult::Stale, None);
+                return (client_id, no_stream(), ReplayResult::Stale, None);
             }
-            self.register(client_id, sid, tx.clone());
+            // The replay drains through the connection queue at the peer's
+            // pace while live events keep arriving: room for what a long replay
+            // can overlap, so a healthy phone catching up is not closed and
+            // then replayed again forever. Bounded by the log capacity.
+            let (tx, rx) = mpsc::channel::<StreamItem>(
+                self.client_queue_capacity + by_seq.len().min(self.event_log_capacity),
+            );
+            self.register(client_id, sid, tx, Arc::clone(&gaps), closing);
             let count = by_seq.len() as u64;
-            for event in by_seq.into_values() {
-                if tx.send(event).is_err() {
-                    drop(sessions);
-                    self.unregister_client(client_id);
-                    return (client_id, rx, ReplayResult::Stale, None);
-                }
-            }
-            return (client_id, rx, ReplayResult::Ok(count), Some(head));
+            let stream = EventStream::new(by_seq.into_values().collect(), rx, gaps);
+            return (client_id, stream, ReplayResult::Ok(count), Some(head));
         }
     }
 
@@ -806,17 +819,11 @@ impl WsRelaySink {
     pub async fn subscribe_snapshot(
         &self,
         sid: &str,
-    ) -> Result<
-        (
-            ClientId,
-            mpsc::UnboundedReceiver<SequencedEvent>,
-            Vec<SequencedEvent>,
-            LogHead,
-        ),
-        String,
-    > {
+        closing: &CancellationToken,
+    ) -> Result<(ClientId, EventStream, Vec<SequencedEvent>, LogHead), String> {
         let client_id = ClientId::new();
-        let (tx, rx) = mpsc::unbounded_channel::<SequencedEvent>();
+        let (tx, rx) = mpsc::channel::<StreamItem>(self.client_queue_capacity);
+        let gaps = Gaps::default();
         let gate = self.replay_gate(sid).await;
         let _replay_guard = gate.lock().await;
         let Some(persistence) = &self.persistence else {
@@ -826,8 +833,8 @@ impl WsRelaySink {
                 .map(|state| state.events.iter().cloned().collect())
                 .unwrap_or_default();
             let head = self.session_head_locked(&mut sessions, sid);
-            self.register(client_id, sid, tx);
-            return Ok((client_id, rx, snapshot, head));
+            self.register(client_id, sid, tx, Arc::clone(&gaps), closing);
+            return Ok((client_id, EventStream::new(Vec::new(), rx, gaps), snapshot, head));
         };
         let mut passes: u32 = 0;
         loop {
@@ -882,8 +889,13 @@ impl WsRelaySink {
                 }
             }
             let head = self.session_head_locked(&mut sessions, sid);
-            self.register(client_id, sid, tx);
-            return Ok((client_id, rx, by_seq.into_values().collect(), head));
+            self.register(client_id, sid, tx, Arc::clone(&gaps), closing);
+            return Ok((
+                client_id,
+                EventStream::new(Vec::new(), rx, gaps),
+                by_seq.into_values().collect(),
+                head,
+            ));
         }
     }
 
