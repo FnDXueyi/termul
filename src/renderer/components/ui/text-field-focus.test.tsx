@@ -175,3 +175,34 @@ describe('raw text fields in the renderer', () => {
     ).toEqual([])
   })
 })
+
+/** A focus ring, border or outline in a status or brand colour instead of the neutral `ring`. */
+const COLORED_FOCUS =
+  /(?<![\w-])focus(?:-visible|-within)?:(?:ring|border|outline)-(?:primary|accent|destructive|success|warning)(?![\w-])/
+
+describe('focus colour on every control', () => {
+  it('flags a coloured focus ring and accepts the neutral ring', () => {
+    expect(COLORED_FOCUS.test('focus-visible:ring-primary/60')).toBe(true)
+    expect(COLORED_FOCUS.test('focus-visible:ring-destructive')).toBe(true)
+    expect(COLORED_FOCUS.test('focus-within:border-primary')).toBe(true)
+    expect(COLORED_FOCUS.test('focus-visible:ring-ring')).toBe(false)
+    expect(COLORED_FOCUS.test('focus-visible:ring-primary-foreground/40')).toBe(false)
+  })
+
+  it('no renderer source uses a coloured focus state', () => {
+    const report: string[] = []
+    for (const path of listSourceFiles(RENDERER_ROOT, ['.tsx', '.ts'])) {
+      readFileSync(path, 'utf8')
+        .split('\n')
+        .forEach((text, index) => {
+          if (COLORED_FOCUS.test(text)) {
+            report.push(`src/renderer/${toRootPath(RENDERER_ROOT, path)}:${index + 1}`)
+          }
+        })
+    }
+    expect(
+      report,
+      `Focus is the neutral ring token (docs/design/colors.md). Use focus-visible:ring-ring:\n${report.join('\n')}`
+    ).toEqual([])
+  })
+})

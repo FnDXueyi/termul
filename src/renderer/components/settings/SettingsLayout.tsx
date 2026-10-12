@@ -222,7 +222,7 @@ export function SettingsLayout({
                   key={`${result.categoryId}-${result.label}`}
                   type="button"
                   onClick={() => scrollToSection(result.categoryId, result.anchorId)}
-                  className="flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-secondary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <span className="font-medium">{result.label}</span>
                   <span className="text-2xs text-muted-foreground">
@@ -243,7 +243,7 @@ export function SettingsLayout({
                   onClick={() => scrollToSection(category.id)}
                   onKeyDown={(e) => handleCategoryKeyDown(e, index)}
                   className={cn(
-                    'flex flex-shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary md:w-full',
+                    'flex flex-shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring md:w-full',
                     isActive
                       ? 'bg-primary/10 font-medium text-primary'
                       : 'text-muted-foreground hover:bg-secondary hover:text-foreground'

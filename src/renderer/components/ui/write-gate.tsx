@@ -27,7 +27,7 @@ export function WriteGate({ gated, focusable = true, className, children }: Writ
       title={READ_ONLY_SERVER_REASON}
       tabIndex={focusable ? 0 : undefined}
       className={cn(
-        'inline-flex rounded [&>*]:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
+        'inline-flex rounded [&>*]:pointer-events-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
         className
       )}
     >

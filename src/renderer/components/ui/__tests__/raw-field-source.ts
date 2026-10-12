@@ -78,14 +78,20 @@ export function findTextFieldTags(source: string): RawFieldTag[] {
   return tags
 }
 
-/** Non-test `.tsx` files under `dir`, sorted. */
-export function listSourceFiles(dir: string): string[] {
+/** Non-test source files under `dir` with one of `extensions`, sorted. */
+export function listSourceFiles(dir: string, extensions: readonly string[] = ['.tsx']): string[] {
   const files: string[] = []
   for (const name of readdirSync(dir).sort()) {
     if (name === 'node_modules') continue
     const path = join(dir, name)
-    if (statSync(path).isDirectory()) files.push(...listSourceFiles(path))
-    else if (name.endsWith('.tsx') && !name.endsWith('.test.tsx')) files.push(path)
+    if (statSync(path).isDirectory()) files.push(...listSourceFiles(path, extensions))
+    else if (
+      extensions.some((ext) => name.endsWith(ext)) &&
+      !/\.test\.tsx?$/.test(name) &&
+      !name.endsWith('.d.ts')
+    ) {
+      files.push(path)
+    }
   }
   return files
 }
