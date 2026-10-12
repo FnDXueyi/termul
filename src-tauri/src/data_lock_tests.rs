@@ -121,6 +121,44 @@ fn symlink_aliases_share_one_lock() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_planted_at_the_sidecar_path_is_refused_and_its_target_untouched() {
+    let root = temp_dir("sidecar-symlink");
+    let dir = root.join("state");
+    fs::create_dir_all(&dir).unwrap();
+    let victim = root.join("victim.txt");
+    fs::write(&victim, b"precious").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join(DIR_LOCK_FILE_NAME)).unwrap();
+
+    let mut locks = DataLocks::new();
+    let error = locks.lock_dir(&dir).expect_err("symlinked sidecar must be refused");
+    assert!(!error.is_busy(), "a planted symlink is an I/O refusal: {error:?}");
+    assert!(locks.is_empty());
+    assert_eq!(fs::read(&victim).unwrap(), b"precious", "target not truncated/written");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn recorded_pid_is_readable_by_a_rival_and_never_leaves_stale_digits() {
+    let root = temp_dir("pid-record");
+    let dir = root.join("state");
+    fs::create_dir_all(&dir).unwrap();
+    // A previous (longer) record must not bleed through the new one.
+    fs::write(dir.join(DIR_LOCK_FILE_NAME), "999999999999999999999999\n").unwrap();
+
+    let mut first = DataLocks::new();
+    first.lock_dir(&dir).unwrap();
+    let mut second = DataLocks::new();
+    match second.lock_dir(&dir).unwrap_err() {
+        DataLockError::Busy { holder_pid, .. } => {
+            assert_eq!(holder_pid, Some(std::process::id()));
+        }
+        other => panic!("expected Busy, got {other:?}"),
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn desktop_lock_set_covers_app_data_and_its_overridable_stores() {
     let root = temp_dir("desktop");

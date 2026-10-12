@@ -26,10 +26,13 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::web::ServerConfig;
+
+/// Upper bound on the bytes read from a rival's lock file to learn its pid.
+const MAX_PID_RECORD_BYTES: usize = 256;
 
 /// Sidecar lock file name inside a directory store.
 pub const DIR_LOCK_FILE_NAME: &str = ".termul.lock";
@@ -178,30 +181,46 @@ impl DataLocks {
         if self.held.contains(&lock_path) {
             return Ok(());
         }
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        // The sidecar sits in a user-writable data dir: never follow a
+        // symlink planted at its path (it would let the pid record clobber
+        // the link target). `O_NOFOLLOW` makes the open fail with `ELOOP`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
             .open(&lock_path)
             .map_err(|source| io_error(protected, source))?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                let mut recorded = String::new();
-                let _ = file.read_to_string(&mut recorded);
+                // Advisory only: bounded read (the rival's file is untrusted
+                // input) of the pid it recorded.
+                let mut buf = Vec::with_capacity(MAX_PID_RECORD_BYTES);
+                let _ = (&file)
+                    .take(MAX_PID_RECORD_BYTES as u64)
+                    .read_to_end(&mut buf);
                 return Err(DataLockError::Busy {
                     path: protected.to_path_buf(),
                     lock_file: lock_path,
-                    holder_pid: recorded.trim().parse().ok(),
+                    holder_pid: String::from_utf8_lossy(&buf)
+                        .lines()
+                        .next()
+                        .and_then(|line| line.trim().parse().ok()),
                 });
             }
             Err(TryLockError::Error(source)) => return Err(io_error(protected, source)),
         }
         // Advisory: record our pid so a refused host can name its rival.
+        // Written at offset 0 and never truncating (nothing of ours is
+        // destroyed through a hard link); readers parse only the first line,
+        // so leftovers of an older, longer record are ignored.
         let record = file
-            .set_len(0)
-            .and_then(|()| file.write_all(format!("{}\n", std::process::id()).as_bytes()));
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| file.write_all(format!("{}\n", std::process::id()).as_bytes()));
         if let Err(error) = record {
             tracing::warn!(
                 "data lock: could not record pid in '{}': {error}",

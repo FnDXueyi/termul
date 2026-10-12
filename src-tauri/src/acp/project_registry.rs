@@ -315,6 +315,19 @@ impl FileProjectRegistry {
                         found,
                     });
                 }
+                // Only versions `migrate` knows (1, 2) may be rewritten; any
+                // other lower version (e.g. 0) is rejected exactly as `load`
+                // rejects it, never backed up and overwritten.
+                Some(found) if found < SCHEMA_VERSION && !matches!(found, 1 | 2) => {
+                    warn!(
+                        "refusing to overwrite projects file '{}': unsupported schema version {found}",
+                        path.display()
+                    );
+                    return Err(ProjectRegistryError::BadSchemaVersion {
+                        expected: SCHEMA_VERSION,
+                        found,
+                    });
+                }
                 Some(found) if found < SCHEMA_VERSION => {
                     let backup = crate::acp::atomic_file::backup_pre_migration(
                         path,

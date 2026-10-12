@@ -97,3 +97,24 @@ fn newer_schema_is_recognised_even_when_the_rest_of_the_shape_is_unknown() {
     assert!(NewerSchema::check(path, b"not json", 3).is_ok());
     assert_eq!(peek_schema_version(br#"{"schemaVersion":"7"}"#), None);
 }
+
+#[cfg(unix)]
+#[test]
+fn backups_are_owner_only_even_under_a_permissive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("backup-mode");
+    let target = dir.join("projects.json");
+    // The source is world-readable; its backup must still be 0600 (the
+    // registry/store hold MCP env secrets).
+    fs::write(&target, b"secret").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    for backup in [
+        backup_pre_migration(&target, b"secret", 3).unwrap(),
+        backup_corrupt(&target, b"secret").unwrap(),
+    ] {
+        let mode = fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} has mode {mode:o}", backup.display());
+        assert_eq!(fs::read(&backup).unwrap(), b"secret");
+    }
+    let _ = fs::remove_dir_all(dir);
+}

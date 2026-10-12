@@ -492,9 +492,9 @@ async fn shared_live_with_a_tunnel_requires_the_token_and_shares_it_in_the_url()
         http_status(&api, Some("not-the-token")).await,
         reqwest::StatusCode::UNAUTHORIZED
     );
-    assert_ne!(
+    assert_eq!(
         http_status(&api, Some(&token)).await,
-        reqwest::StatusCode::UNAUTHORIZED,
+        reqwest::StatusCode::OK,
         "the right token is accepted"
     );
 
@@ -535,9 +535,9 @@ async fn shared_live_on_loopback_without_a_tunnel_is_ungated_and_writes_no_token
         .await
         .expect("start");
     let api = format!("{}/projects", status.url.expect("loopback url"));
-    assert_ne!(
+    assert_eq!(
         http_status(&api, None).await,
-        reqwest::StatusCode::UNAUTHORIZED
+        reqwest::StatusCode::OK
     );
     assert!(
         !data_dir
@@ -578,9 +578,9 @@ async fn shared_live_requested_beyond_loopback_requires_the_token_even_without_a
         reqwest::StatusCode::UNAUTHORIZED
     );
     let token = persisted_token(data_dir.path());
-    assert_ne!(
+    assert_eq!(
         http_status(&api, Some(&token)).await,
-        reqwest::StatusCode::UNAUTHORIZED
+        reqwest::StatusCode::OK
     );
     let _ = state.stop().await;
 }

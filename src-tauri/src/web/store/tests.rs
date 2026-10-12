@@ -204,13 +204,95 @@ fn newer_schema_is_refused_and_the_file_is_left_byte_identical() {
 }
 
 #[test]
-fn unrecognised_envelope_is_treated_as_corrupt() {
+fn bare_map_with_a_user_key_named_schema_version_is_legacy_not_an_envelope() {
+    let dir = tempdir_like("legacy-schema-key");
+    let file = dir.join("store.json");
+    // A numeric user key `schemaVersion` (even a "newer" looking one) without
+    // a `data` envelope is user data, not a version marker.
+    let legacy = br#"{"schemaVersion":7,"settings":{"theme":"dark"}}"#;
+    std::fs::write(&file, legacy).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert_eq!(store.read("schemaVersion").unwrap(), Some(serde_json::json!(7)));
+    assert_eq!(
+        store.read("settings").unwrap(),
+        Some(serde_json::json!({ "theme": "dark" }))
+    );
+    let backups = backups_with_prefix(&dir, "store.json.pre-v1-");
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), legacy);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(on_disk["data"]["schemaVersion"], serde_json::json!(7));
+    cleanup(&dir);
+}
+
+#[test]
+fn envelope_with_non_object_data_is_not_an_envelope() {
     let dir = tempdir_like("bad-envelope");
     let file = dir.join("store.json");
     std::fs::write(&file, br#"{"schemaVersion":1,"data":[1,2]}"#).unwrap();
 
     let store = WebStore::open(file.clone()).unwrap();
-    assert_eq!(store.read("k").unwrap(), None);
-    assert_eq!(backups_with_prefix(&dir, "store.json.corrupt-").len(), 1);
+    // Read as a legacy map: nothing is lost, and the original is backed up.
+    assert_eq!(store.read("data").unwrap(), Some(serde_json::json!([1, 2])));
+    assert_eq!(backups_with_prefix(&dir, "store.json.pre-v1-").len(), 1);
+    cleanup(&dir);
+}
+
+#[test]
+fn unknown_top_level_envelope_keys_survive_writes_and_deletes() {
+    let dir = tempdir_like("extra-keys");
+    let file = dir.join("store.json");
+    std::fs::write(
+        &file,
+        br#"{"schemaVersion":1,"data":{"k":1},"futureThing":{"x":[1,2]}}"#,
+    )
+    .unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert!(backups_with_prefix(&dir, "store.json.").is_empty());
+    store.write("j", serde_json::json!(2), None).unwrap();
+    store.delete("k").unwrap();
+
+    let reopened = WebStore::open(file.clone()).unwrap();
+    assert_eq!(reopened.read("j").unwrap(), Some(serde_json::json!(2)));
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        on_disk,
+        serde_json::json!({
+            "schemaVersion": 1,
+            "data": { "j": 2 },
+            "futureThing": { "x": [1, 2] }
+        })
+    );
+    cleanup(&dir);
+}
+
+#[test]
+fn write_limit_applies_to_the_data_payload_not_the_envelope() {
+    let dir = tempdir_like("limit");
+    let file = dir.join("store.json");
+    // A bare map whose payload is just under the limit: its envelope is
+    // larger than the limit, yet writes must keep working after migration.
+    let value_len = MAX_DATA_BYTES - br#"{"a":""}"#.len() - 4;
+    let legacy = format!(r#"{{"a":"{}"}}"#, "x".repeat(value_len));
+    assert!(legacy.len() < MAX_DATA_BYTES);
+    std::fs::write(&file, &legacy).unwrap();
+
+    let store = WebStore::open(file.clone()).unwrap();
+    assert!(std::fs::metadata(&file).unwrap().len() as usize > MAX_DATA_BYTES);
+    // Same-size rewrite fits (payload unchanged) although the file is over 10 MiB.
+    assert!(store
+        .write("a", serde_json::json!("y".repeat(value_len)), None)
+        .unwrap());
+    // Growing the payload past the limit is still refused, file untouched.
+    let before = std::fs::read(&file).unwrap();
+    let error = store
+        .write("a", serde_json::json!("y".repeat(value_len + 10)), None)
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
     cleanup(&dir);
 }

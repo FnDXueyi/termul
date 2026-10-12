@@ -20,6 +20,13 @@
 //! than this build understands is refused with [`WebStoreError::NewerSchema`]
 //! and left byte-identical.
 //!
+//! An object is an envelope only when it has a numeric `schemaVersion` AND a
+//! `data` key; any other object is a legacy map, so a user key that happens to
+//! be named `schemaVersion` is not misread. Unknown extra top-level keys of a
+//! v1 envelope are kept verbatim across rewrites. The 10 MiB write limit is
+//! measured on the `data` payload, not the enveloped file, so migrating a
+//! legacy map never leaves a store that cannot be written.
+//!
 //! Exposed to browsers as the `store_read` / `store_write` / `store_delete`
 //! WS requests (see `ws.rs`). The client debounces high-frequency writes, so
 //! write volume here is low.
@@ -74,51 +81,76 @@ impl std::error::Error for WebStoreError {
     }
 }
 
+/// Maximum size of the `data` payload a write may persist.
+const MAX_DATA_BYTES: usize = 10 * 1024 * 1024;
+
+/// Top-level keys of the envelope that are not `schemaVersion`/`data`,
+/// preserved verbatim.
+type ExtraKeys = serde_json::Map<String, Value>;
+
 /// Borrowed envelope for serialization (no clone of the map per write).
 #[derive(Serialize)]
 struct EnvelopeRef<'a> {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     data: &'a HashMap<String, Value>,
+    #[serde(flatten)]
+    extra: &'a ExtraKeys,
 }
 
-fn encode(map: &HashMap<String, Value>) -> io::Result<Vec<u8>> {
+fn encode(map: &HashMap<String, Value>, extra: &ExtraKeys) -> io::Result<Vec<u8>> {
     serde_json::to_vec(&EnvelopeRef {
         schema_version: STORE_SCHEMA_VERSION,
         data: map,
+        extra,
     })
     .map_err(|e| io::Error::other(e.to_string()))
 }
 
+/// Bytes the envelope adds around the `data` payload (everything but the
+/// payload itself), so the limit can be checked on one serialization.
+fn envelope_overhead(extra: &ExtraKeys) -> io::Result<usize> {
+    // An empty `data` serializes as `{}` (2 bytes), which the payload replaces.
+    Ok(encode(&HashMap::new(), extra)?.len() - 2)
+}
+
 /// What a store file's bytes mean to this build.
 enum Decoded {
-    /// `{"schemaVersion":1,"data":{…}}`.
-    Current(HashMap<String, Value>),
+    /// `{"schemaVersion":1,"data":{…}, …unknown keys}`.
+    Current(HashMap<String, Value>, ExtraKeys),
     /// A bare `{ "key": value }` map from before versioning.
     Legacy(HashMap<String, Value>),
 }
 
 fn decode(path: &Path, bytes: &[u8]) -> Result<Decoded, DecodeFailure> {
-    NewerSchema::check(path, bytes, STORE_SCHEMA_VERSION).map_err(DecodeFailure::Newer)?;
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|e| DecodeFailure::Corrupt(format!("invalid JSON: {e}")))?;
-    let Value::Object(object) = value else {
+    let Value::Object(mut object) = value else {
         return Err(DecodeFailure::Corrupt(
             "top-level value is not a JSON object".to_string(),
         ));
     };
-    if atomic_file::peek_schema_version(bytes).is_none() {
-        return Ok(Decoded::Legacy(object.into_iter().collect()));
-    }
-    // Envelope: only version 1 reaches here (newer was refused above).
-    match (object.get("schemaVersion").and_then(Value::as_u64), object.get("data")) {
-        (Some(1), Some(Value::Object(data))) => Ok(Decoded::Current(
-            data.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        )),
-        _ => Err(DecodeFailure::Corrupt(
-            "unrecognised store envelope (expected schemaVersion 1 with an object `data`)"
-                .to_string(),
-        )),
+    let version = object.get("schemaVersion").and_then(Value::as_u64);
+    match (version, object.get("data")) {
+        // Newer envelope (a `data` key beside a numeric version): refuse,
+        // whatever shape `data` has in that future version.
+        (Some(found), Some(_)) if found > u64::from(STORE_SCHEMA_VERSION) => {
+            Err(DecodeFailure::Newer(NewerSchema {
+                path: path.to_path_buf(),
+                found: u32::try_from(found).unwrap_or(u32::MAX),
+                supported: STORE_SCHEMA_VERSION,
+            }))
+        }
+        (Some(1), Some(Value::Object(_))) => {
+            let Some(Value::Object(data)) = object.remove("data") else {
+                unreachable!("matched an object `data` above");
+            };
+            object.remove("schemaVersion");
+            Ok(Decoded::Current(data.into_iter().collect(), object))
+        }
+        // Anything else — including a bare map with a user key named
+        // `schemaVersion` — is a legacy map.
+        _ => Ok(Decoded::Legacy(object.into_iter().collect())),
     }
 }
 
@@ -134,6 +166,8 @@ enum DecodeFailure {
 /// doc for the on-disk envelope).
 pub struct WebStore {
     path: PathBuf,
+    /// Unknown top-level envelope keys, written back unchanged.
+    extra: ExtraKeys,
     inner: Mutex<Option<HashMap<String, Value>>>,
 }
 
@@ -154,9 +188,13 @@ impl WebStore {
     /// - Other read failure → warn + unavailable store (reads/writes return
     ///   `STORE_UNAVAILABLE`; the file is not touched).
     pub fn open(path: PathBuf) -> Result<Self, WebStoreError> {
+        let mut extra = ExtraKeys::new();
         let data = match fs::read(&path) {
             Ok(bytes) => match decode(&path, &bytes) {
-                Ok(Decoded::Current(map)) => Some(map),
+                Ok(Decoded::Current(map, unknown)) => {
+                    extra = unknown;
+                    Some(map)
+                }
                 Ok(Decoded::Legacy(map)) => Some(Self::migrate_legacy(&path, &bytes, map)?),
                 Err(DecodeFailure::Newer(newer)) => {
                     warn!("{}", WebStoreError::NewerSchema(newer.clone()));
@@ -198,6 +236,7 @@ impl WebStore {
         };
         Ok(Self {
             path,
+            extra,
             inner: Mutex::new(data),
         })
     }
@@ -217,7 +256,7 @@ impl WebStore {
             path.display(),
             backup.display()
         );
-        match encode(&map).and_then(|bytes| atomic_file::replace(path, &bytes)) {
+        match encode(&map, &ExtraKeys::new()).and_then(|bytes| atomic_file::replace(path, &bytes)) {
             Ok(()) => {}
             Err(e) => warn!(
                 "could not rewrite migrated store '{}': {e}; the envelope is written on the next successful write",
@@ -256,11 +295,11 @@ impl WebStore {
         let mut next = map.clone();
         next.insert(key.to_string(), value);
 
-        let bytes = encode(&next)?;
-        if bytes.len() > 10 * 1024 * 1024 {
+        let bytes = encode(&next, &self.extra)?;
+        if bytes.len() - envelope_overhead(&self.extra)? > MAX_DATA_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "store file exceeds 10MB limit",
+                "store data exceeds 10MB limit",
             ));
         }
         atomic_file::replace(&self.path, &bytes)?;
@@ -279,7 +318,7 @@ impl WebStore {
         let mut next = map.clone();
         let removed = next.remove(key).is_some();
 
-        let bytes = encode(&next)?;
+        let bytes = encode(&next, &self.extra)?;
         atomic_file::replace(&self.path, &bytes)?;
 
         *map = next;

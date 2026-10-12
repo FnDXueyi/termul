@@ -358,6 +358,41 @@ fn pre_migration_backups(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
+fn save_atomic_rejects_an_unmigratable_older_schema_like_load_does() {
+    let dir = tempdir_like("save-v0");
+    let file = dir.join("projects.json");
+    let old = br#"{"schemaVersion":0,"projects":[]}"#;
+    fs::write(&file, old).unwrap();
+
+    let err = FileProjectRegistry::empty()
+        .save_atomic(&file)
+        .expect_err("v0 has no migration path");
+    assert!(
+        matches!(err, ProjectRegistryError::BadSchemaVersion { found: 0, .. }),
+        "got {err:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), old, "file untouched");
+    assert!(pre_migration_backups(&dir).is_empty());
+    cleanup(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_backup_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir_like("migrate-backup-mode");
+    let file = dir.join("projects.json");
+    fs::write(&file, br#"{"schemaVersion":1,"projects":[]}"#).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    FileProjectRegistry::empty().save_atomic(&file).expect("save");
+    let backups = pre_migration_backups(&dir);
+    assert_eq!(backups.len(), 1);
+    let mode = fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    cleanup(&dir);
+}
+
+#[test]
 fn save_atomic_refuses_to_overwrite_a_newer_schema_file() {
     let dir = tempdir_like("save-newer");
     let file = dir.join("projects.json");

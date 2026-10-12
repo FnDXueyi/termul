@@ -137,14 +137,35 @@ pub fn backup_pre_migration(path: &Path, bytes: &[u8], to_version: u32) -> io::R
     ))
 }
 
+/// Create `path` (never clobbering), write, sync, and sync the parent
+/// directory (unix) so the new directory entry is durable, like [`replace`].
+/// Backups hold the same secrets as the file they preserve (MCP env, tokens),
+/// so on unix they are created owner-only (`0600`) regardless of umask.
 fn write_new_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.flush()?;
-    file.sync_all()
+    file.sync_all()?;
+    drop(file);
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 /// A store file written by a NEWER host than this one (AD-18: a host refuses,
