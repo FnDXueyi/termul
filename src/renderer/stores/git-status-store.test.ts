@@ -250,13 +250,17 @@ describe('git-status-store commit footer', () => {
     expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false)
   })
 
-  it('a HEAD that cannot be read fails the context fetch, so the footer cannot commit without a precondition', async () => {
+  it('a HEAD that cannot be read keeps the context but refuses a commit without a precondition', async () => {
     gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
     gitApi.getLog.mockRejectedValue(new Error('locked'))
 
     await useGitStatusStore.getState().fetchCommitContext(CWD)
 
-    expect(useGitStatusStore.getState().commitContexts[CWD]).toBeUndefined()
+    expect(useGitStatusStore.getState().commitContexts[CWD]).toMatchObject({ hasHead: true })
+    await expect(useGitStatusStore.getState().commit(CWD, 's', '', false)).rejects.toThrow(
+      'HEAD could not be read'
+    )
+    expect(gitApi.commit).not.toHaveBeenCalled()
   })
 
   it('a superseded commit-context fetch does not record its HEAD', async () => {

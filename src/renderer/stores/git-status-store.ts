@@ -312,9 +312,6 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     const isCurrent = () => commitContextRequests[key] === token
     try {
       const context = await gitApi.getCommitContext(cwd)
-      // A HEAD that cannot be read fails the whole fetch (the catch below drops
-      // the context, so the footer disables commit) rather than leaving a commit
-      // with no precondition.
       const head = isCurrent() ? await readHead(cwd, context.hasHead) : undefined
       if (isCurrent() && head !== undefined) {
         knownHeads[key] = head
@@ -463,6 +460,7 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       // The commit lands on the HEAD the panel last showed: a HEAD moved by
       // another client or terminal refuses it (`precondition_failed`).
       const expectedHead = knownHeads[trackPath(cwd)]
+      if (expectedHead === null) throw new Error('HEAD could not be read. Refresh and try again.')
       if (expectedHead === undefined) await gitApi.commit(cwd, summary, description, amend)
       else await gitApi.commit(cwd, summary, description, amend, expectedHead)
     } catch (error) {
@@ -628,16 +626,21 @@ const diffRequestVersions: Record<string, number> = {}
 const commitContextRequests: Record<string, number> = {}
 
 /** Full sha of HEAD (`''`: unborn branch) as of the last commit-context fetch,
- * per tracked path: the `expectedHead` of the next commit. Absent before the first
- * successful fetch and after a failed one. Control metadata. */
-const knownHeads: Record<string, string> = {}
+ * per tracked path: the `expectedHead` of the next commit. `null`: HEAD could not
+ * be read, so a commit is refused until a fetch succeeds. Absent before the first
+ * fetch and after a failed one (the commit then carries no precondition).
+ * Control metadata. */
+const knownHeads: Record<string, string | null> = {}
 
-/** HEAD's full sha (`''` on an unborn branch); throws when it cannot be read. */
-async function readHead(cwd: string, hasHead: boolean): Promise<string> {
+/** HEAD's full sha (`''` on an unborn branch); `null` when it cannot be read. */
+async function readHead(cwd: string, hasHead: boolean): Promise<string | null> {
   if (!hasHead) return ''
-  const [head] = await gitApi.getLog(cwd, 1)
-  if (!head?.hash) throw new Error('HEAD could not be read')
-  return head.hash
+  try {
+    const [head] = await gitApi.getLog(cwd, 1)
+    return head?.hash ?? null
+  } catch {
+    return null
+  }
 }
 
 function isPreconditionFailed(error: unknown): boolean {
