@@ -175,6 +175,15 @@ pub struct ClientIdentity {
     pub client_instance_id: String,
 }
 
+impl ClientIdentity {
+    /// Log-safe label for one id: the first 8 characters. The ids are stable
+    /// per profile, so the full values stay out of service logs.
+    #[must_use]
+    pub fn log_label(id: &str) -> String {
+        id.chars().take(8).collect()
+    }
+}
+
 /// Why an `authenticate` handshake was refused before the token gate ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeRefusal {
@@ -204,8 +213,10 @@ impl HandshakeRefusal {
 /// `clientInstanceId` (shared by `/ws` and `/terminal/ws`). Runs BEFORE any
 /// token check so a stale tab learns it must reload even on a token mismatch.
 /// A missing, non-numeric or different `protocolVersion` is a mismatch; each
-/// id must be a non-empty string of at most [`MAX_CLIENT_ID_LEN`] bytes. The
-/// ids are returned exactly as received (the host never mints or rewrites).
+/// id must be a non-empty string of at most [`MAX_CLIENT_ID_LEN`] bytes with
+/// no control characters (the host logs ids, so a newline must not forge a
+/// log line). The ids are returned exactly as received (the host never mints
+/// or rewrites).
 pub fn validate_authenticate_handshake(payload: &Value) -> Result<ClientIdentity, HandshakeRefusal> {
     if payload["protocolVersion"].as_u64() != Some(u64::from(WS_PROTOCOL_VERSION)) {
         return Err(HandshakeRefusal {
@@ -218,14 +229,18 @@ pub fn validate_authenticate_handshake(payload: &Value) -> Result<ClientIdentity
     }
     let client_id = |field: &'static str| -> Result<String, HandshakeRefusal> {
         match payload[field].as_str() {
-            Some(value) if !value.is_empty() && value.len() <= MAX_CLIENT_ID_LEN => {
+            Some(value)
+                if !value.is_empty()
+                    && value.len() <= MAX_CLIENT_ID_LEN
+                    && !value.chars().any(char::is_control) =>
+            {
                 Ok(value.to_string())
             }
             _ => Err(HandshakeRefusal {
                 code: WsErrorCode::InvalidClientIdentity,
                 check: field,
                 message: format!(
-                    "{field} must be a non-empty string of at most {MAX_CLIENT_ID_LEN} bytes"
+                    "{field} must be a non-empty string of at most {MAX_CLIENT_ID_LEN} bytes without control characters"
                 ),
             }),
         }

@@ -486,6 +486,11 @@ export class WebTerminalClient {
     const error = new Error(message || `Terminal authenticate refused (${code})`)
     this.handshakeHalted = error
     this.reconnectAttempt = 0
+    // No input can ever be delivered on a halted client: mark every tracked
+    // terminal disconnected and drop buffered keystrokes so write() stops
+    // reporting success for input that never reaches the host.
+    for (const tracker of this.trackers.values()) tracker.disconnected = true
+    this.inputBuffers.clear()
     this.failConnect(socket, reject, error)
     this.emitConnectionState('disconnected')
     if (code === WEB_TERMINAL_ERROR_CODES.PROTOCOL_VERSION_MISMATCH) {

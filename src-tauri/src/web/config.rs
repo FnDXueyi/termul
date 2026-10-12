@@ -89,7 +89,11 @@ where
     S: AsRef<str>,
     I: Iterator<Item = S>,
 {
-    if iter.peek().is_some_and(|next| !next.as_ref().starts_with("--")) {
+    // `-h` stays the help flag, never the removed flag's value.
+    if iter
+        .peek()
+        .is_some_and(|next| !next.as_ref().starts_with("--") && next.as_ref() != "-h")
+    {
         iter.next().map(|value| value.as_ref().to_string())
     } else {
         None

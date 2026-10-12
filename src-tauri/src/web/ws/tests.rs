@@ -1694,7 +1694,13 @@ fn authenticate_version_missing_or_wrong_is_refused_pre_auth() {
 #[test]
 fn authenticate_bad_identity_is_refused_pre_auth() {
     let oversized = "x".repeat(MAX_CLIENT_ID_LEN + 1);
+    // 65 two-byte characters: 65 chars but 130 bytes — the limit is in bytes.
+    let oversized_bytes = "\u{e9}".repeat(MAX_CLIENT_ID_LEN / 2 + 1);
     let cases = [
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": oversized_bytes, "clientInstanceId": "c"}),
+        // Control characters could forge log lines.
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d\nforged log line", "clientInstanceId": "c"}),
+        json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "d", "clientInstanceId": "c\u{7}"}),
         json!({"protocolVersion": WS_PROTOCOL_VERSION, "clientInstanceId": "c"}),
         json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": "", "clientInstanceId": "c"}),
         json!({"protocolVersion": WS_PROTOCOL_VERSION, "deviceId": 7, "clientInstanceId": "c"}),
@@ -1755,6 +1761,9 @@ fn authenticate_checks_version_then_identity_then_token() {
         Some(&gate),
     );
     assert_eq!(err_code(&reply), "protocol_version_mismatch");
+    // The version-mismatch refusal never echoes the presented token.
+    let mismatch_serialized = serde_json::to_string(&reply).expect("serialize");
+    assert!(!mismatch_serialized.contains("WRONG"));
     // Valid version, bad identity, wrong token: identity beats token.
     let reply = handle_sync_with_auth(
         &auth_frame_with(
@@ -1769,7 +1778,7 @@ fn authenticate_checks_version_then_identity_then_token() {
     let reply = handle_sync_with_auth(&auth_frame("r3", Some("WRONG")), &mut authed, Some(&gate));
     assert_eq!(err_code(&reply), "unauthorized");
     assert!(!authed);
-    // Version mismatch refusal never echoes the token.
+    // The unauthorized refusal never echoes the presented token either.
     let serialized = serde_json::to_string(&reply).expect("serialize");
     assert!(!serialized.contains("WRONG"));
 }

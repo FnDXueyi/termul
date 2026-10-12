@@ -43,6 +43,29 @@ describe('web-client-identity', () => {
     expect(instanceB).not.toBe(instanceA)
   })
 
+  it('replaces a stored id that exceeds the host byte limit', () => {
+    // 100 two-byte characters: 100 UTF-16 units but 200 UTF-8 bytes.
+    const tooLong = '\u00e9'.repeat(100)
+    window.localStorage.setItem(DEVICE_ID_STORAGE_KEY, tooLong)
+    const device = getDeviceId()
+    expect(device).not.toBe(tooLong)
+    expect(new TextEncoder().encode(device).length).toBeLessThanOrEqual(MAX_CLIENT_ID_LEN)
+  })
+
+  it('adopts the persisted device id when a concurrent tab wrote first', () => {
+    const winner = 'winner-device-id'
+    const realSet = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (
+      this: Storage,
+      key: string,
+      value: string
+    ) {
+      // The other tab's write lands after our mint, before our re-read.
+      realSet.call(this, key, key === DEVICE_ID_STORAGE_KEY ? winner : value)
+    })
+    expect(getDeviceId()).toBe(winner)
+  })
+
   it('a reload of one tab keeps its client instance id', () => {
     const instance = getClientInstanceId()
     __resetClientIdentityForTesting() // fresh module state, same sessionStorage

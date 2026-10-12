@@ -88,6 +88,9 @@ export function handleProtocolVersionMismatch(source: string): ProtocolMismatchO
 
 /** A handshake succeeded: the client matches the host, re-arm the reload latch. */
 export function clearProtocolMismatchLatch(): void {
+  // A mismatch reload is already pending: keep the loop latch it set, so a
+  // sibling socket succeeding in the meantime cannot re-arm a reload storm.
+  if (reloadScheduled) return
   try {
     safeSessionStorage()?.removeItem(PROTOCOL_RELOAD_LATCH_KEY)
   } catch {

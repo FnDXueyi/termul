@@ -307,7 +307,8 @@ async fn handle(
             let identity = ctx.identity.insert(identity);
             info!(
                 "[terminal-ws] connection authenticated device_id={} client_instance_id={}",
-                identity.device_id, identity.client_instance_id
+                ClientIdentity::log_label(&identity.device_id),
+                ClientIdentity::log_label(&identity.client_instance_id)
             );
             Ok(json!({}))
         }

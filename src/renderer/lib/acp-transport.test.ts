@@ -47,7 +47,11 @@ function validateHandshake(payload: unknown): string | null {
   if (p.protocolVersion !== WS_PROTOCOL_VERSION) return 'protocol_version_mismatch'
   for (const key of ['deviceId', 'clientInstanceId']) {
     const value = p[key]
-    if (typeof value !== 'string' || value.length === 0 || value.length > MAX_CLIENT_ID_LEN) {
+    if (
+      typeof value !== 'string' ||
+      value.length === 0 ||
+      new TextEncoder().encode(value).length > MAX_CLIENT_ID_LEN
+    ) {
       return 'invalid_client_identity'
     }
   }

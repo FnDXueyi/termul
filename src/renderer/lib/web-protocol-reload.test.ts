@@ -51,10 +51,17 @@ describe('handleProtocolVersionMismatch', () => {
     )
   })
 
+  it('a success while a mismatch reload is pending keeps the loop latch', () => {
+    handleProtocolVersionMismatch('WebTerminalClient')
+    clearProtocolMismatchLatch()
+    expect(window.sessionStorage.getItem(PROTOCOL_RELOAD_LATCH_KEY)).not.toBeNull()
+  })
+
   it('a successful handshake clears the latch so a later host upgrade can reload again', () => {
     handleProtocolVersionMismatch('Test')
-    clearProtocolMismatchLatch()
+    // The reload happened: the new page starts with fresh module state.
     __resetProtocolMismatchForTesting()
+    clearProtocolMismatchLatch()
     expect(window.sessionStorage.getItem(PROTOCOL_RELOAD_LATCH_KEY)).toBeNull()
     expect(handleProtocolVersionMismatch('Test')).toBe('reloading')
     expect(reload).toHaveBeenCalledTimes(2)

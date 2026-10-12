@@ -45,8 +45,13 @@ const memoryIds: Record<StorageKind, string | null> = { local: null, session: nu
 /** One warn per kind per page: ids are resolved on every handshake. */
 const warnedFallback: Record<StorageKind, boolean> = { local: false, session: false }
 
+const utf8 = new TextEncoder()
+
+/** The host limits ids by UTF-8 BYTES (`MAX_CLIENT_ID_LEN`), not UTF-16 units. */
 function isValidId(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= MAX_CLIENT_ID_LEN
+  return (
+    typeof value === 'string' && value.length > 0 && utf8.encode(value).length <= MAX_CLIENT_ID_LEN
+  )
 }
 
 function warnFallback(kind: StorageKind, operation: 'read' | 'write'): void {
@@ -82,6 +87,11 @@ function resolveId(kind: StorageKind, key: string): string {
   try {
     if (!storage) throw new Error('storage unavailable')
     storage.setItem(key, minted)
+    // Two first-run tabs can both mint before either write lands; the last
+    // write wins in storage. Adopt whatever storage holds now, so this tab
+    // converges on the persisted value instead of a losing one.
+    const persisted = storage.getItem(key)
+    if (isValidId(persisted)) return persisted
   } catch {
     memoryIds[kind] = minted
     warnFallback(kind, 'write')

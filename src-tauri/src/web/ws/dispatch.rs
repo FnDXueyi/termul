@@ -150,8 +150,8 @@ pub(super) async fn handle_request(
             info!(
                 target: "termul::web::ws",
                 request_id = %req.id,
-                device_id = %validated.device_id,
-                client_instance_id = %validated.client_instance_id,
+                device_id = %ClientIdentity::log_label(&validated.device_id),
+                client_instance_id = %ClientIdentity::log_label(&validated.client_instance_id),
                 "/ws connection authenticated"
             );
             *identity = Some(validated);

@@ -139,6 +139,17 @@ fn server_config_bind_addr() {
     assert_eq!(bad.bind_addr(), None);
 }
 
+/// Startup warnings that come from the removed permission flags only.
+/// `from_args` also queues warnings for invalid tunable env values, and
+/// those depend on the process environment, so tests that look at the
+/// removed flags must not count them.
+fn removed_flag_warnings(cfg: &ServerConfig) -> Vec<&String> {
+    cfg.deprecation_warnings
+        .iter()
+        .filter(|warning| warning.contains("--permission-"))
+        .collect()
+}
+
 #[test]
 fn from_args_defaults() {
     let cfg = ServerConfig::from_args(Vec::<&str>::new()).expect("defaults");
@@ -149,8 +160,8 @@ fn from_args_defaults() {
         "default event-log-capacity is 4096 (AC4)"
     );
     assert!(
-        cfg.deprecation_warnings.is_empty(),
-        "no removed flags passed => no startup warnings"
+        removed_flag_warnings(&cfg).is_empty(),
+        "no removed flags passed => no removed-flag warnings"
     );
     // PR-S4: project_root defaults to $HOME / $USERPROFILE when the env var
     // is unset. The CI hosts in this repo all set $HOME, so the resolved
@@ -235,11 +246,12 @@ fn from_args_removed_permission_flags_parse_and_warn_once_each() {
         "5",
     ])
     .expect("removed flags still parse");
-    assert_eq!(cfg.deprecation_warnings.len(), 2);
-    assert!(cfg.deprecation_warnings[0].contains("--permission-timeout"));
-    assert!(cfg.deprecation_warnings[0].contains("'30'"));
-    assert!(cfg.deprecation_warnings[1].contains("--permission-reconnect-grace"));
-    assert!(cfg.deprecation_warnings[1].contains("'5'"));
+    let warnings = removed_flag_warnings(&cfg);
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings[0].contains("--permission-timeout"));
+    assert!(warnings[0].contains("'30'"));
+    assert!(warnings[1].contains("--permission-reconnect-grace"));
+    assert!(warnings[1].contains("'5'"));
     // Everything else is unaffected.
     assert_eq!(cfg.host, "127.0.0.1");
     assert_eq!(cfg.port, 8080);
@@ -255,8 +267,9 @@ fn from_args_removed_permission_flags_tolerate_invalid_values() {
     ] {
         let cfg = ServerConfig::from_args([flag, value])
             .unwrap_or_else(|e| panic!("{flag} {value} must not abort: {e}"));
-        assert_eq!(cfg.deprecation_warnings.len(), 1, "{flag} {value}");
-        assert!(cfg.deprecation_warnings[0].contains(flag));
+        let warnings = removed_flag_warnings(&cfg);
+        assert_eq!(warnings.len(), 1, "{flag} {value}");
+        assert!(warnings[0].contains(flag));
     }
 }
 
@@ -264,14 +277,21 @@ fn from_args_removed_permission_flags_tolerate_invalid_values() {
 fn from_args_removed_permission_flags_tolerate_missing_value() {
     // Trailing: no value at all.
     let cfg = ServerConfig::from_args(["--permission-timeout"]).expect("must not abort");
-    assert_eq!(cfg.deprecation_warnings.len(), 1);
-    assert!(cfg.deprecation_warnings[0].contains("no value"));
+    let warnings = removed_flag_warnings(&cfg);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("no value"));
     // Followed by another flag: that flag is NOT swallowed as the value.
     let cfg = ServerConfig::from_args(["--permission-reconnect-grace", "--port", "9091"])
         .expect("must not abort");
     assert_eq!(cfg.port, 9091, "the next flag keeps its own value");
-    assert_eq!(cfg.deprecation_warnings.len(), 1);
-    assert!(cfg.deprecation_warnings[0].contains("no value"));
+    let warnings = removed_flag_warnings(&cfg);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("no value"));
+    // `-h` is help, never the removed flag's value.
+    assert!(matches!(
+        ServerConfig::from_args(["--permission-timeout", "-h"]),
+        Err(ParseCliError::Help)
+    ));
 }
 
 #[test]

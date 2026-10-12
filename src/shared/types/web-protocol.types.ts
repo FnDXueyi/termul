@@ -354,7 +354,7 @@ export interface RemoveProjectPayload {
 }
 
 // ============================================================================
-// Error codes (11) — stable machine strings (AC2)
+// Error codes — stable machine strings (AC2)
 // ============================================================================
 
 /**
