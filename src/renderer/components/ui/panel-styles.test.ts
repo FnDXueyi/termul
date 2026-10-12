@@ -40,7 +40,7 @@ describe('panel-styles', () => {
 
   it('panel field uses the card fill and a neutral focus border', () => {
     expect(classes(PANEL_FIELD_CLASS)).toEqual(
-      expect.arrayContaining(['bg-card', 'border-border', 'focus:border-muted-foreground/60'])
+      expect.arrayContaining(['bg-card', 'border-border', 'focus-visible:border-ring'])
     )
   })
 
