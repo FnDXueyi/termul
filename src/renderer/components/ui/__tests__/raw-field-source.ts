@@ -19,16 +19,41 @@ export const NON_TEXT_TYPES: ReadonlySet<string> = new Set([
   'color'
 ])
 
-const TAG_NAME = /^(?:input|textarea|select)(?![\w-])/
+const FIELD_TAG = /^(?:input|textarea|select)(?![\w-])/
+const ANY_TAG = /^([A-Za-z][\w.-]*)/
 
 /**
- * Indexes of raw `<input>`, `<textarea>` and `<select>` tags, skipping strings,
- * comments and JSX comments (`{/* *\/}`). Position does not matter: `return <input`
- * and `<div><input` count.
+ * True when `<` at `index` opens JSX. In text it always does. In code it does
+ * after `return`, `=>`, or a non-identifier, so `useState<string>` is not a tag.
+ */
+function isJsxOpen(source: string, index: number, inText: boolean): boolean {
+  if (inText) return true
+  const lineStart = source.lastIndexOf('\n', index - 1) + 1
+  if (source.slice(lineStart, index).trim() === '') return true
+  let cursor = index - 1
+  while (cursor >= 0 && /\s/.test(source[cursor])) cursor--
+  if (cursor < 0) return true
+  const previous = source[cursor]
+  if ('({}=&|?:,;[]>'.includes(previous)) return true
+  const word = /[A-Za-z]+$/.exec(source.slice(0, cursor + 1))?.[0]
+  return word === 'return' || word === 'yield'
+}
+
+/**
+ * Indexes of raw `<input>`, `<textarea>` and `<select>` tags. Strings, comments
+ * and JSX comments are skipped, and an apostrophe in JSX text is not a string,
+ * so a later field is still found. Position does not matter.
  */
 export function findRawTagStarts(source: string): number[] {
   const starts: number[] = []
+  let mode: 'code' | 'tag' | 'text' = 'code'
   let quote: string | null = null
+  let cameFrom: 'code' | 'text' = 'code'
+  let openName = ''
+  let brace = 0
+  const elements: Array<{ name: string; resume: 'code' | 'text' }> = []
+  const expressions: Array<{ resume: 'tag' | 'text'; depth: number }> = []
+
   for (let i = 0; i < source.length; i++) {
     const char = source[i]
     if (quote) {
@@ -36,12 +61,12 @@ export function findRawTagStarts(source: string): number[] {
       else if (char === quote) quote = null
       continue
     }
-    if (char === '/' && source[i + 1] === '/') {
+    if (mode !== 'text' && char === '/' && source[i + 1] === '/') {
       const end = source.indexOf('\n', i)
       i = end === -1 ? source.length : end
       continue
     }
-    if (char === '/' && source[i + 1] === '*') {
+    if (mode !== 'text' && char === '/' && source[i + 1] === '*') {
       const end = source.indexOf('*/', i + 2)
       i = end === -1 ? source.length : end + 1
       continue
@@ -51,11 +76,54 @@ export function findRawTagStarts(source: string): number[] {
       i = end === -1 ? source.length : end + 1
       continue
     }
-    if (char === '"' || char === "'" || char === '`') {
+    if (mode !== 'text' && (char === '"' || char === "'" || char === '`')) {
       quote = char
       continue
     }
-    if (char === '<' && TAG_NAME.test(source.slice(i + 1))) starts.push(i)
+    if (char === '{') {
+      if (mode === 'text' || mode === 'tag') {
+        expressions.push({ resume: mode, depth: brace })
+        mode = 'code'
+      }
+      brace++
+      continue
+    }
+    if (char === '}') {
+      brace--
+      const expression = expressions[expressions.length - 1]
+      if (expression && brace === expression.depth) {
+        expressions.pop()
+        mode = expression.resume
+      }
+      continue
+    }
+    if (char === '<' && mode !== 'tag' && isJsxOpen(source, i, mode === 'text')) {
+      if (source[i + 1] === '/') {
+        const name = /^\/([A-Za-z][\w.-]*)/.exec(source.slice(i + 1))?.[1]
+        const end = source.indexOf('>', i)
+        if (end !== -1) i = end
+        const open = elements[elements.length - 1]
+        if (name && open && open.name === name) {
+          elements.pop()
+          mode = open.resume
+        }
+        continue
+      }
+      const name = ANY_TAG.exec(source.slice(i + 1))?.[1]
+      if (!name) continue
+      if (FIELD_TAG.test(name)) starts.push(i)
+      cameFrom = mode === 'text' ? 'text' : 'code'
+      openName = name
+      mode = 'tag'
+      continue
+    }
+    if (mode === 'tag' && char === '>') {
+      if (source[i - 1] === '/') mode = cameFrom
+      else {
+        elements.push({ name: openName, resume: cameFrom })
+        mode = 'text'
+      }
+    }
   }
   return starts
 }

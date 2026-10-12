@@ -195,6 +195,12 @@ describe('findOffenders', () => {
   it('finds a tag after return or another tag, and ignores a type mentioned in another attribute', () => {
     expect(findOffenders('return <input className="text-sm" />')).toHaveLength(1)
     expect(findOffenders('<div><input className="text-sm" /></div>')).toHaveLength(1)
+    expect(
+      findOffenders(
+        'return (\n  <div>\n    <p>Don\'t skip</p>\n    <input className="text-sm" />\n  </div>\n)'
+      )
+    ).toHaveLength(1)
+    expect(findOffenders('const value = useState<string>("")')).toEqual([])
     expect(findOffenders('<input placeholder="type=checkbox" className="text-sm" />')).toHaveLength(
       1
     )
