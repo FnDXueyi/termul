@@ -144,8 +144,9 @@ export function RemoteAccessPopover(): React.JSX.Element {
               <div className="flex items-start gap-2 text-xs text-warning bg-warning/10 border border-warning/30 rounded-md px-3 py-2">
                 <ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" />
                 <span>
-                  No auth yet — anyone with this link can drive your live agent. The link is random
-                  and shown only to you. Toggle off to rotate.
+                  This link carries your access token (after the #) — anyone who has it can drive
+                  your live agent, so share it only with devices you trust. The tunnel address is
+                  random and changes each time you toggle off and on.
                 </span>
               </div>
               <button

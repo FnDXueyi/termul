@@ -65,7 +65,7 @@ use crate::acp::archive::{
     extract_archive, mark_executable, mark_spawnables_in_tree, normalize_cmd_path,
     resolve_cmd_in_root, MAX_ARCHIVE_BYTES,
 };
-use crate::acp::atomic_file;
+use crate::acp::atomic_file::{self, NewerSchema};
 use crate::acp::catalog::{CatalogAgent, HostCapability, SupportedAcpAgentStatus};
 use crate::acp::AcpCatalogService;
 use crate::acp_registry_snapshot::is_safe_agent_id;
@@ -503,11 +503,21 @@ impl AcpInstallService {
         {
             fs::create_dir_all(&root)?;
         }
-        let manifest = Self::load_manifest_blocking(&root.join(INSTALLED_MANIFEST_FILENAME))
-            .unwrap_or_else(|error| {
+        let manifest = match Self::load_manifest_blocking(&root.join(INSTALLED_MANIFEST_FILENAME))
+        {
+            Ok(manifest) => manifest,
+            // AD-18: a manifest written by a NEWER host is never replaced by a
+            // fresh one — refuse to open, file untouched (typed
+            // `NewerSchema` inside the `io::Error`; see `NewerSchema::from_io`).
+            Err(error) if NewerSchema::from_io(&error).is_some() => {
+                log::error!("[acp-install] open refused: {error}");
+                return Err(error);
+            }
+            Err(error) => {
                 log::warn!("[acp-install] manifest load failed (defaulting to empty): {error}");
                 InstalledManifestFile::default()
-            });
+            }
+        };
         log::info!("[acp-install] service ready root={}", root.display());
         Ok(Arc::new(Self {
             root,
@@ -540,7 +550,8 @@ impl AcpInstallService {
 
     /// Load the on-disk manifest (blocking). A missing file = empty (fresh
     /// start). A corrupt file is backed up via `backup_corrupt` then treated as
-    /// empty. A wrong schema version is backed up + empty.
+    /// empty. An OLDER schema version is backed up + empty (no migrations
+    /// exist yet); a NEWER one is refused (`Err`, file untouched).
     fn load_manifest_blocking(path: &Path) -> io::Result<InstalledManifestFile> {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -549,11 +560,13 @@ impl AcpInstallService {
             }
             Err(error) => return Err(error),
         };
+        NewerSchema::check(path, &bytes, INSTALLED_MANIFEST_SCHEMA_VERSION)
+            .map_err(NewerSchema::into_io_error)?;
         match serde_json::from_slice::<InstalledManifestFile>(&bytes) {
             Ok(file) if file.schema_version == INSTALLED_MANIFEST_SCHEMA_VERSION => Ok(file),
             Ok(file) => {
                 log::warn!(
-                    "[acp-install] manifest bad schema_version expected={} found={} — backing up + fresh start",
+                    "[acp-install] manifest older schema_version expected={} found={} — backing up + fresh start",
                     INSTALLED_MANIFEST_SCHEMA_VERSION,
                     file.schema_version
                 );

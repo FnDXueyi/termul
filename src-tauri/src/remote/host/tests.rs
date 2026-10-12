@@ -130,11 +130,26 @@ fn lifecycle_fixtures() -> (
     (acp, pty, relay, registry)
 }
 
+/// The desktop's data handed to the shared-live host: a store opened ONCE at
+/// `<app_data_dir>/store.json` inside a throwaway `app_data_dir`. Keep the
+/// returned guard alive for the test.
+fn shared_live_fixture() -> (SharedLiveData, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp app_data_dir");
+    let store = WebStore::open(crate::data_lock::desktop_store_file(dir.path()))
+        .expect("open the desktop web store");
+    let data = SharedLiveData {
+        store: Arc::new(store),
+        data_dir: dir.path().to_path_buf(),
+    };
+    (data, dir)
+}
+
 #[tokio::test]
 async fn remote_server_state_start_then_stop_lifecycle() {
     // The full start→status(running)→stop→status(stopped)→restart cycle
     // that T8.1 asked for and the old misnamed test never exercised.
     let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, _data_dir) = shared_live_fixture();
     let state = RemoteServerState::new();
     assert!(!state.status().running);
 
@@ -145,6 +160,8 @@ async fn remote_server_state_start_then_stop_lifecycle() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -178,6 +195,8 @@ async fn remote_server_state_start_then_stop_lifecycle() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -194,6 +213,7 @@ async fn remote_server_state_double_start_is_rejected() {
     // Err — and (per R1) does NOT orphan a second server (its shutdown_tx is
     // signaled before returning). The first server keeps running.
     let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, _data_dir) = shared_live_fixture();
     let state = RemoteServerState::new();
     let _first = state
         .start(
@@ -202,6 +222,8 @@ async fn remote_server_state_double_start_is_rejected() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -216,6 +238,8 @@ async fn remote_server_state_double_start_is_rejected() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -240,6 +264,7 @@ async fn remote_server_state_start_stop_does_not_kill_agents() {
     // nothing to kill — this guards the path: start/stop complete without
     // touching kill_all, i.e. no panic, no error, clean drain.)
     let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, _data_dir) = shared_live_fixture();
     let state = RemoteServerState::new();
     let _ = state
         .start(
@@ -248,6 +273,8 @@ async fn remote_server_state_start_stop_does_not_kill_agents() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -271,6 +298,7 @@ async fn status_clears_tunnel_url_when_cloudflared_child_exits() {
     // (it would otherwise offer a link that yields "This site can't be
     // reached").
     let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, _data_dir) = shared_live_fixture();
     let state = RemoteServerState::new();
     let _ = state
         .start(
@@ -279,6 +307,8 @@ async fn status_clears_tunnel_url_when_cloudflared_child_exits() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,
@@ -327,6 +357,25 @@ fn quick_exit_command() -> tokio::process::Command {
     c.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    c
+}
+
+/// A cross-platform command that stays alive for a while (a stand-in for a
+/// healthy cloudflared child); `kill_on_drop` reaps it when the host stops.
+fn long_lived_command() -> tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    let mut c = tokio::process::Command::new("ping");
+    #[cfg(target_os = "windows")]
+    c.args(["-n", "30", "127.0.0.1"]);
+    #[cfg(not(target_os = "windows"))]
+    let mut c = tokio::process::Command::new("sleep");
+    #[cfg(not(target_os = "windows"))]
+    c.arg("30");
+
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
     c
 }
 
@@ -380,6 +429,219 @@ fn strip_line_comments(src: &str) -> String {
 }
 
 #[test]
+fn shared_live_requires_token_when_exposed() {
+    // Ungated ONLY on loopback with no tunnel; a tunnel or a LAN bind gates.
+    assert!(!shared_live_requires_token(RemoteBindMode::Localhost, false));
+    assert!(shared_live_requires_token(RemoteBindMode::Localhost, true));
+    assert!(shared_live_requires_token(RemoteBindMode::All, false));
+    assert!(shared_live_requires_token(RemoteBindMode::All, true));
+}
+
+/// Read the persisted bearer token the host generated under `data_dir`.
+fn persisted_token(data_dir: &std::path::Path) -> String {
+    std::fs::read_to_string(data_dir.join(crate::web::auth::WEB_AUTH_TOKEN_FILE))
+        .expect("token file under app_data_dir")
+        .trim()
+        .to_string()
+}
+
+async fn http_status(url: &str, token: Option<&str>) -> reqwest::StatusCode {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("build reqwest client");
+    let mut request = client.get(url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    request.send().await.expect("request completes").status()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_live_with_a_tunnel_requires_the_token_and_shares_it_in_the_url() {
+    let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, data_dir) = shared_live_fixture();
+    let state = RemoteServerState::new();
+    let status = state
+        .start(
+            acp,
+            pty,
+            relay,
+            registry,
+            RemoteBindMode::Localhost,
+            true,
+            &data,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start with a planned tunnel");
+    let api = format!("{}/projects", status.url.expect("loopback url"));
+
+    // Token persisted under the desktop app_data_dir, never the service-account dir.
+    let token = persisted_token(data_dir.path());
+    assert!(!token.is_empty());
+
+    assert_eq!(
+        http_status(&api, None).await,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "HTTP without the bearer token is refused"
+    );
+    assert_eq!(
+        http_status(&api, Some("not-the-token")).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_ne!(
+        http_status(&api, Some(&token)).await,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the right token is accepted"
+    );
+
+    // Once the tunnel is attached the shared link carries `#token=`; the
+    // bare tunnel URL never appears alone, and Debug redacts it.
+    let child = long_lived_command().spawn().expect("spawn child");
+    state
+        .attach_tunnel("https://abc.trycloudflare.com".to_string(), child)
+        .expect("attach");
+    let shared = state.status().tunnel_url.expect("tunnel url while child lives");
+    assert_eq!(
+        shared,
+        format!("https://abc.trycloudflare.com#token={token}")
+    );
+    assert!(!format!("{:?}", state.status()).contains(&token));
+
+    let _ = state.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_live_on_loopback_without_a_tunnel_is_ungated_and_writes_no_token() {
+    let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, data_dir) = shared_live_fixture();
+    let state = RemoteServerState::new();
+    let status = state
+        .start(
+            acp,
+            pty,
+            relay,
+            registry,
+            RemoteBindMode::Localhost,
+            false,
+            &data,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+    let api = format!("{}/projects", status.url.expect("loopback url"));
+    assert_ne!(
+        http_status(&api, None).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        !data_dir
+            .path()
+            .join(crate::web::auth::WEB_AUTH_TOKEN_FILE)
+            .exists(),
+        "an ungated loopback host persists no token"
+    );
+    let _ = state.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_live_requested_beyond_loopback_requires_the_token_even_without_a_tunnel() {
+    let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, data_dir) = shared_live_fixture();
+    let state = RemoteServerState::new();
+    let status = state
+        .start(
+            acp,
+            pty,
+            relay,
+            registry,
+            RemoteBindMode::All,
+            false,
+            &data,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start on all interfaces");
+    let api = format!(
+        "http://127.0.0.1:{}/projects",
+        status.port.expect("bound port")
+    );
+    assert_eq!(
+        http_status(&api, None).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let token = persisted_token(data_dir.path());
+    assert_ne!(
+        http_status(&api, Some(&token)).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let _ = state.stop().await;
+}
+
+#[tokio::test]
+async fn stop_then_start_reuses_the_one_desktop_store_without_taking_a_second_lock() {
+    let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, data_dir) = shared_live_fixture();
+    // The desktop's composition root holds the data-dir locks for the whole
+    // process; a host start that tried to lock again would fail against it.
+    let _locks = crate::data_lock::lock_desktop_data(data_dir.path()).expect("desktop locks");
+    assert_eq!(
+        data.store.path(),
+        crate::data_lock::desktop_store_file(data_dir.path()),
+        "the shared-live store is app_data_dir/store.json"
+    );
+    data.store
+        .write("sentinel", serde_json::json!("kept"), None)
+        .expect("seed the store");
+
+    let state = RemoteServerState::new();
+    for round in 0..2 {
+        state
+            .start(
+                acp.clone(),
+                pty.clone(),
+                relay.clone(),
+                registry.clone(),
+                RemoteBindMode::Localhost,
+                true,
+                &data,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("start round {round} must not lock again: {e}"));
+        assert_eq!(
+            data.store.read("sentinel").expect("read"),
+            Some(serde_json::json!("kept")),
+            "the same store instance survives round {round}"
+        );
+        state.stop().await.expect("stop");
+    }
+
+    // Nothing but the desktop's own files ever appears in app_data_dir.
+    let mut names: Vec<String> = std::fs::read_dir(data_dir.path())
+        .expect("read data dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert!(
+        names.iter().all(|n| {
+            n == "store.json" || n == crate::web::auth::WEB_AUTH_TOKEN_FILE || n.contains("lock")
+                || n == "acp-sessions" || n == "workspace-manifests" || n == "acp-catalog"
+        }),
+        "unexpected files in app_data_dir: {names:?}"
+    );
+}
+
+#[test]
 fn remote_server_state_default_equals_new() {
     let _ = RemoteServerState::default();
 }
@@ -409,6 +671,7 @@ fn remote_server_state_default_equals_new() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_live_binds_project_root_to_active_cross_drive_project() {
     let (acp, pty, relay, registry) = lifecycle_fixtures();
+    let (data, _data_dir) = shared_live_fixture();
 
     // Resolve the user home dir the way the buggy `default_project_root()`
     // does, then pick a base provably OUTSIDE the home tree so the project
@@ -560,6 +823,8 @@ async fn shared_live_binds_project_root_to_active_cross_drive_project() {
             relay.clone(),
             registry.clone(),
             RemoteBindMode::Localhost,
+            false,
+            &data,
             None,
             None,
             None,

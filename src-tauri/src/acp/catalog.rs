@@ -46,7 +46,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::acp::atomic_file;
+use crate::acp::atomic_file::{self, NewerSchema};
 use crate::acp_registry_snapshot::{
     self, AcpRegistrySnapshot, ResolvedSnapshot, SnapshotFetchOutcome,
 };
@@ -520,8 +520,10 @@ impl AcpCatalogService {
     }
 
     /// Read the opt-in flag. Returns `false` when the file is missing (the
-    /// default — CDN augmentation is off) or when the file is corrupt (backed
-    /// up + treated as fresh, mirroring `WorkspaceManifestService`).
+    /// default — CDN augmentation is off) or when the file is corrupt / older
+    /// (backed up + treated as fresh, mirroring `WorkspaceManifestService`). A
+    /// NEWER-schema file also reads as `false` but is logged and left untouched;
+    /// [`Self::set_opt_in`] refuses to overwrite it.
     pub fn is_opt_in(&self) -> bool {
         match self.read_opt_in_blocking() {
             Ok(enabled) => enabled,
@@ -537,6 +539,19 @@ impl AcpCatalogService {
     /// read-back is backed up + treated as fresh.
     pub fn set_opt_in(&self, enabled: bool) -> Result<(), CatalogError> {
         let path = self.config_path();
+        // Never overwrite a config a newer host wrote (AD-18).
+        match fs::read(&path) {
+            Ok(existing) => {
+                if let Err(newer) =
+                    NewerSchema::check(&path, &existing, CATALOG_CONFIG_SCHEMA_VERSION)
+                {
+                    log::error!("[acp-catalog] opt-in write refused: {newer}");
+                    return Err(CatalogError::NewerSchema(newer));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let envelope = CatalogConfigFile {
             schema_version: CATALOG_CONFIG_SCHEMA_VERSION,
             opt_in_cdn: enabled,
@@ -565,11 +580,17 @@ impl AcpCatalogService {
             }
             Err(error) => return Err(error.into()),
         };
+        // AD-18: a config written by a NEWER host is refused (typed error,
+        // file untouched) — never backed up and replaced by a fresh one.
+        if let Err(newer) = NewerSchema::check(&path, &bytes, CATALOG_CONFIG_SCHEMA_VERSION) {
+            log::error!("[acp-catalog] opt-in config refused: {newer}");
+            return Err(CatalogError::NewerSchema(newer));
+        }
         match serde_json::from_slice::<CatalogConfigFile>(&bytes) {
             Ok(file) if file.schema_version == CATALOG_CONFIG_SCHEMA_VERSION => Ok(file.opt_in_cdn),
             Ok(file) => {
                 log::warn!(
-                    "[acp-catalog] opt-in bad schema_version expected={} found={} — backing up + fresh start",
+                    "[acp-catalog] opt-in older schema_version expected={} found={} — backing up + fresh start",
                     CATALOG_CONFIG_SCHEMA_VERSION,
                     file.schema_version
                 );
@@ -736,6 +757,9 @@ pub enum CatalogError {
     BundledParse(serde_json::Error),
     /// Filesystem read/write failure (permission, disk full, …).
     Io(io::Error),
+    /// The opt-in config was written by a NEWER Termul (AD-18): refused, the
+    /// file is left untouched.
+    NewerSchema(NewerSchema),
 }
 
 impl std::fmt::Display for CatalogError {
@@ -745,6 +769,7 @@ impl std::fmt::Display for CatalogError {
                 write!(f, "bundled catalog parse failed: {error}")
             }
             Self::Io(error) => write!(f, "acp-catalog io error: {error}"),
+            Self::NewerSchema(newer) => write!(f, "acp-catalog: {newer}"),
         }
     }
 }
@@ -754,6 +779,7 @@ impl std::error::Error for CatalogError {
         match self {
             Self::BundledParse(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::NewerSchema(newer) => Some(newer),
         }
     }
 }

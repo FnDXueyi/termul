@@ -931,7 +931,7 @@ async fn handle_request_with_store(text: &str, store: &Arc<WebStore>) -> WsReply
 async fn store_write_then_read_roundtrips() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
 
     let write = handle_request_with_store(
         r#"{"id":"r1","type":"store_write","payload":{"key":"settings","value":{"theme":"dark"}}}"#,
@@ -953,7 +953,7 @@ async fn store_write_then_read_roundtrips() {
 
     // A second open (fresh connection) still sees the value — server-side
     // persistence, not per-connection memory.
-    let reopened = Arc::new(WebStore::open(dir.join("store.json")));
+    let reopened = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     let read2 = handle_request_with_store(
         r#"{"id":"r3","type":"store_read","payload":{"key":"settings"}}"#,
         &reopened,
@@ -970,7 +970,7 @@ async fn store_write_then_read_roundtrips() {
 async fn store_read_missing_key_returns_null_value() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-miss-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     let reply = handle_request_with_store(
         r#"{"id":"r1","type":"store_read","payload":{"key":"nope"}}"#,
         &store,
@@ -988,7 +988,7 @@ async fn store_read_missing_key_returns_null_value() {
 async fn store_delete_removes_and_reports_existed() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-del-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("k", json!("v"), None).unwrap();
 
     let del = handle_request_with_store(
@@ -1043,7 +1043,7 @@ async fn store_handlers_degraded_return_unavailable() {
 async fn store_empty_key_is_validation_error() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-empty-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("keep", json!(1), None).unwrap();
     for frame in [
         r#"{"id":"r1","type":"store_read","payload":{"key":""}}"#,
@@ -1096,7 +1096,7 @@ async fn store_empty_key_is_validation_error() {
 async fn store_write_rejects_value_over_256kib() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-big-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     store.write("keep", json!(1), None).unwrap();
 
     // 256 KiB + 1 char of string content → serialized size 256 KiB + 3
@@ -1133,7 +1133,7 @@ async fn store_write_rejects_value_over_256kib() {
 async fn store_malformed_payload_returns_validation_error() {
     let dir = std::env::temp_dir().join(format!("termul-ws-store-bad-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Arc::new(WebStore::open(dir.join("store.json")));
+    let store = Arc::new(WebStore::open(dir.join("store.json")).unwrap());
     // Missing `key` fails the payload serde.
     let reply =
         handle_request_with_store(r#"{"id":"r1","type":"store_read","payload":{}}"#, &store).await;

@@ -129,6 +129,10 @@ pub(crate) fn test_pty_manager() -> Arc<PtyManager> {
 /// its own under `<app_data_dir>/acp-registry-binaries`. `None` degrades to
 /// `ACP_INSTALL_UNAVAILABLE`.
 ///
+/// `store` is the host-owned [`WebStore`], opened by the caller AFTER the data
+/// locks are held (`termul-server` opens it under the state dir or
+/// `--store-file`); `serve` never opens a store itself (AD-14).
+///
 /// The standalone binary owns its agent lifetime end-to-end, so it kills agents
 /// on exit. The desktop-hosted shared-live path calls [`serve_router`] directly
 /// and must NOT kill the desktop's live agents — see [`serve_router`].
@@ -148,6 +152,7 @@ pub async fn serve(
     workspace_manifest: Option<Arc<crate::acp::WorkspaceManifestService>>,
     acp_catalog: Option<Arc<crate::acp::AcpCatalogService>>,
     acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
+    store: Arc<WebStore>,
     web_auth: Option<Arc<auth::WebAuth>>,
     canvas_pool: Option<Arc<crate::canvas::pool::CanvasDaemonPool>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -186,6 +191,7 @@ pub async fn serve(
         workspace_manifest,
         acp_catalog,
         acp_install,
+        store,
         // Standalone binary is NOT shared-live — its admission path is the
         // `--allow-remote-writes` opt-in, not a deployment-mode deny.
         false,
@@ -262,10 +268,15 @@ pub async fn serve(
 /// desktop-hosted shared-live server (`remote/host.rs`) calls this directly so
 /// toggling the server off never kills the desktop's live agents.
 ///
-/// `web_auth` is the CAP-1 interim token gate threaded into the router +
-/// `/ws` + `/terminal/ws`. The desktop shared-live host passes `None` (its
-/// cloudflared exposure predates this story — Epic-2 territory); `None` keeps
-/// every endpoint byte-identical to the pre-gate server.
+/// `store` is the host's already-opened [`WebStore`]. `serve_router` never
+/// opens or locks one: the desktop shared-live host passes the single
+/// instance opened once in `lib.rs` under `app_data_dir`, so stop/start
+/// cycles reuse it (AD-14).
+///
+/// `web_auth` is the token gate threaded into the router + `/ws` +
+/// `/terminal/ws`. `None` keeps every endpoint ungated (loopback-only hosts);
+/// the desktop shared-live host passes `Some` whenever it advertises a tunnel
+/// or binds beyond loopback (AD-3).
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_router(
     acp: Arc<AcpManager>,
@@ -283,6 +294,7 @@ pub async fn serve_router(
     workspace_manifest: Option<Arc<crate::acp::WorkspaceManifestService>>,
     acp_catalog: Option<Arc<crate::acp::AcpCatalogService>>,
     acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
+    store: Arc<WebStore>,
     shared_live_writes_denied: bool,
     web_auth: Option<Arc<auth::WebAuth>>,
     canvas_pool: Option<Arc<crate::canvas::pool::CanvasDaemonPool>>,
@@ -315,16 +327,6 @@ pub async fn serve_router(
     } else {
         HistoryMode::LiveOnly
     };
-    // Issue #613: resolve the server-side store path — explicit
-    // `--store-file` wins, otherwise default under the service-account state
-    // dir (same resolution posture as workspace-manifests / acp-catalog). The
-    // desktop shared-live host passes `store_file: None`, so it lands on the
-    // same default and gets a durable store too.
-    let store = Some(Arc::new(WebStore::open(
-        cfg.store_file
-            .clone()
-            .unwrap_or_else(|| cfg.service_account_state_dir().join("store.json")),
-    )));
     // CAP-1 + #856: build the live project-root handle ONCE per server —
     // the same `Arc` the router registers with the registry (a project
     // switch rebinds it in place) AND the server-side fs watcher reads to
@@ -355,7 +357,7 @@ pub async fn serve_router(
         workspace_manifest,
         acp_catalog,
         acp_install,
-        store,
+        Some(store),
         cfg.allow_remote_writes,
         shared_live_writes_denied,
         // The effective externally reachable origin for OAuth redirect URIs.

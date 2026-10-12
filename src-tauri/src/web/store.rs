@@ -10,6 +10,16 @@
 //! `atomic_file` machinery `FileProjectRegistry::save_atomic` uses), so the
 //! state survives browser switches and server restarts.
 //!
+//! # Schema (AD-18)
+//!
+//! On disk the file is `{"schemaVersion":1,"data":{ "key": value, … }}`. A
+//! legacy bare-map file (`{ "key": value }`, written before versioning) is
+//! migrated on open: the original bytes are first copied to
+//! `<file>.pre-v1-<unix-ts>.bak` (a backup failure aborts the open), then the
+//! file is rewritten in the envelope. A file whose `schemaVersion` is newer
+//! than this build understands is refused with [`WebStoreError::NewerSchema`]
+//! and left byte-identical.
+//!
 //! Exposed to browsers as the `store_read` / `store_write` / `store_delete`
 //! WS requests (see `ws.rs`). The client debounces high-frequency writes, so
 //! write volume here is low.
@@ -17,55 +27,159 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
+use serde::Serialize;
 use serde_json::Value;
 use tracing::{info, warn};
 
-use crate::acp::atomic_file;
+use crate::acp::atomic_file::{self, NewerSchema};
+
+/// Current on-disk schema version of the web store envelope.
+pub const STORE_SCHEMA_VERSION: u32 = 1;
+
+/// Why [`WebStore::open`] refused to open the store file. Both variants are
+/// startup-fatal for the host that hit them.
+#[derive(Debug)]
+pub enum WebStoreError {
+    /// The file was written by a newer host (`schemaVersion` above
+    /// [`STORE_SCHEMA_VERSION`]); it was not modified.
+    NewerSchema(NewerSchema),
+    /// A legacy bare-map file could not be backed up before migration, so the
+    /// migration was not attempted and the file was not modified.
+    MigrationBackup { path: PathBuf, source: io::Error },
+}
+
+impl std::fmt::Display for WebStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NewerSchema(error) => write!(f, "web store {error}"),
+            Self::MigrationBackup { path, source } => write!(
+                f,
+                "web store '{}' is a legacy (unversioned) file and could not be backed up \
+                 before migration: {source}; refusing to open it, the file was left untouched",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WebStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NewerSchema(error) => Some(error),
+            Self::MigrationBackup { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Borrowed envelope for serialization (no clone of the map per write).
+#[derive(Serialize)]
+struct EnvelopeRef<'a> {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    data: &'a HashMap<String, Value>,
+}
+
+fn encode(map: &HashMap<String, Value>) -> io::Result<Vec<u8>> {
+    serde_json::to_vec(&EnvelopeRef {
+        schema_version: STORE_SCHEMA_VERSION,
+        data: map,
+    })
+    .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// What a store file's bytes mean to this build.
+enum Decoded {
+    /// `{"schemaVersion":1,"data":{…}}`.
+    Current(HashMap<String, Value>),
+    /// A bare `{ "key": value }` map from before versioning.
+    Legacy(HashMap<String, Value>),
+}
+
+fn decode(path: &Path, bytes: &[u8]) -> Result<Decoded, DecodeFailure> {
+    NewerSchema::check(path, bytes, STORE_SCHEMA_VERSION).map_err(DecodeFailure::Newer)?;
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|e| DecodeFailure::Corrupt(format!("invalid JSON: {e}")))?;
+    let Value::Object(object) = value else {
+        return Err(DecodeFailure::Corrupt(
+            "top-level value is not a JSON object".to_string(),
+        ));
+    };
+    if atomic_file::peek_schema_version(bytes).is_none() {
+        return Ok(Decoded::Legacy(object.into_iter().collect()));
+    }
+    // Envelope: only version 1 reaches here (newer was refused above).
+    match (object.get("schemaVersion").and_then(Value::as_u64), object.get("data")) {
+        (Some(1), Some(Value::Object(data))) => Ok(Decoded::Current(
+            data.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        )),
+        _ => Err(DecodeFailure::Corrupt(
+            "unrecognised store envelope (expected schemaVersion 1 with an object `data`)"
+                .to_string(),
+        )),
+    }
+}
+
+enum DecodeFailure {
+    Newer(NewerSchema),
+    Corrupt(String),
+}
 
 /// A key → arbitrary-JSON-value map persisted to one JSON file.
 ///
 /// All mutation goes through a single `parking_lot::Mutex`; each write
-/// serializes the whole map and replaces the file atomically. The file is a
-/// bare JSON object (`{ "key": value }`); an empty store is `{}`.
+/// serializes the whole map and replaces the file atomically (see the module
+/// doc for the on-disk envelope).
 pub struct WebStore {
     path: PathBuf,
     inner: Mutex<Option<HashMap<String, Value>>>,
 }
 
 impl WebStore {
-    /// Open (and lazily load) the store at `path`.
+    /// Open (and load) the store at `path`.
     ///
-    /// - Missing file → empty store (first run).
+    /// - Missing file → empty store (first run); the envelope appears on the
+    ///   first write.
+    /// - Current envelope → loaded.
+    /// - Legacy bare map → backed up to `<path>.pre-v1-<ts>.bak`, then
+    ///   rewritten in the envelope. Backup failure → `Err`, file untouched.
+    ///   A failed rewrite only warns (the next write persists the envelope).
+    /// - Newer `schemaVersion` → `Err(NewerSchema)`, file untouched.
     /// - Corrupt file → backed up to `<path>.corrupt-<ts>.bak`, then treated
     ///   as empty — the web client degrades to defaults rather than the
     ///   server refusing to start (same corrupt-handling posture as
     ///   `AcpCatalogService` / `AcpInstallService`).
-    /// - Other read failure → warn + empty store (the store degrades; the
-    ///   next successful write recreates the file).
-    #[must_use]
-    pub fn open(path: PathBuf) -> Self {
+    /// - Other read failure → warn + unavailable store (reads/writes return
+    ///   `STORE_UNAVAILABLE`; the file is not touched).
+    pub fn open(path: PathBuf) -> Result<Self, WebStoreError> {
         let data = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<HashMap<String, Value>>(&bytes) {
-                Ok(map) => Some(map),
-                Err(e) => match atomic_file::backup_corrupt(&path, &bytes) {
-                    Ok(_) => {
-                        warn!(
-                                "store file '{}' is corrupt ({e}); backed up and starting with an empty store",
+            Ok(bytes) => match decode(&path, &bytes) {
+                Ok(Decoded::Current(map)) => Some(map),
+                Ok(Decoded::Legacy(map)) => Some(Self::migrate_legacy(&path, &bytes, map)?),
+                Err(DecodeFailure::Newer(newer)) => {
+                    warn!("{}", WebStoreError::NewerSchema(newer.clone()));
+                    return Err(WebStoreError::NewerSchema(newer));
+                }
+                Err(DecodeFailure::Corrupt(reason)) => {
+                    match atomic_file::backup_corrupt(&path, &bytes) {
+                        Ok(_) => {
+                            warn!(
+                                "store file '{}' is corrupt ({reason}); backed up and starting with an empty store",
                                 path.display()
                             );
-                        Some(HashMap::new())
-                    }
-                    Err(backup_err) => {
-                        warn!(
-                                "store file '{}' is corrupt ({e}) and backup failed: {backup_err}; store is unavailable",
+                            Some(HashMap::new())
+                        }
+                        Err(backup_err) => {
+                            warn!(
+                                "store file '{}' is corrupt ({reason}) and backup failed: {backup_err}; store is unavailable",
                                 path.display()
                             );
-                        None
+                            None
+                        }
                     }
-                },
+                }
             },
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 info!(
@@ -82,10 +196,41 @@ impl WebStore {
                 None
             }
         };
-        Self {
+        Ok(Self {
             path,
             inner: Mutex::new(data),
+        })
+    }
+
+    fn migrate_legacy(
+        path: &Path,
+        original: &[u8],
+        map: HashMap<String, Value>,
+    ) -> Result<HashMap<String, Value>, WebStoreError> {
+        let backup = atomic_file::backup_pre_migration(path, original, STORE_SCHEMA_VERSION)
+            .map_err(|source| WebStoreError::MigrationBackup {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        info!(
+            "store file '{}' is a legacy unversioned map; original backed up to '{}', migrating to schema v{STORE_SCHEMA_VERSION}",
+            path.display(),
+            backup.display()
+        );
+        match encode(&map).and_then(|bytes| atomic_file::replace(path, &bytes)) {
+            Ok(()) => {}
+            Err(e) => warn!(
+                "could not rewrite migrated store '{}': {e}; the envelope is written on the next successful write",
+                path.display()
+            ),
         }
+        Ok(map)
+    }
+
+    /// The backing file path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Read a value, or `None` when the key is absent.
@@ -111,7 +256,7 @@ impl WebStore {
         let mut next = map.clone();
         next.insert(key.to_string(), value);
 
-        let bytes = serde_json::to_vec(&next).map_err(|e| io::Error::other(e.to_string()))?;
+        let bytes = encode(&next)?;
         if bytes.len() > 10 * 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -134,7 +279,7 @@ impl WebStore {
         let mut next = map.clone();
         let removed = next.remove(key).is_some();
 
-        let bytes = serde_json::to_vec(&next).map_err(|e| io::Error::other(e.to_string()))?;
+        let bytes = encode(&next)?;
         atomic_file::replace(&self.path, &bytes)?;
 
         *map = next;

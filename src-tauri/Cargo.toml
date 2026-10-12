@@ -4,8 +4,9 @@ version = "0.4.21"
 description = "Project-aware terminal that treats workspaces as first-class citizens"
 authors = ["gnoviawan", "mannnrachman (Tauri port)"]
 edition = "2021"
-# ACP 1.3.0 is edition 2024 and requires Rust ≥ 1.88; bump MSRV to match.
-rust-version = "1.88"
+# ACP 1.3.0 is edition 2024 and requires Rust ≥ 1.88; `std::fs::File::try_lock`
+# (data-dir locks, AD-14) stabilised in 1.89, so the MSRV is 1.89.
+rust-version = "1.89"
 # Two binaries live in this crate: the desktop app (`termul-manager`, the
 # implicit src/main.rs) and the standalone headless server (`termul-server`).
 # Pin `cargo run` / `tauri dev` to the desktop app so Cargo doesn't error on
