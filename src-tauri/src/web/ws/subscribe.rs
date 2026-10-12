@@ -73,7 +73,7 @@ pub(super) async fn handle_subscribe(
     // stale/failure and lets grace cancellation happen only after resubscribe.
     let prior_clients = subscribed_clients.clients_for(&parsed.session_id);
 
-    let (client_id, rx, replay) = relay.subscribe(&parsed.session_id, parsed.last_seq).await;
+    let (client_id, rx, replay, _head) = relay.subscribe(&parsed.session_id, parsed.last_seq).await;
     match replay {
         ReplayResult::NotFound => {
             // Durable failure record for the desktop log sink (ws.rs runs on

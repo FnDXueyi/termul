@@ -265,9 +265,9 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
             handle_deliver_auth_redirect(id, &req.payload, acp).await
         }
         // CAP-2: host-authored durable agent-switch marker (desktop parity
-        // with the `acp_record_agent_switch` Tauri command). Persists the
-        // `agent_switch` record through `SessionPersistence`, then fans the
-        // synthetic live event — ONE durable record per switch.
+        // with the `acp_record_agent_switch` Tauri command). The relay numbers
+        // ONE `agent_switch` record, persists it and delivers it live under
+        // the same seq — ONE durable record per switch.
         "record_agent_switch" => {
             handle_record_agent_switch(id, &req.payload, acp, relay, history_mode).await
         }

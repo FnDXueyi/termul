@@ -511,11 +511,10 @@ impl AcpManager {
     pub fn persistence(&self) -> Option<Arc<SessionPersistence>> {
         self.persistence.clone()
     }
-    /// Host-authored durable agent-switch marker (CAP-2): persist through
-    /// `SessionPersistence`, flush, then fan the synthetic live event out
-    /// through this manager's sinks (Tauri renderer + WS relay on desktop;
-    /// relay-only on the standalone server). See the module-level
-    /// [`record_agent_switch`] for the persistence/fan-out contract.
+    /// Host-authored durable agent-switch marker (CAP-2): the relay numbers,
+    /// persists and delivers it through this manager's sinks, then the flush
+    /// is the durability boundary. Sinks are the Tauri renderer plus the WS
+    /// relay on desktop, and the relay alone on the standalone server.
     pub async fn record_agent_switch(
         &self,
         session_id: String,

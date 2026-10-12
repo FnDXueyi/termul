@@ -232,8 +232,8 @@ async fn acp_send_prompt_resend_of_same_turn_id_returns_a_receipt() {
 }
 
 /// CAP-2 (spec-in-chat-agent-switch): the desktop command writes the
-/// durable `agent_switch` record with the camelCase payload matching the
-/// WS `record_agent_switch` route byte-for-byte. Exercises the manager's
+/// durable `agent_switch` record with the camelCase `AgentSwitchEvent`
+/// payload, the same one the WS `record_agent_switch` route records. Exercises the manager's
 /// `record_agent_switch` (the command's delegation target — a full
 /// command unit test would need a Tauri `State`, which is not
 /// constructible here; the manager-with-persistence setup mirrors the
@@ -262,7 +262,12 @@ async fn record_agent_switch_writes_durable_marker_with_desktop_payload() {
         })
         .await
         .unwrap();
-    let manager = Arc::new(AcpManager::with_persistence(vec![], persistence.clone()));
+    // The relay numbers the record (one seq authority).
+    let relay = Arc::new(WsRelaySink::with_persistence(8, persistence.clone()));
+    let manager = Arc::new(AcpManager::with_persistence(
+        vec![relay.clone()],
+        persistence.clone(),
+    ));
 
     manager
         .record_agent_switch(
@@ -284,8 +289,8 @@ async fn record_agent_switch_writes_durable_marker_with_desktop_payload() {
     // Switches are not messages: message_count stays unchanged.
     assert_eq!(metadata.message_count, 0);
 
-    // The durable record carries the shared camelCase payload shape
-    // (matches the WS `record_agent_switch` handler byte-for-byte).
+    // The durable record carries the camelCase `AgentSwitchEvent` payload
+    // (the request's five fields, plus `agentId`).
     let records = persistence.replay_after("sess-switch", 0).unwrap();
     assert_eq!(records.len(), 1);
     let record = &records[0];
@@ -335,7 +340,11 @@ async fn record_agent_switch_unknown_session_fails_closed() {
         })
         .await
         .unwrap();
-    let manager = Arc::new(AcpManager::with_persistence(vec![], persistence.clone()));
+    let relay = Arc::new(WsRelaySink::with_persistence(8, persistence.clone()));
+    let manager = Arc::new(AcpManager::with_persistence(
+        vec![relay.clone()],
+        persistence.clone(),
+    ));
 
     let error = manager
         .record_agent_switch(
@@ -350,9 +359,12 @@ async fn record_agent_switch_unknown_session_fails_closed() {
         )
         .await
         .unwrap_err();
-    // Unknown session surfaces as a write failure; the known session is
-    // untouched (no durable record, no seq advance).
-    assert!(!error.is_empty());
+    // Unknown session reaches the relay's host-record path and surfaces as
+    // the distinguishable writer-unavailable classification; nothing is
+    // allocated, and the known session is untouched (no durable record, no
+    // seq advance).
+    assert_eq!(error, "session writer unavailable");
+    assert_eq!(relay.session_watermark("sess-absent"), 0);
     assert!(persistence
         .replay_after("sess-known", 0)
         .unwrap()

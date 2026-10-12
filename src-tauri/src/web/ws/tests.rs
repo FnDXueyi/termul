@@ -81,7 +81,7 @@ async fn connection_cleanup_unregisters_once_after_writer_first_shutdown() {
     relay.set_rendezvous(Arc::clone(&permissions));
     relay.set_question_rendezvous(Arc::clone(&questions));
     relay.seed_session_for_test("session-cleanup");
-    let (client_id, _rx, replay) = relay.subscribe("session-cleanup", None).await;
+    let (client_id, _rx, replay, _) = relay.subscribe("session-cleanup", None).await;
     assert!(matches!(replay, ReplayResult::Ok(0)));
     permissions.register(
         "permission-cleanup".to_string(),
@@ -154,7 +154,7 @@ async fn question_disconnect_grace_defers_cancel_until_expiry() {
     ));
     relay.set_question_rendezvous(Arc::clone(&questions));
     relay.seed_session_for_test("session-q-grace");
-    let (client_id, _rx, replay) = relay.subscribe("session-q-grace", None).await;
+    let (client_id, _rx, replay, _) = relay.subscribe("session-q-grace", None).await;
     assert!(matches!(replay, ReplayResult::Ok(0)));
     questions.register(
         "question-grace".to_string(),
@@ -201,7 +201,7 @@ async fn question_disconnect_grace_cancelled_by_resubscribe() {
     ));
     relay.set_question_rendezvous(Arc::clone(&questions));
     relay.seed_session_for_test("session-q-resub");
-    let (client_id, _rx, replay) = relay.subscribe("session-q-resub", None).await;
+    let (client_id, _rx, replay, _) = relay.subscribe("session-q-resub", None).await;
     assert!(matches!(replay, ReplayResult::Ok(0)));
     questions.register(
         "question-resub".to_string(),
@@ -219,7 +219,7 @@ async fn question_disconnect_grace_cancelled_by_resubscribe() {
     assert_eq!(relay.session_subscriber_count("session-q-resub"), 0);
 
     // A new subscriber arrives within the grace window.
-    let (_client2, _rx2, replay2) = relay.subscribe("session-q-resub", None).await;
+    let (_client2, _rx2, replay2, _) = relay.subscribe("session-q-resub", None).await;
     assert!(matches!(replay2, ReplayResult::Ok(0)));
     questions.cancel_disconnect_grace("session-q-resub");
 
@@ -236,7 +236,7 @@ async fn question_disconnect_grace_cancelled_by_resubscribe() {
 async fn connection_cleanup_runs_when_relay_future_is_cancelled() {
     let relay = Arc::new(WsRelaySink::new());
     relay.seed_session_for_test("session-cancelled-relay");
-    let (client_id, _rx, replay) = relay.subscribe("session-cancelled-relay", None).await;
+    let (client_id, _rx, replay, _) = relay.subscribe("session-cancelled-relay", None).await;
     assert!(matches!(replay, ReplayResult::Ok(0)));
     let subscribed = subscriptions_with("session-cancelled-relay", client_id);
 
@@ -560,7 +560,7 @@ async fn accepted_prompt_survives_disconnect_and_persists_completion_for_reconne
         event.type_ == "prompt_complete" && event.payload["turnId"] == "turn-resume"
     }));
 
-    let (_client_id, _events, reconnect_replay) = relay.subscribe("session-resume", Some(0)).await;
+    let (_client_id, _events, reconnect_replay, _) = relay.subscribe("session-resume", Some(0)).await;
     assert!(matches!(reconnect_replay, ReplayResult::Ok(replayed) if replayed >= 2));
     persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
@@ -1980,7 +1980,7 @@ async fn delete_session_removes_host_persisted_record() {
     // the observer session first — otherwise its channel never lives to
     // receive the broadcast.
     relay.seed_session_for_test("s-other");
-    let (_client, mut rx, _replay) = relay.subscribe("s-other", None).await;
+    let (_client, mut rx, _replay, _) = relay.subscribe("s-other", None).await;
 
     let reply = handle_delete_session(
         "r1".to_string(),
@@ -2623,7 +2623,7 @@ fn relay_with_subscribed_permission(
     // Subscribe a client to the session (populates subscribed_clients via
     // the production subscribe path).
     relay.seed_session_for_test(session_id);
-    let (client_id, _rx, _replay) = block_on(relay.subscribe(session_id, None));
+    let (client_id, _rx, _replay, _) = block_on(relay.subscribe(session_id, None));
     let subs = subscriptions_with(session_id, client_id);
     // Emit a permission_request event through the sink (production path) so
     // the rendezvous snapshots a ticket.
@@ -2682,7 +2682,7 @@ fn handle_respond_permission_needs_no_subscription() {
         crate::web::permissions::PermissionRendezvous::default(),
     ));
     relay.seed_session_for_test("sess-B");
-    let (_other_client, _rx, _replay) = block_on(relay.subscribe("sess-B", None));
+    let (_other_client, _rx, _replay, _) = block_on(relay.subscribe("sess-B", None));
     let subs = subscriptions_with("sess-B", ClientId::new());
     relay.emit(&AcpEvent {
         sid: Some("sess-A".to_string()),
@@ -2747,7 +2747,7 @@ fn relay_with_subscribed_question(
         crate::web::permissions::QuestionRendezvous::default(),
     ));
     relay.seed_session_for_test(session_id);
-    let (client_id, _rx, _replay) = block_on(relay.subscribe(session_id, None));
+    let (client_id, _rx, _replay, _) = block_on(relay.subscribe(session_id, None));
     let subs = subscriptions_with(session_id, client_id);
     let options_value = serde_json::Value::Array(
         options
@@ -2823,7 +2823,7 @@ fn handle_answer_question_needs_no_subscription() {
         crate::web::permissions::QuestionRendezvous::default(),
     ));
     relay.seed_session_for_test("sess-B");
-    let (_other_client, _rx, _replay) = block_on(relay.subscribe("sess-B", None));
+    let (_other_client, _rx, _replay, _) = block_on(relay.subscribe("sess-B", None));
     let subs = subscriptions_with("sess-B", ClientId::new());
     relay.emit(&AcpEvent {
         sid: Some("sess-A".to_string()),
@@ -3261,7 +3261,7 @@ async fn record_agent_switch_writes_durable_marker_and_replies_ok() {
         .await
         .unwrap();
     let relay = Arc::new(WsRelaySink::with_persistence(8, persistence.clone()));
-    let acp = Arc::new(AcpManager::with_persistence(vec![], persistence.clone()));
+    let acp = Arc::new(AcpManager::with_persistence(vec![relay.clone()], persistence.clone()));
 
     let reply = handle_record_agent_switch(
         "r1".to_string(),
@@ -3354,6 +3354,69 @@ async fn record_agent_switch_unknown_session_is_not_found() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `recover_session_snapshot`'s reply `watermark` is the log head (the
+/// allocated seq frontier) the registration was made at, so live events resume
+/// right after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recover_session_snapshot_reply_watermark_is_the_log_head() {
+    use crate::web::sink::{AcpEvent, EventSink};
+    let root = std::env::temp_dir().join(format!("termul-ws-snap-head-{}", uuid::Uuid::new_v4()));
+    let cwd = root.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let persistence = crate::acp::SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(crate::acp::SessionRegistration {
+            session_id: "session-head".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let relay = Arc::new(WsRelaySink::with_persistence(8, persistence.clone()));
+    for n in 0..3 {
+        relay.emit(&AcpEvent {
+            sid: Some("session-head".to_string()),
+            type_: "acp:tool_call",
+            payload: json!({"sessionId": "session-head", "n": n}),
+        });
+    }
+    // A non-durable event consumes a seq without reaching the JSONL: the head
+    // is the allocated frontier, not the durable one.
+    relay.emit(&AcpEvent {
+        sid: Some("session-head".to_string()),
+        type_: "acp:permission_request",
+        payload: json!({"sessionId": "session-head"}),
+    });
+    let subs = Arc::new(Subscriptions::default());
+    let (out_tx, _out_rx) = test_outbound();
+
+    let reply = handle_recover_session_snapshot(
+        "r1".to_string(),
+        &json!({ "sessionId": "session-head" }),
+        &relay,
+        &out_tx,
+        &subs,
+        HistoryMode::Server,
+    )
+    .await;
+    assert!(reply.ok, "{reply:?}");
+    let payload = reply.payload.unwrap();
+    assert_eq!(payload["watermark"], 4);
+    assert_eq!(payload["watermark"], relay.session_watermark("session-head"));
+    let seqs: Vec<u64> = payload["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3], "snapshot holds the durable events up to the head");
+
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// CAP-2 classification parity: a catalog-known session whose writer
 /// runtime is gone (post-restart recovered session — the metadata
 /// pre-check PASSES) surfaces a typed `not_found` reply via the manager's
@@ -3383,13 +3446,13 @@ async fn record_agent_switch_writer_gone_session_replies_not_found() {
         .unwrap();
     // Simulate the post-restart state: the catalog entry survives (the
     // handler's metadata pre-check passes) but no writer runtime is
-    // installed — `append_agent_switch` hits SessionNotFound.
+    // installed — the relay's host record hits SessionNotFound.
     persistence.shutdown().await.unwrap();
     let reopened = crate::acp::SessionPersistence::open(root.join("sessions"))
         .await
         .unwrap();
     let relay = Arc::new(WsRelaySink::with_persistence(8, reopened.clone()));
-    let acp = Arc::new(AcpManager::with_persistence(vec![], reopened.clone()));
+    let acp = Arc::new(AcpManager::with_persistence(vec![relay.clone()], reopened.clone()));
 
     let reply = handle_record_agent_switch(
         "r1".to_string(),
@@ -3854,7 +3917,7 @@ async fn handle_set_default_project_broadcasts_to_all_clients() {
     );
     // Subscribe a client to prove the broadcast reaches it.
     relay.seed_session_for_test("sess-1");
-    let (_client, mut rx, _replay) = relay.subscribe("sess-1", None).await;
+    let (_client, mut rx, _replay, _) = relay.subscribe("sess-1", None).await;
 
     let reply = handle_set_default_project(
         "r1".to_string(),

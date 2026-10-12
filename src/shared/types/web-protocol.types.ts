@@ -80,10 +80,15 @@ export const WS_EVENT_TYPES = [
   // captured the agent's auth URL. Agent-level event (sid null, seq 0);
   // payload `{ agentId, url }` — the renderer shows the BrowserAuthDialog.
   'browser_open_request',
-  // CAP-2 (spec-in-chat-agent-switch): live fan-out of a durable agent-switch
-  // marker (Reliable tier). The durable record — not this event — is the
-  // transcript authority.
+  // CAP-2 (spec-in-chat-agent-switch): durable agent-switch marker (Reliable
+  // tier). The host numbers it once; the durable record and this live event
+  // share one seq.
   'agent_switch',
+  // Host-authored durable title record (Reliable tier). Occupies a seq in the
+  // session log like any record, so live delivery keeps the seq run
+  // contiguous; the title itself reaches the UI through the
+  // `session_info_update` that follows it, so clients have no handler for it.
+  'local_title_generated',
   // #856 (web explorer live refresh): server-side FS watcher batch. Agent-
   // level event (sid null, seq 0), delivered only to connections that sent
   // `watch_project`; payload `{ projectId, root, paths: string[] }` —
@@ -219,8 +224,8 @@ export const WS_REQUEST_TYPES = [
   'remove_project',
   // CAP-2 (spec-in-chat-agent-switch): host-authored durable agent-switch
   // marker. Mirrors the `acp_record_agent_switch` Tauri command: the host
-  // writes ONE durable `agent_switch` record (writer-assigned seq) then fans
-  // the synthetic `acp:agent_switch` event to live clients. Reply `{}`;
+  // numbers ONE `agent_switch` record, appends it durably and delivers the
+  // `acp:agent_switch` event to live clients under the same seq. Reply `{}`;
   // unknown session → `not_found`; live-only mode → `unsupported`.
   'record_agent_switch',
   // Per-project fs watch: `{ projectId }` subscribes/unsubscribes THIS
@@ -252,8 +257,9 @@ export interface DeleteSessionPayload {
 /**
  * `record_agent_switch` request payload (CAP-2, spec-in-chat-agent-switch).
  * Host-authored durable agent-switch marker — mirrors the
- * `acp_record_agent_switch` Tauri command args and the durable record's
- * payload byte-for-byte. Reply: `{}` on success; `not_found` for an unknown
+ * `acp_record_agent_switch` Tauri command args; the durable record's payload
+ * is the `agent_switch` event built from them (these fields plus the
+ * runtime `agentId`). Reply: `{}` on success; `not_found` for an unknown
  * session; `unsupported` in live-only mode or on a storage failure.
  */
 export interface RecordAgentSwitchPayload {
@@ -476,6 +482,8 @@ export const WS_EVENT_TIERS: Readonly<Record<WsEventType, ReliabilityTier>> = {
   browser_open_request: WS_RELAY_TIERS.RELIABLE,
   // CAP-2: switch markers are one-shot durable-backed events — reliable.
   agent_switch: WS_RELAY_TIERS.RELIABLE,
+  // Durable host record that owns a seq — reliable so no seq goes missing.
+  local_title_generated: WS_RELAY_TIERS.RELIABLE,
   // #856: fs_changed batches are debounced snapshots — a lost one is
   // recovered by the next batch or a manual refresh, but reliable keeps
   // the tree consistent without polling.
