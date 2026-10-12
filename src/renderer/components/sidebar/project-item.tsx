@@ -107,7 +107,7 @@ export const ProjectItem = memo(function ProjectItem({
                 onChange={(e) => onEditNameChange(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onBlur={onSaveRename}
-                className={`h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground ${FIELD_FOCUS_CLASS}`}
+                className={`h-6 min-w-0 flex-1 rounded border border-border bg-card px-1.5 text-xs text-foreground ${FIELD_FOCUS_CLASS}`}
                 onClick={(e) => e.stopPropagation()}
               />
             ) : (

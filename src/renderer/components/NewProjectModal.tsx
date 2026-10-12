@@ -7,7 +7,7 @@ import { basename } from '@/components/chat/chat-attachments'
 import { ChevronDown, ChevronRight, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
+import { FIELD_FOCUS_CLASS, FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { Skeleton } from '@/components/ui/skeleton'
 import { dialogApi, filesystemApi, gitApi, shellApi } from '@/lib/api'
 import { availableColors, getColorClasses } from '@/lib/colors'
@@ -598,7 +598,7 @@ export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProject
                         id="init-git"
                         checked={initGit}
                         onChange={(e) => setInitGit(e.target.checked)}
-                        className="rounded border-border text-primary bg-secondary h-3.5 w-3.5"
+                        className={`rounded border-border text-primary bg-secondary h-3.5 w-3.5 ${FOCUS_RING_CLASS}`}
                       />
                       <label
                         htmlFor="init-git"

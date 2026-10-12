@@ -114,7 +114,7 @@ export function InlineNameInput({ className }: { className?: string }): React.JS
         event.stopPropagation()
       }}
       className={cn(
-        `h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground placeholder:text-muted-foreground/70 ${FIELD_FOCUS_CLASS}`,
+        `h-6 min-w-0 flex-1 rounded border border-border bg-card px-1.5 text-xs text-foreground placeholder:text-muted-foreground/70 ${FIELD_FOCUS_CLASS}`,
         className
       )}
       aria-label={

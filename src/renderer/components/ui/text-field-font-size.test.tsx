@@ -4,10 +4,10 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { cn } from '@/lib/utils'
 import {
+  findRawTagStarts,
   findTextFieldTags,
   listSourceFiles,
   type RawFieldTag,
-  TAG_START,
   toRootPath
 } from './__tests__/raw-field-source'
 import { Command, CommandInput } from './command'
@@ -192,6 +192,14 @@ describe('findOffenders', () => {
     ).toHaveLength(1)
   })
 
+  it('finds a tag after return or another tag, and ignores a type mentioned in another attribute', () => {
+    expect(findOffenders('return <input className="text-sm" />')).toHaveLength(1)
+    expect(findOffenders('<div><input className="text-sm" /></div>')).toHaveLength(1)
+    expect(findOffenders('<input placeholder="type=checkbox" className="text-sm" />')).toHaveLength(
+      1
+    )
+  })
+
   it('ignores commented-out tags', () => {
     expect(findOffenders('// <input className="text-sm" />')).toEqual([])
     expect(findOffenders('{/* <input className="text-sm" /> */}')).toEqual([])
@@ -311,7 +319,7 @@ describe('raw text fields in the renderer', () => {
       const file = toRendererPath(path)
       const source = readFileSync(path, 'utf8')
       const allow = DESKTOP_ONLY.filter((entry) => entry.file === file)
-      scanned += [...source.matchAll(TAG_START)].length
+      scanned += findRawTagStarts(source).length
       for (const { line } of findOffenders(source, allow)) {
         report.push(`src/renderer/${file}:${line}`)
       }

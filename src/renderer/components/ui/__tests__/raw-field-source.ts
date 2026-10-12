@@ -19,10 +19,71 @@ export const NON_TEXT_TYPES: ReadonlySet<string> = new Set([
   'color'
 ])
 
-/** A tag at the start of a line, or right after `&&`, `?`, `:`, `=>` or `(` in a JSX expression. */
-export const TAG_START = /(?:^[ \t]*|(?:&&|\?|:|=>|\()[ \t]*)<(?:input|textarea|select)(?![\w-])/gm
+const TAG_NAME = /^(?:input|textarea|select)(?![\w-])/
 
-const LITERAL_TYPE = /(?<![\w-])type=(?:"([^"]*)"|'([^']*)'|\{\s*["']([^"']*)["']\s*\})/
+/**
+ * Indexes of raw `<input>`, `<textarea>` and `<select>` tags, skipping strings,
+ * comments and JSX comments (`{/* *\/}`). Position does not matter: `return <input`
+ * and `<div><input` count.
+ */
+export function findRawTagStarts(source: string): number[] {
+  const starts: number[] = []
+  let quote: string | null = null
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]
+    if (quote) {
+      if (char === '\\') i++
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i)
+      i = end === -1 ? source.length : end
+      continue
+    }
+    if (char === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      i = end === -1 ? source.length : end + 1
+      continue
+    }
+    if (char === '{' && source[i + 1] === '/' && source[i + 2] === '*') {
+      const end = source.indexOf('*/', i + 3)
+      i = end === -1 ? source.length : end + 1
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '<' && TAG_NAME.test(source.slice(i + 1))) starts.push(i)
+  }
+  return starts
+}
+
+/** The literal `type` attribute, read outside quotes so a placeholder cannot impersonate it. */
+function literalType(tag: string): string | null {
+  let quote: string | null = null
+  let depth = 0
+  for (let i = 0; i < tag.length; i++) {
+    const char = tag[i]
+    if (quote) {
+      if (char === '\\') i++
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '{') depth++
+    else if (char === '}') depth--
+    else if (depth === 0 && (i === 0 || /\s/.test(tag[i - 1])) && tag.startsWith('type=', i)) {
+      const literal = tag.slice(i + 5).match(/^"([^"]*)"|^'([^']*)'|^\{\s*["']([^"']*)["']/)
+      return literal ? (literal[1] ?? literal[2] ?? literal[3]) : null
+    }
+  }
+  return null
+}
 
 /** Reads one opening tag from its `<` to its closing `>`, skipping `{}` bodies, quotes and comments. */
 export function readTag(source: string, start: number): string {
@@ -57,8 +118,8 @@ export function readTag(source: string, start: number): string {
 
 /** True when the tag has a literal `type` that takes no text, such as a checkbox. */
 export function isNonTextTag(tag: string): boolean {
-  const type = LITERAL_TYPE.exec(tag)
-  return type !== null && NON_TEXT_TYPES.has(type[1] ?? type[2] ?? type[3])
+  const type = literalType(tag)
+  return type !== null && NON_TEXT_TYPES.has(type)
 }
 
 export interface RawFieldTag {
@@ -69,8 +130,7 @@ export interface RawFieldTag {
 /** Every raw text-entry tag in `source`, with its 1-based line. Non-text input types are skipped. */
 export function findTextFieldTags(source: string): RawFieldTag[] {
   const tags: RawFieldTag[] = []
-  for (const match of source.matchAll(TAG_START)) {
-    const start = match.index + match[0].indexOf('<')
+  for (const start of findRawTagStarts(source)) {
     const tag = readTag(source, start)
     if (isNonTextTag(tag)) continue
     tags.push({ line: source.slice(0, start).split('\n').length, tag })

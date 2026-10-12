@@ -110,7 +110,7 @@ const FOCUS_CONSTANTS = [
 ]
 /** Blue focus, `focus:` (also on mouse click for selects) and an outline removed in forced colors. */
 const FORBIDDEN =
-  /(?<![\w-])(?:focus(?:-visible)?:(?:ring|border)-primary|focus:(?:ring|border|outline)[\w[\]/.-]*|outline-none)(?![\w-])/
+  /(?<![\w-])(?:focus(?:-visible)?:(?:ring|border)-primary|focus:(?:ring|border|outline)[\w[\]/.-]*|outline-none|ring-offset-\d)(?![\w-])/
 
 function findFocusOffenders(source: string): Array<RawFieldTag & { reason: string }> {
   const offenders: Array<RawFieldTag & { reason: string }> = []
@@ -137,7 +137,8 @@ describe('findFocusOffenders', () => {
       'focus-visible:ring-primary',
       'focus:border-primary',
       'focus:outline-none',
-      'outline-none'
+      'outline-none',
+      'ring-offset-2'
     ]) {
       expect(findFocusOffenders(`<input className="${bad} \${FIELD_FOCUS_CLASS}" />`)).toHaveLength(
         1
@@ -177,8 +178,11 @@ describe('raw text fields in the renderer', () => {
 })
 
 /** A focus ring, border or outline in a status or brand colour instead of the neutral `ring`. */
-const COLORED_FOCUS =
-  /(?<![\w-])focus(?:-visible|-within)?:(?:ring|border|outline)-(?:primary|accent|destructive|success|warning)(?![\w-])/
+const FOCUS_COLOR =
+  'primary|accent|destructive|success|warning|slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|black|white'
+const COLORED_FOCUS = new RegExp(
+  `(?<![\\w-])focus(?:-visible|-within)?:(?:ring|border|outline)-(?:${FOCUS_COLOR})(?:-\\d+)?(?![\\w-])`
+)
 
 describe('focus colour on every control', () => {
   it('flags a coloured focus ring and accepts the neutral ring', () => {
@@ -187,6 +191,9 @@ describe('focus colour on every control', () => {
     expect(COLORED_FOCUS.test('focus-within:border-primary')).toBe(true)
     expect(COLORED_FOCUS.test('focus-visible:ring-ring')).toBe(false)
     expect(COLORED_FOCUS.test('focus-visible:ring-primary-foreground/40')).toBe(false)
+    expect(COLORED_FOCUS.test('focus-visible:ring-red-500')).toBe(true)
+    expect(COLORED_FOCUS.test('focus:border-blue-500')).toBe(true)
+    expect(COLORED_FOCUS.test('focus-visible:ring-white')).toBe(true)
   })
 
   it('no renderer source uses a coloured focus state', () => {
