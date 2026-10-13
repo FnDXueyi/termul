@@ -4,6 +4,7 @@
  * and no store closure — `set`/`get` arrive as parameters.
  */
 
+import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type {
@@ -1049,6 +1050,23 @@ export function agentConfigIdentityChanged(
 ): boolean {
   if (!prev) return false
   return agentConfigIdentityKey(prev) !== agentConfigIdentityKey(next)
+}
+
+/**
+ * The project a chat session names: the live record's `projectId`, else its
+ * session-index entry (closed history chats are evicted from `sessions` but
+ * stay indexed). `''` (an unattributed `session_created` stub) and the host's
+ * unassigned sentinel name no project: `undefined`. A plain field read, not a
+ * filter — nothing is hidden or dropped on the basis of it.
+ */
+export function sessionProjectId(
+  state: Pick<AcpState, 'sessions' | 'sessionIndex'>,
+  sessionId: string
+): string | undefined {
+  const projectId =
+    state.sessions[sessionId]?.projectId ||
+    state.sessionIndex.find((entry) => entry.id === sessionId)?.projectId
+  return projectId && projectId !== UNASSIGNED_PROJECT_ID ? projectId : undefined
 }
 
 export function configIdForAgentId(state: AcpState, agentId: AgentId): string | null {

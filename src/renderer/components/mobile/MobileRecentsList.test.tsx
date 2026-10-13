@@ -181,7 +181,7 @@ describe('MobileRecentsList merged list', () => {
     expect(screen.getByRole('button', { name: 'Live title' })).toBeInTheDocument()
   })
 
-  it('leaves out an open chat tab known to belong to another project, keeping unknown ones', () => {
+  it('lists every open chat tab of the tree, whatever project its session names', () => {
     seedHistory([{ id: 'h1', title: 'Past chat' }])
     seedOptionsSession('s7', 'agent-1', { title: 'Other project chat', projectId: 'p2' })
     seedOptionsSession('s8', 'agent-1', { title: 'Unattributed chat', projectId: '' })
@@ -191,7 +191,7 @@ describe('MobileRecentsList merged list', () => {
     ])
     renderList()
 
-    expect(screen.queryByRole('button', { name: 'Other project chat' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Other project chat' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Unattributed chat' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Past chat' })).toBeInTheDocument()
   })

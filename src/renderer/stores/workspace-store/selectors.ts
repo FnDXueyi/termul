@@ -134,3 +134,23 @@ export function getActiveFilePathFromTree(state: WorkspaceState): string | null 
   if (activeTab?.type === 'editor') return activeTab.filePath
   return null
 }
+
+/** Roots of every project's tree: the active one first, then each parked one. */
+export function getAllTreeRoots(state: Pick<WorkspaceState, 'root' | 'parkedTrees'>): PaneNode[] {
+  return [state.root, ...Object.values(state.parkedTrees).map((tree) => tree.root)]
+}
+
+/** Session ids that have an agent-chat tab in at least one tree (active or parked). */
+export function getAgentChatSessionIdsInAllTrees(
+  state: Pick<WorkspaceState, 'root' | 'parkedTrees'>
+): Set<string> {
+  const ids = new Set<string>()
+  for (const root of getAllTreeRoots(state)) {
+    for (const leaf of getAllLeafPanes(root)) {
+      for (const tab of leaf.tabs) {
+        if (tab.type === 'agent-chat') ids.add(tab.sessionId)
+      }
+    }
+  }
+  return ids
+}

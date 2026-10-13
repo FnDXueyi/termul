@@ -115,10 +115,12 @@ export function mergeNonPortableTabs(
       return id === null || !seen.has(id)
     })
     if (refs.length === 0) continue
-    const built = deserializePaneTree(
-      { type: 'leaf', id: slice.id, tabs: refs, activeTabId: slice.activeTabId },
-      projectId
-    )
+    const built = deserializePaneTree({
+      type: 'leaf',
+      id: slice.id,
+      tabs: refs,
+      activeTabId: slice.activeTabId
+    })
     if (built.type !== 'leaf') continue
     const tabs = built.tabs.filter((tab) => !seen.has(tab.id))
     if (tabs.length === 0) continue

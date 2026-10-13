@@ -82,7 +82,6 @@ import {
   setCachedSessionPayload,
   toPersistedSessionSummaries,
   trackPendingIndexWrite,
-  unpinProjectSessionPayloads,
   unpinSessionPayload,
   waitForPendingSessionIndexWrite
 } from './acp-history-persistence'
@@ -946,36 +945,6 @@ describe('bounded full-payload cache', () => {
     expect(getCachedSessionPayload('rp-1')).toBeUndefined()
     expect(getCachedSessionPayload('rp-2')).toBeDefined()
     expect(getCachedSessionPayload('rp-9')).toBeDefined()
-  })
-
-  it('unpinProjectSessionPayloads unpins only matching projectId', () => {
-    // project-1 (the `entry` default) payloads: two pinned, one unpinned.
-    for (const id of ['s-p1-a', 's-p1-b']) {
-      setCachedSessionPayload(id, payload(id))
-      markSessionPayloadPinned(id)
-    }
-    setCachedSessionPayload('s-p1-plain', payload('s-p1-plain'))
-    // A project-2 payload, pinned.
-    const p2 = payload('s-p2-a')
-    p2.metadata.projectId = 'project-2'
-    setCachedSessionPayload('s-p2-a', p2)
-    markSessionPayloadPinned('s-p2-a')
-
-    unpinProjectSessionPayloads('project-1')
-
-    // project-1 entries were pinned before the call; if the unpin had not
-    // engaged they would survive any budget pressure. Under pressure they
-    // evict (no longer pinned) while the project-2 pin survives.
-    for (let index = 0; index <= INACTIVE_PAYLOAD_CACHE_BUDGET; index += 1) {
-      setCachedSessionPayload(`other-${index}`, payload(`other-${index}`))
-    }
-    expect(getCachedSessionPayload('s-p1-a')).toBeUndefined()
-    expect(getCachedSessionPayload('s-p1-b')).toBeUndefined()
-    expect(getCachedSessionPayload('s-p1-plain')).toBeUndefined()
-    expect(getCachedSessionPayload('s-p2-a')).toBeDefined()
-    // Unpinning a project with no matching payloads is a no-op.
-    expect(() => unpinProjectSessionPayloads('project-none')).not.toThrow()
-    expect(getCachedSessionPayload('s-p2-a')).toBeDefined()
   })
 
   it('saveSessionPayload never reads or writes the store (host-authored history)', async () => {

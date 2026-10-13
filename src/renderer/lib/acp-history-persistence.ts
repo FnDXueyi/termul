@@ -692,27 +692,6 @@ export function unpinSessionPayload(id: string): void {
   evictInactivePayloads()
 }
 
-/**
- * Unpin every cached payload belonging to `projectId` (matches
- * `metadata.projectId`). Called on project switch-away so the previous
- * project's transcript payloads stop occupying pins; their cache entries
- * stay in the cache and become subject to the normal inactive-budget
- * eviction (lossless — scroll-up refetches from the host).
- *
- * Snapshot first: `unpinSessionPayload` runs `evictInactivePayloads`, which
- * may DELETE cache entries mid-loop (the evictor skips pinned ids — that is
- * the invariant that keeps a still-pinned sibling safe while this loop runs).
- * Phantom pin ids with no cache entry are intentionally invisible here: they
- * hold a pin slot but evict nothing, and `markSessionPayloadPinned`'s cap
- * evicts them by age.
- */
-export function unpinProjectSessionPayloads(projectId: string): void {
-  for (const [id, cached] of [...payloadCache]) {
-    if (cached.metadata.projectId !== projectId) continue
-    unpinSessionPayload(id)
-  }
-}
-
 export function getCachedSessionPayload(id: string): SessionPayload | undefined {
   const payload = payloadCache.get(id)
   if (payload) touchPayload(id, payload)

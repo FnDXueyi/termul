@@ -44,7 +44,22 @@ function leavesOf(node: FakePane): FakePane[] {
 
 vi.mock('sonner', () => ({ toast: { info: mockToastInfo, error: mockToastError } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
-vi.mock('@/stores/acp-store', () => ({ useAcpStore: { getState: () => acpRef.current } }))
+vi.mock('@/stores/acp-store', () => ({
+  // Same field read as the real selector.
+  sessionProjectId: (
+    state: {
+      sessions: Record<string, { projectId: string }>
+      sessionIndex: Array<{ id: string; projectId: string }>
+    },
+    sessionId: string
+  ): string | undefined => {
+    const projectId =
+      state.sessions[sessionId]?.projectId ||
+      state.sessionIndex.find((entry) => entry.id === sessionId)?.projectId
+    return projectId && projectId !== '__unassigned__' ? projectId : undefined
+  },
+  useAcpStore: { getState: () => acpRef.current }
+}))
 vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   findPaneById: (root: FakePane, id: string): FakePane | null =>
@@ -123,8 +138,9 @@ describe('openAgentChatInOwnProject', () => {
     request.mockRestore()
   })
 
-  it("drops the previous project's tab-focus pointer when it switches to the owner", () => {
-    setTabFocusedSessionId('s-a')
+  it('drops a tab-focus pointer on an unassigned chat when it switches to the owner', () => {
+    acpRef.current.sessionIndex = [{ id: 's-stray', projectId: '__unassigned__' }]
+    setTabFocusedSessionId('s-stray')
     openAgentChatInOwnProject('s-b', 'test')
     expect(getTabFocusedSessionId()).toBeNull()
   })
