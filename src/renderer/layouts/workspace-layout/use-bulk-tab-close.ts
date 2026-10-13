@@ -6,6 +6,7 @@ import {
   isEditorTabBusy,
   NO_APPROVED_DIRTY
 } from '@/layouts/workspace-layout/bulk-close'
+import { blockSaveOnDraftConflict } from '@/layouts/workspace-layout/draft-conflict-save-guard'
 import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { logFrontendError } from '@/lib/log-api'
 import { useConfirmTerminalClose } from '@/stores/app-settings-store'
@@ -232,6 +233,11 @@ export function useBulkTabClose({
         bulkClose.dirtyFilePaths.length > 0
           ? bulkApprovedDirtyPaths(bulkClose.tabs)
           : NO_APPROVED_DIRTY
+      // A draft-conflicted file cannot be saved here: reveal it, close nothing.
+      if (blockSaveOnDraftConflict(approvedDirty)) {
+        setBulkClose(null)
+        return
+      }
       for (const filePath of approvedDirty) {
         const saved = await useEditorStore.getState().saveFile(filePath)
         if (!saved) {

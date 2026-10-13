@@ -65,6 +65,9 @@ export function EditorPanel({ filePath, isVisible }: EditorPanelProps): React.JS
   }
 
   const isMarkdownFile = fileState.language === 'markdown'
+  // An unresolved draft conflict holds two stored buffers (disk + draft); no
+  // edit may exist outside them, so the editor is locked until resolved.
+  const isReadOnly = fileState.draftConflict !== undefined
 
   return (
     <div className="flex h-full w-full flex-col bg-background">
@@ -82,6 +85,7 @@ export function EditorPanel({ filePath, isVisible }: EditorPanelProps): React.JS
             filePath={filePath}
             content={fileState.content}
             isVisible={isVisible}
+            readOnly={isReadOnly}
             onChange={handleChange}
           />
         ) : (
@@ -89,6 +93,7 @@ export function EditorPanel({ filePath, isVisible }: EditorPanelProps): React.JS
             filePath={filePath}
             content={fileState.content}
             language={fileState.language}
+            readOnly={isReadOnly}
             isVisible={isVisible}
             initialCursorPosition={fileState.cursorPosition}
             initialScrollTop={fileState.scrollTop}

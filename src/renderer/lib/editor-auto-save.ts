@@ -18,6 +18,13 @@ const DEFAULT_AUTO_SAVE_DELAY_MS = 1000
 const autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 /** Paths whose last auto-save failed; suppresses repeat toasts until the next edit. */
 const failedAutoSavePaths = new Set<string>()
+/**
+ * Auto-save writes a fired timer has started and not yet finished, by path.
+ * The timer callback removes its own timer before `saveFile` runs, so without
+ * this a flush could not tell that a write is still on its way to disk.
+ * Resolves to whether the write succeeded.
+ */
+const inFlightAutoSaves = new Map<string, Promise<boolean>>()
 
 function clearTimer(filePath: string): void {
   const timer = autoSaveTimers.get(filePath)
@@ -61,16 +68,16 @@ export function scheduleAutoSave(filePath: string): void {
         return
       }
 
-      void useEditorStore
+      const run: Promise<boolean> = useEditorStore
         .getState()
         .saveFile(filePath)
         .then((saved) => {
           const stillDirty = Boolean(useEditorStore.getState().openFiles.get(filePath)?.isDirty)
           if (saved) {
             failedAutoSavePaths.delete(filePath)
-            return
+            return true
           }
-          if (!stillDirty) return
+          if (!stillDirty) return false
           // Toast once per failure episode; the retry keeps trying quietly.
           if (!failedAutoSavePaths.has(filePath)) {
             failedAutoSavePaths.add(filePath)
@@ -79,13 +86,14 @@ export function scheduleAutoSave(filePath: string): void {
           if (useAppSettingsStore.getState().settings.editorAutoSave) {
             scheduleAutoSave(filePath)
           }
+          return false
         })
         .catch(() => {
           // saveFile never rejects in practice (it catches internally and
           // returns false), but a flush registration that throws lands here;
           // treat it as a failed autosave episode — retry, stay dirty.
           const stillDirty = Boolean(useEditorStore.getState().openFiles.get(filePath)?.isDirty)
-          if (!stillDirty) return
+          if (!stillDirty) return false
           if (!failedAutoSavePaths.has(filePath)) {
             failedAutoSavePaths.add(filePath)
             toast.error('Auto save failed', { description: getBasename(filePath) })
@@ -93,7 +101,12 @@ export function scheduleAutoSave(filePath: string): void {
           if (useAppSettingsStore.getState().settings.editorAutoSave) {
             scheduleAutoSave(filePath)
           }
+          return false
         })
+        .finally(() => {
+          if (inFlightAutoSaves.get(filePath) === run) inFlightAutoSaves.delete(filePath)
+        })
+      inFlightAutoSaves.set(filePath, run)
     }, resolveDelayMs())
   )
 }
@@ -134,27 +147,44 @@ export function getPendingAutoSaveCount(): number {
 
 /**
  * Write every file with a pending auto-save timer NOW (project switch / close
- * barrier). Each timer is cleared; the file is saved only if it is still open,
- * dirty and not mid saving/reloading (a busy file keeps a fresh timer so its
- * pending edit is not dropped). A failed save leaves the file dirty, is logged
- * (no toast — the caller is mid-flow) and re-arms the normal retry timer.
+ * barrier), and wait for auto-save writes a fired timer already started. Each
+ * timer is cleared; the file is saved only if it is still open, dirty and not
+ * mid saving/reloading (a busy file keeps a fresh timer so its pending edit is
+ * not dropped). A failed save leaves the file dirty, is logged (no toast — the
+ * caller is mid-flow) and re-arms the normal retry timer. Best effort: it
+ * never throws, and a busy or failing file stays unsaved.
  */
 export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed: string[] }> {
-  const paths = Array.from(autoSaveTimers.keys())
-  for (const path of paths) clearTimer(path)
+  const timerPaths = new Set(autoSaveTimers.keys())
+  for (const path of timerPaths) clearTimer(path)
+  const paths = new Set([...timerPaths, ...inFlightAutoSaves.keys()])
 
   const saved: string[] = []
   const failed: string[] = []
 
   await Promise.all(
-    paths.map(async (path) => {
+    Array.from(paths, async (path) => {
+      // A write a fired timer already started: wait for it, then re-check.
+      const pending = inFlightAutoSaves.get(path)
+      const inFlightOk = pending ? await pending : undefined
+
       const file = useEditorStore.getState().openFiles.get(path)
-      if (!file || !file.isDirty) return
+      if (!file?.isDirty) {
+        if (inFlightOk === true) saved.push(path)
+        return
+      }
+      if (!timerPaths.has(path)) {
+        // In-flight only: that chain already toasted/re-armed on failure.
+        if (inFlightOk === true) saved.push(path)
+        else failed.push(path)
+        return
+      }
       if (file.operationStatus === 'saving' || file.operationStatus === 'reloading') {
         scheduleAutoSave(path)
         return
       }
 
+      const name = getBasename(path)
       let ok = false
       try {
         ok = await useEditorStore.getState().saveFile(path)
@@ -162,7 +192,7 @@ export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed
         void logFrontendError({
           level: 'warn',
           source: 'editor-auto-save.flush',
-          message: `flush save threw for ${path}: ${error instanceof Error ? error.message : String(error)}`
+          message: `flush save threw for ${name}: ${error instanceof Error ? error.message : String(error)}`
         })
       }
       if (ok) {
@@ -178,7 +208,7 @@ export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed
       void logFrontendError({
         level: 'warn',
         source: 'editor-auto-save.flush',
-        message: `flush save failed for ${path}; file stays dirty`
+        message: `flush save failed for ${name}; file stays dirty`
       })
       if (useAppSettingsStore.getState().settings.editorAutoSave) {
         scheduleAutoSave(path)

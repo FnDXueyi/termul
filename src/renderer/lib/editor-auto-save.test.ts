@@ -336,6 +336,62 @@ describe('editor-auto-save (GH-539)', () => {
       expect(getPendingAutoSaveCount()).toBe(1)
     })
 
+    it('waits for a write a fired timer already started (timer gone, save still in flight)', async () => {
+      setOpenFile('/project/a.txt')
+      const saveGate = Promise.withResolvers<boolean>()
+      mocks.saveFile.mockImplementationOnce(() => saveGate.promise)
+      scheduleAutoSave('/project/a.txt')
+      vi.advanceTimersByTime(1000)
+      expect(getPendingAutoSaveCount()).toBe(0)
+      expect(mocks.saveFile).toHaveBeenCalledTimes(1)
+
+      let settled = false
+      const flush = flushPendingAutoSaves().then((result) => {
+        settled = true
+        return result
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(settled).toBe(false)
+
+      mocks.openFiles.set('/project/a.txt', { isDirty: false, operationStatus: 'idle' })
+      saveGate.resolve(true)
+      await expect(flush).resolves.toEqual({ saved: ['/project/a.txt'], failed: [] })
+      // The flush must not start a second write for the already-saved file.
+      expect(mocks.saveFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('reports an in-flight write that fails as failed without a second write', async () => {
+      setOpenFile('/project/a.txt')
+      const saveGate = Promise.withResolvers<boolean>()
+      mocks.saveFile.mockImplementationOnce(() => saveGate.promise)
+      scheduleAutoSave('/project/a.txt')
+      vi.advanceTimersByTime(1000)
+
+      const flush = flushPendingAutoSaves()
+      saveGate.resolve(false)
+
+      await expect(flush).resolves.toEqual({ saved: [], failed: ['/project/a.txt'] })
+      expect(mocks.saveFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs only the file basename, never the absolute path', async () => {
+      setOpenFile('/secret/dir/a.txt')
+      scheduleAutoSave('/secret/dir/a.txt')
+      mocks.saveFile.mockResolvedValueOnce(false)
+
+      await flushPendingAutoSaves()
+
+      const messages = mocks.logFrontendError.mock.calls.map(
+        (call: unknown[]) => (call[0] as { message: string }).message
+      )
+      expect(messages.length).toBeGreaterThan(0)
+      for (const message of messages) {
+        expect(message).toContain('a.txt')
+        expect(message).not.toContain('/secret')
+      }
+    })
+
     it('treats a rejecting save as failed instead of throwing', async () => {
       setOpenFile('/project/a.txt')
       scheduleAutoSave('/project/a.txt')

@@ -265,6 +265,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { openFiles } = get()
     const file = openFiles.get(path)
     if (!file) return
+    // The editor is read-only while a draft conflict is unresolved: an edit
+    // here would live outside the two stored buffers (disk + draft) and be
+    // lost on switch. Drop it rather than let it diverge.
+    if (file.draftConflict) return
 
     const newFiles = new Map(openFiles)
     const isDirty = content !== file.originalContent
@@ -279,9 +283,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     // returning to the original content clears it (and any pending timer).
     if (content !== file.content) {
       clearAutoSaveFailure(path)
-      if (isDirty && !file.draftConflict) {
+      if (isDirty) {
         scheduleAutoSave(path)
-      } else if (!isDirty) {
+      } else {
         cancelAutoSave(path)
       }
     }
@@ -326,7 +330,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         void logFrontendError({
           level: 'info',
           source: 'editor-store.saveFile',
-          message: `save skipped for ${path}: unresolved draft conflict`
+          message: `save skipped for ${path.split(/[\\/]/).pop() || path}: unresolved draft conflict`
         })
         return false
       }

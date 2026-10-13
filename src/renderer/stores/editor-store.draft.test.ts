@@ -21,6 +21,7 @@ vi.mock('@/lib/log-api', () => ({
 import { filesystemApi } from '@/lib/api'
 import { cancelAllAutoSaves, getPendingAutoSaveCount } from '@/lib/editor-auto-save'
 import { flushEditorContent } from '@/lib/editor-content-flush'
+import { logFrontendError } from '@/lib/log-api'
 
 const path = '/project/file.ts'
 
@@ -79,6 +80,7 @@ describe('editor-store draft restore', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.mocked(flushEditorContent).mockReset()
+    vi.mocked(logFrontendError).mockClear()
     vi.mocked(flushEditorContent).mockResolvedValue(undefined)
     vi.mocked(filesystemApi.writeFile).mockReset()
     vi.mocked(filesystemApi.writeFile).mockResolvedValue({ success: true, data: undefined })
@@ -182,5 +184,34 @@ describe('editor-store draft restore', () => {
     expect(filesystemApi.writeFile).not.toHaveBeenCalled()
     expect(filesystemApi.readFile).not.toHaveBeenCalled()
     expect(current()?.draftConflict).toBeDefined()
+  })
+
+  it('drops edits made while a conflict is unresolved so no edit lives outside the two buffers', () => {
+    seed(makeFile({ lastModified: 9_000 }))
+    useEditorStore.getState().restoreDraft(path, { content: 'draft', savedAt: 2_000 })
+
+    useEditorStore.getState().updateContent(path, 'typed during conflict')
+
+    expect(current()).toMatchObject({ content: 'disk', isDirty: false })
+    expect(current()?.draftConflict).toEqual({ draftContent: 'draft', draftSavedAt: 2_000 })
+    expect(getPendingAutoSaveCount()).toBe(0)
+  })
+
+  it('logs only the basename when a save is refused for a conflict', async () => {
+    const conflicted = '/secret/dir/file.ts'
+    useEditorStore.setState({
+      openFiles: new Map([[conflicted, makeFile({ filePath: conflicted, lastModified: 9_000 })]])
+    })
+    useEditorStore.getState().restoreDraft(conflicted, { content: 'draft', savedAt: 2_000 })
+
+    await useEditorStore.getState().saveFile(conflicted)
+
+    const messages = vi
+      .mocked(logFrontendError)
+      .mock.calls.map((call) => call[0].message)
+      .filter((message) => message.includes('unresolved draft conflict'))
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('file.ts')
+    expect(messages[0]).not.toContain('/secret')
   })
 })
