@@ -1,8 +1,9 @@
 import { SettingsSection } from '@/components/settings/SettingsLayout'
 import { Label } from '@/components/ui/label'
-import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
+import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
 import { Switch } from '@/components/ui/switch'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { cn } from '@/lib/utils'
 import {
   type AppSettings,
   BUFFER_SIZE_OPTIONS,
@@ -101,7 +102,7 @@ export function AppearanceSection({
             <select
               value={fontFamily}
               onChange={(e) => handleFontFamilyChange(e.target.value)}
-              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
+              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
             >
               {FONT_FAMILY_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -143,7 +144,7 @@ export function AppearanceSection({
             <select
               value={bufferSize}
               onChange={(e) => handleBufferSizeChange(parseInt(e.target.value, 10))}
-              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
+              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
             >
               {BUFFER_SIZE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -165,7 +166,7 @@ export function AppearanceSection({
             <select
               value={terminalRenderer}
               onChange={(e) => handleRendererChange(e.target.value)}
-              className={`w-full bg-secondary/50 border border-border rounded-lg px-3 py-2 text-sm pointer-coarse:text-base text-foreground transition-colors ${FIELD_FOCUS_CLASS}`}
+              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
             >
               {TERMINAL_RENDERER_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>

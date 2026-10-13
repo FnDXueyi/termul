@@ -262,7 +262,8 @@ describe('GitHistoryPanel desktop shell (characterization)', () => {
     expect(filter.className).toContain('w-44')
     expect(filter.className).toContain('text-xs')
     expect(filter.className).not.toContain('h-11')
-    expect(filter.className).not.toContain('text-base')
+    // Only the coarse-pointer token may lift it to 16px.
+    expect(filter.className.split(' ')).not.toContain('text-base')
 
     const refresh = screen.getByRole('button', { name: 'Refresh history' })
     expect(refresh.className).toContain('h-8 w-8')

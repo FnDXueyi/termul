@@ -3,11 +3,7 @@ import type React from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import { GitBranch, History, RefreshCw, Search, Tag } from '@/components/icons'
 import { Button } from '@/components/ui/button'
-import {
-  FOCUS_RING_CLASS,
-  PANEL_FIELD_CLASS,
-  PANEL_FIELD_ICON_CLASS
-} from '@/components/ui/panel-styles'
+import { PANEL_FIELD_CLASS, PANEL_FIELD_ICON_CLASS } from '@/components/ui/panel-styles'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Spinner } from '@/components/ui/spinner'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
@@ -184,7 +180,7 @@ export function GitHistoryPanel({
                 type="text"
                 placeholder="Filter commits..."
                 aria-label="Filter commits"
-                className={`w-full bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs ${FOCUS_RING_CLASS}`}
+                className={cn(PANEL_FIELD_CLASS, 'w-full rounded-md py-1.5 pl-8 pr-3')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
@@ -335,7 +331,7 @@ export function GitHistoryPanel({
               type="text"
               placeholder="Filter commits..."
               aria-label="Filter commits"
-              className={`w-44 bg-secondary/50 border-none rounded-md py-1.5 pl-8 pr-3 text-xs ${FOCUS_RING_CLASS}`}
+              className={cn(PANEL_FIELD_CLASS, 'w-44 rounded-md py-1.5 pl-8 pr-3')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />

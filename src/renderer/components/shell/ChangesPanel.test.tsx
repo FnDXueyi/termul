@@ -130,9 +130,9 @@ describe('ChangesPanel', () => {
       screen.getByRole('button', { name: 'Stash changes' }),
       screen.getByLabelText('Commit summary'),
       screen.getByRole('button', { name: /Push 1/ }),
-      screen.getByPlaceholderText('Filter changes...'),
-      screen.getByText(/^Changes \(/),
-      screen.getByText(/^Stashes \(/),
+      screen.getByPlaceholderText('Filter changes'),
+      screen.getByText('Changes', { selector: '.label-panel' }),
+      screen.getByText('Stashes', { selector: '.label-panel' }),
       screen.getByRole('region', { name: 'Git graph' })
     ]
     for (let i = 1; i < order.length; i++) {
@@ -145,7 +145,7 @@ describe('ChangesPanel', () => {
   it('scrolls the upper region on its own, apart from the Graph', () => {
     render(<ChangesPanel cwd="/work" isVisible />)
 
-    const upper = screen.getByPlaceholderText('Filter changes...').closest('.overflow-y-auto')
+    const upper = screen.getByPlaceholderText('Filter changes').closest('.overflow-y-auto')
     expect(upper).not.toBeNull()
     const graph = screen.getByRole('region', { name: 'Git graph' })
     expect(upper).not.toContainElement(graph)
@@ -156,7 +156,7 @@ describe('ChangesPanel', () => {
     render(<ChangesPanel cwd="/work" isVisible />)
 
     expect(screen.getByText('one.ts')).toBeInTheDocument()
-    fireEvent.change(screen.getByPlaceholderText('Filter changes...'), {
+    fireEvent.change(screen.getByPlaceholderText('Filter changes'), {
       target: { value: 'two' }
     })
     expect(screen.queryByText('one.ts')).toBeNull()
