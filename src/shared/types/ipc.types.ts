@@ -555,6 +555,10 @@ export interface PersistenceWriteOpts {
   // Idempotency id; a resend of the same write reuses it so the host can
   // recognise its own applied write.
   commandId?: string
+  // The caller re-reads and resends a write that lost a compare-and-set race.
+  // Such a conflict is not reported on the error bus; set it on every attempt
+  // except the last one, so only the final failure reaches the user.
+  retrying?: boolean
 }
 
 // A read that also reports the host's per-key revision stamp.
@@ -565,6 +569,28 @@ export interface StampedValue<T> {
   clientInstanceId: string | null
 }
 
+// Codes of failed store writes that the user must hear about: the value was
+// not saved and the writer cannot fix it alone.
+export const PERSISTENCE_ERROR_CODES = [
+  'STORE_VALUE_TOO_LARGE',
+  'STORE_PARTITION_FULL',
+  'STORE_NOT_HYDRATED',
+  'STORE_WRITE_FAILED',
+  'STORE_BASE_REQUIRED',
+  'STORE_CAS_FAILED'
+] as const
+
+export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number]
+
+// One failed write, by logical key.
+export interface PersistenceErrorEvent {
+  key: string
+  code: PersistenceErrorCode
+  message: string
+}
+
+export type PersistenceErrorListener = (event: PersistenceErrorEvent) => void
+
 // Persistence API for renderer
 export interface PersistenceApi {
   read: <T>(key: string) => Promise<IpcResult<T>>
@@ -573,6 +599,9 @@ export interface PersistenceApi {
   writeDebounced: <T>(key: string, data: T) => Promise<IpcResult<void>>
   flushPendingWrites: () => Promise<IpcResult<void>>
   delete: (key: string) => Promise<IpcResult<void>>
+  // Subscribe to failed writes (any caller, debounced or not). Returns the
+  // unsubscribe function. The desktop plugin-store never emits.
+  onPersistenceError: (listener: PersistenceErrorListener) => () => void
 }
 
 // System API for renderer

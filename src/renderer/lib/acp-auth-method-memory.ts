@@ -11,16 +11,15 @@
  * choose).
  */
 
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { persistenceApi } from '@/lib/api'
-
-export const ACP_AUTH_METHODS_KEY = 'acp/auth-methods'
 
 /** `configId` → `methodId` of the last successful `authenticate`. */
 export type AuthMethodMemory = Record<string, string>
 
 /** Load persisted auth-method memory (empty map when none stored). */
 export async function loadAuthMethodMemory(): Promise<AuthMethodMemory> {
-  const res = await persistenceApi.read<unknown>(ACP_AUTH_METHODS_KEY)
+  const res = await persistenceApi.read<unknown>(PersistenceKeys.acpAuthMethods)
   if (res.success) {
     // Sanitize on read: a corrupt/non-map payload must never crash startup —
     // drop anything that is not a non-empty-string → non-empty-string entry
@@ -43,7 +42,7 @@ export async function loadAuthMethodMemory(): Promise<AuthMethodMemory> {
 
 /** Persist the full configId → methodId memory map. */
 export async function saveAuthMethodMemory(map: AuthMethodMemory): Promise<void> {
-  const res = await persistenceApi.write(ACP_AUTH_METHODS_KEY, map)
+  const res = await persistenceApi.write(PersistenceKeys.acpAuthMethods, map)
   if (!res.success) {
     throw new Error(res.error ?? 'Failed to persist auth-method memory')
   }

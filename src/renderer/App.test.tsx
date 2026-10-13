@@ -1,7 +1,7 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useUpdaterStore } from '@/stores/updater-store'
-import { CONTEXT_BAR_SETTINGS_KEY } from '@/types/settings'
 import App from './App'
 
 const { mockContextBarSettingsRead } = vi.hoisted(() => ({
@@ -10,7 +10,7 @@ const { mockContextBarSettingsRead } = vi.hoisted(() => ({
 
 vi.mock('./hooks/use-context-bar-settings', () => ({
   useContextBarSettings: () => {
-    void mockContextBarSettingsRead(CONTEXT_BAR_SETTINGS_KEY)
+    void mockContextBarSettingsRead(PersistenceKeys.contextBarSettings)
   }
 }))
 
@@ -220,7 +220,7 @@ describe('App Routes', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(mockContextBarSettingsRead).toHaveBeenCalledWith(CONTEXT_BAR_SETTINGS_KEY)
+      expect(mockContextBarSettingsRead).toHaveBeenCalledWith(PersistenceKeys.contextBarSettings)
     })
   })
 

@@ -1,8 +1,9 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useEffect } from 'react'
 import { persistenceApi } from '@/lib/api'
 import { useTocSettingsStore } from '@/stores/toc-settings-store'
 import type { TocSettings } from '@/types/settings'
-import { DEFAULT_TOC_SETTINGS, TOC_SETTINGS_KEY } from '@/types/settings'
+import { DEFAULT_TOC_SETTINGS } from '@/types/settings'
 
 let loadPromise: Promise<void> | null = null
 let hasSubscribedToPersistence = false
@@ -13,7 +14,7 @@ async function initializeTocSettings(
   setLoadFailed: (failed: boolean) => void
 ): Promise<void> {
   try {
-    const result = await persistenceApi.read<TocSettings>(TOC_SETTINGS_KEY)
+    const result = await persistenceApi.read<TocSettings>(PersistenceKeys.tocSettings)
 
     if (result.success && result.data) {
       setSettings({
@@ -52,7 +53,7 @@ export function useTocSettings(): void {
           return
         }
 
-        void persistenceApi.writeDebounced(TOC_SETTINGS_KEY, state.settings)
+        void persistenceApi.writeDebounced(PersistenceKeys.tocSettings, state.settings)
       })
 
       hasSubscribedToPersistence = true

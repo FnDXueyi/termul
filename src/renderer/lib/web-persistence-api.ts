@@ -13,11 +13,14 @@
  * stays readable by either implementation.
  */
 
-import type {
-  IpcResult,
-  PersistenceApi,
-  PersistenceWriteOpts,
-  StampedValue
+import {
+  type IpcResult,
+  PERSISTENCE_ERROR_CODES,
+  type PersistenceApi,
+  type PersistenceErrorCode,
+  type PersistenceErrorListener,
+  type PersistenceWriteOpts,
+  type StampedValue
 } from '@shared/types/ipc.types'
 import { scopedKey, scopeOf } from '@shared/types/persistence.types'
 import {
@@ -32,12 +35,13 @@ import { HOST_GOING_AWAY_CLOSE_CODE, probeHostHealth } from './acp-transport/hos
 import { HANDSHAKE_TIMEOUT_MS } from './acp-transport/ws-transport-timing'
 import { findUnresolvedCommand, openCommand, resolveCommand } from './command-journal'
 import { logFrontendError } from './log-api'
+import { STORE_VALUE_MAX_BYTES, STORED_VALUE_VERSION, storedValueBytes } from './persistence-trim'
 import { getWebAuthToken } from './web-auth-token'
 import { buildAuthenticatePayload, getDeviceId } from './web-client-identity'
 import { clearProtocolMismatchLatch, handleProtocolVersionMismatch } from './web-protocol-reload'
 
 const DEBOUNCE_MS = 500
-const CURRENT_VERSION = 1
+const CURRENT_VERSION = STORED_VALUE_VERSION
 
 /** Transport-level failure carrying the server's stable error `code`. */
 interface StoreError {
@@ -290,10 +294,9 @@ export class WebStoreSocket {
   }
 }
 
-/** Largest serialized value the host accepts (mirrors `STORE_VALUE_MAX_BYTES`). */
-const STORE_VALUE_MAX_BYTES = 256 * 1024
-
-const utf8 = new TextEncoder()
+function isPersistenceErrorCode(code: string): code is PersistenceErrorCode {
+  return (PERSISTENCE_ERROR_CODES as readonly string[]).includes(code)
+}
 
 interface StoredValue<T> {
   _version: number
@@ -380,6 +383,7 @@ export function createWebPersistenceApi(opts?: {
   /** Last known stored (wrapped) value of shared/cas keys: the default `expected`. */
   const casValues = new Map<string, unknown>()
   const listeners = new Map<string, Set<SharedChangeListener>>()
+  const errorListeners = new Set<PersistenceErrorListener>()
   /** Per host key operation chain: replies must land in request order. */
   const chains = new Map<string, Promise<unknown>>()
 
@@ -501,7 +505,42 @@ export function createWebPersistenceApi(opts?: {
     return flushOrSupersede(logicalKey, () => sendWrite(logicalKey, data, writeOpts))
   }
 
+  /** Tells every error listener about a failed write; returns `result` unchanged. */
+  function reportFailure<T>(
+    logicalKey: string,
+    result: IpcResult<T>,
+    retrying = false
+  ): IpcResult<T> {
+    if (result.success || !isPersistenceErrorCode(result.code)) return result
+    // The caller resends a lost compare-and-set race itself; only its last
+    // failure is worth the user's attention.
+    if (retrying && result.code === 'STORE_CAS_FAILED') return result
+    const event = { key: logicalKey, code: result.code, message: result.error }
+    for (const listener of Array.from(errorListeners)) {
+      try {
+        listener(event)
+      } catch (err) {
+        void logFrontendError({
+          level: 'warn',
+          source: 'WebPersistenceApi.onPersistenceError',
+          message: `persistence-error listener for ${logicalKey} threw: ${String(err)}`
+        })
+      }
+    }
+    return result
+  }
+
   function sendWrite<T>(
+    logicalKey: string,
+    data: T,
+    writeOpts?: PersistenceWriteOpts
+  ): Promise<IpcResult<void>> {
+    return attemptWrite(logicalKey, data, writeOpts).then((result) =>
+      reportFailure(logicalKey, result, writeOpts?.retrying)
+    )
+  }
+
+  function attemptWrite<T>(
     logicalKey: string,
     data: T,
     writeOpts?: PersistenceWriteOpts
@@ -509,7 +548,7 @@ export function createWebPersistenceApi(opts?: {
     const hostKey = scopedKey(logicalKey, deviceId())
     const scope = scopeOf(logicalKey)
     const wrapped: StoredValue<T> = { _version: CURRENT_VERSION, data }
-    const size = utf8.encode(JSON.stringify(wrapped)).length
+    const size = storedValueBytes(data)
     if (size > STORE_VALUE_MAX_BYTES) {
       return Promise.resolve(
         failure(
@@ -557,6 +596,10 @@ export function createWebPersistenceApi(opts?: {
   }
 
   function sendDelete(logicalKey: string): Promise<IpcResult<void>> {
+    return attemptDelete(logicalKey).then((result) => reportFailure(logicalKey, result))
+  }
+
+  function attemptDelete(logicalKey: string): Promise<IpcResult<void>> {
     const hostKey = scopedKey(logicalKey, deviceId())
     const scope = scopeOf(logicalKey)
     return serialized(hostKey, async () => {
@@ -671,6 +714,13 @@ export function createWebPersistenceApi(opts?: {
     },
 
     flushPendingWrites,
+
+    onPersistenceError(listener: PersistenceErrorListener): () => void {
+      errorListeners.add(listener)
+      return () => {
+        errorListeners.delete(listener)
+      }
+    },
 
     onSharedChange(key: string, listener: SharedChangeListener): () => void {
       const set = listeners.get(key) ?? new Set<SharedChangeListener>()

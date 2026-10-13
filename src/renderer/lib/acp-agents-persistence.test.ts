@@ -1,3 +1,4 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/api', () => ({
@@ -8,14 +9,7 @@ vi.mock('@/lib/api', () => ({
 }))
 
 import { persistenceApi } from '@/lib/api'
-import {
-  ACP_AGENTS_KEY,
-  loadAgentConfigs,
-  looksLikeSecretValue,
-  type StoredAgentConfig,
-  saveAgentConfigs,
-  validateAgentConfig
-} from './acp-agents-persistence'
+import { loadAgentConfigs, looksLikeSecretValue, type StoredAgentConfig, saveAgentConfigs, validateAgentConfig } from './acp-agents-persistence'
 
 describe('validateAgentConfig', () => {
   it('requires non-empty name and command', () => {
@@ -203,7 +197,7 @@ describe('load/save agent configs', () => {
   it('writes under the dedicated key and throws on failure', async () => {
     ;(persistenceApi.write as ReturnType<typeof vi.fn>).mockResolvedValue({ success: true })
     await saveAgentConfigs([])
-    expect(persistenceApi.write).toHaveBeenCalledWith(ACP_AGENTS_KEY, [])
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpAgents, [])
     ;(persistenceApi.write as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: 'disk full'
@@ -244,7 +238,7 @@ describe('load/save agent configs', () => {
       }
     ]
     await saveAgentConfigs(list)
-    expect(persistenceApi.write).toHaveBeenCalledWith(ACP_AGENTS_KEY, list)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpAgents, list)
   })
 
   it('filters out malformed (null/non-object/id-less) persisted entries on load', async () => {

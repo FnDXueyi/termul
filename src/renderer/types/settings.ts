@@ -17,9 +17,6 @@ export const DEFAULT_CONTEXT_BAR_SETTINGS: ContextBarSettings = {
   showExitCode: true
 }
 
-// Persistence key for context bar settings
-export const CONTEXT_BAR_SETTINGS_KEY = 'settings/context-bar'
-
 // Table of contents panel settings
 export interface TocSettings {
   isVisible: boolean
@@ -37,8 +34,6 @@ export const DEFAULT_TOC_SETTINGS: TocSettings = {
   maxHeadingLevel: 3,
   width: 240
 }
-
-export const TOC_SETTINGS_KEY = 'settings/toc'
 
 export type TerminalUrlOpenMode = 'system' | 'termul'
 
@@ -249,9 +244,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   notifyOnAgentChatTurnFinished: true,
   notifyOnAgentChatNeedsYou: true
 }
-
-// Persistence key for app settings
-export const APP_SETTINGS_KEY = 'settings/app'
 
 // Keyboard shortcut definition
 export interface KeyboardShortcut {
@@ -481,5 +473,3 @@ export function getDefaultKeyboardShortcuts(): KeyboardShortcutsConfig {
   return webDefaults
 }
 
-// Persistence key for keyboard shortcuts
-export const KEYBOARD_SHORTCUTS_KEY = 'settings/keyboard-shortcuts'

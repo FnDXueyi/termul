@@ -1,4 +1,4 @@
-import type { IpcResult, StampedValue } from '@shared/types/ipc.types'
+import type { IpcResult, PersistenceErrorListener, StampedValue } from '@shared/types/ipc.types'
 import { Store } from '@tauri-apps/plugin-store'
 
 const STORE_FILE = 'termul-data.json'
@@ -252,7 +252,24 @@ export const tauriPersistenceApi = {
     }
 
     return firstFailure ?? createSuccessResult()
+  },
+
+  // The plugin-store has no value cap and no revisions, so nothing is reported.
+  onPersistenceError(_listener: PersistenceErrorListener): () => void {
+    return () => {}
   }
+}
+
+// Best-effort flush when the window is hidden or going away: a debounced write
+// must not die with it. No await: nothing can use the outcome during unload.
+// (The window close path also awaits `flushPendingWrites` explicitly.)
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') void tauriPersistenceApi.flushPendingWrites()
+  })
+  window.addEventListener('pagehide', () => {
+    void tauriPersistenceApi.flushPendingWrites()
+  })
 }
 
 /**

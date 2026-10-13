@@ -1,3 +1,4 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/api', () => ({
@@ -18,17 +19,7 @@ import { persistenceApi } from '@/lib/api'
 import { syncMcpRegistryToProject } from '@/lib/tauri-remote-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { webServerMcpServers } from '@/lib/web-server-api'
-import {
-  ACP_MCP_KEY,
-  buildMcpServers,
-  loadMcpServers,
-  normalizeMcpRegistry,
-  type StoredMcpServer,
-  saveMcpServers,
-  selectMcpServersForAgent,
-  transportOf,
-  validateMcpServer
-} from './acp-mcp-persistence'
+import { buildMcpServers, loadMcpServers, normalizeMcpRegistry, type StoredMcpServer, saveMcpServers, selectMcpServersForAgent, transportOf, validateMcpServer } from './acp-mcp-persistence'
 import { logFrontendError } from './log-api'
 
 const registry: StoredMcpServer[] = [
@@ -130,8 +121,8 @@ describe('registry persistence parity', () => {
     vi.mocked(persistenceApi.write).mockResolvedValue({ success: true, data: undefined })
     expect(await loadMcpServers('p1')).toHaveLength(3)
     await saveMcpServers(registry, 'p1')
-    expect(persistenceApi.read).toHaveBeenCalledWith(ACP_MCP_KEY)
-    expect(persistenceApi.write).toHaveBeenCalledWith(ACP_MCP_KEY, registry)
+    expect(persistenceApi.read).toHaveBeenCalledWith(PersistenceKeys.acpMcpServers)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpMcpServers, registry)
   })
 
   it('uses the shared web route outside Tauri', async () => {
@@ -180,7 +171,7 @@ describe('desktop → project-file sync (CAP-7)', () => {
     await saveMcpServers(registry, 'p1')
 
     // The app-store write must happen first (the source of truth).
-    expect(persistenceApi.write).toHaveBeenCalledWith(ACP_MCP_KEY, registry)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpMcpServers, registry)
     // Then the best-effort mirror to the named project's file (CAP-7), with
     // the same normalized registry.
     expect(syncMcpRegistryToProject).toHaveBeenCalledTimes(1)

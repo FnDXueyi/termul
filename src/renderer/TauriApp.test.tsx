@@ -1,6 +1,6 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CONTEXT_BAR_SETTINGS_KEY } from '@/types/settings'
 import TauriApp from './TauriApp'
 
 const { mockPersistenceRead } = vi.hoisted(() => ({
@@ -169,7 +169,7 @@ describe('TauriApp', () => {
     render(<TauriApp />)
 
     await waitFor(() => {
-      expect(mockPersistenceRead).toHaveBeenCalledWith(CONTEXT_BAR_SETTINGS_KEY)
+      expect(mockPersistenceRead).toHaveBeenCalledWith(PersistenceKeys.contextBarSettings)
     })
   })
 

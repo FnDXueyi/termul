@@ -1,3 +1,4 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { beforeEach, describe, expect, type Mock, vi } from 'vitest'
 
 const { mockTransport, mockHistoryApi } = vi.hoisted(() => {
@@ -986,9 +987,9 @@ describe('legacy import', () => {
     expect(mockHistoryApi.save).toHaveBeenNthCalledWith(2, 'old-2', old2)
     expect(mockHistoryApi.getLegacy).toHaveBeenCalledWith('old-1')
     expect(mockHistoryApi.getLegacy).toHaveBeenCalledWith('old-2')
-    expect(persistenceApi.delete).toHaveBeenCalledWith(sessionPayloadKey('old-1'))
-    expect(persistenceApi.delete).toHaveBeenCalledWith(sessionPayloadKey('old-2'))
-    expect(persistenceApi.delete).toHaveBeenCalledWith(SESSION_INDEX_KEY)
+    expect(persistenceApi.delete).toHaveBeenCalledWith(PersistenceKeys.acpSession('old-1'))
+    expect(persistenceApi.delete).toHaveBeenCalledWith(PersistenceKeys.acpSession('old-2'))
+    expect(persistenceApi.delete).toHaveBeenCalledWith(PersistenceKeys.acpSessionsIndex)
     expect(persistenceApi.delete).toHaveBeenCalledTimes(3)
     expect(mockHistoryApi.markLegacyImportComplete).toHaveBeenCalledTimes(1)
   })
@@ -1067,9 +1068,9 @@ describe('legacy import', () => {
       .mockResolvedValueOnce({ success: false, error: 'delete failed', code: 'DELETE_ERROR' })
 
     await expect(runHistoryWipeMigration()).rejects.toThrow('delete failed')
-    expect(persistenceApi.write).toHaveBeenCalledWith(sessionPayloadKey('old-1'), old1)
-    expect(persistenceApi.write).toHaveBeenCalledWith(sessionPayloadKey('old-2'), old2)
-    expect(persistenceApi.write).toHaveBeenCalledWith(SESSION_INDEX_KEY, index)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpSession('old-1'), old1)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpSession('old-2'), old2)
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpSessionsIndex, index)
     expect(mockHistoryApi.markLegacyImportComplete).not.toHaveBeenCalled()
   })
 

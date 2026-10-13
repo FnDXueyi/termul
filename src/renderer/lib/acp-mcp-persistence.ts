@@ -1,11 +1,10 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import type { AgentCapabilities, McpServer, McpServerConfig } from '@/lib/acp-api'
 import { persistenceApi } from '@/lib/api'
 import { syncMcpRegistryToProject } from '@/lib/tauri-remote-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { webServerMcpServers } from '@/lib/web-server-api'
 import { logFrontendError } from './log-api'
-
-export const ACP_MCP_KEY = 'acp/mcp-servers'
 
 export type McpTransport = 'stdio' | 'http' | 'sse'
 
@@ -182,7 +181,7 @@ export function selectMcpServersForAgent(
 export async function loadMcpServers(projectId: string): Promise<StoredMcpServer[]> {
   if (!isTauriContext() && !projectId) return []
   const res = isTauriContext()
-    ? await persistenceApi.read<unknown>(ACP_MCP_KEY)
+    ? await persistenceApi.read<unknown>(PersistenceKeys.acpMcpServers)
     : await webServerMcpServers.get(projectId as string)
   if (res.success) return normalizeMcpRegistry(res.data)
   if (res.code === 'KEY_NOT_FOUND') return []
@@ -192,7 +191,7 @@ export async function loadMcpServers(projectId: string): Promise<StoredMcpServer
 export async function saveMcpServers(list: StoredMcpServer[], projectId: string): Promise<void> {
   const normalized = normalizeMcpRegistry(list)
   if (isTauriContext()) {
-    const res = await persistenceApi.write(ACP_MCP_KEY, normalized)
+    const res = await persistenceApi.write(PersistenceKeys.acpMcpServers, normalized)
     if (!res.success) {
       throw new Error(res.error ?? 'Failed to persist MCP servers')
     }

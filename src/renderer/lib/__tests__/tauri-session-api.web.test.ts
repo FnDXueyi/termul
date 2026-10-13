@@ -1,25 +1,21 @@
 /**
  * Web-branch tests for tauri-session-api.ts (CAP-3: Web UI entry parity).
  *
- * `getStore` branches on `isTauriContext()`: desktop calls
- * `Store.load(STORE_FILE, ...)`; web constructs a `WebSessionStore` backed by
- * flat composite localStorage keys (`${STORE_FILE}::${key}`, e.g.
- * `termul-sessions.json::sessions/auto-save`), matching the spec's I/O
- * matrix. All session methods (`save`/`restore`/`clear`/`flush`/`hasSession`)
- * go through `getStore`, so branching in `getStore` makes them all web-aware.
+ * The session lives in the persistence facade (the host store on web). The only
+ * thing that still differs between the branches is the legacy file a leftover
+ * entry is moved from: on desktop it is the `termul-sessions.json` plugin-store
+ * file, on web a localStorage shim of it with flat composite keys
+ * (`${STORE_FILE}::${key}`, e.g. `termul-sessions.json::sessions/auto-save`).
  *
- * This file asserts, per the `log-api.test.ts` dual-branch pattern, that:
- * - the WEB branch reads/writes localStorage and does NOT touch `Store.load`
+ * This file asserts that:
+ * - the WEB branch reads (and deletes) the localStorage legacy entry and does
+ *   NOT touch `Store.load`
  * - the DESKTOP branch uses `Store.load` and does NOT touch localStorage
- * - corrupted localStorage (schema mismatch) makes `hasSession` return false
- *
- * The existing `tauri-session-api.test.ts` covers the desktop branch's
- * validation/error paths in depth; this file focuses on the web branch +
- * the branch boundary.
+ * - session reads and writes never touch localStorage on either branch
  */
 
-import type { SessionData } from '@shared/types/ipc.types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { fakePersistence, validSessionData } from './session-test-support'
 
 const { mockStoreLoad, mockIsTauriContext } = vi.hoisted(() => ({
   mockStoreLoad: vi.fn(),
@@ -32,6 +28,15 @@ vi.mock('@tauri-apps/plugin-store', () => ({
   }
 }))
 
+// `vi.mock` factories run before the static imports, so the shared fake can only
+// be reached through a dynamic import (it resolves to the same module instance).
+vi.mock('../persistence-api', async () => {
+  const { fakePersistence: fake } = await import('./session-test-support')
+  return { persistenceApi: fake.api }
+})
+
+vi.mock('../log-api', () => ({ logFrontendError: vi.fn(async () => {}) }))
+
 vi.mock('../tauri-runtime', () => ({
   isTauriContext: mockIsTauriContext
 }))
@@ -40,32 +45,11 @@ import { _resetStoreInstanceForTesting, tauriSessionApi } from '../tauri-session
 
 const STORE_FILE = 'termul-sessions.json'
 const SESSION_KEY = 'sessions/auto-save'
-
-function validSessionData(): SessionData {
-  return {
-    timestamp: new Date().toISOString(),
-    terminals: [
-      {
-        id: 'term-1',
-        shell: 'bash',
-        cwd: '/home/user',
-        history: ['ls', 'cd /tmp']
-      }
-    ],
-    workspaces: [
-      {
-        projectId: 'proj-1',
-        activeTerminalId: 'term-1',
-        terminals: [{ id: 'term-1', shell: 'bash', cwd: '/home/user', history: [] }]
-      }
-    ]
-  }
-}
+const LEGACY_LOCAL_KEY = `${STORE_FILE}::${SESSION_KEY}`
 
 describe('tauriSessionApi (web vs desktop branch)', () => {
-  const mockTauriStore = {
+  const legacyDesktopStore = {
     get: vi.fn(),
-    set: vi.fn(),
     delete: vi.fn(),
     save: vi.fn()
   }
@@ -74,233 +58,173 @@ describe('tauriSessionApi (web vs desktop branch)', () => {
     vi.clearAllMocks()
     _resetStoreInstanceForTesting()
     localStorage.clear()
+    fakePersistence.data.clear()
 
-    mockStoreLoad.mockResolvedValue(mockTauriStore)
-    mockTauriStore.get.mockResolvedValue(undefined)
-    mockTauriStore.set.mockResolvedValue(undefined)
-    mockTauriStore.delete.mockResolvedValue(undefined)
-    mockTauriStore.save.mockResolvedValue(undefined)
+    mockStoreLoad.mockResolvedValue(legacyDesktopStore)
+    legacyDesktopStore.get.mockResolvedValue(undefined)
+    legacyDesktopStore.delete.mockResolvedValue(true)
+    legacyDesktopStore.save.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
     vi.useRealTimers()
   })
 
-  describe('hasSession (web branch: localStorage)', () => {
-    it('web: returns false when localStorage is empty', async () => {
+  describe('web branch: legacy localStorage entry', () => {
+    beforeEach(() => {
       mockIsTauriContext.mockReturnValue(false)
+    })
 
-      const result = await tauriSessionApi.hasSession()
-
-      expect(result).toEqual({ success: true, data: false })
+    it('hasSession is false when the facade and localStorage are both empty', async () => {
+      expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
       expect(mockStoreLoad).not.toHaveBeenCalled()
     })
 
-    it('web: returns true when a valid session is persisted', async () => {
-      mockIsTauriContext.mockReturnValue(false)
+    it('moves a valid legacy entry into the facade and removes it from localStorage', async () => {
       const data = validSessionData()
-      const persisted = { _version: 1, data }
-      localStorage.setItem(`${STORE_FILE}::${SESSION_KEY}`, JSON.stringify(persisted))
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data }))
 
-      const result = await tauriSessionApi.hasSession()
+      expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: true })
 
-      expect(result).toEqual({ success: true, data: true })
-      expect(mockTauriStore.get).not.toHaveBeenCalled()
+      expect(fakePersistence.data.get(SESSION_KEY)).toEqual(data)
+      expect(fakePersistence.data.get('sessions/legacy-migrated')).toBe(true)
+      expect(localStorage.getItem(LEGACY_LOCAL_KEY)).toBeNull()
+      expect(legacyDesktopStore.get).not.toHaveBeenCalled()
+      expect(mockStoreLoad).not.toHaveBeenCalled()
     })
 
-    it('web: returns false when the persisted session has no terminals', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const data = validSessionData()
-      const persisted = { _version: 1, data: { ...data, terminals: [] } }
-      localStorage.setItem(`${STORE_FILE}::${SESSION_KEY}`, JSON.stringify(persisted))
+    it('keeps a legacy session with no terminals out of hasSession', async () => {
+      const data = { ...validSessionData(), terminals: [] }
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data }))
 
-      const result = await tauriSessionApi.hasSession()
-
-      expect(result).toEqual({ success: true, data: false })
+      expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
     })
 
-    it('web: returns false when localStorage holds corrupted (schema-mismatch) data', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const corrupted = {
-        _version: 1,
-        data: {
-          timestamp: 'bad',
-          terminals: 'not-an-array',
-          workspaces: []
-        }
-      }
-      localStorage.setItem(`${STORE_FILE}::${SESSION_KEY}`, JSON.stringify(corrupted))
+    it('treats corrupted legacy data as an invalid session', async () => {
+      const corrupted = { timestamp: 'bad', terminals: 'not-an-array', workspaces: [] }
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data: corrupted }))
 
-      const result = await tauriSessionApi.hasSession()
-
-      expect(result).toEqual({ success: true, data: false })
+      expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
+      expect(await tauriSessionApi.restore()).toMatchObject({ code: 'SESSION_INVALID' })
     })
 
-    it('web: returns false when the stored JSON is unparseable', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      localStorage.setItem(`${STORE_FILE}::${SESSION_KEY}`, '{not-json')
+    it('treats an unparseable legacy entry as no legacy entry', async () => {
+      localStorage.setItem(LEGACY_LOCAL_KEY, '{not-json')
 
-      const result = await tauriSessionApi.hasSession()
-
-      expect(result).toEqual({ success: true, data: false })
-    })
-  })
-
-  describe('save + restore (web branch: localStorage round-trip)', () => {
-    it('web: save writes to localStorage; restore reads it back', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const data = validSessionData()
-
-      const saveResult = await tauriSessionApi.save(data)
-      expect(saveResult).toEqual({ success: true, data: undefined })
-      expect(mockTauriStore.set).not.toHaveBeenCalled()
-
-      const restoreResult = await tauriSessionApi.restore()
-      expect(restoreResult.success).toBe(true)
-      if (restoreResult.success) {
-        expect(restoreResult.data.terminals).toEqual(data.terminals)
-        expect(restoreResult.data.workspaces).toEqual(data.workspaces)
-      }
+      expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
+      expect(await tauriSessionApi.restore()).toMatchObject({ code: 'SESSION_NOT_FOUND' })
     })
 
-    it('web: restore returns SESSION_NOT_FOUND when nothing saved', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-
-      const result = await tauriSessionApi.restore()
-
-      expect(result.success).toBe(false)
-      if (!result.success) {
-        expect(result.code).toBe('SESSION_NOT_FOUND')
-      }
-    })
-
-    it('web: save rejects invalid session data with SESSION_INVALID', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const invalid = {
-        timestamp: 'x',
-        terminals: 'not-array',
-        workspaces: []
-      } as unknown as SessionData
-
-      const result = await tauriSessionApi.save(invalid)
-
-      expect(result.success).toBe(false)
-      if (!result.success) {
-        expect(result.code).toBe('SESSION_INVALID')
-      }
-    })
-
-    it('web: save returns SESSION_STORE_ERROR when the localStorage write fails (quota)', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const data = validSessionData()
-      const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-        throw new Error('QuotaExceededError')
-      })
+    it('does not read localStorage again once a session is stored', async () => {
+      await tauriSessionApi.save(validSessionData())
+      const getItem = vi.spyOn(Storage.prototype, 'getItem')
 
       try {
-        const result = await tauriSessionApi.save(data)
-
-        expect(result.success).toBe(false)
-        if (!result.success) {
-          expect(result.code).toBe('SESSION_STORE_ERROR')
-        }
+        _resetStoreInstanceForTesting()
+        expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: true })
+        expect(getItem).not.toHaveBeenCalled()
       } finally {
-        spy.mockRestore()
+        getItem.mockRestore()
       }
     })
-  })
 
-  describe('clear (web branch: localStorage)', () => {
-    it('web: clear removes the session key from localStorage', async () => {
-      mockIsTauriContext.mockReturnValue(false)
+    it('still moves the entry when localStorage.removeItem fails, and marks the move', async () => {
       const data = validSessionData()
-      await tauriSessionApi.save(data)
-
-      const result = await tauriSessionApi.clear()
-
-      expect(result).toEqual({ success: true, data: undefined })
-      expect(localStorage.getItem(`${STORE_FILE}::${SESSION_KEY}`)).toBeNull()
-      expect(mockTauriStore.delete).not.toHaveBeenCalled()
-    })
-
-    it('web: clear returns SESSION_STORE_ERROR when localStorage.removeItem fails', async () => {
-      mockIsTauriContext.mockReturnValue(false)
-      const data = validSessionData()
-      await tauriSessionApi.save(data)
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data }))
       const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
         throw new Error('SecurityError')
       })
 
       try {
-        const result = await tauriSessionApi.clear()
+        const result = await tauriSessionApi.restore()
 
-        expect(result.success).toBe(false)
-        if (!result.success) {
-          expect(result.code).toBe('SESSION_STORE_ERROR')
-        }
+        expect(result).toMatchObject({ success: true })
+        expect(fakePersistence.data.get('sessions/legacy-migrated')).toBe(true)
       } finally {
         spy.mockRestore()
       }
     })
   })
 
-  describe('flush (web branch: localStorage)', () => {
-    it('web: flush succeeds with no pending data (localStorage is sync, save is no-op)', async () => {
+  describe('web branch: session in the facade', () => {
+    beforeEach(() => {
       mockIsTauriContext.mockReturnValue(false)
+    })
 
-      const result = await tauriSessionApi.flush()
+    it('save writes the facade and never localStorage; restore reads it back', async () => {
+      const data = validSessionData()
+      const setItem = vi.spyOn(Storage.prototype, 'setItem')
 
-      expect(result).toEqual({ success: true, data: undefined })
+      try {
+        expect(await tauriSessionApi.save(data)).toEqual({ success: true, data: undefined })
+        expect(setItem).not.toHaveBeenCalledWith(LEGACY_LOCAL_KEY, expect.anything())
+      } finally {
+        setItem.mockRestore()
+      }
+      expect(mockStoreLoad).not.toHaveBeenCalled()
+
+      const restored = await tauriSessionApi.restore()
+      expect(restored.success).toBe(true)
+      if (restored.success) {
+        expect(restored.data.terminals).toEqual(data.terminals)
+        expect(restored.data.workspaces).toEqual(data.workspaces)
+      }
+    })
+
+    it('restore returns SESSION_NOT_FOUND when nothing is stored', async () => {
+      expect(await tauriSessionApi.restore()).toMatchObject({
+        success: false,
+        code: 'SESSION_NOT_FOUND'
+      })
+    })
+
+    it('clear removes the session from the facade', async () => {
+      await tauriSessionApi.save(validSessionData())
+
+      expect(await tauriSessionApi.clear()).toEqual({ success: true, data: undefined })
+      expect(fakePersistence.data.has(SESSION_KEY)).toBe(false)
+    })
+
+    it('flush succeeds with no pending data', async () => {
+      expect(await tauriSessionApi.flush()).toEqual({ success: true, data: undefined })
     })
   })
 
-  describe('desktop branch: Tauri Store', () => {
-    it('desktop: hasSession reads from the Tauri Store (not localStorage)', async () => {
+  describe('desktop branch: legacy Tauri Store file', () => {
+    beforeEach(() => {
       mockIsTauriContext.mockReturnValue(true)
-      mockTauriStore.get.mockResolvedValue(undefined)
+    })
+
+    it('reads the legacy plugin-store file (not localStorage) when the facade has no session', async () => {
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data: {} }))
 
       await tauriSessionApi.hasSession()
 
       expect(mockStoreLoad).toHaveBeenCalledTimes(1)
-      expect(mockTauriStore.get).toHaveBeenCalledWith(SESSION_KEY)
-      // localStorage must not be touched on the desktop branch.
-      expect(localStorage.getItem(STORE_FILE)).toBeNull()
+      expect(legacyDesktopStore.get).toHaveBeenCalledWith(SESSION_KEY)
+      expect(localStorage.getItem(LEGACY_LOCAL_KEY)).not.toBeNull()
     })
 
-    it('desktop: save writes via the Tauri Store', async () => {
-      mockIsTauriContext.mockReturnValue(true)
-      const data = validSessionData()
-
-      await tauriSessionApi.save(data)
-
-      expect(mockTauriStore.set).toHaveBeenCalledWith(
-        SESSION_KEY,
-        expect.objectContaining({ _version: 1, data: expect.objectContaining({}) })
-      )
-      expect(mockTauriStore.save).toHaveBeenCalled()
-      expect(localStorage.getItem(STORE_FILE)).toBeNull()
-    })
-
-    it('desktop: clear deletes via the Tauri Store', async () => {
-      mockIsTauriContext.mockReturnValue(true)
-
+    it('save and clear go to the facade, not the plugin-store file', async () => {
+      await tauriSessionApi.save(validSessionData())
       await tauriSessionApi.clear()
 
-      expect(mockTauriStore.delete).toHaveBeenCalledWith(SESSION_KEY)
-      expect(mockTauriStore.save).toHaveBeenCalled()
+      expect(fakePersistence.api.write).toHaveBeenCalledWith(SESSION_KEY, expect.anything())
+      expect(fakePersistence.api.delete).toHaveBeenCalledWith(SESSION_KEY)
+      expect(legacyDesktopStore.delete).not.toHaveBeenCalled()
     })
   })
 
   describe('_resetStoreInstanceForTesting (branch flip)', () => {
-    it('clears the shared singleton so the next call re-creates the adapter for the new branch', async () => {
-      // Desktop branch — creates a Tauri Store adapter.
+    it('re-creates the legacy adapter for the new branch', async () => {
+      // Desktop branch — opens the Tauri legacy store.
       mockIsTauriContext.mockReturnValue(true)
-      mockTauriStore.get.mockResolvedValue(undefined)
       await tauriSessionApi.hasSession()
       expect(mockStoreLoad).toHaveBeenCalledTimes(1)
 
       // Reset + flip to web — must NOT reuse the Tauri adapter.
       _resetStoreInstanceForTesting()
+      fakePersistence.data.clear()
       mockIsTauriContext.mockReturnValue(false)
       await tauriSessionApi.hasSession()
 

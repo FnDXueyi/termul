@@ -2,6 +2,7 @@
  * Switch slice — extracted from ../acp-store.ts (spec-04 PR B). Pure move, no logic changes.
  */
 
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { toast } from 'sonner'
 import type { StateCreator } from 'zustand'
 import type { PendingLauncherOptions } from '@/components/agents/pending-launcher-options'
@@ -313,7 +314,7 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
 
       // Clear the old session's composer draft (CAP-3: the draft is the pending
       // user message, cleared from the old session's draft state).
-      const draftKey = `chat-draft/${oldSession.projectId}/${sessionId}`
+      const draftKey = PersistenceKeys.chatDraft(oldSession.projectId, sessionId)
       void persistenceApi.delete(draftKey).catch(() => {})
 
       // Live merged transcript (spec-agent-switch-live-merged-transcript):
