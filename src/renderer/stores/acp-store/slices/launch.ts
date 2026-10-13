@@ -112,8 +112,9 @@ function promotePreparedSession(
       })
     inFlightPromotions.set(sessionId, promotion)
   }
-  // Prepared keys exclude projectId; if projects share a cwd, the seed's
-  // projectId would be wrong for the consumer — stamp the consuming project.
+  // Prepared keys exclude projectId. Stamp the consuming project when it is
+  // the seed's project. A different project must not claim this session:
+  // the agent process was spawned for the seed project's Claude Account.
   set((s) => {
     const session = s.sessions[sessionId]
     if (!session) return {}
@@ -140,6 +141,19 @@ function promotePreparedSession(
   ) {
     void state.prepareChat(kConfig, kCwd, undefined, projectId, { silent: true })
   }
+}
+
+/**
+ * A prepared session with no project, or with this project, can be claimed.
+ * A session seeded for a different project keeps its agent (and Claude Account).
+ */
+function preparedSessionFitsProject(
+  get: () => AcpState,
+  sessionId: SessionId,
+  projectId: string
+): boolean {
+  const seeded = get().sessions[sessionId]?.projectId
+  return !seeded || seeded === projectId
 }
 
 type LaunchSliceState = Pick<
@@ -337,16 +351,25 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
     for (;;) {
       const prepared = get().preparedSessions[key]
       if (prepared) {
+        if (!preparedSessionFitsProject(get, prepared, projectId)) {
+          void logFrontendError({
+            level: 'info',
+            source: 'acp-store.startChat',
+            message: `Prepared session ${prepared} for ${configId} at ${trimmedCwd} belongs to another project; starting a separate agent`
+          })
+          break
+        }
         promotePreparedSession(key, prepared, projectId, get, set)
         return prepared
       }
       const inFlight = inFlightPrepared.get(key)
       if (!inFlight) break
       const sessionId = await inFlight
-      if (sessionId) {
+      if (sessionId && preparedSessionFitsProject(get, sessionId, projectId)) {
         promotePreparedSession(key, sessionId, projectId, get, set)
         return sessionId
       }
+      if (sessionId) break
       // null: cancelled or failed — re-check for a newer prepare before spawning.
     }
     const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
@@ -356,7 +379,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
 
   claimPreparedChat: (key, projectId) => {
     const sessionId = get().preparedSessions[key]
-    if (!sessionId) return null
+    if (!sessionId || !preparedSessionFitsProject(get, sessionId, projectId)) return null
     promotePreparedSession(key, sessionId, projectId, get, set)
     return sessionId
   },

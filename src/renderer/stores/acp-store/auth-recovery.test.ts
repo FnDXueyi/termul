@@ -666,7 +666,7 @@ describe('acp provider authentication & recovery', () => {
     })
     // The live agent must survive a multi-auth failure so method clicks stay wired.
     expect(useAcpStore.getState().agents['agent-9']).toBeDefined()
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work')]).toBe(
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]).toBe(
       'agent-9'
     )
     expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'acp_kill_agent')).toHaveLength(0)

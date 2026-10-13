@@ -714,7 +714,10 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       if (isDetachedReuseKey(reuseKey)) continue
       const { configId, cwd } = parseReuseKey(reuseKey)
       for (const [errKey, err] of Object.entries(get().prepareChatErrors)) {
-        if (!errKey.startsWith(`${reuseKey}\0`)) continue
+        // Prepare keys stay `configId\0cwd\0mcpKey`. A Project-scoped reuse
+        // key has more segments, so match the config and cwd, not the prefix.
+        const parsedError = parseReuseKey(errKey)
+        if (parsedError.configId !== configId || parsedError.cwd !== cwd) continue
         if (err.category !== 'auth' && err.category !== 'multi-auth') continue
         get().cancelPreparedChat(errKey)
         get().prepareChat(configId, cwd, undefined, projectId)

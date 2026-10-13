@@ -22,7 +22,13 @@ import { __clearCommandJournalForTesting } from '@/lib/command-journal'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useProjectStore } from '@/stores/project-store'
-import { agentReuseKey, configIdFromReuseKey, detachedReuseKey } from '../acp-reuse-keys'
+import {
+  agentReuseKey,
+  configIdFromReuseKey,
+  detachedReuseKey,
+  isDetachedReuseKey,
+  parseReuseKey
+} from '../acp-reuse-keys'
 import { ephemeralSessionIds } from './ephemeral-ids'
 import { isReusableStatus } from './helpers'
 import type { AcpSession, AcpState, ChatMessage, CommitMessageCollector } from './types'
@@ -204,13 +210,19 @@ export function persistSession(
 }
 
 /**
- * In-flight pre-warm spawns, keyed by `agentReuseKey(configId, cwd)`. Held
+ * In-flight pre-warm spawns, keyed by `agentReuseKey(configId, cwd, projectId)`. Held
  * outside reactive state (promises don't belong in the store) so `prewarmAgent`,
  * `startChat`, and `deleteAgentConfig` can dedupe against a warm that is still
  * spawning for the same config+cwd. The reactive `warmingConfigs` flag mirrors
  * membership for the UI.
  */
 export const inFlightWarms = new Map<string, Promise<AgentId | null>>()
+
+/**
+ * First Project to use an unscoped (no-Project) process for a config+cwd.
+ * A second Project must not join that spawn or take the process.
+ */
+const unscopedReuseOwner = new Map<string, string>()
 /** The same spawns, un-swallowed: what a joining caller judges by its own options. */
 const inFlightWarmOutcomes = new Map<string, Promise<AgentId | null>>()
 
@@ -489,8 +501,9 @@ export function _handoffOnlyTurnIdsForTesting(): ReadonlySet<string> {
  *
  * Adoption seeds the store's agent presence (`agents` + `agentStatus`) from
  * the summary's capabilities and registers the reuse key
- * (`agentReuseKey(configId, cwd)`) → host agent id, so every later
- * `ensureLiveAgent`/`prepareChat` for that config+cwd reuses the host process.
+ * (`agentReuseKey(configId, cwd, projectId)`) → host agent id, so every later
+ * `ensureLiveAgent`/`prepareChat` for that config, cwd, and Project reuses the
+ * host process.
  *
  * Desktop skips the lookup by default (`isTauriContext()`): the desktop store
  * already owns its agents in memory. A reload while a turn is still running
@@ -509,7 +522,7 @@ export async function adoptHostOwnedAgent(
   sessionId: SessionId,
   configId: string,
   cwd: string,
-  options?: { allowDesktop?: boolean; isCurrent?: () => boolean }
+  options?: { allowDesktop?: boolean; isCurrent?: () => boolean; projectId?: string | null }
 ): Promise<{ adopted: AgentId | null; listingTrusted: boolean }> {
   const trimmedCwd = cwd.trim()
   if ((!options?.allowDesktop && isTauriContext()) || trimmedCwd.length === 0) {
@@ -548,7 +561,8 @@ export async function adoptHostOwnedAgent(
     source: 'acp-store.adoptHostOwnedAgent',
     message: `Reusing host agent ${match.id} that owns session ${sessionId} instead of spawning a duplicate`
   })
-  const reuseKey = agentReuseKey(configId, trimmedCwd)
+  const projectId = (options?.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
   set((s) => ({
     agents: {
       ...s.agents,
@@ -636,7 +650,9 @@ export function ensureLiveAgent(
   const config = get().agentConfigs.find((c) => c.id === configId)
   if (!config) return Promise.resolve(null)
 
-  const reuseKey = agentReuseKey(configId, trimmedCwd)
+  const projectId = (options.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
+  claimUnscopedAgent(get, set, configId, trimmedCwd, projectId, reuseKey)
   const currentAgentId = get().configToLiveAgent[reuseKey]
   if (
     currentAgentId &&
@@ -667,7 +683,7 @@ export function ensureLiveAgent(
     return Promise.resolve(existing)
   }
 
-  const inFlight = inFlightWarms.get(reuseKey)
+  const inFlight = inFlightForReuse(configId, trimmedCwd, projectId, reuseKey)
   if (inFlight) {
     // Join the running spawn, but judge ITS failure by THIS caller's options: a
     // prewarm (silent) started it, yet a user-initiated caller that joins must
@@ -689,6 +705,14 @@ export function ensureLiveAgent(
     set((s) => ({ warmingConfigs: { ...s.warmingConfigs, [reuseKey]: true } }))
   }
 
+  if (projectId && otherProjectHoldsAgent(get(), configId, trimmedCwd, projectId)) {
+    void logFrontendError({
+      level: 'info',
+      source: 'acp-store.ensureLiveAgent',
+      message: `Project ${projectId} spawns its own agent for ${configId} at ${trimmedCwd}; another project already holds that cwd`
+    })
+  }
+
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
       const agentId = await get().spawnAgent(
@@ -700,7 +724,7 @@ export function ensureLiveAgent(
           env: config.env,
           allowTerminal: config.allowTerminal
         },
-        options.projectId || projectIdForCwd(trimmedCwd)
+        projectId || undefined
       )
       definiteSpawnRejections.delete(reuseKey)
       if (get().agentConfigs.some((c) => c.id === configId)) {
@@ -742,6 +766,92 @@ export function ensureLiveAgent(
  * failure (except a definite rejection it asked to surface); any other caller
  * gets the rejection.
  */
+/**
+ * An unscoped process (spawned with no Project) belongs to the first Project
+ * that needs this config and cwd. Later Projects spawn their own process so
+ * they do not share a Claude Account.
+ */
+function claimUnscopedAgent(
+  get: () => AcpState,
+  set: (fn: (s: AcpState) => Partial<AcpState> | AcpState) => void,
+  configId: string,
+  cwd: string,
+  projectId: string,
+  reuseKey: string
+): void {
+  if (!projectId) return
+  const legacyKey = agentReuseKey(configId, cwd)
+  if (legacyKey === reuseKey) return
+  if (!inFlightWarms.has(legacyKey) && !get().configToLiveAgent[legacyKey]) {
+    unscopedReuseOwner.delete(legacyKey)
+  }
+  const owner = unscopedReuseOwner.get(legacyKey)
+  if (owner && owner !== projectId) return
+  let claimed = false
+  set((s) => {
+    if (s.configToLiveAgent[reuseKey]) {
+      claimed = true
+      return {}
+    }
+    const legacyId = s.configToLiveAgent[legacyKey]
+    if (!legacyId || !isReusableStatus(s.agentStatus[legacyId])) return {}
+    const ownedByOther = Object.values(s.sessions).some(
+      (session) =>
+        session.agentId === legacyId &&
+        session.status !== 'closed' &&
+        session.cwd?.trim() === cwd &&
+        !!session.projectId &&
+        session.projectId !== projectId
+    )
+    if (ownedByOther) return {}
+    const configToLiveAgent = { ...s.configToLiveAgent }
+    delete configToLiveAgent[legacyKey]
+    configToLiveAgent[reuseKey] = legacyId
+    claimed = true
+    return { configToLiveAgent }
+  })
+  if (claimed || inFlightWarms.has(legacyKey)) {
+    if (!unscopedReuseOwner.has(legacyKey)) unscopedReuseOwner.set(legacyKey, projectId)
+  }
+}
+
+function inFlightForReuse(
+  configId: string,
+  cwd: string,
+  projectId: string,
+  reuseKey: string
+): Promise<AgentId | null> | undefined {
+  const scoped = inFlightWarms.get(reuseKey)
+  if (scoped || !projectId) return scoped
+  const legacyKey = agentReuseKey(configId, cwd)
+  const legacy = inFlightWarms.get(legacyKey)
+  if (!legacy) return undefined
+  const owner = unscopedReuseOwner.get(legacyKey)
+  if (owner && owner !== projectId) return undefined
+  if (!owner) unscopedReuseOwner.set(legacyKey, projectId)
+  return legacy
+}
+
+/** True when a different Project already has a live process for this config and cwd. */
+function otherProjectHoldsAgent(
+  state: AcpState,
+  configId: string,
+  cwd: string,
+  projectId: string
+): boolean {
+  return Object.keys(state.configToLiveAgent).some((key) => {
+    if (isDetachedReuseKey(key)) return false
+    const parsed = parseReuseKey(key)
+    return (
+      parsed.configId === configId &&
+      parsed.cwd === cwd &&
+      typeof parsed.projectId === 'string' &&
+      parsed.projectId.length > 0 &&
+      parsed.projectId !== projectId
+    )
+  })
+}
+
 function asCallerView(
   strict: Promise<AgentId | null>,
   reuseKey: string,

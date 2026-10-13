@@ -532,9 +532,44 @@ describe('acp-store', () => {
     const sessionId = await useAcpStore.getState().startChat('cfg-1', '/work', undefined, 'p1')
     expect(sessionId).toBe('sess-9')
     expect(useAcpStore.getState().sessions['sess-9'].agentId).toBe('agent-9')
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work')]).toBe(
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]).toBe(
       'agent-9'
     )
+  })
+
+  it('startChat on one cwd spawns a separate agent for a second project', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Gemini', command: 'gemini', args: [], env: {} })
+    ;(invoke as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ agentId: 'agent-a', capabilities: {}, authMethods: [] })
+      .mockResolvedValueOnce({ sessionId: 'sess-a' })
+      .mockResolvedValueOnce({ agentId: 'agent-b', capabilities: {}, authMethods: [] })
+      .mockResolvedValueOnce({ sessionId: 'sess-b' })
+    const first = await useAcpStore.getState().startChat('cfg-1', '/work', undefined, 'p1')
+    // Close the first chat so process reuse is decided by the project key.
+    // An open chat already forces a new process for the next chat.
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [first]: { ...s.sessions[first], status: 'closed' }
+      }
+    }))
+    const second = await useAcpStore.getState().startChat('cfg-1', '/work', undefined, 'p2')
+    expect(useAcpStore.getState().sessions[first].agentId).toBe('agent-a')
+    expect(useAcpStore.getState().sessions[second].agentId).toBe('agent-b')
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]).toBe(
+      'agent-a'
+    )
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p2')]).toBe(
+      'agent-b'
+    )
+    const spawnCalls = (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (call) => call[0] === 'acp_spawn_agent'
+    )
+    expect(spawnCalls).toHaveLength(2)
+    expect(spawnCalls[0]?.[1]).toEqual(expect.objectContaining({ projectId: 'p1' }))
+    expect(spawnCalls[1]?.[1]).toEqual(expect.objectContaining({ projectId: 'p2' }))
   })
 
   it('startChat reuses a prepared session from prepareChat (GH-288)', async () => {

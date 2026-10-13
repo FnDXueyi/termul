@@ -33,7 +33,12 @@ import {
 } from '@/lib/skill-tokens'
 import { wireBlocksToDisplay, wireTextToDisplay } from '@/lib/skills-wire-reverse'
 import { randomUUID } from '@/lib/uuid'
-import { agentReuseKey, configIdFromReuseKey, detachedReuseKey } from '../acp-reuse-keys'
+import {
+  configIdFromReuseKey,
+  detachedReuseKey,
+  isDetachedReuseKey,
+  parseReuseKey
+} from '../acp-reuse-keys'
 import {
   buildRecoverPromptToQueuePatch,
   dropPromptQueueForSession,
@@ -1404,9 +1409,16 @@ export function detachOldAgentForSwitch(
   cwd: string,
   agentId: AgentId
 ): void {
-  const reuseKey = agentReuseKey(configId, cwd)
+  const trimmedCwd = cwd.trim()
   set((s) => {
-    if (s.configToLiveAgent[reuseKey] !== agentId) return {}
+    // Match the Project-scoped key and the legacy config+cwd key. Both name
+    // this process; the next prepare must not reuse either one.
+    const reuseKey = Object.keys(s.configToLiveAgent).find((key) => {
+      if (isDetachedReuseKey(key) || s.configToLiveAgent[key] !== agentId) return false
+      const parsed = parseReuseKey(key)
+      return parsed.configId === configId && parsed.cwd === trimmedCwd
+    })
+    if (!reuseKey) return {}
     const configToLiveAgent = { ...s.configToLiveAgent }
     delete configToLiveAgent[reuseKey]
     // Keep the superseded process resolvable for its (still-open) old session

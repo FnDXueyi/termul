@@ -184,7 +184,9 @@ describe('acp-store multi-project isolation', () => {
     const sessionId = await useAcpStore.getState().startChat('cfg-1', '/b', undefined, 'p1')
     expect(sessionId).toBe('sess-b')
     expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/a')]).toBe('agent-a')
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/b')]).toBe('agent-b')
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/b', 'p1')]).toBe(
+      'agent-b'
+    )
     const spawnCalls = (invoke as ReturnType<typeof vi.fn>).mock.calls.filter(
       (c) => c[0] === 'acp_spawn_agent'
     )

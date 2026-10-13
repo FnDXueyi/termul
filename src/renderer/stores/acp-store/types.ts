@@ -347,7 +347,7 @@ export interface AcpState {
   // User-configured agents (persisted, distinct from the live `agents` map)
   agentConfigs: StoredAgentConfig[]
   /**
-   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd)`) to its
+   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd, projectId)`) to its
    * live spawned AgentId (for reuse). Keyed by config+cwd — not config alone —
    * so the same configured agent runs an independent process per project/cwd
    * and one process's disconnect can't cascade to another project's sessions.

@@ -430,7 +430,7 @@ describe('warm session pool', () => {
     expect(state.sessions[first]?.agentId).toBe('factory-first')
     expect(state.sessions[first]?.configOptions[0]?.currentValue).toBe('glm-5.3-flash')
     expect(state.sessions['factory-2']?.agentId).toBe('factory-second')
-    expect(state.configToLiveAgent[agentReuseKey(configId, '/work')]).toBe('factory-second')
+    expect(state.configToLiveAgent[agentReuseKey(configId, '/work', 'p1')]).toBe('factory-second')
     expect(Object.entries(state.configToLiveAgent)).toContainEqual([
       expect.stringContaining('factory-first'),
       'factory-first'
@@ -451,8 +451,9 @@ describe('warm session pool', () => {
 
     useAcpStore.getState().detachAgentForNewCredentials(configId, '/work')
     const mapping = useAcpStore.getState().configToLiveAgent
-    expect(mapping[agentReuseKey(configId, '/work')]).toBeUndefined()
-    expect(mapping[`${agentReuseKey(configId, '/work')}\0factory-live`]).toBe('factory-live')
+    const reuseKey = agentReuseKey(configId, '/work', 'p1')
+    expect(mapping[reuseKey]).toBeUndefined()
+    expect(mapping[`${reuseKey}\0factory-live`]).toBe('factory-live')
     expect(useAcpStore.getState().sessions['factory-chat']?.status).not.toBe('closed')
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('acp_kill_agent', expect.anything())
   })
