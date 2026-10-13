@@ -25,6 +25,7 @@ import { PersistenceKeys } from '@shared/types/persistence.types'
 import { Store } from '@tauri-apps/plugin-store'
 import { logFrontendError } from './log-api'
 import { persistenceApi } from './persistence-api'
+import { trimSessionData } from './persistence-trim'
 import { isTauriContext } from './tauri-runtime'
 
 // ============================================================================
@@ -66,8 +67,8 @@ interface LegacySessionStore {
  * Each logical key is its own localStorage entry; there is no shared envelope
  * object.
  *
- * `save()` is a no-op — localStorage writes are synchronous. Reads swallow
- * `SecurityError`/JSON parse failures and degrade to `undefined`. `delete`
+ * `save()` is a no-op — localStorage writes are synchronous. Corrupt JSON
+ * degrades to `undefined`; a `getItem` failure propagates. `delete`
  * propagates `removeItem` failures so the caller can log them.
  */
 class WebSessionStore implements LegacySessionStore {
@@ -83,12 +84,14 @@ class WebSessionStore implements LegacySessionStore {
 
   async get<T>(key: string): Promise<T | undefined> {
     if (typeof localStorage === 'undefined') return undefined
+    // A failing `getItem` (SecurityError in private mode) throws, so the caller
+    // can tell "unreadable" from "absent" and retry the move later.
+    const raw = localStorage.getItem(this.compositeKey(key))
+    if (raw === null) return undefined
     try {
-      const raw = localStorage.getItem(this.compositeKey(key))
-      if (raw === null) return undefined
       return JSON.parse(raw) as T
     } catch {
-      // Corrupt JSON / SecurityError (private mode) — degrade silently.
+      // Corrupt JSON: nothing recoverable, treat as absent.
       return undefined
     }
   }
@@ -154,12 +157,18 @@ function legacySessionData(raw: LegacyPersistedSession | SessionData): SessionDa
  * API, which then simply has no legacy entry to offer.
  */
 async function moveLegacySession(): Promise<void> {
-  const current = await persistenceApi.read<SessionData>(PersistenceKeys.sessionsAutoSave)
-  if (current.success) return
-  if (current.code !== 'KEY_NOT_FOUND') throw new Error(current.error)
   const marker = await persistenceApi.read<boolean>(PersistenceKeys.sessionsLegacyMigrated)
   if (marker.success) return
   if (marker.code !== 'KEY_NOT_FOUND') throw new Error(marker.error)
+  const current = await persistenceApi.read<SessionData>(PersistenceKeys.sessionsAutoSave)
+  if (current.success) {
+    // The facade already holds a session: mark the move done so a later
+    // `clear()` cannot bring a stale legacy entry back.
+    const done = await persistenceApi.write(PersistenceKeys.sessionsLegacyMigrated, true)
+    if (!done.success) throw new Error(done.error)
+    return
+  }
+  if (current.code !== 'KEY_NOT_FOUND') throw new Error(current.error)
 
   let legacy: LegacySessionStore
   let raw: LegacyPersistedSession | SessionData | undefined
@@ -172,13 +181,15 @@ async function moveLegacySession(): Promise<void> {
       source: 'tauri-session-api.legacy-read',
       message: `could not read the legacy session file: ${String(error)}`
     })
+    // Unreadable is not absent: nothing is marked, so the next call tries again.
+    legacySettlement = null
     return
   }
 
   if (raw !== null && raw !== undefined) {
     const moved = await persistenceApi.write(
       PersistenceKeys.sessionsAutoSave,
-      legacySessionData(raw)
+      trimSessionData(legacySessionData(raw))
     )
     if (!moved.success) throw new Error(moved.error)
   }
@@ -294,10 +305,10 @@ async function save(sessionData: SessionData): Promise<IpcResult<void>> {
     }
 
     await settleLegacySession()
-    const result = await persistenceApi.write(PersistenceKeys.sessionsAutoSave, {
-      ...sessionData,
-      timestamp: new Date().toISOString()
-    })
+    const result = await persistenceApi.write(
+      PersistenceKeys.sessionsAutoSave,
+      trimSessionData({ ...sessionData, timestamp: new Date().toISOString() })
+    )
     if (!result.success) throw new Error(result.error)
 
     return { success: true, data: undefined }

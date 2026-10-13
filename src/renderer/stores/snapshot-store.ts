@@ -355,10 +355,7 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => ({
             snapshots: existingResult.data.snapshots.filter((s) => s.id !== id),
             updatedAt: new Date().toISOString()
           }
-          const writeResult = await persistenceApi.write(key, updatedList)
-          if (!writeResult.success) {
-            throw new Error(`Failed to persist snapshot delete: ${writeResult.error}`)
-          }
+          await writeSnapshotList(projectId, updatedList, 'Failed to persist snapshot delete')
         }
         logSnapshotBoundary('delete', projectId, 'ok')
       })

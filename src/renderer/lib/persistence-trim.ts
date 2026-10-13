@@ -12,6 +12,7 @@
  * and every trimmer returns its input untouched.
  */
 
+import type { SessionData, TerminalSession } from '@shared/types/ipc.types'
 import type {
   PersistedSnapshot,
   PersistedSnapshotList,
@@ -220,4 +221,34 @@ export function trimSnapshotList(
     if (dropped) droppedIds.push(dropped.id)
   }
   return { list: { ...list, snapshots }, shrunk, droppedIds }
+}
+
+/** `terminal` with only the newest `step / KEEP_STEPS` of its history lines kept. */
+function shrinkSessionTerminal(terminal: TerminalSession, step: number): TerminalSession {
+  const keep = Math.floor(terminal.history.length * (step / KEEP_STEPS))
+  return {
+    ...terminal,
+    history: keep > 0 ? terminal.history.slice(terminal.history.length - keep) : []
+  }
+}
+
+/**
+ * `sessions/auto-save`: cut the oldest history lines of every terminal by the
+ * same share until the session fits. The newest lines of each terminal survive.
+ */
+export function trimSessionData(
+  session: SessionData,
+  cap: number = storeValueCapBytes()
+): SessionData {
+  if (storedValueBytes(session) <= cap) return session
+  const withStep = (step: number): SessionData => ({
+    ...session,
+    terminals: session.terminals.map((t) => shrinkSessionTerminal(t, step)),
+    workspaces: session.workspaces.map((w) => ({
+      ...w,
+      terminals: w.terminals.map((t) => shrinkSessionTerminal(t, step))
+    }))
+  })
+  const step = largestFitting(KEEP_STEPS, (s) => storedValueBytes(withStep(s)) <= cap)
+  return withStep(step)
 }

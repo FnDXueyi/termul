@@ -1,3 +1,4 @@
+import type { SessionData } from '@shared/types/ipc.types'
 import type {
   PersistedSnapshot,
   PersistedSnapshotList,
@@ -14,6 +15,7 @@ import {
   storedValueBytes,
   storeValueCapBytes,
   trimListToCap,
+  trimSessionData,
   trimSnapshotList,
   trimTerminalLayout
 } from '../persistence-trim'
@@ -363,5 +365,38 @@ describe('command history writer', () => {
     expect(value.at(-1)?.command.startsWith(`${499 - (value.length - 2)}:`)).toBe(true)
     // In memory nothing was dropped.
     expect(useCommandHistoryStore.getState().entries).toHaveLength(500)
+  })
+})
+
+describe('trimSessionData', () => {
+  const session = (lines: number): SessionData => ({
+    timestamp: '2026-01-01T00:00:00Z',
+    terminals: [
+      {
+        id: 't',
+        shell: 'bash',
+        cwd: '/',
+        history: Array.from(
+          { length: lines },
+          (_, i) => `cmd ${String(i).padStart(6, '0')} ${'x'.repeat(80)}`
+        )
+      }
+    ],
+    workspaces: []
+  })
+
+  it('returns a session under the cap untouched', () => {
+    const small = session(10)
+    expect(trimSessionData(small)).toBe(small)
+  })
+
+  it('keeps the newest history lines and fits the cap when over it', () => {
+    const big = session(6000)
+    const trimmed = trimSessionData(big)
+    expect(storedValueBytes(trimmed)).toBeLessThanOrEqual(STORE_VALUE_MAX_BYTES)
+    const history = trimmed.terminals[0].history
+    expect(history.length).toBeGreaterThan(0)
+    expect(history.length).toBeLessThan(6000)
+    expect(history.at(-1)).toBe(big.terminals[0].history.at(-1))
   })
 })

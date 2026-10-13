@@ -542,6 +542,38 @@ describe('snapshot-store', () => {
       expect(storeResult.current.snapshots).toHaveLength(0)
     })
 
+    it('trims a list that is already over the cap when it deletes', async () => {
+      const snap = (id: string) => ({
+        id,
+        projectId: 'project-big',
+        name: id,
+        createdAt: new Date().toISOString(),
+        terminals: [
+          {
+            id: `t-${id}`,
+            name: 'T',
+            shell: 'bash',
+            cwd: '/',
+            scrollback: Array.from({ length: 1500 }, (_, i) => `${id} ${i} ${'x'.repeat(100)}`)
+          }
+        ],
+        activeTerminalId: null
+      })
+      const list = { snapshots: [snap('a'), snap('b'), snap('c')], updatedAt: 'x' }
+      useSnapshotStore.setState({ snapshots: list.snapshots as never })
+      mockPersistence.read.mockResolvedValue({ success: true, data: list })
+      mockPersistence.write.mockResolvedValue({ success: true })
+
+      const { result } = renderHook(() => useSnapshotActions())
+      await act(async () => {
+        await result.current.deleteSnapshot('c')
+      })
+
+      const written = mockPersistence.write.mock.calls.at(-1)?.[1] as typeof list
+      expect(JSON.stringify({ _version: 1, data: written }).length).toBeLessThanOrEqual(256 * 1024)
+      expect(written.snapshots.some((s) => s.id === 'c')).toBe(false)
+    })
+
     it('should do nothing if snapshot not found', async () => {
       const { result } = renderHook(() => useSnapshotActions())
 

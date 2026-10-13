@@ -14,6 +14,7 @@
  * - session reads and writes never touch localStorage on either branch
  */
 
+import type { SessionData } from '@shared/types/ipc.types'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakePersistence, validSessionData } from './session-test-support'
 
@@ -41,6 +42,7 @@ vi.mock('../tauri-runtime', () => ({
   isTauriContext: mockIsTauriContext
 }))
 
+import { jsonBytes, STORE_VALUE_MAX_BYTES } from '../persistence-trim'
 import { _resetStoreInstanceForTesting, tauriSessionApi } from '../tauri-session-api'
 
 const STORE_FILE = 'termul-sessions.json'
@@ -113,6 +115,52 @@ describe('tauriSessionApi (web vs desktop branch)', () => {
 
       expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
       expect(await tauriSessionApi.restore()).toMatchObject({ code: 'SESSION_NOT_FOUND' })
+    })
+
+    it('retries the move on a later call when the legacy entry is unreadable', async () => {
+      const data = validSessionData()
+      localStorage.setItem(LEGACY_LOCAL_KEY, JSON.stringify({ _version: 1, data }))
+      const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementationOnce(() => {
+        throw new Error('SecurityError')
+      })
+
+      try {
+        expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: false })
+        expect(fakePersistence.data.has('sessions/legacy-migrated')).toBe(false)
+        expect(await tauriSessionApi.hasSession()).toEqual({ success: true, data: true })
+        expect(fakePersistence.data.get(SESSION_KEY)).toEqual(data)
+      } finally {
+        getItem.mockRestore()
+      }
+    })
+
+    it('marks the move done when the facade already holds a session', async () => {
+      fakePersistence.data.set(SESSION_KEY, validSessionData())
+      localStorage.setItem(
+        LEGACY_LOCAL_KEY,
+        JSON.stringify({ _version: 1, data: validSessionData() })
+      )
+
+      await tauriSessionApi.hasSession()
+
+      expect(fakePersistence.data.get('sessions/legacy-migrated')).toBe(true)
+    })
+
+    it('trims an oversized session to the newest history lines before it writes', async () => {
+      const data = validSessionData()
+      data.terminals[0].history = Array.from(
+        { length: 4000 },
+        (_, i) => `cmd ${String(i).padStart(5, '0')} ${'x'.repeat(100)}`
+      )
+
+      expect(await tauriSessionApi.save(data)).toMatchObject({ success: true })
+
+      const stored = fakePersistence.data.get(SESSION_KEY) as SessionData
+      expect(jsonBytes({ _version: 1, data: stored })).toBeLessThanOrEqual(STORE_VALUE_MAX_BYTES)
+      const history = stored.terminals[0].history
+      expect(history.length).toBeGreaterThan(0)
+      expect(history.length).toBeLessThan(4000)
+      expect(history.at(-1)).toBe(data.terminals[0].history.at(-1))
     })
 
     it('does not read localStorage again once a session is stored', async () => {
