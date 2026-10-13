@@ -426,7 +426,12 @@ export function useTerminalRestore(): void {
           // The visible pane tree belongs to the project being left until the
           // switch commits: wait, or these tabs would land in the wrong tree.
           await whenProjectSwitchSettled(projectIdToRestore)
-          if (isCancelled()) {
+          // Settled also means failed/superseded/disposed: only a committed
+          // target owns the visible tree.
+          if (
+            isCancelled() ||
+            useWorkspaceStore.getState().activeProjectId !== projectIdToRestore
+          ) {
             debugLog('useTerminalRestore', `CANCELLED [${callId}] after project switch settled`)
             return
           }
@@ -1265,10 +1270,12 @@ async function restoreFromLayout(
     const existingTerminals = terminalStore.terminals
     terminalStore.setTerminals([...existingTerminals, ...newTerminals])
 
-    if (idMap.size > 0) {
-      // Remap rewrites the visible tree: wait until the switch toward this
-      // project has committed so it is the tree being rewritten.
-      await whenProjectSwitchSettled(projectId)
+    // Remap rewrites the visible tree: wait until the switch toward this
+    // project has committed so it is the tree being rewritten. Settled also
+    // means failed/superseded/disposed, so re-check that the target is visible.
+    if (idMap.size > 0) await whenProjectSwitchSettled(projectId)
+    const targetCommitted = useWorkspaceStore.getState().activeProjectId === projectId
+    if (idMap.size > 0 && targetCommitted) {
       useWorkspaceStore.getState().remapTerminalTabs(Object.fromEntries(idMap))
     }
 
@@ -1278,8 +1285,8 @@ async function restoreFromLayout(
       activeId = idMap.get(layout.activeTerminalId)!
     }
 
-    // Select the active terminal
-    if (activeId) {
+    // Select the active terminal (only while the target's tree is visible)
+    if (activeId && targetCommitted) {
       terminalStore.selectTerminal(activeId)
     }
 

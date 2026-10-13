@@ -14,9 +14,20 @@ import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import { useWorkspaceManifestSyncStore } from '@/stores/workspace-manifest-sync-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
-import { reattachOpenAgentChats } from './chat-restore'
+import { reattachOpenAgentChats, retainVisibleAgentChats } from './chat-restore'
+import { persistState } from './persist'
 
 export function commitStagedProject(projectId: string, staged: StagedProject): void {
+  // The project being left stayed visible (and editable) while the target
+  // hydrated, and `leave()` persisted it BEFORE that window. Persist it again
+  // synchronously, before the editor store is cleared, so edits made in the
+  // window are not lost with the buffers (both calls are idempotent).
+  const leaving = useWorkspaceStore.getState().activeProjectId
+  if (leaving && leaving !== projectId) {
+    retainVisibleAgentChats(leaving)
+    persistState(leaving)
+  }
+
   // Editor files (one global store swapped per switch): clear cancels the
   // leaving project's pending autosaves, then the staged map goes in whole.
   const editor = useEditorStore.getState()
