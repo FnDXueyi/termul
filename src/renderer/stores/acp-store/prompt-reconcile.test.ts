@@ -58,6 +58,7 @@ vi.mock('@/lib/acp-mcp-persistence', async (orig) => {
 vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   getAllLeafPanes: () => [],
+  getAllTreeRoots: () => [],
   findPaneContainingTab: () => null,
   useWorkspaceStore: {
     getState: () => ({ addAgentChatTab: vi.fn(), root: null })
