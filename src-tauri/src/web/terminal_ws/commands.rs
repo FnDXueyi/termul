@@ -1,16 +1,16 @@
 //! The `/terminal/ws` requests that enter the command ledger (AD-5): `spawn`,
 //! `write`, `kill`, `rotate_claim` and `revoke_claim`.
 //!
-//! A request WITHOUT a `commandId` runs exactly as it always has. With one it
-//! is admitted through `command_ledger::terminal` AFTER the capability gate in
-//! [`handle`](super::handle) (a refused request leaves no ledger entry) and
-//! after any per-terminal authorization that must not be recorded.
+//! A request WITHOUT a `commandId` is refused with `INVALID_COMMAND_ID` before
+//! it runs. With one it is admitted through `command_ledger::terminal` AFTER the
+//! capability gate in [`handle`](super::handle) (a refused request leaves no
+//! ledger entry) and after any per-terminal authorization that must not be
+//! recorded.
 //!
 //! The `commandId` is the request envelope's `commandId`; a `spawn` may also
 //! carry it as `payload.commandId` (the field rides `SpawnOptions`, like on the
 //! desktop carrier), and both must agree when both are present.
 
-use crate::web::command_ledger::is_valid_command_id;
 use crate::web::command_ledger::terminal::{
     self as ledgered, Done, Effect, INVALID_COMMAND_ID_CODE, OUTCOME_UNKNOWN_CODE,
 };
@@ -25,24 +25,17 @@ fn in_progress_reply() -> Value {
     json!({ "receipt": "in_progress" })
 }
 
-/// The validated `commandId` of a request, `None` when it carries none.
-fn validated(command_id: Option<&str>) -> Result<Option<String>, Failure> {
-    match command_id {
-        None => Ok(None),
-        Some(id) if is_valid_command_id(id) => Ok(Some(id.to_string())),
-        Some(_) => Err((
-            INVALID_COMMAND_ID_CODE,
-            ledgered::invalid_command_id_message(),
-        )),
-    }
+/// The `commandId` of a ledgered request: required and well-formed.
+fn required(kind: &str, command_id: Option<&str>) -> Result<String, Failure> {
+    ledgered::required_command_id(kind, command_id).map(str::to_string)
 }
 
 /// The `spawn` request's `commandId`: the envelope's and the payload's must
-/// agree when both are present.
+/// agree when both are present; one of them is required.
 fn spawn_command_id(
     envelope: Option<&str>,
     payload: Option<&str>,
-) -> Result<Option<String>, Failure> {
+) -> Result<String, Failure> {
     if let (Some(envelope), Some(payload)) = (envelope, payload) {
         if envelope != payload {
             return Err((
@@ -51,7 +44,7 @@ fn spawn_command_id(
             ));
         }
     }
-    validated(envelope.or(payload))
+    required(ledgered::SPAWN, envelope.or(payload))
 }
 
 pub(super) async fn spawn(
@@ -61,7 +54,10 @@ pub(super) async fn spawn(
 ) -> Result<Value, Failure> {
     let mut options = SpawnOptions::deserialize(&request.payload)
         .map_err(|e| ("VALIDATION_ERROR", e.to_string()))?;
-    options.command_id = spawn_command_id(request.command_id.as_deref(), options.command_id.as_deref())?;
+    options.command_id = Some(spawn_command_id(
+        request.command_id.as_deref(),
+        options.command_id.as_deref(),
+    )?);
     // Require project_id so the terminal is scoped — do not default
     // to a literal that any client can target.
     if options
@@ -119,7 +115,7 @@ pub(super) async fn write(
         ));
     }
     let data = string_field(&request.payload, "data")?;
-    let command_id = validated(request.command_id.as_deref())?;
+    let command_id = required(ledgered::WRITE, request.command_id.as_deref())?;
     let pty = state.pty.clone();
     let client_id = ctx.client_id.clone();
     let owned_terminal = terminal_id.to_string();
@@ -131,12 +127,6 @@ pub(super) async fn write(
             instance.note_web_size_owner(&client_id);
         }
         pty.write(&owned_terminal, &owned_data).await
-    };
-    let Some(command_id) = command_id else {
-        return write
-            .await
-            .map(|_| Value::Null)
-            .map_err(|e| ("WRITE_FAILED", e));
     };
     // The chunk is identified by its terminal and length, never its text.
     let length = data.len().to_string();
@@ -168,43 +158,15 @@ pub(super) async fn kill(
     ctx: &mut ConnectionContext,
 ) -> Result<Value, Failure> {
     let terminal_id = string_field(&request.payload, "terminalId")?;
-    let command_id = validated(request.command_id.as_deref())?;
+    let command_id = required(ledgered::KILL, request.command_id.as_deref())?;
     // CWE-862: authorization FIRST — a connection may only kill a
-    // terminal it spawned or verifiably attached to. The check runs
-    // BEFORE any existence check or force_kill and collapses to the
+    // terminal it spawned or verifiably attached to. The check collapses to the
     // single generic UNAUTHORIZED, so a client holding only the shared
     // web token can neither terminate another connection's PTY nor
     // distinguish "terminal exists but not yours" from "unknown id".
     let authorized = ctx.is_authorized(terminal_id);
-    let Some(command_id) = command_id else {
-        if !authorized {
-            return Err(unauthorized_error(terminal_id));
-        }
-        // Idempotent kill for an AUTHORIZED terminal whose PTY is already
-        // gone (reaped/exited on its own): treat as success so closing a
-        // tab over a dead PTY doesn't leave an uncloseable tab. A repeat
-        // kill after a successful kill is NOT idempotent without a
-        // `commandId` — the first kill detached the terminal, so the retry
-        // takes the generic UNAUTHORIZED branch above like any other
-        // unauthorized id.
-        if state.pty.get(terminal_id).is_none() {
-            ctx.detach(terminal_id, state);
-            return Ok(Value::Null);
-        }
-        // Force-kill: bypass the desktop is_hidden deferral so web close
-        // actually terminates the process. Desktop behavior is unchanged.
-        return state
-            .pty
-            .force_kill(terminal_id)
-            .await
-            .map(|_| {
-                ctx.detach(terminal_id, state);
-                Value::Null
-            })
-            .map_err(|e| ("KILL_FAILED", e));
-    };
 
-    // With a `commandId` a repeat after a successful kill answers ok from the
+    // A repeat after a successful kill answers ok from the
     // ledger BEFORE the authorization check could refuse it (the first kill
     // detached the terminal). Authorization is still enforced for the one run
     // that executes: an unauthorized caller releases the id and leaves no entry.
@@ -253,38 +215,30 @@ pub(super) async fn rotate_claim(
     // (missing claims flow through verification, never a shape error).
     let terminal_id = string_field(&request.payload, "terminalId")?.to_string();
     let claim = request.payload["claim"].as_str().unwrap_or("").to_string();
-    let command_id = validated(request.command_id.as_deref())?;
-    let rotated = match command_id {
-        None => state
-            .pty
-            .rotate_claim(&terminal_id, &claim)
-            .map_err(|_| unauthorized_error(&terminal_id))?,
-        Some(command_id) => {
-            let pty = state.pty.clone();
-            let owned_terminal = terminal_id.clone();
-            let outcome = ledgered::command(
-                state.relay.ledger(),
-                ledgered::ROTATE_CLAIM,
-                &command_id,
-                &[("terminalId", Some(&terminal_id))],
-                async move {
-                    match pty.rotate_claim(&owned_terminal, &claim) {
-                        Ok(rotated) => Effect::Done(rotated),
-                        Err(_) => {
-                            let (code, message) = unauthorized_error(&owned_terminal);
-                            Effect::Released { code, message }
-                        }
-                    }
-                },
-            )
-            .await;
-            match outcome.into_result(ledgered::ROTATE_CLAIM)? {
-                Done::Executed(rotated) => rotated,
-                Done::InProgress => return Ok(in_progress_reply()),
-                // The rotation was applied but its credential was never kept.
-                Done::Found(_) | Done::Receipt => return Err(unknown("rotate_claim")),
+    let command_id = required(ledgered::ROTATE_CLAIM, request.command_id.as_deref())?;
+    let pty = state.pty.clone();
+    let owned_terminal = terminal_id.clone();
+    let outcome = ledgered::command(
+        state.relay.ledger(),
+        ledgered::ROTATE_CLAIM,
+        &command_id,
+        &[("terminalId", Some(&terminal_id))],
+        async move {
+            match pty.rotate_claim(&owned_terminal, &claim) {
+                Ok(rotated) => Effect::Done(rotated),
+                Err(_) => {
+                    let (code, message) = unauthorized_error(&owned_terminal);
+                    Effect::Released { code, message }
+                }
             }
-        }
+        },
+    )
+    .await;
+    let rotated = match outcome.into_result(ledgered::ROTATE_CLAIM)? {
+        Done::Executed(rotated) => rotated,
+        Done::InProgress => return Ok(in_progress_reply()),
+        // The rotation was applied but its credential was never kept.
+        Done::Found(_) | Done::Receipt => return Err(unknown("rotate_claim")),
     };
     // Teardown (amendment R1): the invalidated holder loses the output
     // stream (attachment task detached) AND write/resize access
@@ -308,40 +262,32 @@ pub(super) async fn revoke_claim(
     // UNAUTHORIZED as attach.
     let terminal_id = string_field(&request.payload, "terminalId")?.to_string();
     let claim = request.payload["claim"].as_str().unwrap_or("").to_string();
-    let command_id = validated(request.command_id.as_deref())?;
-    match command_id {
-        None => state
-            .pty
-            .revoke_claim(&terminal_id, &claim)
-            .map_err(|_| unauthorized_error(&terminal_id))?,
-        Some(command_id) => {
-            let pty = state.pty.clone();
-            let owned_terminal = terminal_id.clone();
-            let outcome = ledgered::command(
-                state.relay.ledger(),
-                ledgered::REVOKE_CLAIM,
-                &command_id,
-                &[("terminalId", Some(&terminal_id))],
-                async move {
-                    match pty.revoke_claim(&owned_terminal, &claim) {
-                        Ok(()) => Effect::Done(()),
-                        Err(_) => {
-                            let (code, message) = unauthorized_error(&owned_terminal);
-                            Effect::Released { code, message }
-                        }
-                    }
-                },
-            )
-            .await;
-            match outcome.into_result(ledgered::REVOKE_CLAIM)? {
-                Done::Executed(()) => {}
-                Done::InProgress => return Ok(in_progress_reply()),
-                // A replay: the revocation already happened. The connection
-                // may have re-attached with a fresh claim since, so it must
-                // not be detached again.
-                Done::Found(()) | Done::Receipt => return Ok(Value::Null),
+    let command_id = required(ledgered::REVOKE_CLAIM, request.command_id.as_deref())?;
+    let pty = state.pty.clone();
+    let owned_terminal = terminal_id.clone();
+    let outcome = ledgered::command(
+        state.relay.ledger(),
+        ledgered::REVOKE_CLAIM,
+        &command_id,
+        &[("terminalId", Some(&terminal_id))],
+        async move {
+            match pty.revoke_claim(&owned_terminal, &claim) {
+                Ok(()) => Effect::Done(()),
+                Err(_) => {
+                    let (code, message) = unauthorized_error(&owned_terminal);
+                    Effect::Released { code, message }
+                }
             }
-        }
+        },
+    )
+    .await;
+    match outcome.into_result(ledgered::REVOKE_CLAIM)? {
+        Done::Executed(()) => {}
+        Done::InProgress => return Ok(in_progress_reply()),
+        // A replay: the revocation already happened. The connection
+        // may have re-attached with a fresh claim since, so it must
+        // not be detached again.
+        Done::Found(()) | Done::Receipt => return Ok(Value::Null),
     }
     // Teardown (amendment R1): same severing as rotate — the revoked
     // holder is a credential-less client and receives no further

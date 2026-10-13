@@ -3,9 +3,11 @@
 //! commands share), stamp `visible_at` on session-scoped replies and convert
 //! between [`WsReply`] and the carrier-neutral [`Settled`] outcome.
 //!
-//! A request without a `commandId` keeps today's behavior (executed, never
-//! recorded). Capability refusals happen before this module runs, so a refused
-//! request leaves no ledger entry.
+//! A ledgered request (`create`/`command` classes except `send_prompt`, whose
+//! `turnId` is optional for turnless callers) without a `commandId` is refused
+//! with `invalid_command_id` before it runs. Naturally idempotent classes and
+//! reads need none. Capability refusals happen before this module runs, so a
+//! refused request leaves no ledger entry.
 
 use serde_json::json;
 
@@ -29,11 +31,20 @@ pub(super) async fn execute_request(request: WsRequest, env: &HandlerEnv) -> WsR
     let Some((kind, class)) = class_of(&request.type_) else {
         return route_request(request, env).await;
     };
-    let Some(command_id) = request
+    let command_id = request
         .command_id
         .as_deref()
-        .filter(|_| class.kind != ClassKind::Read)
-    else {
+        .filter(|_| class.kind != ClassKind::Read);
+    let Some(command_id) = command_id else {
+        if class.ledgered() {
+            // A ledgered command without an id has no replay protection:
+            // refused before it runs, nothing is recorded.
+            return WsReply::err(
+                request.id,
+                WsErrorCode::InvalidCommandId,
+                format!("`{kind}` requires a commandId"),
+            );
+        }
         return route_and_stamp(request, env).await;
     };
     if !is_valid_command_id(command_id) {

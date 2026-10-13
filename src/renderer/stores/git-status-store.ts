@@ -1,11 +1,13 @@
-﻿import type {
-  GitCommitContext,
-  GitDiffStat,
-  GitStashInfo,
-  GitStatusDetail
+﻿import {
+  type GitCommitContext,
+  type GitDiffStat,
+  type GitStashInfo,
+  type GitStatusDetail,
+  PRECONDITION_FAILED_CODE
 } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
+import { AcpTransportError } from '@/lib/acp-transport/types'
 import { isGitWriteBlocked } from '@/lib/active-working-copy'
 import { gitApi } from '@/lib/git-api'
 import { logFrontendError } from '@/lib/log-api'
@@ -310,6 +312,10 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     const isCurrent = () => commitContextRequests[key] === token
     try {
       const context = await gitApi.getCommitContext(cwd)
+      const head = isCurrent() ? await readHead(cwd, context.hasHead) : undefined
+      if (isCurrent() && head !== undefined) {
+        knownHeads[key] = head
+      }
       if (isCurrent()) {
         set((state) => ({
           commitContexts: { ...state.commitContexts, [key]: context }
@@ -321,6 +327,9 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
       return null
     } catch (error) {
       if (!isCurrent()) return null
+      // The HEAD last shown is as stale as the context: no precondition is
+      // better than a wrong one.
+      delete knownHeads[key]
       // Drop any stale context so the footer disables its actions rather than
       // acting on out-of-date ahead/staged/HEAD data.
       set((state) => {
@@ -447,7 +456,21 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
 
   commit: async (cwd, summary, description, amend) => {
     assertWritable(cwd)
-    await gitApi.commit(cwd, summary, description, amend)
+    try {
+      // The commit lands on the HEAD the panel last showed: a HEAD moved by
+      // another client or terminal refuses it (`precondition_failed`).
+      const key = trackPath(cwd)
+      if (knownHeads[key] === undefined) await get().fetchCommitContext(cwd)
+      const expectedHead = knownHeads[key]
+      // No commit without a known HEAD: the host could not refuse a moved one.
+      if (expectedHead === undefined || expectedHead === null) {
+        throw new Error('HEAD could not be read. Refresh and try again.')
+      }
+      await gitApi.commit(cwd, summary, description, amend, expectedHead)
+    } catch (error) {
+      if (isPreconditionFailed(error)) await refreshAfterWrite(get, cwd)
+      throw error
+    }
     // The mutation succeeded. Refresh status/context to reflect the new HEAD,
     // but never let a refresh failure surface as a commit failure (the commit
     // already happened) â€” swallow refresh errors here.
@@ -606,6 +629,27 @@ const diffRequestVersions: Record<string, number> = {}
  * render data, so it lives outside React state (same rationale as above). */
 const commitContextRequests: Record<string, number> = {}
 
+/** Full sha of HEAD (`''`: unborn branch) as of the last commit-context fetch,
+ * per tracked path: the `expectedHead` of the next commit. `null`: HEAD could not
+ * be read. Absent before the first fetch and after a failed one. A commit needs a
+ * known value (it fetches one when absent). Control metadata. */
+const knownHeads: Record<string, string | null> = {}
+
+/** HEAD's full sha (`''` on an unborn branch); `null` when it cannot be read. */
+async function readHead(cwd: string, hasHead: boolean): Promise<string | null> {
+  if (!hasHead) return ''
+  try {
+    const [head] = await gitApi.getLog(cwd, 1)
+    return head?.hash ?? null
+  } catch {
+    return null
+  }
+}
+
+function isPreconditionFailed(error: unknown): boolean {
+  return error instanceof AcpTransportError && error.code === PRECONDITION_FAILED_CODE
+}
+
 /** Monotonic request token per working-copy key for 
 efreshStatus (same idea). */
 const statusRequests: Record<string, number> = {}
@@ -631,6 +675,7 @@ export function resetGitStatusStoreControlForTests(): void {
   diffStatWatchers.clear()
   diffStatLastFetch.clear()
   for (const key of Object.keys(commitContextRequests)) delete commitContextRequests[key]
+  for (const key of Object.keys(knownHeads)) delete knownHeads[key]
   for (const key of Object.keys(statusRequests)) delete statusRequests[key]
 }
 

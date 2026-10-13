@@ -23,7 +23,8 @@
 //! `rotate_claim` cannot hand out the new credential (it was never kept), so it
 //! answers `OUTCOME_UNKNOWN` and the client recovers through `list_preserved`.
 //!
-//! A command without a `commandId` keeps today's behavior on every carrier.
+//! A ledgered command without a `commandId` is refused with
+//! `INVALID_COMMAND_ID` on every carrier, before it runs.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -135,6 +136,25 @@ pub fn invalid_command_id_message() -> String {
     format!(
         "commandId must be 1-{MAX_COMMAND_ID_LEN} characters of A-Z, a-z, 0-9, `_` or `-`"
     )
+}
+
+/// A refusal text for a ledgered terminal command sent without a `commandId`.
+#[must_use]
+pub fn missing_command_id_message(kind: &str) -> String {
+    format!("`{kind}` requires a commandId")
+}
+
+/// The `commandId` of a ledgered terminal command: required and well-formed,
+/// else the `INVALID_COMMAND_ID` refusal `(code, message)` of the carrier.
+pub fn required_command_id<'a>(
+    kind: &str,
+    command_id: Option<&'a str>,
+) -> Result<&'a str, (&'static str, String)> {
+    match command_id {
+        None => Err((INVALID_COMMAND_ID_CODE, missing_command_id_message(kind))),
+        Some(id) if is_valid_command_id(id) => Ok(id),
+        Some(_) => Err((INVALID_COMMAND_ID_CODE, invalid_command_id_message())),
+    }
 }
 
 /// A digest of a terminal request's identity: the kind plus the entity-naming
@@ -361,11 +381,12 @@ where
     admit(ledger, kind, id, fingerprint(kind, fields), || None, execute).await
 }
 
-/// Spawn a terminal. With `options.command_id` the spawn is recorded BEFORE a
-/// terminal slot is reserved, a concurrent same-id spawn waits for the first,
-/// a resend answers with the existing PTY plus a FRESH claim (never a second
-/// PTY, never the first claim), and a spawn that fails releases the id so a
-/// retry executes. Without a `commandId` this is a plain spawn.
+/// Spawn a terminal. The spawn is recorded BEFORE a terminal slot is reserved
+/// (`options.command_id` is required: a spawn without one is refused with
+/// `INVALID_COMMAND_ID`), a concurrent same-id spawn waits for the first, a
+/// resend answers with the existing PTY plus a FRESH claim (never a second PTY,
+/// never the first claim), and a spawn that fails releases the id so a retry
+/// executes.
 ///
 /// On the desktop the replay's new `on_data` channel is dropped: the original
 /// channel stays bound to the PTY, so the client attaches to receive output.
@@ -376,12 +397,9 @@ pub async fn spawn(
     on_data: Option<Channel<Response>>,
 ) -> Outcome<SpawnedTerminal> {
     let Some(id) = options.command_id.clone() else {
-        return match pty.spawn(options, on_data).await {
-            Ok(spawned) => Outcome::Executed(spawned),
-            Err(message) => Outcome::Rejected {
-                code: "SPAWN_FAILED",
-                message,
-            },
+        return Outcome::Rejected {
+            code: INVALID_COMMAND_ID_CODE,
+            message: missing_command_id_message(SPAWN),
         };
     };
     let print = spawn_fingerprint(&options);

@@ -308,11 +308,9 @@ pub async fn terminal_rotate_claim(
     pty_manager: State<'_, Arc<PtyManager>>,
     relay: State<'_, Arc<WsRelaySink>>,
 ) -> Result<IpcResult<RotatedClaim>, String> {
-    let Some(command_id) = command_id else {
-        return Ok(match pty_manager.rotate_claim(&terminal_id, &claim) {
-            Ok(new_claim) => IpcResult::success(RotatedClaim { claim: new_claim }),
-            Err(_) => IpcResult::error("Unauthorized", "UNAUTHORIZED"),
-        });
+    let command_id = match ledgered::required_command_id(ledgered::ROTATE_CLAIM, command_id.as_deref()) {
+        Ok(id) => id.to_string(),
+        Err((code, message)) => return Ok(IpcResult::error(message, code)),
     };
     let pty = Arc::clone(pty_manager.inner());
     let target = terminal_id.clone();
@@ -350,11 +348,9 @@ pub async fn terminal_revoke_claim(
     pty_manager: State<'_, Arc<PtyManager>>,
     relay: State<'_, Arc<WsRelaySink>>,
 ) -> Result<IpcResult<()>, String> {
-    let Some(command_id) = command_id else {
-        return Ok(match pty_manager.revoke_claim(&terminal_id, &claim) {
-            Ok(()) => IpcResult::success(()),
-            Err(_) => IpcResult::error("Unauthorized", "UNAUTHORIZED"),
-        });
+    let command_id = match ledgered::required_command_id(ledgered::REVOKE_CLAIM, command_id.as_deref()) {
+        Ok(id) => id.to_string(),
+        Err((code, message)) => return Ok(IpcResult::error(message, code)),
     };
     let pty = Arc::clone(pty_manager.inner());
     let target = terminal_id.clone();
@@ -379,8 +375,8 @@ pub async fn terminal_revoke_claim(
 
 /// Write data to a terminal
 ///
-/// With a `commandId` (one per input chunk) a resend of a chunk that already
-/// reached the PTY answers ok instead of typing it twice.
+/// The `commandId` is optional on the desktop (see the body); with one a resend
+/// of a chunk that already reached the PTY answers ok instead of typing it twice.
 #[tauri::command]
 pub async fn terminal_write(
     terminal_id: String,
@@ -389,6 +385,9 @@ pub async fn terminal_write(
     pty_manager: State<'_, Arc<PtyManager>>,
     relay: State<'_, Arc<WsRelaySink>>,
 ) -> Result<IpcResult<()>, String> {
+    // The desktop IPC has no lost-reply window and a keystroke per ledger entry
+    // would flood the shared ledger: an id is optional here and a write without
+    // one is plain. (`/terminal/ws` write requires one per chunk.)
     let Some(command_id) = command_id else {
         return Ok(match pty_manager.write(&terminal_id, &data).await {
             Ok(()) => IpcResult::success(()),
@@ -443,11 +442,9 @@ pub async fn terminal_kill(
     pty_manager: State<'_, Arc<PtyManager>>,
     relay: State<'_, Arc<WsRelaySink>>,
 ) -> Result<IpcResult<()>, String> {
-    let Some(command_id) = command_id else {
-        return Ok(match pty_manager.kill(&terminal_id).await {
-            Ok(()) => IpcResult::success(()),
-            Err(e) => IpcResult::error(e, "KILL_FAILED"),
-        });
+    let command_id = match ledgered::required_command_id(ledgered::KILL, command_id.as_deref()) {
+        Ok(id) => id.to_string(),
+        Err((code, message)) => return Ok(IpcResult::error(message, code)),
     };
     let pty = Arc::clone(pty_manager.inner());
     let target = terminal_id.clone();

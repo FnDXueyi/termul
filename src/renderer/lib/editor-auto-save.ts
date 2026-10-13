@@ -60,6 +60,10 @@ export function scheduleAutoSave(filePath: string): void {
 
       const file = useEditorStore.getState().openFiles.get(filePath)
       if (!file || !file.isDirty) return
+      // The host refused the last save because the file changed on disk: only
+      // the user's choice on the "File changed externally" notice (Reload or
+      // Overwrite) resolves that, not a retry.
+      if (file.externalConflict) return
 
       // A save/reload in flight will finish on its own; wait another window
       // instead of writing concurrently or dropping the pending save.
@@ -72,12 +76,13 @@ export function scheduleAutoSave(filePath: string): void {
         .getState()
         .saveFile(filePath)
         .then((saved) => {
-          const stillDirty = Boolean(useEditorStore.getState().openFiles.get(filePath)?.isDirty)
+          const latest = useEditorStore.getState().openFiles.get(filePath)
+          const stillDirty = Boolean(latest?.isDirty)
           if (saved) {
             failedAutoSavePaths.delete(filePath)
             return true
           }
-          if (!stillDirty) return false
+          if (!stillDirty || latest?.externalConflict) return false
           // Toast once per failure episode; the retry keeps trying quietly.
           if (!failedAutoSavePaths.has(filePath)) {
             failedAutoSavePaths.add(filePath)

@@ -35,6 +35,7 @@ vi.mock('@/lib/git-api', () => ({
     commit: vi.fn(),
     push: vi.fn(),
     getCommitContext: vi.fn(),
+    getLog: vi.fn(),
     getDiffStat: vi.fn(),
     stashSave: vi.fn(),
     stashList: vi.fn(),
@@ -67,6 +68,7 @@ const { gitApi } = gitApiModule as unknown as {
     commit: ReturnType<typeof vi.fn>
     push: ReturnType<typeof vi.fn>
     getCommitContext: ReturnType<typeof vi.fn>
+    getLog: ReturnType<typeof vi.fn>
     getDiffStat: ReturnType<typeof vi.fn>
     stashSave: ReturnType<typeof vi.fn>
     stashList: ReturnType<typeof vi.fn>
@@ -95,6 +97,7 @@ const makeContext = (over: Partial<GitCommitContext> = {}): GitCommitContext => 
 
 beforeEach(() => {
   vi.clearAllMocks()
+  gitApi.getLog.mockResolvedValue([{ hash: 'a'.repeat(40) }])
   resetGitStatusStoreControlForTests()
   useGitStatusStore.setState({
     paths: {},
@@ -197,15 +200,103 @@ describe('git-status-store commit footer', () => {
   })
 
   it('commit invokes gitApi.commit then refreshes status and context', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: false } as GitCommitContext)
     await useGitStatusStore.getState().commit(CWD, 'summary', 'body', false)
-    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'summary', 'body', false)
+    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'summary', 'body', false, '')
     expect(gitApi.getStatus).toHaveBeenCalledWith(CWD)
     expect(gitApi.getCommitContext).toHaveBeenCalledWith(CWD)
   })
 
+  it('commit sends the HEAD last shown by the commit context as expectedHead (unborn branch: empty)', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockResolvedValue([{ hash: 'f'.repeat(40) }])
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    await useGitStatusStore.getState().commit(CWD, 'summary', 'body', false)
+    expect(gitApi.getLog).toHaveBeenCalledWith(CWD, 1)
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 'summary', 'body', false, 'f'.repeat(40))
+
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: false } as GitCommitContext)
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    await useGitStatusStore.getState().commit(CWD, 'first', '', false)
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 'first', '', false, '')
+  })
+
+  it('a commit refused because HEAD moved refreshes the panel (new HEAD for the retry) and still throws', async () => {
+    const { PRECONDITION_FAILED_CODE } = await import('@shared/types/ipc.types')
+    const { AcpTransportError } = await import('@/lib/acp-transport/types')
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockResolvedValue([{ hash: '1'.repeat(40) }])
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    gitApi.commit.mockRejectedValueOnce(
+      new AcpTransportError(PRECONDITION_FAILED_CODE, 'HEAD moved')
+    )
+    gitApi.getLog.mockResolvedValue([{ hash: '2'.repeat(40) }])
+
+    await expect(useGitStatusStore.getState().commit(CWD, 's', '', false)).rejects.toMatchObject({
+      code: PRECONDITION_FAILED_CODE
+    })
+
+    await useGitStatusStore.getState().commit(CWD, 's', '', false)
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false, '2'.repeat(40))
+  })
+
+  it('a failed commit-context fetch forgets the HEAD: the next commit refetches it and is refused when that fails too', async () => {
+    gitApi.getCommitContext.mockResolvedValueOnce({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockResolvedValue([{ hash: 'c'.repeat(40) }])
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    gitApi.getCommitContext.mockRejectedValue(new Error('locked'))
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+
+    await expect(useGitStatusStore.getState().commit(CWD, 's', '', false)).rejects.toThrow(
+      'HEAD could not be read'
+    )
+    expect(gitApi.commit).not.toHaveBeenCalled()
+  })
+
+  it('a commit before any context fetch reads the HEAD first and sends it', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockResolvedValue([{ hash: 'd'.repeat(40) }])
+
+    await useGitStatusStore.getState().commit(CWD, 's', '', false)
+
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false, 'd'.repeat(40))
+  })
+
+  it('a HEAD that cannot be read keeps the context but refuses a commit without a precondition', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockRejectedValue(new Error('locked'))
+
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+
+    expect(useGitStatusStore.getState().commitContexts[CWD]).toMatchObject({ hasHead: true })
+    await expect(useGitStatusStore.getState().commit(CWD, 's', '', false)).rejects.toThrow(
+      'HEAD could not be read'
+    )
+    expect(gitApi.commit).not.toHaveBeenCalled()
+  })
+
+  it('a superseded commit-context fetch does not record its HEAD', async () => {
+    let releaseSlow: (context: GitCommitContext) => void = () => {}
+    gitApi.getCommitContext.mockReturnValueOnce(
+      new Promise<GitCommitContext>((resolve) => {
+        releaseSlow = resolve
+      })
+    )
+    gitApi.getLog.mockResolvedValue([{ hash: 'old'.padEnd(40, '0') }])
+    const slow = useGitStatusStore.getState().fetchCommitContext(CWD)
+    gitApi.getCommitContext.mockResolvedValueOnce({ hasHead: false } as GitCommitContext)
+    await useGitStatusStore.getState().fetchCommitContext(CWD)
+    releaseSlow({ hasHead: true } as GitCommitContext)
+    await slow
+
+    await useGitStatusStore.getState().commit(CWD, 's', '', false)
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false, '')
+  })
+
   it('commit passes amend flag through', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: false } as GitCommitContext)
     await useGitStatusStore.getState().commit(CWD, 'reword', '', true)
-    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'reword', '', true)
+    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'reword', '', true, '')
   })
 
   it('commit propagates errors to the caller', async () => {

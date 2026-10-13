@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { __resetCommandEngineForTesting, AWAITED_RESEND_DELAYS_MS } from '@/lib/command-engine'
+import { __clearCommandJournalForTesting } from '@/lib/command-journal'
 import { mockSpawnedTerminal } from '@/lib/test-utils/terminal'
 
-const mockInvoke = vi.fn()
-const mockListen = vi.fn()
+const { mockInvoke, mockListen } = vi.hoisted(() => ({ mockInvoke: vi.fn(), mockListen: vi.fn() }))
 
 vi.mock('@tauri-apps/api/core', () => {
   // Minimal Tauri binary Channel double: records the `onmessage` handler so
@@ -20,6 +21,8 @@ vi.mock('@tauri-apps/api/event', () => ({
 describe('tauri-terminal-api', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    __clearCommandJournalForTesting()
+    __resetCommandEngineForTesting()
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
@@ -137,7 +140,12 @@ describe('tauri-terminal-api', () => {
       expect(mockInvoke).toHaveBeenCalledTimes(1)
       const [command, args] = mockInvoke.mock.calls[0]
       expect(command).toBe('terminal_spawn')
-      expect(args.options).toEqual({ projectId: 'p1', cols: 120, rows: 32 })
+      expect(args.options).toEqual({
+        projectId: 'p1',
+        cols: 120,
+        rows: 32,
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
+      })
       // Output still streams through a raw binary channel (shape unchanged).
       expect(args.onData).toBeInstanceOf(Channel)
 
@@ -275,7 +283,8 @@ describe('tauri-terminal-api', () => {
       expect(mockInvoke).toHaveBeenCalledTimes(1)
       expect(mockInvoke).toHaveBeenCalledWith('terminal_rotate_claim', {
         terminalId: 'terminal-1752-1',
-        claim: 'lease-claim-64-hex'
+        claim: 'lease-claim-64-hex',
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
       })
       // Possession-based rotation: the response carries the fresh credential.
       expect(result).toEqual({ success: true, data: { claim: 'rotated-claim-64-hex' } })
@@ -290,9 +299,109 @@ describe('tauri-terminal-api', () => {
       expect(mockInvoke).toHaveBeenCalledTimes(1)
       expect(mockInvoke).toHaveBeenCalledWith('terminal_revoke_claim', {
         terminalId: 'terminal-1752-1',
-        claim: 'lease-claim-64-hex'
+        claim: 'lease-claim-64-hex',
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
       })
       expect(result).toEqual({ success: true, data: undefined })
+    })
+
+    it('outcome_unknown from a spawn resend surfaces as a failure and is never resent', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockRejectedValue('outcome_unknown: no longer known')
+
+      const result = await api.spawn({ projectId: 'p1' })
+
+      expect(result).toMatchObject({ success: false, code: 'OUTCOME_UNKNOWN' })
+      expect(mockInvoke).toHaveBeenCalledTimes(1)
+    })
+
+    it('a spawn resent in-call (reply lost / first run still going) keeps its id, drops the new Channel and attaches with the fresh claim', async () => {
+      vi.useFakeTimers()
+      try {
+        const { api, Channel } = await loadApi()
+        mockInvoke
+          .mockRejectedValueOnce('command_in_progress: still running')
+          .mockResolvedValueOnce({ success: true, data: { ...SPAWNED, claim: 'fresh-claim' } })
+          .mockResolvedValueOnce({ success: true, data: ATTACHED })
+        const pending = api.spawn({ projectId: 'p1', cwd: '/w' })
+        await vi.advanceTimersByTimeAsync(AWAITED_RESEND_DELAYS_MS[0])
+        const result = await pending
+
+        const [first, resend, attach] = mockInvoke.mock.calls
+        expect(resend[1].options.commandId).toBe(first[1].options.commandId)
+        expect(attach[0]).toBe('terminal_attach')
+        expect(attach[1]).toMatchObject({
+          terminalId: SPAWNED.id,
+          claim: 'fresh-claim',
+          lastSeq: 0
+        })
+        expect(attach[1].onData).toBeInstanceOf(Channel)
+        expect(attach[1].onData).not.toBe(resend[1].onData)
+        expect(result).toEqual({ success: true, data: { ...SPAWNED, claim: 'fresh-claim' } })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a NEW spawn after an uncertain one is a new intent: it gets a different id (never the old PTY)', async () => {
+      vi.useFakeTimers()
+      try {
+        const { api } = await loadApi()
+        mockInvoke.mockRejectedValue('command_in_progress: still running')
+        const first = api.spawn({ projectId: 'p1', cwd: '/w' })
+        for (const delay of AWAITED_RESEND_DELAYS_MS) await vi.advanceTimersByTimeAsync(delay)
+        await expect(first).resolves.toMatchObject({ success: false, code: 'COMMAND_IN_PROGRESS' })
+        const firstId = mockInvoke.mock.calls[0][1].options.commandId
+
+        mockInvoke.mockReset()
+        mockInvoke.mockResolvedValue({ success: true, data: SPAWNED })
+        await api.spawn({ projectId: 'p1', cwd: '/w' })
+        expect(mockInvoke.mock.calls[0][1].options.commandId).not.toBe(firstId)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('kill sends a well-formed commandId; a desktop write sends none (no lost-reply window, no ledger flood)', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockResolvedValue({ success: true, data: undefined })
+
+      await api.kill('terminal-1752-1')
+      await api.write('terminal-1752-1', 'ls\r')
+
+      expect(mockInvoke).toHaveBeenNthCalledWith(1, 'terminal_kill', {
+        terminalId: 'terminal-1752-1',
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
+      })
+      expect(mockInvoke).toHaveBeenNthCalledWith(2, 'terminal_write', {
+        terminalId: 'terminal-1752-1',
+        data: 'ls\r'
+      })
+    })
+
+    it('a spawn the host refused mints a NEW id on the next try', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockResolvedValue({ success: false, error: 'no shell', code: 'SPAWN_FAILED' })
+      await api.spawn({ projectId: 'p1' })
+      await api.spawn({ projectId: 'p1' })
+      const ids = mockInvoke.mock.calls.map(
+        ([, args]) => (args as { options: { commandId: string } }).options.commandId
+      )
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).not.toBe(ids[0])
+    })
+
+    it('a spawn whose invoke rejects reports INVOKE_ERROR and mints a NEW id on the next try', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockRejectedValue(new Error('no such command'))
+      const first = await api.spawn({ projectId: 'p1' })
+      await api.spawn({ projectId: 'p1' })
+      expect(first).toMatchObject({ success: false, code: 'INVOKE_ERROR' })
+      const ids = mockInvoke.mock.calls.map(
+        ([, args]) => (args as { options: { commandId: string } }).options.commandId
+      )
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).not.toBe(ids[0])
     })
   })
 })

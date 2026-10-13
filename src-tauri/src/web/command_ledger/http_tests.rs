@@ -16,7 +16,7 @@ use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use super::test_clock::ManualClock;
+use super::test_clock::{fresh_command_id, ManualClock};
 use super::*;
 use crate::acp::AcpManager;
 use crate::web::fs_api::{self, IpcBody};
@@ -146,8 +146,24 @@ impl Reply {
     }
 }
 
+/// Send a request. A write without an explicit `id` is stamped with a fresh one
+/// (a ledgered route refuses a bare request); [`send_unstamped`] sends none.
 async fn send(app: &Router, method: &str, uri: &str, body: Value, id: Option<&str>) -> Reply {
+    let minted;
+    let id = match id {
+        Some(id) => Some(id),
+        None if method != "GET" => {
+            minted = fresh_command_id();
+            Some(minted.as_str())
+        }
+        None => None,
+    };
     send_from(app, method, uri, body, id, SocketAddr::from(LOOPBACK)).await
+}
+
+/// Send a request with no `X-Command-Id` header at all.
+async fn send_unstamped(app: &Router, method: &str, uri: &str, body: Value) -> Reply {
+    send_from(app, method, uri, body, None, SocketAddr::from(LOOPBACK)).await
 }
 
 async fn send_from(
@@ -259,9 +275,28 @@ async fn a_lost_reply_to_a_rename_is_answered_with_the_original_outcome() {
     assert_eq!(resend.status, StatusCode::OK);
     assert!(to.exists() && !from.exists());
 
-    // Without a commandId the repeat is today's error, unchanged.
-    let bare = send(&app, "POST", "/fs/rename", body, None).await;
-    assert_eq!(code(&bare), "RENAME_ERROR");
+    // A ledgered route refuses a request without a commandId, before it runs.
+    let bare = send_unstamped(&app, "POST", "/fs/rename", body).await;
+    assert_eq!(code(&bare), "INVALID_COMMAND_ID");
+}
+
+#[tokio::test]
+async fn a_workspace_write_without_a_command_id_is_refused() {
+    let dir = TempDir::new("workspace-bare");
+    let mut state = host(dir.path());
+    state.workspace_manifest = Some(
+        crate::acp::WorkspaceManifestService::open(dir.path().join("manifests"))
+            .await
+            .expect("open manifest store"),
+    );
+    let app = app(state);
+    let body = json!({
+        "basedRevision": null,
+        "manifest": { "projectId": "p1", "revision": 0, "updatedAt": 0 },
+    });
+
+    let bare = send_unstamped(&app, "POST", "/workspace/p1/write", body).await;
+    assert_eq!(code(&bare), "INVALID_COMMAND_ID", "{}", bare.text);
 }
 
 #[tokio::test]
@@ -476,7 +511,15 @@ async fn expected_absent_only_creates_a_new_file() {
 
     assert!(ok(&send(&app, "POST", "/fs/write", create.clone(), None).await));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
-    let again = send(&app, "POST", "/fs/write", create, None).await;
+    // A different write over the now-existing file is stale.
+    let again = send(
+        &app,
+        "POST",
+        "/fs/write",
+        json!({ "path": path_str(&file), "content": "second", "expected": "absent" }),
+        None,
+    )
+    .await;
     assert_eq!(code(&again), "PRECONDITION_FAILED");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
 }
@@ -724,11 +767,11 @@ async fn a_worktree_create_resend_replays_and_never_finds_a_worktree_by_existenc
     assert_eq!(code(&conflict), "COMMAND_CONFLICT");
 
     // A NEW id for the same branch is a real conflict, not a resend: the
-    // original refusal stands (with or without an id).
+    // original refusal stands.
     let fresh_id = send(&host_one, "POST", "/worktree/create", body.clone(), Some("wt-2")).await;
     assert_eq!(code(&fresh_id), "BRANCH_ALREADY_HAS_WORKTREE");
-    let bare = send(&host_one, "POST", "/worktree/create", body, None).await;
-    assert_eq!(code(&bare), "BRANCH_ALREADY_HAS_WORKTREE");
+    let bare = send_unstamped(&host_one, "POST", "/worktree/create", body).await;
+    assert_eq!(code(&bare), "INVALID_COMMAND_ID");
 }
 
 #[tokio::test]
@@ -839,6 +882,75 @@ fn credential_and_secret_kinds_are_never_admitted() {
     }
 }
 
+/// Enforcement (AD-5): every ledgered domain kind is refused without an id on
+/// BOTH carriers (HTTP header, Tauri argument), its effect never runs and
+/// nothing is recorded; the naturally idempotent kinds are never refused.
+#[tokio::test]
+async fn every_ledgered_domain_kind_refuses_a_request_without_a_command_id() {
+    let kinds = [
+        "fs_write", "fs_rename", "fs_copy", "git_commit", "git_discard", "git_stash_save",
+        "git_stash_apply", "git_stash_pop", "git_stash_drop", "git_stage_hunk",
+        "git_unstage_hunk", "git_create_branch", "worktree_create", "worktree_rename_branch",
+        "workspace_write", "install_acp_agent",
+    ];
+    let ledger = Arc::new(CommandLedger::new(RETENTION));
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for kind in kinds {
+        let (_, class) = domain_class(kind).unwrap_or_else(|| panic!("{kind} has no class"));
+        assert!(class.ledgered(), "{kind}");
+
+        let counter = Arc::clone(&runs);
+        let body = run_http(
+            &ledger,
+            &HeaderMap::new(),
+            kind,
+            fingerprint_of(kind, &[("cwd", "/repo")]),
+            no_entity(),
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                IpcBody::ok(())
+            },
+        )
+        .await;
+        assert_eq!(body.code.as_deref(), Some("INVALID_COMMAND_ID"), "{kind}: http");
+
+        let counter = Arc::clone(&runs);
+        let refused = run_domain(
+            &ledger,
+            kind,
+            None,
+            fingerprint_of(kind, &[("cwd", "/repo")]),
+            no_entity(),
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.starts_with("invalid_command_id"), "{kind}: tauri {refused}");
+    }
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0, "no effect ran");
+    assert_eq!(ledger.counts(), (0, 0, 0), "a refusal leaves no entry");
+
+    // A kind that is not ledgered runs without an id.
+    let counter = Arc::clone(&runs);
+    let body = run_http(
+        &ledger,
+        &HeaderMap::new(),
+        "git_stage",
+        fingerprint_of("git_stage", &[("cwd", "/repo")]),
+        no_entity(),
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            IpcBody::ok(())
+        },
+    )
+    .await;
+    assert!(body.success);
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn the_tauri_carrier_replays_errors_and_flags_a_conflict() {
     let ledger = Arc::new(CommandLedger::new(RETENTION));
@@ -879,10 +991,10 @@ async fn the_tauri_carrier_replays_errors_and_flags_a_conflict() {
     assert!(conflict.starts_with("command_conflict"), "{conflict}");
     let invalid = run(&[("cwd", "/repo")], Some("bad id"), false).await.unwrap_err();
     assert!(invalid.starts_with("invalid_command_id"), "{invalid}");
-    // No id: runs every time, never recorded.
-    run(&[("cwd", "/repo")], None, false).await.unwrap();
-    run(&[("cwd", "/repo")], None, false).await.unwrap();
-    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+    // No id: refused before it runs, nothing recorded.
+    let missing = run(&[("cwd", "/repo")], None, false).await.unwrap_err();
+    assert!(missing.starts_with("invalid_command_id"), "{missing}");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 mod routes;

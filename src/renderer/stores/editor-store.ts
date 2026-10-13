@@ -1,3 +1,4 @@
+import { COMMAND_RESULT_CODES } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
@@ -13,6 +14,7 @@ import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { markEditorSelfSave } from '@/lib/editor-self-save'
 import { logFrontendError } from '@/lib/log-api'
 import { scheduleGitStatusRefreshForPath } from '@/lib/schedule-git-status-refresh'
+import { sha256Hex } from '@/lib/sha256-hex'
 
 /** Saves currently in flight, by file path (in-flight guard, QA r2 story 4). */
 const savesInFlight = new Map<string, Promise<boolean>>()
@@ -47,6 +49,37 @@ function logSaveBoundary(
     message: `editor save succeeded ${detail}`
   })
 }
+
+/**
+ * The host refused a save because the file changed on disk since it was read
+ * (`PRECONDITION_FAILED`): same "File changed externally" notice the file
+ * watcher raises for a dirty buffer. Reload takes the disk version; Overwrite
+ * keeps the buffer and saves it without a precondition.
+ */
+function notifyExternalChange(path: string): void {
+  toast('File changed externally', {
+    description: path.split(/[\\/]/).pop() || path,
+    action: {
+      label: 'Reload',
+      onClick: () => {
+        void useEditorStore.getState().reloadFile(path, { force: true })
+      }
+    },
+    cancel: {
+      label: 'Overwrite',
+      onClick: () => {
+        void useEditorStore.getState().overwriteFile(path)
+      }
+    }
+  })
+}
+
+/** Write failures that say nothing about whether the host applied the write. */
+const UNCERTAIN_WRITE_CODES: ReadonlySet<string> = new Set([
+  'NETWORK_ERROR',
+  COMMAND_RESULT_CODES.OUTCOME_UNKNOWN,
+  COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS
+])
 
 const EDITOR_TAB_LIMIT = 15
 
@@ -101,6 +134,19 @@ export interface EditorFileState {
   scrollTop: number
   operationStatus: 'idle' | 'saving' | 'reloading' | 'saved'
   /**
+   * sha256 of the bytes this buffer was last read from / saved to (web host
+   * only): sent as the `expected` precondition of the next save so a write over
+   * a file changed elsewhere is refused instead of overwriting it.
+   */
+  contentHash?: string
+  /**
+   * The host reports content hashes for this file (web): kept when `contentHash`
+   * is dropped (overwrite) so the next successful save re-establishes it.
+   */
+  tracksHash?: true
+  /** The host refused the last save (`PRECONDITION_FAILED`): the file changed on disk. */
+  externalConflict?: boolean
+  /**
    * Set when a restored unsaved draft differs from a file that changed on disk
    * after the draft was saved. `content` holds the disk version; the draft is
    * kept here until the user resolves it (never silently dropped).
@@ -142,7 +188,14 @@ export interface EditorState {
   setViewMode: (path: string, mode: 'code' | 'markdown') => void
   updateCursorPosition: (path: string, line: number, col: number) => void
   updateScrollTop: (path: string, scrollTop: number) => void
-  reloadFile: (path: string) => Promise<void>
+  /**
+   * Save the buffer over whatever is on disk: drops the stored hash (and the
+   * conflict flag) so the write carries no precondition. The user's answer to
+   * "File changed externally".
+   */
+  overwriteFile: (path: string) => Promise<boolean>
+  /** `force`: reload even a dirty buffer (the user chose to take the disk version). */
+  reloadFile: (path: string, options?: { force?: boolean }) => Promise<void>
   setActiveFilePath: (path: string | null) => void
   clearAllFiles: () => void
   hasDirtyFiles: () => boolean
@@ -212,6 +265,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       isDirty: false,
       language: detectLanguage(path),
       lastModified: result.data.modifiedAt,
+      ...(result.data.contentHash
+        ? { contentHash: result.data.contentHash, tracksHash: true as const }
+        : {}),
       viewMode: getDefaultViewMode(path),
       cursorPosition: { line: 1, col: 1 },
       scrollTop: 0,
@@ -347,17 +403,49 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ openFiles: newFiles })
 
       try {
-        const result = await filesystemApi.writeFile(path, snapshotContent)
+        let result = file.contentHash
+          ? await filesystemApi.writeFile(path, snapshotContent, {
+              expected: { sha256: file.contentHash }
+            })
+          : await filesystemApi.writeFile(path, snapshotContent)
+        // The reply was lost or its outcome is unknown: the host may or may not
+        // have applied the write. Read the file back. If it holds our content the
+        // write landed, so treat it as saved. Otherwise keep the hash this buffer
+        // was read at: the next save is checked against it, so it never
+        // overwrites a change made after the unknown write.
+        if (!result.success && file.tracksHash && UNCERTAIN_WRITE_CODES.has(result.code)) {
+          const disk = await filesystemApi.readFile(path)
+          if (disk.success && disk.data.content === snapshotContent) {
+            result = { success: true, data: undefined }
+          }
+        }
         if (!result.success) {
+          const conflict = result.code === COMMAND_RESULT_CODES.PRECONDITION_FAILED
+          // An unchecked write (an overwrite the user chose) whose outcome could
+          // not be confirmed has no hash to check a retry against: stop automatic
+          // saves and let the user decide again (Reload or Overwrite).
+          const needsDecision =
+            !conflict &&
+            !file.contentHash &&
+            file.tracksHash === true &&
+            UNCERTAIN_WRITE_CODES.has(result.code)
           const resetFiles = new Map(get().openFiles)
           const current = resetFiles.get(path)
           if (current) {
-            resetFiles.set(path, { ...current, operationStatus: 'idle' })
+            resetFiles.set(path, {
+              ...current,
+              operationStatus: 'idle',
+              ...(conflict || needsDecision ? { externalConflict: true } : {})
+            })
             set({ openFiles: resetFiles })
           }
+          if (conflict) notifyExternalChange(path)
           logSaveBoundary(path, snapshotContent.length, 'failed', result.error)
           return false
         }
+        // The host now holds exactly `snapshotContent`; its hash is the next
+        // save's precondition.
+        const savedHash = file.tracksHash ? sha256Hex(snapshotContent) : undefined
 
         const updatedFiles = new Map(get().openFiles)
         const current = updatedFiles.get(path)
@@ -370,7 +458,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           originalContent: current.content,
           isDirty: !bufferUnchanged,
           lastModified: Date.now(),
-          operationStatus: 'saved'
+          operationStatus: 'saved',
+          externalConflict: false,
+          ...(savedHash ? { contentHash: savedHash } : {})
         })
         set({ openFiles: updatedFiles })
         markEditorSelfSave(path)
@@ -461,13 +551,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ openFiles: newFiles })
   },
 
-  reloadFile: async (path: string): Promise<void> => {
+  overwriteFile: async (path: string): Promise<boolean> => {
+    const file = get().openFiles.get(path)
+    if (!file) return false
+    const files = new Map(get().openFiles)
+    files.set(path, { ...file, contentHash: undefined, externalConflict: false })
+    set({ openFiles: files })
+    return get().saveFile(path)
+  },
+
+  reloadFile: async (path: string, options?: { force?: boolean }): Promise<void> => {
     const { openFiles } = get()
     const file = openFiles.get(path)
     if (!file) return
 
     // Don't reload dirty (or draft-conflicted) files silently
-    if (file.isDirty || file.draftConflict) return
+    if ((file.isDirty && !options?.force) || file.draftConflict) return
 
     const snapshotContent = file.content
     const newFiles = new Map(get().openFiles)
@@ -499,6 +598,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           originalContent: result.data.content,
           isDirty: false,
           lastModified: result.data.modifiedAt,
+          contentHash: result.data.contentHash,
+          ...(result.data.contentHash ? { tracksHash: true as const } : {}),
+          externalConflict: false,
           operationStatus: 'idle'
         })
       } else {

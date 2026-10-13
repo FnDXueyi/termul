@@ -160,7 +160,8 @@ describe('tauri-workspace-manifest-api', () => {
       expect(args).toEqual({
         projectId: 'project-1',
         basedRevision: null,
-        manifest: sampleManifest
+        manifest: sampleManifest,
+        commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
       })
       expect(result).toEqual(updated)
     })

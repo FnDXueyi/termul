@@ -331,6 +331,38 @@ async fn a_malformed_or_disagreeing_command_id_is_refused_without_an_entry() {
     assert!(state.pty.get_all().is_empty());
 }
 
+/// Enforcement (AD-5): every ledgered terminal op is refused without an id,
+/// before it runs; the idempotent ops need none.
+#[tokio::test]
+async fn a_ledgered_terminal_op_without_a_command_id_is_refused_and_nothing_runs() {
+    let (state, _) = state_with_clock();
+    let mut conn = gate_test_ctx(true);
+    let spawned = spawn(&state, &mut conn, "spawn-1", "p").await.unwrap();
+    let id = str_of(&spawned, "id");
+    let claim = str_of(&spawned, "claim");
+
+    for (kind, payload) in [
+        ("spawn", json!({ "projectId": "p" })),
+        ("write", json!({ "terminalId": id, "data": "x" })),
+        ("kill", json!({ "terminalId": id })),
+        ("rotate_claim", json!({ "terminalId": id, "claim": claim })),
+        ("revoke_claim", json!({ "terminalId": id, "claim": claim })),
+    ] {
+        let refused = call(&state, &mut conn, request(kind, payload, None)).await;
+        assert_eq!(code(refused), "INVALID_COMMAND_ID", "{kind}");
+    }
+    // Nothing ran: still one PTY, the original claim still valid, only the spawn recorded.
+    assert_eq!(state.pty.get_all().len(), 1);
+    assert!(state.pty.verify_claim(&id, &claim).is_ok());
+    assert_eq!(entries(&state), (0, 1, 0));
+
+    // Idempotent ops (resize, detach, ...) need no id.
+    let resize = request("resize", json!({ "terminalId": id, "cols": 100, "rows": 30 }), None);
+    assert!(call(&state, &mut conn, resize).await.is_ok());
+
+    state.pty.force_kill(&id).await.unwrap();
+}
+
 #[tokio::test]
 async fn a_spawn_carries_its_command_id_in_the_payload_like_the_desktop_options() {
     let (state, _) = state_with_clock();
@@ -397,7 +429,7 @@ async fn a_spawn_resend_after_its_claim_was_revoked_is_outcome_unknown_and_never
     let revoke = request(
         "revoke_claim",
         json!({ "terminalId": id, "claim": str_of(&spawned, "claim") }),
-        None,
+        Some("revoke-1"),
     );
     call(&state, &mut conn, revoke).await.unwrap();
 

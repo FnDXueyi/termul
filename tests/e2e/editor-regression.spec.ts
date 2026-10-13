@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { expect, type Page, request, test } from 'playwright/test'
 import { E2E_BASE_URL, E2E_TOKEN } from './helpers'
 import { openWorkspace, selectColumnTab, selectProject } from './ui'
@@ -30,10 +31,16 @@ const RELOAD_FILE_NAME = 'e2e-reload.md'
 async function writeFileOnServer(path: string, content: string): Promise<void> {
   const api = await request.newContext()
   const res = await api.post(`${E2E_BASE_URL}/fs/write`, {
-    headers: { Authorization: `Bearer ${E2E_TOKEN}`, 'content-type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${E2E_TOKEN}`,
+      'content-type': 'application/json',
+      // /fs/write is ledgered: the host refuses it without a command id.
+      'X-Command-Id': randomUUID()
+    },
     data: { path, content }
   })
-  if (!res.ok()) throw new Error(`fs/write failed: ${res.status()}`)
+  const body = (await res.json()) as { success?: boolean; error?: string }
+  if (!res.ok() || !body.success) throw new Error(`fs/write failed: ${res.status()} ${body.error}`)
 }
 
 async function workspaceRoot(): Promise<string> {

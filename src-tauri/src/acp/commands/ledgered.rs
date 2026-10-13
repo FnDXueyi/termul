@@ -2,9 +2,10 @@
 //! `/ws` dispatch uses ([`run_command`]), shaped for `Result<T, String>`
 //! commands.
 //!
-//! A command without a `commandId` runs exactly as before. A ledgered kind
-//! with one is recorded before it runs and a resend gets the original
-//! outcome. Verdicts that are not an outcome surface as errors whose text
+//! A ledgered kind without a `commandId` is refused with `invalid_command_id`
+//! before it runs; with one it is recorded before it runs and a resend gets the
+//! original outcome. Commands of a naturally idempotent class run either way.
+//! Verdicts that are not an outcome surface as errors whose text
 //! starts with a stable code: `invalid_command_id`, `command_conflict`,
 //! `outcome_unknown`, `command_in_progress` (the `/ws` reply is the
 //! `{receipt:"in_progress"}` payload; a typed command cannot carry one) or
@@ -58,7 +59,16 @@ where
     T: Serialize + DeserializeOwned + Send + 'static,
     F: Future<Output = Result<T, String>> + Send + 'static,
 {
+    let class = tauri_request_type(command)
+        .and_then(class_of)
+        .filter(|(_, class)| class.ledgered());
     let Some(command_id) = command_id else {
+        if class.is_some() {
+            // A ledgered command without an id has no replay protection.
+            return Err(format!(
+                "{INVALID_COMMAND_ID}: `{command}` requires a commandId"
+            ));
+        }
         return execute.await;
     };
     if !is_valid_command_id(&command_id) {
@@ -66,8 +76,7 @@ where
             "{INVALID_COMMAND_ID}: commandId must be 1-{MAX_COMMAND_ID_LEN} characters of A-Z, a-z, 0-9, `_` or `-`"
         ));
     }
-    let class = tauri_request_type(command).and_then(class_of);
-    let Some((kind, class)) = class.filter(|(_, class)| class.ledgered()) else {
+    let Some((kind, class)) = class else {
         return execute.await;
     };
 

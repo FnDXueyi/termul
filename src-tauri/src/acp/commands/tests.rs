@@ -468,20 +468,31 @@ mod ledgered {
     }
 
     #[tokio::test]
-    async fn a_command_without_an_id_runs_every_time_and_a_malformed_id_runs_nothing() {
+    async fn a_ledgered_command_without_an_id_or_with_a_malformed_one_runs_nothing() {
         let host = host();
         let runs = Arc::new(AtomicUsize::new(0));
         let payload = json!({"agentId": "a", "sessionId": "s"});
 
-        for _ in 0..2 {
-            let ok = run(&host, "acp_close_session", None, payload.clone(), &runs, Ok(())).await;
-            assert_eq!(ok, Ok(()));
-        }
+        let missing = run(&host, "acp_close_session", None, payload.clone(), &runs, Ok(())).await;
         let malformed = run(&host, "acp_close_session", Some("not valid!"), payload, &runs, Ok(())).await;
 
+        assert!(missing.unwrap_err().starts_with("invalid_command_id"));
         assert!(malformed.unwrap_err().starts_with("invalid_command_id"));
-        assert_eq!(runs.load(Ordering::SeqCst), 2, "only the id-less runs executed");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "a refused command never executes");
         assert_eq!(host.0.ledger().counts(), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn an_idempotent_command_runs_without_an_id() {
+        let host = host();
+        let runs = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let ok = run(&host, "acp_logout", None, json!({"agentId": "a"}), &runs, Ok(())).await;
+            assert_eq!(ok, Ok(()));
+        }
+
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

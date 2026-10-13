@@ -18,6 +18,7 @@ import type {
   WriteOutcome
 } from '@shared/types/workspace-manifest.types'
 
+import { invokeIpcCommand } from './acp-transport/tauri-verdicts'
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
 
@@ -82,11 +83,11 @@ export function createTauriWorkspaceManifestApi(): WorkspaceManifestApi {
           code: 'INVOKE_ERROR'
         }
       }
-      return invokeIpc<WriteOutcome>(IPC_COMMANDS.WRITE, {
-        projectId,
-        basedRevision,
-        manifest
-      })
+      return invokeIpcCommand<WriteOutcome>(
+        IPC_COMMANDS.WRITE,
+        { projectId, basedRevision, manifest },
+        { kind: 'workspace_write', entityKey: projectId, fresh: true }
+      )
     },
 
     async deleteManifest(projectId: string): Promise<IpcResult<void>> {
