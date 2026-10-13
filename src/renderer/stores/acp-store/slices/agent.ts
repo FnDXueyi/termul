@@ -73,6 +73,19 @@ export const authenticatedAgents = new Set<AgentId>()
  */
 const inFlightAuth = new Map<string, Promise<boolean>>()
 
+/**
+ * Provider usage-limit failures (`errorKind` from the Claude ACP adapter) end
+ * only the turn: the agent process stays alive and keeps the conversation, so
+ * they must not mark the session or agent 'error' (that triggers a reopen).
+ */
+const PROVIDER_LIMIT_ERROR_KINDS = new Set(['rate_limit', 'billing_error'])
+
+function isProviderLimitError(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const kind = (data as { errorKind?: unknown }).errorKind
+  return typeof kind === 'string' && PROVIDER_LIMIT_ERROR_KINDS.has(kind)
+}
+
 /** True while an ACP `authenticate` call is still waiting. */
 export function isAnyAgentAuthInFlight(): boolean {
   return inFlightAuth.size > 0
@@ -846,8 +859,18 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     // Flush coalesced updates so the error reflects the final transcript state.
     flushCoalescedSync()
     const detail = parseAcpErrorDetail(e)
+    const providerLimit = Boolean(e.sessionId) && isProviderLimitError(detail.data)
+    if (providerLimit) {
+      void logFrontendError({
+        level: 'warn',
+        source: 'acp.onAgentError.providerLimit',
+        message: `Provider usage limit on session ${e.sessionId} (agent ${e.agentId}); keeping the chat live`
+      })
+    }
     set((s) => {
-      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      const agentStatus = providerLimit
+        ? s.agentStatus
+        : { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
       if (e.sessionId && s.sessions[e.sessionId] && s.sessions[e.sessionId].status !== 'closed') {
         return {
           agentStatus,
@@ -863,7 +886,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
               // (the agent may be wedged — the user should see an error, not
               // a perpetually-active turn). The `_onAgentDisconnected` reducer
               // now preserves the 'error' status (it skips 'error' sessions).
-              status: 'error' as SessionStatus,
+              status: providerLimit ? s.sessions[e.sessionId].status : ('error' as SessionStatus),
               lastError: e.message,
               lastErrorCode: detail.code ?? null,
               lastErrorData: detail.data,
