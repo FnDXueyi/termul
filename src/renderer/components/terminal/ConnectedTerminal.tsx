@@ -157,8 +157,10 @@ function ConnectedTerminalComponent({
   // The project this terminal's tree belongs to: a hidden ProjectTreeHost keeps
   // its own project (not the visible one) for the spawn root path.
   const hostProjectId = useProjectPaneContext()?.projectId
-  const treeProject = useProjectStore((state) =>
-    state.projects.find((p) => p.id === (hostProjectId || state.activeProjectId))
+  // Selects the path (a string), so a hidden terminal does not render again
+  // when a project switch rebuilds the project objects.
+  const treeProjectPath = useProjectStore(
+    (state) => state.projects.find((p) => p.id === (hostProjectId || state.activeProjectId))?.path
   )
   const shortcuts = useKeyboardShortcutsStore((state) => state.shortcuts)
   // Story 10 (F1/F10): terminal-channel health — drives the non-blocking
@@ -192,8 +194,8 @@ function ConnectedTerminalComponent({
   // recovery, visibility restore) read fresh state without re-subscribing.
   const isMobileWebShellRef = useRef(isMobileWebShell)
   isMobileWebShellRef.current = isMobileWebShell
-  const activeProjectPathRef = useRef<string | undefined>(treeProject?.path)
-  activeProjectPathRef.current = treeProject?.path
+  const activeProjectPathRef = useRef<string | undefined>(treeProjectPath)
+  activeProjectPathRef.current = treeProjectPath
   const shortcutsRef = useRef(shortcuts)
   shortcutsRef.current = shortcuts
   const cleanupDataListenerRef = useRef<(() => void) | null>(null)
