@@ -20,7 +20,7 @@ import {
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { IconActionButton } from '@/components/ui/icon-action-button'
 import { ShimmerText } from '@/components/ui/shimmer-text'
-import type { ContentBlock, ToolCall, ToolCallContent } from '@/lib/acp-api'
+import type { ContentBlock, DiffContent, ToolCall, ToolCallContent } from '@/lib/acp-api'
 import { resolveDiffLanguage } from '@/lib/diff-highlight'
 import { type FilePathResolutionContext, openFilePathFromTerminal } from '@/lib/file-path-links'
 import { logFrontendError } from '@/lib/log-api'
@@ -29,6 +29,7 @@ import { MediaBlocks } from './ChatMessage'
 import { CHAT_ROW_ICON, CHAT_ROW_MIN_H } from './chat-layout'
 import { CHEVRON_TRANSITION } from './chat-motion'
 import { DiffPreview } from './DiffPreview'
+import { EditDiffBlock } from './EditDiffBlock'
 import { HighlightedCode } from './highlighted-code'
 import { type ToolIconName, toolIconName } from './tool-call-format'
 import {
@@ -124,6 +125,11 @@ function extractItemText(item: ToolCallContent): string | null {
   return null
 }
 
+function diffContent(item: ToolCallContent): DiffContent {
+  const d = item as { path: string; oldText?: string | null; newText: string }
+  return { path: d.path, oldText: d.oldText ?? null, newText: d.newText }
+}
+
 /** Render one `ToolCallContent` item; shared with `SubagentDetailsDialog`. */
 export function renderContentItem(
   item: ToolCallContent,
@@ -132,13 +138,7 @@ export function renderContentItem(
   stream?: { terminalOutput?: string; terminalExitCode?: number | null }
 ): React.JSX.Element | null {
   if (item.type === 'diff') {
-    const d = item as { path: string; oldText?: string | null; newText: string }
-    return (
-      <DiffPreview
-        key={key}
-        diff={{ path: d.path, oldText: d.oldText ?? null, newText: d.newText }}
-      />
-    )
+    return <DiffPreview key={key} diff={diffContent(item)} />
   }
   if (item.type === 'content') {
     const c = item as { content?: ContentBlock }
@@ -240,6 +240,7 @@ function ToolCallCardComponent({
   const Icon = ICONS[toolIconName(toolCall)]
   const content = toolCall.content ?? []
   const hasContent = content.length > 0
+  const hasDiff = content.some((item) => item.type === 'diff')
   const terminalOutput = typeof toolCall.terminalOutput === 'string' ? toolCall.terminalOutput : ''
   const terminalExitCode =
     typeof toolCall.terminalExitCode === 'number' ? toolCall.terminalExitCode : undefined
@@ -277,21 +278,51 @@ function ToolCallCardComponent({
   const label = `${verb} ${primary}`.trim()
 
   const openFilePath = filePathContext ? toolCallFilePath(toolCall) : undefined
-  const openFile = useCallback(() => {
-    if (!openFilePath || !filePathContext) return
-    void openFilePathFromTerminal(openFilePath, filePathContext)
-      .then((result) => {
-        if (!result.ok) toast.error(result.message)
-      })
-      .catch((error: unknown) => {
-        void logFrontendError({
-          level: 'warn',
-          source: 'ToolCallCard.openFile',
-          message: `Failed to open ${openFilePath}: ${String(error)}`
+  const openFileAt = useCallback(
+    (path: string, line?: number) => {
+      if (!filePathContext) return
+      void openFilePathFromTerminal(line ? `${path}:${line}` : path, filePathContext)
+        .then((result) => {
+          if (!result.ok) toast.error(result.message)
         })
-        toast.error('Failed to open file from chat.')
-      })
-  }, [openFilePath, filePathContext])
+        .catch((error: unknown) => {
+          void logFrontendError({
+            level: 'warn',
+            source: 'ToolCallCard.openFile',
+            message: `Failed to open ${path}: ${String(error)}`
+          })
+          toast.error('Failed to open file from chat.')
+        })
+    },
+    [filePathContext]
+  )
+  const openFile = useCallback(() => {
+    if (openFilePath) openFileAt(openFilePath)
+  }, [openFilePath, openFileAt])
+
+  if (hasDiff && !isSubagent) {
+    return (
+      <div
+        aria-busy={running || undefined}
+        data-status={status}
+        className="group/tool relative w-full overflow-hidden px-1"
+      >
+        {content.map((item, i) =>
+          item.type === 'diff' ? (
+            <EditDiffBlock
+              key={i}
+              diff={diffContent(item)}
+              running={running}
+              failed={failed}
+              onOpenFile={filePathContext ? openFileAt : undefined}
+            />
+          ) : (
+            renderContentItem(item, i, language, stream)
+          )
+        )}
+      </div>
+    )
+  }
 
   // Row summary (icon + label + meta) lives inside the disclosure button so
   // clicking the label toggles details. The open-file button and chevron are
