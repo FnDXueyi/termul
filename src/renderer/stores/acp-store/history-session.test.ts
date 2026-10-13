@@ -1038,7 +1038,7 @@ describe('acp-store', () => {
       ],
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('cfg-1', '/w')]: 'fresh-agent'
+        [agentReuseKey('cfg-1', '/w', 'p1')]: 'fresh-agent'
       },
       agents: {
         ...s.agents,
@@ -1091,7 +1091,7 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('cfg-restart', '/w')]: 'fresh-agent'
+        [agentReuseKey('cfg-restart', '/w', 'p1')]: 'fresh-agent'
       },
       agents: {
         ...s.agents,

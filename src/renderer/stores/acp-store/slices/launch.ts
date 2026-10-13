@@ -144,16 +144,15 @@ function promotePreparedSession(
 }
 
 /**
- * A prepared session with no project, or with this project, can be claimed.
- * A session seeded for a different project keeps its agent (and Claude Account).
+ * A prepared session can be claimed only when it was seeded for this project.
+ * A session with no project was spawned on the default Claude Account.
  */
 function preparedSessionFitsProject(
   get: () => AcpState,
   sessionId: SessionId,
   projectId: string
 ): boolean {
-  const seeded = get().sessions[sessionId]?.projectId
-  return !seeded || seeded === projectId
+  return get().sessions[sessionId]?.projectId === projectId
 }
 
 type LaunchSliceState = Pick<

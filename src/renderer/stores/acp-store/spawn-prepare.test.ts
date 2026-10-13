@@ -163,6 +163,7 @@ import {
   reapOrphanPreparedSession,
   useAcpStore
 } from '@/stores/acp-store'
+import { useProjectStore } from '@/stores/project-store'
 import { FRESH, flushTurnEnd, seedSession } from './testkit'
 
 describe('acp-store', () => {
@@ -186,6 +187,7 @@ describe('acp-store', () => {
     _resetHistorySeqWatermarksForTesting()
     _resetLiveSwitchSourcesForTesting()
     useAcpStore.setState(FRESH)
+    useProjectStore.setState({ projects: [], activeProjectId: '' })
   })
 
   it('createSession merges with a record created by an event during the await', async () => {
@@ -451,6 +453,10 @@ describe('acp-store', () => {
     ;(invoke as ReturnType<typeof vi.fn>)
       .mockReturnValueOnce(spawnGate)
       .mockResolvedValueOnce({ sessionId: 'sess-prep' })
+    useProjectStore.setState({
+      projects: [{ id: 'p1', name: 'P', path: '/work', color: 'blue' } as never],
+      activeProjectId: 'p1'
+    })
     const warm = useAcpStore.getState().prewarmAgent('cfg-w', '/work')
     useAcpStore.getState().prepareChat('cfg-w', '/work', undefined, 'p1')
     resolveSpawn({ agentId: 'agent-warm', capabilities: {}, authMethods: [] })
@@ -464,7 +470,7 @@ describe('acp-store', () => {
       (c) => c[0] === 'acp_spawn_agent'
     )
     expect(spawnCalls).toHaveLength(1)
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-w', '/work')]).toBe(
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-w', '/work', 'p1')]).toBe(
       'agent-warm'
     )
     expect(useAcpStore.getState().sessions['sess-prep'].agentId).toBe('agent-warm')
@@ -489,6 +495,10 @@ describe('acp-store', () => {
     ;(invoke as ReturnType<typeof vi.fn>)
       .mockReturnValueOnce(spawnGate) // acp_spawn_agent (warm)
       .mockResolvedValueOnce({ sessionId: 'sess-warm' }) // acp_new_session (reuse)
+    useProjectStore.setState({
+      projects: [{ id: 'p1', name: 'P', path: '/work', color: 'blue' } as never],
+      activeProjectId: 'p1'
+    })
     const warm = useAcpStore.getState().prewarmAgent('cfg-w', '/work')
     const chat = useAcpStore.getState().startChat('cfg-w', '/work', undefined, 'p1')
     resolveSpawn({ agentId: 'agent-warm', capabilities: {}, authMethods: [] })
@@ -585,7 +595,10 @@ describe('acp-store', () => {
       selectedAgentConfigId: null,
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ sessionId: 'sess-prep' })
     useAcpStore.getState().prepareChat('cfg-1', '/work', undefined, 'p1')
@@ -624,7 +637,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce('session/new timed out after 30s')
 
@@ -767,7 +783,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       sessionId: 'sess-cache',
@@ -809,7 +828,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     const sessionResults: unknown[] = []
     let resolveFirst!: (value: unknown) => void
@@ -867,7 +889,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let resolveFirst!: (value: unknown) => void
     let resolveSecond!: (value: unknown) => void
@@ -927,7 +952,10 @@ describe('acp-store', () => {
       selectedAgentConfigId: null,
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let resolveFirst!: (value: unknown) => void
     const firstGate = new Promise((resolve) => {
@@ -1001,7 +1029,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let resolveSession!: (value: unknown) => void
     const sessionGate = new Promise((resolve) => {
@@ -1025,7 +1056,7 @@ describe('acp-store', () => {
     useAcpStore.setState({
       agents: { 'agent-warm': { id: 'agent-warm', capabilities: null } },
       agentStatus: { 'agent-warm': 'connected' },
-      configToLiveAgent: { [agentReuseKey('cfg-1', '/work')]: 'agent-warm' },
+      configToLiveAgent: { [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-warm' },
       agentOptionsCache: {
         'cfg-1': {
           models: {
@@ -1047,7 +1078,7 @@ describe('acp-store', () => {
     })
     expect(useAcpStore.getState().agentOptionsCache['cfg-1']).toBeUndefined()
     // Warm process is not killed solely for options-cache invalidation.
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work')]).toBe(
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]).toBe(
       'agent-warm'
     )
     expect(invoke).not.toHaveBeenCalledWith('acp_kill_agent', expect.anything())
@@ -1211,7 +1242,10 @@ describe('acp-store', () => {
           ]
         }
       },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     ;(invoke as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(undefined) // set_model
@@ -1299,7 +1333,10 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
       agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ sessionId: 'sess-2' })
     const sessionId = await useAcpStore.getState().startChat('cfg-1', '/work', undefined, 'p1')

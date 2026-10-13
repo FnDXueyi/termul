@@ -2194,8 +2194,10 @@ describe('Claude Accounts parity (ADR-0004)', () => {
   })
 
   it('the spawn sends the projectId that selects the account on every carrier', () => {
+    // Desktop and the browser share the /ws spawn_agent handler. The host
+    // command file no longer has a per-domain spawn command.
     expect(wsTransport).toMatch(/'spawn_agent',\s*\{ config, projectId: projectId \?\? null \}/)
     expect(read('web', 'ws', 'agents.rs')).toMatch(/project_id: Option<String>/)
-    expect(read('acp', 'commands.rs')).toMatch(/project_id: Option<String>/)
+    expect(read('acp', 'manager', 'mod.rs')).toMatch(/project_id: Option<String>/)
   })
 })

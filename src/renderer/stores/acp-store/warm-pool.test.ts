@@ -182,7 +182,8 @@ describe('warm session pool', () => {
   async function seedConnectedAgent(
     configId: string,
     agentId: string,
-    cwd = '/work'
+    cwd = '/work',
+    projectId = 'p1'
   ): Promise<void> {
     await useAcpStore.getState().saveAgentConfig({
       id: configId,
@@ -194,7 +195,10 @@ describe('warm session pool', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, [agentId]: { id: agentId, capabilities: null } },
       agentStatus: { ...s.agentStatus, [agentId]: 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey(configId, cwd)]: agentId }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey(configId, cwd, projectId)]: agentId
+      }
     }))
   }
 
@@ -477,7 +481,7 @@ describe('warm session pool', () => {
 
   it('retargetWarmPool keeps pooled sessions for other cwds (project switch-back)', async () => {
     await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-1')
-    await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-2')
+    await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-2', 'p2')
     vi.mocked(invoke).mockResolvedValueOnce({ sessionId: 'sess-1' })
     useAcpStore.getState().prepareChat('cfg-a', '/work/proj-1', undefined, 'p1')
     const key1 = prepareChatKey('cfg-a', '/work/proj-1', undefined)

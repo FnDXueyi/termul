@@ -1429,19 +1429,21 @@ export function detachOldAgentForSwitch(
 ): void {
   const trimmedCwd = cwd.trim()
   set((s) => {
-    // Match the Project-scoped key and the legacy config+cwd key. Both name
-    // this process; the next prepare must not reuse either one.
-    const reuseKey = Object.keys(s.configToLiveAgent).find((key) => {
+    // Detach every canonical key for this process (legacy and Project-scoped).
+    // A later prepare must not reuse any of them.
+    const reuseKeys = Object.keys(s.configToLiveAgent).filter((key) => {
       if (isDetachedReuseKey(key) || s.configToLiveAgent[key] !== agentId) return false
       const parsed = parseReuseKey(key)
       return parsed.configId === configId && parsed.cwd === trimmedCwd
     })
-    if (!reuseKey) return {}
+    if (reuseKeys.length === 0) return {}
     const configToLiveAgent = { ...s.configToLiveAgent }
-    delete configToLiveAgent[reuseKey]
-    // Keep the superseded process resolvable for its (still-open) old session
-    // — the detached key is never consumed by a new prepare.
-    configToLiveAgent[detachedReuseKey(reuseKey, agentId)] = agentId
+    for (const reuseKey of reuseKeys) {
+      delete configToLiveAgent[reuseKey]
+      // Keep the superseded process resolvable for its (still-open) old session
+      // — the detached key is never consumed by a new prepare.
+      configToLiveAgent[detachedReuseKey(reuseKey, agentId)] = agentId
+    }
     return { configToLiveAgent }
   })
 }

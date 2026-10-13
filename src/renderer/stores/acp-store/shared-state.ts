@@ -218,11 +218,6 @@ export function persistSession(
  */
 export const inFlightWarms = new Map<string, Promise<AgentId | null>>()
 
-/**
- * First Project to use an unscoped (no-Project) process for a config+cwd.
- * A second Project must not join that spawn or take the process.
- */
-const unscopedReuseOwner = new Map<string, string>()
 /** The same spawns, un-swallowed: what a joining caller judges by its own options. */
 const inFlightWarmOutcomes = new Map<string, Promise<AgentId | null>>()
 
@@ -652,7 +647,6 @@ export function ensureLiveAgent(
 
   const projectId = (options.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
   const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
-  claimUnscopedAgent(get, set, configId, trimmedCwd, projectId, reuseKey)
   const currentAgentId = get().configToLiveAgent[reuseKey]
   if (
     currentAgentId &&
@@ -683,7 +677,7 @@ export function ensureLiveAgent(
     return Promise.resolve(existing)
   }
 
-  const inFlight = inFlightForReuse(configId, trimmedCwd, projectId, reuseKey)
+  const inFlight = inFlightWarms.get(reuseKey)
   if (inFlight) {
     // Join the running spawn, but judge ITS failure by THIS caller's options: a
     // prewarm (silent) started it, yet a user-initiated caller that joins must
@@ -761,77 +755,6 @@ export function ensureLiveAgent(
   return spawnPromise
 }
 
-/**
- * The spawn's outcome as one caller sees it: a silent caller gets `null` for a
- * failure (except a definite rejection it asked to surface); any other caller
- * gets the rejection.
- */
-/**
- * An unscoped process (spawned with no Project) belongs to the first Project
- * that needs this config and cwd. Later Projects spawn their own process so
- * they do not share a Claude Account.
- */
-function claimUnscopedAgent(
-  get: () => AcpState,
-  set: (fn: (s: AcpState) => Partial<AcpState> | AcpState) => void,
-  configId: string,
-  cwd: string,
-  projectId: string,
-  reuseKey: string
-): void {
-  if (!projectId) return
-  const legacyKey = agentReuseKey(configId, cwd)
-  if (legacyKey === reuseKey) return
-  if (!inFlightWarms.has(legacyKey) && !get().configToLiveAgent[legacyKey]) {
-    unscopedReuseOwner.delete(legacyKey)
-  }
-  const owner = unscopedReuseOwner.get(legacyKey)
-  if (owner && owner !== projectId) return
-  let claimed = false
-  set((s) => {
-    if (s.configToLiveAgent[reuseKey]) {
-      claimed = true
-      return {}
-    }
-    const legacyId = s.configToLiveAgent[legacyKey]
-    if (!legacyId || !isReusableStatus(s.agentStatus[legacyId])) return {}
-    const ownedByOther = Object.values(s.sessions).some(
-      (session) =>
-        session.agentId === legacyId &&
-        session.status !== 'closed' &&
-        session.cwd?.trim() === cwd &&
-        !!session.projectId &&
-        session.projectId !== projectId
-    )
-    if (ownedByOther) return {}
-    const configToLiveAgent = { ...s.configToLiveAgent }
-    delete configToLiveAgent[legacyKey]
-    configToLiveAgent[reuseKey] = legacyId
-    claimed = true
-    return { configToLiveAgent }
-  })
-  if (claimed || inFlightWarms.has(legacyKey)) {
-    if (!unscopedReuseOwner.has(legacyKey)) unscopedReuseOwner.set(legacyKey, projectId)
-  }
-}
-
-function inFlightForReuse(
-  configId: string,
-  cwd: string,
-  projectId: string,
-  reuseKey: string
-): Promise<AgentId | null> | undefined {
-  const scoped = inFlightWarms.get(reuseKey)
-  if (scoped || !projectId) return scoped
-  const legacyKey = agentReuseKey(configId, cwd)
-  const legacy = inFlightWarms.get(legacyKey)
-  if (!legacy) return undefined
-  const owner = unscopedReuseOwner.get(legacyKey)
-  if (owner && owner !== projectId) return undefined
-  if (!owner) unscopedReuseOwner.set(legacyKey, projectId)
-  return legacy
-}
-
 /** True when a different Project already has a live process for this config and cwd. */
 function otherProjectHoldsAgent(
   state: AcpState,
@@ -852,6 +775,11 @@ function otherProjectHoldsAgent(
   })
 }
 
+/**
+ * The spawn's outcome as one caller sees it: a silent caller gets `null` for a
+ * failure (except a definite rejection it asked to surface); any other caller
+ * gets the rejection.
+ */
 function asCallerView(
   strict: Promise<AgentId | null>,
   reuseKey: string,
