@@ -12,9 +12,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockIsTauriContext, mockInvoke, mockPersistenceApi } = vi.hoisted(() => ({
+const { mockIsTauriContext, mockInvoke, mockListen, mockPersistenceApi } = vi.hoisted(() => ({
   mockIsTauriContext: vi.fn(),
   mockInvoke: vi.fn(),
+  mockListen: vi.fn(),
   mockPersistenceApi: {
     read: vi.fn(),
     write: vi.fn()
@@ -31,7 +32,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn()
+  listen: mockListen
 }))
 
 vi.mock('../persistence-api', () => ({
@@ -127,6 +128,40 @@ describe('sshApi (web branch)', () => {
       expect(result.code).toBe('WEB_UNSUPPORTED')
     }
     expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
+  it('session commands return WEB_UNSUPPORTED when !isTauriContext()', async () => {
+    const api = createSSHApi()
+    const results = await Promise.all([
+      api.openSession({ sessionId: 's', profileId: 'profile-1', cols: 80, rows: 24 }),
+      api.respondHostKey('s', true),
+      api.cancelSession('s'),
+      api.closeSession('s'),
+      api.listSessions(),
+      api.inspectKey('/k'),
+      api.listKeys(),
+      api.duplicateProfile('profile-1'),
+      api.sftpRealpath('s', '.')
+    ])
+
+    for (const result of results) {
+      expect(result.success).toBe(false)
+      if (!result.success) expect(result.code).toBe('WEB_UNSUPPORTED')
+    }
+    expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
+  it('session event listeners are no-ops outside the desktop', () => {
+    const api = createSSHApi()
+    for (const unlisten of [
+      api.onSessionProgress(vi.fn()),
+      api.onSessionHostKey(vi.fn()),
+      api.onSessionEnded(vi.fn())
+    ]) {
+      expect(unlisten).toBeTypeOf('function')
+      unlisten()
+    }
+    expect(mockListen).not.toHaveBeenCalled()
   })
 
   it('sftpListDir returns WEB_UNSUPPORTED when !isTauriContext()', async () => {
