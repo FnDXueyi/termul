@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   toastWarning: vi.fn(),
   setActivePane: vi.fn(),
   setActiveTab: vi.fn(),
+  clearFullscreenPane: vi.fn(),
+  fullscreenPaneId: null as string | null,
   root: {
     type: 'leaf' as const,
     id: 'pane-1',
@@ -27,7 +29,9 @@ vi.mock('@/stores/workspace-store', async () => {
       getState: () => ({
         root: mocks.root,
         setActivePane: mocks.setActivePane,
-        setActiveTab: mocks.setActiveTab
+        setActiveTab: mocks.setActiveTab,
+        clearFullscreenPane: mocks.clearFullscreenPane,
+        fullscreenPaneId: mocks.fullscreenPaneId
       })
     }
   }
@@ -40,6 +44,8 @@ beforeEach(() => {
   mocks.toastWarning.mockReset()
   mocks.setActivePane.mockReset()
   mocks.setActiveTab.mockReset()
+  mocks.clearFullscreenPane.mockReset()
+  mocks.fullscreenPaneId = null
 })
 
 describe('blockSaveOnDraftConflict', () => {
@@ -66,5 +72,24 @@ describe('blockSaveOnDraftConflict', () => {
 
     expect(blockSaveOnDraftConflict(new Set(['/clean.ts', '/a.ts']))).toBe(true)
     expect(mocks.setActiveTab).toHaveBeenCalledWith('pane-1', 'edit-/a.ts')
+  })
+
+  it('leaves fullscreen when the conflicted tab lives in a different pane', () => {
+    mocks.fullscreenPaneId = 'pane-other'
+    mocks.openFiles.set('/a.ts', { draftConflict: { draftContent: 'd', draftSavedAt: 1 } })
+
+    blockSaveOnDraftConflict(['/a.ts'])
+
+    expect(mocks.clearFullscreenPane).toHaveBeenCalledTimes(1)
+    expect(mocks.setActiveTab).toHaveBeenCalledWith('pane-1', 'edit-/a.ts')
+  })
+
+  it('keeps fullscreen when the conflicted tab is in the fullscreen pane', () => {
+    mocks.fullscreenPaneId = 'pane-1'
+    mocks.openFiles.set('/a.ts', { draftConflict: { draftContent: 'd', draftSavedAt: 1 } })
+
+    blockSaveOnDraftConflict(['/a.ts'])
+
+    expect(mocks.clearFullscreenPane).not.toHaveBeenCalled()
   })
 })

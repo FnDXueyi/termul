@@ -20,6 +20,11 @@ export function blockSaveOnDraftConflict(filePaths: Iterable<string>): boolean {
     const tabId = editorTabId(filePath)
     const pane = findPaneContainingTab(workspace.root, tabId)
     if (pane) {
+      // Fullscreen is per-client view state: a conflicted tab in another pane
+      // would stay hidden behind the fullscreen one (see use-mobile-tab-actions).
+      if (workspace.fullscreenPaneId && workspace.fullscreenPaneId !== pane.id) {
+        workspace.clearFullscreenPane()
+      }
       workspace.setActivePane(pane.id)
       workspace.setActiveTab(pane.id, tabId)
     }

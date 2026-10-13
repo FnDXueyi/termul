@@ -197,7 +197,14 @@ export function MarkdownEditor({
       >
         <div className="markdown-editor-document flex min-h-full w-full flex-col">
           {hasFrontmatter && (
-            <div className={readOnly ? 'pointer-events-none opacity-60' : undefined}>
+            <div
+              className={readOnly ? 'pointer-events-none opacity-60' : undefined}
+              aria-disabled={readOnly || undefined}
+              // `inert` (React 18 types lack it; an empty string renders the
+              // attribute) removes the fields from the tab order and a11y
+              // tree so keyboard users cannot edit during a draft conflict.
+              {...(readOnly ? ({ inert: '' } as Record<string, string>) : {})}
+            >
               <FrontmatterProperties data={frontmatter} onChange={handleFrontmatterChange} />
             </div>
           )}

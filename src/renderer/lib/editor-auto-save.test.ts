@@ -375,6 +375,24 @@ describe('editor-auto-save (GH-539)', () => {
       expect(mocks.saveFile).toHaveBeenCalledTimes(1)
     })
 
+    it('never logs the absolute path when a save rejects with a path-bearing error', async () => {
+      setOpenFile('/secret/dir/a.txt')
+      scheduleAutoSave('/secret/dir/a.txt')
+      mocks.saveFile.mockRejectedValueOnce(
+        new Error('EACCES: permission denied, open /secret/dir/a.txt')
+      )
+
+      await flushPendingAutoSaves()
+
+      const messages = mocks.logFrontendError.mock.calls.map(
+        (call: unknown[]) => (call[0] as { message: string }).message
+      )
+      expect(messages.length).toBeGreaterThan(0)
+      for (const message of messages) {
+        expect(message).not.toContain('/secret')
+      }
+    })
+
     it('logs only the file basename, never the absolute path', async () => {
       setOpenFile('/secret/dir/a.txt')
       scheduleAutoSave('/secret/dir/a.txt')

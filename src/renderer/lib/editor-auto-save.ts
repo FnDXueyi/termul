@@ -192,7 +192,8 @@ export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed
         void logFrontendError({
           level: 'warn',
           source: 'editor-auto-save.flush',
-          message: `flush save threw for ${name}: ${error instanceof Error ? error.message : String(error)}`
+          // The error text can embed the absolute path: log the basename only.
+          message: `flush save threw for ${name}`
         })
       }
       if (ok) {
