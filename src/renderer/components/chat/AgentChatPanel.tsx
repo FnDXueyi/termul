@@ -50,6 +50,7 @@ import { ChatMessageList } from './ChatMessageList'
 import { CHAT_GUTTER_X } from './chat-layout'
 import { ChatStarters } from './chat-start'
 import { buildTimeline, consolidateThoughtGroups } from './chat-timeline'
+import { ClaudeLimitNotice } from './claude-account/ClaudeLimitNotice'
 import { ElicitationPrompt } from './ElicitationPrompt'
 import { PendingRestartBanner } from './PendingRestartBanner'
 import { PermissionPrompt } from './PermissionPrompt'
@@ -877,6 +878,13 @@ export function AgentChatPanel({
               isMobileShell ? (opener) => openGitSheet(session.cwd, opener) : undefined
             }
           />
+          {!isClosed && (
+            <div className={CHAT_GUTTER_X}>
+              <div className="mx-auto w-full max-w-3xl">
+                <ClaudeLimitNotice sessionId={sessionId} />
+              </div>
+            </div>
+          )}
           <ChatInputBar
             session={composerSession ?? session}
             projectRoot={skillsProjectRoot}

@@ -1928,7 +1928,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     }
   },
 
-  retryCrashedSession: async (sessionId) => {
+  retryCrashedSession: async (sessionId, options) => {
     // Dedupe concurrent Retry clicks: only one relaunch+replay+resend per session.
     if (inFlightCrashedRetries.has(sessionId)) return
     inFlightCrashedRetries.add(sessionId)
@@ -1955,6 +1955,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       // transcript + let the resume error show — do not blank.
       const reopened = get().sessions[sessionId]
       if (!reopened || reopened.status === 'closed') return
+      if (options?.resend === false) return
       // Re-send the last user prompt to produce a fresh assistant turn (retry).
       // `switch-splice:` records are projected pre-switch history — retrying
       // one would re-send the OLD agent's prompt to the new session.
