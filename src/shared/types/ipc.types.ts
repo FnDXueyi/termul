@@ -2,6 +2,71 @@
 import type { AcpCatalog } from './acp-catalog.types'
 import type { WorkspaceManifest, WriteOutcome } from './workspace-manifest.types'
 
+// ============================================================================
+// Domain-command carriers (AD-5): `X-Command-Id` header of the ledgered HTTP
+// routes, the codes the host answers a ledgered command with, and the
+// precondition shapes of `fs write` / `git commit`. Mirrors
+// `src-tauri/src/web/command_ledger/{http,terminal}.rs` and
+// `web/fs_api/precondition.rs`.
+// ============================================================================
+
+/** Request header carrying the `commandId` of a ledgered HTTP route. */
+export const COMMAND_ID_HEADER = 'X-Command-Id'
+
+/**
+ * `IpcBody.code` / `IpcResult.code` (and `/terminal/ws` reply codes) of a
+ * ledger verdict. SCREAMING_SNAKE on the HTTP, Tauri-IpcResult and terminal
+ * carriers (the `/ws` carrier uses snake_case `WS_ERROR_CODES`).
+ */
+export const COMMAND_RESULT_CODES = {
+  /** The `commandId` is missing (ledgered route) or not 1-128 of `[A-Za-z0-9_-]`. */
+  INVALID_COMMAND_ID: 'INVALID_COMMAND_ID',
+  /** The `commandId` was already used for a different request. */
+  COMMAND_CONFLICT: 'COMMAND_CONFLICT',
+  /** A resend whose outcome the host no longer knows; it was NOT run again. */
+  OUTCOME_UNKNOWN: 'OUTCOME_UNKNOWN',
+  /** A stale `expected` hash (fs write) or `expectedHead` (git commit); nothing changed. */
+  PRECONDITION_FAILED: 'PRECONDITION_FAILED',
+  /**
+   * Client-local: the host answered `{ success: true, receipt: "in_progress" }`
+   * (the first run of this id is still going). Neither accepted nor rejected.
+   */
+  COMMAND_IN_PROGRESS: 'COMMAND_IN_PROGRESS'
+} as const
+
+export type CommandResultCode = (typeof COMMAND_RESULT_CODES)[keyof typeof COMMAND_RESULT_CODES]
+
+/** `IpcBody.receipt` of a resend while the first run is still going. */
+export const IN_PROGRESS_RECEIPT = 'in_progress'
+
+/**
+ * Local engine code (lower snake_case, like the `/ws` codes) a stale
+ * precondition maps to: the host refused, nothing changed. A definite
+ * rejection — the caller re-reads and decides; a retry is a new intent.
+ */
+export const PRECONDITION_FAILED_CODE = 'precondition_failed'
+
+/**
+ * `expected` precondition of `POST /fs/write`: the sha256 hex (lower case) of
+ * the bytes being replaced (`contentHash` of `GET /fs/read`), or `"absent"`
+ * when the file must not exist yet.
+ */
+export type FsWriteExpected = 'absent' | { sha256: string }
+
+/**
+ * A file read. The web host adds `contentHash` (lower-case sha256 hex of the
+ * file's bytes): send it back as the `expected` precondition of the next write.
+ * Absent on desktop reads (`plugin-fs`), which carry no precondition.
+ */
+export type HashedFileContent = FileContent & { contentHash?: string }
+
+/**
+ * `code` values a ledgered command can fail with beyond its own domain codes
+ * are listed below (`COMMAND_RESULT_CODES`). A host reply
+ * `{ success: true, receipt: "in_progress" }` (first run of a resent id still
+ * going) is surfaced as the failure `COMMAND_IN_PROGRESS`: neither accepted nor
+ * rejected, so the caller keeps the command pending.
+ */
 export type IpcResult<T> =
   | { success: true; data: T }
   | { success: false; error: string; code: string }
@@ -85,6 +150,14 @@ export interface TerminalAttachResult {
   rows: number
   latestSeq: number
   gap: boolean
+  /**
+   * The cursor did not belong to this terminal's log (another epoch, or ahead
+   * of the head): the replay starts from the retained log's first chunk and the
+   * client must discard what it rendered.
+   */
+  reset: boolean
+  /** Epoch of this spawn's output log; the next cursor is `(logEpoch, latestSeq)`. */
+  logEpoch: string
   snapshot: TerminalStateSnapshot
 }
 
@@ -99,7 +172,8 @@ export type TerminalIpcChannels = {
   'terminal:attach': (
     terminalId: string,
     claim: string,
-    lastSeq: number
+    lastSeq: number,
+    logEpoch?: string
   ) => IpcResult<TerminalAttachResult>
   'terminal:rotate_claim': (terminalId: string, claim: string) => IpcResult<RotatedClaim>
   'terminal:revoke_claim': (terminalId: string, claim: string) => IpcResult<void>
@@ -275,7 +349,14 @@ export interface GitApi {
   unstage: (cwd: string, path: string) => Promise<void>
   discard: (cwd: string, path: string) => Promise<void>
   getLog: (cwd: string, limit?: number) => Promise<GitCommit[]>
-  commit: (cwd: string, summary: string, description?: string, amend?: boolean) => Promise<void>
+  /** `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch); a moved HEAD refuses the commit (`precondition_failed`). */
+  commit: (
+    cwd: string,
+    summary: string,
+    description?: string,
+    amend?: boolean,
+    expectedHead?: string
+  ) => Promise<void>
   push: (cwd: string) => Promise<void>
   getCommitContext: (cwd: string) => Promise<GitCommitContext>
   init: (cwd: string) => Promise<void>
@@ -296,14 +377,17 @@ export interface TerminalApi {
   spawn: (options?: TerminalSpawnOptions) => Promise<IpcResult<SpawnedTerminal>>
   /**
    * CAP-3: attach to a terminal's output stream with terminalId + claim +
-   * lastSeq. Verification is the gate — any failure (unknown terminal,
+   * lastSeq (+ the `logEpoch` the cursor was issued under; a nonzero cursor
+   * without one is refused as untrusted and replays everything with `reset`).
+   * Verification is the gate — any failure (unknown terminal,
    * missing/wrong/revoked credential) resolves to the same generic
    * UNAUTHORIZED error with no terminal metadata or output.
    */
   attach: (
     terminalId: string,
     claim: string,
-    lastSeq: number
+    lastSeq: number,
+    logEpoch?: string
   ) => Promise<IpcResult<TerminalAttachResult>>
   /** CAP-3: possession-based rotation — old credential invalidated atomically. */
   rotateClaim: (terminalId: string, claim: string) => Promise<IpcResult<RotatedClaim>>
@@ -322,7 +406,6 @@ export interface TerminalApi {
   getGitStatus: (terminalId: string) => Promise<IpcResult<GitStatus | null>>
   onExitCodeChanged: (callback: TerminalExitCodeChangedCallback) => () => void
   getExitCode: (terminalId: string) => Promise<IpcResult<number | null>>
-  updateOrphanDetection: (enabled: boolean, timeout: number | null) => Promise<IpcResult<void>>
   /**
    * Story 5 (preserved-PTY reattach): enumerate the server-preserved
    * terminals of a project on an AUTHED connection, each with metadata and
@@ -493,10 +576,29 @@ export interface ShellApi {
   getAvailableShells: () => Promise<IpcResult<DetectedShells>>
 }
 
+// Optional precondition/idempotency options for `PersistenceApi.write`.
+export interface PersistenceWriteOpts {
+  // Compare-and-set precondition (shared/cas keys): the logical value the key
+  // must currently hold; `null` means the key must be absent.
+  expected?: unknown
+  // Idempotency id; a resend of the same write reuses it so the host can
+  // recognise its own applied write.
+  commandId?: string
+}
+
+// A read that also reports the host's per-key revision stamp.
+export interface StampedValue<T> {
+  value: T
+  // 0 = key absent (desktop plugin-store has no revisions and always reports 0).
+  revision: number
+  clientInstanceId: string | null
+}
+
 // Persistence API for renderer
 export interface PersistenceApi {
   read: <T>(key: string) => Promise<IpcResult<T>>
-  write: <T>(key: string, data: T) => Promise<IpcResult<void>>
+  readStamped: <T>(key: string) => Promise<IpcResult<StampedValue<T>>>
+  write: <T>(key: string, data: T, opts?: PersistenceWriteOpts) => Promise<IpcResult<void>>
   writeDebounced: <T>(key: string, data: T) => Promise<IpcResult<void>>
   flushPendingWrites: () => Promise<IpcResult<void>>
   delete: (key: string) => Promise<IpcResult<void>>
@@ -619,7 +721,7 @@ export interface FilesystemApi {
    */
   grantFsScope: (paths: string[]) => Promise<IpcResult<FsScopeGrantSummary>>
   readDirectory: (dirPath: string) => Promise<IpcResult<DirectoryEntry[]>>
-  readFile: (filePath: string) => Promise<IpcResult<FileContent>>
+  readFile: (filePath: string) => Promise<IpcResult<HashedFileContent>>
   getFileInfo: (filePath: string) => Promise<IpcResult<FileInfo>>
   searchContent: (
     scopeRoot: string,
@@ -681,7 +783,12 @@ export interface FilesystemApi {
       error?: string
     }) => void
   ) => () => void
-  writeFile: (filePath: string, content: string) => Promise<IpcResult<void>>
+  /** `options.expected` (web only): refuse with `PRECONDITION_FAILED` when the file changed since it was read. */
+  writeFile: (
+    filePath: string,
+    content: string,
+    options?: { expected?: FsWriteExpected }
+  ) => Promise<IpcResult<void>>
   createFile: (filePath: string, content?: string) => Promise<IpcResult<void>>
   createDirectory: (dirPath: string) => Promise<IpcResult<void>>
   deletePath: (path: string, options?: { recursive?: boolean }) => Promise<IpcResult<void>>

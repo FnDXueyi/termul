@@ -2,16 +2,27 @@ import type { ProjectListPayload } from '@shared/types/web-projects.types'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useProjectStore } from '@/stores/project-store'
-import { useProjectsLoader } from '../use-projects-persistence'
+import { useProjectsAutoSave, useProjectsLoader } from '../use-projects-persistence'
 
-const { mockList, mockOnEvent, mockPersistenceRead, mockPersistenceWrite, mockReconcile } =
-  vi.hoisted(() => ({
-    mockList: vi.fn(),
-    mockReconcile: vi.fn(),
-    mockOnEvent: vi.fn(),
-    mockPersistenceRead: vi.fn(),
-    mockPersistenceWrite: vi.fn()
-  }))
+const {
+  mockList,
+  mockAddProject,
+  mockRemoveProject,
+  mockUpdateProject,
+  mockSubscribe,
+  mockPersistenceRead,
+  mockPersistenceWrite,
+  mockReconcile
+} = vi.hoisted(() => ({
+  mockList: vi.fn(),
+  mockAddProject: vi.fn(),
+  mockRemoveProject: vi.fn(),
+  mockUpdateProject: vi.fn(),
+  mockReconcile: vi.fn(),
+  mockSubscribe: vi.fn(),
+  mockPersistenceRead: vi.fn(),
+  mockPersistenceWrite: vi.fn()
+}))
 
 // Web/remote mode: the loader must hit `GET /projects` (the in-memory registry
 // mirror), NOT the stubbed plugin-store (which returns nothing in a browser).
@@ -20,10 +31,17 @@ vi.mock('@/lib/tauri-runtime', () => ({ isTauriContext: () => false }))
 // These suites exercise the already-authed path — resolve the gate as ok.
 vi.mock('@/lib/web-auth-gate', () => ({ useWebAuthGateOk: () => true }))
 vi.mock('@/lib/worktree-reconciler', () => ({ reconcileProjectWorktrees: mockReconcile }))
-vi.mock('@/lib/web-server-api', () => ({ webServerProjects: { list: mockList } }))
+vi.mock('@/lib/web-server-api', () => ({
+  webServerProjects: {
+    list: mockList,
+    addProject: mockAddProject,
+    removeProject: mockRemoveProject,
+    updateProject: mockUpdateProject
+  }
+}))
 vi.mock('@/lib/acp-transport', () => ({
-  // The loader registers a `projects_changed` listener via the transport.
-  getAcpTransport: () => ({ onEvent: mockOnEvent })
+  // The loader subscribes to the `projects` watch through the transport.
+  getAcpTransport: () => ({ watches: { subscribe: mockSubscribe } })
 }))
 vi.mock('@/lib/api', () => ({
   // Issue #855: the web loader reads + writes the per-client active project
@@ -46,14 +64,25 @@ const payload: ProjectListPayload = {
   defaultProjectId: 'p1'
 }
 
+interface ProjectsWatchHandlers {
+  onState: (list: ProjectListPayload) => void
+  onDelta: (list: ProjectListPayload) => void
+}
+
+/** The handlers the loader registered on the `projects` watch. */
+function watchHandlers(): ProjectsWatchHandlers {
+  expect(mockSubscribe).toHaveBeenCalledWith('projects', expect.any(Object))
+  return mockSubscribe.mock.calls[0]?.[1] as ProjectsWatchHandlers
+}
+
 describe('useProjectsLoader (web/remote mode)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     // The plugin-store stub must NEVER be read for the projects snapshot in
-    // web mode; the webActiveProject key IS read (issue #855) and defaults to
+    // web mode; the activeProject key IS read (issue #855) and defaults to
     // "not found" (a fresh client with no persisted selection).
     mockPersistenceRead.mockImplementation((key: string) =>
-      key === 'web-active-project'
+      key === 'active-project'
         ? Promise.resolve({ success: false })
         : Promise.resolve({ success: false })
     )
@@ -65,7 +94,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
       isLoaded: false,
       isWorktreeOperationLocked: false
     })
-    mockOnEvent.mockReturnValue(() => {})
+    mockSubscribe.mockReturnValue(() => {})
     mockReconcile.mockResolvedValue('unchanged')
   })
 
@@ -78,10 +107,10 @@ describe('useProjectsLoader (web/remote mode)', () => {
       expect(useProjectStore.getState().projects).toHaveLength(2)
     })
     // The projects snapshot is NEVER read from the plugin-store in web mode.
-    // (The webActiveProject read happens — issue #855 — but with the default
+    // (The activeProject read happens — issue #855 — but with the default
     // failure result it does not change the seeded selection.)
     expect(mockPersistenceRead).toHaveBeenCalledTimes(1)
-    expect(mockPersistenceRead).toHaveBeenCalledWith('web-active-project')
+    expect(mockPersistenceRead).toHaveBeenCalledWith('active-project')
     // Epic 7: the initial load seeds activeProjectId from the host default.
     expect(useProjectStore.getState().activeProjectId).toBe('p1')
     expect(useProjectStore.getState().projects[1].isArchived).toBe(false)
@@ -130,24 +159,9 @@ describe('useProjectsLoader (web/remote mode)', () => {
     })
   })
 
-  it('refetches /projects on projects_changed but PRESERVES activeProjectId (no silent retarget)', async () => {
+  it('applies a projects watch delta but PRESERVES activeProjectId (no silent retarget)', async () => {
     // Initial load seeds activeProjectId = p1 (the host default).
-    mockList
-      .mockResolvedValueOnce({ success: true, data: payload })
-      // A subsequent projects_changed carries a DIFFERENT defaultProjectId
-      // (e.g. the desktop switched). The client must NOT adopt it as its
-      // active selection — only the list + isDefault flags refresh.
-      // The host sets isDefault on the matching project (p2).
-      .mockResolvedValueOnce({
-        success: true,
-        data: {
-          projects: [
-            { ...payload.projects[0]!, isDefault: false },
-            { ...payload.projects[1]!, isDefault: true }
-          ],
-          defaultProjectId: 'p2'
-        }
-      })
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
 
     renderHook(() => useProjectsLoader())
     await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1))
@@ -155,33 +169,86 @@ describe('useProjectsLoader (web/remote mode)', () => {
       expect(useProjectStore.getState().activeProjectId).toBe('p1')
     })
 
-    // The loader registered a `projects_changed` listener; firing it refetches.
-    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
-    expect(typeof listener).toBe('function')
-    listener?.()
+    // A delta carries a DIFFERENT defaultProjectId (e.g. the desktop switched).
+    // The client must NOT adopt it as its active selection — only the list +
+    // isDefault flags refresh.
+    watchHandlers().onDelta({
+      projects: [
+        { ...payload.projects[0]!, isDefault: false },
+        { ...payload.projects[1]!, isDefault: true }
+      ],
+      defaultProjectId: 'p2'
+    })
 
-    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(useProjectStore.getState().projects.find((p) => p.id === 'p2')?.isDefault).toBe(true)
+    })
     // Epic 7: the client's own activeProjectId is PRESERVED (not retargeted
     // to the host's new defaultProjectId 'p2').
     expect(useProjectStore.getState().activeProjectId).toBe('p1')
-    // P16: the isDefault flags DO refresh from the new host default — the
-    // project matching the new defaultProjectId has isDefault === true.
-    const projects = useProjectStore.getState().projects
-    expect(projects.find((p) => p.id === 'p2')?.isDefault).toBe(true)
-    expect(projects.find((p) => p.id === 'p1')?.isDefault).toBe(false)
+    expect(useProjectStore.getState().projects.find((p) => p.id === 'p1')?.isDefault).toBe(false)
+    // No second HTTP read: the delta IS the new list.
+    expect(mockList).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not write a host-sent list back as local add or remove edits', async () => {
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
+    renderHook(() => {
+      useProjectsLoader()
+      useProjectsAutoSave()
+    })
+    await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(2))
+
+    // The host drops p1 and adds p3: neither is something this client did.
+    watchHandlers().onDelta({
+      projects: [
+        payload.projects[1]!,
+        { ...payload.projects[0]!, id: 'p3', name: 'Gamma', isDefault: false }
+      ],
+      defaultProjectId: 'p2'
+    })
+
+    await waitFor(() => {
+      expect(useProjectStore.getState().projects.map((p) => p.id)).toEqual(['p2', 'p3'])
+    })
+    expect(mockAddProject).not.toHaveBeenCalled()
+    expect(mockRemoveProject).not.toHaveBeenCalled()
+    expect(mockUpdateProject).not.toHaveBeenCalled()
+  })
+
+  it('rebuilds the list from a watch state (reconnect) without a refetch', async () => {
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
+    renderHook(() => useProjectsLoader())
+    await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(2))
+
+    // The host lost a project while the socket was down; the fresh state says so.
+    watchHandlers().onState({ projects: [payload.projects[1]!], defaultProjectId: 'p2' })
+
+    await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(1))
+    expect(useProjectStore.getState().projects[0]?.id).toBe('p2')
+    expect(mockList).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops an HTTP list that resolves after a newer watch list', async () => {
+    let resolveHttp: (value: unknown) => void = () => {}
+    mockList.mockReturnValueOnce(new Promise((resolve) => (resolveHttp = resolve)))
+    renderHook(() => useProjectsLoader())
+    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1))
+
+    watchHandlers().onState({ projects: [payload.projects[1]!], defaultProjectId: 'p2' })
+    await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(1))
+    // The older HTTP answer (two projects) arrives late and must not win.
+    resolveHttp({ success: true, data: payload })
+    // Let the late answer run to completion before asserting it changed nothing.
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(useProjectStore.getState().projects).toHaveLength(1)
+    expect(useProjectStore.getState().projects[0]?.id).toBe('p2')
   })
 
   it('falls back to defaultProjectId when the current project is deleted by the host', async () => {
     // Initial load: client is on p1 (the default).
     mockList.mockResolvedValueOnce({ success: true, data: payload })
-    // Subsequent refetch: p1 was deleted; the host default is now p2.
-    mockList.mockResolvedValueOnce({
-      success: true,
-      data: {
-        projects: [{ ...payload.projects[1]!, isArchived: false, isDefault: true }],
-        defaultProjectId: 'p2'
-      }
-    })
 
     renderHook(() => useProjectsLoader())
     await waitFor(() => expect(mockList).toHaveBeenCalledTimes(1))
@@ -189,34 +256,21 @@ describe('useProjectsLoader (web/remote mode)', () => {
       expect(useProjectStore.getState().activeProjectId).toBe('p1')
     })
 
-    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
-    listener?.()
+    // p1 was deleted; the host default is now p2.
+    watchHandlers().onDelta({
+      projects: [{ ...payload.projects[1]!, isArchived: false, isDefault: true }],
+      defaultProjectId: 'p2'
+    })
 
-    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
     // The client's activeProjectId (p1) is no longer in the list → fall back
     // to the host default (p2).
-    expect(useProjectStore.getState().activeProjectId).toBe('p2')
+    await waitFor(() => expect(useProjectStore.getState().activeProjectId).toBe('p2'))
   })
 
-  it('PRESERVES locally resolved isGitRepo across a projects_changed refetch', async () => {
+  it('PRESERVES locally resolved isGitRepo across a projects watch delta', async () => {
     // Initial load: mirror carries NO git fields (ProjectSummary is frozen
     // without them), so p1 arrives with isGitRepo undefined.
-    mockList
-      .mockResolvedValueOnce({ success: true, data: payload })
-      // Refetch payload is identical — but the store now holds a locally
-      // stamped isGitRepo (useProjectGitBranch probe / .git probe). Without
-      // the carry-over the refetch would wipe the flag and the launcher's
-      // worktree picker would flicker away.
-      .mockResolvedValueOnce({
-        success: true,
-        data: {
-          // Refetch payload carries NO git fields (the real wire shape —
-          // ProjectSummary never transports isGitRepo). The flag in the
-          // store must survive the setProjects replacement.
-          projects: [payload.projects[0]!, payload.projects[1]!],
-          defaultProjectId: 'p1'
-        }
-      })
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
 
     renderHook(() => useProjectsLoader())
     await waitFor(() => {
@@ -230,31 +284,42 @@ describe('useProjectsLoader (web/remote mode)', () => {
     useProjectStore.getState().updateProject('p2', { isGitRepo: true })
     expect(useProjectStore.getState().projects.find((p) => p.id === 'p2')?.isGitRepo).toBe(true)
 
-    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
-    listener?.()
+    // The next list is identical but carries NO git fields (the real wire
+    // shape — ProjectSummary never transports isGitRepo). The flag in the
+    // store must survive the setProjects replacement; without the carry-over
+    // the launcher's worktree picker would flicker away.
+    watchHandlers().onDelta({
+      projects: [payload.projects[0]!, { ...payload.projects[1]!, name: 'Beta renamed' }],
+      defaultProjectId: 'p1'
+    })
 
-    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
+    // The renamed project proves the new list was applied before the flags are read.
+    await waitFor(() => {
+      expect(useProjectStore.getState().projects.find((p) => p.id === 'p2')?.name).toBe(
+        'Beta renamed'
+      )
+    })
     const projects = useProjectStore.getState().projects
     expect(projects.find((p) => p.id === 'p2')?.isGitRepo).toBe(true)
     expect(projects.find((p) => p.id === 'p1')?.isGitRepo).toBeUndefined()
   })
 
-  it('PRESERVES the probed gitBranch across a projects_changed refetch', async () => {
-    mockList
-      .mockResolvedValueOnce({ success: true, data: payload })
-      .mockResolvedValueOnce({ success: true, data: payload })
+  it('PRESERVES the probed gitBranch across a projects watch delta', async () => {
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
 
     renderHook(() => useProjectsLoader())
     await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(2))
 
     useProjectStore.getState().updateProject('p1', { gitBranch: 'main' })
 
-    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
-    listener?.()
+    watchHandlers().onDelta({
+      ...payload,
+      projects: [{ ...payload.projects[0]!, name: 'Alpha renamed' }, payload.projects[1]!]
+    })
 
-    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
     await waitFor(() => {
       const projects = useProjectStore.getState().projects
+      expect(projects.find((p) => p.id === 'p1')?.name).toBe('Alpha renamed')
       expect(projects.find((p) => p.id === 'p1')?.gitBranch).toBe('main')
       expect(projects.find((p) => p.id === 'p2')?.gitBranch).toBeUndefined()
     })
@@ -276,10 +341,8 @@ describe('useProjectsLoader (web/remote mode)', () => {
     expect(mockReconcile).toHaveBeenCalledWith('p2')
   })
 
-  it('PRESERVES worktrees (and carries no activeWorktreeId) across a projects_changed refetch', async () => {
-    mockList
-      .mockResolvedValueOnce({ success: true, data: payload })
-      .mockResolvedValueOnce({ success: true, data: payload })
+  it('PRESERVES worktrees (and carries no activeWorktreeId) across a projects watch delta', async () => {
+    mockList.mockResolvedValueOnce({ success: true, data: payload })
 
     renderHook(() => useProjectsLoader())
     await waitFor(() => expect(useProjectStore.getState().projects).toHaveLength(2))
@@ -289,12 +352,14 @@ describe('useProjectsLoader (web/remote mode)', () => {
     ]
     useProjectStore.getState().updateProject('p1', { worktrees })
 
-    const listener = mockOnEvent.mock.calls[0]?.[1] as (() => void) | undefined
-    listener?.()
+    watchHandlers().onDelta({
+      ...payload,
+      projects: [{ ...payload.projects[0]!, name: 'Alpha renamed' }, payload.projects[1]!]
+    })
 
-    await waitFor(() => expect(mockList).toHaveBeenCalledTimes(2))
     await waitFor(() => {
       const p1 = useProjectStore.getState().projects.find((p) => p.id === 'p1')
+      expect(p1?.name).toBe('Alpha renamed')
       expect(p1?.worktrees).toEqual(worktrees)
       expect(p1).not.toHaveProperty('activeWorktreeId')
     })
@@ -306,7 +371,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     // Simulate a reload: the store is fresh (isLoaded: false) but the client
     // previously selected p2 and the server-side store persisted it.
     mockPersistenceRead.mockImplementation((key: string) =>
-      key === 'web-active-project'
+      key === 'active-project'
         ? Promise.resolve({ success: true, data: 'p2' })
         : Promise.resolve({ success: false })
     )
@@ -326,7 +391,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     // The persisted selection (p-deleted) references a project no longer in
     // the list — the restore must not seed a dangling id.
     mockPersistenceRead.mockImplementation((key: string) =>
-      key === 'web-active-project'
+      key === 'active-project'
         ? Promise.resolve({ success: true, data: 'p-deleted' })
         : Promise.resolve({ success: false })
     )
@@ -352,7 +417,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     useProjectStore.getState().selectProject('p2')
 
     await waitFor(() => {
-      expect(mockPersistenceWrite).toHaveBeenCalledWith('web-active-project', 'p2')
+      expect(mockPersistenceWrite).toHaveBeenCalledWith('active-project', 'p2')
     })
     // The loader's own initial-load write of the seeded selection also flows
     // through the same key — but a switch AFTER the initial seed overwrites
@@ -363,7 +428,7 @@ describe('useProjectsLoader (web/remote mode)', () => {
     // Degraded server store (read fails): reload must still work, seeding
     // from the host default as before (issue #855 is best-effort).
     mockPersistenceRead.mockImplementation((key: string) =>
-      key === 'web-active-project'
+      key === 'active-project'
         ? Promise.resolve({ success: false, error: 'STORE_UNAVAILABLE', code: 'STORE_UNAVAILABLE' })
         : Promise.resolve({ success: false })
     )

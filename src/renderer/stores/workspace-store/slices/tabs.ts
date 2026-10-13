@@ -10,6 +10,7 @@ import {
   AGENT_BROWSER_SPLIT_SIZES,
   agentChatTabId,
   canvasTabId,
+  closeTabInWorkspace,
   diffTabId,
   editorTabId,
   findPaneById,
@@ -410,10 +411,21 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
   },
 
   removeTab: (tabId: string): void => {
-    const { root } = get()
+    const { root, parkedTrees } = get()
     const pane = findPaneContainingTab(root, tabId)
     if (pane) {
       void get().closeTab(pane.id, tabId)
+      return
+    }
+    // Not in the visible tree: a visited project's parked tree may hold it
+    // (e.g. a terminal removed from another project's workspace).
+    for (const [projectId, parked] of Object.entries(parkedTrees)) {
+      const parkedPane = findPaneContainingTab(parked.root, tabId)
+      if (!parkedPane) continue
+      const closed = closeTabInWorkspace(parked, parkedPane.id, tabId)
+      if (!closed) continue
+      set((state) => ({ parkedTrees: { ...state.parkedTrees, [projectId]: closed.workspace } }))
+      return
     }
   }
 })

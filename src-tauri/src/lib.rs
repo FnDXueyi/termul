@@ -17,6 +17,8 @@ mod commands;
 mod logging;
 mod migrations;
 mod path_validation;
+// Console-window hiding + Windows kill-on-close Job Objects for spawned processes.
+mod process_util;
 mod project_icon;
 mod pty;
 mod remote;
@@ -597,7 +599,9 @@ fn toggle_devtools<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<(), 
 
 #[cfg(target_os = "windows")]
 fn open_external_url(url: &str) -> Result<(), String> {
-    Command::new("cmd")
+    let mut command = Command::new("cmd");
+    crate::process_util::hide_console(&mut command);
+    command
         .args(["/C", "start", "", url])
         .spawn()
         .map(|_| ())
@@ -1134,7 +1138,10 @@ pub fn run() {
             // locked `app_data_dir`. Shared-live receives this instance on
             // every start and never opens its own, so stop/start cycles reuse
             // it. A newer-schema file refuses startup visibly, untouched.
-            match web::store::WebStore::open(data_lock::desktop_store_file(&app_data_dir)) {
+            match web::store::WebStore::open(
+                data_lock::desktop_store_file(&app_data_dir),
+                web::store::StorePolicy::default(),
+            ) {
                 Ok(store) => {
                     app.manage(remote::SharedLiveData {
                         store: Arc::new(store),
@@ -1193,6 +1200,9 @@ pub fn run() {
                 git_tracker,
                 exit_code_tracker,
             ));
+            pty_manager.set_max_terminals_per_project(
+                web::config::desktop_max_terminals_per_project(),
+            );
             app.manage(pty_manager.clone());
 
             // Create Browser Tab Manager
@@ -1492,40 +1502,28 @@ pub fn run() {
                     (relay, manager)
                 }
             };
-            // Attach the server-side permission rendezvous so a phone can
-            // respond to `acp:permission_request` over WS. The desktop renderer
-            // still responds via the `acp_respond_permission` Tauri command
-            // (direct `AcpManager::respond_permission`); the rendezvous's
-            // at-most-one `take_permission` gate ensures whichever path responds
-            // first wins.
-            //
-            // Capture the runtime handle explicitly (`tauri::async_runtime`)
-            // rather than relying on `Handle::try_current()` — `setup` runs on
-            // the main thread and is not guaranteed to be inside a tokio runtime
-            // context, so capturing the handle here keeps `arm_timeout` reliable
-            // when it runs later on the agent driver thread.
-            // Desktop reconnect grace shared by BOTH rendezvous (issue #841
-            // alignment: a phone attached to a desktop host keeps pending
-            // questions and pending permissions open for the same window).
-            let desktop_disconnect_grace = std::time::Duration::from_secs(15);
-            let rendezvous = Arc::new(PermissionRendezvous::with_handle_and_policy(
-                Arc::clone(&acp_manager),
-                std::time::Duration::from_secs(60),
-                desktop_disconnect_grace,
-                tauri::async_runtime::handle().inner().clone(),
-            ));
+            // Attach the permission and question rendezvous so a phone can
+            // answer `acp:permission_request` and structured questions over WS.
+            // The desktop renderer answers through the `acp_respond_permission`
+            // and `acp_answer_question` Tauri commands (direct `AcpManager`
+            // calls); the agent's single-use `take_permission` /
+            // `take_question` gate makes the first answer win, and the commands
+            // tell the rendezvous so the ticket and the session's queue slot
+            // are released. Tickets have no timer, so no runtime handle is
+            // needed here.
+            let rendezvous = Arc::new(PermissionRendezvous::new(Arc::clone(&acp_manager)));
             ws_relay.set_rendezvous(rendezvous);
-            // Attach the server-side question rendezvous so a phone attached
-            // to a desktop host can answer structured questions over WS too
-            // (desktop renderer answers via the `acp_answer_question` Tauri
-            // command; first-response-wins across both paths).
-            let question_rendezvous = Arc::new(QuestionRendezvous::with_handle_and_policy(
-                Arc::clone(&acp_manager),
-                std::time::Duration::from_secs(60),
-                desktop_disconnect_grace,
-                tauri::async_runtime::handle().inner().clone(),
-            ));
+            let question_rendezvous = Arc::new(QuestionRendezvous::new(Arc::clone(&acp_manager)));
             ws_relay.set_question_rendezvous(question_rendezvous);
+
+            // The one host-owned idle-agent reaper for the desktop process
+            // (probe-based; see `web::agent_reaper`). Never started from
+            // `serve_router`, whose shared-live toggle reuses these agents.
+            app.manage(Arc::new(web::agent_reaper::AgentReaperHandle::start(
+                Arc::clone(&acp_manager),
+                std::time::Duration::from_secs(web::config::DEFAULT_AGENT_IDLE_WINDOW_SECS),
+                tauri::async_runtime::handle().inner(),
+            )));
 
             // Desktop browser-automation host: drives the visible browser
             // pane via BrowserTabManager; registered globally so host_mcp
@@ -1725,10 +1723,6 @@ pub fn run() {
             commands::terminal_get_git_branch,
             commands::terminal_get_git_status,
             commands::terminal_get_exit_code,
-            commands::terminal_update_orphan_detection,
-            commands::terminal_add_renderer_ref,
-            commands::terminal_remove_renderer_ref,
-            commands::terminal_set_protected,
             commands::terminal_set_visibility,
             // Agent registry (ADR-004.6: identity/discovery, opt-in, read-only)
             commands::agent_registry_fetch,
@@ -1786,19 +1780,24 @@ pub fn run() {
             commands::ssh_save_profile,
             commands::ssh_delete_profile,
             commands::ssh_import_config,
-            commands::ssh_connect,
-            commands::ssh_disconnect,
-            commands::ssh_get_connections,
             commands::ssh_port_forward_start,
             commands::ssh_port_forward_stop,
             commands::sftp_list_dir,
+            commands::sftp_realpath,
             commands::sftp_download,
             commands::sftp_upload,
             commands::sftp_delete,
             commands::sftp_mkdir,
             commands::sftp_rename,
-            // SSH askpass helper
-            commands::ssh_create_askpass,
+            // SSH interactive sessions
+            commands::ssh_session_open,
+            commands::ssh_session_respond_host_key,
+            commands::ssh_session_cancel,
+            commands::ssh_session_close,
+            commands::ssh_session_list,
+            commands::ssh_inspect_key,
+            commands::ssh_list_keys,
+            commands::ssh_duplicate_profile,
             // SFTP file operations
             commands::sftp_read_file,
             commands::sftp_write_file,
@@ -1975,6 +1974,9 @@ pub fn run() {
             let acp_manager = app_handle
                 .try_state::<Arc<AcpManager>>()
                 .map(|state| state.inner().clone());
+            let agent_reaper = app_handle
+                .try_state::<Arc<web::agent_reaper::AgentReaperHandle>>()
+                .map(|state| state.inner().clone());
 
             // OpenPencil canvas mode: join the daemon pool shutdown (stdin
             // EOF → kill) in the exit cleanup so no op-host-web-server
@@ -2007,6 +2009,9 @@ pub fn run() {
                         // drains them, appends the interrupted marker for an open
                         // turn, and persists status closed. A single-agent kill
                         // does not take this path.
+                        if let Some(agent_reaper) = &agent_reaper {
+                            agent_reaper.stop().await;
+                        }
                         acp_manager.kill_all().await;
                         if let Err(error) = acp_manager.shutdown_persistence().await {
                             log::error!(
@@ -2027,6 +2032,9 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     if let Some(canvas_pool) = canvas_pool {
                         canvas_pool.shutdown_all().await;
+                    }
+                    if let Some(agent_reaper) = &agent_reaper {
+                        agent_reaper.stop().await;
                     }
                     acp_manager.kill_all().await;
                     if let Err(error) = acp_manager.shutdown_persistence().await {

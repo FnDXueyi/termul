@@ -116,6 +116,7 @@ impl TerminalRegistry {
         // bare names on PATH natively). Mirrors the agent-spawn path.
         let resolved = crate::trackers::git_tracker::resolve_executable(command);
         let mut cmd = Command::new(resolved);
+        crate::process_util::hide_console(&mut cmd);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -274,6 +275,32 @@ impl TerminalRegistry {
                 reap(child);
             }
         }
+    }
+
+    /// Number of terminals whose command is still running. A terminal whose
+    /// child has exited but was never polled is observed here (`try_wait`) and
+    /// cached, so a finished command stops counting as background work.
+    /// A terminal whose child is out of the registry (a `wait_for_exit` is in
+    /// flight) has no recorded exit, so it counts as running.
+    pub fn running_count(&mut self) -> usize {
+        let mut running = 0;
+        for term in self.terminals.values_mut() {
+            if term.exit.is_some() {
+                continue;
+            }
+            let Some(child) = term.child.as_mut() else {
+                running += 1;
+                continue;
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    term.exit = Some(to_exit_status(status));
+                    term.child = None;
+                }
+                Ok(None) | Err(_) => running += 1,
+            }
+        }
+        running
     }
 }
 

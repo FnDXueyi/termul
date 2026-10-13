@@ -21,7 +21,6 @@ import type {
   DetectedShells,
   DirectoryEntry,
   DirtyStatus,
-  FileContent,
   FileInfo,
   GitCommit,
   GitCommitContext,
@@ -33,8 +32,24 @@ import type {
   WorktreeInfo,
   WorktreeProgressEvent
 } from '@shared/types/ipc.types'
+import {
+  COMMAND_ID_HEADER,
+  type FsWriteExpected,
+  type HashedFileContent
+} from '@shared/types/ipc.types'
 import type { ProjectListPayload, ProjectSummary } from '@shared/types/web-projects.types'
-import { getJson, networkError, parseBody, postJson, putJson, serverBase } from './ipc/http'
+import {
+  bodyToResult,
+  getJson,
+  ipcFailureError,
+  networkError,
+  parseBody,
+  postJson,
+  putJson,
+  runIpcCommand,
+  serverBase,
+  worktreeCreateKey
+} from './ipc/http'
 import { logFrontendError } from './log-api'
 import type { AgentSkillContent, AgentSkillSummary } from './skills-api'
 import { authHeader } from './web-auth-token'
@@ -51,12 +66,17 @@ import type { BaseBranchInfo, IncludeCopyResult } from './worktree-api'
 async function postNdjsonStream<T>(
   path: string,
   body: unknown,
-  onFrame: (frame: Record<string, unknown>) => void
+  onFrame: (frame: Record<string, unknown>) => void,
+  commandId?: string
 ): Promise<IpcResult<T>> {
   try {
     const res = await fetch(`${serverBase()}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...authHeader() },
+      headers: {
+        'content-type': 'application/json',
+        ...authHeader(),
+        ...(commandId ? { [COMMAND_ID_HEADER]: commandId } : {})
+      },
       body: JSON.stringify(body)
     })
     const contentType = res.headers.get('content-type') ?? ''
@@ -70,7 +90,7 @@ async function postNdjsonStream<T>(
       try {
         const frame = JSON.parse(trimmed) as Record<string, unknown>
         if (frame.type === 'result') {
-          result = frame.result as IpcResult<T>
+          result = bodyToResult<T>(frame.result) ?? (frame.result as IpcResult<T>)
         } else {
           onFrame(frame)
         }
@@ -114,12 +134,26 @@ export const webServerFilesystem = {
     return postJson<void>('/fs/mkdir', { path: dirPath })
   },
 
+  /** Creates (or truncates) the file, like the desktop `writeTextFile`; no precondition. */
   async createFile(filePath: string, content = ''): Promise<IpcResult<void>> {
     return postJson<void>('/fs/write', { path: filePath, content })
   },
 
-  async writeFile(filePath: string, content: string): Promise<IpcResult<void>> {
-    return postJson<void>('/fs/write', { path: filePath, content })
+  /**
+   * Replace a file. `expected` (the `contentHash` of the last read, or
+   * `"absent"`) makes the host refuse with `PRECONDITION_FAILED` when the file
+   * changed meanwhile; nothing is written then.
+   */
+  async writeFile(
+    filePath: string,
+    content: string,
+    options?: { expected?: FsWriteExpected }
+  ): Promise<IpcResult<void>> {
+    return postJson<void>('/fs/write', {
+      path: filePath,
+      content,
+      ...(options?.expected ? { expected: options.expected } : {})
+    })
   },
 
   async readDirectory(dirPath: string): Promise<IpcResult<DirectoryEntry[]>> {
@@ -149,9 +183,9 @@ export const webServerFilesystem = {
     }
   },
 
-  async readFile(filePath: string): Promise<IpcResult<FileContent>> {
+  async readFile(filePath: string): Promise<IpcResult<HashedFileContent>> {
     const encoded = encodeURIComponent(filePath)
-    return getJson<FileContent>(`/fs/read?path=${encoded}`)
+    return getJson<HashedFileContent>(`/fs/read?path=${encoded}`)
   },
 
   async getFileInfo(filePath: string): Promise<IpcResult<FileInfo>> {
@@ -232,17 +266,17 @@ export const webServerGit = {
 
   async stageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
     const res = await postJson<void>('/git/stage-hunk', { cwd, path, hunkPatch })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async unstageHunk(cwd: string, path: string, hunkPatch: string): Promise<void> {
     const res = await postJson<void>('/git/unstage-hunk', { cwd, path, hunkPatch })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async discard(cwd: string, path: string): Promise<void> {
     const res = await postJson<void>('/git/discard', { cwd, path })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async getLog(cwd: string, limit?: number): Promise<GitCommit[]> {
@@ -254,9 +288,25 @@ export const webServerGit = {
     return res.data
   },
 
-  async commit(cwd: string, summary: string, description = '', amend = false): Promise<void> {
-    const res = await postJson<void>('/git/commit', { cwd, summary, description, amend })
-    if (!res.success) throw new Error(res.error)
+  /**
+   * `expectedHead` (the full sha HEAD must be at; `""` for an unborn branch)
+   * makes the host refuse with `PRECONDITION_FAILED` when HEAD moved.
+   */
+  async commit(
+    cwd: string,
+    summary: string,
+    description = '',
+    amend = false,
+    expectedHead?: string
+  ): Promise<void> {
+    const res = await postJson<void>('/git/commit', {
+      cwd,
+      summary,
+      description,
+      amend,
+      ...(expectedHead !== undefined ? { expectedHead } : {})
+    })
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async push(cwd: string): Promise<void> {
@@ -293,7 +343,7 @@ export const webServerGit = {
       branch,
       ...(startRef !== undefined ? { startRef } : {})
     })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async stashSave(cwd: string, message?: string, includeUntracked?: boolean): Promise<void> {
@@ -302,7 +352,7 @@ export const webServerGit = {
       ...(message !== undefined ? { message } : {}),
       ...(includeUntracked !== undefined ? { includeUntracked } : {})
     })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async stashList(cwd: string): Promise<GitStashInfo[]> {
@@ -314,17 +364,17 @@ export const webServerGit = {
 
   async stashApply(cwd: string, index: number): Promise<void> {
     const res = await postJson<void>('/git/stash-apply', { cwd, index })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async stashPop(cwd: string, index: number): Promise<void> {
     const res = await postJson<void>('/git/stash-pop', { cwd, index })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async stashDrop(cwd: string, index: number): Promise<void> {
     const res = await postJson<void>('/git/stash-drop', { cwd, index })
-    if (!res.success) throw new Error(res.error)
+    if (!res.success) throw ipcFailureError(res)
   },
 
   async branchList(cwd: string): Promise<string[]> {
@@ -370,7 +420,7 @@ export const webServerProjects = {
    * Set the host's default project (Epic 7 — cross-client workspace
    * continuity). Validates the project is switchable, updates
    * `registry.set_default_project`, persists to the `FileProjectRegistry`
-   * (VPS), and broadcasts `projects_changed` to all connected clients.
+   * (VPS), and publishes the project state to every `projects` watcher.
    */
   async setDefaultProject(projectId: string): Promise<IpcResult<void>> {
     return postJson<void>('/projects/default', { projectId })
@@ -379,7 +429,7 @@ export const webServerProjects = {
   /**
    * Create / upsert a project (Option B: the standalone server is a first-class
    * project-list authority). Canonicalizes + validates the path on the server,
-   * persists to `FileProjectRegistry` (VPS), and broadcasts `projects_changed`.
+   * persists to `FileProjectRegistry` (VPS), and publishes the project state.
    * Mirrors the `add_project` WS request.
    */
   async addProject(params: {
@@ -605,17 +655,26 @@ export const webServerWorktree = {
     }
     const { progressId, ...rest } = params
     const id = progressId ?? ''
-    return postNdjsonStream<WorktreeInfo>(
-      '/worktree/create',
-      { ...rest, progressId: progressId ?? null, streamProgress: true },
-      (frame) => {
-        if (frame.type === 'preparing') {
-          onProgress({ progressId: id, line: 'preparing' })
-        } else if (frame.type === 'progress' && typeof frame.line === 'string') {
-          onProgress({ progressId: id, line: frame.line })
-        }
-      }
-    )
+    const body = { ...rest, progressId: progressId ?? null, streamProgress: true }
+    // The streamed variant is not a plain `postJson`: it goes through the engine
+    // itself, under the same key `postJson` uses for this route.
+    return runIpcCommand<WorktreeInfo>({
+      kind: 'worktree_create',
+      entityKey: worktreeCreateKey(params),
+      send: (commandId) =>
+        postNdjsonStream<WorktreeInfo>(
+          '/worktree/create',
+          body,
+          (frame) => {
+            if (frame.type === 'preparing') {
+              onProgress({ progressId: id, line: 'preparing' })
+            } else if (frame.type === 'progress' && typeof frame.line === 'string') {
+              onProgress({ progressId: id, line: frame.line })
+            }
+          },
+          commandId
+        )
+    })
   },
 
   async remove(

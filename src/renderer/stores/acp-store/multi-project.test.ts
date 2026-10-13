@@ -221,7 +221,7 @@ describe('acp-store multi-project isolation', () => {
       }
     }))
     // Project A's process dies.
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-a' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-a', reason: 'crashed' })
     expect(useAcpStore.getState().sessions['s-a'].status).toBe('closed')
     expect(useAcpStore.getState().agentStatus['agent-a']).toBe('error')
     // Project B is untouched.
@@ -414,7 +414,7 @@ describe('acp-store multi-project isolation', () => {
     })
     expect(useAcpStore.getState().sessions['s1'].status).toBe('error')
     // 3. Disconnect event — must NOT overwrite 'error' to 'closed'
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().sessions['s1'].status).toBe('error')
     expect(useAcpStore.getState().sessions['s1'].lastError).toBe('child exited')
     expect(useAcpStore.getState().agentStatus['agent-1']).toBe('error')
@@ -436,11 +436,47 @@ describe('acp-store multi-project isolation', () => {
     expect(useAcpStore.getState().sessions['s1'].activeTurn).toBe(false)
   })
 
+  // A provider usage limit fails only the turn: the agent process stays alive
+  // and holds the conversation. Marking the chat 'error' made AgentChatPanel
+  // auto-reopen it, which replaced the transcript with a history tail.
+  it.each([
+    'rate_limit',
+    'billing_error'
+  ])('agent_error for a provider %s keeps the session and agent live', (errorKind) => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.setState((s) => ({
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' },
+      messages: {
+        s1: [
+          { id: 'm1', role: 'user', blocks: [{ type: 'text', text: 'first' }], timestamp: 1 },
+          { id: 'm2', role: 'agent', blocks: [{ type: 'text', text: 'reply' }], timestamp: 2 },
+          { id: 'm3', role: 'user', blocks: [{ type: 'text', text: 'second' }], timestamp: 3 }
+        ]
+      }
+    }))
+    useAcpStore.getState()._onAgentError({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      message: "Internal error: You've hit your session limit · resets 8:20pm",
+      code: -32603,
+      data: { errorKind }
+    })
+    const state = useAcpStore.getState()
+    expect(state.agentStatus['agent-1']).toBe('connected')
+    expect(state.sessions['s1'].status).toBe('active')
+    expect(state.sessions['s1'].activeTurn).toBe(false)
+    expect(state.sessions['s1'].lastError).toContain('session limit')
+    expect(state.sessions['s1'].lastErrorData).toEqual({ errorKind })
+    expect(state.messages['s1'].map((m) => m.id)).toEqual(['m1', 'm2', 'm3'])
+  })
+
   // Story 1.9 review (EC #8): a crash event for an already-closed session
   // must NOT resurrect it to 'error'.
   it('agent_crashed does not resurrect a closed session', () => {
     seedSession('s1', 'agent-1')
-    useAcpStore.getState()._onSessionClosed({ agentId: 'agent-1', sessionId: 's1' })
+    useAcpStore
+      .getState()
+      ._onSessionClosed({ agentId: 'agent-1', sessionId: 's1', reason: 'closed' })
     expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
     useAcpStore.getState()._onAgentCrashed({
       agentId: 'agent-1',
@@ -501,7 +537,7 @@ describe('acp-store multi-project isolation', () => {
       agentId: 'agent-1',
       message: 'fatal: api key revoked'
     })
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
     expect(useAcpStore.getState().sessions['s1'].lastError).toBe('fatal: api key revoked')
   })

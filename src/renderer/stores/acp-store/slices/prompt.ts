@@ -15,8 +15,9 @@ import {
   type StopReason
 } from '@/lib/acp-api'
 import { getCachedSessionPayload, setCachedSessionPayload } from '@/lib/acp-history-persistence'
-import { AcpTransportError, isTransientAcpTransportError } from '@/lib/acp-transport'
+import { AcpTransportError, isOutcomeUncertainError } from '@/lib/acp-transport'
 import { bumpTurnEndNotice } from '@/lib/agent-chat-notify'
+import { settleCommand } from '@/lib/command-engine'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import {
@@ -46,12 +47,6 @@ import {
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
-  forgetTrackedPermission,
-  forgetTrackedPermissionsForSession,
-  retrackPermission,
-  retrackStillPending
-} from '../permission-denial'
-import {
   activeWirePromptTurns,
   claimPromptTurnEnd,
   commitMessageCollectors,
@@ -69,7 +64,8 @@ import type { AcpSession, AcpState, ChatMessage, TurnEndSetter } from '../types'
 import {
   abandonPendingPrompt,
   beginPromptReconcile,
-  clearPromptReconcile
+  clearPromptReconcile,
+  recheckPendingPrompt
 } from './prompt-reconcile'
 import { clampLiveToolCallFields, flushCoalescedSync } from './transcript'
 
@@ -107,12 +103,14 @@ export function flushNextQueuedPrompt(set: TurnEndSetter, sessionId: SessionId):
 
 /**
  * End the current turn after the macrotask queue drains so streamed
- * `acp:message_chunk` events delivered after `acp_send_prompt` / `acp:prompt_complete`
- * are still accepted. Idempotent when the turn is already closed.
+ * `acp:message_chunk` events delivered alongside `acp:prompt_complete` are
+ * still accepted. Only the durable `prompt_complete` (live or replayed) and
+ * Stop schedule this — a command reply never does (AD-6). Idempotent when the
+ * turn is already closed.
  *
- * `expectedTurnId` guards against duplicate end signals (dispatch resolve +
- * `acp:prompt_complete` both schedule end) clearing a newer turn — e.g. a
- * queued prompt flushed immediately after the previous turn closed.
+ * `expectedTurnId` guards against duplicate end signals (a replayed
+ * `prompt_complete` + the live one) clearing a newer turn — e.g. a queued
+ * prompt flushed immediately after the previous turn closed.
  *
  * When there is no turn id but `activeTurn` is still set (defensive activeTurn-only
  * state), clear the busy flags and flush the queue so send-now / completion can
@@ -248,6 +246,11 @@ export async function runPromptTurn(
   // `user_prompt` echo → reliable dedup in `_onUserPrompt` regardless of block
   // differences (the bug: the echo rendered a second user bubble because the
   // optimistic id (`msg-<uuid>`) never matched the echo's `turn:<uuid>`).
+  // AD-5: the turn id IS the prompt's command id. It is NOT journaled: a
+  // renderer reload loses the optimistic turn and its draft, so a persisted id
+  // could never be reused for the same prompt (the host's `prompt_complete`
+  // replay / sweeper settles a turn the old page sent). The in-memory engine
+  // reuses it for every resend of THIS dispatch.
   const turnId = randomUUID()
 
   // Atomically decide enqueue vs start so rapid sends cannot both reach the backend.
@@ -378,7 +381,11 @@ export async function runPromptTurn(
     }
   })
 
-  if (enqueued) return
+  if (enqueued || !openTurnId) {
+    // Nothing is dispatched under this id: it is not an unresolved command.
+    settleCommand(turnId, 'rejected')
+    if (enqueued) return
+  }
   // `userMessage` is absent ONLY in the deliberate empty-display dispatch —
   // the turn still runs (the optimistic-bubble step was skipped, not failed).
   if (!openTurnId) throw new Error(`unknown session ${sessionId}`)
@@ -388,21 +395,20 @@ export async function runPromptTurn(
   activeWirePromptTurns.set(sessionId, turnId)
 
   /**
-   * A stop reason ends the turn (it ran on this call). A receipt resolves the
-   * COMMAND only: the host already holds this turn id, and its stop reason
-   * arrives as the durable `prompt_complete` (live or replayed) — never end the
-   * turn view from a receipt.
+   * AD-6: the reply (a receipt, or the stop reason the turn ran to) resolves
+   * the COMMAND only. The turn view ends from the durable `prompt_complete`
+   * event (live or replayed) — never from a reply: the host already holds this
+   * turn id and the log is the single authority on how the turn ended.
    */
   const settleDispatch = (result: PromptDispatchResult): void => {
-    if (isPromptReceipt(result)) {
-      void logFrontendError({
-        level: 'info',
-        source: 'acp-store.promptReceipt',
-        message: `Prompt turn ${turnId} on session ${sessionId} answered with a ${result.receipt} receipt; awaiting its prompt_complete`
-      })
-      return
-    }
-    scheduleTurnEnd(set, sessionId, result, openTurnId)
+    settleCommand(turnId, 'accepted')
+    void logFrontendError({
+      level: 'info',
+      source: 'acp-store.promptReceipt',
+      message: `Prompt turn ${turnId} on session ${sessionId} answered ${
+        isPromptReceipt(result) ? `with a ${result.receipt} receipt` : `with stop reason ${result}`
+      }; awaiting its prompt_complete`
+    })
   }
   // A definite server rejection (explicit error reply): the turn failed. An
   // agent-dead rejection ("agent thread dropped the reply" / "is no longer
@@ -411,6 +417,7 @@ export async function runPromptTurn(
   // `lastError`. Don't clobber that crash message with the low-level IPC
   // string, and leave the turn finalized so callers can suppress the toast.
   const failTurn = (err: unknown): void => {
+    settleCommand(turnId, 'rejected')
     activeWirePromptTurns.delete(sessionId)
     clearPromptReconcile(sessionId)
     const agentDead = isAgentDeadError(err)
@@ -434,9 +441,8 @@ export async function runPromptTurn(
 
   persistSession(get(), sessionId, (entries) => set({ sessionIndex: entries }))
   try {
-    // Command reply vs streamed chunks have no ordering guarantee; defer turn
-    // end to a macrotask so chunk listeners run first. Idempotent with
-    // `_onPromptComplete` (which also calls `scheduleTurnEnd`).
+    // The command reply resolves the COMMAND only (`settleDispatch`); the turn
+    // ends from the durable `prompt_complete` via `_onPromptComplete`.
     const liveSession = get().sessions[sessionId]
     if (!liveSession) throw new Error(`unknown session ${sessionId}`)
     // Story 8: a claimed warm-pool session's backend promote must resolve
@@ -477,6 +483,7 @@ export async function runPromptTurn(
     settleDispatch(await dispatch(liveSession, turnId))
   } catch (err) {
     if (isPromptTurnInProgressError(err)) {
+      settleCommand(turnId, 'rejected')
       activeWirePromptTurns.delete(sessionId)
       // The empty-display dispatch has no optimistic user message to strip;
       // recover the wire blocks into the queue under the turn id so the
@@ -508,7 +515,7 @@ export async function runPromptTurn(
     // turn id is resent once the transport recovers; the host answers with a
     // receipt or the stop reason. Only a definite server rejection fails the
     // turn, and Retry of a failed turn is a new intent with a new id.
-    if (isTransientAcpTransportError(err)) {
+    if (isOutcomeUncertainError(err)) {
       // The turn may have ended while the dispatch was in flight (stop reason /
       // terminator landed, Stop pressed, or a queued prompt already started
       // the next turn). Reconciling it now would resend a finished turn and
@@ -517,6 +524,7 @@ export async function runPromptTurn(
         get().sessions[sessionId]?.openTurnId !== openTurnId ||
         activeWirePromptTurns.get(sessionId) !== turnId
       ) {
+        settleCommand(turnId, 'accepted')
         return
       }
       beginPromptReconcile(sessionId, {
@@ -527,7 +535,9 @@ export async function runPromptTurn(
           return dispatch(resendSession, turnId)
         },
         onResult: settleDispatch,
-        onDefiniteFailure: (rejection) => failTurn(rejection)
+        onDefiniteFailure: (rejection) => failTurn(rejection),
+        outcomeUnknown:
+          err instanceof AcpTransportError && err.code === WS_ERROR_CODES.OUTCOME_UNKNOWN
       })
       return
     }
@@ -541,13 +551,14 @@ type PromptSliceState = Pick<
   | 'promptQueues'
   | 'turnEndNotices'
   | 'suppressQueueFlush'
-  | 'pendingPromptReconcile'
+  | 'promptCommandStates'
   | 'pendingPermissions'
   | 'pendingQuestions'
   | 'pendingElicitations'
   | 'sendPrompt'
   | 'sendPromptBlocks'
   | 'cancelPrompt'
+  | 'recheckPromptCommand'
   | 'removeQueuedPrompt'
   | 'sendQueuedPromptNow'
   | 'setConfigOption'
@@ -563,7 +574,7 @@ type PromptSliceState = Pick<
 >
 
 /** The host's stable `already_resolved` reply: the approval/question ticket was
- *  resolved by another connection, a timeout or a disconnect deny. */
+ *  answered by another connection or released when its turn, session or agent ended. */
 function isAlreadyResolved(err: unknown): boolean {
   return err instanceof AcpTransportError && err.code === WS_ERROR_CODES.ALREADY_RESOLVED
 }
@@ -575,7 +586,7 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
   promptQueues: {},
   turnEndNotices: {},
   suppressQueueFlush: {},
-  pendingPromptReconcile: {},
+  promptCommandStates: {},
 
   sendPrompt: (sessionId, text) => {
     // Staged switch-on-send (CAP-1/CAP-4): an armed switch intercepts the
@@ -619,8 +630,6 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
   cancelPrompt: async (sessionId) => {
     const session = get().sessions[sessionId]
     if (!session?.activeTurn) return
-    // Stop is a user action: a permission it abandons is not a disconnect denial.
-    const forgotten = forgetTrackedPermissionsForSession(sessionId)
     // A prompt still waiting to be confirmed may never have reached the host:
     // Stop abandons the command (no more same-id resends — a late resend must
     // not start a turn the user cancelled) and ends the local turn view itself,
@@ -639,8 +648,6 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     try {
       await acpApi.cancelPrompt(session.agentId, sessionId)
     } catch (err) {
-      // The cancel never landed, so the permission is still the server's to deny.
-      retrackStillPending(forgotten, get().pendingPermissions)
       if (!abandonedPending) throw err
       void logFrontendError({
         level: 'warn',
@@ -652,6 +659,10 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
       scheduleTurnEnd(set, sessionId, 'cancelled', session.openTurnId)
     }
     // otherwise the turn is cleared by _onPromptComplete (cancelled) or by sendPrompt's resolution
+  },
+
+  recheckPromptCommand: (sessionId) => {
+    recheckPendingPrompt(sessionId)
   },
 
   removeQueuedPrompt: (sessionId, queueId) => {
@@ -682,13 +693,7 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
 
     try {
       if (sessionTurnBusy(session)) {
-        const forgotten = forgetTrackedPermissionsForSession(sessionId)
-        try {
-          await acpApi.cancelPrompt(session.agentId, sessionId)
-        } catch (err) {
-          retrackStillPending(forgotten, get().pendingPermissions)
-          throw err
-        }
+        await acpApi.cancelPrompt(session.agentId, sessionId)
         await waitForTurnClear(sessionId, get, useAcpStore.subscribe)
       }
       await runPromptTurn(
@@ -716,6 +721,12 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     }
   },
 
+  // AD-6 exception (acknowledged value applied locally) for setConfigOption /
+  // setMode / setModel below: these are idempotent value-sets (no ledger entry)
+  // and no event is guaranteed to echo the applied value — agents are not
+  // required to emit `mode_update` / `config_options_update` after a set, and
+  // there is no model event at all — so the acknowledged reply is the only
+  // source of the applied value.
   setConfigOption: async (sessionId, configId, valueId) => {
     const session = get().sessions[sessionId]
     if (!session) throw new Error(`unknown session ${sessionId}`)
@@ -834,8 +845,6 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
   respondPermission: async (requestId, optionId) => {
     const pending = get().pendingPermissions[requestId]
     if (!pending) return
-    // The user is answering: leaving the store is not a disconnect denial.
-    const tracked = forgetTrackedPermission(requestId)
     // Optimistically remove so a rapid double-click can't fire a second backend
     // call for the same request (which would error as 'unknown request').
     set((s) => {
@@ -846,14 +855,12 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     try {
       await acpApi.respondPermission(pending.agentId, requestId, optionId)
     } catch (err) {
-      // Another connection (or a timeout) already resolved this ticket: the
-      // request is gone for good, so restoring it would resurrect a modal
-      // nobody can answer. Mirrors the desktop command's idempotent resolve.
+      // Another connection already answered this ticket, or its turn or session
+      // ended: the request is gone for good, so restoring it would resurrect a
+      // modal nobody can answer. Mirrors the desktop command's idempotent resolve.
       if (isAlreadyResolved(err)) return
-      // Restore the entry so the user can retry, then track it again (after the
-      // restore, so the restore is not read as the request vanishing).
+      // Restore the entry so the user can retry.
       set((s) => ({ pendingPermissions: { ...s.pendingPermissions, [requestId]: pending } }))
-      if (tracked) retrackPermission(requestId, tracked)
       throw err
     }
   },

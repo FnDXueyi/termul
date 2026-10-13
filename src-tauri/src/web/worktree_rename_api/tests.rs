@@ -74,6 +74,7 @@ fn test_state(root: &Path, acp: Arc<AcpManager>) -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
+        connections: Default::default(),
     }
 }
 
@@ -97,6 +98,10 @@ async fn post_json(state: AppState, body: &serde_json::Value, peer: SocketAddr) 
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/worktree/rename-branch")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(peer))

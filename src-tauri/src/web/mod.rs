@@ -24,7 +24,9 @@ pub mod auth;
 pub mod canvas_api;
 pub mod capabilities;
 pub mod catalog_api;
+pub mod command_ledger;
 pub mod config;
+pub mod connection_runtime;
 pub mod fs_api;
 pub mod fs_watcher;
 pub mod git_api;
@@ -50,6 +52,7 @@ pub mod sink;
 pub mod skills_api;
 pub mod store;
 pub mod terminal_ws;
+pub mod watch;
 pub mod workspace_api;
 pub mod worktree_api;
 pub mod worktree_rename_api;
@@ -58,13 +61,8 @@ pub mod ws;
 pub use config::ServerConfig;
 pub use permissions::PermissionRendezvous;
 pub use permissions::QuestionRendezvous;
-pub use project_registry::{
-    seed_from_file, ProjectListPayload, ProjectRegistry, ProjectSummary, ProjectsChangedPayload,
-};
-pub use sink::{
-    broadcast_chat_history_changed, broadcast_projects_changed, fan_out, EventSink, TauriEventSink,
-    WsRelaySink,
-};
+pub use project_registry::{seed_from_file, ProjectListPayload, ProjectRegistry, ProjectSummary};
+pub use sink::{fan_out, EventSink, EventStream, StreamItem, TauriEventSink, WsRelaySink};
 pub use ws::{AppState, HistoryMode, ReliabilityTier, RuntimePolicy, SequencedEvent, WsErrorCode};
 
 use std::future::Future;
@@ -79,6 +77,7 @@ use tracing::{error, info, warn};
 use crate::acp::AcpManager;
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
+use crate::web::connection_runtime::{ConnectionRuntime, SOCKET_DRAIN_BOUND};
 use crate::web::store::WebStore;
 
 #[cfg(test)]
@@ -158,8 +157,9 @@ pub async fn serve(
     web_auth: Option<Arc<auth::WebAuth>>,
     canvas_pool: Option<Arc<crate::canvas::pool::CanvasDaemonPool>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Issue #837: idle agent reaper (standalone server only — see the module
-    // doc for why this is NOT in `serve_router`). The shutdown future resolves
+    // Idle agent reaper (standalone server; the desktop starts its own from
+    // `lib.rs` — see the module doc for why this is NOT in `serve_router`).
+    // The shutdown future resolves
     // on SIGINT/SIGTERM OR when the router task finishes for any other reason
     // (bind failure, panic, early exit) so `serve` never hangs waiting on a
     // reaper whose signal can no longer arrive in-process.
@@ -167,7 +167,6 @@ pub async fn serve(
     let reaper_window = std::time::Duration::from_secs(cfg.agent_idle_window_secs);
     let reaper_handle = agent_reaper::spawn_agent_idle_reaper(
         acp.clone(),
-        ws_relay.clone(),
         reaper_window,
         Box::pin(async move {
             tokio::select! {
@@ -345,6 +344,15 @@ pub async fn serve_router(
             cfg.project_root.display()
         );
     }
+    // AD-19: one shutdown handle + overflow tolerance for every socket this
+    // host upgrades.
+    let connections = ConnectionRuntime::from_config(&cfg);
+    // A serve start is a new host epoch for the watch hub: a client that sees
+    // the epoch change rebuilds its watched state from a fresh full-state frame.
+    ws_relay.watches().renew_epoch();
+    info!(target: "termul::web::watch", "watch hub host epoch renewed for this serve start");
+    let store_for_gc = Arc::clone(&store);
+    let socket_shutdown = connections.shutdown.clone();
     let app = router::router(
         Arc::clone(&acp),
         pty,
@@ -377,20 +385,42 @@ pub async fn serve_router(
         // server instead (AD-8).
         canvas_pool,
         cfg.allowed_origins.clone(),
+        connections,
     );
 
+    // Stale device partitions are swept daily while this host serves; the
+    // task stops with it (the desktop shared-live host starts and stops).
+    let store_gc = store::spawn_gc_task(store_for_gc, Arc::clone(ws_relay.presence()));
     let handle = tokio::spawn(async move {
         // Patch D: `into_make_service_with_connect_info::<SocketAddr>()` so
         // the fs WRITE routes can extract `ConnectInfo<SocketAddr>` for the
         // localhost-only guard. Read routes and `/ws` are unaffected.
+        //
+        // Axum's graceful shutdown only drains plain HTTP requests: an
+        // upgraded socket is handed to a detached task. So the stop signal
+        // also tells every admitted `/ws` + `/terminal/ws` socket to close
+        // (`Close(1001)`), and the task below awaits them before it reports
+        // the server stopped.
+        let begin_socket_shutdown = socket_shutdown.clone();
         let serve_result = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            begin_socket_shutdown.begin();
+        })
         .await
         .inspect_err(|e| error!("ACP web server error: {}", e));
 
+        // Also reached when the server errored rather than being stopped.
+        socket_shutdown.begin();
+        let stragglers = socket_shutdown.drain(SOCKET_DRAIN_BOUND).await;
+        if stragglers > 0 {
+            error!("ACP web server stopped with {stragglers} socket task(s) still running");
+        }
+
+        store_gc.abort();
         match serve_result {
             Ok(()) => info!("ACP web server stopped"),
             Err(e) => error!("ACP web server stopped with error: {}", e),

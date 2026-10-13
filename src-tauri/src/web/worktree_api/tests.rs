@@ -63,6 +63,7 @@ fn test_state(root: &std::path::Path) -> AppState {
             std::collections::HashMap::new(),
         )),
         oauth_base_url: "http://127.0.0.1".to_string(),
+        connections: Default::default(),
     }
 }
 
@@ -108,6 +109,10 @@ async fn post_json_from(
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri(uri)
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(peer))
@@ -556,6 +561,7 @@ fn production_router(root: &std::path::Path) -> axum::Router {
         // No canvas pool on this fixture — the /canvas/* routes degrade.
         None,
         crate::web::origin::OriginPolicy::default(),
+        crate::web::connection_runtime::ConnectionRuntime::default(),
     )
 }
 
@@ -577,6 +583,10 @@ async fn production_router_serves_worktree_list_as_ipcbody_not_spa_fallback() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/worktree/list")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(loopback()))
@@ -654,6 +664,10 @@ async fn production_router_serves_worktree_resolve_base_branch_as_ipcbody() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/worktree/resolve-base-branch")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(loopback()))
@@ -687,6 +701,10 @@ async fn production_router_does_not_swallow_unregistered_path_as_ipcbody() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/worktree/nonexistent-route")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(loopback()))

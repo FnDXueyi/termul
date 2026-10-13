@@ -4,10 +4,12 @@
 //! socket against the production router seam (`ws_upgrade`).
 
 use super::tests::{
-    auth_frame, handle_sync_with_access, test_access, test_policy, ws_read_frame,
-    ws_test_app_state, ws_write_frame,
+    auth_frame, handle_sync_with_access, test_access, test_env, test_outbound, test_policy,
+    ws_read_frame, ws_test_app_state, ws_write_frame,
 };
 use super::*;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const MUTATIONS: &[&str] = &[
     "spawn_agent",
@@ -31,7 +33,6 @@ const MUTATIONS: &[&str] = &[
     "update_project",
     "remove_project",
     "set_default_project",
-    "switch_project",
     "set_catalog_opt_in",
     "install_acp_agent",
     "authenticate_agent",
@@ -179,36 +180,12 @@ async fn send_prompt_fast_path_enforces_the_capability_check() {
     let relay = Arc::new(WsRelaySink::new());
     let acp = Arc::new(AcpManager::new(vec![]));
     let registry = Arc::new(ProjectRegistry::new());
-    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
-    let subscribed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let mut authed = true;
-    let mut access = view_only_access();
-    let mut current_agent = None;
-    let current_session = Arc::new(parking_lot::Mutex::new(None));
-    let current_project = Arc::new(parking_lot::Mutex::new(None));
-    let switch_queue = Arc::new(tokio::sync::Mutex::new(ProjectSwitchQueue::default()));
-    let alive = dispatch_connection_text(
-        r#"{"id":"p1","type":"send_prompt","payload":{"agentId":"a","sessionId":"s","text":"hi","turnId":"t"}}"#,
-        &mut authed,
-        &mut None,
-        &mut access,
-        None,
-        &acp,
-        &relay,
-        &registry,
-        None,
-        None,
-        &tx,
-        &subscribed,
-        &mut current_agent,
-        &current_session,
-        &current_project,
-        &switch_queue,
-        HistoryMode::LiveOnly,
-        None,
-        None,
-        None,
-    )
+    let (tx, mut rx) = test_outbound();
+    let subscribed = Arc::new(Subscriptions::default());
+    let mut conn = ConnState::authenticated(view_only_access());
+    conn.subscriptions = Arc::clone(&subscribed);
+    let exec = KeyedExecutor::new(CancellationToken::new());
+    let alive = dispatch_connection_text(r#"{"id":"p1","type":"send_prompt","payload":{"agentId":"a","sessionId":"s","text":"hi","turnId":"t"}}"#, &mut conn, &test_env(&acp, &relay, &registry, &tx, &subscribed), &exec)
     .await;
     assert!(alive);
     let Some(Outbound::Reply(reply)) = rx.recv().await else {
@@ -216,6 +193,37 @@ async fn send_prompt_fast_path_enforces_the_capability_check() {
     };
     assert_eq!(code(&reply), "forbidden");
     assert!(rx.try_recv().is_err(), "no turn was started");
+}
+
+/// A refusal happens ahead of admission: a view-only connection's mutation
+/// with a `commandId` leaves no ledger entry, so the same id stays free for a
+/// connection that may write.
+#[tokio::test]
+async fn a_capability_refusal_leaves_no_ledger_entry() {
+    let relay = Arc::new(WsRelaySink::new());
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let registry = Arc::new(ProjectRegistry::new());
+    let (tx, mut rx) = test_outbound();
+    let subscribed = Arc::new(Subscriptions::default());
+    let mut conn = ConnState::authenticated(view_only_access());
+    conn.subscriptions = Arc::clone(&subscribed);
+    let exec = KeyedExecutor::new(CancellationToken::new());
+    let env = test_env(&acp, &relay, &registry, &tx, &subscribed);
+
+    let alive = dispatch_connection_text(
+        r#"{"id":"c1","type":"promote_session","command_id":"cmd-1","payload":{"agentId":"a","sessionId":"s"}}"#,
+        &mut conn,
+        &env,
+        &exec,
+    )
+    .await;
+
+    assert!(alive);
+    let Some(Outbound::Reply(reply)) = rx.recv().await else {
+        panic!("expected a reply frame");
+    };
+    assert_eq!(code(&reply), "forbidden");
+    assert_eq!(relay.ledger().counts(), (0, 0, 0), "the refusal was not recorded");
 }
 
 // ---------------------------------------------------------------------------

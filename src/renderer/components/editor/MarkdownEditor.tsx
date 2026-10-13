@@ -19,6 +19,8 @@ interface MarkdownEditorProps {
   filePath: string
   content: string
   isVisible: boolean
+  /** Locks the buffer (e.g. while a draft conflict awaits a decision). */
+  readOnly?: boolean
   onChange: (content: string) => void
 }
 
@@ -45,8 +47,11 @@ export function MarkdownEditor({
   filePath,
   content,
   isVisible,
+  readOnly = false,
   onChange
 }: MarkdownEditorProps): React.JSX.Element {
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   // Count of local emits still awaiting acknowledgment from the content prop sync.
   const pendingLocalEmitsRef = useRef(0)
   const prevContentRef = useRef(content)
@@ -65,6 +70,7 @@ export function MarkdownEditor({
 
   const emitFullContent = useCallback(
     (body: string) => {
+      if (readOnlyRef.current) return
       bodyRef.current = body
       const full = composeFullMarkdown(hasFrontmatterRef.current, frontmatterRef.current, body)
       // Serialize failure → keep last-good store content (muted).
@@ -117,6 +123,7 @@ export function MarkdownEditor({
 
   const handleFrontmatterChange = useCallback(
     (next: FrontmatterMap) => {
+      if (readOnlyRef.current) return
       frontmatterRef.current = next
       hasFrontmatterRef.current = true
       setFrontmatter(next)
@@ -190,11 +197,21 @@ export function MarkdownEditor({
       >
         <div className="markdown-editor-document flex min-h-full w-full flex-col">
           {hasFrontmatter && (
-            <FrontmatterProperties data={frontmatter} onChange={handleFrontmatterChange} />
+            <div
+              className={readOnly ? 'pointer-events-none opacity-60' : undefined}
+              aria-disabled={readOnly || undefined}
+              // `inert` (React 18 types lack it; an empty string renders the
+              // attribute) removes the fields from the tab order and a11y
+              // tree so keyboard users cannot edit during a draft conflict.
+              {...(readOnly ? ({ inert: '' } as Record<string, string>) : {})}
+            >
+              <FrontmatterProperties data={frontmatter} onChange={handleFrontmatterChange} />
+            </div>
           )}
           <div className="min-h-0 flex-1">
             <BlockNoteViewRaw
               editor={editor}
+              editable={!readOnly}
               theme={isDark ? 'dark' : 'light'}
               formattingToolbar={false}
               linkToolbar={false}

@@ -7,19 +7,28 @@
 //! failing `Authenticate`). [`raw_client`] covers the cases that need a real
 //! upgraded socket (terminal teardown, host stop).
 //!
-//! Cases that assert behavior the relay execution rework (AD-19) delivers are
-//! `#[ignore]`d with a reason and named `audit_*`; run them with
-//! `cargo test --lib -- --ignored audit` to see them fail on pre-rework code.
+//! The AD-19 relay-execution repros are named `audit_*` (`cargo test --lib audit_`).
 
 pub(crate) mod carrier;
 pub(crate) mod raw_client;
 
+#[cfg(test)]
+mod relay_approval_tests;
+#[cfg(test)]
+mod relay_bounded_tests;
+#[cfg(test)]
+mod relay_execution_tests;
+#[cfg(test)]
+mod relay_command_tests;
 #[cfg(test)]
 mod relay_fault_tests;
 #[cfg(test)]
 mod relay_liveness_tests;
 #[cfg(test)]
 mod relay_prompt_tests;
+#[cfg(test)]
+mod watch_hub_tests;
+mod store_tests;
 #[cfg(test)]
 mod watch_tests;
 
@@ -52,6 +61,16 @@ impl Host {
         relay.seed_session_for_test(SESSION);
         let acp = Arc::new(AcpManager::new(vec![relay.clone()]));
         install(&acp, HashSet::from([SESSION.to_string()]));
+        Self::from_parts(relay, acp, HistoryMode::LiveOnly)
+    }
+
+    /// A host over an existing relay + manager (tests that build their own,
+    /// e.g. with durable persistence or an injected ledger clock).
+    pub(crate) fn from_parts(
+        relay: Arc<WsRelaySink>,
+        acp: Arc<AcpManager>,
+        history_mode: HistoryMode,
+    ) -> Self {
         let pty = crate::web::test_pty_manager();
         let state = AppState {
             acp: Arc::clone(&acp),
@@ -64,7 +83,7 @@ impl Host {
             registry: Arc::new(ProjectRegistry::new()),
             registry_persistence: None,
             projects_file: None,
-            history_mode: HistoryMode::LiveOnly,
+            history_mode,
             workspace_manifest: None,
             acp_catalog: None,
             acp_install: None,
@@ -76,8 +95,15 @@ impl Host {
                 std::collections::HashMap::new(),
             )),
             oauth_base_url: "http://127.0.0.1".to_string(),
+            connections: Default::default(),
         };
         Self { relay, state }
+    }
+
+    /// Attach a store (the default host runs without one, as in degraded mode).
+    pub(crate) fn with_store(mut self, store: Arc<crate::web::store::WebStore>) -> Self {
+        self.state.store = Some(store);
+        self
     }
 
     /// Open a connection: the production relay loop on a fault carrier.
@@ -85,6 +111,9 @@ impl Host {
         let (carrier, peer) = pair();
         let (done_tx, done) = watch::channel(false);
         let state = self.state.clone();
+        // Admitted before the task is spawned, like the upgrade handler does,
+        // so a stop cannot drain past a connection that has not started yet.
+        let lease = state.connections.shutdown.admit();
         let task = tokio::spawn(async move {
             // Signals completion on a normal exit or a cancel, never on a panic.
             struct Finished(watch::Sender<bool>);
@@ -100,7 +129,7 @@ impl Host {
             let _finished = Finished(done_tx);
             // The harness peer is a local, write-capable connection.
             let local_peer = SocketAddr::from(([127, 0, 0, 1], 0));
-            run_relay(carrier, state, local_peer).await;
+            serve_socket(lease, carrier, state, local_peer).await;
         });
         Conn { peer, task, done }
     }
@@ -117,14 +146,19 @@ pub(crate) struct Conn {
 impl Conn {
     /// Run the versioned `authenticate` handshake and require `ok`.
     pub(crate) async fn authenticate(&mut self) {
+        self.authenticate_as("device-harness", "tab-harness").await;
+    }
+
+    /// `authenticate` as one tab of one device.
+    pub(crate) async fn authenticate_as(&mut self, device_id: &str, client_instance_id: &str) {
         let reply = self
             .request(
                 "auth",
                 "authenticate",
                 json!({
                     "protocolVersion": WS_PROTOCOL_VERSION,
-                    "deviceId": "device-harness",
-                    "clientInstanceId": "tab-harness",
+                    "deviceId": device_id,
+                    "clientInstanceId": client_instance_id,
                 }),
             )
             .await;

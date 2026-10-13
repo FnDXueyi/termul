@@ -14,7 +14,7 @@ use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionMode, SessionModeId, StopReason, ToolCall, ToolCallUpdate,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Re-export the transport-neutral fan-out helper so the `acp` dispatcher emits
 /// through `Vec<Arc<dyn EventSink>>` instead of `AppHandle::emit` directly
@@ -33,7 +33,7 @@ pub(crate) use crate::web::fan_out;
 /// 0.14 — they are a `SessionConfigOption` with `category = "model"` — so
 /// Termul reconstructs this legacy view from `config_options` to keep the
 /// renderer's Model Picker contract byte-compatible.
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionModel {
     pub model_id: String,
@@ -46,7 +46,7 @@ pub struct SessionModel {
 ///
 /// Wire-identical to the pre-1.3 schema `SessionModelState`
 /// (`{ currentModelId, availableModels[] }`).
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionModelState {
     pub current_model_id: String,
@@ -166,10 +166,13 @@ pub const EVENT_SESSION_CLOSED: &str = "acp:session_closed";
 pub const EVENT_AGENT_DISCONNECTED: &str = "acp:agent_disconnected";
 /// Event name: the agent updated session metadata (e.g. title).
 pub const EVENT_SESSION_INFO_UPDATE: &str = "acp:session_info_update";
-/// Event name: a durable agent-switch marker was recorded (CAP-2). Emitted
-/// synthetically by the host after the `agent_switch` record is durable —
-/// the record is the transcript authority, the event is live-only delivery.
+/// Event name: a durable agent-switch marker was recorded (CAP-2). The host
+/// authors it once: the relay numbers it, appends it to the durable log and
+/// delivers it live under that same seq.
 pub const EVENT_AGENT_SWITCH: &str = "acp:agent_switch";
+/// Host-authored durable title record (relay-only: the desktop renderer gets
+/// the `acp:session_info_update` twin instead).
+pub const EVENT_LOCAL_TITLE_GENERATED: &str = "acp:local_title_generated";
 /// Event name: a worktree's branch was renamed by the host (story 16,
 /// CAP-5). Agent-level (`sid = None`); the payload is
 /// [`WorktreeBranchRenamedEvent`]. Every client reconciles worktrees and
@@ -209,7 +212,7 @@ pub enum ChunkRole {
 /// forwards `type` only — the renderer shows a disabled "not supported" entry
 /// (respawn-with-env is out of scope). No agent-type filtering is applied —
 /// every advertised method is forwarded.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthMethodInfo {
     pub id: String,
@@ -838,22 +841,43 @@ pub struct AgentCrashedEvent {
     pub data: Option<serde_json::Value>,
 }
 
+/// Why an agent (or one of its sessions) ended. Additive on the wire so every
+/// viewer can tell a deliberate stop from a crash.
+///
+/// `closed` is used only for an explicit `close_session`; the other three
+/// describe agent-level endings. Process shutdown stays silent and has no
+/// reason.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentExitReason {
+    /// An explicit kill from a client.
+    Killed,
+    /// The idle reaper stopped the agent after its quiet window.
+    Reaped,
+    /// The agent process or its connection died on its own.
+    Crashed,
+    /// A single session was closed explicitly; the agent keeps running.
+    Closed,
+}
+
 /// `acp:agent_disconnected`
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDisconnectedEvent {
     pub agent_id: AgentId,
+    pub reason: AgentExitReason,
 }
 
 /// `acp:session_closed`
 ///
-/// Emitted when a session ends — either via an explicit close or because the
-/// owning agent disconnected/crashed while the session was active.
+/// Emitted when a session ends — via an explicit close, or because the owning
+/// agent was killed, reaped or crashed while the session was active.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionClosedEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
+    pub reason: AgentExitReason,
 }
 
 /// OpenCode compaction marker carried on `session_info_update` `_meta`.
@@ -1020,10 +1044,9 @@ pub struct WorktreeBranchRenamedEvent {
     pub new_branch: String,
 }
 
-/// `acp:agent_switch` (CAP-2) — the live fan-out of a durable agent-switch
-/// marker. Emitted only after `SessionPersistence::append_agent_switch`
-/// flushed the record; the durable record (not this event) is the transcript
-/// authority, so replay dedup is the watermark guard's job.
+/// `acp:agent_switch` (CAP-2) — a durable agent-switch marker. The relay
+/// numbers it, appends it to the durable log and delivers it live under the
+/// same seq (`record_host_event`), so replay dedup is the seq watermark's job.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSwitchEvent {

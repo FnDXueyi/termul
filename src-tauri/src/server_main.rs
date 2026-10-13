@@ -24,14 +24,11 @@ use termul_manager_lib::server_update::{
 };
 use termul_manager_lib::web::auth::{resolve as resolve_web_auth, WebAuthResolution};
 use termul_manager_lib::web::config::ParseCliError;
-use termul_manager_lib::web::permissions::{
-    DEFAULT_PERMISSION_RECONNECT_GRACE, DEFAULT_PERMISSION_TIMEOUT,
-};
 use termul_manager_lib::web::{
     seed_from_file, serve, PermissionRendezvous, ProjectRegistry, QuestionRendezvous, ServerConfig,
     WsRelaySink,
 };
-use termul_manager_lib::web::store::WebStore;
+use termul_manager_lib::web::store::{StorePolicy, WebStore};
 use termul_manager_lib::{
     AcpCatalogService, AcpInstallService, AcpManager, CwdTracker, ExitCodeTracker,
     FileProjectRegistry, GitTracker, PtyManager, SessionPersistence, TerminalEventHub,
@@ -271,7 +268,7 @@ fn main() -> ExitCode {
         // held. A newer-schema file (or a legacy file that cannot be backed
         // up before migration) refuses startup visibly instead of degrading;
         // the file is left untouched.
-        let store = match WebStore::open(data_paths.store_file.clone()) {
+        let store = match WebStore::open(data_paths.store_file.clone(), StorePolicy::from_config(&cfg)) {
             Ok(store) => Arc::new(store),
             Err(error) => {
                 error!("termul-server: refusing to start: {error}");
@@ -335,41 +332,24 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        let ws_relay = Arc::new(WsRelaySink::with_persistence(
-            cfg.event_log_capacity,
-            Arc::clone(&persistence),
-        ));
+        let ws_relay = Arc::new(
+            WsRelaySink::with_persistence(cfg.event_log_capacity, Arc::clone(&persistence))
+                .with_ledger(termul_manager_lib::web::command_ledger::CommandLedger::new(
+                    Duration::from_secs(cfg.receipt_retention_secs),
+                )),
+        );
         let acp = Arc::new(AcpManager::with_persistence_and_claude_agent(
             vec![ws_relay.clone()],
             persistence,
             claude_agent,
         ));
-        // Story 1.7: attach the server-side permission rendezvous (bounded
-        // timeout, at-most-one, first-response-wins, disconnect-deny, TOCTOU).
-        // The relay snapshots `acp:permission_request` events into it; the
-        // `/ws` `respond_permission` handler + disconnect cleanup enforce the
-        // policy. The desktop path does NOT attach a rendezvous (it uses the
-        // `acp_respond_permission` Tauri command directly).
-        let rendezvous = Arc::new(PermissionRendezvous::with_policy(
-            Arc::clone(&acp),
-            DEFAULT_PERMISSION_TIMEOUT,
-            DEFAULT_PERMISSION_RECONNECT_GRACE,
-        ));
+        // Attach the permission and question rendezvous. The relay snapshots
+        // `acp:permission_request` and `acp:question_request` events into them
+        // (at-most-one per session, first-response-wins, TOCTOU). A ticket has
+        // no timer: it waits until it is answered or its session ends.
+        let rendezvous = Arc::new(PermissionRendezvous::new(Arc::clone(&acp)));
         ws_relay.set_rendezvous(rendezvous);
-        // Issue #411: attach the server-side question rendezvous (bounded
-        // timeout, first-response-wins, TOCTOU). The relay snapshots
-        // `acp:question_request` events into it; the `/ws` `answer_question`
-        // handler + disconnect cleanup enforce the policy. The desktop path
-        // does NOT attach one (it uses the `acp_answer_question` Tauri command
-        // directly).
-        // Issue #841: questions share the permission reconnect grace so a
-        // user who steps away and returns within the window finds them
-        // still pending instead of instantly cancelled.
-        let question_rendezvous = Arc::new(QuestionRendezvous::with_policy(
-            Arc::clone(&acp),
-            DEFAULT_PERMISSION_TIMEOUT,
-            DEFAULT_PERMISSION_RECONNECT_GRACE,
-        ));
+        let question_rendezvous = Arc::new(QuestionRendezvous::new(Arc::clone(&acp)));
         ws_relay.set_question_rendezvous(question_rendezvous);
         // Story 4.1: the in-memory project registry. In VPS mode the
         // standalone binary is the source of truth — it seeds the registry
@@ -432,6 +412,7 @@ fn main() -> ExitCode {
             Arc::clone(&git_tracker),
             Arc::clone(&exit_code_tracker),
         ));
+        pty.set_max_terminals_per_project(cfg.max_terminals_per_project);
 
         let projects_file = cfg.projects_file.clone();
         // OpenPencil canvas mode (spec-openpencil-canvas-mode): the
@@ -765,29 +746,39 @@ OPTIONS:
                                   Idle window after which an idle agent is
                                   reaped. Positive integer.
                                   [env: TERMUL_AGENT_IDLE_REAP_SECS]
-                                  [default: 900]
+                                  [default: 1800]
+    --max-terminals-per-project <N>
+                                  Most live terminals one project may have.
+                                  The host refuses a spawn past it with
+                                  TERMINAL_LIMIT; the host-wide cap is 30.
+                                  Positive integer.
+                                  [env: TERMUL_MAX_TERMINALS_PER_PROJECT]
+                                  [default: 10]
     --overflow-tolerance <N>      Reliable-queue overflow tolerance per client.
                                   Positive integer. Reserved: the host
                                   validates it but does not read it yet.
                                   [default: 15]
     --receipt-retention-secs <SECS>
-                                  How long a command receipt is retained.
-                                  Positive integer. Reserved: the host
-                                  validates it but does not read it yet.
+                                  How long the command ledger keeps a
+                                  command's outcome, so a resend after a lost
+                                  reply gets the original answer (bare command
+                                  ids are kept six times as long). Positive
+                                  integer; values above 604800 (7 days) are
+                                  clamped.
                                   [default: 600]
     --partition-gc-age-secs <SECS>
-                                  Age after which an unused device partition
-                                  is garbage collected. Positive integer.
-                                  Reserved: the host validates it but does
-                                  not read it yet.
+                                  Age after which the web store partition of
+                                  a device that has not connected (and is not
+                                  connected now) is garbage collected.
+                                  Positive integer.
                                   [env: TERMUL_PARTITION_GC_AGE_SECS]
-                                  [default: unset]
+                                  [default: 7776000]
     --partition-byte-budget <BYTES>
-                                  Per-device partition byte budget. Positive
-                                  integer. Reserved: the host validates it
-                                  but does not read it yet.
+                                  Per-device web store partition byte budget;
+                                  a write past it is refused
+                                  (STORE_PARTITION_FULL). Positive integer.
                                   [env: TERMUL_PARTITION_BYTE_BUDGET]
-                                  [default: unset]
+                                  [default: 16777216]
     --permission-timeout <SECS>, --permission-reconnect-grace <SECS>
                                   Removed. Still accepted so existing launch
                                   commands keep starting, but ignored (a

@@ -2,10 +2,10 @@
  * Workspace-manifest sync hook (CAP-5 / Story 6).
  *
  * Owns the renderer side of the host-owned versioned workspace manifest:
- *  - `loadWorkspaceManifest(projectId)` — reads the host manifest and rebuilds
- *    the workspace topology from its portable projection (called by
- *    `useEditorPersistence`'s restore flow, which owns the editor open-files
- *    loop the manifest topology is reconciled against).
+ *  - `fetchManifestWorkspace(projectId)` — reads the host manifest and
+ *    rebuilds the workspace topology from its portable projection WITHOUT
+ *    writing any store (the project-switch hydration stages it);
+ *    `loadWorkspaceManifest` is the thin committer used by conflict reload.
  *  - `useWorkspaceManifestSync(projectId)` — the React hook mounted alongside
  *    `useEditorPersistence` in `WorkspaceLayout`. Subscribes to the portable
  *    slice of the workspace/editor/acp/terminal stores and debounced-writes
@@ -49,6 +49,11 @@ import type { WorkspaceTab } from '@/stores/workspace-store'
 import { editorTabId, terminalTabId, useWorkspaceStore } from '@/stores/workspace-store'
 import type { Terminal } from '@/types/project'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'
+
+/** True when `projectId`'s tree is the one the workspace store currently shows. */
+function isCommittedProject(projectId: string): boolean {
+  return useWorkspaceStore.getState().activeProjectId === projectId
+}
 
 /** Debounce window for coalesced manifest writes (mirrors useEditorPersistence). */
 const MANIFEST_WRITE_DEBOUNCE_MS = 500
@@ -279,20 +284,29 @@ export function rebuildTopologyFromManifest(manifest: WorkspaceManifest): {
   return { root, activePaneId, focusedSessionId }
 }
 
+/** A host manifest rebuilt into renderer shapes, with NO store written (see {@link fetchManifestWorkspace}). */
+export interface FetchedManifestWorkspace {
+  root: PaneNode
+  activePaneId: string | null
+  focusedSessionId: string | null
+  revision: number
+  /** Editor descriptors whose files the restore should open. */
+  editors: EditorDescriptor[]
+}
+
 /**
- * Load the host manifest for a project and rebuild the workspace topology
- * from its portable projection. Returns `true` when a manifest was found and
- * restored (topology + active pane + focused session + basedRevision set),
- * `false` when no manifest exists or the load failed (caller falls back to
- * the renderer-local `editorStateKey.paneLayout` path or a fresh layout).
- *
- * The caller MUST wrap this call in `setManifestRestoreInProgress(projectId,
- * true/false)` so the writer cancels pending writes during the tree rebuild.
- * This function does not set the guard itself — the caller owns the window to
- * avoid nested-clear races when the restore flow wraps a broader region.
+ * Side-effect-free read of a project's host manifest: fetches it and rebuilds
+ * the portable topology, writing NO store (the project-switch coordinator
+ * stages the result and commits it atomically). Returns `null` when no
+ * manifest exists or the read failed (failures are logged and degrade
+ * gracefully — the caller falls back to the renderer-local
+ * `editorStateKey.paneLayout` path or a fresh layout, and treats the next
+ * write's basedRevision as `null`).
  */
-export async function loadWorkspaceManifest(projectId: string): Promise<boolean> {
-  if (!projectId) return false
+export async function fetchManifestWorkspace(
+  projectId: string
+): Promise<FetchedManifestWorkspace | null> {
+  if (!projectId) return null
   try {
     const result = await workspaceManifestApi.getManifest(projectId)
 
@@ -303,53 +317,67 @@ export async function loadWorkspaceManifest(projectId: string): Promise<boolean>
         source: 'workspace-manifest-sync',
         message: `getManifest failed for project ${projectId}: ${result.code} ${result.error}`
       })
-      useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, null)
-      return false
+      return null
     }
 
-    if (!result.data) {
-      // Fresh workspace: no manifest exists yet. Next write uses basedRevision null.
-      useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, null)
-      return false
-    }
+    // Fresh workspace: no manifest exists yet. Next write uses basedRevision null.
+    if (!result.data) return null
 
     const manifest = result.data
-    const { root, activePaneId, focusedSessionId } = rebuildTopologyFromManifest(manifest)
-    useWorkspaceStore.getState().loadProjectWorkspace(root, activePaneId)
-    useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, manifest.revision)
-    if (focusedSessionId) {
-      useAcpStore.getState().setActiveSession(focusedSessionId)
+    return {
+      ...rebuildTopologyFromManifest(manifest),
+      revision: manifest.revision,
+      editors: manifest.editors
     }
-
-    // Seed editor openFiles for manifest editor descriptors. On a cross-client
-    // cold restore (no renderer-local editorStateKey), the open-files loop in
-    // useEditorPersistence iterated over an empty persisted.openFiles, so the
-    // manifest's editor tabs would reference filePaths whose EditorFileState
-    // is undefined. Mirror the existing open-files loop: openFile reads from
-    // disk; a missing/unreadable file is swallowed (the tab still references
-    // the path and opens on demand when clicked).
-    const editorStore = useEditorStore.getState()
-    await Promise.all(
-      manifest.editors.map((descriptor) => {
-        if (editorStore.openFiles.has(descriptor.filePath)) return Promise.resolve()
-        return editorStore.openFile(descriptor.filePath).catch(() => {
-          // File may not exist on this client (cross-client); the editor tab
-          // still references the path. Not an error — degrade gracefully.
-        })
-      })
-    )
-
-    return true
   } catch (error) {
     void logFrontendError({
       source: 'workspace-manifest-sync',
-      message: `loadWorkspaceManifest threw for project ${projectId}: ${
+      message: `fetchManifestWorkspace threw for project ${projectId}: ${
         error instanceof Error ? error.message : String(error)
       }`
     })
-    useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, null)
+    return null
+  }
+}
+
+/**
+ * Load the host manifest for a project and rebuild the workspace topology
+ * from its portable projection into the ACTIVE tree. A thin committer over
+ * {@link fetchManifestWorkspace}, used by the conflict "reload" action (the
+ * project switch stages through the fetch instead). Returns `true` when a
+ * manifest was found and restored (topology + active pane + focused session +
+ * basedRevision set), `false` when none exists or the load failed.
+ *
+ * The caller MUST wrap this call in `setManifestRestoreInProgress(projectId,
+ * true/false)` so the writer cancels pending writes during the tree rebuild.
+ * This function does not set the guard itself.
+ */
+export async function loadWorkspaceManifest(projectId: string): Promise<boolean> {
+  const fetched = await fetchManifestWorkspace(projectId)
+  if (!fetched) {
+    if (projectId) useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, null)
     return false
   }
+
+  useWorkspaceStore.getState().loadProjectWorkspace(fetched.root, fetched.activePaneId)
+  useWorkspaceManifestSyncStore.getState().setBasedRevision(projectId, fetched.revision)
+  if (fetched.focusedSessionId) {
+    useAcpStore.getState().setActiveSession(fetched.focusedSessionId)
+  }
+
+  // Seed editor openFiles for the manifest's editor descriptors: a
+  // missing/unreadable file is swallowed (the tab still references the path
+  // and opens on demand when clicked).
+  const editorStore = useEditorStore.getState()
+  await Promise.all(
+    fetched.editors.map((descriptor) => {
+      if (editorStore.openFiles.has(descriptor.filePath)) return Promise.resolve()
+      return editorStore.openFile(descriptor.filePath).catch(() => {
+        // File may not exist on this client (cross-client); not an error.
+      })
+    })
+  )
+  return true
 }
 
 /**
@@ -367,6 +395,10 @@ export type ManifestWriteResult = 'updated' | 'conflict' | 'failed' | 'skipped'
 
 export async function performManifestWrite(projectId: string): Promise<ManifestWriteResult> {
   if (!projectId) return 'skipped'
+  // The manifest is built from the ACTIVE tree: never write it for a project
+  // whose tree is not the committed one (a switch is pending, or this is a
+  // stale timer of the project just left).
+  if (!isCommittedProject(projectId)) return 'skipped'
   if (isManifestRestoreInProgressFor(projectId) || isTerminalRestoreInProgress()) return 'skipped'
   if (useWorkspaceManifestSyncStore.getState().hasPendingConflict(projectId)) return 'skipped'
 
@@ -557,6 +589,7 @@ export function useWorkspaceManifestSync(projectId: string): void {
 
     const fireWrite = (): void => {
       writeTimer = null
+      if (!isCommittedProject(projectId)) return
       if (isManifestRestoreInProgressFor(projectId) || isTerminalRestoreInProgress()) {
         // Restore started during the debounce. Remember the pending change;
         // the sync-store subscription below re-fires when restore clears.
@@ -571,6 +604,10 @@ export function useWorkspaceManifestSync(projectId: string): void {
     }
 
     const scheduleWrite = (): void => {
+      // This hook instance follows the project-store intent; only the project
+      // whose tree is committed may schedule (the switch commit itself
+      // reschedules through the restore-guard clear below).
+      if (!isCommittedProject(projectId)) return
       if (isManifestRestoreInProgressFor(projectId) || isTerminalRestoreInProgress()) {
         // Can't schedule now — a restore is in flight. Remember the change.
         pendingChange = true

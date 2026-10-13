@@ -2,14 +2,12 @@ use super::*;
 
 // Constants matching Electron implementation
 pub(super) const GLOBAL_TERMINAL_LIMIT: usize = 30;
-pub(super) const ORPHAN_TIMEOUT_MS: u64 = 300_000; // 5 minutes
-pub(super) const ORPHAN_CHECK_INTERVAL_MS: u64 = 30_000; // 30 seconds
-/// #851b: conservative default web-listed reap window (5 minutes). A
-/// web-spawned terminal that no client has listed for this long — and that
-/// has neither a live web attachment nor a renderer ref — is swept by the
-/// orphan reaper. Matches the ordinary orphan timeout so web and desktop
-/// terminals share one retention budget.
-pub(super) const WEB_LISTED_REAP_AFTER_MS: u64 = 300_000;
+/// How long an exited PTY stays tracked, so a client that reattaches soon
+/// after the process ends still replays its output. A live PTY is never
+/// removed by time. Atomic so tests can shrink it.
+pub(super) const EXITED_TERMINAL_TTL_MS: u64 = 600_000; // 10 minutes
+/// How often the sweeper looks for exited PTYs past their TTL.
+pub(super) const EXITED_SWEEP_INTERVAL_MS: u64 = 30_000; // 30 seconds
 
 // ADR-002.3: Flusher thread constants
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(4);
@@ -68,6 +66,13 @@ pub struct TerminalAttachResult {
     pub rows: u16,
     pub latest_seq: u64,
     pub gap: bool,
+    /// The cursor did not belong to this terminal's log (another epoch, or
+    /// ahead of the head): the replay starts from the retained log's first
+    /// chunk and the client must discard what it has rendered.
+    pub reset: bool,
+    /// Epoch of this spawn's output log; the client's next cursor is
+    /// `(logEpoch, latestSeq)`.
+    pub log_epoch: String,
     pub snapshot: TerminalStateSnapshot,
 }
 
@@ -103,7 +108,9 @@ pub struct TerminalOutputChunk {
 pub struct TerminalReplay {
     pub chunks: Vec<TerminalOutputChunk>,
     pub gap: bool,
+    pub reset: bool,
     pub latest_seq: u64,
+    pub log_epoch: String,
     pub receiver: tokio::sync::broadcast::Receiver<TerminalOutputChunk>,
 }
 
@@ -117,6 +124,9 @@ pub(super) const TERM_BROADCAST_CAPACITY: usize = 1024;
 /// 256 KiB ≈ several screenfuls of history; bounded so memory stays predictable
 /// even for very chatty terminals. Oldest bytes are evicted first.
 pub const SCROLLBACK_CAP: usize = 256 * 1024;
+
+/// Resize hook for an adopted (non-PTY) terminal: `(cols, rows)`.
+pub type ExternalResizer = Arc<dyn Fn(u16, u16) -> Result<(), String> + Send + Sync>;
 
 /// Options for spawning a new terminal
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +149,12 @@ pub struct SpawnOptions {
     pub args: Option<Vec<String>>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// The client-minted `commandId` that asked for this spawn (AD-5). Stamped
+    /// on the instance so a resend whose ledger entry is gone still finds the
+    /// live PTY ([`PtyManager::find_by_command_id`]). Absent = today's
+    /// behavior.
+    #[serde(default)]
+    pub command_id: Option<String>,
 }
 
 impl Default for SpawnOptions {
@@ -153,6 +169,7 @@ impl Default for SpawnOptions {
             program: None,
             args: None,
             kind: None,
+            command_id: None,
         }
     }
 }

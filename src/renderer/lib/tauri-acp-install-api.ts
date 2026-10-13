@@ -15,7 +15,7 @@
 import type { AcpInstallApi, InstallOutcome } from '@shared/types/acp-install.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 
-import { invokeIpc } from './ipc/tauri'
+import { invokeIpcCommand } from './acp-transport/tauri-verdicts'
 import { isTauriContext } from './tauri-runtime'
 
 /** IPC command name matching the Rust `#[tauri::command]` declaration. */
@@ -43,9 +43,11 @@ export function createTauriAcpInstallApi(): AcpInstallApi {
           code: 'INVOKE_ERROR'
         }
       }
-      return invokeIpc<InstallOutcome>(IPC_COMMANDS.INSTALL_AGENT, {
-        request: { agentId }
-      })
+      return invokeIpcCommand<InstallOutcome>(
+        IPC_COMMANDS.INSTALL_AGENT,
+        { request: { agentId } },
+        { kind: 'install_acp_agent', entityKey: agentId, needsReply: true }
+      )
     }
   }
 }

@@ -8,7 +8,6 @@ import {
   type AppSettings,
   BUFFER_SIZE_OPTIONS,
   FONT_FAMILY_OPTIONS,
-  MAX_TERMINALS_OPTIONS,
   TERMINAL_RENDERER_OPTIONS,
   UI_ZOOM_DEFAULT,
   UI_ZOOM_MAX,
@@ -23,7 +22,6 @@ interface AppearanceSectionProps {
   bufferSize: number
   terminalRenderer: AppSettings['terminalRenderer']
   screenReaderMode: boolean
-  maxTerminals: number
   handleFontFamilyChange: (value: string) => void
   handleFontSizeChange: (value: number) => void
   handleUiZoomChange: (value: number) => void
@@ -31,7 +29,6 @@ interface AppearanceSectionProps {
   handleBufferSizeChange: (value: number) => void
   handleRendererChange: (value: string) => void
   handleScreenReaderModeChange: (enabled: boolean) => void
-  handleMaxTerminalsChange: (value: number) => void
 }
 
 export function AppearanceSection({
@@ -41,15 +38,13 @@ export function AppearanceSection({
   bufferSize,
   terminalRenderer,
   screenReaderMode,
-  maxTerminals,
   handleFontFamilyChange,
   handleFontSizeChange,
   handleUiZoomChange,
   handleUiZoomReset,
   handleBufferSizeChange,
   handleRendererChange,
-  handleScreenReaderModeChange,
-  handleMaxTerminalsChange
+  handleScreenReaderModeChange
 }: AppearanceSectionProps): React.JSX.Element {
   return (
     <SettingsSection id="appearance">
@@ -160,27 +155,6 @@ export function AppearanceSection({
             <p className="text-xs text-muted-foreground mt-1">
               Number of lines to keep in terminal history. Higher values use more memory. Changes
               apply to new terminals.
-            </p>
-          </div>
-
-          {/* Max Terminals */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Max Terminals Per Project
-            </label>
-            <select
-              value={maxTerminals}
-              onChange={(e) => handleMaxTerminalsChange(parseInt(e.target.value, 10))}
-              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
-            >
-              {MAX_TERMINALS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground mt-1">
-              Maximum number of terminal tabs allowed per project.
             </p>
           </div>
 

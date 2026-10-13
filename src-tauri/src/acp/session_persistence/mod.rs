@@ -22,6 +22,11 @@ use crate::acp::atomic_file;
 use crate::path_validation::strip_verbatim_prefix;
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 const INDEX_FILE: &str = "sessions.json";
+/// Written once the one-shot migration that stamped every project-less
+/// persisted session with [`UNASSIGNED_PROJECT_ID`] has completed, so later
+/// opens never re-run it (and never re-stamp a session whose project was
+/// deliberately cleared by a future feature).
+const UNASSIGNED_MIGRATION_MARKER: &str = "unassigned-project-migrated";
 const METADATA_FILE: &str = "metadata.json";
 const MESSAGES_FILE: &str = "messages.jsonl";
 const TOOL_CALLS_FILE: &str = "tool-calls.jsonl";
@@ -50,6 +55,7 @@ mod diff_stat;
 mod jsonl;
 mod model;
 mod normalize;
+mod sweep;
 mod types;
 mod worktree_branch;
 mod writer;
@@ -101,18 +107,41 @@ impl SessionRuntime {
     }
 }
 
+/// The single allocator of per-session sequence numbers.
+///
+/// Every record in a session log (live fan-out, durable JSONL, replay)
+/// carries a seq handed out by exactly one authority — the live relay — so
+/// the durable log and the live stream can never disagree. The session
+/// writer only appends records that arrive with their seq; the one record it
+/// authors itself (the process-shutdown `interrupted` marker) asks the
+/// authority when one is installed instead of computing `last_seq + 1`.
+pub trait SeqAuthority: Send + Sync {
+    /// Allocate the next seq for `session_id`: strictly greater than both the
+    /// authority's own frontier and `floor` (the highest seq the writer found
+    /// durably on disk).
+    fn allocate_after(&self, session_id: &str, floor: u64) -> u64;
+}
+
 struct Inner {
     root: PathBuf,
     /// Active writer tasks only. Finalized sessions are removed from this map.
     sessions: Mutex<HashMap<String, SessionRuntime>>,
     /// Canonical in-memory metadata for both active and finalized sessions.
     catalog: Mutex<HashMap<String, Arc<Mutex<SessionMetadata>>>>,
+    /// Secondary index over the catalog: creating `commandId` -> session id,
+    /// for resend resolution ([`SessionPersistence::find_session_by_command_id`]).
+    /// Always updated together with the catalog (insert/remove helpers).
+    command_index: Mutex<HashMap<String, String>>,
     registration_lock: tokio::sync::Mutex<()>,
     index_lock: tokio::sync::Mutex<()>,
     /// Set by `kill_all` before agent drivers exit. A single-agent kill,
     /// crash, or disconnect leaves this false so that teardown finalizes
     /// without an interrupted marker (#842 is process shutdown only).
     process_shutdown: AtomicBool,
+    /// The sole allocator of per-session sequence numbers (the live relay).
+    /// The writer never invents a seq: records it must author itself (the
+    /// shutdown `interrupted` marker) take theirs from here.
+    seq_authority: Mutex<Option<Arc<dyn SeqAuthority>>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -137,6 +166,8 @@ pub(crate) struct ReplayTestHook {
     entered: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
     released: StdMutex<bool>,
     release: Condvar,
+    /// How many scans reached the hook.
+    waits: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -146,10 +177,17 @@ impl ReplayTestHook {
             entered: StdMutex::new(Some(entered)),
             released: StdMutex::new(false),
             release: Condvar::new(),
+            waits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
+    /// How many scans reached the hook so far.
+    pub(crate) fn waits(&self) -> usize {
+        self.waits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn wait(&self) {
+        self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(entered) = self.entered.lock().expect("replay hook poisoned").take() {
             let _ = entered.send(());
         }
@@ -223,13 +261,6 @@ impl WriterGate {
 
 enum WriterCommand {
     Append(PersistedEventRecord),
-    AppendLocalTitle(String, oneshot::Sender<Result<u64>>),
-    /// Append a host-authored `agent_switch` durable record (CAP-2 marker).
-    /// The payload mirrors the wire event: `{sessionId, fromConfigId,
-    /// toConfigId, newSessionId, summaryText}` — `seq`/`recordedAt` come from
-    /// the record envelope the writer builds. Switches are NOT messages
-    /// (`message_count` stays unchanged).
-    AppendAgentSwitch(AgentSwitchRecord, oneshot::Sender<Result<u64>>),
     Flush(oneshot::Sender<Result<()>>),
     Finalize(PersistedSessionStatus, oneshot::Sender<Result<()>>),
     Shutdown(oneshot::Sender<Result<()>>),
@@ -240,6 +271,8 @@ enum WriterCommand {
     /// A single-agent exit uses [`WriterCommand::Finalize`] instead and does
     /// not write that marker.
     ShutdownInterrupted(oneshot::Sender<Result<()>>),
+    /// Write the in-memory metadata (the `head_ahead_of_durable` mark) to disk.
+    PersistMetadata,
 }
 
 impl WriterCommand {
@@ -251,14 +284,29 @@ impl WriterCommand {
             Self::Append(record) => {
                 format!("Append({} seq {})", record.type_, record.seq)
             }
-            Self::AppendLocalTitle(..) => "AppendLocalTitle".to_string(),
-            Self::AppendAgentSwitch(..) => "AppendAgentSwitch".to_string(),
             Self::Flush(..) => "Flush".to_string(),
             Self::Finalize(status, ..) => format!("Finalize({status:?})"),
             Self::Shutdown(..) => "Shutdown".to_string(),
             Self::ShutdownInterrupted(..) => "ShutdownInterrupted".to_string(),
+            Self::PersistMetadata => "PersistMetadata".to_string(),
         }
     }
+}
+
+/// The non-empty `turnId`s of the `prompt_complete` records.
+fn turn_ids_of(records: Vec<PersistedEventRecord>) -> HashSet<String> {
+    records
+        .into_iter()
+        .filter(|record| record.type_ == "prompt_complete")
+        .filter_map(|record| {
+            record
+                .payload
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|turn_id| !turn_id.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
 }
 
 impl SessionPersistence {
@@ -275,9 +323,11 @@ impl SessionPersistence {
                 root,
                 sessions: Mutex::new(HashMap::new()),
                 catalog: Mutex::new(HashMap::new()),
+                command_index: Mutex::new(HashMap::new()),
                 registration_lock: tokio::sync::Mutex::new(()),
                 index_lock: tokio::sync::Mutex::new(()),
                 process_shutdown: AtomicBool::new(false),
+                seq_authority: Mutex::new(None),
                 #[cfg(test)]
                 writer_gate_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -290,6 +340,13 @@ impl SessionPersistence {
         });
         service.recover().await?;
         Ok(service)
+    }
+
+    /// Install the sole seq authority (see [`SeqAuthority`]). Without one the
+    /// writer numbers its own marker above both the metadata and the on-disk
+    /// frontier.
+    pub fn set_seq_authority(&self, authority: Arc<dyn SeqAuthority>) {
+        *self.inner.seq_authority.lock() = Some(authority);
     }
 
     #[must_use]
@@ -342,7 +399,7 @@ impl SessionPersistence {
             session_id: registration.session_id.clone(),
             stable_agent_namespace: registration.stable_agent_namespace,
             runtime_agent_id: registration.runtime_agent_id,
-            project_id: registration.project_id,
+            project_id: stamped_project_id(registration.project_id),
             cwd: cwd.clone(),
             title: None,
             title_source: None,
@@ -361,6 +418,9 @@ impl SessionPersistence {
             // Story 16: provenance is recorded only for the creating session.
             worktree_branch_source: creator.then_some(WorktreeBranchSource::Auto),
             worktree_launch_branch: if creator { launch_branch } else { None },
+            command_id: registration.command_id.filter(|id| !id.is_empty()),
+            log_epoch: Some(mint_log_epoch()),
+            head_ahead_of_durable: false,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -375,7 +435,7 @@ impl SessionPersistence {
         }
         if let Err(error) = self.persist_index().await {
             self.inner.sessions.lock().remove(&registration.session_id);
-            self.inner.catalog.lock().remove(&registration.session_id);
+            self.remove_catalog_entry(&registration.session_id);
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
             return Err(error);
         }
@@ -422,7 +482,6 @@ impl SessionPersistence {
                     )));
                 }
                 metadata.runtime_agent_id = registration.runtime_agent_id;
-                metadata.project_id = registration.project_id;
                 metadata.status = PersistedSessionStatus::Active;
                 metadata.last_activity_at = metadata.last_activity_at.max(now);
                 metadata.discovered = true;
@@ -447,7 +506,7 @@ impl SessionPersistence {
             storage_key,
             session_id: session_id.to_string(),
             stable_agent_namespace: registration.stable_agent_namespace,
-            project_id: registration.project_id,
+            project_id: stamped_project_id(registration.project_id),
             runtime_agent_id: registration.runtime_agent_id,
             cwd: cwd.clone(),
             title: normalized_title,
@@ -466,6 +525,9 @@ impl SessionPersistence {
             model_name: None,
             worktree_branch_source: None,
             worktree_launch_branch: None,
+            command_id: None,
+            log_epoch: Some(mint_log_epoch()),
+            head_ahead_of_durable: false,
         };
         if let Err(error) = self.persist_metadata(&metadata) {
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
@@ -473,7 +535,7 @@ impl SessionPersistence {
         }
         self.install_catalog_entry(metadata.clone());
         if let Err(error) = self.persist_index().await {
-            self.inner.catalog.lock().remove(session_id);
+            self.remove_catalog_entry(session_id);
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
             return Err(error);
         }
@@ -517,7 +579,7 @@ impl SessionPersistence {
             session_id: registration.session_id.clone(),
             stable_agent_namespace: registration.stable_agent_namespace,
             runtime_agent_id: registration.runtime_agent_id,
-            project_id: registration.project_id,
+            project_id: stamped_project_id(registration.project_id),
             cwd: strip_verbatim_prefix(&registration.cwd.to_string_lossy()).into_owned(),
             title,
             title_source: None,
@@ -535,6 +597,9 @@ impl SessionPersistence {
             model_name: None,
             worktree_branch_source: None,
             worktree_launch_branch: None,
+            command_id: None,
+            log_epoch: Some(mint_log_epoch()),
+            head_ahead_of_durable: false,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -548,7 +613,7 @@ impl SessionPersistence {
         }
         if let Err(error) = self.persist_index().await {
             self.inner.sessions.lock().remove(&registration.session_id);
-            self.inner.catalog.lock().remove(&registration.session_id);
+            self.remove_catalog_entry(&registration.session_id);
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
             return Err(error);
         }
@@ -612,19 +677,35 @@ impl SessionPersistence {
     }
 
     /// Hold this session's send lock across a critical section that both
-    /// assigns a sequence and enqueues it. Returns `None` when no writer is
-    /// installed (the caller falls through to the pre-registration buffer).
+    /// assigns a sequence and enqueues it. `arg` is handed to `body`; when no
+    /// writer is installed `body` does not run and `arg` comes back as
+    /// `Err(arg)` (the caller falls through to the pre-registration buffer).
     ///
     /// The lock is a `ReentrantMutex` because the section calls
     /// `enqueue_event`, which locks again on the same thread.
-    pub(crate) fn with_ordered_sender<R>(
+    pub(crate) fn with_ordered_sender<T, R>(
         &self,
         session_id: &str,
-        body: impl FnOnce() -> R,
-    ) -> Option<R> {
-        let runtime = self.runtime(session_id).ok()?;
+        arg: T,
+        body: impl FnOnce(T) -> R,
+    ) -> std::result::Result<R, T> {
+        let Ok(runtime) = self.runtime(session_id) else {
+            return Err(arg);
+        };
         let _order = runtime.send_lock.lock();
-        Some(body())
+        Ok(body(arg))
+    }
+
+    /// Fail when the session has no writer installed
+    /// ([`SessionPersistenceError::SessionNotFound`]) or its writer has turned
+    /// unhealthy ([`SessionPersistenceError::PersistenceUnhealthy`]): a record
+    /// that cannot persist must not be numbered or delivered.
+    pub(crate) fn ensure_writer_healthy(&self, session_id: &str) -> Result<()> {
+        let runtime = self.runtime(session_id)?;
+        if let Some(message) = runtime.unhealthy.lock().clone() {
+            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
+        }
+        Ok(())
     }
 
     /// Queue `command` under the session send lock, without ever blocking the
@@ -809,48 +890,6 @@ impl SessionPersistence {
         }
     }
 
-    /// Append a normalized local-title event with a writer-assigned sequence.
-    /// The writer is the sole sequence authority, so a mid-turn title tool call
-    /// cannot race queued message chunks and reuse their sequence number.
-    pub async fn append_local_title(&self, session_id: &str, title: String) -> Result<u64> {
-        let runtime = self.runtime(session_id)?;
-        if let Some(message) = runtime.unhealthy.lock().clone() {
-            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
-        }
-        let (tx, rx) = oneshot::channel();
-        self.send_command(
-            &runtime,
-            session_id,
-            WriterCommand::AppendLocalTitle(title, tx),
-        )?;
-        rx.await
-            .map_err(|_| SessionPersistenceError::WriterStopped)?
-    }
-
-    /// Append a host-authored `agent_switch` durable marker record with a
-    /// writer-assigned sequence (CAP-2). Mirrors [`append_local_title`]: the
-    /// writer is the sole sequence authority, so a switch recorded between
-    /// queued message chunks cannot collide with their sequence numbers. The
-    /// record is NOT a message — `message_count` stays unchanged.
-    pub async fn append_agent_switch(
-        &self,
-        session_id: &str,
-        record: AgentSwitchRecord,
-    ) -> Result<u64> {
-        let runtime = self.runtime(session_id)?;
-        if let Some(message) = runtime.unhealthy.lock().clone() {
-            return Err(SessionPersistenceError::PersistenceUnhealthy(message));
-        }
-        let (tx, rx) = oneshot::channel();
-        self.send_command(
-            &runtime,
-            session_id,
-            WriterCommand::AppendAgentSwitch(record, tx),
-        )?;
-        rx.await
-            .map_err(|_| SessionPersistenceError::WriterStopped)?
-    }
-
     pub async fn flush_session(&self, session_id: &str) -> Result<()> {
         let runtime = match self.runtime(session_id) {
             Ok(runtime) => runtime,
@@ -1004,7 +1043,129 @@ impl SessionPersistence {
     }
 
     pub fn last_seq(&self, session_id: &str) -> Result<u64> {
-        Ok(self.metadata(session_id)?.last_seq)
+        self.with_metadata(session_id, |metadata| metadata.last_seq)
+    }
+
+    /// The session's log epoch (see [`SessionMetadata::log_epoch`]); `None`
+    /// for an unknown session.
+    #[must_use]
+    pub fn log_epoch(&self, session_id: &str) -> Option<String> {
+        self.with_metadata(session_id, |metadata| metadata.log_epoch.clone())
+            .ok()
+            .flatten()
+    }
+
+    /// Record that `session_id`'s allocated seq frontier is (or is about to be)
+    /// ahead of its durable log: a non-durable event took a seq. Cheap after
+    /// the first successful call (an in-memory flag); the first call also gets
+    /// the mark onto disk so a restart can tell and rotate the log epoch.
+    /// Never blocks on the writer. Unknown sessions are ignored (the relay
+    /// remembers the mark and calls again when the session registers).
+    ///
+    /// With a writer installed the write is queued on it: the writer is the one
+    /// thread that writes this session's metadata, so no stale inline write can
+    /// overtake its finalize. If that write fails the writer retries it on its
+    /// next command. A writer that has stopped is treated like no writer.
+    ///
+    /// Without a (working) writer the metadata is written inline, under the catalog lock
+    /// and only while the session is still in the catalog: `delete_session`
+    /// drops the catalog entry before it removes the directory, so a delete in
+    /// progress is seen here and never gets its directory back. A failed inline
+    /// write clears the flag so the next call retries.
+    ///
+    /// `reopen_writer` can swap the catalog entry while this runs; the mark is
+    /// then applied to the new entry too (a few passes at most).
+    pub fn note_head_ahead_of_durable(&self, session_id: &str) {
+        for pass in 0..3 {
+            let Some(entry) = self.inner.catalog.lock().get(session_id).cloned() else {
+                return;
+            };
+            let we_set_it = {
+                let mut metadata = entry.lock();
+                // Later passes re-queue even when the (cloned) flag is set: the
+                // new writer may not have written it.
+                if metadata.head_ahead_of_durable && pass == 0 {
+                    return;
+                }
+                let was_set = metadata.head_ahead_of_durable;
+                metadata.head_ahead_of_durable = true;
+                !was_set
+            };
+            let failed = match self.runtime(session_id) {
+                // A writer that refuses the command has stopped, so it can no
+                // longer write this session's metadata: write it inline.
+                Ok(runtime) => match self.send_command(
+                    &runtime,
+                    session_id,
+                    WriterCommand::PersistMetadata,
+                ) {
+                    Ok(()) => None,
+                    Err(_) => self.persist_mark_inline(session_id, &entry),
+                },
+                Err(_) => self.persist_mark_inline(session_id, &entry),
+            };
+            if let Some(error) = failed {
+                // Roll back only what this pass set: a flag cloned in from the
+                // old entry may already be on disk.
+                if we_set_it {
+                    entry.lock().head_ahead_of_durable = false;
+                }
+                log::warn!(
+                    "[acp-history] could not persist the head-ahead mark session_id={} error={error}",
+                    crate::logging::redact_session_id(session_id)
+                );
+                return;
+            }
+            let still_current = self
+                .inner
+                .catalog
+                .lock()
+                .get(session_id)
+                .is_none_or(|current| Arc::ptr_eq(current, &entry));
+            if still_current {
+                return;
+            }
+        }
+    }
+
+    /// Write `entry`'s metadata for a session with no writer, holding the
+    /// catalog lock so a concurrent `delete_session` cannot remove the
+    /// directory between the check and the write. `None` = written, or the
+    /// session is gone (nothing to mark).
+    fn persist_mark_inline(
+        &self,
+        session_id: &str,
+        entry: &Arc<Mutex<SessionMetadata>>,
+    ) -> Option<SessionPersistenceError> {
+        let catalog = self.inner.catalog.lock();
+        if !catalog
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, entry))
+        {
+            return None;
+        }
+        let snapshot = entry.lock().clone();
+        let dir_exists = self
+            .session_dir(&snapshot.storage_key)
+            .is_ok_and(|dir| dir.is_dir());
+        if !dir_exists {
+            return None;
+        }
+        persist_metadata_at_root(&self.inner.root, &snapshot).err()
+    }
+
+    /// Read from a session's catalog metadata without cloning it whole.
+    fn with_metadata<T>(
+        &self,
+        session_id: &str,
+        read: impl FnOnce(&SessionMetadata) -> T,
+    ) -> Result<T> {
+        self.inner
+            .catalog
+            .lock()
+            .get(session_id)
+            .map(|metadata| read(&metadata.lock()))
+            .ok_or(SessionPersistenceError::SessionNotFound)
     }
 
     /// Permanently remove a persisted session: drain the writer runtime when
@@ -1033,7 +1194,7 @@ impl SessionPersistence {
         // salvage serializes its rewrite on the catalog lock, so once the
         // entry is gone no in-flight or future salvage can stage a rewrite
         // that would resurrect the deleted dir via `create_dir_all`.
-        self.inner.catalog.lock().remove(session_id);
+        self.remove_catalog_entry(session_id);
         fs::remove_dir_all(&dir)?;
         self.persist_index().await?;
         log::info!(
@@ -1563,19 +1724,16 @@ impl SessionPersistence {
     /// records. This survives restart without treating arbitrary browser input
     /// as authoritative transcript state.
     pub fn completed_turn_ids(&self, session_id: &str) -> Result<HashSet<String>> {
-        Ok(self
-            .replay_after(session_id, 0)?
-            .into_iter()
-            .filter(|record| record.type_ == "prompt_complete")
-            .filter_map(|record| {
-                record
-                    .payload
-                    .get("turnId")
-                    .and_then(Value::as_str)
-                    .filter(|turn_id| !turn_id.is_empty())
-                    .map(str::to_string)
-            })
-            .collect())
+        Ok(turn_ids_of(self.replay_after(session_id, 0)?))
+    }
+
+    /// [`Self::completed_turn_ids`] on Tokio's blocking pool (the JSONL scan
+    /// never stalls the async runtime).
+    pub async fn completed_turn_ids_async(
+        self: &Arc<Self>,
+        session_id: String,
+    ) -> Result<HashSet<String>> {
+        Ok(turn_ids_of(self.replay_after_async(session_id, 0).await?))
     }
 
     async fn recover(&self) -> Result<()> {
@@ -1595,6 +1753,12 @@ impl SessionPersistence {
             Err(error) => return Err(error.into()),
         };
 
+        let migration_marker = self.inner.root.join(UNASSIGNED_MIGRATION_MARKER);
+        let migrate_unassigned = !migration_marker.exists();
+        let mut unassigned_stamped = 0usize;
+        // Sessions the loop could not visit (unreadable, quarantined,
+        // conflicting): they miss the stamping, so they keep the migration open.
+        let mut skipped = 0usize;
         let mut recovered = HashMap::new();
         let mut logical_ids = HashSet::new();
         for entry in fs::read_dir(&self.inner.root)? {
@@ -1610,7 +1774,12 @@ impl SessionPersistence {
             let metadata_path = dir.join(METADATA_FILE);
             let bytes = match fs::read(&metadata_path) {
                 Ok(bytes) => bytes,
-                Err(_) => continue,
+                Err(error) => {
+                    if error.kind() != io::ErrorKind::NotFound {
+                        skipped += 1;
+                    }
+                    continue;
+                }
             };
             let mut metadata: SessionMetadata = match decode_versioned(&bytes) {
                 Ok(metadata) => metadata,
@@ -1619,12 +1788,14 @@ impl SessionPersistence {
                 }
                 Err(_) => {
                     let _ = atomic_file::backup_corrupt(&metadata_path, &bytes);
+                    skipped += 1;
                     continue;
                 }
             };
             if metadata.storage_key != storage_key
                 || !logical_ids.insert(metadata.session_id.clone())
             {
+                skipped += 1;
                 continue;
             }
             ensure_log_exists(&dir.join(MESSAGES_FILE))?;
@@ -1716,6 +1887,7 @@ impl SessionPersistence {
                             "[acp-history] recover() fallback load_jsonl failed for messages session_id={} error={e}",
                             crate::logging::redact_session_id(&metadata.session_id)
                         );
+                        skipped += 1;
                         continue;
                     }
                 };
@@ -1726,6 +1898,7 @@ impl SessionPersistence {
                             "[acp-history] recover() fallback load_jsonl failed for tool-calls session_id={} error={e}",
                             crate::logging::redact_session_id(&metadata.session_id)
                         );
+                        skipped += 1;
                         continue;
                     }
                 }
@@ -1734,6 +1907,7 @@ impl SessionPersistence {
                         "[acp-history] recover() fallback validate_and_sort failed, quarantining session_id={}",
                         crate::logging::redact_session_id(&metadata.session_id)
                     );
+                    skipped += 1;
                     continue;
                 }
                 metadata.message_count = records
@@ -1769,6 +1943,21 @@ impl SessionPersistence {
                 metadata.status = PersistedSessionStatus::Closed;
                 dirty = true;
             }
+            // AD-5 host-start sweep: terminate a turn the crash left open
+            // (never replayed) before any manager or carrier exists.
+            if sweep::sweep_interrupted_turn(&self.inner.root, &mut metadata) {
+                dirty = true;
+            }
+            if migrate_unassigned
+                && metadata
+                    .project_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty())
+            {
+                metadata.project_id = Some(UNASSIGNED_PROJECT_ID.to_string());
+                unassigned_stamped += 1;
+                dirty = true;
+            }
             if dirty {
                 if let Err(e) = self.persist_metadata(&metadata) {
                     log::error!(
@@ -1776,6 +1965,30 @@ impl SessionPersistence {
                         crate::logging::redact_session_id(&metadata.session_id)
                     );
                     return Err(e);
+                }
+            }
+            // A legacy record has no log epoch; one whose seq frontier ran ahead
+            // of the disk before the restart cannot keep its epoch (see
+            // `SessionMetadata::head_ahead_of_durable`). Mint a new one and
+            // persist it. A write failure keeps the new epoch in memory only:
+            // the next metadata write persists it, and a restart before that
+            // simply mints another.
+            if metadata.log_epoch.is_none() || metadata.head_ahead_of_durable {
+                let rotated = metadata.log_epoch.is_some();
+                metadata.log_epoch = Some(mint_log_epoch());
+                metadata.head_ahead_of_durable = false;
+                if let Err(error) = self.persist_metadata(&metadata) {
+                    log::warn!(
+                        "[acp-history] recover() could not persist the minted log epoch \
+                         session_id={} error={error}",
+                        crate::logging::redact_session_id(&metadata.session_id)
+                    );
+                } else if rotated {
+                    log::info!(
+                        "[acp-history] recover() rotated the log epoch of session_id={} \
+                         (its seq frontier had run ahead of the disk)",
+                        crate::logging::redact_session_id(&metadata.session_id)
+                    );
                 }
             }
             recovered.insert(metadata.session_id.clone(), metadata);
@@ -1789,6 +2002,19 @@ impl SessionPersistence {
         // metadata + logs so stale titles/status/counts/namespaces cannot survive.
         let _ = existing_index;
         self.persist_index().await?;
+        if migrate_unassigned && skipped == 0 {
+            // Marker last: a crash before this point re-runs the (idempotent)
+            // stamping on the next open. A skipped session keeps the
+            // migration open so it is stamped once it becomes readable.
+            atomic_file::replace(&migration_marker, b"1\n")?;
+            log::info!(
+                "[acp-history] unassigned-project migration complete stamped={unassigned_stamped}"
+            );
+        } else if migrate_unassigned {
+            log::warn!(
+                "[acp-history] unassigned-project migration left open stamped={unassigned_stamped} skipped={skipped}"
+            );
+        }
         Ok(())
     }
 
@@ -1867,10 +2093,7 @@ impl SessionPersistence {
             }
             return Err(SessionPersistenceError::Io(error));
         }
-        self.inner
-            .catalog
-            .lock()
-            .insert(session_id.clone(), Arc::clone(&metadata));
+        self.insert_catalog_entry(session_id.clone(), Arc::clone(&metadata));
         self.inner.sessions.lock().insert(
             session_id,
             SessionRuntime {
@@ -1887,10 +2110,38 @@ impl SessionPersistence {
     }
 
     fn install_catalog_entry(&self, metadata: SessionMetadata) {
-        self.inner
-            .catalog
-            .lock()
-            .insert(metadata.session_id.clone(), Arc::new(Mutex::new(metadata)));
+        self.insert_catalog_entry(metadata.session_id.clone(), Arc::new(Mutex::new(metadata)));
+    }
+
+    /// The single catalog insert: keeps the `commandId` index in step.
+    fn insert_catalog_entry(&self, session_id: String, metadata: Arc<Mutex<SessionMetadata>>) {
+        if let Some(command_id) = metadata.lock().command_id.clone() {
+            self.inner
+                .command_index
+                .lock()
+                .insert(command_id, session_id.clone());
+        }
+        self.inner.catalog.lock().insert(session_id, metadata);
+    }
+
+    /// The single catalog remove: drops the session's `commandId` index entry.
+    fn remove_catalog_entry(&self, session_id: &str) {
+        let removed = self.inner.catalog.lock().remove(session_id);
+        if let Some(command_id) = removed.and_then(|metadata| metadata.lock().command_id.clone()) {
+            let mut index = self.inner.command_index.lock();
+            if index.get(&command_id).is_some_and(|sid| sid == session_id) {
+                index.remove(&command_id);
+            }
+        }
+    }
+
+    /// The session created by the command with `command_id`, if it still
+    /// exists. Durable: the stamp is part of the persisted metadata, so this
+    /// answers after a host restart too.
+    #[must_use]
+    pub fn find_session_by_command_id(&self, command_id: &str) -> Option<SessionMetadata> {
+        let session_id = self.inner.command_index.lock().get(command_id).cloned()?;
+        self.metadata(&session_id).ok()
     }
 
     fn runtime(&self, session_id: &str) -> Result<SessionRuntime> {
@@ -1938,6 +2189,11 @@ impl SessionPersistence {
         }
         Ok(self.inner.root.join(storage_key))
     }
+}
+
+/// A fresh log epoch: the identity of one incarnation of a session's log.
+fn mint_log_epoch() -> String {
+    Uuid::new_v4().to_string()
 }
 
 /// Issue #842: find the turn-id of the LAST `user_prompt` record that has no
@@ -2005,4 +2261,8 @@ mod model_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod unassigned_tests;
+#[cfg(test)]
 mod worktree_branch_tests;
+#[cfg(test)]
+mod sweep_tests;

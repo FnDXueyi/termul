@@ -1,10 +1,13 @@
 import type { PreservedTerminalEntry } from '@shared/types/ipc.types'
+import { WEB_TERMINAL_ERROR_CODES } from '@shared/types/web-terminal-protocol.types'
 import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { resolveAgentEnv } from '@/lib/agent-launch'
 import { getBuiltInAgent } from '@/lib/agents/agent-registry'
 import { loadCustomAgents } from '@/lib/agents/custom-agents'
 import { terminalApi } from '@/lib/api'
 import { resolveEnvForSpawn } from '@/lib/env-parser'
+import { whenProjectSwitchSettled } from '@/lib/project-switch/status-store'
 import { shellApi } from '@/lib/shell-api'
 import {
   beginProjectContinuityCorrelation,
@@ -419,6 +422,19 @@ export function useTerminalRestore(): void {
           const layout = await loadPersistedTerminals(projectIdToRestore)
           if (isCancelled()) {
             debugLog('useTerminalRestore', `CANCELLED [${callId}] after live layout load`)
+            return
+          }
+
+          // The visible pane tree belongs to the project being left until the
+          // switch commits: wait, or these tabs would land in the wrong tree.
+          await whenProjectSwitchSettled(projectIdToRestore)
+          // Settled also means failed/superseded/disposed: only a committed
+          // target owns the visible tree.
+          if (
+            isCancelled() ||
+            useWorkspaceStore.getState().activeProjectId !== projectIdToRestore
+          ) {
+            debugLog('useTerminalRestore', `CANCELLED [${callId}] after project switch settled`)
             return
           }
 
@@ -939,6 +955,7 @@ async function restoreFromLayout(
     // ALL preserved restore as tabs, not just the active one).
     const preservedById = new Map(preserved.map((entry) => [entry.id, entry]))
 
+    const limitRefusals = { count: 0, message: '' }
     for (const persistedTerminal of layout.terminals) {
       if (isCancelled()) {
         await cleanupSpawnedPtys(newTerminals, restoreId, 'during restore loop')
@@ -1127,6 +1144,14 @@ async function restoreFromLayout(
 
         if (!spawnResult.success || !spawnData) {
           debugLog('restoreFromLayout', `Spawn FAILED, skipping [${terminalCallId}]`)
+          if (
+            !spawnResult.success &&
+            'code' in spawnResult &&
+            spawnResult.code === WEB_TERMINAL_ERROR_CODES.TERMINAL_LIMIT
+          ) {
+            limitRefusals.count += 1
+            limitRefusals.message = spawnResult.error
+          }
           continue
         }
 
@@ -1177,6 +1202,14 @@ async function restoreFromLayout(
         if (spawnTimeout) clearTimeout(spawnTimeout)
         TERMINALS_PENDING_PTY_ASSIGNMENT.delete(newId)
       }
+    }
+
+    // The host refuses a spawn past a terminal cap. Say so once: a skipped
+    // tab would otherwise vanish without a trace.
+    if (limitRefusals.count > 0) {
+      toast.error(
+        `${limitRefusals.count} terminal${limitRefusals.count === 1 ? '' : 's'} not restored. ${limitRefusals.message}`
+      )
     }
 
     // Story 5 (resolved Q3): every preserved PTY of the project restores as
@@ -1256,7 +1289,12 @@ async function restoreFromLayout(
     const existingTerminals = terminalStore.terminals
     terminalStore.setTerminals([...existingTerminals, ...newTerminals])
 
-    if (idMap.size > 0) {
+    // Remap rewrites the visible tree: wait until the switch toward this
+    // project has committed so it is the tree being rewritten. Settled also
+    // means failed/superseded/disposed, so re-check that the target is visible.
+    if (idMap.size > 0) await whenProjectSwitchSettled(projectId)
+    const targetCommitted = useWorkspaceStore.getState().activeProjectId === projectId
+    if (idMap.size > 0 && targetCommitted) {
       useWorkspaceStore.getState().remapTerminalTabs(Object.fromEntries(idMap))
     }
 
@@ -1266,8 +1304,8 @@ async function restoreFromLayout(
       activeId = idMap.get(layout.activeTerminalId)!
     }
 
-    // Select the active terminal
-    if (activeId) {
+    // Select the active terminal (only while the target's tree is visible)
+    if (activeId && targetCommitted) {
       terminalStore.selectTerminal(activeId)
     }
 

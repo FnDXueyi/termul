@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
+import { UNASSIGNED_PROJECT_ID } from './web-projects.types'
+
 import {
+  COMMAND_ID_PATTERN,
   isHumanRelayedCap,
   isOsFulfilledCap,
   MAX_CLIENT_ID_LEN,
+  MAX_COMMAND_ID_LEN,
   type ReliabilityTier,
+  WS_COMMAND_CLASSES,
   WS_ERROR_CODES,
   WS_EVENT_TIERS,
   WS_EVENT_TYPES,
@@ -13,6 +18,7 @@ import {
   WS_PROTOCOL_VERSION,
   WS_RELAY_TIERS,
   WS_REQUEST_TYPES,
+  WS_WATCH_FRAME_TYPE,
   type WsError,
   type WsEvent,
   type WsEventType,
@@ -24,7 +30,7 @@ import {
 import { WEB_TERMINAL_ERROR_CODES } from './web-terminal-protocol.types'
 
 describe('web-protocol.types — event/request type registries (AC2)', () => {
-  it('exports exactly 26 event types including durable user prompts, switch markers + worktree renames', () => {
+  it('exports exactly 26 event types including durable user prompts, host records, switch markers, worktree renames + delivery frames', () => {
     expect(WS_EVENT_TYPES).toHaveLength(26)
     // The 16 from events.rs (prefix-dropped) + auth_required.
     const expected16FromEvents = [
@@ -49,28 +55,36 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       expect(WS_EVENT_TYPES).toContain(name)
     }
     expect(WS_EVENT_TYPES).toContain('auth_required')
-    // Epic-4 bridge: desktop project-list live push (agent-level, seq 0).
-    expect(WS_EVENT_TYPES).toContain('projects_changed')
-    expect(WS_EVENT_TYPES).toContain('project_switch_completed')
-    expect(WS_EVENT_TYPES).toContain('project_switch_failed')
     expect(WS_EVENT_TYPES).toContain('user_prompt')
-    // Epic-4 bridge: desktop chat-history live push (agent-level, seq 0).
-    expect(WS_EVENT_TYPES).toContain('chat_history_changed')
+    // The nudges retired by the watch hub must not come back as seq-0 events.
+    expect(WS_EVENT_TYPES).not.toContain('projects_changed')
+    expect(WS_EVENT_TYPES).not.toContain('chat_history_changed')
     // Headless ACP auth (spec-acp-terminal-auth): shim-captured auth URL.
     expect(WS_EVENT_TYPES).toContain('browser_open_request')
     // CAP-2 (spec-in-chat-agent-switch): durable agent-switch marker.
     expect(WS_EVENT_TYPES).toContain('agent_switch')
+    // Host-authored durable title record (occupies a session-log seq).
+    expect(WS_EVENT_TYPES).toContain('local_title_generated')
     // #856: server-side FS watcher change push (agent-level broadcast).
     expect(WS_EVENT_TYPES).toContain('fs_changed')
+    expect(WS_EVENT_TYPES).toContain('fs_watch_ended')
     // Story 16 (CAP-5): host worktree branch rename (agent-level broadcast).
     expect(WS_EVENT_TYPES).toContain('worktree_branch_renamed')
+    // Delivery frames (no seq): gap after a LOSSY drop, host heartbeat.
+    expect(WS_EVENT_TYPES).toContain('gap')
+    expect(WS_EVENT_TYPES).toContain('heartbeat')
+    // The watch frame is not an event type: its name is also a request type.
+    expect(WS_EVENT_TYPES).not.toContain('watch')
+    expect(WS_WATCH_FRAME_TYPE).toBe('watch')
+    expect(WS_REQUEST_TYPES).toContain('watch')
+    expect(WS_REQUEST_TYPES).toContain('unwatch')
     expect(WS_REQUEST_TYPES).toContain('list_persisted_sessions')
     expect(WS_REQUEST_TYPES).toContain('open_persisted_session')
     expect(WS_REQUEST_TYPES).toContain('get_session_payload')
   })
 
-  it('exports exactly 44 request types including warm-pool promotion and host-owned session delete', () => {
-    expect(WS_REQUEST_TYPES).toHaveLength(44)
+  it('exports exactly 48 request types including warm-pool promotion and host-owned session delete', () => {
+    expect(WS_REQUEST_TYPES).toHaveLength(48)
     const expected = [
       'send_prompt',
       'cancel_prompt',
@@ -87,7 +101,6 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       // Story 8: promote a backend-ephemeral warm-pool session to durable.
       'promote_session',
 
-      'switch_project',
       'subscribe',
       'ping',
       'list_persisted_sessions',
@@ -125,7 +138,12 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       // `acp_` prefix — the wire name is fixed by the contract.
       'acp_deliver_auth_redirect',
       // CAP-2 (spec-in-chat-agent-switch): host-authored durable marker.
-      'record_agent_switch'
+      'record_agent_switch',
+      // Per-project fs watch.
+      'watch_project',
+      'unwatch_project',
+      // Explicit host-default project change.
+      'set_default_project'
     ]
     for (const name of expected) {
       expect(WS_REQUEST_TYPES).toContain(name)
@@ -142,9 +160,9 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
 })
 
 describe('web-protocol.types — error codes (AC2)', () => {
-  it('exports exactly 23 stable error codes', () => {
+  it('exports exactly 26 stable error codes', () => {
     const codes = new Set(Object.values(WS_ERROR_CODES))
-    expect(codes.size).toBe(23)
+    expect(codes.size).toBe(26)
     const expected = [
       'not_found',
       'unauthorized',
@@ -155,7 +173,6 @@ describe('web-protocol.types — error codes (AC2)', () => {
       'duplicate',
       'unsupported',
       'not_implemented',
-      'no_agent',
       'agent_auth_required',
       'session_owned_by_other',
       // Versioned handshake refusals.
@@ -171,7 +188,13 @@ describe('web-protocol.types — error codes (AC2)', () => {
       'provider_request_rejected',
       // Capability refusal + ticket tombstone.
       'forbidden',
-      'already_resolved'
+      'already_resolved',
+      // Deterministic spawn rejections (never auto-retried).
+      'agent_unavailable',
+      'invalid_agent_config',
+      // Command ledger refusals.
+      'command_conflict',
+      'invalid_command_id'
     ]
     for (const code of expected) {
       expect(codes).toContain(code)
@@ -187,8 +210,12 @@ describe('web-protocol.types — error codes (AC2)', () => {
 
 describe('web-protocol.types — versioned handshake contract (AD-15)', () => {
   it('pins the protocol version and client id length cap shared with the Rust host', () => {
-    expect(WS_PROTOCOL_VERSION).toBe(1)
+    expect(WS_PROTOCOL_VERSION).toBe(7)
     expect(MAX_CLIENT_ID_LEN).toBe(128)
+  })
+
+  it('pins the unassigned-project sentinel shared with the Rust host', () => {
+    expect(UNASSIGNED_PROJECT_ID).toBe('__unassigned__')
   })
 
   it('WsRequest/WsReply carry the optional command_id / visible_at envelope fields', () => {
@@ -256,10 +283,9 @@ describe('web-protocol.types — reliability tier registry (AC5)', () => {
       'session_info_update',
       'usage_update',
       'auth_required',
-      'projects_changed',
-      'project_switch_completed',
-      'project_switch_failed',
-      'worktree_branch_renamed'
+      'worktree_branch_renamed',
+      'gap',
+      'heartbeat'
     ]
     for (const type of reliable) {
       expect(WS_EVENT_TIERS[type]).toBe('reliable')
@@ -379,17 +405,70 @@ describe('web-protocol.types — envelope shapes (AC2 + AC3)', () => {
   })
 })
 
+describe('web-protocol.types — command classes (AD-5)', () => {
+  it('classifies exactly the request types, with a replay policy on create/command only', () => {
+    expect(Object.keys(WS_COMMAND_CLASSES).sort()).toEqual([...WS_REQUEST_TYPES].sort())
+    for (const [kind, replay] of Object.values(WS_COMMAND_CLASSES)) {
+      expect(replay !== null).toBe(kind === 'create' || kind === 'command')
+    }
+  })
+
+  it('keeps the credential-bearing kinds receipt-only and the prompt on its turn id', () => {
+    for (const type of [
+      'authenticate_agent',
+      'respond_elicitation',
+      'acp_deliver_auth_redirect'
+    ] as const) {
+      expect(WS_COMMAND_CLASSES[type]).toEqual(['command', 'receipt-only'])
+    }
+    expect(WS_COMMAND_CLASSES.send_prompt).toEqual(['command', 'entity'])
+    expect(WS_COMMAND_CLASSES.create_session).toEqual(['create', 'entity'])
+  })
+
+  it('accepts 1-128 chars of [A-Za-z0-9_-] as a commandId and nothing else', () => {
+    expect(MAX_COMMAND_ID_LEN).toBe(128)
+    expect(COMMAND_ID_PATTERN.test('3f2b9c0e-1d4a-4b7e-9a10-aabbccddeeff')).toBe(true)
+    expect(COMMAND_ID_PATTERN.test('a'.repeat(128))).toBe(true)
+    expect(COMMAND_ID_PATTERN.test('a'.repeat(129))).toBe(false)
+    expect(COMMAND_ID_PATTERN.test('')).toBe(false)
+    expect(COMMAND_ID_PATTERN.test('has space')).toBe(false)
+    expect(COMMAND_ID_PATTERN.test('new\nline')).toBe(false)
+  })
+})
+
 describe('web-terminal-protocol.types — error codes', () => {
-  it('mirrors the Rust terminal_ws codes, including the view-only refusal', () => {
+  it('mirrors the Rust terminal_ws codes, including the view-only refusal and the command verdicts', () => {
     expect(Object.values(WEB_TERMINAL_ERROR_CODES).sort()).toEqual([
+      'COMMAND_CONFLICT',
       'FORBIDDEN',
       'INVALID_CLIENT_IDENTITY',
+      'INVALID_COMMAND_ID',
+      'OUTCOME_UNKNOWN',
       'PROTOCOL_VERSION_MISMATCH',
+      'TERMINAL_LIMIT',
       'UNAUTHORIZED'
     ])
   })
 
   it('FORBIDDEN is the SCREAMING form of the /ws `forbidden` code', () => {
     expect(WEB_TERMINAL_ERROR_CODES.FORBIDDEN.toLowerCase()).toBe(WS_ERROR_CODES.FORBIDDEN)
+  })
+
+  it('the command verdicts are the SCREAMING form of the /ws codes', () => {
+    expect(WEB_TERMINAL_ERROR_CODES.OUTCOME_UNKNOWN.toLowerCase()).toBe(
+      WS_ERROR_CODES.OUTCOME_UNKNOWN
+    )
+    expect(WEB_TERMINAL_ERROR_CODES.COMMAND_CONFLICT.toLowerCase()).toBe(
+      WS_ERROR_CODES.COMMAND_CONFLICT
+    )
+    expect(WEB_TERMINAL_ERROR_CODES.INVALID_COMMAND_ID.toLowerCase()).toBe(
+      WS_ERROR_CODES.INVALID_COMMAND_ID
+    )
+  })
+
+  it('TERMINAL_LIMIT is the SCREAMING form of the /ws `terminal_limit` code', () => {
+    expect(WEB_TERMINAL_ERROR_CODES.TERMINAL_LIMIT.toLowerCase()).toBe(
+      WS_ERROR_CODES.TERMINAL_LIMIT
+    )
   })
 })

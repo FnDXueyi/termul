@@ -43,7 +43,9 @@ pub(crate) fn probe_node_major() -> Option<u64> {
 fn probe_node_major_uncached() -> Option<u64> {
     let path = super::config::runtime_resolution_path();
     let node = resolve_runtime_executable("node", &path)?;
-    let mut child = std::process::Command::new(node)
+    let mut command = std::process::Command::new(node);
+    crate::process_util::hide_console(&mut command);
+    let mut child = command
         .arg("--version")
         .env("PATH", path)
         .stdout(std::process::Stdio::piped())
@@ -288,6 +290,7 @@ impl ClaudeRuntimeProbe for SystemClaudeRuntimeProbe {
                 .ok_or_else(|| "Claude CLI path is not valid Unicode".to_string())?,
         )?;
         let mut command = tokio::process::Command::new(cli.program);
+        crate::process_util::hide_console(&mut command);
         command
             .args(cli.prepend_args)
             .args(["auth", "status"])
@@ -645,7 +648,8 @@ impl ClaudeAgentService {
         }
         if let Err(reason) = self.runtime_probe.ensure_supported().await {
             log::warn!("[acp-claude] managed config rejected: {reason}");
-            return Err(reason);
+            // Missing Claude CLI / Node runtime: nothing a retry can fix.
+            return Err(super::manager::agent_unavailable(reason));
         }
         match self.auth_mode() {
             Ok(ClaudeAuthMode::ClaudeCode) => {

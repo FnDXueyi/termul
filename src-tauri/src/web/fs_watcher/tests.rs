@@ -4,6 +4,7 @@
 //! events.
 
 use super::*;
+use crate::web::ws::{outbound_channel, OutboundReceiver, OUTBOUND_QUEUE_CAPACITY};
 use serde_json::json;
 
 #[test]
@@ -102,13 +103,13 @@ fn fs_changed_payload_serializes_camelcase_project_root_and_paths() {
 
 const ARM_WAIT: Duration = Duration::from_secs(10);
 
-type Conn = (
-    UnboundedSender<Outbound>,
-    tokio::sync::mpsc::UnboundedReceiver<Outbound>,
-);
+type Conn = (OutboundSender, OutboundReceiver);
 
 fn conn() -> Conn {
-    tokio::sync::mpsc::unbounded_channel()
+    outbound_channel(
+        OUTBOUND_QUEUE_CAPACITY,
+        crate::web::config::DEFAULT_OVERFLOW_TOLERANCE,
+    )
 }
 
 fn temp_project_dir(label: &str) -> PathBuf {
@@ -146,7 +147,7 @@ fn registry_with(projects: &[(&str, &PathBuf)]) -> Arc<ProjectRegistry> {
 
 /// Wait up to `wait` for one `fs_changed` event on `rx`.
 async fn next_fs_changed(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>,
+    rx: &mut OutboundReceiver,
     wait: Duration,
 ) -> Option<serde_json::Value> {
     let deadline = tokio::time::Instant::now() + wait;
@@ -432,4 +433,67 @@ async fn a_moved_project_root_re_arms_the_live_watch() {
     for d in [old, new] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+/// `fs_changed` goes through the subscriber's bounded queue: a full queue
+/// misses the batch (never grows past its bound) and, once the overflow
+/// tolerance is reached, the subscriber is closed and pruned (dropping the
+/// watcher with its last subscriber).
+#[tokio::test(start_paused = true)]
+async fn deliver_uses_the_bounded_queue_and_prunes_a_peer_that_stays_full() {
+    let (tx, mut rx) = outbound_channel(1, 3);
+    let watches: WatchMap = Arc::new(Mutex::new(HashMap::new()));
+    watches.lock().insert(
+        "p-full".to_string(),
+        ProjectWatch {
+            generation: 1,
+            subscribers: vec![tx.clone()],
+            cancel: CancellationToken::new(),
+            armed: tokio::sync::watch::channel(false).1,
+        },
+    );
+    let payload = FsChangedPayload {
+        project_id: "p-full".to_string(),
+        root: "/root".to_string(),
+        paths: vec!["/root/a".to_string()],
+    };
+
+    assert!(deliver(&watches, "p-full", 1, &payload), "first batch queued");
+    assert!(deliver(&watches, "p-full", 1, &payload), "full: batch missed, peer kept");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(deliver(&watches, "p-full", 1, &payload), "full again, within tolerance");
+    assert!(!tx.closing().is_cancelled());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !deliver(&watches, "p-full", 1, &payload),
+        "third consecutive full window reaches the tolerance: subscriber pruned, watch dropped"
+    );
+    assert!(tx.closing().is_cancelled(), "the overflowing peer's connection is closed");
+    assert!(watches.lock().is_empty());
+    assert!(rx.try_recv().is_ok(), "exactly the first batch was queued");
+    assert!(rx.try_recv().is_err(), "the queue never grew past its bound");
+}
+
+/// `fs_watch_ended` is the client's only cue to re-request its watch, so a full
+/// queue delays it instead of losing it.
+#[tokio::test]
+async fn watch_ended_is_delivered_once_a_full_queue_has_room() {
+    let (tx, mut rx) = outbound_channel(1, 100);
+    let filler = Outbound::Event(SequencedEvent::new(None, 0, "filler", json!({})));
+    assert_eq!(tx.try_enqueue(filler), EnqueueOutcome::Enqueued);
+
+    notify_watch_ended("p-gone", std::slice::from_ref(&tx));
+    assert!(
+        matches!(rx.recv().await, Some(Outbound::Event(event)) if event.type_ == "filler"),
+        "the queued frame is delivered first"
+    );
+    let ended = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("fs_watch_ended was lost on a full queue")
+        .expect("queue open");
+    assert!(
+        matches!(ended, Outbound::Event(event) if event.type_ == "fs_watch_ended"
+            && event.payload["projectId"] == "p-gone"),
+        "the watch-ended notice follows once there is room"
+    );
 }

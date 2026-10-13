@@ -2,6 +2,7 @@
 //! the in-crate fake agent (`FakeDriver`: real `DriverState` single-flight,
 //! accept hook, and the same terminator helpers as the real command loop).
 
+use tokio_util::sync::CancellationToken;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +18,7 @@ use crate::acp::session_persistence::{
 use crate::acp::{AcpManager, AgentId, SessionId};
 use crate::web::permissions::TurnClaim;
 use crate::web::sink::ReplayResult;
-use crate::web::WsRelaySink;
+use crate::web::{StreamItem, WsRelaySink};
 
 const AGENT: &str = "agent-turns";
 const SESSION: &str = "sess-turns";
@@ -285,7 +286,7 @@ async fn error_timeout_crash_and_cancel_turns_end_with_exactly_one_terminator() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_prompt_is_never_delivered_after_a_chunk_of_its_turn() {
     let env = env(Vec::new(), true).await;
-    let (_client, mut rx, replay) = env.relay.subscribe(SESSION, Some(0)).await;
+    let (_client, mut rx, replay, _) = env.relay.subscribe(SESSION, Some(0), None, &CancellationToken::new()).await;
     assert!(matches!(replay, ReplayResult::Ok(_)));
 
     run_prompt_turn(&env.acp, &env.relay, request(Some("t1")))
@@ -294,7 +295,7 @@ async fn user_prompt_is_never_delivered_after_a_chunk_of_its_turn() {
 
     let mut order = Vec::new();
     while let Ok(event) = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-        let Some(event) = event else { break };
+        let Some(StreamItem::Event(event)) = event else { break };
         order.push((event.seq, event.type_.clone()));
         if event.type_ == "prompt_complete" {
             break;
@@ -596,4 +597,123 @@ async fn spawn_failure_without_accept_hook_emits_no_terminator() {
     let log = records(&env).await;
     assert_eq!(count(&log, "user_prompt"), 0);
     assert_eq!(count(&log, "prompt_complete"), 0, "no hook, no terminator");
+}
+
+/// A host restart empties the in-memory completed-turn set, which is
+/// otherwise rebuilt only when a client subscribes. A resend of a completed
+/// `turnId` that arrives BEFORE any subscribe must still find the turn on the
+/// durable log: `accepted`, never a second `user_prompt`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resend_of_a_completed_turn_after_restart_is_accepted_without_a_subscribe() {
+    let env = env(vec![], false).await;
+    run_prompt_turn(&env.acp, &env.relay, request(Some("t1")))
+        .await
+        .expect("first run completes");
+    assert_eq!(count(&records(&env).await, "prompt_complete"), 1);
+
+    // The restarted host: an empty watermark over the same durable history.
+    let restarted = Arc::new(WsRelaySink::with_persistence(64, env.persistence.clone()));
+    assert!(!restarted.turn_watermark().is_completed(SESSION, "t1"));
+    let resend = accept_prompt_turn(&env.acp, &restarted, request(Some("t1"))).await;
+
+    match resend {
+        Ok(PromptAdmission::Receipt(reply)) => {
+            assert_eq!(receipt(&reply), serde_json::json!({"receipt": "accepted"}));
+        }
+        _ => panic!("a completed turn must answer accepted after a restart"),
+    }
+    let log = records(&env).await;
+    assert_eq!(count(&log, "user_prompt"), 1, "the turn was never re-run");
+    assert_eq!(count(&log, "prompt_complete"), 1);
+    assert!(
+        restarted.turn_watermark().is_restored(SESSION),
+        "restored once per session on the first claim"
+    );
+}
+
+/// A failed durable restore must not let the claim through: claiming without
+/// the completed set could re-run a finished turn. The prompt is refused with
+/// an explicit error, nothing is started or recorded, and the next claim
+/// (history readable again) is answered from the log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_turn_history_restore_refuses_the_prompt_instead_of_re_running_it() {
+    let env = env(vec![], false).await;
+    run_prompt_turn(&env.acp, &env.relay, request(Some("t1")))
+        .await
+        .expect("first run completes");
+    let messages = env
+        .persistence
+        .root()
+        .join(env.persistence.metadata(SESSION).unwrap().storage_key)
+        .join("messages.jsonl");
+    let saved = std::fs::read(&messages).unwrap();
+
+    let restarted = Arc::new(WsRelaySink::with_persistence(64, env.persistence.clone()));
+    std::fs::remove_file(&messages).unwrap();
+    let refused = accept_prompt_turn(&env.acp, &restarted, request(Some("t1"))).await;
+    match refused {
+        Err(PromptTurnError::Failed(message)) => {
+            assert!(message.contains("turn history could not be read"), "{message}");
+        }
+        _ => panic!("an unreadable history must refuse the prompt"),
+    }
+    assert_eq!(
+        restarted.turn_watermark().claim_turn(SESSION, Some("probe")),
+        TurnClaim::Claimed,
+        "the refusal took no claim"
+    );
+    restarted.turn_watermark().release_claim(SESSION, Some("probe"));
+    assert!(!restarted.turn_watermark().is_restored(SESSION));
+
+    std::fs::write(&messages, saved).unwrap();
+    match accept_prompt_turn(&env.acp, &restarted, request(Some("t1"))).await {
+        Ok(PromptAdmission::Receipt(reply)) => {
+            assert_eq!(receipt(&reply), serde_json::json!({"receipt": "accepted"}));
+        }
+        _ => panic!("once readable, the completed turn answers accepted"),
+    }
+    assert_eq!(count(&records(&env).await, "user_prompt"), 1, "never re-ran");
+}
+
+/// Concurrent claims of one session restore its history once: the second
+/// waits for the first scan instead of starting its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_claims_restore_a_sessions_turn_history_once() {
+    let env = env(vec![], false).await;
+    run_prompt_turn(&env.acp, &env.relay, request(Some("t1")))
+        .await
+        .expect("first run completes");
+
+    let restarted = Arc::new(WsRelaySink::with_persistence(64, env.persistence.clone()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let hook = crate::acp::session_persistence::ReplayTestHook::new(entered_tx);
+    env.persistence.set_replay_test_hook(hook.clone());
+
+    let tasks: Vec<_> = (0..3)
+        .map(|_| {
+            let relay = Arc::clone(&restarted);
+            tokio::spawn(async move { relay.ensure_turns_restored(SESSION).await })
+        })
+        .collect();
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the first scan started");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    hook.release();
+    for task in tasks {
+        task.await.unwrap().expect("restore succeeds");
+    }
+
+    assert_eq!(hook.waits(), 1, "one scan served every concurrent claim");
+    assert!(restarted.turn_watermark().is_completed(SESSION, "t1"));
+}
+
+/// A session with no durable history (not in the catalog: ephemeral) has
+/// nothing to restore, so the claim proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_without_durable_history_skips_the_restore() {
+    let env = env(vec![], false).await;
+    assert!(env.relay.ensure_turns_restored("not-in-the-catalog").await.is_ok());
+    assert!(!env.relay.turn_watermark().is_restored("not-in-the-catalog"));
 }

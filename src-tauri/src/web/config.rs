@@ -22,15 +22,27 @@ fn trimmed_env_path(key: &str) -> Option<PathBuf> {
     })
 }
 
-/// Default idle-agent reap window in seconds (15 min) — the value the
-/// standalone server used before the window became a [`ServerConfig`] field.
-pub const DEFAULT_AGENT_IDLE_WINDOW_SECS: u64 = 900;
+/// Default idle-agent reap window in seconds (30 min). The one definition the
+/// standalone server and the desktop host both read; no client holds a copy.
+pub const DEFAULT_AGENT_IDLE_WINDOW_SECS: u64 = 1800;
+/// Default per-project terminal cap. The host enforces it on every spawn
+/// carrier; the global cap of 30 is fixed in the PTY manager.
+pub const DEFAULT_MAX_TERMINALS_PER_PROJECT: usize = 10;
 /// Default reliable-queue overflow tolerance per client.
 pub const DEFAULT_OVERFLOW_TOLERANCE: usize = 15;
 /// Default command-receipt retention in seconds (10 min).
 pub const DEFAULT_RECEIPT_RETENTION_SECS: u64 = 600;
+/// Default age after which an unseen, absent device's store partition is
+/// garbage collected: 90 days.
+pub const DEFAULT_PARTITION_GC_AGE_SECS: u64 = 90 * 24 * 60 * 60;
+/// Default per-device store partition byte budget: 16 MiB.
+pub const DEFAULT_PARTITION_BYTE_BUDGET: u64 = 16 * 1024 * 1024;
+/// Longest command-receipt retention the host honors (7 days); a larger
+/// `--receipt-retention-secs` is clamped to it at startup.
+pub const MAX_RECEIPT_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 const AGENT_IDLE_WINDOW_ENV: &str = "TERMUL_AGENT_IDLE_REAP_SECS";
+const MAX_TERMINALS_PER_PROJECT_ENV: &str = "TERMUL_MAX_TERMINALS_PER_PROJECT";
 const PARTITION_GC_AGE_ENV: &str = "TERMUL_PARTITION_GC_AGE_SECS";
 const PARTITION_BYTE_BUDGET_ENV: &str = "TERMUL_PARTITION_BYTE_BUDGET";
 
@@ -71,6 +83,20 @@ where
             None
         }
     }
+}
+
+/// The per-project terminal cap for the desktop host, which has no CLI:
+/// `$TERMUL_MAX_TERMINALS_PER_PROJECT` → [`DEFAULT_MAX_TERMINALS_PER_PROJECT`].
+/// An invalid env value is ignored with a logged warning.
+#[must_use]
+pub fn desktop_max_terminals_per_project() -> usize {
+    let mut warnings = Vec::new();
+    let value = positive_env::<usize>(MAX_TERMINALS_PER_PROJECT_ENV, &mut warnings)
+        .unwrap_or(DEFAULT_MAX_TERMINALS_PER_PROJECT);
+    for warning in warnings {
+        log::warn!("{warning}");
+    }
+    value
 }
 
 /// Next CLI token as a flag's value, or the shared `missing value` error.
@@ -339,28 +365,35 @@ pub struct ServerConfig {
     pub event_log_capacity: usize,
     /// Idle window (seconds) after which the host reaps an idle agent.
     /// `--agent-idle-window-secs` → `$TERMUL_AGENT_IDLE_REAP_SECS` →
-    /// [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (900, the pre-existing server
-    /// value). The desktop host reads the same default const.
+    /// [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (1800). The desktop host reads the
+    /// same default const.
     pub agent_idle_window_secs: u64,
-    /// Reliable-queue overflow tolerance per client. `--overflow-tolerance`
-    /// → [`DEFAULT_OVERFLOW_TOLERANCE`] (15). Reserved: this is the single
-    /// definition; the read-model work that bounds the queue reads it. No
-    /// runtime code reads it yet.
+    /// Outbound-queue overflow tolerance per client: consecutive failed
+    /// enqueues before a peer that stopped draining is closed.
+    /// `--overflow-tolerance` → [`DEFAULT_OVERFLOW_TOLERANCE`] (15). Read by
+    /// `serve_router` into the connection runtime every `/ws` socket uses.
     pub overflow_tolerance: usize,
-    /// How long a command receipt is retained, in seconds.
+    /// Per-project terminal cap enforced by the PTY manager on every spawn.
+    /// `--max-terminals-per-project` → `$TERMUL_MAX_TERMINALS_PER_PROJECT` →
+    /// [`DEFAULT_MAX_TERMINALS_PER_PROJECT`] (10). The desktop host reads the
+    /// same env var and default through [`desktop_max_terminals_per_project`].
+    pub max_terminals_per_project: usize,
+    /// How long the command ledger keeps a command's outcome, in seconds
+    /// (bare command ids are kept six times as long).
     /// `--receipt-retention-secs` → [`DEFAULT_RECEIPT_RETENTION_SECS`] (600).
-    /// Reserved: the command-receipt work reads it. No runtime code reads it
-    /// yet.
+    /// `termul-server` builds its ledger from it; the desktop shared-live host
+    /// uses the default.
     pub receipt_retention_secs: u64,
-    /// Age (seconds) after which an unused per-device partition is garbage
-    /// collected. `None` (unset) until the device-state work picks a value;
-    /// `--partition-gc-age-secs` → `$TERMUL_PARTITION_GC_AGE_SECS`.
-    pub partition_gc_age_secs: Option<u64>,
-    /// Per-device partition byte budget. `None` (unset) until the
-    /// device-state work picks a value; `--partition-byte-budget` →
-    /// `$TERMUL_PARTITION_BYTE_BUDGET`. Reserved: no runtime code reads it
-    /// yet.
-    pub partition_byte_budget: Option<u64>,
+    /// Age (seconds) after which an unused per-device store partition is
+    /// garbage collected. `--partition-gc-age-secs` →
+    /// `$TERMUL_PARTITION_GC_AGE_SECS` → [`DEFAULT_PARTITION_GC_AGE_SECS`]
+    /// (90 days). Read by the host's [`crate::web::store::StorePolicy`].
+    pub partition_gc_age_secs: u64,
+    /// Per-device store partition byte budget. `--partition-byte-budget` →
+    /// `$TERMUL_PARTITION_BYTE_BUDGET` → [`DEFAULT_PARTITION_BYTE_BUDGET`]
+    /// (16 MiB). A write that would push a partition past it is refused
+    /// `STORE_PARTITION_FULL`.
+    pub partition_byte_budget: u64,
     /// Startup warnings gathered while parsing: removed flags that are still
     /// accepted and ignored, and invalid tunable env values that were
     /// ignored. Tracing is initialised after parsing, so
@@ -543,7 +576,11 @@ impl ServerConfig {
         let mut event_log_capacity: usize = 4096;
         let mut agent_idle_window_secs: Option<u64> = None;
         let mut overflow_tolerance: usize = DEFAULT_OVERFLOW_TOLERANCE;
+        let mut max_terminals_per_project: Option<usize> = None;
         let mut receipt_retention_secs: u64 = DEFAULT_RECEIPT_RETENTION_SECS;
+        // The last requested value above the cap; the clamp warning is queued
+        // after parsing so a repeated flag cannot leave a stale warning.
+        let mut receipt_retention_over_cap: Option<u64> = None;
         let mut partition_gc_age_secs: Option<u64> = None;
         let mut partition_byte_budget: Option<u64> = None;
         let mut deprecation_warnings: Vec<String> = Vec::new();
@@ -643,6 +680,13 @@ impl ServerConfig {
                     agent_idle_window_secs =
                         Some(parse_positive::<u64>("--agent-idle-window-secs", value.as_ref())?);
                 }
+                "--max-terminals-per-project" => {
+                    let value = require_value(&mut iter, "--max-terminals-per-project")?;
+                    max_terminals_per_project = Some(parse_positive::<usize>(
+                        "--max-terminals-per-project",
+                        value.as_ref(),
+                    )?);
+                }
                 "--overflow-tolerance" => {
                     let value = require_value(&mut iter, "--overflow-tolerance")?;
                     overflow_tolerance =
@@ -652,6 +696,11 @@ impl ServerConfig {
                     let value = require_value(&mut iter, "--receipt-retention-secs")?;
                     receipt_retention_secs =
                         parse_positive::<u64>("--receipt-retention-secs", value.as_ref())?;
+                    receipt_retention_over_cap = (receipt_retention_secs
+                        > MAX_RECEIPT_RETENTION_SECS)
+                        .then_some(receipt_retention_secs);
+                    receipt_retention_secs =
+                        receipt_retention_secs.min(MAX_RECEIPT_RETENTION_SECS);
                 }
                 "--partition-gc-age-secs" => {
                     let value = require_value(&mut iter, "--partition-gc-age-secs")?;
@@ -912,16 +961,29 @@ impl ServerConfig {
             )));
         }
 
+        if let Some(requested) = receipt_retention_over_cap {
+            deprecation_warnings.push(format!(
+                "--receipt-retention-secs {requested} exceeds the maximum; using {MAX_RECEIPT_RETENTION_SECS} (7 days)"
+            ));
+        }
+
         // Tunables: `--flag` wins, then the env var (where one exists), then
         // the shared `DEFAULT_*` const. An invalid env value is ignored with
         // a startup warning; an invalid flag value already failed above.
         let agent_idle_window_secs = agent_idle_window_secs
             .or_else(|| positive_env::<u64>(AGENT_IDLE_WINDOW_ENV, &mut deprecation_warnings))
             .unwrap_or(DEFAULT_AGENT_IDLE_WINDOW_SECS);
+        let max_terminals_per_project = max_terminals_per_project
+            .or_else(|| {
+                positive_env::<usize>(MAX_TERMINALS_PER_PROJECT_ENV, &mut deprecation_warnings)
+            })
+            .unwrap_or(DEFAULT_MAX_TERMINALS_PER_PROJECT);
         let partition_gc_age_secs = partition_gc_age_secs
-            .or_else(|| positive_env::<u64>(PARTITION_GC_AGE_ENV, &mut deprecation_warnings));
+            .or_else(|| positive_env::<u64>(PARTITION_GC_AGE_ENV, &mut deprecation_warnings))
+            .unwrap_or(DEFAULT_PARTITION_GC_AGE_SECS);
         let partition_byte_budget = partition_byte_budget
-            .or_else(|| positive_env::<u64>(PARTITION_BYTE_BUDGET_ENV, &mut deprecation_warnings));
+            .or_else(|| positive_env::<u64>(PARTITION_BYTE_BUDGET_ENV, &mut deprecation_warnings))
+            .unwrap_or(DEFAULT_PARTITION_BYTE_BUDGET);
 
         Ok(Self {
             host,
@@ -929,6 +991,7 @@ impl ServerConfig {
             event_log_capacity,
             agent_idle_window_secs,
             overflow_tolerance,
+            max_terminals_per_project,
             receipt_retention_secs,
             partition_gc_age_secs,
             partition_byte_budget,

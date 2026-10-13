@@ -6,6 +6,7 @@ import { mockTerminal } from '@/lib/test-utils/terminal'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
+import { useWorkspaceStore } from '@/stores/workspace-store'
 import { framerMotionTestState, resetFramerMotionTestState } from '@/test-utils/mock-framer-motion'
 import type { Project, ProjectColor, Terminal } from '@/types/project'
 import WorkspaceLayout from './WorkspaceLayout'
@@ -155,7 +156,6 @@ vi.mock('@/stores/app-settings-store', () => ({
   useTerminalFontFamily: vi.fn(() => 'monospace'),
   useTerminalBufferSize: vi.fn(() => 10000),
   useDefaultShell: vi.fn(() => 'bash'),
-  useMaxTerminalsPerProject: vi.fn(() => 10),
   useConfirmTerminalClose: vi.fn(() => true),
   useUpdateAppSetting: vi.fn(() => vi.fn()),
   useDefaultProjectColor: vi.fn(() => 'blue'),
@@ -387,8 +387,6 @@ const { mockApi } = vi.hoisted(() => ({
       runMigration: vi.fn(),
       rollback: vi.fn()
     },
-    addRendererRef: vi.fn(),
-    removeRendererRef: vi.fn(),
     hasActiveTerminalSessions: vi.fn()
   }
 }))
@@ -406,8 +404,6 @@ vi.mock('@/lib/api', () => ({
   visibilityApi: mockApi.visibility,
   sessionApi: mockApi.session,
   dataMigrationApi: mockApi.dataMigration,
-  addRendererRef: mockApi.addRendererRef,
-  removeRendererRef: mockApi.removeRendererRef,
   hasActiveTerminalSessions: mockApi.hasActiveTerminalSessions,
   sshApi: { onConnectionStatusChanged: vi.fn(() => vi.fn()) },
   gitApi: { getCommitContext: vi.fn().mockResolvedValue({ branch: null }) },
@@ -512,9 +508,23 @@ describe('WorkspaceLayout - Empty States', () => {
     expect(screen.getByTestId('workspace-conflict-banner')).toBeInTheDocument()
   })
 
+  it('does not persist a project whose switch has not committed yet before unload', async () => {
+    mockUseActiveProjectId.mockReturnValue('project-1')
+    mockUseActiveProject.mockReturnValue(createProject('project-1', '/workspace/project-1', 'blue'))
+    useWorkspaceStore.setState({ activeProjectId: 'project-0' })
+
+    renderWithRouter()
+    window.dispatchEvent(new Event('beforeunload'))
+
+    expect(mockSaveTerminalLayout).not.toHaveBeenCalled()
+    useWorkspaceStore.setState({ activeProjectId: '' })
+  })
+
   it('persists terminal layout before unload when a project is active', async () => {
     mockUseActiveProjectId.mockReturnValue('project-1')
     mockUseActiveProject.mockReturnValue(createProject('project-1', '/workspace/project-1', 'blue'))
+    // The committed project (the layout's persistence hook is mocked here).
+    useWorkspaceStore.setState({ activeProjectId: 'project-1' })
 
     renderWithRouter()
 
@@ -527,6 +537,7 @@ describe('WorkspaceLayout - Empty States', () => {
     await waitFor(() => {
       expect(mockSaveTerminalLayout).toHaveBeenCalledWith('project-1')
     })
+    useWorkspaceStore.setState({ activeProjectId: '' })
   })
 
   it('re-surfaces the token-entry screen mid-session when the web auth gate flags unauthorized (#907)', async () => {

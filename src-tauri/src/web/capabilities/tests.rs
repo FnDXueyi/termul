@@ -74,6 +74,8 @@ fn view_only_may_read_but_not_mutate() {
         "subscribe",
         "watch_project",
         "unwatch_project",
+        "watch",
+        "unwatch",
         "list_persisted_sessions",
         "open_persisted_session",
         "get_session_payload",
@@ -202,10 +204,6 @@ fn terminal_view_allow_list_excludes_every_mutation() {
         "kill",
         "rotate_claim",
         "revoke_claim",
-        "set_protected",
-        "update_orphan_detection",
-        "add_renderer_ref",
-        "remove_renderer_ref",
         // Re-issues the claim of every unattached terminal.
         "list_preserved",
     ] {

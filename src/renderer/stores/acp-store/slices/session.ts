@@ -29,14 +29,12 @@ import {
 } from '@/lib/acp-history-persistence'
 import { selectMcpServersForAgent } from '@/lib/acp-mcp-persistence'
 import { decideResume, resumeMissesSession } from '@/lib/acp-resume-policy'
-import { chatForeignToProject } from '@/lib/acp-session-ownership'
 import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transport'
 import { classifySetupError } from '@/lib/agents/acp-spawn-errors'
 import { deleteSessionTempFiles } from '@/lib/attachment-temp-cleanup'
 import { logFrontendError } from '@/lib/log-api'
 import { sanitizeDisplayText } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { useProjectStore } from '@/stores/project-store'
 import {
@@ -211,7 +209,10 @@ async function attachLiveTurn(
 ): Promise<void> {
   const cursor = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
   const transport = getAcpTransport()
-  transport.seedSessionCursor?.(id, cursor)
+  transport.seedSessionCursor?.(id, {
+    lastSeq: cursor,
+    logEpoch: payload.metadata.logEpoch ?? null
+  })
   let missing = false
   set((s) => {
     const session = s.sessions[id]
@@ -572,6 +573,11 @@ async function redirectSwitchedReopen(
   return true
 }
 
+// AD-6 exception (reply-driven session state kept): `session/load` and
+// `session/resume` report the session's modes / models / config options ONLY in
+// the reply (the replayed updates carry changes, not the initial state), so the
+// reply is merged for exactly that data — and only over values nothing else
+// moved (`baseline`).
 function mergeReopenOutcomeIfUnchanged(
   set: TurnEndSetter,
   sessionId: SessionId,
@@ -900,9 +906,20 @@ async function openHistorySessionInner(
     // No owning agent — ensure one for the reopen anyway so the chat is
     // usable (covers the plain idle path AND the dead-turn degrade above:
     // the fresh agent hosts the resumed session, never the dead turn).
-    const ensured = await ensureLiveAgent(get, set, meta.agentConfigId, meta.cwd, {
-      silentSpawnFailure: true
-    })
+    let ensured: AgentId | null
+    try {
+      ensured = await ensureLiveAgent(get, set, meta.agentConfigId, meta.cwd, {
+        silentSpawnFailure: true,
+        surfaceDefiniteRejection: true
+      })
+    } catch (err) {
+      // AD-5: a missing binary / invalid config is a definite rejection —
+      // reopening on the dead owner cannot work and a silent retry cannot fix
+      // it, so show the host's reason (the Retry button is a new intent).
+      if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
+      set((s) => ({ sessions: withSessionResumeError(s.sessions, id, err) }))
+      throw err
+    }
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
     if (ensured) liveAgentId = ensured
   }
@@ -1310,15 +1327,11 @@ type SessionSliceState = Pick<
   | 'discoveredSessions'
   | 'discoveringKeys'
   | 'discoveredReopenContexts'
-  | 'queuedProjectSwitchId'
-  | 'failedProjectSwitchId'
-  | 'switchingProjectId'
   | 'createSession'
-  | 'switchProject'
-  | 'setFailedProjectSwitch'
   | 'closeSession'
   | 'setActiveSession'
   | 'loadSessionIndex'
+  | 'applySessionIndexSnapshot'
   | 'openHistorySession'
   | 'resumeLiveSession'
   | 'flushLiveSessionSaves'
@@ -1330,6 +1343,55 @@ type SessionSliceState = Pick<
   | '_onSessionCreated'
   | '_onSessionClosed'
 >
+
+type IndexSet = (partial: Partial<AcpState> | ((state: AcpState) => Partial<AcpState>)) => void
+
+/**
+ * Merge a host session index into the local projection. `generation` is the
+ * load generation the entries belong to: a response older than one already
+ * applied is discarded so it cannot revert a newer local mutation.
+ */
+async function applyIndexEntries(
+  set: IndexSet,
+  get: () => AcpState,
+  generation: number,
+  entries: SessionIndexEntry[]
+): Promise<void> {
+  if (generation <= sessionIndexAppliedGeneration) return
+  sessionIndexAppliedGeneration = generation
+  // Continue the placeholder counter from the highest persisted suffix so a
+  // restart doesn't restart at 1 and collide with existing `Untitled Chat N`.
+  rebaseUntitledCounter(entries)
+  // Merge with the locally-known projection so a stale response cannot
+  // remove a just-created row or revert a freshly-titled session. The
+  // initial empty-load case (no local entries) applies the host response
+  // verbatim.
+  const current = get().sessionIndex
+  const liveSessionIds = new Set(Object.keys(get().sessions) as SessionId[])
+  const merged = stampLiveTurnOnIndex(
+    mergeSessionIndexEntries(current, entries, liveSessionIds),
+    get().sessions
+  )
+  set({ sessionIndex: merged })
+  // Prune restored agent-chat tabs whose session is neither live nor in the
+  // hydrated index — they could only render the corpse "chat unavailable"
+  // fallback. Live sessions win over index absence (a just-failed launch is
+  // local-only until the host learns about it). Runs only on a successful
+  // load: the throw path above preserves tabs when the index cannot be read.
+  // Also prunes tabs the now-loaded index proves FOREIGN to the active
+  // project (inserted fail-open before ownership was known): the pane tree
+  // is shared, so such a tab renders another project's chat here. The
+  // session keeps running and is handed back to its owner's retained set
+  // first, so switching to the owner reattaches it (lossless even in the
+  // render gap where the owner's tabs are still mounted mid-switch).
+  pruneRestoredChatTabs({
+    liveSessionIds,
+    indexedSessionIds: new Set(merged.map((e) => e.id)),
+    ownership: get(),
+    activeProjectId: useProjectStore.getState().activeProjectId
+  })
+  await recoverDroppedLaunchChats(merged)
+}
 
 export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceState> = (
   set,
@@ -1345,9 +1407,6 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
   sessions: {},
   activeSessionId: null,
   sessionUsage: {},
-  queuedProjectSwitchId: null,
-  failedProjectSwitchId: null,
-  switchingProjectId: null,
 
   createSession: async (agentId, cwd, mcpServers, projectId, opts) => {
     try {
@@ -1382,6 +1441,33 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         })
       )
       const sessionId = outcome.sessionId
+      // AD-5/AD-6: a RESEND answered by the host's entity lookup (`lookup`) is a
+      // receipt for a session an earlier, reply-lost attempt created. It carries
+      // no modes/models/options, so it resolves the COMMAND only: the entity is
+      // opened through the history-open flow (durable transcript + live attach),
+      // never built from the reply.
+      if (outcome.lookup) {
+        // A warm-pool / ephemeral session is live-only (not persisted until it is
+        // promoted), so there is no history to open it from: fail clearly and let
+        // the caller start over with a new intent instead of binding a ghost.
+        if (opts?.ephemeral || opts?.backendEphemeral) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'acp.createSession.lookup',
+            message: `session/new for agent ${agentId} was answered by entity lookup (session ${sessionId}) but the session is ephemeral; it cannot be reopened from history`
+          })
+          throw new Error(
+            'The temporary session could not be confirmed after the connection dropped. Try again.'
+          )
+        }
+        void logFrontendError({
+          level: 'warn',
+          source: 'acp.createSession.lookup',
+          message: `session/new for agent ${agentId} was answered by entity lookup (session ${sessionId}); opening it from history`
+        })
+        await get().openHistorySession(sessionId)
+        return sessionId
+      }
       invalidateSessionReopen(sessionId)
       set((s) => {
         // Merge with any record an event may have created during the await window,
@@ -1470,137 +1556,6 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     }
   },
 
-  switchProject: async (projectId) => {
-    const transport = getAcpTransport()
-    if (!transport.switchProject) {
-      throw new Error('Project switching is only available in web/remote mode')
-    }
-    // Published before the first await so the shell announcer sees the switch
-    // begin; cleared on every exit (completed, selected, queued, rejected).
-    set({ switchingProjectId: projectId })
-    try {
-      // Starting a new switch clears any prior transient failure indicator so a
-      // retry doesn't keep a stale "Failed" badge while the new attempt runs.
-      set({ failedProjectSwitchId: null })
-      const focusedSessionId = getTabFocusedSessionId() ?? get().activeSessionId
-      const focusedSession = focusedSessionId ? get().sessions[focusedSessionId] : null
-      const outcome = await transport.switchProject(projectId)
-      if (outcome.status === 'queued') {
-        set({ queuedProjectSwitchId: outcome.projectId })
-        return outcome
-      }
-      if (outcome.status === 'selected') {
-        // Cold tab: the server updated the shared active project but created no
-        // session (no agent spawned). Mirror desktop's local select + clear the
-        // transient switch badges; the agent spawns lazily when a chat starts.
-        set({ queuedProjectSwitchId: null, failedProjectSwitchId: null })
-        // No session was minted, so the focus pointers still name the
-        // PREVIOUS project's chat — clear them so a later switch/manifest
-        // write cannot inherit that session on the target project.
-        const st = get()
-        if (st.activeSessionId && chatForeignToProject(st.activeSessionId, outcome.projectId, st)) {
-          set({ activeSessionId: null })
-        }
-        const tabFocused = getTabFocusedSessionId()
-        if (tabFocused && chatForeignToProject(tabFocused, outcome.projectId, st)) {
-          setTabFocusedSessionId(null)
-        }
-        useProjectStore.getState().selectProject(outcome.projectId)
-        return outcome
-      }
-
-      // Switch-back restore (Epic-4 bridge): if the server reopened an existing
-      // session (detected via the server history index), fetch its transcript via
-      // `openHistorySession` + focus the workspace tab (`addAgentChatTab`) —
-      // mirrors desktop's "restore the last tab." Else the server minted a new
-      // session → current blank-chat path below.
-      if (get().sessionIndex.some((e) => e.id === outcome.sessionId)) {
-        // Parity with the new-session branch: set activeSessionId + clear the
-        // queued id so the reopened session is the active chat (not just tab
-        // focus).
-        set({ queuedProjectSwitchId: null, activeSessionId: outcome.sessionId })
-        const opening = get().openHistorySession(outcome.sessionId)
-        useWorkspaceStore.getState().addAgentChatTab(outcome.sessionId)
-        setTabFocusedSessionId(outcome.sessionId)
-        useProjectStore.getState().selectProject(outcome.projectId)
-        await opening
-        return outcome
-      }
-
-      // `outcome.previousSessionId` is server-authoritative for "which session
-      // this connection was on" — the UI pointer (sessionStorage focus +
-      // activeSessionId) can be stale or empty when every chat tab was closed
-      // or when the pointer survived a reload. Inherit from the focused record
-      // only when the server sent no id (old server) or it matches the
-      // pointer — a mismatched pointer would inherit an unrelated session's
-      // title/modes/models.
-      const previous =
-        (outcome.previousSessionId ? get().sessions[outcome.previousSessionId] : undefined) ??
-        (!outcome.previousSessionId || focusedSessionId === outcome.previousSessionId
-          ? focusedSession
-          : undefined)
-      // `outcome.agentId` is the owning agent — server-authoritative. Local
-      // records are the fallback for older replies carrying no agentId. A
-      // `session_created` event stub for the minted session may already be
-      // installed (the manager fans the event out before the reply lands).
-      const agentId =
-        outcome.agentId ?? previous?.agentId ?? get().sessions[outcome.sessionId]?.agentId
-      if (!agentId) {
-        // Older servers send no `agentId` and no local record exists to borrow
-        // one from — the minted session cannot be attributed here. The switch
-        // DID commit server-side, so mirror the `selected` path rather than
-        // failing; the orphaned session stays reachable via the history index.
-        set({ queuedProjectSwitchId: null, failedProjectSwitchId: null })
-        useProjectStore.getState().selectProject(outcome.projectId)
-        void logFrontendError({
-          level: 'warn',
-          source: 'acp.switchProject',
-          message: `switch_project completed for ${outcome.projectId} but session ${outcome.sessionId} has no attributable agent; deferred to lazy spawn`
-        })
-        return outcome
-      }
-
-      set((s) => {
-        const existing = s.sessions[outcome.sessionId]
-        return {
-          queuedProjectSwitchId: null,
-          failedProjectSwitchId: null,
-          activeSessionId: outcome.sessionId,
-          sessions: {
-            ...s.sessions,
-            [outcome.sessionId]: {
-              id: outcome.sessionId,
-              agentId,
-              cwd: outcome.cwd,
-              projectId: outcome.projectId,
-              status: 'active',
-              title: existing?.title ?? previous?.title ?? null,
-              activeTurn: false,
-              mcpServerCount: outcome.mcpServerCount,
-              openTurnId: null,
-              modes: existing?.modes ?? previous?.modes ?? null,
-              models: existing?.models ?? previous?.models ?? null,
-              configOptions: existing?.configOptions ?? previous?.configOptions ?? [],
-              lastError: existing?.lastError ?? null,
-              createdAt: existing?.createdAt ?? Date.now(),
-              replaying: null
-            }
-          },
-          messages: { ...s.messages, [outcome.sessionId]: s.messages[outcome.sessionId] ?? [] }
-        }
-      })
-      setTabFocusedSessionId(outcome.sessionId)
-      useProjectStore.getState().selectProject(outcome.projectId)
-      return outcome
-    } finally {
-      // Only clear our own marker: an overlapping call for another project
-      // owns the field until it settles.
-      if (get().switchingProjectId === projectId) set({ switchingProjectId: null })
-    }
-  },
-
-  setFailedProjectSwitch: (projectId) => set({ failedProjectSwitchId: projectId }),
-
   closeSession: async (sessionId) => {
     invalidateSessionReopen(sessionId)
     const session = get().sessions[sessionId]
@@ -1678,40 +1633,11 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       }
       throw error
     }
-    if (generation <= sessionIndexAppliedGeneration) return
-    sessionIndexAppliedGeneration = generation
-    // Continue the placeholder counter from the highest persisted suffix so a
-    // restart doesn't restart at 1 and collide with existing `Untitled Chat N`.
-    rebaseUntitledCounter(entries)
-    // Merge with the locally-known projection so a stale response cannot
-    // remove a just-created row or revert a freshly-titled session. The
-    // initial empty-load case (no local entries) applies the host response
-    // verbatim.
-    const current = get().sessionIndex
-    const liveSessionIds = new Set(Object.keys(get().sessions) as SessionId[])
-    const merged = stampLiveTurnOnIndex(
-      mergeSessionIndexEntries(current, entries, liveSessionIds),
-      get().sessions
-    )
-    set({ sessionIndex: merged })
-    // Prune restored agent-chat tabs whose session is neither live nor in the
-    // hydrated index — they could only render the corpse "chat unavailable"
-    // fallback. Live sessions win over index absence (a just-failed launch is
-    // local-only until the host learns about it). Runs only on a successful
-    // load: the throw path above preserves tabs when the index cannot be read.
-    // Also prunes tabs the now-loaded index proves FOREIGN to the active
-    // project (inserted fail-open before ownership was known): the pane tree
-    // is shared, so such a tab renders another project's chat here. The
-    // session keeps running and is handed back to its owner's retained set
-    // first, so switching to the owner reattaches it (lossless even in the
-    // render gap where the owner's tabs are still mounted mid-switch).
-    pruneRestoredChatTabs({
-      liveSessionIds,
-      indexedSessionIds: new Set(merged.map((e) => e.id)),
-      ownership: get(),
-      activeProjectId: useProjectStore.getState().activeProjectId
-    })
-    await recoverDroppedLaunchChats(merged)
+    await applyIndexEntries(set, get, generation, entries)
+  },
+
+  applySessionIndexSnapshot: async (entries) => {
+    await applyIndexEntries(set, get, ++sessionIndexLoadGeneration, entries)
   },
 
   openHistorySession: async (id) => {

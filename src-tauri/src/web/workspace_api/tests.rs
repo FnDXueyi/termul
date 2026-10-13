@@ -92,6 +92,7 @@ async fn state_with_store(root: &std::path::Path) -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
+        connections: Default::default(),
     }
 }
 
@@ -126,6 +127,7 @@ async fn state_without_store() -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
+        connections: Default::default(),
     }
 }
 
@@ -200,6 +202,10 @@ async fn post_write(
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri(format!("/workspace/{project_id}/write"))
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(peer))
@@ -219,6 +225,10 @@ async fn post_delete(
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri(format!("/workspace/{project_id}/delete"))
                 .extension(ConnectInfo(peer))
                 .body(Body::empty())
@@ -497,6 +507,10 @@ async fn write_rejects_malformed_json_body() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/workspace/project-1/write")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(loopback_peer()))

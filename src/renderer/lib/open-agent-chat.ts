@@ -1,7 +1,8 @@
 import { toast } from 'sonner'
-import { isMobileWebShellViewport } from '@/hooks/use-mobile-web-shell'
 import { sessionOwnerProjectId } from '@/lib/acp-session-ownership'
 import { logFrontendError } from '@/lib/log-api'
+import { projectSwitch } from '@/lib/project-switch/coordinator'
+import { releaseFocusNotOwnedBy } from '@/lib/release-foreign-focus'
 import { useAcpStore } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -54,12 +55,13 @@ function openAgentChatAtPlacement(sessionId: string, placement: AgentChatPlaceme
 }
 
 /**
- * Bring an Agent chat on screen IN ITS OWN PROJECT. The pane tree is shared
- * across projects, so adding another project's chat tab directly would leak
- * it into the active project's workspace. A chat owned by another project
- * switches to that project first (the sidebar "needs you" pattern): the chat
- * is retained + one-shot focused for the owner, and the workspace restore
- * reattaches and activates it. Unknown ownership opens in place (fail-open).
+ * Bring an Agent chat on screen IN ITS OWN PROJECT. Each project has its own
+ * pane tree and only the active one is visible, so adding another project's
+ * chat tab directly would land it in the wrong workspace. A chat owned by
+ * another project switches to that project first (the sidebar "needs you"
+ * pattern): the chat is retained + one-shot focused for the owner, and an
+ * explicit `open` switch request activates it once the owner's tree is
+ * committed. Unknown ownership opens in place (fail-open).
  *
  * With a `placement` the tab lands in that pane or split instead; a chat owned
  * by another project is rejected (no tab, no project switch, no retain).
@@ -93,22 +95,18 @@ export function openAgentChatInOwnProject(
     source,
     message: `Opening chat ${sessionId} switches project ${activeProjectId} -> ${owner}`
   })
-  if (isMobileWebShellViewport()) {
-    // The phone shell switches through the shared server session (parity
-    // with its project sheet); it selects the project locally on success.
-    void acp.switchProject(owner).catch((error: unknown) => {
-      acp.setFailedProjectSwitch(owner)
-      void logFrontendError({
-        level: 'warn',
-        source,
-        message: `Project switch to ${owner} for chat ${sessionId} failed: ${String(error)}`
-      })
-    })
-    return 'switched-project'
-  }
-  // Desktop / desktop-style web: same as the sidebar's project select.
+  // Same as the sidebar's project select (client-only on every surface).
+  releaseFocusNotOwnedBy(owner)
   useProjectStore.getState().selectProject(owner)
   useSSHStore.getState().selectProfile(null)
+  // An explicit open (not an effect-driven pick): it survives the pick the
+  // workspace hook issues for the same project, and activating the tab is a
+  // no-op when the commit's chat reattach already put it on screen.
+  void projectSwitch.request({
+    kind: 'open',
+    projectId: owner,
+    afterCommit: () => useWorkspaceStore.getState().addAgentChatTab(sessionId)
+  })
   return 'switched-project'
 }
 

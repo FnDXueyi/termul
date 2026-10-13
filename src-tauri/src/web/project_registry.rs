@@ -2,8 +2,8 @@
 //!
 //! The standalone server seeds it from the file-backed VFS-root registry; the
 //! desktop shared-live server receives renderer snapshots. The browser reads it
-//! through `GET /projects` and resolves `switch_project` ids to private cwd/MCP
-//! context here. Public summaries remain redact-by-omission.
+//! through `GET /projects`; `create_session` resolves project ids and cwds to
+//! registered projects here, and private cwd/MCP context lives alongside. Public summaries remain redact-by-omission.
 //!
 //! The registry itself is not durable. VPS mode persists the default id through
 //! the separately retained `FileProjectRegistry`; desktop mode remains file-free.
@@ -12,9 +12,8 @@
 //!
 //! The host owns a single `default_project_id` — the project NEW web clients
 //! start with on their initial `GET /projects`. It is NOT "whoever switched
-//! last": a per-client `switch_project` updates only the requesting
-//! connection's `current_project` (no broadcast, no persistence). The default
-//! changes only via `set_default_project` (an explicit user action); `set`
+//! last": switching projects is client-only and never reaches the host. The
+//! default changes only via `set_default_project` (an explicit user action); `set`
 //! stores whatever default its caller passes (the desktop project-list sync
 //! passes the existing default, so navigation never moves it).
 //!
@@ -78,21 +77,6 @@ pub struct ProjectListPayload {
     pub projects: Vec<ProjectSummary>,
     /// The host's default project id (seeds a new web client's initial
     /// `activeProjectId`), or `None` when none is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_project_id: Option<String>,
-}
-
-/// `projects_changed` WS event payload (agent-level: `sid: None`, `seq: 0`).
-///
-/// Carries only the new `defaultProjectId` — the web client refetches
-/// `GET /projects` for the full list rather than receiving it inline. On the
-/// initial load the client seeds `activeProjectId` from `defaultProjectId`; on
-/// subsequent `projects_changed` events the client refetches the list but
-/// preserves its own `activeProjectId` (no silent retarget).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectsChangedPayload {
-    /// The host's new default project id, or `None` when none is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_project_id: Option<String>,
 }
@@ -172,6 +156,20 @@ impl ProjectRegistry {
     /// renderer is the source of truth in desktop-hosted mode — a fresh `set`
     /// fully supersedes the prior snapshot.
     pub fn set(&self, mut projects: Vec<ProjectSummary>, default_id: Option<String>) {
+        // The unassigned sentinel names no project; a renderer-fed entry
+        // carrying it would make its sessions indistinguishable from
+        // unassigned ones, so it is never registered.
+        let before = projects.len();
+        projects.retain(|p| p.id != crate::acp::session_persistence::UNASSIGNED_PROJECT_ID);
+        if projects.len() != before {
+            tracing::warn!(
+                target: "termul::web::project_registry",
+                "set: dropped a project carrying the reserved unassigned id"
+            );
+        }
+        // A default naming the sentinel would dangle (P4).
+        let default_id =
+            default_id.filter(|id| id != crate::acp::session_persistence::UNASSIGNED_PROJECT_ID);
         for project in &mut projects {
             project.is_default = default_id.as_deref() == Some(project.id.as_str());
         }
@@ -183,6 +181,30 @@ impl ProjectRegistry {
         }
         self.rebuild_roots();
     }
+    /// Replace the whole mirror, choosing the new default from the registry's
+    /// CURRENT default under the same lock (`derive(current)`), so a
+    /// concurrent `set_default_project` can never be overwritten by a default
+    /// derived from a stale read. Returns the default that was stored.
+    pub fn set_with_default_from(
+        &self,
+        mut projects: Vec<ProjectSummary>,
+        derive: impl FnOnce(&[ProjectSummary], Option<&str>) -> Option<String>,
+    ) -> Option<String> {
+        let default_id = {
+            let mut g = self.inner.lock();
+            let default_id = derive(&projects, g.default_project_id.as_deref());
+            for project in &mut projects {
+                project.is_default = default_id.as_deref() == Some(project.id.as_str());
+            }
+            g.projects = projects;
+            g.default_project_id = default_id.clone();
+            self.epoch.fetch_add(1, Ordering::AcqRel);
+            default_id
+        };
+        self.rebuild_roots();
+        default_id
+    }
+
     /// Insert or replace a single project summary by `id` in the in-memory
     /// mirror (Option B: web-client project create/update). A root with an
     /// existing `id` is replaced in place (preserving order); a new id is
@@ -196,6 +218,14 @@ impl ProjectRegistry {
     /// the current default, `default_project_id` is cleared — same posture as
     /// `update`/`remove`/`load`.
     pub fn upsert(&self, project: ProjectSummary) {
+        // Same reservation as `set`: the sentinel never becomes a project.
+        if project.id == crate::acp::session_persistence::UNASSIGNED_PROJECT_ID {
+            tracing::warn!(
+                target: "termul::web::project_registry",
+                "upsert: refused a project carrying the reserved unassigned id"
+            );
+            return;
+        }
         {
             let mut g = self.inner.lock();
             let adds_real_project = project.id != SEEDED_PROJECT_ID && is_usable(&project);
@@ -295,8 +325,7 @@ impl ProjectRegistry {
 
     /// Resolve a complete switchable project context. Archived, unknown, and
     /// pathless projects are rejected. MCP configuration is kept private and
-    /// never enters `ProjectSummary`/`GET /projects`. Per-connection activity
-    /// is NOT computed here — the caller checks `current_project` itself.
+    /// never enters `ProjectSummary`/`GET /projects`.
     #[must_use]
     pub fn switch_context(&self, project_id: &str) -> Option<ProjectSwitchContext> {
         let g = self.inner.lock();
@@ -346,9 +375,19 @@ impl ProjectRegistry {
         true
     }
 
+    /// Whether `project_id` is a registered project (archived or not). Used by
+    /// `create_session` to validate an explicit `projectId` before stamping it.
+    #[must_use]
+    pub fn contains(&self, project_id: &str) -> bool {
+        self.inner
+            .lock()
+            .projects
+            .iter()
+            .any(|p| p.id == project_id)
+    }
+
     /// Resolve a project id → its cwd (`path`), or `None` when the project is
-    /// not in the registry or has no cwd. Used by the `switch_project` WS
-    /// handler to start a new session at the project's path.
+    /// not in the registry or has no cwd.
     #[must_use]
     pub fn find_path(&self, project_id: &str) -> Option<String> {
         let g = self.inner.lock();

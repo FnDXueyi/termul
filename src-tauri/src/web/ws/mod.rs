@@ -34,34 +34,34 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::acp::config::AgentConfig;
-use crate::acp::{AcpManager, AgentId, FileProjectRegistry, SessionCreationContext, SessionId};
+use crate::acp::{AcpManager, FileProjectRegistry, SessionCreationContext};
+// Only the harness and the ws tests name these (through `super::*`).
+#[cfg(test)]
+use crate::acp::{AgentId, SessionId};
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use crate::web::auth::WebAuth;
 use crate::web::capabilities::{Carrier, CapabilityPolicy};
-use crate::web::permissions::DEFAULT_PERMISSION_RECONNECT_GRACE;
-use crate::web::project_registry::{ProjectRegistry, ProjectSwitchContext};
-use crate::web::sink::{
-    broadcast_chat_history_changed, broadcast_projects_changed, ClientId, ReplayResult, WsRelaySink,
-};
+use crate::web::connection_runtime::ConnectionRuntime;
+use crate::web::project_registry::ProjectRegistry;
+use crate::web::sink::{ClientId, EventStream, ReplayResult, StreamItem, WsRelaySink};
 use crate::web::store::WebStore;
 
 mod access;
 mod agents;
+mod commands;
 mod dispatch;
 mod lifecycle;
 mod projects;
@@ -77,6 +77,7 @@ mod watch;
 // for `tests.rs`' `use super::*` without widening visibility past `ws`.
 use access::*;
 use agents::*;
+use commands::*;
 use dispatch::*;
 use lifecycle::*;
 use projects::*;
@@ -88,8 +89,10 @@ use subscribe::*;
 use watch::*;
 
 // The wire-contract `pub` surface stays reachable at `web::ws::*`.
-pub use relay::{ws_upgrade, AUTH_REQUIRED_TYPE, WS_BATCH_TYPE};
-pub(crate) use relay::Outbound;
+pub use relay::{ws_upgrade, AUTH_REQUIRED_TYPE, WS_BATCH_TYPE, WS_GAP_TYPE, WS_HEARTBEAT_TYPE};
+pub(crate) use relay::{EnqueueOutcome, Outbound, OutboundSender};
+#[cfg(test)]
+pub(crate) use relay::{outbound_channel, OutboundReceiver, OUTBOUND_QUEUE_CAPACITY};
 
 // ---------------------------------------------------------------------------
 // Sequenced event — the wire envelope (AC2 + AC3)
@@ -134,9 +137,11 @@ impl SequencedEvent {
 /// `WS_RELAY_TIERS` const.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReliabilityTier {
-    /// Drop-oldest on a slow client (high-frequency streams).
+    /// Dropped for a slow client, followed by a `gap` frame (high-frequency
+    /// streams the client can rebuild from a snapshot).
     Lossy,
-    /// Never dropped (unbounded per-client queue in this story).
+    /// Never dropped silently: a subscriber that cannot take it loses its
+    /// connection and resumes by cursor.
     Reliable,
     /// Dedup by turn-id before enqueue.
     Idempotent,
@@ -167,7 +172,7 @@ pub fn tier_of(type_: &str) -> ReliabilityTier {
 
 /// The `authenticate` protocol version this host speaks. Mirrors the TS
 /// `WS_PROTOCOL_VERSION`. Bump it on any wire-contract change (AD-15).
-pub const WS_PROTOCOL_VERSION: u32 = 1;
+pub const WS_PROTOCOL_VERSION: u32 = 7;
 
 /// Longest accepted `deviceId` / `clientInstanceId`, in bytes.
 pub const MAX_CLIENT_ID_LEN: usize = 128;
@@ -269,8 +274,10 @@ pub struct WsRequest {
     /// Request payload (shape depends on `type`).
     #[serde(default = "Value::default")]
     pub payload: Value,
-    /// Client-minted command id for a mutating request. The field name is
-    /// fixed here; dispatch ignores it until the command/receipt work lands.
+    /// Client-minted command id for a mutating request (1-128 characters of
+    /// `[A-Za-z0-9_-]`). Ledgered commands are recorded under it before they
+    /// run; `send_prompt`'s `turnId` is its command id. A request without one
+    /// keeps the pre-receipt behavior.
     #[serde(default)]
     pub command_id: Option<String>,
 }
@@ -288,8 +295,9 @@ pub struct WsReply {
     /// Failure detail (omitted on success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub err: Option<WsError>,
-    /// Receipt visibility marker (watch revision or log seq). The field name
-    /// is fixed here; its semantics belong to the command/receipt work.
+    /// Receipt visibility marker: the session log seq the effect is visible
+    /// at, set on ok replies of session-scoped commands (other replies omit
+    /// it until watch revisions exist).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible_at: Option<Value>,
 }
@@ -372,9 +380,6 @@ pub enum WsErrorCode {
     Duplicate,
     Unsupported,
     NotImplemented,
-    /// `switch_project` was sent on a connection with no live agent yet
-    /// (cold web tab) — the server refuses to auto-spawn. Epic-4 bridge.
-    NoAgent,
     /// The agent rejected session entry (`session/new` / `session/load` /
     /// `session/resume`) with ACP `AuthRequired` (-32000) — the user must
     /// authenticate first. Additive (Story 7): receivers that ignore unknown
@@ -391,16 +396,16 @@ pub enum WsErrorCode {
     /// `authenticate` carried a missing, empty or oversized `deviceId` /
     /// `clientInstanceId` (AD-4). The host never mints either id.
     InvalidClientIdentity,
-    /// Reserved: a host terminal cap (per project or global) refused a spawn.
-    /// Handler behavior lands with the host-owned lifecycle work.
+    /// A host terminal cap (per project or global) refused a spawn. The
+    /// terminal carriers (`/terminal/ws`, desktop `terminal_spawn`) answer it
+    /// as the SCREAMING form `TERMINAL_LIMIT`; this is the `/ws` spelling.
     TerminalLimit,
     /// Reserved: project remove/archive refused while sessions or PTYs bound
     /// to the project are live. Handler behavior lands with the project
     /// registry work.
     ProjectBusy,
-    /// Reserved: a command resend found no stored outcome (evicted ledger
-    /// entry); the command is never re-executed. Handler behavior lands with
-    /// the command ledger work.
+    /// A command resend found no stored outcome (evicted ledger entry,
+    /// interrupted handler); the command is never re-executed (AD-5).
     OutcomeUnknown,
     /// Reserved: branch switch / worktree removal refused while a session
     /// with its cwd inside the target path has an active turn.
@@ -417,10 +422,23 @@ pub enum WsErrorCode {
     /// connection attempting a mutation outside `device/<deviceId>/`).
     Forbidden,
     /// `respond_permission` / `answer_question` named a ticket that was
-    /// already resolved (by this or another connection, a timeout or a
-    /// disconnect deny). Tombstones are bounded: an older ticket reads
-    /// `stale`.
+    /// already resolved (answered by this or another connection, or released
+    /// when its turn, session or agent ended). Tombstones are bounded: an
+    /// older ticket reads `stale`.
     AlreadyResolved,
+    /// A spawn failed deterministically: the agent binary is missing, not
+    /// installed, or cannot start (AD-5). Definite — never retried
+    /// automatically.
+    AgentUnavailable,
+    /// A spawn named an unusable agent config: empty name, command or
+    /// `configId` (AD-5). Definite — never retried automatically.
+    InvalidAgentConfig,
+    /// A `commandId` was resent with a different request than the one it was
+    /// first used for (AD-5). Never replayed, never executed.
+    CommandConflict,
+    /// A request's `commandId` is malformed: not 1-128 characters of
+    /// `[A-Za-z0-9_-]`.
+    InvalidCommandId,
 }
 
 impl WsErrorCode {
@@ -437,7 +455,6 @@ impl WsErrorCode {
             Self::Duplicate => "duplicate",
             Self::Unsupported => "unsupported",
             Self::NotImplemented => "not_implemented",
-            Self::NoAgent => "no_agent",
             Self::AgentAuthRequired => "agent_auth_required",
             Self::SessionOwnedByOther => "session_owned_by_other",
             Self::ProtocolVersionMismatch => "protocol_version_mismatch",
@@ -451,6 +468,10 @@ impl WsErrorCode {
             Self::ProviderRequestRejected => "provider_request_rejected",
             Self::Forbidden => "forbidden",
             Self::AlreadyResolved => "already_resolved",
+            Self::AgentUnavailable => "agent_unavailable",
+            Self::InvalidAgentConfig => "invalid_agent_config",
+            Self::CommandConflict => "command_conflict",
+            Self::InvalidCommandId => "invalid_command_id",
         }
     }
 }
@@ -519,7 +540,7 @@ pub struct AppState {
     /// The live WS relay sink (owns per-session logs + seq counters + subs).
     pub relay: Arc<WsRelaySink>,
     /// In-memory, renderer-fed project registry — source for `GET /projects`
-    /// + `switch_project` cwd resolution. Empty on the standalone path.
+    /// + default-project resolution. Empty on the standalone path.
     pub registry: Arc<ProjectRegistry>,
     /// Optional writable VPS file registry + configured path. Desktop shared-live
     /// passes `None`, so switching there remains file-free.
@@ -594,6 +615,9 @@ pub struct AppState {
     /// `None` keeps the legacy ungated behavior (accept-any-token
     /// `authenticate`, no `/terminal/ws` connection gate).
     pub web_auth: Option<Arc<WebAuth>>,
+    /// Host shutdown coordination + per-connection overflow tolerance, shared
+    /// by every upgraded `/ws` and `/terminal/ws` socket (AD-19).
+    pub connections: ConnectionRuntime,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -615,14 +639,13 @@ pub struct RuntimePolicy {
     /// is the **unlimited** sentinel — the client imposes no inactivity timer
     /// (the default). A non-zero value is the bounded inactivity window.
     pub prompt_inactivity_timeout_ms: u64,
-    pub permission_reconnect_grace_ms: u64,
     pub ping_interval_ms: u64,
     pub pong_timeout_ms: u64,
 }
 
 impl RuntimePolicy {
     #[must_use]
-    pub fn resolved(permission_reconnect_grace: Duration) -> Self {
+    pub fn resolved() -> Self {
         let turn_timeout = crate::acp::manager::resolved_turn_timeout(); // Option
         let turn_idle = crate::acp::manager::turn_idle_timeout(); // Option
                                                                   // `turn_timeout_ms`: 0 = unlimited (no hard cap) sentinel; otherwise
@@ -642,7 +665,6 @@ impl RuntimePolicy {
         Self {
             turn_timeout_ms,
             prompt_inactivity_timeout_ms,
-            permission_reconnect_grace_ms: permission_reconnect_grace.as_millis() as u64,
             ping_interval_ms: PING_INTERVAL.as_millis() as u64,
             pong_timeout_ms: PONG_TIMEOUT.as_millis() as u64,
         }
@@ -685,6 +707,17 @@ pub(super) fn acp_err_to_reply(id: String, err: String) -> WsReply {
     if let Some(code) = map_prompt_error_code(&err) {
         return WsReply::err(id, code, err);
     }
+    // AD-5 deterministic spawn rejections: the stable code carries the verdict,
+    // so the message drops the manager's transport prefix.
+    if let Some((failure, message)) = crate::acp::manager::classify_spawn_error(&err) {
+        let code = match failure {
+            crate::acp::manager::SpawnFailure::AgentUnavailable => WsErrorCode::AgentUnavailable,
+            crate::acp::manager::SpawnFailure::InvalidAgentConfig => {
+                WsErrorCode::InvalidAgentConfig
+            }
+        };
+        return WsReply::err(id, code, message.to_string());
+    }
     // Issue #837 split-brain guard: the manager tags a rejected reopen with
     // `ACP_SESSION_OWNED_BY_OTHER` when the session belongs to a different
     // live agent mid-turn.
@@ -722,6 +755,10 @@ pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsR
 
 #[cfg(test)]
 mod capability_tests;
+#[cfg(test)]
+mod project_binding_tests;
+#[cfg(test)]
+mod spawn_rejection_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

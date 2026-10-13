@@ -8,24 +8,24 @@
  * (`.message` is the human string callers already toast).
  */
 
-import type {
-  ProjectSwitchCompletedEvent,
-  SwitchProjectReply
-} from '@shared/types/web-projects.types'
 import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
+  type SessionCursorReply,
   type SessionSnapshotEvent,
+  type SessionSubscribeReply,
   WS_ERROR_CODES,
   WS_EVENT_TYPES,
+  WS_WATCH_FRAME_TYPE,
   type WsAgentSummary,
   type WsEvent,
   type WsReply,
   type WsRequest,
   type WsRequestType,
+  type WsWatchFrame,
   wsTierOf
 } from '@shared/types/web-protocol.types'
 import type {
@@ -58,8 +58,19 @@ import {
   handleProtocolVersionMismatch
 } from '@/lib/web-protocol-reload'
 import { webServerMcpProbe } from '@/lib/web-server-api'
+import { judgeEvent, SyncGate } from './cursor'
 import { toWsEventType } from './event-names'
-import { type AcpConnectionState, type AcpTransport, AcpTransportError } from './types'
+import { HOST_SILENCE_LIMIT_MS, HostLiveness } from './liveness'
+import {
+  type AcpConnectionState,
+  type AcpTransport,
+  AcpTransportError,
+  COMMAND_IN_PROGRESS_CODE,
+  type CommandCallOptions,
+  parseVisibleAt,
+  type SessionCursor
+} from './types'
+import { WatchClient } from './watch-client'
 import { SessionResubscribeRetry, type SessionRetryMode } from './ws-session-retry'
 import {
   HANDSHAKE_TIMEOUT_MS,
@@ -120,23 +131,15 @@ const SEND_PROMPT_GRACE_MS = 10_000
 const FALLBACK_SEND_PROMPT_INACTIVITY_MS = 3_600_000
 
 /**
- * Application-level heartbeat interval. A client-emitted `ping` text request
- * refreshes the server keepalive watchdog (`last_activity`) through proxies
- * that strip WS-level Ping/Pong control frames (Cloudflare tunnels, etc.), so
- * a focused tab no longer false-positive drops at the server's ~75s
+ * Keepalive interval for the host's watchdog. A client-emitted `ping` text
+ * request refreshes the server keepalive watchdog (`last_activity`) through
+ * proxies that strip WS-level Ping/Pong control frames (Cloudflare tunnels,
+ * etc.), so a focused tab no longer false-positive drops at the server's ~75s
  * `PONG_TIMEOUT`. ~30s sits under both the 75s timeout and the 20s Ping
- * interval, so even a single tick keeps a healthy peer alive. Tunable.
+ * interval, so even a single tick keeps a healthy peer alive. The reply is NOT
+ * judged: liveness of the host comes from the frames it sends (`liveness.ts`).
  */
 const HEARTBEAT_INTERVAL_MS = 30_000
-
-/**
- * Consecutive ping failures that trigger a forced reconnect. A single missed
- * reply can be transient (slow link); two in a row (~60s+ of no round-trip) is
- * a strong half-open signal — the inbound ping keeps the *server's* watchdog
- * fresh, so without this the client could sit on a dead socket whose `onclose`
- * never fires (the server→client reply path is broken but client→server works).
- */
-const HEARTBEAT_FAILURE_THRESHOLD = 2
 
 type Pending = {
   resolve: (value: unknown) => void
@@ -150,6 +153,11 @@ type Pending = {
    * extends past it. `undefined` when the server imposes no hard cap
    * (unlimited) or for non-send_prompt requests. */
   deadline?: number
+  /** AD-5: the request carries a `command_id` (an `in_progress` receipt then
+   * means "still pending", not a result). */
+  commandId?: string
+  /** Receives the reply's `visible_at` session seq. */
+  onVisibleAt?: (visibleAt: number) => void
 }
 
 type EventListener = (payload: unknown, eventSeq?: number) => void
@@ -181,8 +189,10 @@ interface AcpCatalogFromHost {
 /**
  * Multiplexed ACP WS client.
  *
- * On `stale` subscribe reply: clear per-session seq/buffer + turn-id dedup and
- * resubscribe live-only (omit `lastSeq`).
+ * Per session the cursor is `(logEpoch, lastSeq)`: the epoch identifies the host
+ * log incarnation `lastSeq` was issued under. A `stale` subscribe reply (another
+ * epoch, or a cursor ahead of the head) installs an atomic snapshot instead of
+ * replaying, and the snapshot's epoch + watermark become the new cursor.
  */
 export class WsAcpTransport implements AcpTransport {
   private socket: WebSocket | null = null
@@ -198,8 +208,12 @@ export class WsAcpTransport implements AcpTransport {
   /** Application-level heartbeat timer (`setInterval`) — cleared on close /
    * dispose / force-reconnect. `null` while no socket is live. */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  /** Consecutive heartbeat ping failures — forces a reconnect at the threshold. */
-  private consecutivePingFailures = 0
+  /** Judges host liveness from received frames (heartbeat included). */
+  private readonly liveness = new HostLiveness({
+    onSilent: (silentMs) => this.probeSilentHost(silentMs),
+    // A hidden tab throttles its timers; the return-from-background probe owns it.
+    canJudge: () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
+  })
   /** Bound DOM-listener refs so `dispose()` can detach them. */
   private visibilityHandler: (() => void) | null = null
   private focusHandler: (() => void) | null = null
@@ -219,8 +233,24 @@ export class WsAcpTransport implements AcpTransport {
   private readonly listeners = new Map<string, Set<EventListener>>()
   /** Per-session last contiguous delivered seq. */
   private readonly lastSeq = new Map<string, number>()
+  /** Per-session epoch of the host log `lastSeq` belongs to. */
+  private readonly logEpochs = new Map<string, string>()
+  /** Per-session `headSeq` of the last subscribe/snapshot reply: seqs up to it are replay. */
+  private readonly headSeqs = new Map<string, number>()
+  /** Holds events that overtake an in-flight subscribe/snapshot reply. */
+  private readonly syncGate = new SyncGate()
   /** Sessions we should re-subscribe after reconnect. */
   private readonly subscribed = new Set<string>()
+  /**
+   * The state watches (projects, chat-history index, agent roster): frames are
+   * routed here from `onMessage`, and every (re)connect resubscribes them.
+   */
+  readonly watches = new WatchClient({
+    request: (type, payload, timeoutMs) => this.request(type, payload, timeoutMs),
+    isLive: () => this.isSocketLive()
+  })
+  /** Projects whose `fs_changed` watch this connection must re-request after reconnect. */
+  private readonly watchedProjects = new Set<string>()
   /** Idempotent prompt_complete turn ids already delivered, scoped by session. */
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
@@ -351,26 +381,40 @@ export class WsAcpTransport implements AcpTransport {
     this.reconnectPriorityProvider = provider
   }
 
-  getSessionCursor(sessionId: SessionId): number | null {
-    return this.lastSeq.get(sessionId) ?? null
+  getSessionCursor(sessionId: SessionId): SessionCursor | null {
+    const lastSeq = this.lastSeq.get(sessionId)
+    if (lastSeq === undefined) return null
+    return { lastSeq, logEpoch: this.logEpochs.get(sessionId) ?? null }
   }
 
-  async fetchSessionCursor(sessionId: SessionId): Promise<number> {
+  async fetchSessionCursor(sessionId: SessionId): Promise<SessionCursor> {
     // R2: proactively fetch the server watermark (NOT only on a STALE error)
-    // so a refreshed transport seeds `lastSeq` before its first subscribe.
+    // so a refreshed transport seeds its cursor before its first subscribe.
     await this.connect()
-    const reply = await this.request<{ sessionId: string; watermark: number }>(
-      'get_session_cursor',
-      { sessionId }
-    )
-    return reply?.watermark ?? 0
+    const reply = await this.request<SessionCursorReply>('get_session_cursor', { sessionId })
+    return { lastSeq: reply?.watermark ?? 0, logEpoch: reply?.logEpoch ?? null }
   }
 
-  seedSessionCursor(sessionId: SessionId, cursor: number): void {
-    // Seed the in-memory watermark without subscribing so the subsequent
+  seedSessionCursor(sessionId: SessionId, cursor: SessionCursor): void {
+    // Seed the in-memory cursor without subscribing so the subsequent
     // `resumeSession`/`subscribeSession` built-in re-subscribe resumes from
     // the server cursor (replays only the gap), not a dead per-instance 0.
-    if (cursor > 0) this.lastSeq.set(sessionId, cursor)
+    // A zero cursor still names an epoch: keeping the old pair would pair a
+    // stale `lastSeq` with a new epoch (or the reverse).
+    if (cursor.lastSeq <= 0) {
+      this.lastSeq.delete(sessionId)
+    } else {
+      this.lastSeq.set(sessionId, cursor.lastSeq)
+    }
+    if (cursor.logEpoch) this.logEpochs.set(sessionId, cursor.logEpoch)
+    else this.logEpochs.delete(sessionId)
+  }
+
+  /** Forget a session's cursor (its next subscribe starts a fresh log view). */
+  private clearCursor(sessionId: string): void {
+    this.lastSeq.delete(sessionId)
+    this.logEpochs.delete(sessionId)
+    this.headSeqs.delete(sessionId)
   }
 
   async connect(): Promise<void> {
@@ -411,6 +455,7 @@ export class WsAcpTransport implements AcpTransport {
 
   dispose(): void {
     this.disposed = true
+    this.watches.dispose()
     this.detachVisibilityListeners()
     this.clearHeartbeat()
     this.clearStableTimer()
@@ -452,16 +497,47 @@ export class WsAcpTransport implements AcpTransport {
     if (!force && lastSeq === undefined && this.subscribed.has(sessionId)) {
       return
     }
+    // Events can overtake the reply on the wire: hold them until the reply
+    // says where the replay ends.
+    this.beginSync(sessionId)
+    let completed = false
+    try {
+      await this.requestSubscription(sessionId, lastSeq, timeoutMs)
+      completed = true
+    } finally {
+      this.endSync(sessionId, completed)
+    }
+  }
+
+  private async requestSubscription(
+    sessionId: SessionId,
+    lastSeq: number | null | undefined,
+    timeoutMs?: number
+  ): Promise<void> {
     this.subscribed.add(sessionId)
-    const payload: { sessionId: string; lastSeq?: number } = { sessionId }
+    const payload: { sessionId: string; lastSeq?: number; logEpoch?: string } = { sessionId }
     if (lastSeq != null) {
       payload.lastSeq = lastSeq
     } else if (lastSeq === undefined && this.lastSeq.has(sessionId)) {
       payload.lastSeq = this.lastSeq.get(sessionId)
     }
     // lastSeq === null → omit field → server live-only (stale recovery).
+    // A cursor is only meaningful with the epoch it was issued under.
+    const epoch = this.logEpochs.get(sessionId)
+    if (payload.lastSeq !== undefined && epoch) payload.logEpoch = epoch
+    if ((payload.lastSeq ?? 0) > 0 && !epoch) {
+      // A nonzero cursor with no epoch to verify it against cannot be trusted:
+      // applying events behind it would drop new ones as duplicates. Skip the
+      // replay (the host would stream events we would throw away) and recover
+      // instead: a snapshot (which also registers the live subscription) in
+      // server history mode, or a live-only subscribe reported as degraded.
+      this.clearCursor(sessionId)
+      await this.recoverSession(sessionId, timeoutMs)
+      return
+    }
+    let reply: SessionSubscribeReply | undefined
     try {
-      await this.request('subscribe', payload, timeoutMs)
+      reply = await this.request<SessionSubscribeReply>('subscribe', payload, timeoutMs)
     } catch (err) {
       if (err instanceof AcpTransportError && err.code === WS_ERROR_CODES.STALE) {
         await this.recoverSession(sessionId, timeoutMs)
@@ -469,40 +545,164 @@ export class WsAcpTransport implements AcpTransport {
       }
       throw err
     }
+    const replyEpoch = reply?.logEpoch
+    if (!replyEpoch) return
+    if (epoch && epoch !== replyEpoch && this.lastSeq.has(sessionId)) {
+      // The host answered under a different log than our cursor (a subscribe
+      // sent without the cursor, so the host could not refuse it): `lastSeq`
+      // means nothing in it, and applying events behind it would drop new
+      // ones as duplicates. Snapshot instead.
+      void logFrontendError({
+        level: 'info',
+        source: 'WsAcpTransport.subscribe',
+        message: `Session ${sessionId} log epoch changed under the cursor; installing a snapshot`
+      })
+      this.clearCursor(sessionId)
+      await this.recoverSession(sessionId, timeoutMs)
+      return
+    }
+    this.logEpochs.set(sessionId, replyEpoch)
+    // Seqs up to the head are replay (holes allowed); above it they must be
+    // contiguous. Without a head the cursor itself is the frontier.
+    if (typeof reply?.headSeq === 'number') this.headSeqs.set(sessionId, reply.headSeq)
   }
 
   /**
    * Stale/degraded recovery for one session: install an atomic server-history
    * snapshot (server history mode) or resubscribe live-only and report the
-   * degradation. Used by a `stale` subscribe reply and by the per-session
-   * retry once cursor resubscribes keep failing.
+   * degradation. Used by a `stale` subscribe reply, by a discontinuity in the
+   * live stream and by the per-session retry once cursor resubscribes keep
+   * failing.
    */
   private async recoverSession(sessionId: SessionId, timeoutMs?: number): Promise<void> {
-    await this.connect()
-    this.subscribed.add(sessionId)
-    // Capture the store's reopen generation BEFORE the recovery
-    // round-trip: a close/delete/reopen during the await invalidates it
-    // and the store rejects the late install so recovery cannot
-    // resurrect a torn-down or replaced session.
-    const reopenGeneration = this.recoveryGenerationProvider?.(sessionId)
-    if (this.negotiatedHistoryMode === 'server') {
-      const recovery = await this.request<SessionSnapshotEvent>(
-        'recover_session_snapshot',
-        { sessionId },
-        timeoutMs
-      )
-      this.lastSeq.set(sessionId, recovery.watermark)
-      this.seenTurnIds.delete(sessionId)
-      await this.recoveryHandler?.(recovery, reopenGeneration)
-      // handle_recover_session_snapshot server-side re-registers the
-      // subscription for continued live delivery — no separate subscribe
-      // call needed here.
+    // First statement, before any await: events that arrive from here on wait
+    // for the snapshot instead of racing it.
+    this.beginSync(sessionId)
+    let completed = false
+    try {
+      await this.connect()
+      this.subscribed.add(sessionId)
+      // Capture the store's reopen generation BEFORE the recovery
+      // round-trip: a close/delete/reopen during the await invalidates it
+      // and the store rejects the late install so recovery cannot
+      // resurrect a torn-down or replaced session.
+      const reopenGeneration = this.recoveryGenerationProvider?.(sessionId)
+      if (this.negotiatedHistoryMode === 'server') {
+        const recovery = await this.request<SessionSnapshotEvent>(
+          'recover_session_snapshot',
+          { sessionId },
+          timeoutMs
+        )
+        this.lastSeq.set(sessionId, recovery.watermark)
+        this.headSeqs.set(sessionId, recovery.headSeq ?? recovery.watermark)
+        if (recovery.logEpoch) this.logEpochs.set(sessionId, recovery.logEpoch)
+        else this.logEpochs.delete(sessionId)
+        this.seenTurnIds.delete(sessionId)
+        await this.recoveryHandler?.(recovery, reopenGeneration)
+        // handle_recover_session_snapshot server-side re-registers the
+        // subscription for continued live delivery — no separate subscribe
+        // call needed here.
+      } else {
+        this.clearCursor(sessionId)
+        this.seenTurnIds.delete(sessionId)
+        const reply = await this.request<SessionSubscribeReply | undefined>(
+          'subscribe',
+          { sessionId },
+          timeoutMs
+        )
+        if (typeof reply?.headSeq === 'number') this.headSeqs.set(sessionId, reply.headSeq)
+        if (reply?.logEpoch) this.logEpochs.set(sessionId, reply.logEpoch)
+        await this.recoveryHandler?.({ sessionId, degraded: true }, reopenGeneration)
+      }
+      completed = true
+    } finally {
+      this.endSync(sessionId, completed)
+    }
+  }
+
+  private beginSync(sessionId: string): void {
+    this.syncGate.begin(sessionId, this.lastSeq.get(sessionId) ?? 0)
+  }
+
+  /**
+   * End one sync level. When the outermost one ends successfully, the held
+   * events are judged against the cursor the reply installed. A failed sync
+   * drops them (its reply never named a replay boundary; a hole they leave is
+   * caught by the next live event or the resubscribe replay) but still acts on
+   * a held `gap`.
+   */
+  private endSync(sessionId: string, completed: boolean): void {
+    const result = this.syncGate.end(sessionId)
+    if (!result) return
+    if (!completed) {
+      // A failed sync drops what it held, but a held `gap` is the host's only
+      // word that LOSSY events went missing (nothing may follow to expose it):
+      // repair it while the socket is up. A dead socket's reconnect pass
+      // resubscribes from the cursor, which replays the hole.
+      if (this.isSocketLive() && result.held.some((item) => item.kind === 'gap')) {
+        this.recoverInBackground(sessionId, 'gap frame during a failed sync')
+      }
       return
     }
-    this.lastSeq.delete(sessionId)
-    this.seenTurnIds.delete(sessionId)
-    await this.request('subscribe', { sessionId }, timeoutMs)
-    await this.recoveryHandler?.({ sessionId, degraded: true }, reopenGeneration)
+    if (result.lost) {
+      this.recoverInBackground(sessionId, 'the held-event buffer overflowed during a sync')
+    }
+    for (const item of result.held) {
+      if (item.kind === 'gap') {
+        // The drop may lie past the head the sync installed, with no later
+        // event to expose it: always act on it.
+        this.recoverInBackground(sessionId, 'gap frame during a sync')
+        continue
+      }
+      this.applyHeldEvent(sessionId, item.evt, result.floorSeq)
+    }
+  }
+
+  /**
+   * Apply an event held during a sync. A `permission_request` is not in the
+   * durable log, so a snapshot never carries it even when its seq is below the
+   * snapshot's head: one that arrived during the sync and was not applied before
+   * it is still delivered (without a seq, which the store would read as covered
+   * by the snapshot) so the user can answer it.
+   */
+  private applyHeldEvent(sessionId: string, evt: WsEvent, floorSeq: number): void {
+    const last = this.lastSeq.get(sessionId) ?? 0
+    const head = this.headSeqs.get(sessionId) ?? last
+    if (
+      evt.type === 'permission_request' &&
+      evt.seq > floorSeq &&
+      judgeEvent(last, head, evt.seq) === 'duplicate'
+    ) {
+      this.emitLocal(evt.type, evt.payload)
+      return
+    }
+    this.applySessionEvent(sessionId, evt)
+  }
+
+  /**
+   * A discontinuity in the live stream (a skipped seq or a `gap` frame): install
+   * a snapshot in the background, one in flight per session. A failure hands the
+   * session to its own bounded retry, which degrades it to snapshot + live; it
+   * never takes the socket down.
+   */
+  private recoverInBackground(sessionId: string, reason: string): void {
+    if (this.disposed || !this.subscribed.has(sessionId) || this.syncGate.isSyncing(sessionId)) {
+      return
+    }
+    void logFrontendError({
+      level: 'info',
+      source: 'WsAcpTransport.discontinuity',
+      message: `Session ${sessionId} stream is discontinuous (${reason}); installing a snapshot`
+    })
+    this.recoverSession(sessionId).catch((error) => {
+      if (this.disposed || !this.subscribed.has(sessionId)) return
+      if (error instanceof AcpTransportError && error.code === WS_ERROR_CODES.NOT_FOUND) {
+        this.dropObsoleteSession(sessionId)
+        return
+      }
+      if (this.isSocketLive()) this.sessionRetry.schedule(sessionId, error)
+      // A dead socket: the reconnect pass resubscribes every session.
+    })
   }
 
   onEvent<T>(eventName: string, callback: (payload: T, eventSeq?: number) => void): () => void {
@@ -543,8 +743,16 @@ export class WsAcpTransport implements AcpTransport {
    * HTTP `IpcBody.code`). The request is `{ agentId }` only; the host resolves
    * everything from the trusted catalog.
    */
-  async installAcpAgent(agentId: string): Promise<InstallAcpRegistryBinaryOutcome> {
-    return this.request<InstallAcpRegistryBinaryOutcome>('install_acp_agent', { agentId })
+  async installAcpAgent(
+    agentId: string,
+    options?: CommandCallOptions
+  ): Promise<InstallAcpRegistryBinaryOutcome> {
+    return this.request<InstallAcpRegistryBinaryOutcome>(
+      'install_acp_agent',
+      { agentId },
+      undefined,
+      options
+    )
   }
 
   /**
@@ -681,8 +889,8 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
-  async spawnAgent(config: AgentConfig): Promise<SpawnAgentResult> {
-    return this.request<SpawnAgentResult>('spawn_agent', { config })
+  async spawnAgent(config: AgentConfig, options?: CommandCallOptions): Promise<SpawnAgentResult> {
+    return this.request<SpawnAgentResult>('spawn_agent', { config }, undefined, options)
   }
 
   async killAgent(agentId: AgentId): Promise<void> {
@@ -719,35 +927,44 @@ export class WsAcpTransport implements AcpTransport {
       worktreePath?: string
       worktreeBranch?: string
       additionalDirectories?: string[]
-    }
+    } & CommandCallOptions
   ): Promise<NewSessionOutcome> {
-    // Web/remote: the host attributes the session to a project by resolving
-    // `cwd` against its registry (CAP-2), so no explicit projectId is sent.
-    // Worktree fields are desktop-only (CAP-3) and ignored on the WS path —
+    // Web/remote: the host stamps `session.projectId` once — the explicit
+    // `projectId` when registered (unknown → `not_found`), else the registry
+    // project owning `cwd`, else the unassigned sentinel. Worktree fields are desktop-only (CAP-3) and ignored on the WS path —
     // the host-owned durable record keys state isolation on `cwd` regardless.
-    const outcome = await this.request<NewSessionOutcome>('create_session', {
-      agentId,
-      cwd,
-      mcpServers,
-      ephemeral: options?.ephemeral ?? false,
-      // Additive (story 8): sent only when set, so the wire shape is unchanged
-      // for every non-promotable create.
-      ...(options?.promotable ? { promotable: true } : {}),
-      ...(options?.additionalDirectories?.length
-        ? { additionalDirectories: options.additionalDirectories }
-        : {})
-    })
+    const outcome = await this.request<NewSessionOutcome>(
+      'create_session',
+      {
+        agentId,
+        cwd,
+        mcpServers,
+        ephemeral: options?.ephemeral ?? false,
+        // Additive (story 8): sent only when set, so the wire shape is unchanged
+        // for every non-promotable create.
+        ...(options?.promotable ? { promotable: true } : {}),
+        ...(options?.projectId ? { projectId: options.projectId } : {}),
+        ...(options?.additionalDirectories?.length
+          ? { additionalDirectories: options.additionalDirectories }
+          : {})
+      },
+      undefined,
+      options
+    )
     if (outcome?.sessionId && !options?.ephemeral) {
       await this.subscribeSession(outcome.sessionId, null)
     }
     return outcome
   }
 
-  /** Web/remote: subscribe immediately only when the server completed the switch. */
-  async disposeEphemeralSession(agentId: AgentId, sessionId: SessionId): Promise<void> {
-    await this.request('dispose_ephemeral_session', { agentId, sessionId })
+  async disposeEphemeralSession(
+    agentId: AgentId,
+    sessionId: SessionId,
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('dispose_ephemeral_session', { agentId, sessionId }, undefined, options)
     this.subscribed.delete(sessionId)
-    this.lastSeq.delete(sessionId)
+    this.clearCursor(sessionId)
     this.seenTurnIds.delete(sessionId)
   }
 
@@ -756,8 +973,12 @@ export class WsAcpTransport implements AcpTransport {
    * subscribe so the first real prompt + its stream reach this client
    * (ephemeral sessions intentionally skip the create-time subscribe).
    */
-  async promoteSession(agentId: AgentId, sessionId: SessionId): Promise<void> {
-    await this.request('promote_session', { agentId, sessionId })
+  async promoteSession(
+    agentId: AgentId,
+    sessionId: SessionId,
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('promote_session', { agentId, sessionId }, undefined, options)
     // No lastSeq: the already-subscribed guard applies (a re-promote after a
     // reconnect must not force a duplicate live subscribe).
     //
@@ -780,26 +1001,44 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
-  async switchProject(projectId: string): Promise<SwitchProjectReply> {
-    const outcome = await this.request<SwitchProjectReply>('switch_project', { projectId })
-    if (outcome.status === 'completed') {
-      await this.subscribeSession(outcome.sessionId, null)
+  async watchProject(projectId: string): Promise<void> {
+    // Tracked BEFORE the reply: if the socket drops or the reply times out
+    // (the host may have registered the watch), the reconnect re-sends it.
+    // Only an explicit host refusal untracks it.
+    this.watchedProjects.add(projectId)
+    try {
+      await this.request('watch_project', { projectId })
+    } catch (error) {
+      const ambiguous =
+        error instanceof AcpTransportError && (error.code === 'closed' || error.code === 'timeout')
+      if (!ambiguous) this.watchedProjects.delete(projectId)
+      throw error
     }
-    return outcome
+  }
+
+  async unwatchProject(projectId: string): Promise<void> {
+    this.watchedProjects.delete(projectId)
+    await this.request('unwatch_project', { projectId })
   }
 
   async loadSession(
     agentId: AgentId,
     sessionId: SessionId,
     cwd: string,
-    additionalDirectories?: string[]
+    additionalDirectories?: string[],
+    options?: CommandCallOptions
   ): Promise<SessionReopenOutcome> {
-    const outcome = await this.request<SessionReopenOutcome>('load_session', {
-      agentId,
-      sessionId,
-      cwd,
-      ...(additionalDirectories?.length ? { additionalDirectories } : {})
-    })
+    const outcome = await this.request<SessionReopenOutcome>(
+      'load_session',
+      {
+        agentId,
+        sessionId,
+        cwd,
+        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+      },
+      undefined,
+      options
+    )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
   }
@@ -808,22 +1047,32 @@ export class WsAcpTransport implements AcpTransport {
     agentId: AgentId,
     sessionId: SessionId,
     cwd: string,
-    additionalDirectories?: string[]
+    additionalDirectories?: string[],
+    options?: CommandCallOptions
   ): Promise<SessionReopenOutcome> {
-    const outcome = await this.request<SessionReopenOutcome>('resume_session', {
-      agentId,
-      sessionId,
-      cwd,
-      ...(additionalDirectories?.length ? { additionalDirectories } : {})
-    })
+    const outcome = await this.request<SessionReopenOutcome>(
+      'resume_session',
+      {
+        agentId,
+        sessionId,
+        cwd,
+        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+      },
+      undefined,
+      options
+    )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
   }
 
-  async closeSession(agentId: AgentId, sessionId: SessionId): Promise<void> {
-    await this.request('close_session', { agentId, sessionId })
+  async closeSession(
+    agentId: AgentId,
+    sessionId: SessionId,
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('close_session', { agentId, sessionId }, undefined, options)
     this.subscribed.delete(sessionId)
-    this.lastSeq.delete(sessionId)
+    this.clearCursor(sessionId)
   }
 
   async listSessions(
@@ -834,15 +1083,23 @@ export class WsAcpTransport implements AcpTransport {
     return this.request<ListSessionsResponse>('list_sessions', { agentId, cwd, cursor })
   }
 
-  async registerDiscoveredSession(input: {
-    sessionId: SessionId
-    agentId: AgentId
-    cwd: string
-    title?: string | null
-    updatedAt?: number
-    projectId?: string
-  }): Promise<PersistedSessionSummary> {
-    return this.request<PersistedSessionSummary>('register_discovered_session', input)
+  async registerDiscoveredSession(
+    input: {
+      sessionId: SessionId
+      agentId: AgentId
+      cwd: string
+      title?: string | null
+      updatedAt?: number
+      projectId?: string
+    },
+    options?: CommandCallOptions
+  ): Promise<PersistedSessionSummary> {
+    return this.request<PersistedSessionSummary>(
+      'register_discovered_session',
+      input,
+      undefined,
+      options
+    )
   }
 
   // CAP-2 (spec-in-chat-agent-switch): durable agent-switch marker — the
@@ -854,9 +1111,10 @@ export class WsAcpTransport implements AcpTransport {
       toConfigId: string
       newSessionId: string
       summaryText: string
-    }
+    },
+    options?: CommandCallOptions
   ): Promise<void> {
-    await this.request('record_agent_switch', { sessionId, ...record })
+    await this.request('record_agent_switch', { sessionId, ...record }, undefined, options)
   }
 
   async sendPrompt(
@@ -905,12 +1163,16 @@ export class WsAcpTransport implements AcpTransport {
     await this.request('cancel_prompt', { agentId, sessionId })
   }
 
-  async deleteAgentSession(agentId: AgentId, sessionId: SessionId): Promise<void> {
-    await this.request('delete_agent_session', { agentId, sessionId })
+  async deleteAgentSession(
+    agentId: AgentId,
+    sessionId: SessionId,
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('delete_agent_session', { agentId, sessionId }, undefined, options)
   }
 
-  async logout(agentId: AgentId): Promise<void> {
-    await this.request('logout_agent', { agentId })
+  async logout(agentId: AgentId, options?: CommandCallOptions): Promise<void> {
+    await this.request('logout_agent', { agentId }, undefined, options)
   }
 
   async respondElicitation(
@@ -918,9 +1180,15 @@ export class WsAcpTransport implements AcpTransport {
     requestId: string,
     action: 'accept' | 'decline' | 'cancel',
     // GH-935: `string[]` = multi-select (`multi-enum`) answers.
-    content?: Record<string, string | number | boolean | string[]>
+    content?: Record<string, string | number | boolean | string[]>,
+    options?: CommandCallOptions
   ): Promise<void> {
-    await this.request('respond_elicitation', { agentId, requestId, action, content })
+    await this.request(
+      'respond_elicitation',
+      { agentId, requestId, action, content },
+      undefined,
+      options
+    )
   }
 
   async setConfigOption(
@@ -945,19 +1213,30 @@ export class WsAcpTransport implements AcpTransport {
     await this.request('set_model', { agentId, sessionId, modelId })
   }
 
-  async respondPermission(agentId: AgentId, requestId: string, optionId?: string): Promise<void> {
-    await this.request('respond_permission', { agentId, requestId, optionId })
+  async respondPermission(
+    agentId: AgentId,
+    requestId: string,
+    optionId?: string,
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('respond_permission', { agentId, requestId, optionId }, undefined, options)
   }
 
-  async answerQuestion(agentId: AgentId, questionId: string, values?: string[]): Promise<void> {
-    await this.request('answer_question', { agentId, questionId, values })
+  async answerQuestion(
+    agentId: AgentId,
+    questionId: string,
+    values?: string[],
+    options?: CommandCallOptions
+  ): Promise<void> {
+    await this.request('answer_question', { agentId, questionId, values }, undefined, options)
   }
 
   /** Agent method auth — distinct from relay `authenticate` token gate. */
   async authenticate(
     agentId: AgentId,
     methodId: string,
-    gateway?: { baseUrl: string; apiKey?: string }
+    gateway?: { baseUrl: string; apiKey?: string },
+    options?: CommandCallOptions
   ): Promise<void> {
     // Await the authenticated relay socket before sending — `connect()`
     // resolves only after the WS token-gate handshake completes (openSocket
@@ -971,7 +1250,7 @@ export class WsAcpTransport implements AcpTransport {
     // browser); Termul never invents a redirect URL or stores credentials.
     // Mirrors the desktop `acp_authenticate` Tauri command.
     await this.connect()
-    await this.request('authenticate_agent', { agentId, methodId, gateway })
+    await this.request('authenticate_agent', { agentId, methodId, gateway }, undefined, options)
   }
 
   /**
@@ -982,12 +1261,18 @@ export class WsAcpTransport implements AcpTransport {
    * replay's HTTP status. Mirrors the desktop `acp_auth_deliver_redirect`
    * Tauri command.
    */
-  async deliverAuthRedirect(agentId: AgentId, url: string): Promise<number> {
+  async deliverAuthRedirect(
+    agentId: AgentId,
+    url: string,
+    options?: CommandCallOptions
+  ): Promise<number> {
     await this.connect()
-    const reply = await this.request<{ status: number }>('acp_deliver_auth_redirect', {
-      agentId,
-      url
-    })
+    const reply = await this.request<{ status: number }>(
+      'acp_deliver_auth_redirect',
+      { agentId, url },
+      undefined,
+      options
+    )
     // A malformed reply (older/buggy host) must not surface as "HTTP
     // undefined" — fail loudly instead of reporting a bogus status.
     if (typeof reply.status !== 'number') {
@@ -1055,6 +1340,7 @@ export class WsAcpTransport implements AcpTransport {
         }
         this.socket = null
         this.authed = false
+        this.watches.onDisconnected()
         this.clearHeartbeat()
         this.clearStableTimer()
         this.sessionRetry.cancelAll()
@@ -1288,6 +1574,7 @@ export class WsAcpTransport implements AcpTransport {
     const old = this.socket
     this.socket = null
     this.authed = false
+    this.watches.onDisconnected()
     this.rejectAllPending('closed', reason)
     this.clearHeartbeat()
     this.clearStableTimer()
@@ -1328,45 +1615,48 @@ export class WsAcpTransport implements AcpTransport {
   }
 
   /**
-   * Start the application-level heartbeat that keeps the server's keepalive
-   * watchdog fresh through proxies that strip WS-level Ping/Pong control
-   * frames. A periodic `ping` text request lands in the server read loop,
-   * which stamps `last_activity` on every inbound frame — so a focused tab no
-   * longer false-positive drops at the ~75s `PONG_TIMEOUT`. Idempotent: clears
-   * any prior timer first. Stopped on close / dispose / force-reconnect.
+   * Start the keepalive and the liveness judge. The periodic `ping` text
+   * request lands in the server read loop, which stamps `last_activity` on every
+   * inbound frame, so a focused tab no longer false-positive drops at the ~75s
+   * `PONG_TIMEOUT` through proxies that strip WS-level Ping/Pong. Its reply is
+   * not judged: the host's `heartbeat` frames (any host frame) are. Idempotent:
+   * clears any prior timers first. Stopped on close / dispose / force-reconnect.
    */
   private startHeartbeat(): void {
     this.clearHeartbeat()
+    this.liveness.start()
     this.heartbeatTimer = setInterval(() => {
       if (this.disposed) return
-      // Only tick while OPEN; the reconnect path owns recovery otherwise. A
-      // failed ping (half-open link) is swallowed per-tick but counted — at the
-      // threshold, force a reconnect so a dead reply path doesn't strand the
-      // client on a socket whose onclose may never fire.
       if (this.socket?.readyState === WebSocket.OPEN) {
-        void this.request<void>('ping', {})
-          .then(() => {
-            this.consecutivePingFailures = 0
-          })
-          .catch(() => {
-            this.consecutivePingFailures += 1
-            if (!this.disposed && this.consecutivePingFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
-              this.forceReconnect(
-                `ping heartbeat: ${this.consecutivePingFailures} consecutive failures (half-open link)`
-              )
-            }
-          })
+        this.request<void>('ping', {}).catch(() => {
+          /* liveness is judged from host frames, not from this reply */
+        })
       }
     }, HEARTBEAT_INTERVAL_MS)
   }
 
-  /** Stop the heartbeat timer (on close / dispose / force-reconnect). */
+  /** Stop the keepalive and the liveness judge (on close / dispose / force-reconnect). */
   private clearHeartbeat(): void {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
     }
-    this.consecutivePingFailures = 0
+    this.liveness.stop()
+  }
+
+  /**
+   * The host sent no frame for {@link HOST_SILENCE_LIMIT_MS}: probe it with one
+   * bounded round trip and replace the socket if the probe fails (half-open
+   * link). Shares the resume probe's coalescing.
+   */
+  private probeSilentHost(silentMs: number): void {
+    if (this.disposed || this.resumeValidation || this.connecting || this.reconnecting) return
+    const validation = this.validateRoundTrip(
+      `no host frame for ${Math.round(silentMs / 1000)}s (limit ${HOST_SILENCE_LIMIT_MS / 1000}s)`
+    ).finally(() => {
+      if (this.resumeValidation === validation) this.resumeValidation = null
+    })
+    this.resumeValidation = validation
   }
 
   private scheduleReconnect(): void {
@@ -1421,7 +1711,7 @@ export class WsAcpTransport implements AcpTransport {
 
   private dropObsoleteSession(sid: string): void {
     this.subscribed.delete(sid)
-    this.lastSeq.delete(sid)
+    this.clearCursor(sid)
     this.seenTurnIds.delete(sid)
     this.sessionRetry.cancel(sid)
   }
@@ -1478,6 +1768,9 @@ export class WsAcpTransport implements AcpTransport {
           }
         }
       }
+      // Off the critical path: a slow or failing watch re-request must never
+      // delay or fail the reconnect (it handles its own errors).
+      void this.rewatchProjects()
       if (obsoleteSessions.length > 0) {
         void logFrontendError({
           level: 'warn',
@@ -1523,6 +1816,35 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
+  /**
+   * The host keeps no watch state across connections, so re-request every
+   * project watch on the fresh socket, in parallel and each bounded by the
+   * resubscribe timeout. A watch the host refuses (project archived/removed
+   * while disconnected) or cannot confirm in time is dropped here AND reported
+   * to listeners as a local `fs_watch_ended`, so the filesystem facade forgets
+   * it and re-requests on its next `watchDirectory` instead of believing it is
+   * live. If the socket itself died, the watches are kept for the next
+   * reconnect pass. Never rejects.
+   */
+  private async rewatchProjects(): Promise<void> {
+    await Promise.all(
+      [...this.watchedProjects].map(async (projectId) => {
+        try {
+          await this.request('watch_project', { projectId }, RESUBSCRIBE_TIMEOUT_MS)
+        } catch (error) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'WsAcpTransport.rewatchProjects',
+            message: `Re-watching project ${projectId} after reconnect failed: ${String(error)}`
+          })
+          if (!this.isSocketLive()) return
+          this.watchedProjects.delete(projectId)
+          this.emitLocal('fs_watch_ended', { projectId, reason: 'rewatch_failed' })
+        }
+      })
+    )
+  }
+
   /** One per-session retry attempt (see {@link SessionResubscribeRetry}). */
   private async retrySessionSubscription(sid: string, mode: SessionRetryMode): Promise<void> {
     if (!this.subscribed.has(sid)) return
@@ -1550,6 +1872,20 @@ export class WsAcpTransport implements AcpTransport {
     // Clear the mark so the next explicit subscribe (e.g. the next prompt)
     // re-subscribes instead of being skipped by the already-subscribed guard.
     this.subscribed.delete(sid)
+    // Surface it through the store's degraded-recovery flow: this session lost
+    // its stream while every other session keeps running.
+    void Promise.resolve(
+      this.recoveryHandler?.(
+        { sessionId: sid, degraded: true },
+        this.recoveryGenerationProvider?.(sid)
+      )
+    ).catch((error) => {
+      void logFrontendError({
+        level: 'warn',
+        source: 'WsAcpTransport.sessionResubscribe',
+        message: `Reporting degraded session ${sid} failed: ${String(error)}`
+      })
+    })
     void logFrontendError({
       level: 'warn',
       source: 'WsAcpTransport.sessionResubscribe',
@@ -1558,6 +1894,7 @@ export class WsAcpTransport implements AcpTransport {
   }
 
   private async onMessage(raw: string): Promise<void> {
+    this.liveness.touch()
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
@@ -1570,6 +1907,19 @@ export class WsAcpTransport implements AcpTransport {
     // Reply frame: has `ok` boolean + `id`
     if (typeof obj.id === 'string' && typeof obj.ok === 'boolean') {
       this.handleReply(obj as unknown as WsReply)
+      return
+    }
+
+    // Delivery frames carry no seq. Any host frame proves the link is alive.
+    if (obj.type === 'heartbeat') return
+    if (obj.type === WS_WATCH_FRAME_TYPE) {
+      this.watches.handleFrame(obj as unknown as WsWatchFrame)
+      return
+    }
+    if (obj.type === 'gap' && typeof obj.sid === 'string') {
+      const gapSid = obj.sid
+      // Queued behind the events already received so it lands in wire order.
+      this.eventTail = this.eventTail.then(() => this.handleGap(gapSid))
       return
     }
 
@@ -1620,20 +1970,57 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
+  /**
+   * The host dropped LOSSY events of `sid` for this connection. Install a
+   * snapshot; this is an accelerator (the next event would expose the hole
+   * anyway) so a gap for a session being synced is simply judged afterwards.
+   */
+  private handleGap(sid: string): void {
+    if (!this.subscribed.has(sid)) return
+    if (this.syncGate.hold(sid, { kind: 'gap' })) return
+    this.recoverInBackground(sid, 'host gap frame')
+  }
+
   private handleReply(reply: WsReply): void {
     const pending = this.pending.get(reply.id)
     if (!pending) return
     // `timer` is `number | null`; the guard narrows to a live handle.
     if (pending.timer) clearTimeout(pending.timer)
     this.pending.delete(reply.id)
+    const visibleAt = parseVisibleAt(reply.visible_at)
     if (reply.ok) {
+      // A command resend that finds the first run still going answers
+      // `{ receipt: "in_progress" }` (prompts keep it as their ok payload):
+      // for any other command that is "still pending", never a result.
+      if (
+        pending.commandId &&
+        pending.type !== 'send_prompt' &&
+        isInProgressReceipt(reply.payload)
+      ) {
+        pending.reject(
+          new AcpTransportError(
+            COMMAND_IN_PROGRESS_CODE,
+            `${pending.type} is still running on the host`,
+            visibleAt
+          )
+        )
+        return
+      }
+      if (visibleAt !== undefined) pending.onVisibleAt?.(visibleAt)
       pending.resolve(reply.payload)
     } else {
-      pending.reject(new AcpTransportError(reply.err.code, reply.err.message || reply.err.code))
+      pending.reject(
+        new AcpTransportError(reply.err.code, reply.err.message || reply.err.code, visibleAt)
+      )
     }
   }
 
   private async handleEvent(evt: WsEvent): Promise<void> {
+    // The host ended a project watch: stop re-requesting it after reconnects.
+    if (evt.type === 'fs_watch_ended') {
+      const endedProject = (evt.payload as { projectId?: unknown } | null)?.projectId
+      if (typeof endedProject === 'string') this.watchedProjects.delete(endedProject)
+    }
     // #907 / CodeQL hardening: validate the event type against the shared
     // protocol registry BEFORE branching on it — the token send is gated by
     // a registry-validated boolean plus connection state, never the raw
@@ -1675,6 +2062,8 @@ export class WsAcpTransport implements AcpTransport {
         // that strip WS-level Ping/Pong so a focused tab stops dropping at ~75s.
         this.startHeartbeat()
         this.startStableTimer()
+        // Every watch rebuilds from fresh full state on this socket.
+        this.watches.onConnected()
         // CAP-3: if the tab is already hidden when auth completes (e.g. a
         // reconnect that finished while backgrounded), the hide event fired
         // before we were authed and was a no-op. Re-sync the server's watchdog
@@ -1759,44 +2148,46 @@ export class WsAcpTransport implements AcpTransport {
 
     // Agent-level / relay events (seq 0, or sid null): deliver immediately.
     if (evt.sid == null || evt.seq === 0) {
-      if (evt.type === 'project_switch_completed') {
-        const payload = evt.payload as ProjectSwitchCompletedEvent
-        await this.subscribeSession(payload.sessionId, null)
-      }
       this.emitLocal(evt.type, evt.payload)
       return
     }
 
     const sid = evt.sid
     this.refreshPromptActivity(sid)
-    const tier = wsTierOf(evt.type)
-    const last = this.lastSeq.get(sid) ?? 0
+    this.applySessionEvent(sid, evt)
+  }
 
-    if (evt.seq <= last) {
-      // Duplicate — ignore.
+  /**
+   * Apply one session event against the contiguous cursor: a duplicate is
+   * dropped, replay (`seq <= headSeq`) and the next live seq are delivered, and
+   * a skipped seq is NOT applied — the session installs a snapshot instead of
+   * waiting for the missing event.
+   */
+  private applySessionEvent(sid: string, evt: WsEvent): void {
+    if (this.syncGate.hold(sid, { kind: 'event', evt })) return
+    const last = this.lastSeq.get(sid) ?? 0
+    const verdict = judgeEvent(last, this.headSeqs.get(sid) ?? last, evt.seq)
+    if (verdict === 'duplicate') return
+    if (verdict === 'gap') {
+      this.recoverInBackground(
+        sid,
+        `seq ${evt.seq} arrived after ${Math.max(last, this.headSeqs.get(sid) ?? 0)}`
+      )
+      // The event that exposed the hole is judged again once the snapshot is in.
+      this.syncGate.hold(sid, { kind: 'event', evt })
       return
     }
 
     // Idempotent prompt_complete: drop a duplicate turn-id but advance the
-    // cursor unconditionally so the seq pipeline cannot stall. A single FIFO
-    // WebSocket never reorders (see the deliver-on-arrival model below), so
-    // advancing only when contiguous would strand a replayed duplicate behind
-    // an unfillable pre-subscribe gap.
-    if (tier === 'idempotent' && evt.type === 'prompt_complete') {
+    // cursor so the seq pipeline cannot stall.
+    if (wsTierOf(evt.type) === 'idempotent' && evt.type === 'prompt_complete') {
       const turnId = extractTurnId(evt.payload)
       if (turnId && this.seenTurnIds.get(sid)?.has(turnId)) {
         this.lastSeq.set(sid, evt.seq)
         return
       }
     }
-
-    // Deliver on arrival (desktop parity). A single FIFO WebSocket never
-    // reorders, so the only gap sources (missed pre-subscribe emits, server
-    // lossy drop-oldest) never fill later — an indefinite hold can only strand.
-    // Advance the cursor to the delivered seq so live + reconnect-replay events
-    // flow without duplication.
     this.deliverContiguous(sid, evt)
-    return
   }
 
   private deliverContiguous(sid: string, evt: WsEvent): void {
@@ -1868,24 +2259,33 @@ export class WsAcpTransport implements AcpTransport {
   private request<T = unknown>(
     type: WsRequestType,
     payload: unknown,
-    timeoutOverrideMs?: number
+    timeoutOverrideMs?: number,
+    command?: CommandCallOptions
   ): Promise<T> {
     // Ensure connected first (unless socket already open — avoids reconnect loops).
     if (this.socket?.readyState === WebSocket.OPEN) {
-      return this.sendWhenOpen(type, payload, timeoutOverrideMs)
+      return this.sendWhenOpen(type, payload, timeoutOverrideMs, command)
     }
-    return this.connect().then(() => this.sendWhenOpen(type, payload, timeoutOverrideMs))
+    return this.connect().then(() => this.sendWhenOpen(type, payload, timeoutOverrideMs, command))
   }
 
   /** Send a request assuming the socket is already OPEN (used during auth handshake). */
   private sendWhenOpen<T = unknown>(
     type: WsRequestType,
     payload: unknown,
-    timeoutOverrideMs?: number
+    timeoutOverrideMs?: number,
+    command?: CommandCallOptions
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID()
-      const frame: WsRequest = { id, type, payload }
+      // `id` is a fresh per-attempt correlation id; `command_id` is the stable
+      // AD-5 command id every resend of one command reuses.
+      const frame: WsRequest = {
+        id,
+        type,
+        payload,
+        ...(command?.commandId ? { command_id: command.commandId } : {})
+      }
       const payloadRecord =
         payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null
       const sessionId =
@@ -1936,7 +2336,9 @@ export class WsAcpTransport implements AcpTransport {
         timer,
         type,
         sessionId,
-        deadline
+        deadline,
+        commandId: command?.commandId,
+        onVisibleAt: command?.onVisibleAt
       })
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
         if (timer) clearTimeout(timer)
@@ -1947,6 +2349,15 @@ export class WsAcpTransport implements AcpTransport {
       this.socket.send(JSON.stringify(frame))
     })
   }
+}
+
+/** The host's `{ receipt: "in_progress" }` answer to a resend of a running command. */
+function isInProgressReceipt(payload: unknown): boolean {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as { receipt?: unknown }).receipt === 'in_progress'
+  )
 }
 
 function extractTurnId(payload: unknown): string | null {

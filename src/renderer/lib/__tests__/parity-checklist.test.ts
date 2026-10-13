@@ -781,10 +781,6 @@ describe('Parity Checklist Automation', () => {
       const content = readFileSync(TauriRemoteApi, 'utf-8')
       expect(content).toMatch(/export\s+async\s+function\s+setHostDefaultProject\b/)
       expect(content).toMatch(/set_host_default_project/)
-      // syncProjects param renamed to defaultProjectId (desktop active IS the
-      // host default in desktop-hosted mode — same value, new param name).
-      expect(content).toMatch(/defaultProjectId:\s*string\s*\|\s*null/)
-      expect(content).not.toMatch(/activeProjectId:\s*string\s*\|\s*null/)
     })
 
     it('web-server-api.ts exposes setDefaultProject hitting POST /projects/default', () => {
@@ -856,9 +852,9 @@ describe('Parity Checklist Automation', () => {
 
   // CAP-2 (spec-in-chat-agent-switch): the durable agent-switch marker must
   // land on BOTH transports with one fold. The host is the sole author: the
-  // Tauri command AND the WS route write ONE durable `agent_switch` record
-  // through SessionPersistence (writer-assigned seq), then fan the synthetic
-  // `acp:agent_switch` event live-only. This block pins the fold arm, the
+  // Tauri command AND the WS route author ONE `agent_switch` record: the
+  // relay's single seq allocator numbers it, appends it durably and delivers
+  // it live under the same seq. This block pins the fold arm, the
   // `switches` field on both the Rust materialized payload and the TS
   // SessionPayload, both host routes, the WS request-type entry, and the
   // renderer wiring (event name + transport facade + store slice + timeline
@@ -873,16 +869,6 @@ describe('Parity Checklist Automation', () => {
       'src',
       'acp',
       'session_payload.rs'
-    )
-    const SessionPersistenceRust = join(
-      LIB_DIR,
-      '..',
-      '..',
-      '..',
-      'src-tauri',
-      'src',
-      'acp',
-      'session_persistence'
     )
     const ManagerRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'manager')
     const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'commands.rs')
@@ -904,20 +890,7 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/pub switches: Vec<MaterializedAgentSwitch>/)
     })
 
-    it('acp/session_persistence owns the sole durable write (ONE record per switch)', () => {
-      expect(
-        existsSync(SessionPersistenceRust),
-        'acp/session_persistence module should exist'
-      ).toBe(true)
-      const content = readRustModule(SessionPersistenceRust)
-      expect(content).toMatch(/AppendAgentSwitch/)
-      expect(content).toMatch(/pub async fn append_agent_switch/)
-      // The live fan-out event is excluded from the relay's durable path —
-      // the writer command is the sole durable author.
-      expect(content).toMatch(/\| "agent_switch"/)
-    })
-
-    it('acp/manager hosts record_agent_switch (persist → flush → fan_out)', () => {
+    it('acp/manager hosts record_agent_switch', () => {
       expect(existsSync(ManagerRust), 'acp/manager module should exist').toBe(true)
       const content = readRustModule(ManagerRust)
       expect(content).toMatch(/fn record_agent_switch/)
@@ -2035,8 +2008,6 @@ describe('Web FS watcher parity (#856)', () => {
     const content = readFileSync(FsFacade, 'utf-8')
     expect(content).toMatch(/wireWebFsChangedBridge/)
     expect(content).toMatch(/'acp:fs_changed'/)
-    // watchDirectory on web is a success no-op (the server owns watching).
-    expect(content).toMatch(/isTauriContext\(\)\) \{\s*$/m)
   })
 })
 
@@ -2108,7 +2079,7 @@ describe('Worktree branch rename parity (shell revamp story 16)', () => {
   const CommandsWorktreeRust = join(SRC_TAURI, 'commands', 'worktree.rs')
   const LibRust = join(SRC_TAURI, 'lib.rs')
   const ProtocolTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
-  const SinkRust = join(SRC_TAURI, 'web', 'sink.rs')
+  const SinkRust = join(SRC_TAURI, 'web', 'sink', 'watch_bridge.rs')
 
   it('worktree-api.ts branches renameBranch on isTauriContext() between invoke and webServerWorktree', () => {
     const content = readFileSync(WorktreeFacade, 'utf-8')
@@ -2195,5 +2166,81 @@ describe('Client identity boot parity (AD-4)', () => {
       const content = readFileSync(join(LIB_DIR, client), 'utf-8')
       expect(content, client).toMatch(/buildAuthenticatePayload\(/)
     }
+  })
+})
+
+describe('Bounded delivery parity (host heartbeat, gap frame)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const RELAY = join(SRC_TAURI, 'web', 'ws', 'relay')
+
+  it('the client reads the host heartbeat interval the Rust write loop uses', () => {
+    const watchdog = readFileSync(join(RELAY, 'watchdog.rs'), 'utf-8')
+    const seconds = /HEARTBEAT_INTERVAL: Duration = Duration::from_secs\((\d+)\)/.exec(watchdog)
+    expect(seconds).not.toBeNull()
+    const liveness = readFileSync(join(LIB_DIR, 'acp-transport', 'liveness.ts'), 'utf-8')
+    const clientMs = /HOST_HEARTBEAT_INTERVAL_MS = ([\d_]+)/.exec(liveness)
+    expect(clientMs).not.toBeNull()
+    expect(Number(clientMs?.[1].replaceAll('_', ''))).toBe(Number(seconds?.[1]) * 1000)
+  })
+
+  it('the gap and heartbeat frame type names match on both ends', () => {
+    const relay = readFileSync(join(RELAY, 'mod.rs'), 'utf-8')
+    expect(relay).toMatch(/WS_GAP_TYPE: &str = "gap"/)
+    expect(relay).toMatch(/WS_HEARTBEAT_TYPE: &str = "heartbeat"/)
+    const protocol = readFileSync(
+      join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts'),
+      'utf-8'
+    )
+    expect(protocol).toMatch(/interface WsGapFrame \{\s+type: 'gap'/)
+    expect(protocol).toMatch(/interface WsHeartbeatFrame \{\s+type: 'heartbeat'/)
+  })
+})
+
+describe('Watch hub parity (projects, chat history, agent roster)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const hubSource = readFileSync(join(SRC_TAURI, 'web', 'watch', 'hub.rs'), 'utf-8')
+  const protocol = readFileSync(
+    join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts'),
+    'utf-8'
+  )
+
+  it('the watch names the host serves are the ones the client names', () => {
+    const asStr = hubSource.slice(hubSource.indexOf('fn as_str'), hubSource.indexOf('pub fn parse'))
+    const rust = [...asStr.matchAll(/Self::\w+ => "(\w+)"/g)].map((match) => match[1])
+    const client = /WS_WATCH_NAMES = \[([^\]]+)\]/.exec(protocol)
+    expect(client).not.toBeNull()
+    const names = [...(client?.[1] ?? '').matchAll(/'(\w+)'/g)].map((match) => match[1])
+    expect(rust.sort()).toEqual([...names].sort())
+  })
+
+  it('the watch frame type matches on both ends', () => {
+    expect(hubSource).toMatch(/WS_WATCH_TYPE: &str = "watch"/)
+    expect(protocol).toMatch(/WS_WATCH_FRAME_TYPE = 'watch'/)
+  })
+
+  it('the host routes the watch and unwatch requests the client declares', () => {
+    const dispatch = readFileSync(join(SRC_TAURI, 'web', 'ws', 'dispatch.rs'), 'utf-8')
+    expect(dispatch).toMatch(/"watch" => handle_watch/)
+    expect(dispatch).toMatch(/"unwatch" => handle_unwatch/)
+    expect(protocol).toMatch(/'watch',\s*\n\s*'unwatch'/)
+  })
+
+  it('no relay, route or command still names the retired seq 0 nudges', () => {
+    const sources = [
+      ['web', 'sink', 'fanout.rs'],
+      ['web', 'sink', 'watch_bridge.rs'],
+      ['web', 'sink', 'mod.rs'],
+      ['web', 'mod.rs'],
+      ['web', 'projects_api.rs'],
+      ['web', 'ws', 'projects.rs'],
+      ['web', 'ws', 'sessions.rs'],
+      ['commands', 'remote.rs'],
+      ['commands', 'acp_history.rs']
+    ]
+    for (const parts of sources) {
+      const source = readFileSync(join(SRC_TAURI, ...parts), 'utf-8')
+      expect(source, parts.join('/')).not.toMatch(/projects_changed|chat_history_changed/)
+    }
+    expect(protocol).not.toMatch(/^\s*'(projects_changed|chat_history_changed)',?$/m)
   })
 })

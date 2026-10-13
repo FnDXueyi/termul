@@ -41,14 +41,11 @@ export const FRESH = {
   pendingPermissions: {},
   pendingQuestions: {},
   pendingElicitations: {},
-  permissionDenialNotices: {},
   promptQueues: {},
   turnEndNotices: {},
   suppressQueueFlush: {},
-  pendingPromptReconcile: {},
+  promptCommandStates: {},
   transportReconnecting: false,
-  queuedProjectSwitchId: null,
-  switchingProjectId: null,
   pendingBrowserOpen: {}
 }
 

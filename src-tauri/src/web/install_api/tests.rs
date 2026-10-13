@@ -20,6 +20,10 @@ fn loopback_peer() -> SocketAddr {
 fn install_request(body: &'static [u8]) -> Request<Body> {
     Request::builder()
         .method("POST")
+        .header(
+            crate::web::command_ledger::COMMAND_ID_HEADER,
+            crate::web::command_ledger::test_clock::fresh_command_id(),
+        )
         .uri("/acp/install")
         .header("content-type", "application/json")
         .extension(ConnectInfo(loopback_peer()))
@@ -85,6 +89,7 @@ async fn state_with_store(root: &std::path::Path) -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
+        connections: Default::default(),
     }
 }
 
@@ -115,6 +120,7 @@ async fn state_without_store() -> AppState {
         web_auth: None,
         allow_remote_writes: false,
         shared_live_writes_denied: false,
+        connections: Default::default(),
     }
 }
 
@@ -157,6 +163,10 @@ async fn install_rejects_non_loopback_peer() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/acp/install")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(SocketAddr::from(([10, 0, 0, 5], 54321))))
@@ -186,6 +196,10 @@ async fn install_admits_non_loopback_peer_when_opt_in() {
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(
+                    crate::web::command_ledger::COMMAND_ID_HEADER,
+                    crate::web::command_ledger::test_clock::fresh_command_id(),
+                )
                 .uri("/acp/install")
                 .header("content-type", "application/json")
                 .extension(ConnectInfo(SocketAddr::from(([10, 0, 0, 5], 54321))))

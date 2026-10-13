@@ -28,6 +28,8 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: mockInvoke
 }))
 
+import { __resetCommandEngineForTesting } from '../command-engine'
+import { __clearCommandJournalForTesting } from '../command-journal'
 import { gitApi } from '../git-api'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -39,6 +41,25 @@ function jsonResponse(body: unknown, status = 200): Response {
   } as unknown as Response
 }
 
+/** Ledgered mutations carry a `commandId` (desktop arg) / `X-Command-Id` (HTTP header). */
+const LEDGERED_COMMANDS = new Set([
+  'git_stage_hunk',
+  'git_unstage_hunk',
+  'git_discard',
+  'git_commit',
+  'git_create_branch',
+  'git_stash_save',
+  'git_stash_apply',
+  'git_stash_pop',
+  'git_stash_drop'
+])
+const LEDGERED_PATHS = new Set(
+  [...LEDGERED_COMMANDS].map(
+    (command) => `/${command.replace('git_', 'git/').replaceAll('_', '-')}`
+  )
+)
+const COMMAND_ID = expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
+
 const CWD = '/web/proj'
 const HUNK_PATCH = '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-one\n+two\n'
 
@@ -46,7 +67,10 @@ describe('gitApi (web vs desktop branch)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockFetch.mockReset()
+    mockInvoke.mockReset()
     vi.stubGlobal('fetch', mockFetch)
+    __clearCommandJournalForTesting()
+    __resetCommandEngineForTesting()
   })
 
   afterEach(() => {
@@ -70,7 +94,10 @@ describe('gitApi (web vs desktop branch)', () => {
         `${window.location.origin}${expectedPath}`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify(expectedBody)
+          body: JSON.stringify(expectedBody),
+          ...(LEDGERED_PATHS.has(expectedPath)
+            ? { headers: expect.objectContaining({ 'X-Command-Id': COMMAND_ID }) }
+            : {})
         })
       )
     } else {
@@ -92,7 +119,12 @@ describe('gitApi (web vs desktop branch)', () => {
     mockIsTauriContext.mockReturnValue(true)
     mockInvoke.mockResolvedValueOnce(undefined)
     await fn()
-    expect(mockInvoke).toHaveBeenCalledWith(expectedCommand, expectedArgs)
+    expect(mockInvoke).toHaveBeenCalledWith(
+      expectedCommand,
+      LEDGERED_COMMANDS.has(expectedCommand)
+        ? { ...expectedArgs, commandId: COMMAND_ID }
+        : expectedArgs
+    )
     expect(mockFetch).not.toHaveBeenCalled()
   }
 
@@ -251,6 +283,43 @@ describe('gitApi (web vs desktop branch)', () => {
       description: 'desc',
       amend: true
     })
+  })
+
+  // ---- ledger verdicts ----
+  it('commit: web surfaces PRECONDITION_FAILED as a typed error, with the expectedHead sent', async () => {
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({ success: false, error: 'HEAD moved', code: 'PRECONDITION_FAILED' })
+    )
+    await expect(gitApi.commit(CWD, 's', '', false, 'a'.repeat(40))).rejects.toMatchObject({
+      code: 'precondition_failed',
+      message: 'HEAD moved'
+    })
+    const [, init] = mockFetch.mock.calls[0]
+    expect(JSON.parse(init.body)).toMatchObject({ expectedHead: 'a'.repeat(40) })
+  })
+  it('commit: desktop maps the precondition_failed: prefix to the same typed error and keeps other errors raw', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockRejectedValueOnce('precondition_failed: HEAD moved')
+    await expect(gitApi.commit(CWD, 's', '', false, 'b'.repeat(40))).rejects.toMatchObject({
+      code: 'precondition_failed',
+      message: 'HEAD moved'
+    })
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'git_commit',
+      expect.objectContaining({ expectedHead: 'b'.repeat(40), commandId: COMMAND_ID })
+    )
+    mockInvoke.mockRejectedValueOnce('nothing to commit')
+    await expect(gitApi.commit(CWD, 's', '', false)).rejects.toBe('nothing to commit')
+  })
+  it('discard: a rejection mints a NEW id on the next try (never auto-retried)', async () => {
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockRejectedValue('boom')
+    await expect(gitApi.discard(CWD, 'a.txt')).rejects.toBe('boom')
+    await expect(gitApi.discard(CWD, 'a.txt')).rejects.toBe('boom')
+    const [first, second] = mockInvoke.mock.calls.map(([, args]) => args.commandId)
+    expect(second).not.toBe(first)
+    expect(mockInvoke).toHaveBeenCalledTimes(2)
   })
 
   // ---- push ----

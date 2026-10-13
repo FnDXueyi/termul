@@ -6,6 +6,7 @@
 
 import { create } from 'zustand'
 import { createPaneSlice } from './slices/pane'
+import { createProjectsSlice } from './slices/projects'
 import { createSyncSlice } from './slices/sync'
 import { createTabsSlice } from './slices/tabs'
 import { createLeaf, editorTabId, makeBrowserTabId, terminalTabId } from './tree'
@@ -21,6 +22,7 @@ export const useWorkspaceStore = create<WorkspaceState>((...a) => {
     agentLauncherPaneId: null,
     agentBrowserPaneId: null,
 
+    ...createProjectsSlice(...a),
     ...createPaneSlice(...a),
     ...createTabsSlice(...a),
     ...createSyncSlice(...a)
@@ -30,7 +32,9 @@ export const useWorkspaceStore = create<WorkspaceState>((...a) => {
 export * from './selectors'
 export {
   agentChatTabId,
+  buildProjectWorkspace,
   canvasTabId,
+  createProjectWorkspace,
   diffTabId,
   findPaneById,
   findPaneContainingTab,
@@ -41,5 +45,11 @@ export {
   gitTabId,
   normalizePaneTree
 } from './tree'
-export type { AddTabOptions, SplitPaneOptions, WorkspaceState, WorkspaceTab } from './types'
+export type {
+  AddTabOptions,
+  ProjectWorkspace,
+  SplitPaneOptions,
+  WorkspaceState,
+  WorkspaceTab
+} from './types'
 export { editorTabId, makeBrowserTabId as browserTabId, terminalTabId }

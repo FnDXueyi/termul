@@ -9,7 +9,7 @@ import {
   useResetShortcut,
   useUpdateShortcut
 } from '@/hooks/use-keyboard-shortcuts'
-import { acpApi, shellApi, terminalApi } from '@/lib/api'
+import { acpApi, shellApi } from '@/lib/api'
 import { scheduleAllDirtyAutoSaves } from '@/lib/editor-auto-save'
 import { logFrontendError } from '@/lib/log-api'
 import { isAurUpdateMode } from '@/lib/tauri-updater-api'
@@ -23,12 +23,9 @@ import {
   useDefaultShell,
   useEditorAutoSave,
   useEditorAutoSaveDelayMs,
-  useMaxTerminalsPerProject,
   useNotifyOnAgentChatNeedsYou,
   useNotifyOnAgentChatTurnFinished,
   useNotifyOnTerminalIdle,
-  useOrphanDetectionEnabled,
-  useOrphanDetectionTimeout,
   useTerminalBufferSize,
   useTerminalFontFamily,
   useTerminalFontSize,
@@ -70,9 +67,6 @@ export function AppPreferencesModal(): React.JSX.Element {
   const terminalScreenReaderMode = useTerminalScreenReaderMode()
   const defaultShell = useDefaultShell()
   const defaultProjectColor = useDefaultProjectColor() as ProjectColor
-  const maxTerminals = useMaxTerminalsPerProject()
-  const orphanDetectionEnabled = useOrphanDetectionEnabled()
-  const orphanDetectionTimeout = useOrphanDetectionTimeout()
   const _confirmTerminalClose = useConfirmTerminalClose()
   const terminalUrlOpenMode = useTerminalUrlOpenMode()
   const acpTurnTimeoutSecs = useAcpTurnTimeout()
@@ -172,10 +166,6 @@ export function AppPreferencesModal(): React.JSX.Element {
     updateSetting('defaultProjectColor', value)
   }
 
-  const handleMaxTerminalsChange = (value: number) => {
-    updateSetting('maxTerminalsPerProject', value)
-  }
-
   const isTerminalUrlOpenMode = (value: string): value is TerminalUrlOpenMode =>
     TERMINAL_URL_OPEN_MODE_OPTIONS.some((option) => option.value === value)
 
@@ -189,26 +179,6 @@ export function AppPreferencesModal(): React.JSX.Element {
 
   const _handleConfirmTerminalCloseToggle = async (enabled: boolean) => {
     await updateSetting('confirmTerminalClose', enabled)
-  }
-
-  const handleOrphanDetectionToggle = async (enabled: boolean) => {
-    await updateSetting('orphanDetectionEnabled', enabled)
-    // Apply to PtyManager immediately
-    try {
-      await terminalApi.updateOrphanDetection(enabled, orphanDetectionTimeout)
-    } catch (error) {
-      console.error('Failed to update orphan detection:', error)
-    }
-  }
-
-  const handleOrphanTimeoutChange = async (value: number | null) => {
-    await updateSetting('orphanDetectionTimeout', value)
-    // Apply to PtyManager immediately
-    try {
-      await terminalApi.updateOrphanDetection(orphanDetectionEnabled, value)
-    } catch (error) {
-      console.error('Failed to update orphan detection timeout:', error)
-    }
   }
 
   const handleAcpTurnTimeoutChange = async (value: number | null) => {
@@ -312,7 +282,6 @@ export function AppPreferencesModal(): React.JSX.Element {
             bufferSize={bufferSize}
             terminalRenderer={terminalRenderer}
             screenReaderMode={terminalScreenReaderMode}
-            maxTerminals={maxTerminals}
             handleFontFamilyChange={handleFontFamilyChange}
             handleFontSizeChange={handleFontSizeChange}
             handleUiZoomChange={handleUiZoomChange}
@@ -320,7 +289,6 @@ export function AppPreferencesModal(): React.JSX.Element {
             handleBufferSizeChange={handleBufferSizeChange}
             handleRendererChange={handleRendererChange}
             handleScreenReaderModeChange={handleScreenReaderModeChange}
-            handleMaxTerminalsChange={handleMaxTerminalsChange}
           />
           {/* Default Shell Section */}
           <ShellSection
@@ -331,16 +299,12 @@ export function AppPreferencesModal(): React.JSX.Element {
           {/* Terminal Behavior Section */}
           <BehaviorSection
             terminalUrlOpenMode={terminalUrlOpenMode}
-            orphanDetectionEnabled={orphanDetectionEnabled}
-            orphanDetectionTimeout={orphanDetectionTimeout}
             editorAutoSave={editorAutoSave}
             editorAutoSaveDelayMs={editorAutoSaveDelayMs}
             notifyOnTerminalIdle={notifyOnTerminalIdle}
             notifyOnAgentChatTurnFinished={notifyOnAgentChatTurnFinished}
             notifyOnAgentChatNeedsYou={notifyOnAgentChatNeedsYou}
             handleTerminalUrlOpenModeChange={handleTerminalUrlOpenModeChange}
-            handleOrphanDetectionToggle={handleOrphanDetectionToggle}
-            handleOrphanTimeoutChange={handleOrphanTimeoutChange}
             handleEditorAutoSaveToggle={handleEditorAutoSaveToggle}
             handleEditorAutoSaveDelayChange={handleEditorAutoSaveDelayChange}
             handleNotifyOnTerminalIdleToggle={handleNotifyOnTerminalIdleToggle}

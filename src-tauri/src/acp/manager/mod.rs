@@ -52,9 +52,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::acp::client;
 use crate::acp::config::{AgentConfig, AgentId, SessionId};
 use crate::acp::events::{
-    self, AgentDisconnectedEvent, AgentSpawnedEvent, AgentSwitchEvent, AuthMethodInfo,
-    ConfigOptionsUpdateEvent, PromptCompleteEvent, SessionClosedEvent, SessionCreatedEvent,
-    SessionInfoUpdateEvent, SessionModelState,
+    self, AgentDisconnectedEvent, AgentExitReason, AgentSpawnedEvent, AgentSwitchEvent,
+    AuthMethodInfo, ConfigOptionsUpdateEvent, PromptCompleteEvent, SessionClosedEvent,
+    SessionCreatedEvent, SessionInfoUpdateEvent, SessionModelState,
 };
 use crate::acp::session::{DriverState, ReopenReservation, ReplayWindowGuard};
 use crate::acp::session_persistence::{
@@ -67,16 +67,22 @@ mod command_loop;
 mod driver;
 mod gates;
 
+mod activity;
+mod close;
+mod exit;
 pub(crate) use gates::{ConfigOptionValue, GatewayAuthInput};
 mod history;
 mod reopen;
+mod spawn_error;
 mod timeouts;
 mod turn;
 mod wire;
 mod worktree_branch;
 
+use close::*;
 use command_loop::*;
 use driver::*;
+use exit::{ExitIntent, ExitSignal};
 use gates::*;
 use turn::*;
 use wire::*;
@@ -91,6 +97,7 @@ mod real_loop_tests;
 
 pub(crate) use history::*;
 pub use reopen::*;
+pub use spawn_error::*;
 pub use timeouts::*;
 pub(crate) use worktree_branch::*;
 
@@ -125,7 +132,7 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const ACP_SESSION_OWNED_BY_OTHER: &str = "ACP_SESSION_OWNED_BY_OTHER";
 
 /// Outcome of creating a new session, returned to the command caller.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionOutcome {
     pub session_id: SessionId,
@@ -158,6 +165,10 @@ pub struct SessionCreationContext {
     /// Extra absolute workspace roots. Applied only when the agent advertises
     /// `additionalDirectories`.
     pub additional_directories: Vec<String>,
+    /// The client `commandId` of the creating request, stamped on the durable
+    /// record so a resend finds the session after ledger eviction or a host
+    /// restart. Ephemeral sessions are live-only and carry no durable stamp.
+    pub command_id: Option<String>,
 }
 
 /// Commands sent from Tauri command handlers to an agent's driver thread.
@@ -176,6 +187,7 @@ enum AcpCommand {
         worktree_path: Option<String>,
         worktree_branch: Option<String>,
         additional_directories: Vec<PathBuf>,
+        command_id: Option<String>,
         reply: oneshot::Sender<Result<NewSessionOutcome, String>>,
     },
     LoadSession {
@@ -259,6 +271,11 @@ enum AcpCommand {
         session_id: SessionId,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// Report the activity evidence the idle reaper reads (see
+    /// [`crate::acp::AgentActivity`]).
+    ActivityProbe {
+        reply: oneshot::Sender<Result<crate::acp::AgentActivity, String>>,
+    },
     WaitTurnIdle {
         session_id: SessionId,
         reply: oneshot::Sender<Result<(), String>>,
@@ -331,7 +348,7 @@ struct InitOutcome {
 /// `acp:agent_spawned` event is still emitted for observers but is no longer the
 /// source of truth — the spawn response is. Serialized camelCase on the wire so
 /// desktop (Tauri `Result`) and web (`WsReply` payload) share one contract.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnOutcome {
     pub agent_id: AgentId,
@@ -366,6 +383,10 @@ pub struct AgentSummary {
     /// answer "which live agent owns this session" from the `list_agents`
     /// reply alone, without a per-agent round-trip.
     pub owns_session: Vec<String>,
+    /// The `commandId` of the `spawn_agent` that created this agent. In-process
+    /// only: never serialized to clients.
+    #[serde(skip)]
+    pub command_id: Option<String>,
 }
 
 /// Test-only record of what the idle reaper did to a fake agent (issue #837
@@ -375,6 +396,13 @@ pub struct AgentSummary {
 pub(crate) struct ReapRecord {
     pub disposed: parking_lot::Mutex<Vec<String>>,
     pub shut_down: parking_lot::Mutex<bool>,
+    /// What the fake driver answers to an activity probe; tests edit it.
+    pub activity: parking_lot::Mutex<crate::acp::AgentActivity>,
+    /// Probes answered so far.
+    pub probes: parking_lot::Mutex<usize>,
+    /// When `Some(n)`, a turn begins as the n-th probe is answered (that
+    /// answer already reports it), modelling activity landing mid-sweep.
+    pub turn_begins_at_probe: parking_lot::Mutex<Option<usize>>,
 }
 
 /// Registry entry for a live agent.
@@ -387,10 +415,23 @@ struct AgentEntry {
     name: String,
     config_id: Option<String>,
     join_handle: Option<JoinHandle<()>>,
-    /// Set true by `kill`/`kill_all` before winding the agent down, so the
-    /// driver thread's teardown can tell an intentional kill (silent) from a
-    /// spontaneous crash (emits `acp:agent_disconnected`). See L4.
-    killed: Arc<AtomicBool>,
+    /// Why the host is stopping this agent, set before the driver is asked to
+    /// shut down. The driver thread's teardown reads it to choose the events
+    /// every sink receives (see [`ExitSignal`]).
+    exit: Arc<ExitSignal>,
+    /// The spawn's `commandId` and handshake facts (see [`SpawnStamp`]).
+    stamp: SpawnStamp,
+}
+
+/// What a spawn stamps on its agent: the client `commandId` (a resent
+/// `spawn_agent` finds the live agent by it) plus the handshake facts a
+/// resend needs to rebuild the original [`SpawnOutcome`]. Carries no config,
+/// env or credential.
+#[derive(Debug, Clone, Default)]
+struct SpawnStamp {
+    command_id: Option<String>,
+    auth_methods: Vec<AuthMethodInfo>,
+    host_auth_ready: bool,
 }
 
 /// Manages all ACP agents, mirroring the `PtyManager` ownership pattern.
@@ -511,11 +552,10 @@ impl AcpManager {
     pub fn persistence(&self) -> Option<Arc<SessionPersistence>> {
         self.persistence.clone()
     }
-    /// Host-authored durable agent-switch marker (CAP-2): persist through
-    /// `SessionPersistence`, flush, then fan the synthetic live event out
-    /// through this manager's sinks (Tauri renderer + WS relay on desktop;
-    /// relay-only on the standalone server). See the module-level
-    /// [`record_agent_switch`] for the persistence/fan-out contract.
+    /// Host-authored durable agent-switch marker (CAP-2): the relay numbers,
+    /// persists and delivers it through this manager's sinks, then the flush
+    /// is the durability boundary. Sinks are the Tauri renderer plus the WS
+    /// relay on desktop, and the relay alone on the standalone server.
     pub async fn record_agent_switch(
         &self,
         session_id: String,
@@ -564,15 +604,40 @@ impl AcpManager {
     /// host-auth readiness, and stable namespace so the renderer can populate the store
     /// synchronously from the response (CAP-4: the spawn response — not the
     /// async event — is the source of truth).
-    pub async fn spawn(&self, mut config: AgentConfig) -> Result<SpawnOutcome, String> {
+    pub async fn spawn(&self, config: AgentConfig) -> Result<SpawnOutcome, String> {
+        self.spawn_with_command_id(config, None).await
+    }
+
+    /// [`spawn`](Self::spawn) stamping the client `commandId` on the agent, so
+    /// a resent `spawn_agent` finds it ([`Self::spawn_outcome_by_command_id`]).
+    pub async fn spawn_with_command_id(
+        &self,
+        mut config: AgentConfig,
+        command_id: Option<String>,
+    ) -> Result<SpawnOutcome, String> {
         crate::acp::factory_key::normalize_launch_args(&mut config);
         crate::acp::factory_key::inject(&mut config)?;
         let host_auth_ready = self
             .claude_agent
             .prepare_managed_config(&mut config)
             .await?;
-        self.spawn_with_sinks(config, host_auth_ready, self.sinks.clone())
+        self.spawn_with_sinks(config, host_auth_ready, self.sinks.clone(), command_id)
             .await
+    }
+
+    /// The [`SpawnOutcome`] of the live agent spawned under `command_id`, or
+    /// `None` when no live agent carries it (never spawned, or since gone).
+    #[must_use]
+    pub fn spawn_outcome_by_command_id(&self, command_id: &str) -> Option<SpawnOutcome> {
+        self.agents.lock().iter().find_map(|(id, entry)| {
+            (entry.stamp.command_id.as_deref() == Some(command_id)).then(|| SpawnOutcome {
+                agent_id: id.clone(),
+                capabilities: entry.capabilities.clone(),
+                auth_methods: entry.stamp.auth_methods.clone(),
+                host_auth_ready: entry.stamp.host_auth_ready,
+                stable_namespace: entry.stable_namespace.clone(),
+            })
+        })
     }
 
     /// Candidate validation bypasses the persisted-key overlay.
@@ -581,7 +646,7 @@ impl AcpManager {
         mut config: AgentConfig,
     ) -> Result<SpawnOutcome, String> {
         crate::acp::factory_key::normalize_launch_args(&mut config);
-        self.spawn_with_sinks(config, false, vec![]).await
+        self.spawn_with_sinks(config, false, vec![], None).await
     }
 
     /// Same as [`spawn`](Self::spawn) but lets the caller supply the sink list
@@ -592,6 +657,7 @@ impl AcpManager {
         config: AgentConfig,
         host_auth_ready: bool,
         sinks: Vec<Arc<dyn EventSink>>,
+        command_id: Option<String>,
     ) -> Result<SpawnOutcome, String> {
         // Fail fast once process shutdown began: the agent would register
         // (or worse, miss registration ordering) after `kill_all_checked`
@@ -613,9 +679,10 @@ impl AcpManager {
         // thread removes itself (reaps) so a late `spawn` insert can't recreate
         // a ghost entry for an agent that already exited.
         let reaped = Arc::new(AtomicBool::new(false));
-        // Set true by `kill`/`kill_all`; lets the driver teardown distinguish an
-        // intentional kill (no disconnect event) from a crash (L4).
-        let killed = Arc::new(AtomicBool::new(false));
+        // Set by `kill`/`reap_agent`/`kill_all` before the driver is asked to
+        // stop; lets the driver teardown announce the right reason (or stay
+        // silent on process shutdown) instead of reporting a crash.
+        let exit = Arc::new(ExitSignal::default());
         // Carries the connection-level failure reason (e.g. the subprocess could
         // not be spawned) back to this await path. When `connect_with` fails,
         // `init_tx` is dropped without ever being sent, so `init_rx` resolves to
@@ -627,7 +694,7 @@ impl AcpManager {
         let thread_config = config.clone();
         let thread_agents = self.agents.clone();
         let thread_reaped = reaped.clone();
-        let thread_killed = killed.clone();
+        let thread_exit = exit.clone();
         let thread_start_error = start_error.clone();
         let thread_persistence = self.persistence.clone();
         let thread_host_plan_server = self.host_plan_server.clone();
@@ -644,7 +711,7 @@ impl AcpManager {
                     init_tx,
                     thread_agents,
                     thread_reaped,
-                    thread_killed,
+                    thread_exit,
                     thread_start_error,
                     thread_persistence,
                 );
@@ -674,6 +741,10 @@ impl AcpManager {
                 // (e.g. "program not found") over the generic fallback.
                 join_thread_bounded(join_handle).await;
                 let reason = start_error.lock().take();
+                // Only a concrete launch refusal (missing / non-executable
+                // program) is a definite rejection; any other start failure
+                // may be transient and stays untagged so it can be retried.
+                let definite = reason.as_deref().is_some_and(is_launch_refusal);
                 let message = match reason {
                     Some(detail) => format!("agent failed to start: {detail}"),
                     None => "agent failed to start (process did not initialize)".to_string(),
@@ -682,10 +753,19 @@ impl AcpManager {
                     // Same redaction convention as the initialize path: generic
                     // toward the renderer, specific detail in the host log.
                     log::warn!("[acp] Factory Droid start failed: {message}");
-                    return Err("Factory Droid start failed".to_string());
+                    let generic = "Factory Droid start failed";
+                    return Err(if definite {
+                        agent_unavailable(generic)
+                    } else {
+                        generic.to_string()
+                    });
                 }
                 log::warn!("[acp] spawn failed: {message}");
-                return Err(message);
+                return Err(if definite {
+                    agent_unavailable(message)
+                } else {
+                    message
+                });
             }
         };
 
@@ -699,10 +779,10 @@ impl AcpManager {
             let mut agents = self.agents.lock();
             if self.process_shutdown.load(Ordering::Acquire) {
                 // `kill_all_checked` already drained the map and will never
-                // see this agent. Mark the kill intentional (silent teardown,
-                // L4), wind the driver down, and join it — same cleanup as an
-                // init failure.
-                killed.store(true, Ordering::Release);
+                // see this agent. Mark the stop as process shutdown (silent
+                // teardown), wind the driver down, and join it — same cleanup
+                // as an init failure.
+                exit.set(ExitIntent::Shutdown);
                 let _ = command_tx.send(AcpCommand::Shutdown);
                 drop(command_tx);
                 drop(agents);
@@ -728,7 +808,12 @@ impl AcpManager {
                     name: config.name.clone(),
                     config_id: config.config_id.clone(),
                     join_handle: Some(join_handle),
-                    killed,
+                    exit,
+                    stamp: SpawnStamp {
+                        command_id,
+                        auth_methods: auth_methods.clone(),
+                        host_auth_ready,
+                    },
                 },
             );
         }
@@ -785,6 +870,7 @@ impl AcpManager {
                 namespace: entry.stable_namespace.clone(),
                 capabilities: entry.capabilities.clone(),
                 owns_session: Vec::new(),
+                command_id: entry.stamp.command_id.clone(),
             })
             .collect()
     }
@@ -939,6 +1025,7 @@ impl AcpManager {
                 worktree_path: context.worktree_path,
                 worktree_branch: context.worktree_branch,
                 additional_directories,
+                command_id: context.command_id,
                 reply,
             })
             .await
@@ -1051,7 +1138,10 @@ impl AcpManager {
         let caps = self.capabilities(agent_id)?;
         gate_close_session(&caps)?;
         let tx = self.command_tx(agent_id)?;
-        send_command(&tx, |reply| AcpCommand::CloseSession { session_id, reply }).await
+        let closed_session = session_id.0.clone();
+        send_command(&tx, |reply| AcpCommand::CloseSession { session_id, reply }).await?;
+        self.release_session_tickets(&closed_session);
+        Ok(())
     }
 
     pub async fn dispose_ephemeral_session(
@@ -1175,6 +1265,17 @@ impl AcpManager {
         Ok(stop_reason)
     }
 
+    /// Release the relay tickets of `session_id` after the driver resolved its
+    /// parked approvals and questions as cancelled (turn cancel or session
+    /// close). Tickets have no timer, so this frees the session's queue slot.
+    fn release_session_tickets(&self, session_id: &str) {
+        for sink in &self.sinks {
+            if let Some(relay) = sink.as_ws_relay() {
+                relay.release_session_tickets(session_id);
+            }
+        }
+    }
+
     /// Cancel the active turn for a session, resolving pending permissions with
     /// the `cancelled` outcome. No-op (Ok) if there is no active turn.
     pub async fn cancel_prompt(
@@ -1183,7 +1284,12 @@ impl AcpManager {
         session_id: SessionId,
     ) -> Result<(), String> {
         let tx = self.command_tx(agent_id)?;
-        send_command(&tx, |reply| AcpCommand::CancelPrompt { session_id, reply }).await
+        let cancelled_session = session_id.0.clone();
+        let result = send_command(&tx, |reply| AcpCommand::CancelPrompt { session_id, reply }).await;
+        // The driver resolved every parked approval and question of the session
+        // as cancelled before it replied, whatever the reply says.
+        self.release_session_tickets(&cancelled_session);
+        result
     }
 
     /// Issue #837 split-brain guard: reject a reopen (`session/load` /
@@ -1423,17 +1529,47 @@ impl AcpManager {
         crate::acp::browser_shim::deliver_auth_redirect(&url).await
     }
 
-    /// Kill an agent: stop its driver thread and join it. Idempotent.
+    /// Kill an agent: stop its driver thread and join it. Idempotent. Every
+    /// sink sees `session_closed` for each live session, then
+    /// `agent_disconnected` with reason `killed`.
     pub async fn kill(&self, agent_id: &AgentId) -> Result<(), String> {
-        let entry = self.agents.lock().remove(agent_id);
+        self.stop_agent(agent_id, ExitIntent::Killed).await
+    }
+
+    /// Stop an agent for the idle reaper: same teardown as [`Self::kill`], but
+    /// announced with reason `reaped`.
+    pub async fn reap_agent(&self, agent_id: &AgentId) -> Result<(), String> {
+        self.stop_agent(agent_id, ExitIntent::Reaped).await
+    }
+
+    async fn stop_agent(&self, agent_id: &AgentId, intent: ExitIntent) -> Result<(), String> {
+        // The exit intent is recorded under the same `agents` lock the
+        // driver's self-reap removes its entry under, so a teardown that races
+        // this stop either removed the entry first (nothing to stop) or reads
+        // the intent already set and announces `killed`/`reaped`.
+        let entry = {
+            let mut agents = self.agents.lock();
+            let entry = agents.remove(agent_id);
+            if let Some(entry) = &entry {
+                entry.exit.set(intent);
+            }
+            entry
+        };
         let Some(mut entry) = entry else {
             // Already gone — idempotent success.
             return Ok(());
         };
-
-        // Mark this as an intentional kill so the driver teardown stays silent
-        // (no `acp:agent_disconnected` for a kill we initiated — L4).
-        entry.killed.store(true, Ordering::Release);
+        log::info!("[acp] stopping agent {agent_id} ({intent:?})");
+        // The driver teardown announces the stop to every sink (and so to the
+        // roster watch) as `session_closed` + `agent_disconnected`. The agent's
+        // approvals can never be answered, so release them and their queue
+        // slots now instead of waiting for that announcement (a wedged driver
+        // may take the whole join bound to tear down).
+        for sink in &self.sinks {
+            if let Some(relay) = sink.as_ws_relay() {
+                relay.release_agent_tickets(agent_id);
+            }
+        }
 
         // Ask the driver loop to wind down, then drop the sender so the loop
         // ends even if the Shutdown was not observed.
@@ -1474,7 +1610,7 @@ impl AcpManager {
 
         let mut handles = Vec::new();
         for (_, mut entry) in entries {
-            entry.killed.store(true, Ordering::Release);
+            entry.exit.set(ExitIntent::Shutdown);
             let _ = entry.command_tx.send(AcpCommand::Shutdown);
             drop(entry.command_tx);
             if let Some(handle) = entry.join_handle.take() {
@@ -1637,7 +1773,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     }
@@ -1659,6 +1796,17 @@ impl AcpManager {
         let record = Arc::new(ReapRecord {
             disposed: Mutex::new(Vec::new()),
             shut_down: Mutex::new(false),
+            activity: Mutex::new(crate::acp::AgentActivity {
+                active_turns: usize::from(active_turn),
+                pending_permissions: 0,
+                pending_questions: 0,
+                pending_elicitations: 0,
+                running_terminals: 0,
+                reopens_in_flight: 0,
+                last_active_at: std::time::Instant::now(),
+            }),
+            probes: Mutex::new(0),
+            turn_begins_at_probe: Mutex::new(None),
         });
         let record_for_task = record.clone();
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
@@ -1672,7 +1820,18 @@ impl AcpManager {
                         let _ = reply.send(Ok(sessions.iter().cloned().collect::<Vec<_>>()));
                     }
                     AcpCommand::IsTurnActive { reply, .. } => {
-                        let _ = reply.send(Ok(active_turn));
+                        let _ = reply.send(Ok(record_for_task.activity.lock().active_turns > 0));
+                    }
+                    AcpCommand::ActivityProbe { reply } => {
+                        let probe = {
+                            let mut probes = record_for_task.probes.lock();
+                            *probes += 1;
+                            *probes
+                        };
+                        if *record_for_task.turn_begins_at_probe.lock() == Some(probe) {
+                            record_for_task.activity.lock().active_turns = 1;
+                        }
+                        let _ = reply.send(Ok(*record_for_task.activity.lock()));
                     }
                     AcpCommand::IsEphemeralSession { session_id, reply } => {
                         let _ = reply.send(Ok(ephemeral && sessions.contains(&session_id.0)));
@@ -1703,7 +1862,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
         record
@@ -1760,7 +1920,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     }
@@ -1797,7 +1958,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     }
@@ -1842,7 +2004,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     }
@@ -1896,7 +2059,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     }
@@ -1953,7 +2117,8 @@ impl AcpManager {
                 name: "test-agent".to_string(),
                 config_id: None,
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
         (release_tx, entered_rx)

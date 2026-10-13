@@ -350,7 +350,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_load_session', {
       agentId: 'spawned-1',
       sessionId: 's-spawn',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().sessions['s-spawn'].agentId).toBe('spawned-1')
     expect(useAcpStore.getState().sessions['s-spawn'].status).toBe('active')
@@ -1534,6 +1535,25 @@ describe('acp-store', () => {
     )
   })
 
+  it('syncMcpRegistryToProjectFile requested before the registry loaded mirrors once it loads', async () => {
+    const persistence = await import('@/lib/acp-mcp-persistence')
+    vi.mocked(persistence.syncMcpRegistryToProjectBestEffort).mockClear()
+    vi.mocked(persistence.loadMcpServers).mockResolvedValueOnce([
+      { id: 'm9', type: 'stdio', name: 'late', command: 'node', enabled: true }
+    ])
+    useAcpStore.setState({ mcpServers: [], mcpServersLoaded: false })
+
+    await useAcpStore.getState().syncMcpRegistryToProjectFile()
+    // Not loaded yet: nothing is mirrored (an empty list would clobber the file).
+    expect(vi.mocked(persistence.syncMcpRegistryToProjectBestEffort)).not.toHaveBeenCalled()
+
+    await useAcpStore.getState().loadMcpServers()
+    expect(vi.mocked(persistence.syncMcpRegistryToProjectBestEffort)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(persistence.syncMcpRegistryToProjectBestEffort)).toHaveBeenCalledWith([
+      expect.objectContaining({ id: 'm9' })
+    ])
+  })
+
   it('rolls back an import batch when registry persistence fails', async () => {
     const persistence = await import('@/lib/acp-mcp-persistence')
     vi.mocked(persistence.saveMcpServers).mockRejectedValueOnce(new Error('disk full'))
@@ -1619,7 +1639,8 @@ describe('acp-store', () => {
       agentId: 'agent-1',
       cwd: '/work',
       mcpServers: [{ type: 'stdio', name: 'Files', command: 'node', args: [], env: [] }],
-      projectId: 'p1'
+      projectId: 'p1',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().sessions.derived.mcpServerCount).toBe(1)
     expect(toastWarning).toHaveBeenCalledWith(
@@ -1640,7 +1661,8 @@ describe('acp-store', () => {
       agentId: 'agent-1',
       cwd: '/work',
       mcpServers: [],
-      projectId: 'p1'
+      projectId: 'p1',
+      commandId: expect.any(String)
     })
     expect(toastWarning).not.toHaveBeenCalled()
   })
@@ -1673,7 +1695,8 @@ describe('acp-store', () => {
       agentId: 'agent-9',
       cwd: '/work',
       mcpServers: servers,
-      projectId: 'p1'
+      projectId: 'p1',
+      commandId: expect.any(String)
     })
   })
 

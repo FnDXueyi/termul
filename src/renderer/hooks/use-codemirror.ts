@@ -147,6 +147,11 @@ interface UseCodeMirrorOptions {
   onCursorChange: (line: number, col: number) => void
   onScrollChange: (scrollTop: number) => void
   onVisibleRangeChange?: (range: VisibleLineRange) => void
+  /**
+   * Replaces the editor-store save on Mod-s (e.g. a remote SFTP file). Gets
+   * the text on screen, since `onChange` lags behind by its debounce.
+   */
+  onSave?: (content: string) => void
 }
 
 interface UseCodeMirrorResult {
@@ -179,6 +184,7 @@ export function useCodeMirror(
   const onCursorChangeRef = useRef(options.onCursorChange)
   const onScrollChangeRef = useRef(options.onScrollChange)
   const onVisibleRangeChangeRef = useRef(options.onVisibleRangeChange)
+  const onSaveRef = useRef(options.onSave)
   const contentRef = useRef(options.content)
   const isExternalUpdate = useRef(false)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -197,6 +203,7 @@ export function useCodeMirror(
   onCursorChangeRef.current = options.onCursorChange
   onScrollChangeRef.current = options.onScrollChange
   onVisibleRangeChangeRef.current = options.onVisibleRangeChange
+  onSaveRef.current = options.onSave
   contentRef.current = options.content
 
   // Create editor
@@ -255,8 +262,9 @@ export function useCodeMirror(
         keymap.of([
           {
             key: 'Mod-s',
-            run: () => {
-              void requestSaveEditorFile(filePathRef.current)
+            run: (view) => {
+              if (onSaveRef.current) onSaveRef.current(view.state.doc.toString())
+              else void requestSaveEditorFile(filePathRef.current)
               return true
             },
             preventDefault: true

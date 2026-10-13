@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { sectionForTab } from '@/hooks/use-mobile-section'
 import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
@@ -169,7 +170,8 @@ export function MobileDrawerSectionList({
   // per-row — zustand's set() always produces a new Map, so this re-renders
   // exactly when openFiles changes.
   const openFiles = useEditorStore((s) => s.openFiles)
-  const isEditorFileDirty = (filePath: string): boolean => openFiles.get(filePath)?.isDirty ?? false
+  const isEditorFileDirty = (filePath: string): boolean =>
+    fileNeedsAttention(openFiles.get(filePath))
 
   // Canvas dirty state, the same way: one canvas session per project.
   const canvasSessions = useCanvasStore((s) => s.sessions)

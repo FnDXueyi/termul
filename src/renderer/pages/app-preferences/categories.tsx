@@ -62,12 +62,6 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
   },
   {
     categoryId: 'appearance',
-    label: 'Max Terminals Per Project',
-    description: 'Maximum number of terminal tabs allowed per project.',
-    keywords: ['tabs', 'limit']
-  },
-  {
-    categoryId: 'appearance',
     label: 'Terminal Renderer',
     description: 'GPU-accelerated rendering for terminal output.',
     keywords: ['webgl', 'dom', 'gpu']
@@ -89,18 +83,6 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     label: 'Open Terminal Links In',
     description: 'Choose how URLs from terminal output open.',
     keywords: ['url', 'links', 'browser']
-  },
-  {
-    categoryId: 'behavior',
-    label: 'Orphan Detection',
-    description: 'Automatically clean up terminals that have been inactive.',
-    keywords: ['cleanup', 'inactive', 'timeout']
-  },
-  {
-    categoryId: 'behavior',
-    label: 'Timeout Before Cleanup',
-    description: 'Duration before inactive terminals are cleaned up.',
-    keywords: ['orphan', 'inactive']
   },
   {
     categoryId: 'behavior',

@@ -1,10 +1,8 @@
-//! AD-19 relay-execution audit repros (AD-16 "Relay execution" cases).
-//!
-//! Each case asserts the behavior the relay execution rework delivers
-//! (per-request tasks, independent watchdog, coordinated shutdown) and is
-//! `#[ignore]`d until that slice lands. Run them against today's code with
-//! `cargo test --lib -- --ignored audit_` to watch each fail for the stated
-//! reason.
+//! AD-19 relay-execution audit repros (AD-16 "Relay execution" cases): a
+//! handler slower than the pong deadline, a stalled half-open peer, and a host
+//! stop with an open socket. They fail on a relay whose read loop awaits
+//! handlers, whose watchdog lives in the write arm, or whose sockets outlive
+//! the host.
 
 use tokio::sync::oneshot;
 
@@ -15,7 +13,7 @@ use crate::acp::manager::{FakeAuth, FakeTurn};
 use crate::remote::host::{RemoteBindMode, RemoteServerState};
 
 /// One agent text chunk fanned out like the real driver does.
-fn emit_chunk(host: &Host) {
+pub(super) fn emit_chunk(host: &Host) {
     let event = events::MessageChunkEvent {
         agent_id: AgentId(AGENT.to_string()),
         session_id: SessionId(SESSION.to_string()),
@@ -30,21 +28,21 @@ fn emit_chunk(host: &Host) {
 }
 
 /// How long a half-open peer may stay unnoticed in the foreground: the pong
-/// deadline plus one ping interval (the watchdog only runs on a ping tick).
+/// deadline plus one watchdog tick.
 fn foreground_reap_by() -> Duration {
-    PONG_TIMEOUT + PING_INTERVAL
+    PONG_TIMEOUT + WATCHDOG_TICK
 }
 
-/// Last instant a backgrounded half-open peer must still be held: one ping
-/// interval short of the background ceiling.
+/// Last instant a backgrounded half-open peer must still be held: one
+/// watchdog tick short of the background ceiling.
 fn background_held_until() -> Duration {
-    BACKGROUND_TIMEOUT - PING_INTERVAL
+    BACKGROUND_TIMEOUT - WATCHDOG_TICK
 }
 
 /// By when a backgrounded half-open peer must be gone: the ceiling plus the
-/// tick that notices it, with one more half interval of margin.
+/// tick that notices it, with a second of margin.
 fn background_reap_by() -> Duration {
-    BACKGROUND_TIMEOUT + PING_INTERVAL + PING_INTERVAL / 2
+    BACKGROUND_TIMEOUT + WATCHDOG_TICK + Duration::from_secs(1)
 }
 
 /// A streaming turn: chunks keep flowing for `total` of (virtual) time.
@@ -59,11 +57,9 @@ async fn stream_for(host: &Host, total: Duration) {
 }
 
 /// A handler slower than the pong deadline must not get the connection
-/// killed. Today the read loop awaits the handler inline, so the peer's
-/// pongs (queued behind the pending request) never refresh the watchdog and
-/// the relay closes a perfectly healthy connection.
+/// killed: the read loop never awaits a handler, so the peer's pongs keep
+/// refreshing the watchdog while the request runs.
 #[tokio::test(start_paused = true)]
-#[ignore = "relay execution rework (AD-19): the read loop awaits handlers inline, so a handler slower than PONG_TIMEOUT starves the watchdog"]
 async fn audit_long_handler_vs_ping() {
     let host = Host::new(|acp, sessions| {
         acp.install_test_agent_with_scripts(
@@ -102,11 +98,9 @@ async fn audit_long_handler_vs_ping() {
 }
 
 /// A half-open peer during a streaming turn is reaped by the watchdog within
-/// the pong deadline, and a backgrounded one only after the background hold. Today
-/// the watchdog lives in the write arm that awaits the (stalled) send, so a
-/// peer whose socket stopped draining is never reaped.
+/// the pong deadline, and a backgrounded one only after the background hold,
+/// even though its socket stopped draining (the write loop is stuck in a send).
 #[tokio::test(start_paused = true)]
-#[ignore = "relay execution rework (AD-19): the watchdog runs inside the write arm that awaits a send, so a stalled peer blocks its own reaping"]
 async fn audit_stale_peer_during_stream_is_reaped_by_the_watchdog() {
     let (release_tx, release_rx) = oneshot::channel();
     let (entered_tx, entered_rx) = oneshot::channel();
@@ -169,14 +163,14 @@ async fn audit_stale_peer_during_stream_is_reaped_by_the_watchdog() {
     drop(release_tx);
 }
 
-/// Stopping the host sends `Close(1001)` to an open socket and the upgraded
-/// task ends with it: after the `Close` the socket reaches EOF (the host
-/// dropped it), so `kill_all` / process exit never races a live relay. Today
-/// `serve_router` only stops accepting; the upgraded socket keeps being
-/// served after the UI says "stopped".
-#[tokio::test]
-#[ignore = "relay execution rework (AD-19): serve_router threads no shutdown token to upgraded sockets, so stop() leaves them open"]
-async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
+/// A started shared-live host on an OS-assigned port, with its scratch dirs.
+struct StartedHost {
+    host: RemoteServerState,
+    addr: std::net::SocketAddr,
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+}
+
+async fn start_host() -> StartedHost {
     let acp = Arc::new(AcpManager::new(vec![]));
     let pty = crate::web::test_pty_manager();
     let relay = Arc::new(WsRelaySink::new());
@@ -198,7 +192,10 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
     let data_dir = tempfile::tempdir().expect("scratch data dir");
     let data = crate::remote::host::SharedLiveData {
         store: Arc::new(
-            crate::web::store::WebStore::open(data_dir.path().join("store.json"))
+            crate::web::store::WebStore::open(
+                data_dir.path().join("store.json"),
+                crate::web::store::StorePolicy::default(),
+            )
                 .expect("open the scratch store"),
         ),
         data_dir: data_dir.path().to_path_buf(),
@@ -219,17 +216,18 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
         )
         .await
         .expect("host starts on an OS-assigned port");
-    let addr: std::net::SocketAddr = ([127, 0, 0, 1], status.port.expect("bound port")).into();
+    let addr = ([127, 0, 0, 1], status.port.expect("bound port")).into();
+    StartedHost {
+        host,
+        addr,
+        _dirs: (root, data_dir),
+    }
+}
 
-    let mut client = RawWsClient::connect(addr, "/ws").await;
-    let first = client
-        .read_json_within(Duration::from_secs(5))
-        .await
-        .expect("auth_required event not delivered in time")
-        .expect("auth_required event");
-    assert_eq!(first["type"], "auth_required", "{first}");
-
-    tokio::time::timeout(Duration::from_secs(10), host.stop())
+/// Stop `started` and require the open `client` to get `Close(1001)` and then
+/// EOF: the upgraded task finished instead of lingering.
+async fn assert_stop_closes_with_1001(started: &StartedHost, client: &mut RawWsClient) {
+    tokio::time::timeout(Duration::from_secs(10), started.host.stop())
         .await
         .expect("stop must not hang on an open socket")
         .expect("stop succeeds");
@@ -245,4 +243,43 @@ async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
         .await
         .expect("the upgraded socket stayed open after its Close frame");
     assert!(eof.is_none(), "unexpected frame after Close: {eof:?}");
+}
+
+/// Stopping the host sends `Close(1001)` to an open socket and the upgraded
+/// task ends with it: after the `Close` the socket reaches EOF (the host
+/// dropped it), so `kill_all` / process exit never races a live relay.
+#[tokio::test]
+async fn audit_stop_with_open_socket_sends_close_1001_and_drains() {
+    let started = start_host().await;
+    let mut client = RawWsClient::connect(started.addr, "/ws").await;
+    let first = client
+        .read_json_within(Duration::from_secs(5))
+        .await
+        .expect("auth_required event not delivered in time")
+        .expect("auth_required event");
+    assert_eq!(first["type"], "auth_required", "{first}");
+
+    assert_stop_closes_with_1001(&started, &mut client).await;
+}
+
+/// The same through the real `/terminal/ws` upgrade handler (its shutdown
+/// lease, `serve_socket` and the host's drain), with `/ws` open alongside.
+#[tokio::test]
+async fn stop_with_an_open_terminal_socket_sends_close_1001() {
+    let started = start_host().await;
+    let mut terminal = RawWsClient::connect(started.addr, "/terminal/ws").await;
+    let mut relay = RawWsClient::connect(started.addr, "/ws").await;
+    relay
+        .read_json_within(Duration::from_secs(5))
+        .await
+        .expect("/ws auth_required")
+        .expect("/ws auth_required");
+
+    assert_stop_closes_with_1001(&started, &mut terminal).await;
+    // `/ws` got its close from the same stop (already delivered by now).
+    let close = relay
+        .close_code_within(Duration::from_millis(500))
+        .await
+        .expect("the /ws socket was not closed by the same stop");
+    assert_eq!(close, Some(1001));
 }

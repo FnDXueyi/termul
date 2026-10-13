@@ -107,15 +107,6 @@ Returns tracked git status summary for a terminal.
 ### `terminal_get_exit_code`
 Returns last known exit code for a terminal.
 
-### `terminal_update_orphan_detection`
-Updates orphan terminal lifecycle policies.
-
-### `terminal_add_renderer_ref`
-Registers a renderer/view attachment against a terminal.
-
-### `terminal_remove_renderer_ref`
-Removes a renderer/view attachment.
-
 ### `terminal_set_visibility`
 Updates visibility state to influence tracker polling behavior.
 
@@ -226,7 +217,7 @@ Client request envelope:
 { "id": "terminal-1", "type": "resize", "payload": { "terminalId": "...", "cols": 100, "rows": 30 } }
 ```
 
-Supported request types are `spawn`, `write`, `resize`, `kill`, `attach`, `get_cwd`, `get_git_branch`, `get_git_status`, `get_exit_code`, `add_renderer_ref`, `remove_renderer_ref`, `set_protected`, and `update_orphan_detection`. Replies use the existing `IpcResult` shape with the request `id`. Output frames are `{ "type": "data", "terminalId": "...", "data": [byte...] }`; event frames contain the transport-neutral exit/cwd/git/exit-code payload. `attach` sends bounded retained scrollback before subscribed live output.
+Supported request types are `spawn`, `write`, `resize`, `kill`, `attach`, `get_cwd`, `get_git_branch`, `get_git_status`, `get_exit_code`, `detach`, `rotate_claim`, `revoke_claim` and `list_preserved`. Replies use the existing `IpcResult` shape with the request `id`. Output frames are `{ "type": "data", "terminalId": "...", "data": [byte...] }`; event frames contain the transport-neutral exit/cwd/git/exit-code payload. `attach` sends bounded retained scrollback before subscribed live output.
 
 The service deliberately does not log request data, terminal bytes, environment values, or secrets. Authentication, authorization, TLS, and sandboxing are not provided; this endpoint is unsafe for public or untrusted network exposure.
 
@@ -540,6 +531,14 @@ A same-`turnId` resend is never `rate_limited`/`stale`. A different `turnId` whi
 
 Every accepted turn ends with exactly one durable, session-scoped `acp:prompt_complete {sessionId, turnId?, stopReason}`. `stopReason` is an ACP stop reason (`end_turn`, `cancelled`, …) or a host terminator: `error` (agent RPC failure, or the turn could not start after acceptance), `timeout` (idle/hard turn deadline), `crashed` (the agent connection closed with the turn active). The existing `acp:agent_error` is still emitted for `error`/`timeout`. A second terminator for the same `turnId` is dropped, and any terminator releases the turn claim. Host shutdown keeps its separate `interrupted` marker.
 
+### Agent and session endings
+
+Every ending of an agent is announced to every connected client, never only to the one that asked for it. A kill (`kill_agent`), an idle reap and a crash emit `acp:session_closed {agentId, sessionId, reason}` for each live session, then `acp:agent_disconnected {agentId, reason}` (a crash emits `acp:agent_crashed` and `acp:agent_error` first). `close_session` emits `acp:session_closed` with `reason: "closed"` and leaves the agent running. `reason` is one of `killed`, `reaped`, `crashed` or `closed`. Only process shutdown (`kill_all`) is silent.
+
+`close_session` during a running turn cancels the turn, waits for its terminator, then closes the session, so the turn still ends with exactly one `acp:prompt_complete` followed by `acp:session_closed`. If the agent does not confirm the cancel in time, the host drops the session locally, emits `acp:session_closed`, and replies with an error.
+
+The host reaps an agent only after `--agent-idle-window-secs` (default 1800) with no host-observed activity: no running turn, no unanswered approval, question or elicitation, no running agent-owned terminal and no reopen in flight. Connections, subscriptions and presence never keep an agent alive, and a disconnect never stops one.
+
 ### `acp_send_prompt` durability ordering
 
 Desktop prompt persistence mirrors the WS `send_prompt` handler so a transport failure can never erase an accepted user message. The command:
@@ -551,6 +550,38 @@ Desktop prompt persistence mirrors the WS `send_prompt` handler so a transport f
 5. awaits the durable flush (`WsRelaySink::flush_prompt_record`) after acceptance; a flush failure is logged with session context only (never prompt content) and does not unwind the accepted turn.
 
 A reopened chat materializes the user bubble (from the durable `user_prompt` record) and derives the title, even for agents (e.g. OpenCode) that do not reliably send a live `session_info_update` title.
+
+### One seq authority per session log
+
+`WsRelaySink` (`src-tauri/src/web/sink/`) numbers every record of a session log. Relay events and host-authored records (`local_title_generated` for a background title, `agent_switch`) take seqs from the same counter; the session writer never assigns one. Assign + durable enqueue + ring append + per-client enqueue run in one critical section, so a subscription never has a gap between its replay and its live events and receives each event it is given in seq order, once. Replay skips seqs that are absent from disk (events that are not durable); the cursor work that follows adds drop handling for slow peers. The critical section only queues the durable write: the disk write is asynchronous and never ordered before delivery. A replay or snapshot that reads from disk first waits for the writer queue (the writer barrier) and registers under the same lock; subscriptions without persistence read the in-memory log only. The shutdown `interrupted` marker takes its seq from the relay through `SeqAuthority`. A host record is durable and live under one seq (`record_host_event`); `local_title_generated` is relay-only (desktop keeps getting the `session_info_update` twin).
+
+### Log epochs and the replay cursor
+
+A replay cursor is `(logEpoch, lastSeq)`: `lastSeq` only means something against the log incarnation `logEpoch` names. A durable session's epoch is minted at creation and stored in its `metadata.json` (`logEpoch`; a legacy file gets one when the store is loaded, written back at that load), so it survives a host restart. It rotates on a restart when the session's seq frontier had run ahead of the disk: a live-only event (e.g. `permission_request`) takes a seq the JSONL never holds, the first one marks the metadata (`headAheadOfDurable`, host-internal), and a load that finds the mark mints a new epoch and clears it. A non-durable session's epoch is minted per process; a terminal's per spawn. `WS_PROTOCOL_VERSION` is 6 (3 introduced the epoch fields, 4 the `gap` and `heartbeat` frames, 5 the `watch` and `unwatch` requests and the `watch` frame, 6 the removal of the `projects_changed`, `chat_history_changed` and sid-less agent events).
+
+- `subscribe{sessionId, lastSeq?, logEpoch?}` replies `{sessionId, replayed, logEpoch, headSeq}`; `headSeq` is the allocated seq frontier read under the seq lock at registration. Events with `seq <= headSeq` are replay (the durable log may skip non-durable seqs); events above it are live. A different `logEpoch`, or `lastSeq > headSeq`, replies `stale` and registers nothing: the client installs `recover_session_snapshot` instead (server history mode) and continues from its `(logEpoch, watermark)`. In live-only mode there is no snapshot: the client drops the cursor and subscribes live, and reports the session as degraded. A client also never sends a nonzero cursor without its epoch: it takes the same snapshot path.
+- `recover_session_snapshot` replies `{sessionId, watermark, headSeq, logEpoch, events}`; `get_session_cursor` replies `{sessionId, watermark, logEpoch?, headSeq?}` (the epoch fields are absent for a session the host does not know). `get_session_payload` carries `metadata.logEpoch` (omitted when the session has none).
+- Terminal `attach{terminalId, claim, lastSeq, logEpoch?}`: a cursor from another spawn's epoch, or ahead of the log head, replays the whole retained log with `reset: true` (the `replay` frame and the attach reply both carry `reset` and `logEpoch`); the client clears the terminal first. Clients send the epoch they learned with the cursor; a nonzero cursor with no known epoch goes out as `logEpoch: ""`, which matches no epoch, so it replays everything with `reset`. The host applies the same rule itself: a nonzero cursor with no `logEpoch` is refused too. The desktop `terminal_attach` command takes the same optional `logEpoch`.
+
+### Bounded delivery, gap frames and heartbeat
+
+Every session subscription holds a bounded channel (256 items, plus room for the replay it started with) into its connection's outbound queue; the host never grows a queue for a slow peer. Fan-out does not wait:
+
+- A LOSSY event (`message_chunk`, `tool_call_update`, `commands_update`, `plan_update`) that finds the channel full is dropped. The host then sends one top-level `{"type":"gap","sid":"..."}` frame (no `seq`) as soon as the channel has drained, even if no further event follows. The client answers with `recover_session_snapshot`.
+- A reliable or idempotent event that finds the channel full is never dropped: the host closes the connection and the client resumes by `(logEpoch, lastSeq)`. The connection queue's own overflow tolerance (`ServerConfig::overflow_tolerance`, default 15) applies behind the channel.
+- The write loop sends `{"type":"heartbeat"}` every 10 s straight to the socket (no `seq`, never queued behind events). The client treats any host frame as proof of life; 2.5 heartbeat intervals without one start a probe, then a reconnect. The client's own `ping` request now only keeps the host's watchdog fed.
+- The client applies events with `seq <= headSeq` (replay, holes allowed) in order, and events above `headSeq` only when they are `last + 1`. Any other seq is not applied: the session installs a snapshot (one in flight per session) and resumes at its watermark. Events that overtake a `subscribe` or snapshot reply are held until the reply names the replay boundary; a `gap` held during a sync is always acted on, because the drop may lie past the snapshot's head. A session whose resubscribe keeps failing degrades alone (cursor retries, then snapshot, then `degradedRecoverySessions`); the reconnect never fails as a whole.
+
+### State watches
+
+The project list, the chat-history index and the agent roster are state, not session logs. They reach a client through `watch` instead of `seq = 0` broadcasts, which a client could miss, receive twice or never receive on a socket without a session subscription.
+
+- `watch{watch, scope?}` with `watch` one of `projects`, `chat_history`, `agents` (scope is always `""`). The host queues one top-level frame `{"type":"watch","watch","scope","revision":{"hostEpoch","n":1},"reset":true,"state":...}` and then replies `{watch, scope, revision}`, so the client holds the state when the reply arrives. `unwatch{watch, scope?}` is idempotent. View-only connections may watch. An unknown watch or scope is `unsupported`; a full connection queue is `rate_limited`.
+- Each change is a delta frame `{"type":"watch","watch","scope","revision":{"hostEpoch","n"},"delta":...}`. `n` counts per connection and watch, and a socket receives each watch once, whatever sessions it subscribed to. A second `watch` of the same watch replaces the subscription and restarts at `n = 1` with fresh state.
+- State and deltas: `projects` — state `{projects, defaultProjectId}` (what `GET /projects` returns), delta the replacement state; `chat_history` — state the persisted-session index (what `list_persisted_sessions` returns, empty without durable history), delta `{changed: [sessionId]}` (empty list: changed in bulk) which the client answers by refetching; `agents` — state the live agent summaries, delta `{event, payload}` for `agent_spawned`, `agent_crashed`, `agent_error` and `agent_disconnected` (a kill or an idle reap arrives as `agent_disconnected` with a `reason`; applying one is idempotent).
+- The host never waits to queue a delta. A delta that finds the connection queue full is dropped but keeps its `n`, so the next frame shows the hole. A `{"resync":true}` marker then takes the next `n` and is queued as soon as there is room, so a hole shows even when no later change comes.
+- The client applies a delta only when it is `n + 1` of the same `hostEpoch`. A skipped `n`, a different epoch (a new serve start), a `resync` marker or a reconnect makes it send `watch` again and rebuild from the fresh state.
+- `projects_changed` and `chat_history_changed` no longer exist, and the relay no longer sends `agent_spawned`, `agent_crashed`, `agent_error` or `agent_disconnected` without a session as `seq = 0` events. `browser_open_request`, `worktree_branch_renamed` and `fs_changed` keep their current delivery. The web client reads the watches: the project switcher rebuilds its list from `projects`, the chat-history sidebar installs the `chat_history` index and refetches on a delta, and the agent store reconciles its roster from `agents`.
 
 ## Notes
 

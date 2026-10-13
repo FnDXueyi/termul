@@ -181,6 +181,33 @@ describe('acp-store', () => {
     useAcpStore.setState(FRESH)
   })
 
+  it('applySessionIndexSnapshot installs a host index and discards an older loadSessionIndex response', async () => {
+    const { loadSessionIndex } = await import('@/lib/acp-history-persistence')
+    const entry = (id: string, title: string) => ({
+      id,
+      agentId: '',
+      title,
+      cwd: '/w',
+      projectId: 'p1',
+      createdAt: 1,
+      lastActivityAt: 2,
+      messageCount: 0,
+      status: 'closed' as const
+    })
+    // A refetch starts, then the watch state lands first; the older response
+    // must not replace it when it resolves.
+    const slow = deferred<ReturnType<typeof entry>[]>()
+    ;(loadSessionIndex as ReturnType<typeof vi.fn>).mockReturnValueOnce(slow.promise)
+    const refetch = useAcpStore.getState().loadSessionIndex()
+
+    await useAcpStore.getState().applySessionIndexSnapshot([entry('s-new', 'Fresh')])
+    expect(useAcpStore.getState().sessionIndex.map((e) => e.id)).toEqual(['s-new'])
+
+    slow.resolve([entry('s-old', 'Stale')])
+    await refetch
+    expect(useAcpStore.getState().sessionIndex.map((e) => e.id)).toEqual(['s-new'])
+  })
+
   it('openHistorySession loads the local transcript when no agent is connected (P5)', async () => {
     const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
     ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -211,6 +238,37 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().sessions['s-old'].status).toBe('closed')
     // Legacy payloads carry no toolCalls: degrade to an empty list, not a crash.
     expect(useAcpStore.getState().toolCalls['s-old']).toEqual([])
+  })
+
+  it('openHistorySession surfaces a definite spawn rejection instead of reopening on a dead owner (AD-5)', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Ghost', command: 'ghost', args: [], env: {} })
+    const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+    ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      metadata: {
+        id: 's-ghost',
+        agentId: 'agent-dead',
+        agentConfigId: 'cfg-1',
+        title: 'Ghost chat',
+        cwd: '/w',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 0,
+        status: 'closed'
+      },
+      messages: []
+    })
+    ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValue(
+      'ACP_AGENT_UNAVAILABLE: agent failed to start: program not found'
+    )
+
+    await expect(useAcpStore.getState().openHistorySession('s-ghost')).rejects.toThrow()
+    expect(useAcpStore.getState().sessions['s-ghost'].lastError).toContain('program not found')
+    const commands = (invoke as ReturnType<typeof vi.fn>).mock.calls.map(([cmd]) => cmd)
+    expect(commands.filter((cmd) => cmd === 'acp_spawn_agent')).toHaveLength(1)
+    expect(commands).not.toContain('acp_resume_session')
+    expect(commands).not.toContain('acp_load_session')
   })
 
   it('openHistorySession restores persisted tool calls alongside the transcript', async () => {
@@ -323,7 +381,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_resume_session', {
       agentId: 'agent-r',
       sessionId: 's-resume',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().toolCalls['s-resume']).toEqual([
       expect.objectContaining({ toolCallId: 'tc-9', seq: 3 })
@@ -508,7 +567,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_load_session', {
       agentId: 'agent-1',
       sessionId: 's-closed',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     // The local transcript stays visible while (and after) the load: an agent
     // that replays nothing must not blank the chat. A real replay replaces it
@@ -744,7 +804,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_resume_session', {
       agentId: 'agent-1',
       sessionId: 's-closed',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().messages['s-closed']).toHaveLength(1)
     expect(useAcpStore.getState().sessions['s-closed'].status).toBe('active')
@@ -1015,7 +1076,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_load_session', {
       agentId: 'fresh-agent',
       sessionId: 's-reopen',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().sessions['s-reopen'].agentId).toBe('fresh-agent')
     expect(useAcpStore.getState().sessions['s-reopen'].status).toBe('active')
@@ -1071,7 +1133,8 @@ describe('acp-store', () => {
     expect(invoke).toHaveBeenCalledWith('acp_load_session', {
       agentId: 'fresh-agent',
       sessionId: 's-cold-start',
-      cwd: '/w'
+      cwd: '/w',
+      commandId: expect.any(String)
     })
     expect(useAcpStore.getState().sessions['s-cold-start'].status).toBe('active')
   })

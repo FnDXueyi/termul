@@ -6,7 +6,7 @@ import { logFrontendError } from '@/lib/log-api'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
 import type { PaneNode } from '@/types/workspace.types'
-import { mergeNonPortableTabs } from './manifest-merge'
+import { mergeNonPortableTabs as mergeIntoTree } from './manifest-merge'
 import type { PersistedPaneNodeInput } from './types'
 
 function leafTabIds(paneId: string): string[] {
@@ -17,6 +17,19 @@ function leafTabIds(paneId: string): string[] {
 function leafActive(paneId: string): string | null | undefined {
   return getAllLeafPanes(useWorkspaceStore.getState().root).find((l) => l.id === paneId)
     ?.activeTabId
+}
+
+/** Merge over the store's tree and write the result back (the pure fn touches no store). */
+function mergeNonPortableTabs(
+  layout: PersistedPaneNodeInput | undefined,
+  projectId: string
+): number {
+  const { root, activePaneId } = useWorkspaceStore.getState()
+  const merged = mergeIntoTree(root, activePaneId, layout, projectId)
+  if (merged.added > 0) {
+    useWorkspaceStore.getState().loadProjectWorkspace(merged.root, activePaneId)
+  }
+  return merged.added
 }
 
 function seed(root: PaneNode, activePaneId: string): void {
@@ -45,6 +58,22 @@ const manifestTree: PaneNode = {
 }
 
 describe('mergeNonPortableTabs', () => {
+  it('is pure: returns the same root when nothing merges and never touches the store', () => {
+    const root = manifestTree
+    const layout: PersistedPaneNodeInput = {
+      type: 'leaf',
+      id: 'A',
+      activeTabId: null,
+      tabs: [{ type: 'git', id: 'git-/repo', cwd: '/repo' }]
+    }
+    const storeRoot = useWorkspaceStore.getState().root
+    const merged = mergeIntoTree(root, 'A', layout, 'p1')
+    expect(merged.added).toBe(1)
+    expect(merged.root).not.toBe(root)
+    expect(useWorkspaceStore.getState().root).toBe(storeRoot)
+    expect(mergeIntoTree(root, 'A', undefined, 'p1').root).toBe(root)
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     useBrowserSessionStore.setState({ tabs: new Map() })

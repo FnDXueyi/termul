@@ -422,10 +422,11 @@ impl RemoteServerState {
             event_log_capacity: ws_relay.event_log_capacity(),
             agent_idle_window_secs: crate::web::config::DEFAULT_AGENT_IDLE_WINDOW_SECS,
             overflow_tolerance: crate::web::config::DEFAULT_OVERFLOW_TOLERANCE,
-            receipt_retention_secs: crate::web::config::DEFAULT_RECEIPT_RETENTION_SECS,
+            max_terminals_per_project: crate::web::config::DEFAULT_MAX_TERMINALS_PER_PROJECT,
+            receipt_retention_secs: ws_relay.ledger().retention().as_secs(),
             // Unset until the device-state work picks values.
-            partition_gc_age_secs: None,
-            partition_byte_budget: None,
+            partition_gc_age_secs: crate::web::config::DEFAULT_PARTITION_GC_AGE_SECS,
+            partition_byte_budget: crate::web::config::DEFAULT_PARTITION_BYTE_BUDGET,
             deprecation_warnings: Vec::new(),
             project_root,
             // Desktop-hosted shared-live mode queries the live desktop
@@ -555,10 +556,12 @@ impl RemoteServerState {
                     // before we proceed (returns Err(Cancelled) — ignored).
                     let _ = handle.await;
                 }
-                // Signal drain, then await the serve task so Axum finishes
-                // flushing before the caller proceeds (e.g. app exit →
-                // `kill_all`). `Drop` would only signal; awaiting here enforces
-                // ordering.
+                // Signal drain, then await the serve task. It drains Axum and
+                // gives upgraded `/ws` + `/terminal/ws` sockets a bounded chance
+                // to close with `Close(1001)`; close delivery can time out, and
+                // tasks still running after the abort grace are logged. `Drop`
+                // would only signal; awaiting here enforces the serve task's
+                // bounded shutdown before the caller proceeds.
                 if let Some(tx) = server.shutdown_tx.take() {
                     let _ = tx.send(());
                 }

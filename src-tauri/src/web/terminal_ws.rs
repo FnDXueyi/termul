@@ -19,19 +19,21 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::pty::manager::{PtyManager, SpawnOptions};
 use crate::web::capabilities::{
     terminal_request_is_view, Capabilities, CapabilityPolicy, Carrier,
 };
+use crate::web::connection_runtime::{send_going_away, SocketLease};
 use crate::web::presence::PresenceGuard;
 use crate::web::ws::{validate_authenticate_handshake, AppState, ClientIdentity};
 
@@ -47,7 +49,14 @@ struct Request {
     type_: String,
     #[serde(default)]
     payload: Value,
+    /// The client-minted `commandId` (AD-5) of a ledgered request (`spawn`,
+    /// `write`, `kill`, `rotate_claim`, `revoke_claim`); absent = today's
+    /// behavior. See [`commands`].
+    #[serde(default)]
+    command_id: Option<String>,
 }
+
+mod commands;
 
 /// The peer address (`ConnectInfo`) feeds the connection's capabilities,
 /// resolved at `authenticate`; the router MUST be served with
@@ -57,20 +66,58 @@ pub async fn terminal_ws_upgrade(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| run(socket, state, peer))
+    // Joins the host shutdown before the handler returns, so the host's drain
+    // cannot miss a socket whose upgrade is still completing.
+    let lease = state.connections.shutdown.admit();
+    ws.on_upgrade(move |socket| serve_socket(lease, socket, state, peer))
 }
 
-async fn run(socket: WebSocket, state: AppState, peer: SocketAddr) {
-    let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::channel::<Message>(MAX_RECONNECT_FRAMES);
+/// Serve an upgraded socket under its shutdown `lease`: [`run`] until it ends,
+/// or until the host's drain bound forces an abort.
+async fn serve_socket<S>(lease: SocketLease, socket: S, state: AppState, peer: SocketAddr)
+where
+    S: Stream<Item = Result<Message, axum::Error>> + Sink<Message, Error = axum::Error> + Send + 'static,
+{
+    let stop = lease.stop_token();
+    lease.run(run(socket, state, peer, stop)).await;
+}
 
-    let write_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            if sink.send(message).await.is_err() {
-                break;
-            }
+/// The write half: forwards queued frames to the socket. A host stop jumps the
+/// queue (`Close(1001)`, bounded by the close drain timeout) and ends the
+/// loop, even while a send to a peer that stopped reading is pending.
+async fn write_loop<K>(mut sink: K, mut rx: mpsc::Receiver<Message>, stop: CancellationToken)
+where
+    K: Sink<Message, Error = axum::Error> + Unpin,
+{
+    loop {
+        let message = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            message = rx.recv() => match message {
+                Some(message) => message,
+                None => return,
+            },
+        };
+        let sent = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            sent = sink.send(message) => sent,
+        };
+        if sent.is_err() {
+            return;
         }
-    });
+    }
+    send_going_away(&mut sink).await;
+}
+
+async fn run<S>(socket: S, state: AppState, peer: SocketAddr, stop: CancellationToken)
+where
+    S: Stream<Item = Result<Message, axum::Error>> + Sink<Message, Error = axum::Error> + Send + 'static,
+{
+    let (sink, mut stream) = socket.split();
+    let (tx, rx) = mpsc::channel::<Message>(MAX_RECONNECT_FRAMES);
+
+    let write_task = tokio::spawn(write_loop(sink, rx, stop.clone()));
 
     // Per-connection authorization: terminal IDs this socket may operate on.
     // Shared with the event-forwarding task so it can see updates.
@@ -118,7 +165,7 @@ async fn run(socket: WebSocket, state: AppState, peer: SocketAddr) {
         }
     });
 
-    let mut ctx = ConnectionContext {
+    let ctx = ConnectionContext {
         authorized: authorized.clone(),
         attachments,
         // Every connection starts un-authed, gated or not; only a valid
@@ -132,8 +179,27 @@ async fn run(socket: WebSocket, state: AppState, peer: SocketAddr) {
         // #851: opaque per-connection id for the size-owner marker.
         client_id,
     };
+    // Owns the connection's context and event task so every way out of this
+    // function (the loop ending, or the future being dropped when the host's
+    // drain aborts a straggler) aborts the forwarders and releases each
+    // attachment exactly once.
+    let mut session = SessionTeardown {
+        ctx,
+        state: state.clone(),
+        event_task,
+    };
 
-    while let Some(frame) = stream.next().await {
+    loop {
+        // A host stop ends the loop even while a request is being served; the
+        // write half sends the `Close(1001)`.
+        let frame = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            frame = stream.next() => match frame {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
         let Ok(message) = frame else { break };
         let Message::Text(text) = message else {
             continue;
@@ -148,7 +214,12 @@ async fn run(socket: WebSocket, state: AppState, peer: SocketAddr) {
         let id = request.id.clone();
         let op_type = request.type_.clone();
         info!("[terminal-ws] request start type={op_type} id={id}");
-        match handle(request, &state, &tx, &mut ctx).await {
+        let handled = tokio::select! {
+            biased;
+            () = stop.cancelled() => break,
+            handled = handle(request, &state, &tx, &mut session.ctx) => handled,
+        };
+        match handled {
             Ok(data) => {
                 info!("[terminal-ws] request success type={op_type} id={id}");
                 let _ = send_json(&tx, json!({ "id": id, "success": true, "data": data })).await;
@@ -161,14 +232,29 @@ async fn run(socket: WebSocket, state: AppState, peer: SocketAddr) {
     }
 
     // Cleanup: abort all output forwarding tasks. PTYs are preserved.
-    event_task.abort();
-    ctx.release_all(&state);
+    drop(session);
     info!(
         "[terminal-ws] client disconnected; {} PTY(s) preserved",
-        ctx.authorized.read().len()
+        authorized.read().len()
     );
     drop(tx);
     let _ = write_task.await;
+}
+
+/// Teardown of one `/terminal/ws` connection, run on drop: aborts the lifecycle
+/// event task and ends every attachment (each releases its `web_attachments`
+/// count exactly once). PTYs themselves are preserved.
+struct SessionTeardown {
+    ctx: ConnectionContext,
+    state: AppState,
+    event_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SessionTeardown {
+    fn drop(&mut self) {
+        self.event_task.abort();
+        self.ctx.release_all(&self.state);
+    }
 }
 
 /// A live output-forwarding attachment: the forwarder task plus the one-shot
@@ -312,7 +398,7 @@ async fn handle(
     let gate = connection_gate(ctx.authed, request.type_.as_str());
     // Required-capability check before any handler arm: a view-only
     // connection may attach/read but never mutate (spawn, write, resize,
-    // kill, claims, renderer refs, protection, orphan detection).
+    // kill, claims).
     if gate == ConnectionGate::Allow
         && !ctx.capabilities.write
         && !terminal_request_is_view(request.type_.as_str())
@@ -373,66 +459,8 @@ async fn handle(
             Ok(json!({}))
         }
         ConnectionGate::Allow => match request.type_.as_str() {
-            "spawn" => {
-                let options: SpawnOptions = serde_json::from_value(request.payload)
-                    .map_err(|e| ("VALIDATION_ERROR", e.to_string()))?;
-                // Require project_id so the terminal is scoped — do not default
-                // to a literal that any client can target.
-                if options
-                    .project_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .is_none()
-                {
-                    return Err((
-                        "VALIDATION_ERROR",
-                        "spawn requires a non-empty projectId".to_string(),
-                    ));
-                }
-                info!(
-                    "[terminal-ws] spawn requested project_id={}",
-                    options.project_id.as_deref().unwrap_or("?")
-                );
-                // CAP-3: spawn is the only issuance path. The reply carries the
-                // flattened info + claim (same camelCase shape as desktop).
-                let spawned = state
-                    .pty
-                    .spawn(options, None)
-                    .await
-                    .map_err(|e| ("SPAWN_FAILED", e))?;
-                ctx.authorize(&spawned.info.id);
-                // #851b: a web spawn IS a web listing — stamp it so the
-                // web-listed reaper window starts rolling for this terminal.
-                if let Some(instance) = state.pty.get(&spawned.info.id) {
-                    instance.mark_web_listed();
-                }
-                info!(
-                    "[terminal-ws] spawn success terminal_id={}",
-                    spawned.info.id
-                );
-                serde_json::to_value(spawned).map_err(|e| ("SPAWN_FAILED", e.to_string()))
-            }
-            "write" => {
-                let terminal_id = string_field(&request.payload, "terminalId")?;
-                if !ctx.is_authorized(terminal_id) {
-                    return Err((
-                        "UNAUTHORIZED",
-                        format!("Not authorized for terminal {terminal_id}"),
-                    ));
-                }
-                let data = string_field(&request.payload, "data")?;
-                // #851 "single size owner": the device that last typed is
-                // the size owner — record it before the write.
-                if let Some(instance) = state.pty.get(terminal_id) {
-                    instance.note_web_size_owner(&ctx.client_id);
-                }
-                state
-                    .pty
-                    .write(terminal_id, data)
-                    .await
-                    .map(|_| Value::Null)
-                    .map_err(|e| ("WRITE_FAILED", e))
-            }
+            "spawn" => commands::spawn(&request, state, ctx).await,
+            "write" => commands::write(&request, state, ctx).await,
             "resize" => {
                 let terminal_id = string_field(&request.payload, "terminalId")?;
                 if !ctx.is_authorized(terminal_id) {
@@ -453,39 +481,7 @@ async fn handle(
                     .map(|_| Value::Null)
                     .map_err(|e| ("RESIZE_FAILED", e))
             }
-            "kill" => {
-                let terminal_id = string_field(&request.payload, "terminalId")?;
-                // CWE-862: authorization FIRST — a connection may only kill a
-                // terminal it spawned or verifiably attached to. The check runs
-                // BEFORE any existence check or force_kill and collapses to the
-                // single generic UNAUTHORIZED, so a client holding only the shared
-                // web token can neither terminate another connection's PTY nor
-                // distinguish "terminal exists but not yours" from "unknown id".
-                if !ctx.is_authorized(terminal_id) {
-                    return Err(unauthorized_error(terminal_id));
-                }
-                // Idempotent kill for an AUTHORIZED terminal whose PTY is already
-                // gone (reaped/exited on its own): treat as success so closing a
-                // tab over a dead PTY doesn't leave an uncloseable tab. A repeat
-                // kill after a successful kill is NOT idempotent — the first kill
-                // detached the terminal, so the retry takes the generic
-                // UNAUTHORIZED branch above like any other unauthorized id.
-                if state.pty.get(terminal_id).is_none() {
-                    ctx.detach(terminal_id, state);
-                    return Ok(Value::Null);
-                }
-                // Force-kill: bypass the desktop is_hidden deferral so web close
-                // actually terminates the process. Desktop behavior is unchanged.
-                state
-                    .pty
-                    .force_kill(terminal_id)
-                    .await
-                    .map(|_| {
-                        ctx.detach(terminal_id, state);
-                        Value::Null
-                    })
-                    .map_err(|e| ("KILL_FAILED", e))
-            }
+            "kill" => commands::kill(&request, state, ctx).await,
             "attach" => {
                 let terminal_id = string_field(&request.payload, "terminalId")?.to_string();
                 // CAP-3: verification is the gate and runs BEFORE any replay; every
@@ -496,6 +492,7 @@ async fn handle(
                 // invalid claim" collapses into the one generic error).
                 let claim = request.payload["claim"].as_str().unwrap_or("");
                 let last_seq = request.payload["lastSeq"].as_u64().unwrap_or(0);
+                let log_epoch = request.payload["logEpoch"].as_str();
 
                 // Capture the generation BEFORE verifying (TOCTOU-safe ordering,
                 // same as the desktop command): captured-first means a rotate/
@@ -540,9 +537,10 @@ async fn handle(
                 if let Some(previous) = ctx.attachments.remove(&terminal_id) {
                     previous.end(&state.pty, &terminal_id);
                 }
-                instance.mark_web_listed();
-                // Sequenced replay: only unseen chunks, with gap detection.
-                let replay = instance.subscribe_from(last_seq);
+                // Sequenced replay: only unseen chunks, with gap detection; a cursor
+                // from another epoch or ahead of the head replays from the start
+                // with `reset`.
+                let replay = instance.subscribe_from(last_seq, log_epoch);
                 let attach_result = state.pty.build_attach_result(&instance, &replay);
                 let snapshot = state.terminal_events.snapshot(&terminal_id);
 
@@ -571,6 +569,8 @@ async fn handle(
                         "terminalId": terminal_id,
                         "chunks": chunk_payloads,
                         "gap": replay.gap,
+                        "reset": replay.reset,
+                        "logEpoch": replay.log_epoch,
                         "latestSeq": replay.latest_seq,
                         "snapshot": serde_json::to_value(&snapshot).unwrap_or(json!({}))
                     }),
@@ -651,47 +651,8 @@ async fn handle(
                 // desktop `terminal_attach` response (no claim key, ever).
                 serde_json::to_value(attach_result).map_err(|e| ("NETWORK_ERROR", e.to_string()))
             }
-            "rotate_claim" => {
-                // CAP-3: possession of the current credential yields a fresh one
-                // and atomically invalidates the old. Any failure — including a
-                // missing/empty claim — is the same generic UNAUTHORIZED as attach
-                // (missing claims flow through verification, never a shape error).
-                let terminal_id = string_field(&request.payload, "terminalId")?.to_string();
-                let claim = request.payload["claim"].as_str().unwrap_or("");
-                let rotated = state
-                    .pty
-                    .rotate_claim(&terminal_id, claim)
-                    .map_err(|_| unauthorized_error(&terminal_id))?;
-                // Teardown (amendment R1): the invalidated holder loses the output
-                // stream (attachment task detached) AND write/resize access
-                // (removed from the authorized set). Holders on OTHER connections
-                // are severed by the claim-generation check inside their
-                // attachment tasks. The PTY keeps running.
-                ctx.detach(&terminal_id, state);
-                info!("[terminal-ws] claim rotated terminal_id={terminal_id}");
-                serde_json::to_value(crate::pty::RotatedClaim { claim: rotated })
-                    .map_err(|e| ("NETWORK_ERROR", e.to_string()))
-            }
-            "revoke_claim" => {
-                // CAP-3: revocation invalidates the credential; the PTY survives
-                // until explicit kill/release/expiry/shutdown. Any failure —
-                // including a missing/empty claim — is the same generic
-                // UNAUTHORIZED as attach.
-                let terminal_id = string_field(&request.payload, "terminalId")?.to_string();
-                let claim = request.payload["claim"].as_str().unwrap_or("");
-                state
-                    .pty
-                    .revoke_claim(&terminal_id, claim)
-                    .map_err(|_| unauthorized_error(&terminal_id))?;
-                // Teardown (amendment R1): same severing as rotate — the revoked
-                // holder is a credential-less client and receives no further
-                // metadata or output; other connections are severed by the
-                // generation check in their attachment tasks. The PTY keeps
-                // running.
-                ctx.detach(&terminal_id, state);
-                info!("[terminal-ws] claim revoked terminal_id={terminal_id}");
-                Ok(Value::Null)
-            }
+            "rotate_claim" => commands::rotate_claim(&request, state, ctx).await,
+            "revoke_claim" => commands::revoke_claim(&request, state, ctx).await,
             "detach" => {
                 let terminal_id = string_field(&request.payload, "terminalId")?;
                 ctx.detach(terminal_id, state);
@@ -737,68 +698,6 @@ async fn handle(
                 }
                 Ok(json!(state.exit_code_tracker.get_exit_code(terminal_id)))
             }
-            "add_renderer_ref" => {
-                let terminal_id = string_field(&request.payload, "terminalId")?;
-                if !ctx.is_authorized(terminal_id) {
-                    return Err((
-                        "UNAUTHORIZED",
-                        format!("Not authorized for terminal {terminal_id}"),
-                    ));
-                }
-                state
-                    .pty
-                    .add_renderer_ref(terminal_id, string_field(&request.payload, "rendererId")?)
-                    .map(|_| Value::Null)
-                    .map_err(|e| ("TERMINAL_NOT_FOUND", e))
-            }
-            "remove_renderer_ref" => {
-                let terminal_id = string_field(&request.payload, "terminalId")?;
-                if !ctx.is_authorized(terminal_id) {
-                    return Err((
-                        "UNAUTHORIZED",
-                        format!("Not authorized for terminal {terminal_id}"),
-                    ));
-                }
-                state
-                    .pty
-                    .remove_renderer_ref(terminal_id, string_field(&request.payload, "rendererId")?)
-                    .map(|_| Value::Null)
-                    .map_err(|e| ("TERMINAL_NOT_FOUND", e))
-            }
-            "set_protected" => {
-                let terminal_id = string_field(&request.payload, "terminalId")?;
-                if !ctx.is_authorized(terminal_id) {
-                    return Err((
-                        "UNAUTHORIZED",
-                        format!("Not authorized for terminal {terminal_id}"),
-                    ));
-                }
-                let protected = request.payload["protected"].as_bool().unwrap_or(true);
-                state.pty.set_protected(terminal_id, protected);
-                Ok(Value::Null)
-            }
-            "update_orphan_detection" => {
-                // Global lifecycle setting. Accepted on any AUTHED connection —
-                // including one with zero attached terminals — because the web
-                // auth token (the connection gate) is the trust boundary for the
-                // deployment posture this op exists in: the settings loader
-                // pushes it at boot, before the first terminal attaches (QA
-                // round 2: the push was previously refused until ≥1 authorized
-                // terminal existed, so orphan-detection settings never applied).
-                // Pre-auth connections are already refused with the single
-                // generic UNAUTHORIZED by `connection_gate` before this arm.
-                let enabled = request.payload["enabled"].as_bool().unwrap_or(true);
-                let timeout = request.payload["timeout"].as_u64();
-                state
-                    .pty
-                    .update_orphan_detection_settings(enabled, timeout)
-                    .await;
-                info!(
-                    "[terminal-ws] orphan detection updated enabled={enabled} timeout_ms={:?}",
-                    timeout
-                );
-                Ok(Value::Null)
-            }
             "list_preserved" => {
                 // Cross-reload reattach (QA round 2, spec story 5): an AUTHED
                 // connection asks which PTYs the host still preserves for a
@@ -821,12 +720,6 @@ async fn handle(
                 let entries: Vec<Value> = preserved
                     .into_iter()
                     .map(|entry| {
-                        // #851b: a listing IS a web listing — stamp every
-                        // returned terminal so the web-listed reaper window
-                        // restarts while ANY client still sees it.
-                        if let Some(instance) = state.pty.get(&entry.info.id) {
-                            instance.mark_web_listed();
-                        }
                         // #851a: every entry now carries ownership info —
                         // `hasLiveAttachment` tells the renderer another
                         // device already holds a live attachment, and the
@@ -922,5 +815,7 @@ async fn send_error(
     .await
 }
 
+#[cfg(test)]
+mod command_tests;
 #[cfg(test)]
 mod tests;

@@ -749,9 +749,10 @@ export function dropRecordKey<T>(
  * calls (`set_mode` / `set_config_option` / `set_model`) and `startChat`
  * promotion at a session whose agent may already be gone — the backend
  * answers `unknown agent`. Every session/agent teardown must drop its slots:
- * renderer-initiated kills emit no `session_closed`/`agent_disconnected`
- * events (intentional kills are silent), so `killAgent`/`closeSession` clean
- * up here just like the event handlers do.
+ * a renderer-initiated kill clears its own state here without waiting for the
+ * host's `session_closed`/`agent_disconnected`, so `killAgent`/`closeSession`
+ * clean up just like the event handlers do and the result never depends on
+ * event order.
  */
 export function dropPreparedSlots(
   prepared: Record<string, SessionId>,
@@ -959,7 +960,7 @@ export function normalizeIndexTitle(title: string): string {
 /**
  * CAP-2: history is host-owned. Refresh the desktop sidebar from the host
  * index after session lifecycle events — browser-origin sessions never flow
- * through `createSession`, and the host's `chat_history_changed` broadcast
+ * through `createSession`, and the host's `chat_history` watch
  * reaches WS clients only, not the desktop renderer. Skipped on the WS
  * transport (its sidebar refetches from the negotiated push).
  */

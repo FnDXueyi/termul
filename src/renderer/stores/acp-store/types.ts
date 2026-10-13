@@ -3,7 +3,6 @@
  * (spec-04 PR A). Pure declarations only: no store logic lives here.
  */
 
-import type { SwitchProjectReply } from '@shared/types/web-projects.types'
 import type { PendingLauncherOptions } from '@/components/agents/pending-launcher-options'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type {
@@ -59,7 +58,11 @@ import type { StoredMcpServer } from '@/lib/acp-mcp-persistence'
 import type { TurnEndNotice } from '@/lib/agent-chat-notify'
 import type { RegistryAgent } from '@/lib/agents/acp-registry'
 import type { PrepareChatError } from '@/lib/agents/acp-spawn-errors'
+import type { CommandState } from '@/lib/command-engine'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
+
+/** A prompt command's state while the chat waits to confirm it (AD-6). */
+export type PromptCommandState = CommandState
 
 export type AgentStatus = 'idle' | 'spawning' | 'connected' | 'error'
 export type SessionStatus = 'initializing' | 'active' | 'error' | 'closed'
@@ -264,17 +267,6 @@ export interface PendingPermission {
   toolCall: unknown
 }
 
-/**
- * A permission the server denied because this device disconnected (L-09). The
- * server emits no event for it, so the store infers it: a request that was
- * pending at a transport loss and later left `pendingPermissions` without the
- * user answering. `tool` is the request's tool title for the notice copy.
- */
-export interface PermissionDenialNotice {
-  requestId: string
-  tool: string
-}
-
 /** A pending structured question (issue #411), keyed by `questionId`. */
 export interface PendingQuestion {
   questionId: string
@@ -459,12 +451,6 @@ export interface AcpState {
   pendingPermissions: Record<string, PendingPermission> // P3 renders, keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
-  /**
-   * Per-session notice that a permission was denied by a disconnect (see
-   * `PermissionDenialNotice`). Set by `attachPermissionDenialTracking`; cleared
-   * when the session's next turn starts or the session goes away.
-   */
-  permissionDenialNotices: Record<SessionId, PermissionDenialNotice>
   /** Pending user prompts keyed by session (sent FIFO when the turn ends). */
   promptQueues: Record<SessionId, QueuedPrompt[]>
   /**
@@ -475,11 +461,13 @@ export interface AcpState {
   /** Sessions whose auto-flush is suppressed during cancel+send-now. */
   suppressQueueFlush: Record<SessionId, true>
   /**
-   * AD-6: sessions whose in-flight prompt command lost its reply to a
-   * transport drop (outcome unknown). The chat shows a non-error "Waiting to
-   * confirm" state while the same `turnId` is resent; never a failure.
+   * AD-6: the command state of sessions whose in-flight prompt command lost
+   * its reply to a transport drop (`pending-reconcile`). The chat shows a
+   * non-error "Waiting to confirm" state while the same `turnId` is resent —
+   * or "outcome unknown — check" when the host no longer knows the outcome;
+   * never a failure. Absent once the command resolves.
    */
-  pendingPromptReconcile: Record<SessionId, true>
+  promptCommandStates: Record<SessionId, PromptCommandState>
 
   /**
    * Story 5.3 (AC3): WS transport-level reconnect flag. True while the WS
@@ -490,18 +478,8 @@ export interface AcpState {
    * (which fires when `openHistorySession` is in flight — both can show).
    */
   transportReconnecting: boolean
-  /** Sessions recovered live-only after stale because no server snapshot exists. */
+  /** Sessions whose stream could not be fully re-synced: recovered live-only (no server snapshot exists) or resubscribe retries ran out. */
   degradedRecoverySessions: Record<SessionId, true>
-  /** Target project waiting for the current turn to finish, if any. */
-  queuedProjectSwitchId: string | null
-  /** Target project whose switch just failed (transient inline indicator). */
-  failedProjectSwitchId: string | null
-  /**
-   * Target project of a `switchProject` call that is awaiting the transport.
-   * Null otherwise. The only store-visible signal for an in-flight switch;
-   * the mobile shell announcer derives "Switching to {project}…" from it.
-   */
-  switchingProjectId: string | null
 
   // Actions — lifecycle
   spawnAgent: (config: Parameters<typeof acpApi.spawnAgent>[0]) => Promise<AgentId>
@@ -555,8 +533,6 @@ export interface AcpState {
   ) => Promise<SessionId>
   closeSession: (sessionId: SessionId) => Promise<void>
   setActiveSession: (sessionId: SessionId | null) => void
-  switchProject: (projectId: string) => Promise<SwitchProjectReply>
-  setFailedProjectSwitch: (projectId: string | null) => void
 
   // Actions — configured agents (P4)
   loadAgentConfigs: () => Promise<void>
@@ -693,6 +669,11 @@ export interface AcpState {
 
   // Actions — chat history (P5)
   loadSessionIndex: () => Promise<void>
+  /**
+   * Merge a host-pushed full index (the `chat_history` watch state) into the
+   * local projection, with the same stale-response guard as `loadSessionIndex`.
+   */
+  applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
   openHistorySession: (id: string) => Promise<void>
   /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
    * `openHistorySessionInner`'s transcript-install + resume but skips
@@ -812,6 +793,11 @@ export interface AcpState {
     options?: { skipUserAppend?: boolean; displayBlocks?: ContentBlock[] }
   ) => Promise<void>
   cancelPrompt: (sessionId: SessionId) => Promise<void>
+  /**
+   * AD-6 manual re-check of a prompt waiting to confirm: resends the SAME turn
+   * id now (the only way out of an `outcome_unknown` hold besides Stop).
+   */
+  recheckPromptCommand: (sessionId: SessionId) => void
   removeQueuedPrompt: (sessionId: SessionId, queueId: string) => void
   /** Cancel the active turn if needed, then send a queued prompt immediately. */
   sendQueuedPromptNow: (sessionId: SessionId, queueId: string) => Promise<void>

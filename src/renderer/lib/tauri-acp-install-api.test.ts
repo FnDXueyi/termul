@@ -28,7 +28,8 @@ describe('createTauriAcpInstallApi', () => {
     const result = await api.installAgent('opencode')
 
     expect(invokeMock).toHaveBeenCalledWith('acp_install_agent', {
-      request: { agentId: 'opencode' }
+      request: { agentId: 'opencode' },
+      commandId: expect.stringMatching(/^[A-Za-z0-9_-]{1,128}$/)
     })
     expect(result.success).toBe(true)
     expect(result.data).toEqual(outcome)
@@ -57,5 +58,14 @@ describe('createTauriAcpInstallApi', () => {
     expect(result.success).toBe(false)
     expect(result.code).toBe('INVOKE_ERROR')
     expect(result.error).toContain('IPC panic')
+  })
+
+  it('installAgent reports a failure, not an empty success, when the host only knows the install ran', async () => {
+    invokeMock.mockRejectedValueOnce('command_accepted: the command ran')
+
+    const api = createTauriAcpInstallApi()
+    const result = await api.installAgent('opencode')
+
+    expect(result.success).toBe(false)
   })
 })

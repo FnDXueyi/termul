@@ -284,6 +284,97 @@ describe('WebTerminalClient visibility-triggered reconnect (AFK recovery)', () =
     vi.useRealTimers()
   })
 
+  it('an explicit cursor goes out with the epoch the caller names, or as untrusted without one', async () => {
+    const client = new WebTerminalClient(
+      'ws://test/terminal/ws',
+      FakeWebSocket as unknown as typeof WebSocket
+    )
+    const internals = client as unknown as ClientInternals
+    await client.connect()
+
+    await client.attachWithCursor('t1', 'lease-1', 40, 'epoch-caller')
+    expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
+      terminalId: 't1',
+      claim: 'lease-1',
+      lastSeq: 40,
+      logEpoch: 'epoch-caller'
+    })
+
+    // No epoch known for a nonzero cursor: '' matches no real epoch, so the
+    // host replays everything with `reset` instead of trusting the cursor.
+    await client.attachWithCursor('t2', 'lease-2', 40)
+    expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
+      terminalId: 't2',
+      claim: 'lease-2',
+      lastSeq: 40,
+      logEpoch: ''
+    })
+
+    // A zero cursor needs no epoch.
+    await client.attachWithCursor('t3', 'lease-3', 0)
+    expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
+      terminalId: 't3',
+      claim: 'lease-3',
+      lastSeq: 0
+    })
+    client.dispose()
+  })
+
+  it('re-attaches with the log epoch a replay frame set, alongside the cursor', async () => {
+    vi.useFakeTimers()
+    const client = new WebTerminalClient(
+      'ws://test/terminal/ws',
+      FakeWebSocket as unknown as typeof WebSocket
+    )
+    const internals = client as unknown as ClientInternals
+    await client.connect()
+    await client.attach('t1', 'claim-t1')
+    const oldSocket = internals.socket
+    oldSocket.emit({
+      type: 'replay',
+      terminalId: 't1',
+      chunks: [],
+      gap: false,
+      reset: false,
+      logEpoch: 'epoch-t1',
+      latestSeq: 0,
+      snapshot: mockTerminalStateSnapshot()
+    })
+    oldSocket.emit({ type: 'data', terminalId: 't1', seq: 7, data: [65] })
+    await Promise.resolve()
+
+    dispatchVisibility('hidden')
+    await vi.advanceTimersByTimeAsync(31_000)
+    dispatchVisibility('visible')
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(600)
+    await Promise.resolve()
+
+    expect(internals.socket).not.toBe(oldSocket)
+    expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
+      terminalId: 't1',
+      claim: 'claim-t1',
+      lastSeq: 7,
+      logEpoch: 'epoch-t1'
+    })
+
+    // A cursor handed in by a caller never borrows the tracker's epoch, even
+    // when its value equals the tracker's own cursor.
+    await client.attachWithCursor('t1', 'claim-t1', 7)
+    expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
+      terminalId: 't1',
+      claim: 'claim-t1',
+      lastSeq: 7,
+      logEpoch: ''
+    })
+
+    if (internals.reconnectTimer) {
+      clearTimeout(internals.reconnectTimer)
+      internals.reconnectTimer = null
+    }
+    client.dispose()
+  })
+
   it('reconnects + re-attaches trackers with their lastSeq after a long hide', async () => {
     vi.useFakeTimers()
     const client = new WebTerminalClient(
@@ -315,7 +406,12 @@ describe('WebTerminalClient visibility-triggered reconnect (AFK recovery)', () =
     // cursor (CAP-3: reattach requires the lease credential).
     const attachReq = findSentRequest(internals.socket, 'attach')
     expect(attachReq).toBeDefined()
-    expect(attachReq?.payload).toEqual({ terminalId: 't1', claim: 'claim-t1', lastSeq: 7 })
+    expect(attachReq?.payload).toEqual({
+      terminalId: 't1',
+      claim: 'claim-t1',
+      lastSeq: 7,
+      logEpoch: ''
+    })
 
     if (internals.reconnectTimer) {
       clearTimeout(internals.reconnectTimer)
@@ -813,10 +909,12 @@ describe('WebTerminalClient frame handling & request lifecycle', () => {
       // the supplied claim + cursor to the server.
       const result = await client.attachWithCursor('t1', 'handoff-claim', 87)
       expect(result.success).toBe(true)
+      // A nonzero cursor with no known epoch is untrusted (`''` matches no epoch).
       expect(findSentRequest(sock, 'attach')?.payload).toEqual({
         terminalId: 't1',
         claim: 'handoff-claim',
-        lastSeq: 87
+        lastSeq: 87,
+        logEpoch: ''
       })
 
       // Server confirmed → the credential is adopted, terminal attachable.
@@ -837,7 +935,8 @@ describe('WebTerminalClient frame handling & request lifecycle', () => {
       expect(findSentRequest(internals.socket, 'attach')?.payload).toEqual({
         terminalId: 't1',
         claim: 'handoff-claim',
-        lastSeq: 90
+        lastSeq: 90,
+        logEpoch: ''
       })
 
       if (internals.reconnectTimer) {
@@ -1020,6 +1119,78 @@ describe('WebTerminalClient attach/replay snapshot dispatch', () => {
     })
 
     expect(branchCb).toHaveBeenCalledWith('t3', null)
+
+    client.dispose()
+  })
+
+  it('a gap replay with no chunks moves the cursor to the head, so a reconnect does not repeat the gap', async () => {
+    const client = new WebTerminalClient(
+      'ws://test/terminal/ws',
+      FakeWebSocket as unknown as typeof WebSocket
+    )
+    await client.connect()
+    const internals = client as unknown as ClientInternals
+    internals.trackers.set('t5', {
+      lastSeq: 3,
+      logEpoch: 'epoch-5',
+      exited: false,
+      refCount: 1,
+      disconnected: false
+    } as never)
+
+    // Eviction emptied the log: output after seq 3 is gone and the head is 9.
+    internals.socket.emit({
+      type: 'replay',
+      terminalId: 't5',
+      chunks: [],
+      gap: true,
+      reset: false,
+      logEpoch: 'epoch-5',
+      latestSeq: 9,
+      snapshot: mockTerminalStateSnapshot()
+    })
+
+    expect(internals.trackers.get('t5')?.lastSeq).toBe(9)
+    client.dispose()
+  })
+
+  it('clears the terminal before a reset replay and adopts the new log epoch + cursor', async () => {
+    const client = new WebTerminalClient(
+      'ws://test/terminal/ws',
+      FakeWebSocket as unknown as typeof WebSocket
+    )
+    await client.connect()
+    const written: number[][] = []
+    client.onData((_id, bytes) => written.push([...bytes]))
+    const internals = client as unknown as ClientInternals
+    // A cursor from a previous incarnation of the log.
+    const tracker = internals.trackers.get('t4') ?? { lastSeq: 0 }
+    internals.trackers.set('t4', {
+      ...tracker,
+      lastSeq: 90,
+      logEpoch: 'epoch-old',
+      exited: false,
+      refCount: 1,
+      disconnected: false
+    } as never)
+
+    internals.socket.emit({
+      type: 'replay',
+      terminalId: 't4',
+      chunks: [
+        { seq: 1, data: [0x61] },
+        { seq: 2, data: [0x62] }
+      ],
+      gap: false,
+      reset: true,
+      logEpoch: 'epoch-new',
+      latestSeq: 2,
+      snapshot: mockTerminalStateSnapshot()
+    })
+
+    // RIS first (discard what the old log rendered), then the whole replay.
+    expect(written).toEqual([[0x1b, 0x63], [0x61], [0x62]])
+    expect(internals.trackers.get('t4')).toMatchObject({ lastSeq: 2, logEpoch: 'epoch-new' })
 
     client.dispose()
   })
@@ -1749,6 +1920,50 @@ describe('WebTerminalClient offline input buffering (Story 10, F9/F10)', () => {
     client.dispose()
   })
 
+  it('a flush that got no answer is resent under the SAME commandId (never typed twice), newer input under a new one', async () => {
+    vi.useFakeTimers()
+    const { client, internals } = makeClient()
+    await client.connect()
+    await client.attach('t1', 'claim-t1')
+    internals.socket.close()
+    await client.write('t1', 'abc')
+
+    FakeWebSocket.holdWrite = true
+    await vi.advanceTimersByTimeAsync(600)
+    await vi.advanceTimersByTimeAsync(0)
+    const firstFrame = findSentRequest(internals.socket, 'write') as { commandId?: string }
+    expect(firstFrame.commandId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    // The channel dies mid-flush; a keystroke lands after the drop.
+    internals.socket.close()
+    await client.write('t1', 'Z')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(internals.inputBuffers.get('t1')).toBe('abcZ')
+
+    // Reconnect: the next flush resends 'abc' under the first id, then 'Z'.
+    FakeWebSocket.holdWrite = false
+    await vi.advanceTimersByTimeAsync(5_000)
+    await vi.advanceTimersByTimeAsync(0)
+    const writes = internals.socket.sent
+      .map(
+        (frame: string) =>
+          JSON.parse(frame) as { type: string; payload: { data?: string }; commandId?: string }
+      )
+      .filter((frame: { type: string }) => frame.type === 'write')
+    expect(writes.map((frame: { payload: { data?: string } }) => frame.payload.data)).toEqual([
+      'abc',
+      'Z'
+    ])
+    expect(writes[0].commandId).toBe(firstFrame.commandId)
+    expect(writes[1].commandId).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+    expect(writes[1].commandId).not.toBe(writes[0].commandId)
+
+    if (internals.reconnectTimer) {
+      clearTimeout(internals.reconnectTimer)
+      internals.reconnectTimer = null
+    }
+    client.dispose()
+  })
+
   it('drops the buffer when the terminal exits', async () => {
     vi.useFakeTimers()
     const { client, internals } = makeClient()
@@ -2174,5 +2389,201 @@ describe('WebTerminalClient session loss (server restart)', () => {
 
     off()
     client.dispose()
+  })
+})
+
+describe('ledgered terminal commands (AD-5)', () => {
+  /**
+   * Terminal carrier of the command ledger (AD-5): every spawn / kill / rotate /
+   * revoke frame carries a client-minted `commandId`, a lost spawn reply is
+   * resent under the SAME id and the replay's FRESH claim is the one attached
+   * with, and a rotate whose reply was lost recovers via `list_preserved`.
+   */
+
+  interface ScriptedFrame {
+    id: string
+    type: string
+    payload: Record<string, unknown>
+    commandId?: string
+  }
+
+  class ScriptedWS {
+    static OPEN = 1
+    static CONNECTING = 0
+    static CLOSING = 2
+    static CLOSED = 3
+    static instances: ScriptedWS[] = []
+    /** Per request type, the next replies (consumed in order); falls back to success. */
+    static replies = new Map<string, unknown[]>()
+
+    readyState = ScriptedWS.CONNECTING
+    onopen: ((ev: Event) => void) | null = null
+    onmessage: ((ev: MessageEvent) => void) | null = null
+    onerror: ((ev: Event) => void) | null = null
+    onclose: ((ev: CloseEvent) => void) | null = null
+    frames: ScriptedFrame[] = []
+
+    constructor(public url: string) {
+      ScriptedWS.instances.push(this)
+      queueMicrotask(() => {
+        this.readyState = ScriptedWS.OPEN
+        this.onopen?.(new Event('open'))
+      })
+    }
+
+    send(data: string): void {
+      const frame = JSON.parse(data) as ScriptedFrame
+      this.frames.push(frame)
+      const scripted = ScriptedWS.replies.get(frame.type)?.shift()
+      const reply: unknown =
+        scripted !== undefined
+          ? scripted
+          : frame.type === 'attach'
+            ? { success: true, data: mockAttachResult({ id: String(frame.payload.terminalId) }) }
+            : { success: true, data: undefined }
+      queueMicrotask(() =>
+        this.onmessage?.(
+          new MessageEvent('message', {
+            data: JSON.stringify({ id: frame.id, ...(reply as object) })
+          })
+        )
+      )
+    }
+
+    close(): void {
+      this.readyState = ScriptedWS.CLOSED
+      this.onclose?.(new CloseEvent('close'))
+    }
+  }
+
+  const framesOf = (type: string): ScriptedFrame[] =>
+    ScriptedWS.instances.flatMap((socket) => socket.frames).filter((frame) => frame.type === type)
+
+  const SPAWNED = mockSpawnedTerminal({ id: 'pty-1', cwd: '/w', pid: 7, claim: 'first-claim' })
+
+  async function loadApi() {
+    const { createWebTerminalApi } = await import('./web-terminal-api')
+    return createWebTerminalApi()
+  }
+
+  describe('web terminal commands carry a commandId', () => {
+    beforeEach(async () => {
+      vi.resetModules()
+      vi.stubGlobal('WebSocket', ScriptedWS)
+      ScriptedWS.instances = []
+      ScriptedWS.replies = new Map()
+      window.localStorage.clear()
+      const journal = await import('./command-journal')
+      journal.__clearCommandJournalForTesting()
+      const engine = await import('./command-engine')
+      engine.__resetCommandEngineForTesting()
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    })
+
+    it('spawn, rotate, revoke and kill each send a well-formed commandId; a direct write sends one per chunk', async () => {
+      ScriptedWS.replies.set('rotate_claim', [{ success: true, data: { claim: 'rotated' } }])
+      ScriptedWS.replies.set('spawn', [{ success: true, data: SPAWNED }])
+      const api = await loadApi()
+
+      const spawned = await api.spawn({ projectId: 'p1', cwd: '/w' })
+      expect(spawned.success).toBe(true)
+      await api.write('pty-1', 'a')
+      await api.write('pty-1', 'b')
+      await api.rotateClaim('pty-1', 'first-claim')
+      await api.revokeClaim('pty-1', 'rotated')
+      await api.kill('pty-1')
+
+      const writes = framesOf('write')
+      const ids = [
+        framesOf('spawn')[0],
+        framesOf('rotate_claim')[0],
+        writes[0],
+        writes[1],
+        framesOf('revoke_claim')[0],
+        framesOf('kill')[0]
+      ].map((frame) => frame?.commandId)
+      for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9_-]{1,128}$/)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+
+    it('a spawn answered "in progress" is resent with the SAME id and attaches with the replay\'s fresh claim', async () => {
+      vi.useFakeTimers()
+      ScriptedWS.replies.set('spawn', [
+        { success: true, data: { receipt: 'in_progress' } },
+        { success: true, data: { ...SPAWNED, claim: 'fresh-claim' } }
+      ])
+      const api = await loadApi()
+
+      const pending = api.spawn({ projectId: 'p1', cwd: '/w' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      const spawned = await pending
+
+      expect(spawned).toMatchObject({ success: true, data: { id: 'pty-1', claim: 'fresh-claim' } })
+      const spawns = framesOf('spawn')
+      expect(spawns).toHaveLength(2)
+      expect(spawns[1].commandId).toBe(spawns[0].commandId)
+      expect(framesOf('attach')[0].payload).toMatchObject({
+        terminalId: 'pty-1',
+        claim: 'fresh-claim'
+      })
+    })
+
+    it('a NEW spawn after an uncertain one is a new intent: it gets a different id (never the old PTY)', async () => {
+      vi.useFakeTimers()
+      ScriptedWS.replies.set(
+        'spawn',
+        Array.from({ length: 4 }, () => ({ success: true, data: { receipt: 'in_progress' } }))
+      )
+      const api = await loadApi()
+
+      const first = api.spawn({ projectId: 'p1', cwd: '/w' })
+      for (const delay of [1_000, 2_000, 4_000]) await vi.advanceTimersByTimeAsync(delay)
+      await expect(first).resolves.toMatchObject({ success: false, code: 'COMMAND_IN_PROGRESS' })
+      ScriptedWS.replies.set('spawn', [{ success: true, data: SPAWNED }])
+      await api.spawn({ projectId: 'p1', cwd: '/w' })
+
+      const ids = framesOf('spawn').map((frame) => frame.commandId)
+      expect(new Set(ids.slice(0, 4)).size).toBe(1)
+      expect(ids[4]).not.toBe(ids[0])
+    })
+
+    it('a spawn rejected with a definite code mints a NEW id on the next try', async () => {
+      ScriptedWS.replies.set('spawn', [
+        { success: false, error: 'no shell', code: 'SPAWN_FAILED' },
+        { success: false, error: 'no shell', code: 'SPAWN_FAILED' }
+      ])
+      const api = await loadApi()
+
+      await api.spawn({ projectId: 'p1', cwd: '/w' })
+      await api.spawn({ projectId: 'p1', cwd: '/w' })
+
+      const [first, second] = framesOf('spawn')
+      expect(second.commandId).not.toBe(first.commandId)
+    })
+
+    it('a rotate whose reply was lost (OUTCOME_UNKNOWN) recovers the fresh claim through list_preserved', async () => {
+      ScriptedWS.replies.set('spawn', [{ success: true, data: SPAWNED }])
+      ScriptedWS.replies.set('rotate_claim', [
+        { success: false, error: 'not retained', code: 'OUTCOME_UNKNOWN' }
+      ])
+      ScriptedWS.replies.set('list_preserved', [
+        {
+          success: true,
+          data: { projectId: 'p1', terminals: [{ id: 'pty-1', claim: 'recovered-claim' }] }
+        }
+      ])
+      const api = await loadApi()
+      await api.spawn({ projectId: 'p1', cwd: '/w' })
+
+      const rotated = await api.rotateClaim('pty-1', 'first-claim')
+
+      expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
+      expect(framesOf('list_preserved')[0].payload).toEqual({ projectId: 'p1' })
+      // A resend is not made: the host would only answer OUTCOME_UNKNOWN again.
+      expect(framesOf('rotate_claim')).toHaveLength(1)
+    })
   })
 })

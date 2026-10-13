@@ -6,8 +6,6 @@ use crate::path_validation;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -305,16 +303,10 @@ pub(crate) fn detect_rg_path() -> String {
     detected
 }
 
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-#[cfg(target_os = "windows")]
+/// Keep the rg sidecar off-screen (see [`crate::process_util::hide_console`]).
 pub(crate) fn configure_background_command(command: &mut Command) {
-    command.creation_flags(CREATE_NO_WINDOW);
+    crate::process_util::hide_console(command);
 }
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn configure_background_command(_command: &mut Command) {}
 
 /// Maximum allowed search query length to prevent resource exhaustion via
 /// oversized input passed to ripgrep or the file-name walker.

@@ -220,6 +220,10 @@ pub fn ws_requirement(request_type: &str) -> Requirement {
         // routes `fs_changed` events to this connection.
         | "watch_project"
         | "unwatch_project"
+        // The state watches (projects, chat history, agents) only route frames
+        // to this connection, like `subscribe`.
+        | "watch"
+        | "unwatch"
         | "list_persisted_sessions"
         | "open_persisted_session"
         | "get_session_payload"
@@ -259,7 +263,7 @@ pub fn ws_request_permitted(
 
 /// `/terminal/ws` request types a view-only connection may still send.
 /// Everything else mutates the host: spawn/write/resize/kill, claim rotation
-/// and revocation, renderer refs, protection, orphan detection — and
+/// and revocation — and
 /// `list_preserved`, which re-issues (replaces) the claim of every terminal
 /// without a live attachment, so a view-only peer could lock out its owner.
 /// A view-only connection therefore cannot obtain a claim to `attach` (claims

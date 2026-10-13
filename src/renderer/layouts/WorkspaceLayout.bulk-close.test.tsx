@@ -28,8 +28,9 @@ const {
   mockWaitForPendingSessionIndexWrite,
   mockFlushSessionHistory,
   mockToastError,
+  mockToastWarning,
   mockListen,
-  mockRequestCloseAgentChat,
+  mockCloseAgentChat,
   mockLogFrontendError,
   mockTerminalKill,
   confirmTerminalCloseRef,
@@ -112,8 +113,9 @@ const {
   mockWaitForPendingSessionIndexWrite: vi.fn(async () => undefined),
   mockFlushSessionHistory: vi.fn(async () => undefined),
   mockToastError: vi.fn(),
+  mockToastWarning: vi.fn(),
   mockListen: vi.fn(async () => vi.fn()),
-  mockRequestCloseAgentChat: vi.fn((_sessionId: string, closeTab: () => void) => closeTab()),
+  mockCloseAgentChat: vi.fn((_sessionId: string, closeTab: () => void) => closeTab()),
   mockLogFrontendError: vi.fn(async () => undefined),
   mockTerminalKill: vi.fn(async () => ({ success: true })),
   confirmTerminalCloseRef: { current: true },
@@ -256,7 +258,6 @@ vi.mock('@/stores/app-settings-store', () => ({
   useTerminalFontSize: () => 14,
   useUiZoomLevel: () => 1,
   useDefaultShell: () => 'bash',
-  useMaxTerminalsPerProject: () => 10,
   useConfirmTerminalClose: () => confirmTerminalCloseRef.current,
   useColorTheme: () => 'termul',
   useAppearanceMode: () => 'dark'
@@ -367,9 +368,8 @@ vi.mock('@/components/CommandHistoryModal', () => ({
   CommandHistoryModal: () => null
 }))
 
-vi.mock('@/hooks/use-agent-idle-shutdown', () => ({
-  useAgentIdleShutdown: vi.fn(),
-  requestCloseAgentChat: mockRequestCloseAgentChat
+vi.mock('@/lib/agent-chat-close', () => ({
+  closeAgentChat: mockCloseAgentChat
 }))
 
 vi.mock('@/lib/browser-api', () => ({
@@ -461,6 +461,7 @@ vi.mock('@/lib/api', () => ({
 vi.mock('sonner', () => ({
   toast: {
     error: mockToastError,
+    warning: mockToastWarning,
     success: vi.fn()
   }
 }))
@@ -540,7 +541,7 @@ describe('WorkspaceLayout aggregate bulk close', () => {
     mockEditorStoreState.saveAllDirty.mockResolvedValue(undefined)
     mockEditorStoreState.saveFile.mockResolvedValue(true)
     mockEditorStoreState.closeFileIfIdle.mockReturnValue(true)
-    mockRequestCloseAgentChat.mockImplementation((_s: string, closeTab: () => void) => closeTab())
+    mockCloseAgentChat.mockImplementation((_s: string, closeTab: () => void) => closeTab())
     mockTerminalKill.mockResolvedValue({ success: true })
     mockFlushPendingWrites.mockResolvedValue({ success: true, data: undefined })
     mockUpdatePanelVisibility.mockResolvedValue(undefined)
@@ -635,7 +636,7 @@ describe('WorkspaceLayout aggregate bulk close', () => {
 
     expect(mockBrowserSessionState.removeTab).toHaveBeenCalledWith('btab-1')
     expect(mockWorkspaceStoreState.removeTab).toHaveBeenCalledWith('browser-1')
-    expect(mockRequestCloseAgentChat).toHaveBeenCalledWith('session-1', expect.any(Function))
+    expect(mockCloseAgentChat).toHaveBeenCalledWith('session-1', expect.any(Function))
     expect(mockWorkspaceStoreState.removeTab).toHaveBeenCalledWith('ac-1')
   })
 
@@ -699,6 +700,39 @@ describe('WorkspaceLayout aggregate bulk close', () => {
     expect(mockWorkspaceStoreState.removeTab).toHaveBeenCalledWith('edit-/b.ts')
     expect(mockWorkspaceStoreState.removeTab).toHaveBeenCalledWith('edit-/c.ts')
     expect(mockWorkspaceStoreState.removeTab).toHaveBeenCalledWith('git-1')
+    expect(screen.queryByRole('dialog', { name: 'Close Tabs' })).not.toBeInTheDocument()
+  })
+
+  it('Save & Close on a draft-conflicted file reveals it and closes nothing', async () => {
+    mockEditorStoreState.openFiles = new Map([
+      [
+        '/a.ts',
+        {
+          isDirty: false,
+          draftConflict: { draftContent: 'd', draftSavedAt: 1 },
+          operationStatus: 'idle'
+        }
+      ],
+      ['/b.ts', { isDirty: true, operationStatus: 'idle' }]
+    ])
+    const tabs = [editorTab('/a.ts'), editorTab('/b.ts'), gitTab('git-1')]
+    seedTabs(...tabs)
+
+    renderLayout()
+    await waitFor(() => expect(paneRendererPropsRef.current?.onCloseTabs).toBeTypeOf('function'))
+    closeTabsNow(tabs)
+
+    expect(await screen.findByRole('dialog', { name: 'Close Tabs' })).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Save & Close' }))
+    })
+
+    expect(mockWorkspaceStoreState.setActiveTab).toHaveBeenCalledWith('pane-root', 'edit-/a.ts')
+    expect(mockToastWarning).toHaveBeenCalledWith('Resolve the draft conflict first')
+    expect(mockEditorStoreState.saveFile).not.toHaveBeenCalled()
+    expect(mockEditorStoreState.closeFileIfIdle).not.toHaveBeenCalled()
+    expect(mockWorkspaceStoreState.removeTab).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog', { name: 'Close Tabs' })).not.toBeInTheDocument()
   })
 

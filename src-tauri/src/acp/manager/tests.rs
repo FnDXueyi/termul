@@ -1,4 +1,5 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 use crate::acp::PersistedEventRecord;
 
 #[test]
@@ -96,7 +97,8 @@ async fn owns_session_queries_authoritative_agent_driver_state() {
             name: "test-agent".to_string(),
             config_id: None,
             join_handle: None,
-            killed: Arc::new(AtomicBool::new(false)),
+            exit: Default::default(),
+            stamp: SpawnStamp::default(),
         },
     );
     let requested = SessionId::new("owned-session");
@@ -133,7 +135,8 @@ fn list_agent_summaries_returns_identity_rich_entries() {
                 name: name.to_string(),
                 config_id: config_id.map(str::to_string),
                 join_handle: None,
-                killed: Arc::new(AtomicBool::new(false)),
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
             },
         );
     };
@@ -1436,9 +1439,16 @@ async fn protected_title_forwards_opencode_markers_without_title() {
         .await
         .unwrap();
     persistence
-        .append_local_title("sess-1", "Background title".to_string())
-        .await
+        .enqueue_event(PersistedEventRecord {
+            schema_version: crate::acp::session_persistence::SESSION_SCHEMA_VERSION,
+            session_id: "sess-1".to_string(),
+            seq: 1,
+            type_: "local_title_generated".to_string(),
+            recorded_at: crate::acp::session_persistence::now_millis(),
+            payload: serde_json::json!({"sessionId": "sess-1", "title": "Background title"}),
+        })
         .unwrap();
+    persistence.flush_session("sess-1").await.unwrap();
     assert_eq!(
         persistence.metadata("sess-1").unwrap().title_source,
         Some(crate::acp::session_persistence::TitleSource::BackgroundGenerated)
@@ -1777,17 +1787,12 @@ async fn record_agent_switch_rejects_blank_identity_fields_before_write() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// CAP-2 "one sequence authority" proof: after `record_agent_switch`
-/// completes (writer-assigned seq S committed + flushed), the relay's
-/// next `assign_and_append` reconciles against the durable frontier and
-/// assigns S+1 — and the durable record it enqueues at S+1 is ACCEPTED
-/// by the writer's fail-closed monotonic check (no collision, no
-/// rejection). This is the same invariant the existing sink.rs test
-/// (`relay_reconciles_cached_seq_with_durable_frontier_after_background_title`)
-/// pins for `record_local_title`; this test proves it for the switch
-/// marker, whose durable write also bypasses the relay.
+/// CAP-2 "one sequence authority" proof: the switch marker is numbered by the
+/// relay's allocator, so the durable record and the live event carry the SAME
+/// seq, a later relay event takes the next one, and a subscriber sees a
+/// contiguous run with no seq consumed by a non-durable twin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn record_agent_switch_then_relay_emit_never_collides_on_seq() {
+async fn record_agent_switch_shares_one_seq_with_the_live_event() {
     let (root, cwd) = temp_dir_with_cwd("switch-seq-authority");
     let persistence = SessionPersistence::open(root.join("sessions"))
         .await
@@ -1805,24 +1810,14 @@ async fn record_agent_switch_then_relay_emit_never_collides_on_seq() {
         Arc::clone(&persistence),
     ));
     let sinks: Vec<Arc<dyn EventSink>> = vec![relay.clone()];
+    let (_client, mut rx, _replay, _head) = relay.subscribe("sess-coll", None, None, &CancellationToken::new()).await;
+    let chunk = |text: &str| TestPayload {
+        agent_id: "a".to_string(),
+        session_id: "sess-coll".to_string(),
+        text: text.to_string(),
+    };
 
-    // 1. A relay emit first (seq 1, durable via assign_and_append).
-    events::fan_out(
-        &sinks,
-        Some("sess-coll"),
-        "acp:message_chunk",
-        &TestPayload {
-            agent_id: "a".to_string(),
-            session_id: "sess-coll".to_string(),
-            text: "first".to_string(),
-        },
-    );
-    persistence.flush_session("sess-coll").await.unwrap();
-    assert_eq!(persistence.last_seq("sess-coll").unwrap(), 1);
-
-    // 2. The switch marker writes DURABLY through the writer command
-    //    (bypassing the relay — seq 2). The relay's cached frontier is
-    //    still 1.
+    events::fan_out(&sinks, Some("sess-coll"), "acp:message_chunk", &chunk("first"));
     record_agent_switch(
         &persistence,
         &sinks,
@@ -1838,53 +1833,116 @@ async fn record_agent_switch_then_relay_emit_never_collides_on_seq() {
     )
     .await
     .unwrap();
-    assert_eq!(persistence.last_seq("sess-coll").unwrap(), 2);
-    // The switch's fan-out was live-only: still exactly ONE agent_switch
-    // durable record (seq 2), plus the seq-1 chunk.
-    let after_switch: Vec<PersistedEventRecord> = persistence.replay_after("sess-coll", 0).unwrap();
-    assert_eq!(after_switch.len(), 2);
-    assert_eq!(
-        after_switch
-            .iter()
-            .filter(|r| r.type_ == "agent_switch")
-            .count(),
-        1
-    );
-
-    // 3. A LATE durable event through the relay: the switch's live-only
-    //    fan-out already consumed relay seq 3 (assign_and_append stamps
-    //    EVERY session-scoped emit; `is_durable_event` drops it from the
-    //    durable queue), so the durable frontier is still 2. The late
-    //    emit reconciles max(cached=3, durable=2)+1 = 4 and enqueues at
-    //    seq 4 — ACCEPTED by the writer's monotonic check: no collision
-    //    with the switch's seq 2, no rejection.
-    events::fan_out(
-        &sinks,
-        Some("sess-coll"),
-        "acp:message_chunk",
-        &TestPayload {
-            agent_id: "a".to_string(),
-            session_id: "sess-coll".to_string(),
-            text: "late".to_string(),
-        },
-    );
+    events::fan_out(&sinks, Some("sess-coll"), "acp:message_chunk", &chunk("late"));
     persistence.flush_session("sess-coll").await.unwrap();
+
+    let mut live = Vec::new();
+    while let Ok(crate::web::StreamItem::Event(event)) = rx.try_recv() {
+        live.push((event.seq, event.type_));
+    }
     assert_eq!(
-        persistence.last_seq("sess-coll").unwrap(),
-        4,
-        "late durable event lands on a fresh seq (no collision with seq 2)"
+        live,
+        vec![
+            (1, "message_chunk".to_string()),
+            (2, "agent_switch".to_string()),
+            (3, "message_chunk".to_string()),
+        ]
     );
-    // The durable log is strictly monotonic; seq 3 was consumed by the
-    // switch's non-durable live event (expected — same as any
-    // non-durable session-scoped emit).
-    let durable: Vec<PersistedEventRecord> = persistence.replay_after("sess-coll", 0).unwrap();
-    let seqs: Vec<u64> = durable.iter().map(|r| r.seq).collect();
-    assert_eq!(seqs, vec![1, 2, 4]);
+    let durable: Vec<(u64, String)> = persistence
+        .replay_after("sess-coll", 0)
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.seq, record.type_))
+        .collect();
+    assert_eq!(durable, live, "durable log and live stream agree on every seq");
+
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The switch reaches a non-relay sink exactly once with the camelCase
+/// `AgentSwitchEvent` payload (the relay is not fanned a duplicate), and the
+/// durable log holds exactly ONE `agent_switch` even if a relay emit of
+/// `acp:agent_switch` follows (host records are appended only by
+/// `record_host_event`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_agent_switch_reaches_other_sinks_once_and_stays_one_durable_record() {
+    let (root, cwd) = temp_dir_with_cwd("switch-fanout");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-fan".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let relay = Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(&persistence),
+    ));
+    let capture = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![capture.clone(), relay.clone()];
+    let (_client, mut rx, _replay, _head) = relay.subscribe("sess-fan", None, None, &CancellationToken::new()).await;
+
+    record_agent_switch(
+        &persistence,
+        &sinks,
+        AgentId("runtime-1".to_string()),
+        "sess-fan".to_string(),
+        AgentSwitchRecord {
+            session_id: "sess-fan".to_string(),
+            from_config_id: "omp".to_string(),
+            to_config_id: "claude".to_string(),
+            new_session_id: "sess-fan-new".to_string(),
+            summary_text: "Handoff".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    // A stray relay emit of the same event is live-only, never a second record.
+    events::fan_out(
+        &[relay.clone() as Arc<dyn EventSink>],
+        Some("sess-fan"),
+        events::EVENT_AGENT_SWITCH,
+        &serde_json::json!({"sessionId": "sess-fan"}),
+    );
+    persistence.flush_session("sess-fan").await.unwrap();
+
+    {
+        let seen = capture.seen.lock();
+        assert_eq!(seen.len(), 1, "other sinks get the switch exactly once");
+        assert_eq!(seen[0].type_, "acp:agent_switch");
+        assert_eq!(seen[0].payload["agentId"], "runtime-1");
+        assert_eq!(seen[0].payload["fromConfigId"], "omp");
+        assert_eq!(seen[0].payload["toConfigId"], "claude");
+        assert_eq!(seen[0].payload["newSessionId"], "sess-fan-new");
+        assert_eq!(seen[0].payload["summaryText"], "Handoff");
+    }
+
+    let mut live_switches = Vec::new();
+    while let Ok(crate::web::StreamItem::Event(event)) = rx.try_recv() {
+        if event.type_ == "agent_switch" {
+            live_switches.push(event.seq);
+        }
+    }
     assert_eq!(
-        durable.iter().filter(|r| r.type_ == "agent_switch").count(),
+        live_switches,
+        vec![1, 2],
+        "relay: the record's live delivery (seq 1) plus the stray emit (seq 2), no duplicate of the record"
+    );
+    let durable = persistence.replay_after("sess-fan", 0).unwrap();
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|record| record.type_ == "agent_switch")
+            .count(),
         1,
-        "still exactly one durable switch marker"
+        "exactly one durable agent_switch record"
     );
+    assert_eq!(durable[0].seq, 1);
 
     persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
@@ -1915,27 +1973,23 @@ async fn record_agent_switch_writer_gone_surfaces_distinguishable_error() {
         .await
         .unwrap();
     assert!(reopened.metadata("sess-recovered").is_ok());
-    // The writer runtime is gone: the direct append surfaces SessionNotFound
-    // (the public observable for "catalog known, writer gone").
+    // The writer runtime is gone: the relay's host record surfaces
+    // SessionNotFound (the public observable for "catalog known, writer
+    // gone") and allocates nothing.
+    let relay = Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(&reopened),
+    ));
     assert!(matches!(
-        reopened
-            .append_agent_switch(
-                "sess-recovered",
-                AgentSwitchRecord {
-                    session_id: "sess-recovered".to_string(),
-                    from_config_id: "omp".to_string(),
-                    to_config_id: "claude".to_string(),
-                    new_session_id: "sess-new".to_string(),
-                    summary_text: "probe".to_string(),
-                }
-            )
-            .await,
+        relay.record_host_event("sess-recovered", "agent_switch", serde_json::json!({})),
         Err(SessionPersistenceError::SessionNotFound)
     ));
+    assert_eq!(relay.session_watermark("sess-recovered"), 0);
+    let sinks: Vec<Arc<dyn EventSink>> = vec![relay];
 
     let error = record_agent_switch(
         &reopened,
-        &[],
+        &sinks,
         AgentId::new(),
         "sess-recovered".to_string(),
         AgentSwitchRecord {
@@ -2075,7 +2129,8 @@ async fn load_session_rejected_when_other_agent_owns_session_mid_turn() {
             name: "test-agent".to_string(),
             config_id: None,
             join_handle: None,
-            killed: Arc::new(AtomicBool::new(false)),
+            exit: Default::default(),
+            stamp: SpawnStamp::default(),
         },
     );
 
@@ -2188,6 +2243,7 @@ async fn spawn_refused_after_kill_all_checked_starts_shutdown() {
             sample_config("test", "definitely-missing-agent-binary", &[]),
             false,
             vec![],
+            None,
         )
         .await
         .expect_err("spawn must be refused once process shutdown began");
@@ -2489,4 +2545,115 @@ async fn transport_closed_outcome_is_left_to_the_interrupted_marker_on_shutdown(
     assert!(!outcome_owned_by_process_shutdown(Some(&persistence), &ok));
     assert!(!outcome_owned_by_process_shutdown(None, &closed));
     let _ = std::fs::remove_dir_all(root);
+}
+
+mod spawn_error_cases {
+    use super::super::spawn_error::*;
+
+    #[test]
+    fn tagged_errors_round_trip_and_untagged_stay_unclassified() {
+        let unavailable = agent_unavailable("program not found");
+        assert_eq!(
+            classify_spawn_error(&unavailable),
+            Some((SpawnFailure::AgentUnavailable, "program not found"))
+        );
+        let invalid = invalid_agent_config("empty command");
+        assert_eq!(
+            classify_spawn_error(&invalid),
+            Some((SpawnFailure::InvalidAgentConfig, "empty command"))
+        );
+        assert_eq!(classify_spawn_error("agent initialize failed: eof"), None);
+        assert_eq!(classify_spawn_error("ACP_AGENT_UNAVAILABLEX: nope"), None);
+    }
+
+    #[test]
+    fn only_concrete_launch_refusals_are_definite() {
+        for detail in [
+            "Internal error: No such file or directory (os error 2)",
+            "program not found",
+            "Permission denied (os error 13)",
+            "Exec format error (os error 8)",
+            "The system cannot find the file specified. (os error 2)",
+            "Internal error: The system cannot find the path specified. (os error 3)",
+            "Access is denied. (os error 5)",
+            "%1 is not a valid Win32 application. (os error 193)",
+            "'ghost' is not recognized as an internal or external command",
+        ] {
+            assert!(is_launch_refusal(detail), "{detail}");
+        }
+        for detail in [
+            "failed to build runtime: out of threads",
+            "connection closed",
+            "Failed to open stdin",
+            "agent exited with status 1",
+        ] {
+            assert!(!is_launch_refusal(detail), "{detail}");
+        }
+    }
+}
+
+/// What the teardown announces follows the host's recorded intent: no intent
+/// is a crash, kill/reap carry their reason, process shutdown is silent.
+#[test]
+fn teardown_reason_follows_the_recorded_exit_intent() {
+    use super::exit::{announced_reason, ExitIntent, ExitSignal};
+    let signal = ExitSignal::default();
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Crashed)
+    );
+    signal.set(ExitIntent::Killed);
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Killed)
+    );
+    signal.set(ExitIntent::Reaped);
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Reaped)
+    );
+    signal.set(ExitIntent::Shutdown);
+    assert_eq!(announced_reason(signal.get()), None);
+}
+
+/// The wire form of the exit reason is the lowercase word the clients match on.
+#[test]
+fn exit_reason_serializes_to_the_wire_words() {
+    for (reason, word) in [
+        (AgentExitReason::Killed, "killed"),
+        (AgentExitReason::Reaped, "reaped"),
+        (AgentExitReason::Crashed, "crashed"),
+        (AgentExitReason::Closed, "closed"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), word);
+    }
+    let event = SessionClosedEvent {
+        agent_id: AgentId("a".to_string()),
+        session_id: SessionId::new("s"),
+        reason: AgentExitReason::Closed,
+    };
+    assert_eq!(serde_json::to_value(&event).unwrap()["reason"], "closed");
+}
+
+/// A close with no running turn proceeds at once; a turn that ends
+/// proceeds; a dropped waiter or a terminator that never comes is an error so
+/// the caller forces local cleanup instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn close_waits_for_the_turn_terminator_and_gives_up_after_the_bound() {
+    assert!(await_turn_terminator(None).await.is_ok());
+
+    let (done_tx, done_rx) = oneshot::channel();
+    done_tx.send(()).unwrap();
+    assert!(await_turn_terminator(Some(done_rx)).await.is_ok());
+
+    let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
+    drop(dropped_tx);
+    assert!(await_turn_terminator(Some(dropped_rx))
+        .await
+        .unwrap_err()
+        .contains("dropped"));
+
+    let (_never_tx, never_rx) = oneshot::channel::<()>();
+    let error = await_turn_terminator(Some(never_rx)).await.unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
 }

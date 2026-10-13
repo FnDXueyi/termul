@@ -73,6 +73,19 @@ export const authenticatedAgents = new Set<AgentId>()
  */
 const inFlightAuth = new Map<string, Promise<boolean>>()
 
+/**
+ * Provider usage-limit failures (`errorKind` from the Claude ACP adapter) end
+ * only the turn: the agent process stays alive and keeps the conversation, so
+ * they must not mark the session or agent 'error' (that triggers a reopen).
+ */
+const PROVIDER_LIMIT_ERROR_KINDS = new Set(['rate_limit', 'billing_error'])
+
+function isProviderLimitError(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const kind = (data as { errorKind?: unknown }).errorKind
+  return typeof kind === 'string' && PROVIDER_LIMIT_ERROR_KINDS.has(kind)
+}
+
 /** True while an ACP `authenticate` call is still waiting. */
 export function isAnyAgentAuthInFlight(): boolean {
   return inFlightAuth.size > 0
@@ -396,6 +409,12 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
  * ambiguous-methods error is translated into actionable guidance).
  * `op` is a static label for the redacted boundary logs — never raw errors or
  * method payloads.
+ *
+ * AD-5: the auth-required reply is a DEFINITE rejection, recorded by the host
+ * under that call's `commandId`; replaying the same id would replay the
+ * rejection. `fn` goes through the `acpApi` facade, whose command engine mints a
+ * NEW id for every try after a rejection (and reuses one only after an
+ * uncertain outcome), so the retry below is a new command by construction.
  */
 export async function withAuthRetry<T>(
   get: () => AcpState,
@@ -542,6 +561,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         const agentStatus = { ...s.agentStatus }
         delete agentStatus[tempKey]
         agentStatus[agentId] = 'connected'
+        // AD-6 exception (reply-driven agent state kept): `acp:agent_spawned`
+        // carries the same `authMethods` / `hostAuthReady`, but it is an
+        // agent-level event with no subscription anchoring its delivery to this
+        // client before the reply (a web client, or a resend answered after the
+        // event fired, may never see it). The reply is the one source that is
+        // guaranteed to reach the caller that needs the data now.
         // The spawn response is the authoritative source of capabilities +
         // authMethods (CAP-4: metadata delivery cannot depend on a session
         // subscription that does not yet exist). The `acp:agent_spawned` event
@@ -610,8 +635,10 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         agentStatus,
         configToLiveAgent,
         sessions,
-        // An intentional kill emits no lifecycle events (L4), so no event
-        // handler will retire this agent's warm-pool slots — drop them here.
+        // The host also announces the kill (`session_closed` +
+        // `agent_disconnected`) and that handler converges on the same state;
+        // drop the warm-pool slots here too so the result never depends on
+        // event order.
         preparedSessions: dropPreparedSlots(
           s.preparedSessions,
           (sid) => s.sessions[sid]?.agentId === agentId
@@ -834,8 +861,18 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     // Flush coalesced updates so the error reflects the final transcript state.
     flushCoalescedSync()
     const detail = parseAcpErrorDetail(e)
+    const providerLimit = Boolean(e.sessionId) && isProviderLimitError(detail.data)
+    if (providerLimit) {
+      void logFrontendError({
+        level: 'warn',
+        source: 'acp.onAgentError.providerLimit',
+        message: `Provider usage limit on session ${e.sessionId} (agent ${e.agentId}); keeping the chat live`
+      })
+    }
     set((s) => {
-      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      const agentStatus = providerLimit
+        ? s.agentStatus
+        : { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
       if (e.sessionId && s.sessions[e.sessionId] && s.sessions[e.sessionId].status !== 'closed') {
         return {
           agentStatus,
@@ -851,7 +888,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
               // (the agent may be wedged — the user should see an error, not
               // a perpetually-active turn). The `_onAgentDisconnected` reducer
               // now preserves the 'error' status (it skips 'error' sessions).
-              status: 'error' as SessionStatus,
+              status: providerLimit ? s.sessions[e.sessionId].status : ('error' as SessionStatus),
               lastError: e.message,
               lastErrorCode: detail.code ?? null,
               lastErrorData: detail.data,
@@ -988,7 +1025,23 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     const affected: SessionId[] = []
     const dropTranscriptIds: SessionId[] = []
     set((s) => {
-      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      // A deliberate end (kill / idle reap / close) is not an error: drop the
+      // agent exactly like a local `killAgent` does, so a stopped agent never
+      // lingers as 'error' or stays mapped from its config. Only a crash keeps
+      // the 'error' status (manual restart). Both paths are idempotent.
+      const deliberate = e.reason !== 'crashed'
+      const agentStatus = deliberate
+        ? { ...s.agentStatus }
+        : { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      const agents = { ...s.agents }
+      const configToLiveAgent = { ...s.configToLiveAgent }
+      if (deliberate) {
+        delete agentStatus[e.agentId]
+        delete agents[e.agentId]
+        for (const cid of Object.keys(configToLiveAgent)) {
+          if (configToLiveAgent[cid] === e.agentId) delete configToLiveAgent[cid]
+        }
+      }
       // Same stale-marker rule as _onAgentCrashed: a disconnected agent can
       // never land a launch still marked in flight.
       const launchingSessionIds = { ...s.launchingSessionIds }
@@ -1054,6 +1107,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       return {
         agentStatus,
         launchingSessionIds,
+        ...(deliberate ? { agents, configToLiveAgent } : {}),
         sessions,
         pendingPermissions: dropPermissionsForAgent(s.pendingPermissions, e.agentId),
         pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, e.agentId),

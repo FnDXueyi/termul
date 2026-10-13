@@ -6,7 +6,7 @@
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'
-import type { WorkspaceTab } from './types'
+import type { ProjectWorkspace, WorkspaceTab } from './types'
 
 // --- Tree helper functions ---
 
@@ -270,4 +270,95 @@ export function normalizePaneTree(root: PaneNode): PaneNode {
   }
 
   return collapse(root) ?? createLeaf()
+}
+
+/** A fresh single-leaf workspace. */
+export function createProjectWorkspace(): ProjectWorkspace {
+  const leaf = createLeaf()
+  return {
+    root: leaf,
+    activePaneId: leaf.id,
+    fullscreenPaneId: null,
+    agentLauncherPaneId: null,
+    agentBrowserPaneId: null
+  }
+}
+
+/**
+ * Workspace for a (possibly un-normalized) tree: normalizes it and resolves
+ * the active pane to an existing leaf (first leaf when the request is stale).
+ */
+export function buildProjectWorkspace(
+  root: PaneNode,
+  activePaneId?: string | null
+): ProjectWorkspace {
+  const normalizedRoot = normalizePaneTree(root)
+  const leaves = getAllLeafPanes(normalizedRoot)
+  return {
+    root: normalizedRoot,
+    activePaneId:
+      activePaneId && leaves.some((leaf) => leaf.id === activePaneId)
+        ? activePaneId
+        : (leaves[0]?.id ?? normalizedRoot.id),
+    fullscreenPaneId: null,
+    agentLauncherPaneId: null,
+    agentBrowserPaneId: null
+  }
+}
+
+/**
+ * Close `tabId` in `paneId` of a workspace without touching any store. An
+ * emptied pane collapses into its sibling (and focus moves there) unless it is
+ * the only pane. Returns null when the tab is not in that pane.
+ */
+export function closeTabInWorkspace(
+  workspace: ProjectWorkspace,
+  paneId: string,
+  tabId: string
+): { workspace: ProjectWorkspace; removed: WorkspaceTab } | null {
+  const { root, activePaneId } = workspace
+  let removed: WorkspaceTab | null = null
+
+  let newRoot = updateLeaf(root, paneId, (leaf) => {
+    const idx = leaf.tabs.findIndex((t) => t.id === tabId)
+    if (idx === -1) return leaf
+    removed = leaf.tabs[idx]
+    const newTabs = leaf.tabs.filter((t) => t.id !== tabId)
+    let newActive = leaf.activeTabId
+    if (leaf.activeTabId === tabId) {
+      newActive = newTabs.length > 0 ? newTabs[Math.min(idx, newTabs.length - 1)].id : null
+    }
+    return { ...leaf, tabs: newTabs, activeTabId: newActive }
+  })
+  if (!removed) return null
+
+  const pane = findPaneById(newRoot, paneId)
+  if (
+    pane &&
+    pane.type === 'leaf' &&
+    pane.tabs.length === 0 &&
+    getAllLeafPanes(newRoot).length > 1
+  ) {
+    // Find sibling to focus
+    const parent = findParentSplit(newRoot, paneId)
+    let newActivePaneId = activePaneId
+    if (parent) {
+      const siblingIdx = parent.children.findIndex((c) => c.id !== paneId)
+      if (siblingIdx >= 0) {
+        const siblingLeaves = getAllLeafPanes(parent.children[siblingIdx])
+        newActivePaneId = siblingLeaves.length > 0 ? siblingLeaves[0].id : activePaneId
+      }
+    }
+    newRoot = removeNode(newRoot, paneId) ?? createLeaf()
+    return {
+      workspace: {
+        ...workspace,
+        root: newRoot,
+        activePaneId: newActivePaneId,
+        fullscreenPaneId: resolveFullscreenPaneId(newRoot, workspace.fullscreenPaneId)
+      },
+      removed
+    }
+  }
+  return { workspace: { ...workspace, root: newRoot }, removed }
 }

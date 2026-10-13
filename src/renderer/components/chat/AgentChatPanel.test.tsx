@@ -9,6 +9,7 @@ import { useConsentCardHost } from '@/stores/browser-consent-card-store'
 const {
   mockOpen,
   mockOpenDiscovered,
+  mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
   mockSendPromptBlocks,
@@ -31,7 +32,7 @@ const {
   launchingRef,
   oskRef,
   transportReconnectingRef,
-  pendingPromptReconcileRef,
+  promptCommandStatesRef,
   changedFilesPanelPropsRef,
   discoveredContextRef,
   messagesRef,
@@ -51,12 +52,11 @@ const {
   askQuestionPropsRef,
   elicitationPropsRef,
   openGitSheetRef,
-  denialNoticesRef,
-  errorNoticeCallsRef,
   permissionPromptPropsRef
 } = vi.hoisted(() => ({
   mockOpen: vi.fn(),
   mockOpenDiscovered: vi.fn(),
+  mockRecheckPromptCommand: vi.fn(),
   // Story 5: failed-launch retry routing (Retry must reach retryFailedLaunch,
   // never retryCrashedSession, and never toast a circular "Could not retry").
   mockRetryCrashed: vi.fn(),
@@ -111,7 +111,7 @@ const {
   // Story 5.3 (AC1/AC3): test seams for OSK + reconnect overlay.
   oskRef: { current: { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 } },
   transportReconnectingRef: { current: false },
-  pendingPromptReconcileRef: { current: {} as Record<string, true> },
+  promptCommandStatesRef: { current: {} as Record<string, unknown> },
   changedFilesPanelPropsRef: {
     current: [] as Array<{
       cwd: string
@@ -174,18 +174,7 @@ const {
   askQuestionPropsRef: { current: [] as Array<{ autoFocusFirstOption?: boolean }> },
   elicitationPropsRef: { current: [] as Array<{ autoFocusHeading?: boolean }> },
   openGitSheetRef: { current: vi.fn() },
-  // L-09: the store's denied-by-disconnect notices (keyed by session id), every
-  // ChatErrorNotice render in order (the panel mounts the denial line right
-  // before the session error line, so each panel render pushes the pair
-  // [denial, error]), and the props the morph branch hands PermissionPrompt.
-  denialNoticesRef: { current: {} as Record<string, { requestId: string; tool: string }> },
-  errorNoticeCallsRef: {
-    current: [] as Array<{
-      message: string | null
-      onRetry?: () => void
-      onDismiss: () => void
-    }>
-  },
+  // The props the morph branch hands PermissionPrompt.
   permissionPromptPropsRef: {
     current: [] as Array<{ isVisible?: boolean; embedded?: boolean }>
   }
@@ -227,7 +216,6 @@ vi.mock('@/stores/acp-store', () => {
     pendingPermissions: pendingPermissionsRef.current,
     pendingQuestions: pendingQuestionsRef.current,
     pendingElicitations: pendingElicitationsRef.current,
-    permissionDenialNotices: denialNoticesRef.current,
     pendingBrowserConsents: pendingBrowserConsentsRef.current,
     // The panel's gate selects `s.messages[sessionId]`; the legacy
     // useAcpMessages mock serves one flat list for ANY session, so the map
@@ -243,7 +231,8 @@ vi.mock('@/stores/acp-store', () => {
     launchingSessionIds: launchingRef.current,
     discoveredReopenContexts: discoveredContextRef.current,
     transportReconnecting: transportReconnectingRef.current,
-    pendingPromptReconcile: pendingPromptReconcileRef.current,
+    promptCommandStates: promptCommandStatesRef.current,
+    recheckPromptCommand: mockRecheckPromptCommand,
     openHistorySession: mockOpen,
     openDiscoveredSession: mockOpenDiscovered,
     sendPrompt: vi.fn(),
@@ -339,7 +328,6 @@ vi.mock('./ChatErrorNotice', () => ({
     onDismiss: () => void
   }) => {
     errorNoticePropsRef.current = props
-    errorNoticeCallsRef.current.push(props)
     return null
   }
 }))
@@ -448,6 +436,18 @@ import { AgentChatPanel } from './AgentChatPanel'
 
 function seedLiveSession(id: string, lastError: string | null = null): void {
   sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'closed', lastError })
+}
+
+/** A prompt command waiting to confirm (AD-6), as the store publishes it. */
+function pendingCommand(outcomeUnknown: boolean): Record<string, unknown> {
+  return {
+    commandId: 'turn-1',
+    kind: 'send_prompt',
+    entityKey: 's1',
+    phase: 'pending-reconcile',
+    outcomeUnknown,
+    attempts: 1
+  }
 }
 
 describe('AgentChatPanel restored-tab rehydration', () => {
@@ -634,7 +634,7 @@ describe('AgentChatPanel OSK + reconnect overlay (Story 5.3)', () => {
     launchingRef.current = {}
     oskRef.current = { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 }
     transportReconnectingRef.current = false
-    pendingPromptReconcileRef.current = {}
+    promptCommandStatesRef.current = {}
     discoveredContextRef.current = {}
   })
 
@@ -688,7 +688,7 @@ describe('AgentChatPanel OSK + reconnect overlay (Story 5.3)', () => {
 
 describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
   beforeEach(() => {
-    pendingPromptReconcileRef.current = {}
+    promptCommandStatesRef.current = {}
     transportReconnectingRef.current = false
   })
 
@@ -699,12 +699,43 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
       activeTurn: true,
       openTurnId: 'turn-1'
     })
-    pendingPromptReconcileRef.current = { s1: true }
+    promptCommandStatesRef.current = { s1: pendingCommand(false) }
     render(<AgentChatPanel sessionId="s1" isVisible />)
     expect(screen.getByRole('status')).toHaveTextContent('Waiting to confirm')
     // Not a failure: no error banner / Retry affordance.
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('labels a host-reported unknown outcome "Outcome unknown — check" and re-checks with the SAME command id', () => {
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      activeTurn: true,
+      openTurnId: 'turn-1'
+    })
+    promptCommandStatesRef.current = { s1: pendingCommand(true) }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByRole('status')).toHaveTextContent('Outcome unknown — check')
+    // Still not a failure, and no new-send Retry while the command is unresolved.
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Re-check' }))
+    expect(mockRecheckPromptCommand).toHaveBeenCalledWith('s1')
+  })
+
+  it('shows "Checking…" and disables the re-check while the same-id resend runs', () => {
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      activeTurn: true,
+      openTurnId: 'turn-1'
+    })
+    promptCommandStatesRef.current = {
+      s1: { ...pendingCommand(true), phase: 'pending', checking: true }
+    }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByRole('status')).toHaveTextContent('Checking…')
+    expect(screen.getByRole('button', { name: 'Re-check' })).toBeDisabled()
   })
 
   it('does not show it for a confirmed prompt or another session', () => {
@@ -714,7 +745,7 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
       activeTurn: true,
       openTurnId: 'turn-1'
     })
-    pendingPromptReconcileRef.current = { other: true }
+    promptCommandStatesRef.current = { other: pendingCommand(false) }
     render(<AgentChatPanel sessionId="s1" isVisible />)
     expect(screen.queryByText(/Waiting to confirm/)).toBeNull()
   })
@@ -825,118 +856,6 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     // relaunch+replay path runs, never the failed-launch path.
     expect(mockRetryCrashed).toHaveBeenCalledWith('s1')
     expect(mockRetryFailed).not.toHaveBeenCalled()
-  })
-})
-
-describe('AgentChatPanel permission denial notice (L-09)', () => {
-  const NOTICE = { requestId: 'r1', tool: 'npm test -- auth' }
-  const DENIED =
-    'Permission for npm test -- auth was denied because this device disconnected. Ask the agent to retry.'
-
-  /** The denial line is the first of the two notices each panel render mounts. */
-  const lastDenialLine = () => errorNoticeCallsRef.current.at(-2)
-  const lastErrorLine = () => errorNoticeCallsRef.current.at(-1)
-
-  beforeEach(() => {
-    mobileRef.current = true
-    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w' })
-    sessionsMapRef.current = {}
-    indexRef.current = []
-    openingRef.current = {}
-    restoringRef.current = {}
-    launchingRef.current = {}
-    discoveredContextRef.current = {}
-    messagesRef.current = []
-    pendingPermissionsRef.current = {}
-    pendingQuestionsRef.current = {}
-    pendingElicitationsRef.current = {}
-    denialNoticesRef.current = {}
-    errorNoticeCallsRef.current = []
-    errorNoticePropsRef.current = null
-  })
-
-  afterEach(() => {
-    mobileRef.current = true
-    denialNoticesRef.current = {}
-  })
-
-  it('shows the denial line for a notice of this panel session, with no Retry', () => {
-    denialNoticesRef.current = { s1: NOTICE }
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-
-    expect(lastDenialLine()?.message).toBe(DENIED)
-    expect(lastDenialLine()?.onRetry).toBeUndefined()
-    // The session error line is a separate notice and stays empty.
-    expect(lastErrorLine()?.message).toBeNull()
-  })
-
-  it('does not show the notice of another session', () => {
-    denialNoticesRef.current = { s2: NOTICE }
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-
-    expect(lastDenialLine()?.message).toBeNull()
-  })
-
-  it('shows nothing without a notice, and drops the line when the notice is removed', () => {
-    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastDenialLine()?.message).toBeNull()
-
-    denialNoticesRef.current = { s1: NOTICE }
-    rerender(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastDenialLine()?.message).toBe(DENIED)
-
-    // The store clears it when the next turn starts.
-    denialNoticesRef.current = {}
-    rerender(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastDenialLine()?.message).toBeNull()
-  })
-
-  it('keeps the line across unrelated re-renders', () => {
-    denialNoticesRef.current = { s1: NOTICE }
-    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
-    messagesRef.current = [{ id: 'm1', role: 'agent', blocks: [{ type: 'text', text: 'hi' }] }]
-    rerender(<AgentChatPanel sessionId="s1" isVisible />)
-    rerender(<AgentChatPanel sessionId="s1" isVisible={false} />)
-
-    expect(lastDenialLine()?.message).toBe(DENIED)
-  })
-
-  it('hides only that notice on Dismiss, and shows a newer denial again', () => {
-    denialNoticesRef.current = { s1: NOTICE }
-    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
-
-    act(() => lastDenialLine()?.onDismiss())
-    expect(lastDenialLine()?.message).toBeNull()
-
-    // The same notice stays hidden through further renders.
-    rerender(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastDenialLine()?.message).toBeNull()
-
-    denialNoticesRef.current = { s1: { requestId: 'r2', tool: 'git push' } }
-    rerender(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastDenialLine()?.message).toBe(
-      'Permission for git push was denied because this device disconnected. Ask the agent to retry.'
-    )
-  })
-
-  it('does not touch the session error line when Dismiss is pressed', () => {
-    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w', lastError: 'agent said no' })
-    denialNoticesRef.current = { s1: NOTICE }
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(lastErrorLine()?.message).toBe('agent said no')
-
-    act(() => lastDenialLine()?.onDismiss())
-
-    expect(lastDenialLine()?.message).toBeNull()
-    expect(lastErrorLine()?.message).toBe('agent said no')
-  })
-
-  it('shows the line on the desktop layout too (the notice is shell-independent)', () => {
-    mobileRef.current = false
-    denialNoticesRef.current = { s1: NOTICE }
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-
-    expect(lastDenialLine()?.message).toBe(DENIED)
   })
 })
 

@@ -9,7 +9,6 @@ import {
 } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { setTerminalProtected } from '@/lib/terminal-api'
 import { useWebAuthGateOk } from '@/lib/web-auth-gate'
 import { webServerProjects } from '@/lib/web-server-api'
 import { workspaceManifestApi } from '@/lib/workspace-manifest-api'
@@ -27,7 +26,7 @@ import type {
   PersistedWorktree
 } from '../../shared/types/persistence.types'
 import { PersistenceKeys } from '../../shared/types/persistence.types'
-import type { ProjectSummary } from '../../shared/types/web-projects.types'
+import type { ProjectListPayload, ProjectSummary } from '../../shared/types/web-projects.types'
 
 const REDACTED_VALUE = '[REDACTED]'
 type EnvVariableSnapshot = Pick<EnvVariable, 'key' | 'value' | 'isSecret'>
@@ -252,7 +251,8 @@ async function toPersistedProject(
     envVars: redactedEnvVars,
     worktrees: project.worktrees?.map(toPersistedWorktree),
     isGitRepo: project.isGitRepo,
-    icon: project.icon
+    icon: project.icon,
+    isDefault: project.isDefault
   }
 }
 
@@ -298,7 +298,8 @@ async function fromPersistedProject(persisted: PersistedProject): Promise<Projec
     envVars: loadedEnvVars,
     worktrees: persisted.worktrees?.map(fromPersistedWorktree),
     isGitRepo: persisted.isGitRepo,
-    icon: persisted.icon
+    icon: persisted.icon,
+    isDefault: persisted.isDefault
   }
 }
 
@@ -308,36 +309,39 @@ async function fromPersistedProject(persisted: PersistedProject): Promise<Projec
  * the wire — redact-by-omission. Shared by the auto-save live-push path + the
  * `RemoteAccessPopover` server-start seed.
  *
- * In desktop-hosted mode the desktop's `activeProjectId` IS the host default
- * (the desktop user is the host operator), so the per-entry flag is
- * `isDefault` (the host default), not `isActive` (which is per-client and the
- * host cannot know). The param is named `defaultProjectId` because the value
- * the desktop renderer tracks (its active selection) is pushed as the default
- * for new web clients — the caller passes `state.activeProjectId` as the
- * `defaultProjectId` (P12: the param name now matches its wire semantics).
+ * The host default is each project's stored `isDefault` flag (the explicit
+ * set-default action) and nothing else: the desktop's active project is
+ * per-client navigation state and is never pushed as the default.
  */
-export function toProjectSummaries(
-  projects: Project[],
-  defaultProjectId: string
-): ProjectSummary[] {
-  // Derive the host default from each project's stored `isDefault` flag — NOT
-  // from `defaultProjectId`. At the autosave call site `defaultProjectId` is
-  // `state.activeProjectId`, but the active (per-connection) project and the
-  // host default are distinct: `handleSetDefault` flips the stored flags while
-  // `activeProjectId` still points at the switch target. Deriving from
-  // `activeProjectId` here would re-broadcast the active project as the host
-  // default and clobber an explicit `set_default_project`. Fall back to
-  // `defaultProjectId` only when no project carries a stored flag (legacy
-  // snapshots / initial load where the flag was never set).
-  const hasStoredDefault = projects.some((p) => p.isDefault === true)
+export function toProjectSummaries(projects: Project[]): ProjectSummary[] {
   return projects.map((p) => ({
     id: p.id,
     name: p.name,
     color: p.color,
     path: p.path ?? null,
     isArchived: p.isArchived ?? false,
-    isDefault: hasStoredDefault ? p.isDefault === true : p.id === defaultProjectId
+    isDefault: p.isDefault === true
   }))
+}
+
+/** `true` when two summary lists carry the same wire fields (navigation rebuilds the
+ * project array to flip `isActive`, which is not a list change). */
+function sameProjectSummaries(a: ProjectSummary[], b: ProjectSummary[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((p, i) => {
+      const q = b[i]
+      return (
+        q !== undefined &&
+        p.id === q.id &&
+        p.name === q.name &&
+        p.color === q.color &&
+        p.path === q.path &&
+        p.isArchived === q.isArchived &&
+        p.isDefault === q.isDefault
+      )
+    })
+  )
 }
 
 /**
@@ -366,6 +370,24 @@ function summaryToProject(summary: ProjectSummary): Project {
   }
 }
 
+/**
+ * True while the web loader installs a list the host sent (HTTP read, watch
+ * state or delta). The web auto-save subscriber diffs every list change into
+ * add/update/remove writes, so it must not read a host-sent list as a local
+ * edit: an older watched list that lacks a project whose POST is still pending
+ * would otherwise turn into a DELETE of that project.
+ */
+let applyingHostList = false
+
+function applyHostList(install: () => void): void {
+  applyingHostList = true
+  try {
+    install()
+  } finally {
+    applyingHostList = false
+  }
+}
+
 export function useProjectsLoader(): void {
   const setProjects = useProjectStore((state) => state.setProjects)
   // #854: while the web auth gate reports unauthorized (missing/rotated
@@ -380,11 +402,11 @@ export function useProjectsLoader(): void {
     // `ProjectRegistry` via `GET /projects`. The browser's stubbed plugin-store
     // returns nothing, so without this branch the sidebar renders empty. The
     // mirror is read-only — `useProjectsAutoSave` is disabled in web mode. The
-    // desktop broadcasts `projects_changed` on store mutation; refetch on it.
+    // desktop publishes the project state on store mutation; the `projects` watch delivers it.
     //
     // Epic 7 (cross-client continuity): on the INITIAL load (store not yet
     // `isLoaded`) the client seeds `activeProjectId` from the host's
-    // `defaultProjectId`. On subsequent `projects_changed` refetches it
+    // `defaultProjectId`. On subsequent watch lists it
     // preserves its OWN `activeProjectId` (no silent retarget when another
     // client switches). If the current project was deleted by the host, it
     // falls back to `defaultProjectId` (or the first project).
@@ -407,12 +429,17 @@ export function useProjectsLoader(): void {
       // Guard against completing a fetch after unmount (skip the stale
       // setProjects so a remounted store is not clobbered).
       let cancelled = false
-      const fetchMirror = async (): Promise<void> => {
-        const result = await webServerProjects.list()
-        if (cancelled || !result.success || !result.data) return
+      // Every list that arrives (the HTTP read, a watch state or delta) takes a
+      // generation; one that resolves after a newer list has landed is dropped.
+      let listGeneration = 0
+      const applyList = async (
+        data: ProjectListPayload,
+        generation = ++listGeneration
+      ): Promise<void> => {
+        if (cancelled) return
         // Carry resolved icons across the mirror: `ProjectSummary` (a frozen
         // wire shape) does not transport `icon`, and `setProjects` replaces the
-        // whole array — without this merge every `projects_changed` refetch
+        // whole array — without this merge every new list
         // would flash monograms until `use-project-icon` re-resolves.
         const iconById = new Map(
           useProjectStore
@@ -422,7 +449,7 @@ export function useProjectsLoader(): void {
         )
         // Same carry-over for locally resolved git flags: `ProjectSummary`
         // carries no git fields (frozen wire shape), so without this merge
-        // every `projects_changed` refetch would drop `isGitRepo` stamped by
+        // every new list would drop `isGitRepo` stamped by
         // `useProjectGitBranch`/`.git` probes and the web launcher's worktree
         // picker would flicker away until the next probe re-runs.
         const isGitRepoById = new Map(
@@ -434,7 +461,7 @@ export function useProjectsLoader(): void {
         // Worktrees are reconciler-owned, also not on the wire (the switcher pick lives in
         // the shell-layout store, keyed by path).
         const prevById = new Map(useProjectStore.getState().projects.map((p) => [p.id, p] as const))
-        const projects = result.data.projects.map((summary) => {
+        const projects = data.projects.map((summary) => {
           const project = summaryToProject(summary)
           const icon = iconById.get(project.id)
           const isGitRepo = isGitRepoById.get(project.id)
@@ -450,7 +477,7 @@ export function useProjectsLoader(): void {
             ...(prev?.gitBranch ? { gitBranch: prev.gitBranch } : {})
           }
         })
-        const defaultId = result.data.defaultProjectId
+        const defaultId = data.defaultProjectId
         // P2: validate the host default references a project still in the
         // list (the host may have deleted the default project). Fall back to
         // the first project when the default is null or dangling.
@@ -462,7 +489,7 @@ export function useProjectsLoader(): void {
           // Initial load: prefer THIS client's persisted selection (issue
           // #855), then the host default.
           let restored: string | null = null
-          const persisted = await persistenceApi.read<string>(PersistenceKeys.webActiveProject)
+          const persisted = await persistenceApi.read<string>(PersistenceKeys.activeProject)
           if (
             persisted.success &&
             persisted.data &&
@@ -470,7 +497,8 @@ export function useProjectsLoader(): void {
           ) {
             restored = persisted.data
           }
-          setProjects(projects, restored ?? validDefault)
+          if (cancelled || generation !== listGeneration) return
+          applyHostList(() => setProjects(projects, restored ?? validDefault))
           for (const project of projects) {
             if (project.path) void reconcileProjectWorktrees(project.id)
           }
@@ -480,16 +508,31 @@ export function useProjectsLoader(): void {
           // default (or the first project if the default is also gone).
           const currentActive = useProjectStore.getState().activeProjectId
           const stillExists = !!currentActive && projects.some((p) => p.id === currentActive)
-          setProjects(projects, stillExists ? currentActive : validDefault)
+          applyHostList(() => setProjects(projects, stillExists ? currentActive : validDefault))
         }
       }
+      const fetchMirror = async (): Promise<void> => {
+        const generation = ++listGeneration
+        const result = await webServerProjects.list()
+        if (cancelled || !result.success || !result.data) return
+        if (generation !== listGeneration) return
+        await applyList(result.data, generation)
+      }
       void fetchMirror()
+      // The `projects` watch sends the full list on every (re)subscribe and the
+      // replacement list on each change, so a missed change is rebuilt from the
+      // next state instead of refetched.
+      const applyWatched = (list: ProjectListPayload): void => {
+        if (!Array.isArray(list?.projects)) return
+        void applyList(list)
+      }
       try {
-        unsub = getAcpTransport().onEvent('acp:projects_changed', () => {
-          void fetchMirror()
-        })
+        unsub = getAcpTransport().watches?.subscribe<ProjectListPayload, ProjectListPayload>(
+          'projects',
+          { onState: applyWatched, onDelta: applyWatched }
+        )
       } catch (err) {
-        console.debug('[projects] projects_changed listener unavailable', err)
+        console.debug('[projects] projects watch unavailable', err)
       }
       // Persist the client's active selection on every change (issue #855)
       // so a reload restores it. Fire-and-forget with a boundary log on
@@ -498,12 +541,12 @@ export function useProjectsLoader(): void {
         if (state.activeProjectId === prevState.activeProjectId) return
         if (!state.activeProjectId) return
         void persistenceApi
-          .write(PersistenceKeys.webActiveProject, state.activeProjectId)
+          .write(PersistenceKeys.activeProject, state.activeProjectId)
           .then((res) => {
             if (!res.success) {
               void logFrontendError({
                 level: 'warn',
-                source: 'useProjectsLoader.webActiveProject',
+                source: 'useProjectsLoader.activeProject',
                 message: `persisting the web active project failed: ${res.error ?? 'unknown'}`
               })
             }
@@ -577,6 +620,44 @@ export function useProjectsLoader(): void {
  * Hook to auto-save projects when the store changes
  * Subscribes to project store changes and triggers debounced writes
  */
+// The host default the latest project-list sync reply reported (`undefined`
+// until one arrived or after the server stopped), shared by the auto-save hook
+// and the server-start seed so a fallback change of the effective default is
+// detected against the right baseline. Replies are applied in request order:
+// IPC promises can resolve out of order, and a stale reply must not move it.
+let hostDefaultSeen: string | null | undefined
+let hostDefaultAppliedSeq = 0
+let syncRequestSeq = 0
+
+/** Number a project-list sync request (call before sending it). */
+export function nextSyncSeq(): number {
+  syncRequestSeq += 1
+  return syncRequestSeq
+}
+
+/**
+ * Record the host default a sync reply reported: `'changed'` when the
+ * effective default changed (or was unknown), `'same'` when it did not, and
+ * `'stale'` for a reply older than one already applied (ignored entirely — it
+ * must not trigger any further write).
+ */
+export function noteHostDefault(
+  seq: number,
+  hostDefault: string | null | undefined
+): 'changed' | 'same' | 'stale' {
+  if (seq < hostDefaultAppliedSeq) return 'stale'
+  hostDefaultAppliedSeq = seq
+  const changed = hostDefaultSeen !== hostDefault
+  hostDefaultSeen = hostDefault
+  return changed ? 'changed' : 'same'
+}
+
+/** Forget the host default (the server stopped; its registry was cleared). */
+export function resetHostDefault(): void {
+  hostDefaultSeen = undefined
+  hostDefaultAppliedSeq = syncRequestSeq
+}
+
 export function useProjectsAutoSave(): void {
   const hasInitialized = useRef(false)
 
@@ -585,12 +666,14 @@ export function useProjectsAutoSave(): void {
     // the standalone server is a first-class project-list authority, so
     // web-client-created projects survive refresh). Diff the store and push
     // individual add/update/remove mutations to the server — the server is
-    // the source of truth in VPS mode, and `projects_changed` broadcasts
-    // refetch `GET /projects` on all connected clients.
+    // the source of truth in VPS mode, and the `projects` watch
+    // delivers the new list to all connected clients.
     if (!isTauriContext()) {
       const unsubscribe = useProjectStore.subscribe((state, prevState) => {
         if (!state.isLoaded || !prevState.isLoaded) return
         if (state.projects === prevState.projects) return
+        // A list the host sent is not a local edit (see `applyingHostList`).
+        if (applyingHostList) return
 
         const prevById = new Map(prevState.projects.map((p) => [p.id, p]))
         const nextById = new Map(state.projects.map((p) => [p.id, p]))
@@ -704,33 +787,41 @@ export function useProjectsAutoSave(): void {
       })
 
       // Epic-4 bridge live push: if the shared-live server is running, mirror
-      // the new project list into the in-memory registry + broadcast
-      // `projects_changed` so connected web clients refetch `GET /projects`.
+      // the new project list into the in-memory registry + publish
+      // the state to the `projects` watch so connected web clients rebuild their list.
       // Fire-and-forget (replaces the snapshot — idempotent); no env-var values.
-      if (useRemoteStatusStore.getState().status?.running) {
-        const projectSwitched =
-          state.activeProjectId !== prevState.activeProjectId ||
+      // Navigation (`activeProjectId`) is NOT a list change: switching the
+      // active project pushes nothing and moves no host default.
+      const summaries = toProjectSummaries(state.projects)
+      if (
+        useRemoteStatusStore.getState().status?.running &&
+        state.projects !== prevState.projects &&
+        !sameProjectSummaries(summaries, toProjectSummaries(prevState.projects))
+      ) {
+        const defaultChanged =
           state.projects.find((p) => p.isDefault === true)?.id !==
-            prevState.projects.find((p) => p.isDefault === true)?.id
-        syncProjects(
-          toProjectSummaries(state.projects, state.activeProjectId),
-          state.activeProjectId || null
-        )
+          prevState.projects.find((p) => p.isDefault === true)?.id
+        const syncSeq = nextSyncSeq()
+        syncProjects(summaries)
           .then((result) => {
             if (!result.success) {
               console.warn('[projects] remote sync unsuccessful:', result.error)
             }
-            // CAP-7: after the backend `ProjectRegistry` (and thus the resolved
-            // project root) reflects the new default, mirror the MCP registry to
-            // the new project's `.termul/mcp-servers.json`. Best-effort +
-            // non-fatal — the action logs failures and never throws, so a
-            // switch still completes even if the sync write fails. Only on a
-            // real project switch (not a projects/groups-only mutation), and
-            // only when the upstream sync succeeded (a failed syncProjects
-            // leaves the backend on the old default — syncing then would write
-            // to the wrong project's file).
-            if (projectSwitched && result.success) {
-              void useAcpStore.getState().syncMcpRegistryToProjectFile()
+            // CAP-7 interim bridge: the web MCP registry file lives under the
+            // host default project, so mirror the MCP registry when the host's
+            // EFFECTIVE default changed — the stored default flag moved (an
+            // explicit set-default) or the host fell back to another project —
+            // never on navigation. Best-effort + non-fatal; only after the
+            // sync landed. The first reply counts as a change (the file for the
+            // default the host picked has not been mirrored yet).
+            if (result.success) {
+              const outcome = noteHostDefault(syncSeq, result.data)
+              // A stale reply never writes: the newer reply already carries the
+              // effective default, and a second mirror could replace a file
+              // update made in between.
+              if (outcome !== 'stale' && (defaultChanged || outcome === 'changed')) {
+                void useAcpStore.getState().syncMcpRegistryToProjectFile()
+              }
             }
           })
           .catch((err: unknown) => {
@@ -797,10 +888,6 @@ export function useDeleteProjectWithCascade(): (id: string) => Promise<void> {
           const result = await terminalApi.kill(terminal.ptyId)
           if (!result.success) {
             console.warn('Failed to kill PTY during project delete:', result.error)
-            // Best-effort fallback: allow orphan cleanup if PTY still exists
-            await setTerminalProtected(terminal.ptyId, false).catch((error) => {
-              console.warn('Failed to clear PTY protection during project delete:', error)
-            })
           }
         } catch (error) {
           console.warn('Failed to kill PTY during project delete:', error)

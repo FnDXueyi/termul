@@ -243,7 +243,6 @@ const mockTerminalStoreState = {
   clearTerminalPtyId: vi.fn(),
   truncateHiddenTerminalBuffers: vi.fn(),
   getTerminalCount: vi.fn(() => 0),
-  isTerminalLimitReached: vi.fn(() => false),
   cleanupProjectTerminals: vi.fn()
 }
 
@@ -252,11 +251,6 @@ vi.mock('@/stores/terminal-store', () => ({
     vi.fn((selector) => selector(mockTerminalStoreState)),
     { getState: () => mockTerminalStoreState }
   )
-}))
-
-vi.mock('@/lib/tauri-terminal-api', () => ({
-  addRendererRef: vi.fn().mockResolvedValue({ success: true, data: undefined }),
-  removeRendererRef: vi.fn().mockResolvedValue({ success: true, data: undefined })
 }))
 
 const mockRecordTerminalContinuityEvent = vi.hoisted(() => vi.fn())

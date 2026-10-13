@@ -9,6 +9,7 @@ import {
 } from '@/stores/acp-store/live-turn'
 import { seedSession } from '@/stores/acp-store/testkit'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
+import type { ProjectWorkspace } from '@/stores/workspace-store'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'
 import {
   deserializePaneTree,
@@ -21,16 +22,18 @@ const { mockLoadPersistedTerminals } = vi.hoisted(() => ({
   mockLoadPersistedTerminals: vi.fn()
 }))
 
-const { mockPersistenceRead, mockPersistenceWriteDebounced } = vi.hoisted(() => ({
+const { mockPersistenceRead, mockPersistenceWriteDebounced, mockReadFile } = vi.hoisted(() => ({
   mockPersistenceRead: vi.fn(),
-  mockPersistenceWriteDebounced: vi.fn()
+  mockPersistenceWriteDebounced: vi.fn(),
+  mockReadFile: vi.fn()
 }))
 
 vi.mock('@/lib/api', () => ({
   persistenceApi: {
     read: mockPersistenceRead,
     writeDebounced: mockPersistenceWriteDebounced
-  }
+  },
+  filesystemApi: { readFile: mockReadFile }
 }))
 
 function createEditorFileState(filePath: string): {
@@ -61,11 +64,6 @@ const mockEditorState = {
   openFiles: new Map<string, ReturnType<typeof createEditorFileState>>(),
   activeFilePath: null as string | null,
   clearAllFiles: vi.fn(),
-  openFile: vi.fn().mockResolvedValue(undefined),
-  updateCursorPosition: vi.fn(),
-  updateScrollTop: vi.fn(),
-  setViewMode: vi.fn(),
-  updateContent: vi.fn(),
   setActiveFilePath: vi.fn()
 }
 
@@ -76,48 +74,53 @@ const mockExplorerState = {
   restoreExpandedDirs: vi.fn().mockResolvedValue(undefined)
 }
 
-const mockWorkspaceState: {
-  root: PaneNode
-  activePaneId: string
-  activeTabId: string | null
-  syncEditorTabs: ReturnType<typeof vi.fn>
-  remapTerminalTabs: ReturnType<typeof vi.fn>
-  syncTerminalTabs: ReturnType<typeof vi.fn>
-  clearEditorTabs: ReturnType<typeof vi.fn>
-  resetLayout: ReturnType<typeof vi.fn>
-  loadProjectWorkspace: ReturnType<typeof vi.fn>
-  insertAgentChatTab: ReturnType<typeof vi.fn>
-  addAgentChatTab: ReturnType<typeof vi.fn>
-} = {
+const mockWorkspaceState = {
   root: {
     type: 'leaf',
     id: 'pane-root',
     tabs: [],
     activeTabId: null
-  },
+  } as PaneNode,
   activePaneId: 'pane-root',
-  activeTabId: null,
-  syncEditorTabs: vi.fn(),
-  remapTerminalTabs: vi.fn(),
+  activeTabId: null as string | null,
+  activeProjectId: '',
+  parkedTrees: {} as Record<string, unknown>,
+  // The store's park/unpark is covered in workspace-store.test.ts: here it is
+  // only the recorded commit target.
+  activateProject: vi.fn((projectId: string, _tree?: unknown) => {
+    mockWorkspaceState.activeProjectId = projectId
+  }),
+  hasProjectTree: vi.fn(
+    (projectId: string) =>
+      mockWorkspaceState.activeProjectId === projectId ||
+      projectId in mockWorkspaceState.parkedTrees
+  ),
+  dropProjectTree: vi.fn(),
   syncTerminalTabs: vi.fn(),
-  clearEditorTabs: vi.fn(),
-  resetLayout: vi.fn(),
-  loadProjectWorkspace: vi.fn(),
   insertAgentChatTab: vi.fn(),
   addAgentChatTab: vi.fn(),
   hideAgentLauncher: vi.fn()
 }
 
 const mockProjectState = {
+  activeProjectId: 'project-a',
   projects: [
     { id: 'project-a', path: '/projects/a' },
     { id: 'project-b', path: '/projects/b' }
-  ]
+  ],
+  selectProject: vi.fn((id: string) => {
+    mockProjectState.activeProjectId = id
+  })
 }
 
 vi.mock('@/stores/editor-store', () => ({
+  detectLanguage: () => 'typescript',
+  getDefaultViewMode: () => 'code',
   useEditorStore: {
     getState: vi.fn(() => mockEditorState),
+    setState: vi.fn((patch: Partial<typeof mockEditorState>) =>
+      Object.assign(mockEditorState, patch)
+    ),
     subscribe: vi.fn(() => vi.fn())
   }
 }))
@@ -145,7 +148,8 @@ vi.mock('@/stores/workspace-store', async () => {
 
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: {
-    getState: vi.fn(() => mockProjectState)
+    getState: vi.fn(() => mockProjectState),
+    subscribe: vi.fn(() => vi.fn())
   }
 }))
 
@@ -258,15 +262,12 @@ beforeEach(() => {
     mockEditorState.openFiles.clear()
     mockEditorState.activeFilePath = null
   })
-  mockEditorState.openFile.mockReset()
-  mockEditorState.openFile.mockImplementation(async (filePath: string) => {
-    mockEditorState.openFiles.set(filePath, createEditorFileState(filePath))
-  })
-  mockEditorState.updateCursorPosition.mockReset()
-  mockEditorState.updateScrollTop.mockReset()
-  mockEditorState.setViewMode.mockReset()
-  mockEditorState.updateContent.mockReset()
   mockEditorState.setActiveFilePath.mockReset()
+  mockReadFile.mockReset()
+  mockReadFile.mockImplementation(async () => ({
+    success: true,
+    data: { content: 'disk', modifiedAt: 5 }
+  }))
 
   mockExplorerState.expandedDirs = new Set<string>()
   mockExplorerState.isVisible = true
@@ -282,12 +283,11 @@ beforeEach(() => {
   }
   mockWorkspaceState.activePaneId = 'pane-root'
   mockWorkspaceState.activeTabId = null
-  mockWorkspaceState.syncEditorTabs.mockReset()
-  mockWorkspaceState.remapTerminalTabs.mockReset()
+  mockWorkspaceState.activeProjectId = ''
+  mockWorkspaceState.parkedTrees = {}
+  mockWorkspaceState.activateProject.mockClear()
   mockWorkspaceState.syncTerminalTabs.mockReset()
-  mockWorkspaceState.clearEditorTabs.mockReset()
-  mockWorkspaceState.resetLayout.mockReset()
-  mockWorkspaceState.loadProjectWorkspace.mockReset()
+  mockProjectState.activeProjectId = 'project-a'
 
   mockTerminalState.terminals = []
 })
@@ -299,10 +299,30 @@ afterEach(() => {
   useAgentChatLifetimeStore.setState({
     retainedByProject: {},
     activeSessionByProject: {},
-    focusSessionByProject: {},
-    closingSessionIds: {}
+    focusSessionByProject: {}
   })
 })
+
+/** Mount the hook on `projectId`, mirroring the project store (the user's intent) like the real layout. */
+function mountPersistence(projectId: string): {
+  switchTo: (nextProjectId: string) => void
+} {
+  mockProjectState.activeProjectId = projectId
+  const hook = renderHook(({ id }) => useEditorPersistence(id), { initialProps: { id: projectId } })
+  return {
+    switchTo: (nextProjectId) => {
+      mockProjectState.activeProjectId = nextProjectId
+      hook.rerender({ id: nextProjectId })
+    }
+  }
+}
+
+/** The tree + project the coordinator last committed through `activateProject`. */
+function lastActivation(): { projectId: string; tree: ProjectWorkspace | undefined } {
+  const call = mockWorkspaceState.activateProject.mock.calls.at(-1)
+  if (!call) throw new Error('nothing was committed')
+  return { projectId: call[0], tree: call[1] as ProjectWorkspace | undefined }
+}
 
 describe('useEditorPersistence', () => {
   it('restores only expanded dirs within active project root', async () => {
@@ -316,7 +336,7 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.setExpandedDirs).toHaveBeenCalledWith(
@@ -343,7 +363,7 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenCalledWith(['/projects/a/src'])
@@ -373,15 +393,13 @@ describe('useEditorPersistence', () => {
         }
       })
 
-    const { rerender } = renderHook(({ projectId }) => useEditorPersistence(projectId), {
-      initialProps: { projectId: 'project-a' }
-    })
+    const mounted = mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenLastCalledWith(['/projects/a/src'])
     })
 
-    rerender({ projectId: 'project-b' })
+    mounted.switchTo('project-b')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenLastCalledWith(['/projects/b/docs'])
@@ -434,6 +452,7 @@ describe('useEditorPersistence', () => {
       ]
     }
     mockWorkspaceState.activePaneId = 'pane-left'
+    mockWorkspaceState.activeProjectId = 'project-a'
 
     persistState('project-a')
 
@@ -456,6 +475,14 @@ describe('useEditorPersistence', () => {
       { type: 'terminal', terminalId: 'old-1' },
       { type: 'editor', filePath: '/projects/a/src/index.ts' }
     ])
+  })
+
+  it('refuses to persist a project whose tree is not the committed one', () => {
+    mockWorkspaceState.activeProjectId = 'project-a'
+
+    persistState('project-b')
+
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
   })
 
   it('drops canvas tabs on persist (host-local runtime, never portable)', () => {
@@ -484,6 +511,7 @@ describe('useEditorPersistence', () => {
       activeTabId: 'canvas-project-a'
     }
     mockWorkspaceState.activePaneId = 'pane-canvas'
+    mockWorkspaceState.activeProjectId = 'project-a'
 
     persistState('project-a')
 
@@ -592,17 +620,17 @@ describe('useEditorPersistence', () => {
       updatedAt: '2026-03-09T00:00:00.000Z'
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
+    const { projectId: committedProjectId, tree } = lastActivation()
+    expect(committedProjectId).toBe('project-a')
+    expect(tree?.activePaneId).toBe('pane-drop')
 
-    expect(activePaneIdArg).toBe('pane-drop')
-
-    const restoredRoot = restoredRootArg as SplitNode
+    const restoredRoot = tree?.root as SplitNode
     expect(restoredRoot.type).toBe('split')
 
     const leftLeaf = restoredRoot.children[0] as LeafNode
@@ -656,15 +684,15 @@ describe('useEditorPersistence', () => {
       updatedAt: '2026-03-09T00:00:00.000Z'
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
-    expect(activePaneIdArg).toBe('pane-recovery')
-    expect(restoredRootArg).toEqual({
+    const { tree } = lastActivation()
+    expect(tree?.activePaneId).toBe('pane-recovery')
+    expect(tree?.root).toEqual({
       type: 'leaf',
       id: 'pane-recovery',
       tabs: [
@@ -679,43 +707,19 @@ describe('useEditorPersistence', () => {
   })
 
   it('ignores stale restore results after switching projects', async () => {
-    const projectARead = {
-      resolve: undefined as
-        | ((value: {
-            success: true
-            data: {
-              openFiles: never[]
-              activeFilePath: null
-              expandedDirs: string[]
-              fileExplorerVisible: boolean
-              activeTabId: null
-              activePaneId: string
-              paneLayout: {
-                type: 'leaf'
-                id: string
-                tabs: { type: 'editor'; filePath: string }[]
-                activeTabId: string
-              }
-            }
-          }) => void)
-        | undefined
-    }
-
-    mockPersistenceRead
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            projectARead.resolve = resolve
-          })
-      )
-      .mockResolvedValueOnce({ success: true, data: null })
-      .mockResolvedValueOnce({
+    let resolveProjectARead: ((value: unknown) => void) | undefined
+    mockPersistenceRead.mockImplementation((key: string) => {
+      if (key === 'editor-state/project-a') {
+        return new Promise((resolve) => {
+          resolveProjectARead = resolve
+        })
+      }
+      return Promise.resolve({
         success: true,
         data: {
           openFiles: [],
           activeFilePath: null,
           expandedDirs: ['/projects/b'],
-          fileExplorerVisible: true,
           activeTabId: null,
           activePaneId: 'pane-b',
           paneLayout: {
@@ -726,27 +730,26 @@ describe('useEditorPersistence', () => {
           }
         }
       })
-
-    const { rerender } = renderHook(
-      ({ currentProjectId }) => useEditorPersistence(currentProjectId),
-      {
-        initialProps: { currentProjectId: 'project-a' }
-      }
-    )
-
-    rerender({ currentProjectId: 'project-b' })
-
-    await waitFor(() => {
-      expect(mockWorkspaceState.resetLayout).toHaveBeenCalledTimes(1)
     })
 
-    projectARead.resolve?.({
+    const mounted = mountPersistence('project-a')
+    await waitFor(() => expect(resolveProjectARead).toBeDefined())
+    mounted.switchTo('project-b')
+
+    await waitFor(() => {
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledWith(
+        'project-b',
+        expect.anything()
+      )
+    })
+
+    // Project A's read lands after B committed: it must be dropped.
+    resolveProjectARead?.({
       success: true,
       data: {
         openFiles: [],
         activeFilePath: null,
         expandedDirs: ['/projects/a'],
-        fileExplorerVisible: true,
         activeTabId: null,
         activePaneId: 'pane-a',
         paneLayout: {
@@ -757,12 +760,11 @@ describe('useEditorPersistence', () => {
         }
       }
     })
+    await Promise.resolve()
+    await Promise.resolve()
 
-    await waitFor(() => {
-      expect(mockPersistenceRead).toHaveBeenCalledTimes(2)
-    })
-
-    expect(mockWorkspaceState.loadProjectWorkspace).not.toHaveBeenCalled()
+    expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
+    expect(mockWorkspaceState.activeProjectId).toBe('project-b')
   })
 
   it('restores legacy pane layout entries that use editorFilePaths', async () => {
@@ -792,16 +794,15 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
-
-    expect(activePaneIdArg).toBe('pane-legacy')
-    expect(restoredRootArg).toEqual({
+    const { tree } = lastActivation()
+    expect(tree?.activePaneId).toBe('pane-legacy')
+    expect(tree?.root).toEqual({
       type: 'leaf',
       id: 'pane-legacy',
       tabs: [
@@ -815,7 +816,8 @@ describe('useEditorPersistence', () => {
     })
   })
 
-  it('resets pane layout when destination project has no persisted state', async () => {
+  it('commits a fresh single-leaf layout when the destination project has no persisted state', async () => {
+    mockWorkspaceState.activeProjectId = 'project-a'
     mockWorkspaceState.root = {
       type: 'split',
       id: 'split-old',
@@ -828,32 +830,51 @@ describe('useEditorPersistence', () => {
           tabs: [{ type: 'terminal', id: 'term-old-1', terminalId: 'old-1' }],
           activeTabId: 'term-old-1'
         },
-        {
-          type: 'leaf',
-          id: 'pane-right',
-          tabs: [
-            {
-              type: 'editor',
-              id: 'edit-/projects/a/src/leftover.ts',
-              filePath: '/projects/a/src/leftover.ts'
-            }
-          ],
-          activeTabId: 'edit-/projects/a/src/leftover.ts'
-        }
+        { type: 'leaf', id: 'pane-right', tabs: [], activeTabId: null }
       ]
     }
     mockWorkspaceState.activePaneId = 'pane-left'
 
-    mockPersistenceRead.mockResolvedValue({
-      success: true,
-      data: null
-    })
+    mockPersistenceRead.mockResolvedValue({ success: true, data: null })
 
-    renderHook(() => useEditorPersistence('project-b'))
+    mountPersistence('project-b')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.resetLayout).toHaveBeenCalledTimes(1)
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
     })
+    const { projectId, tree } = lastActivation()
+    expect(projectId).toBe('project-b')
+    expect(tree?.root).toMatchObject({ type: 'leaf', tabs: [], activeTabId: null })
+    expect(tree?.root.id).not.toBe('split-old')
+    // The project left is persisted before the swap.
+    expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
+      'editor-state/project-a',
+      expect.anything()
+    )
+  })
+
+  it('stages a visited project without a tree so its parked tree is kept', async () => {
+    mockPersistenceRead.mockResolvedValue({ success: true, data: null })
+    const mounted = mountPersistence('project-a')
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-a'))
+    mounted.switchTo('project-b')
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-b'))
+    // project-a now has a parked tree in the real store.
+    mockWorkspaceState.parkedTrees = { 'project-a': {} }
+    mockGetManifest.mockClear()
+    mockLoadPersistedTerminals.mockClear()
+
+    mounted.switchTo('project-a')
+
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-a'))
+    const { projectId, tree } = lastActivation()
+    expect(projectId).toBe('project-a')
+    expect(tree).toBeUndefined()
+    // No manifest/terminal read for a tree that already exists; the parked
+    // tree is reconciled against the project's live terminals.
+    expect(mockGetManifest).not.toHaveBeenCalled()
+    expect(mockLoadPersistedTerminals).not.toHaveBeenCalled()
+    expect(mockWorkspaceState.syncTerminalTabs).toHaveBeenCalledWith([])
   })
 
   // P3: manifest-wins integration — when getManifest returns a real manifest,
@@ -897,30 +918,30 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockGetManifest).toHaveBeenCalledWith('project-a')
     })
 
-    // The manifest path rebuilt the tree → loadProjectWorkspace called with
-    // the manifest-rebuilt root (leaf id 'manifest-leaf-A'), NOT 'legacy-leaf'.
+    // The manifest path rebuilt the tree → committed root is the manifest's
+    // (leaf id 'manifest-leaf-A'), NOT 'legacy-leaf'.
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalledTimes(1)
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
     })
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
-    expect((restoredRootArg as { id: string }).id).toBe('manifest-leaf-A')
-    expect(activePaneIdArg).toBe('manifest-leaf-A')
+    const { tree } = lastActivation()
+    expect(tree?.root.id).toBe('manifest-leaf-A')
+    expect(tree?.activePaneId).toBe('manifest-leaf-A')
+    expect(mockSyncStoreState.setBasedRevision).toHaveBeenCalledWith('project-a', 3)
 
     // The legacy path is skipped: loadPersistedTerminals + reconcileTerminalTabs
     // (which would call loadProjectWorkspace with the 'legacy-leaf' tree) are
     // NOT invoked.
     expect(mockLoadPersistedTerminals).not.toHaveBeenCalled()
-    expect(mockWorkspaceState.resetLayout).not.toHaveBeenCalled()
-    expect(mockWorkspaceState.syncEditorTabs).not.toHaveBeenCalled()
 
-    // P2: the manifest's editor descriptors are seeded into openFiles.
-    expect(mockEditorState.openFile).toHaveBeenCalledWith('/manifest/file.ts')
+    // P2: the manifest's editor descriptors are staged into the committed openFiles.
+    expect(mockReadFile).toHaveBeenCalledWith('/manifest/file.ts')
+    expect([...mockEditorState.openFiles.keys()]).toEqual(['/manifest/file.ts'])
   })
 
   // P11: when no manifest exists (data: null), the legacy paneLayout fallback runs.
@@ -943,13 +964,13 @@ describe('useEditorPersistence', () => {
     mockGetManifest.mockResolvedValue({ success: true, data: null })
     mockLoadPersistedTerminals.mockResolvedValue(null)
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockGetManifest).toHaveBeenCalledWith('project-a')
-      // The legacy path runs — loadPersistedTerminals + loadProjectWorkspace.
+      // The legacy path runs — loadPersistedTerminals + a committed tree.
       expect(mockLoadPersistedTerminals).toHaveBeenCalledWith('project-a')
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalledTimes(1)
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -958,8 +979,7 @@ describe('useEditorPersistence', () => {
     useAgentChatLifetimeStore.setState({
       retainedByProject: {},
       activeSessionByProject: {},
-      focusSessionByProject: {},
-      closingSessionIds: {}
+      focusSessionByProject: {}
     })
     mockWorkspaceState.insertAgentChatTab.mockReset()
     mockPersistenceRead.mockResolvedValue({
@@ -983,7 +1003,7 @@ describe('useEditorPersistence', () => {
     mockGetManifest.mockResolvedValue({ success: true, data: null })
     mockLoadPersistedTerminals.mockResolvedValue(null)
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockWorkspaceState.insertAgentChatTab).toHaveBeenCalledWith('sess-real')
@@ -1013,7 +1033,7 @@ describe('useEditorPersistence', () => {
     mockGetManifest.mockResolvedValue({ success: true, data: null })
     mockLoadPersistedTerminals.mockResolvedValue(null)
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockWorkspaceState.insertAgentChatTab).toHaveBeenCalledWith('launch-abc')
@@ -1063,12 +1083,12 @@ describe('useEditorPersistence', () => {
     })
 
     try {
-      renderHook(() => useEditorPersistence('project-a'))
+      mountPersistence('project-a')
 
       await waitFor(() => {
-        expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+        expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
       })
-      const tree = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]?.[0] as PaneNode
+      const tree = lastActivation().tree?.root as PaneNode
       if (tree.type !== 'leaf') throw new Error('expected leaf')
       expect(tree.tabs.map((tab) => tab.id)).toEqual(['chat-s-unknown'])
       expect(tree.activeTabId).toBe('chat-s-unknown')
@@ -1077,9 +1097,9 @@ describe('useEditorPersistence', () => {
     }
   })
 
-  // P9: the restore flow sets setManifestRestoreInProgress(projectId, true)
-  // before the manifest load and (projectId, false) in the finally.
-  it('sets manifestRestoreInProgress true on entry and false in finally', async () => {
+  // P9: the switch holds setManifestRestoreInProgress(projectId, true) from the
+  // request until it ends, and clears it (false) after the commit.
+  it('sets manifestRestoreInProgress true on entry and false when the switch ends', async () => {
     mockPersistenceRead.mockResolvedValue({
       success: true,
       data: {
@@ -1091,13 +1111,14 @@ describe('useEditorPersistence', () => {
     })
     mockGetManifest.mockResolvedValue({ success: true, data: null })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockGetManifest).toHaveBeenCalled()
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-a', false)
     })
+    expect(mockGetManifest).toHaveBeenCalled()
 
-    // true is set before the load, false in the finally.
+    // true is set before the load, false once the switch ends.
     expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-a', true)
     expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-a', false)
 

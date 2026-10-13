@@ -1,5 +1,6 @@
 /** Desktop ACP history persistence boundary. */
 
+import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import type { PersistedSessionSummary } from '@shared/types/web-protocol.types'
 import type { ToolCall } from '@/lib/acp-api'
 import { acpHistoryApi } from '@/lib/acp-history-api'
@@ -48,6 +49,11 @@ export interface SessionIndexEntry {
    * `get_session_cursor` remains the authoritative functional cursor.
    */
   lastSeq?: number
+  /**
+   * Identity of the session log incarnation `lastSeq` belongs to. Host-minted
+   * (absent on entries from older hosts); a cursor is only valid with it.
+   */
+  logEpoch?: string
   status: SessionStatus
   /** Agent-owned metadata mirror created from ACP `session/list`; no local transcript. */
   discovered?: boolean
@@ -348,6 +354,15 @@ export function deriveTitle(messages: ChatMessage[], fallbackTitle: string): str
 }
 
 export type RecencyGroup = 'Today' | 'Yesterday' | 'Earlier'
+
+/** The history bucket for sessions the host could not attribute to any project. */
+export const UNASSIGNED_GROUP = 'Unassigned'
+export type HistoryGroup = RecencyGroup | typeof UNASSIGNED_GROUP
+
+/** Index entries stamped with the host's unassigned-project sentinel. */
+export function unassignedSessions(entries: SessionIndexEntry[]): SessionIndexEntry[] {
+  return entries.filter((entry) => entry.projectId === UNASSIGNED_PROJECT_ID)
+}
 
 export function groupSessionsByRecency<T extends { lastActivityAt: number }>(
   entries: T[],

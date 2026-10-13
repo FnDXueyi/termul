@@ -206,8 +206,13 @@ impl Peer {
         self.send_message(Message::Text(text.into().into()));
     }
 
+    /// Send a JSON frame. A ledgered request type without a `command_id` is
+    /// stamped with a fresh one (see `test_clock::stamp_ws_frame`); use
+    /// [`Self::send_text`] to send a frame untouched.
     pub(crate) fn send_json(&self, value: &Value) {
-        self.send_text(value.to_string());
+        let mut frame = value.clone();
+        crate::web::command_ledger::test_clock::stamp_ws_frame(&mut frame);
+        self.send_text(frame.to_string());
     }
 
     pub(crate) fn send_close(&self, code: u16, reason: &str) {
