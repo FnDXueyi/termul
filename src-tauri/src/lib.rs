@@ -153,7 +153,7 @@ fn resolve_executable_from_path(command: &str) -> Option<String> {
 // Re-exports for commands
 pub use acp::{
     AcpCatalogService, AcpInstallService, AcpManager, ChatHistoryStore, ClaudeAgentService,
-    ClaudeAuthMode, ClaudeAuthStatus, FileProjectRegistry, SessionPersistence,
+    ClaudeAuthMode, ClaudeAuthStatus, SessionPersistence,
     WorkspaceManifestService,
 };
 // Host-injected `plan` MCP tool: the `--internal-mcp-plan-server`
@@ -1168,6 +1168,55 @@ pub fn run() {
                 }
             }
 
+            // The ONE durable project registry (AD-17): opened here, before any
+            // sink or carrier is wired, from the locked `app_data_dir`. It
+            // survives shared-live stop/start (stop never clears it) and is the
+            // list `GET /projects`, the web boundary and the project commands
+            // read. A newer-schema file refuses startup untouched; a corrupt
+            // one is copied aside and replaced by an empty registry so the
+            // desktop still starts.
+            let projects_file = data_lock::desktop_projects_file(&app_data_dir);
+            let project_registry = match ProjectRegistry::open_durable(
+                &projects_file,
+                acp::RootCheck::Lenient,
+            ) {
+                Ok(registry) => registry,
+                Err(error @ acp::ProjectRegistryError::BadSchemaVersion { .. }) => {
+                    refuse_startup(&handle, &error.to_string());
+                    return Ok(());
+                }
+                Err(error) => {
+                    // Only a parse failure copied the file aside; a read failure
+                    // (for example permission denied) left it in place and keeps
+                    // every later save failing until it can be read again.
+                    let (log_note, dialog_note) = match &error {
+                        acp::ProjectRegistryError::Parse(_) => (
+                            "starting with an empty project list (the corrupt file was copied aside)",
+                            "It started with an empty list; the unreadable file was kept next to it as a .corrupt backup.",
+                        ),
+                        _ => (
+                            "starting with an empty project list (the file was not changed; project changes are not saved until it can be read)",
+                            "It started with an empty list. Project changes will not be saved until the file can be read.",
+                        ),
+                    };
+                    log::error!(
+                        "[startup] could not load the project registry '{}': {error}; {log_note}",
+                        projects_file.display()
+                    );
+                    handle
+                        .dialog()
+                        .message(format!(
+                            "Termul could not read its saved project list ({error}). {dialog_note}"
+                        ))
+                        .title("Project list unavailable")
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                    ProjectRegistry::empty_durable(&projects_file)
+                }
+            };
+            let project_registry = Arc::new(project_registry);
+            app.manage(Arc::clone(&project_registry));
+
             // Window chrome is configured before show(). macOS overlay settings
             // live in tauri.conf.json — avoid set_decorations(true) there because
             // it resets hiddenTitle/full-size content view. Win/Linux drop native
@@ -1561,13 +1610,6 @@ pub fn run() {
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));
 
-            // In-memory project registry (Epic-4 bridge) — renderer-fed via
-            // `remote_sync_projects`; the source for `GET /projects` +
-            // `switch_project` cwd resolution on the shared-live web server.
-            // Lives only while the server runs; cleared on `remote_server_stop`.
-            let project_registry = Arc::new(ProjectRegistry::new());
-            app.manage(Arc::clone(&project_registry));
-
             // The desktop's own `/ws` relay carrier: the renderer speaks the
             // `/ws` contract over one Tauri `ipc::Channel` per connection
             // (`ws_channel_*`), served by the same relay as shared-live over
@@ -1579,7 +1621,7 @@ pub fn run() {
                     acp: acp_manager,
                     pty: pty_manager.clone(),
                     relay: ws_relay,
-                    registry: project_registry,
+                    registry: Arc::clone(&project_registry),
                     workspace_manifest: workspace_manifest_service.clone(),
                     acp_catalog: acp_catalog_service.clone(),
                     acp_install: acp_install_service.clone(),
@@ -1933,6 +1975,7 @@ pub fn run() {
             commands::remote_server_status,
             commands::remote_sync_projects,
             commands::set_host_default_project,
+            commands::project_registry_import,
             commands::remote_sync_chat_history,
             commands::remote_sync_mcp_registry,
             // Desktop ACP renderer-history storage
