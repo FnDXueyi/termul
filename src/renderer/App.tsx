@@ -61,6 +61,7 @@ import { useAcpSessionResume } from './hooks/use-acp-session-resume'
 import { useChatNotifications } from './hooks/use-chat-notifications'
 import { useKeyboardShortcutsLoader } from './hooks/use-keyboard-shortcuts'
 import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
+import { usePersistenceErrorToasts } from './hooks/use-persistence-error-toasts'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
 import { usePreventNativeContextMenu } from './hooks/use-prevent-native-context-menu'
 import { useProjectRegistry } from './hooks/use-project-registry'
@@ -140,6 +141,9 @@ function AppEffects(): null {
     primeServerCapability()
   }, [])
 
+  // Toast when a store write fails (value too large, partition full, ...).
+  // Mounted on both renderer roots for parity.
+  usePersistenceErrorToasts()
   useTerminalAutoSave()
   useTerminalRestore()
   useCrashRecovery()

@@ -764,4 +764,162 @@ describe('createWebPersistenceApi', () => {
       expect(storeFrames().filter((f) => f.type === 'store_write')).toHaveLength(1)
     })
   })
+
+  describe('persistence error bus', () => {
+    /** An api plus the events it reported. */
+    function withEvents(instance = api): {
+      events: { key: string; code: string; message: string }[]
+      unsubscribe: () => void
+    } {
+      const events: { key: string; code: string; message: string }[] = []
+      const unsubscribe = instance.onPersistenceError((event) => events.push(event))
+      return { events, unsubscribe }
+    }
+
+    it('reports STORE_VALUE_TOO_LARGE with the logical key, and sends nothing', async () => {
+      const { events } = withEvents()
+
+      const result = await api.write('chat-draft/p1/s1', 'x'.repeat(256 * 1024))
+
+      expect(result).toMatchObject({ success: false, code: 'STORE_VALUE_TOO_LARGE' })
+      expect(events).toEqual([
+        {
+          key: 'chat-draft/p1/s1',
+          code: 'STORE_VALUE_TOO_LARGE',
+          message: expect.stringContaining('chat-draft/p1/s1')
+        }
+      ])
+      expect(hostLog).toHaveLength(0)
+    })
+
+    it.each([
+      'STORE_PARTITION_FULL',
+      'STORE_WRITE_FAILED'
+    ])('reports %s answered by the host', async (code) => {
+      const { events } = withEvents()
+      await api.read('warmup')
+      sockets[0].failCode = code
+
+      const result = await api.write('terminals/p1', { a: 1 })
+
+      expect(result).toMatchObject({ success: false, code })
+      expect(events).toEqual([{ key: 'terminals/p1', code, message: 'store failed' }])
+    })
+
+    it('reports STORE_NOT_HYDRATED when the key was never read successfully', async () => {
+      const { events } = withEvents()
+      await api.read('warmup')
+      sockets[0].failCode = 'STORE_UNAVAILABLE'
+      await api.read('terminals/p1')
+      sockets[0].failCode = null
+
+      const result = await api.write('terminals/p1', { a: 1 })
+
+      expect(result).toMatchObject({ success: false, code: 'STORE_NOT_HYDRATED' })
+      expect(events.map((e) => [e.key, e.code])).toEqual([['terminals/p1', 'STORE_NOT_HYDRATED']])
+    })
+
+    it('reports STORE_BASE_REQUIRED for a shared key this page never read', async () => {
+      const { events } = withEvents()
+
+      const result = await api.write('settings/app', { theme: 'dark' })
+
+      expect(result).toMatchObject({ success: false, code: 'STORE_BASE_REQUIRED' })
+      expect(events.map((e) => [e.key, e.code])).toEqual([['settings/app', 'STORE_BASE_REQUIRED']])
+    })
+
+    it('reports a failed delete the same way', async () => {
+      const { events } = withEvents()
+
+      await api.delete('settings/app')
+
+      expect(events.map((e) => [e.key, e.code])).toEqual([['settings/app', 'STORE_BASE_REQUIRED']])
+    })
+
+    describe('STORE_CAS_FAILED', () => {
+      /** Reads the absent key, then makes another device create it: `expected: null` is stale. */
+      async function loseTheRace(): Promise<void> {
+        await api.read('ssh/profiles')
+        const other = makeApi('device-b')
+        await other.read('ssh/profiles')
+        expect(await other.write('ssh/profiles', [{ id: 'other' }], { expected: null })).toEqual(
+          okVoid
+        )
+      }
+
+      it('is reported for a write that loses the race', async () => {
+        const { events } = withEvents()
+        await loseTheRace()
+
+        const result = await api.write('ssh/profiles', [{ id: 'mine' }], { expected: null })
+
+        expect(result).toMatchObject({ success: false, code: 'STORE_CAS_FAILED' })
+        expect(events.map((e) => [e.key, e.code])).toEqual([['ssh/profiles', 'STORE_CAS_FAILED']])
+      })
+
+      it('stays quiet while the caller retries, and reports the last attempt', async () => {
+        const { events } = withEvents()
+        await loseTheRace()
+
+        const retried = await api.write('ssh/profiles', [{ id: 'mine' }], {
+          expected: null,
+          retrying: true
+        })
+        expect(retried).toMatchObject({ success: false, code: 'STORE_CAS_FAILED' })
+        expect(events).toEqual([])
+
+        await api.write('ssh/profiles', [{ id: 'mine' }], { expected: null, retrying: false })
+        expect(events).toHaveLength(1)
+      })
+
+      it('does not silence other failures of a retrying write', async () => {
+        const { events } = withEvents()
+
+        await api.write('ssh/profiles', [{ id: 'mine' }], { expected: null, retrying: true })
+
+        // Never read in this page: refused before any compare-and-set happens.
+        expect(events.map((e) => e.code)).toEqual(['STORE_BASE_REQUIRED'])
+      })
+    })
+
+    it('reports a failed debounced write when it flushes', async () => {
+      vi.useFakeTimers()
+      const { events } = withEvents()
+      void api.writeDebounced('settings/app', { theme: 'dark' })
+
+      await vi.advanceTimersByTimeAsync(500)
+
+      expect(events.map((e) => [e.key, e.code])).toEqual([['settings/app', 'STORE_BASE_REQUIRED']])
+    })
+
+    it('stays quiet for successes, failed reads and codes the user cannot act on', async () => {
+      const { events } = withEvents()
+
+      await api.write('terminals/p1', { a: 1 })
+      await api.read('missing')
+      sockets[0].failCode = 'STORE_UNAVAILABLE'
+      await api.write('terminals/p1', { a: 2 })
+      await api.read('unreadable')
+      sockets[0].failCode = 'STORE_KEY_SCOPE'
+      await api.write('terminals/p1', { a: 3 })
+
+      expect(events).toEqual([])
+    })
+
+    it('stops reporting after unsubscribe and survives a throwing listener', async () => {
+      const first = withEvents()
+      const second = withEvents()
+      api.onPersistenceError(() => {
+        throw new Error('listener bug')
+      })
+
+      const result = await api.write('settings/app', { theme: 'dark' })
+      first.unsubscribe()
+      await api.write('settings/app', { theme: 'light' })
+
+      expect(result).toMatchObject({ success: false, code: 'STORE_BASE_REQUIRED' })
+      expect(first.events).toHaveLength(1)
+      expect(second.events).toHaveLength(2)
+    })
+  })
 })

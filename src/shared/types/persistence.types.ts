@@ -62,12 +62,47 @@ export interface PersistedSnapshotList {
   updatedAt: string // ISO timestamp
 }
 
-// Keys used for persistence storage
+/**
+ * Every logical persistence key the renderer reads or writes, declared once.
+ * Scope is decided by `KEY_SCOPES` below: a key listed there is shared between
+ * devices, every other key is device-scoped. A test keeps both tables in step.
+ */
 export const PersistenceKeys = {
   terminals: (projectId: string): string => `terminals/${projectId}`,
   snapshots: (projectId: string): string => `snapshots/${projectId}`,
   projects: 'projects',
   windowState: 'window-state',
+  // App-wide settings records (shared between devices, merged per field).
+  appSettings: 'settings/app',
+  keyboardShortcuts: 'settings/keyboard-shortcuts',
+  contextBarSettings: 'settings/context-bar',
+  tocSettings: 'settings/toc',
+  pinnedCommands: 'settings/pinned-commands',
+  // The palette's recently used command ids (device scope).
+  recentCommands: 'settings/recent-commands',
+  // Per-project command history of the terminals (device scope).
+  commandHistory: (projectId: string): string => `projects/${projectId}/command-history`,
+  // The launcher's unsent prompt per project (device scope).
+  lastLaunchDraft: (projectId: string): string => `last-launch-draft/${projectId}`,
+  // The composer's unsent message per chat session (device scope).
+  chatDraft: (projectId: string, sessionId: string): string =>
+    `chat-draft/${projectId}/${sessionId}`,
+  // ACP agent configuration (shared between devices, merged per field).
+  acpAgents: 'acp/agents',
+  acpAuthMethods: 'acp/auth-methods',
+  acpMcpServers: 'acp/mcp-servers',
+  // Recently @-mentioned files. The bare key is the legacy single-map layout
+  // (read once for back-compat); each (project, cwd) partition lives under its
+  // own key: the caller passes the URI-encoded composite id.
+  acpMentionRecentsLegacy: 'acp/mention-recents',
+  acpMentionRecents: (partitionId: string): string => `acp/mention-recents/${partitionId}`,
+  // SSH profile metadata of the web client (shared, whole-value compare-and-set).
+  sshProfiles: 'ssh/profiles',
+  // The last crash-recovery session snapshot (device scope).
+  sessionsAutoSave: 'sessions/auto-save',
+  // Marker: the pre-fold-in `termul-sessions.json` entry was moved to
+  // `sessionsAutoSave`; the legacy file is never read again once it is set.
+  sessionsLegacyMigrated: 'sessions/legacy-migrated',
   // ADR-004.3 / ADR-004.6: user-defined terminal-native agent definitions.
   customAgents: 'agents/custom',
   // Last-selected agent in the launcher (persisted across sessions).

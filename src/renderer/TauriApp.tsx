@@ -37,6 +37,7 @@ import { useGitStatus } from './hooks/use-git-status'
 import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useKeyboardShortcutsLoader } from './hooks/use-keyboard-shortcuts'
 import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
+import { usePersistenceErrorToasts } from './hooks/use-persistence-error-toasts'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
 import { useProjectGitBranch } from './hooks/use-project-git-branch'
 import { useProjectIcon } from './hooks/use-project-icon'
@@ -71,6 +72,9 @@ function AppEffects(): null {
     ensureClientIdentity()
   }, [])
 
+  // Toast when a store write fails (value too large, partition full, ...).
+  // Mounted on both renderer roots for parity.
+  usePersistenceErrorToasts()
   useTerminalAutoSave()
   useTerminalRestore()
   useCrashRecovery()

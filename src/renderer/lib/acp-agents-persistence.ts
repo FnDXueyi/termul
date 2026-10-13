@@ -7,10 +7,9 @@
  * lives in OS secure storage.
  */
 
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import type { AgentConfig } from '@/lib/acp-api'
 import { persistenceApi } from '@/lib/api'
-
-export const ACP_AGENTS_KEY = 'acp/agents'
 
 /** A persisted agent config carries a stable local id. */
 export interface StoredAgentConfig extends AgentConfig {
@@ -63,7 +62,7 @@ export function looksLikeSecretValue(value: string): boolean {
 
 /** Load persisted agent configs (empty list when none stored). */
 export async function loadAgentConfigs(): Promise<StoredAgentConfig[]> {
-  const res = await persistenceApi.read<StoredAgentConfig[]>(ACP_AGENTS_KEY)
+  const res = await persistenceApi.read<StoredAgentConfig[]>(PersistenceKeys.acpAgents)
   if (res.success) {
     if (!Array.isArray(res.data)) return []
     // Filter out malformed records before the configId backfill so a corrupt
@@ -147,7 +146,7 @@ export async function saveAgentConfigs(list: StoredAgentConfig[]): Promise<void>
       }
     }
   }
-  const res = await persistenceApi.write(ACP_AGENTS_KEY, list)
+  const res = await persistenceApi.write(PersistenceKeys.acpAgents, list)
   if (!res.success) {
     throw new Error(res.error ?? 'Failed to persist agent configs')
   }

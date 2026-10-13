@@ -1,8 +1,9 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useCallback, useEffect } from 'react'
 import { persistenceApi } from '@/lib/api'
 import { useContextBarSettingsStore } from '@/stores/context-bar-settings-store'
 import type { ContextBarSettings } from '@/types/settings'
-import { CONTEXT_BAR_SETTINGS_KEY, DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
+import { DEFAULT_CONTEXT_BAR_SETTINGS } from '@/types/settings'
 
 /**
  * Hook to load and persist context bar settings
@@ -15,8 +16,9 @@ export function useContextBarSettings(): void {
   useEffect(() => {
     async function loadSettings(): Promise<void> {
       try {
-        const result =
-          await persistenceApi.read<Partial<ContextBarSettings>>(CONTEXT_BAR_SETTINGS_KEY)
+        const result = await persistenceApi.read<Partial<ContextBarSettings>>(
+          PersistenceKeys.contextBarSettings
+        )
 
         if (result.success && result.data) {
           // Merge with defaults to handle any new settings added in future versions.
@@ -49,7 +51,7 @@ export function useUpdateContextBarSetting(): (element: keyof ContextBarSettings
     async (element: keyof ContextBarSettings) => {
       toggleElement(element)
       const updatedSettings = useContextBarSettingsStore.getState().settings
-      await persistenceApi.writeDebounced(CONTEXT_BAR_SETTINGS_KEY, updatedSettings)
+      await persistenceApi.writeDebounced(PersistenceKeys.contextBarSettings, updatedSettings)
     },
     [toggleElement]
   )
