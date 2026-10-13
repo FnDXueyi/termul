@@ -66,13 +66,17 @@ describe('hydrateProject', () => {
     expect(useEditorStore.getState().openFiles).toBe(openFilesBefore)
   })
 
-  it('keeps the disk content when the file changed after the draft was taken', async () => {
+  it('shows a conflict, not a dropped draft, when the file changed after the draft was taken', async () => {
     mockRead.mockResolvedValue(persistedState(persistedFile()))
     mockReadFile.mockResolvedValue({ success: true, data: { content: 'disk', modifiedAt: 101 } })
 
     const staged = await hydrateProject('p1', () => true)
 
-    expect(staged.editorFiles.get('/p/a.ts')).toMatchObject({ content: 'disk', isDirty: false })
+    expect(staged.editorFiles.get('/p/a.ts')).toMatchObject({
+      content: 'disk',
+      isDirty: false,
+      draftConflict: { draftContent: 'draft text', draftSavedAt: 100 }
+    })
   })
 
   it('skips files that can no longer be read', async () => {
