@@ -44,6 +44,8 @@ const REQUEST_TIMEOUT_MS = 15_000
  * refuses new input with INPUT_BLOCKED (buffered data is never silently
  * truncated). */
 const INPUT_BUFFER_MAX_CHARS = 8_192
+/** Wait before replaying input whose first run is still in progress on the host. */
+const IN_PROGRESS_FLUSH_RETRY_MS = 1_000
 const RECONNECT_MAX_ATTEMPTS = 10
 /** How long the page must stay hidden before a return triggers a proactive
  * reconnect. Mobile browsers suspend JS in backgrounded tabs, so the server's
@@ -663,8 +665,10 @@ export class WebTerminalClient {
         tracker.claim = undefined
         tracker.disconnected = true
         // Story 10: undeliverable input for a terminal whose claim was
-        // dropped is discarded, not stranded.
+        // dropped is discarded, not stranded (with its unconfirmed chunk, so a
+        // later input that starts with the same text never reuses its id).
         this.inputBuffers.delete(terminalId)
+        this.unconfirmedChunks.delete(terminalId)
         // #850: a direct attach rejection (not the reconnect path) — the
         // claim was refused while the channel was healthy. Surface the
         // loss so the UI does not silently swallow input either way.
@@ -888,6 +892,17 @@ export class WebTerminalClient {
           source: 'WebTerminalClient.flushInputBuffer',
           message: `buffered-input replay failed (${result.code}) — input re-buffered for the next re-attach`
         })
+        // The first run is still going: the socket stays up, so no re-attach
+        // will flush this. Try again soon, or newer keystrokes (sent direct)
+        // would overtake the stranded input.
+        if (result.code === COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS) {
+          setTimeout(() => {
+            const current = this.trackers.get(terminalId)
+            if (!this.disposed && current?.attachedSocket === this.socket) {
+              this.flushInputBuffer(terminalId)
+            }
+          }, IN_PROGRESS_FLUSH_RETRY_MS)
+        }
         return
       }
       // A non-network replay failure drops the buffered input (the buffer

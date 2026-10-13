@@ -200,8 +200,9 @@ describe('git-status-store commit footer', () => {
   })
 
   it('commit invokes gitApi.commit then refreshes status and context', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: false } as GitCommitContext)
     await useGitStatusStore.getState().commit(CWD, 'summary', 'body', false)
-    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'summary', 'body', false)
+    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'summary', 'body', false, '')
     expect(gitApi.getStatus).toHaveBeenCalledWith(CWD)
     expect(gitApi.getCommitContext).toHaveBeenCalledWith(CWD)
   })
@@ -239,15 +240,26 @@ describe('git-status-store commit footer', () => {
     expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false, '2'.repeat(40))
   })
 
-  it('a failed commit-context fetch forgets the HEAD: the next commit carries no expectedHead', async () => {
+  it('a failed commit-context fetch forgets the HEAD: the next commit refetches it and is refused when that fails too', async () => {
     gitApi.getCommitContext.mockResolvedValueOnce({ hasHead: true } as GitCommitContext)
     gitApi.getLog.mockResolvedValue([{ hash: 'c'.repeat(40) }])
     await useGitStatusStore.getState().fetchCommitContext(CWD)
-    gitApi.getCommitContext.mockRejectedValueOnce(new Error('locked'))
+    gitApi.getCommitContext.mockRejectedValue(new Error('locked'))
     await useGitStatusStore.getState().fetchCommitContext(CWD)
 
+    await expect(useGitStatusStore.getState().commit(CWD, 's', '', false)).rejects.toThrow(
+      'HEAD could not be read'
+    )
+    expect(gitApi.commit).not.toHaveBeenCalled()
+  })
+
+  it('a commit before any context fetch reads the HEAD first and sends it', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: true } as GitCommitContext)
+    gitApi.getLog.mockResolvedValue([{ hash: 'd'.repeat(40) }])
+
     await useGitStatusStore.getState().commit(CWD, 's', '', false)
-    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false)
+
+    expect(gitApi.commit).toHaveBeenLastCalledWith(CWD, 's', '', false, 'd'.repeat(40))
   })
 
   it('a HEAD that cannot be read keeps the context but refuses a commit without a precondition', async () => {
@@ -282,8 +294,9 @@ describe('git-status-store commit footer', () => {
   })
 
   it('commit passes amend flag through', async () => {
+    gitApi.getCommitContext.mockResolvedValue({ hasHead: false } as GitCommitContext)
     await useGitStatusStore.getState().commit(CWD, 'reword', '', true)
-    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'reword', '', true)
+    expect(gitApi.commit).toHaveBeenCalledWith(CWD, 'reword', '', true, '')
   })
 
   it('commit propagates errors to the caller', async () => {

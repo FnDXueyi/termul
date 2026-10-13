@@ -338,7 +338,10 @@ const LEDGERED_ROUTES: Readonly<Record<string, LedgeredRoute>> = {
   '/git/unstage-hunk': { kind: 'git_unstage_hunk', fresh: true, entityKey: pair('cwd', 'path') },
   '/git/discard': { kind: 'git_discard', entityKey: pair('cwd', 'path') },
   '/git/commit': { kind: 'git_commit', fresh: true, entityKey: (b) => part(b, 'cwd') },
-  '/git/create-branch': { kind: 'git_create_branch', entityKey: pair('cwd', 'branch') },
+  '/git/create-branch': {
+    kind: 'git_create_branch',
+    entityKey: (b) => entityKeyOf(part(b, 'cwd'), part(b, 'branch'), part(b, 'startRef'))
+  },
   '/git/stash-save': { kind: 'git_stash_save', fresh: true, entityKey: (b) => part(b, 'cwd') },
   '/git/stash-apply': { kind: 'git_stash_apply', entityKey: pair('cwd', 'index') },
   '/git/stash-pop': { kind: 'git_stash_pop', entityKey: pair('cwd', 'index') },

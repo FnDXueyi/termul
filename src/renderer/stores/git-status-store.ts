@@ -459,10 +459,14 @@ export const useGitStatusStore = create<GitStatusState>((set, get) => ({
     try {
       // The commit lands on the HEAD the panel last showed: a HEAD moved by
       // another client or terminal refuses it (`precondition_failed`).
-      const expectedHead = knownHeads[trackPath(cwd)]
-      if (expectedHead === null) throw new Error('HEAD could not be read. Refresh and try again.')
-      if (expectedHead === undefined) await gitApi.commit(cwd, summary, description, amend)
-      else await gitApi.commit(cwd, summary, description, amend, expectedHead)
+      const key = trackPath(cwd)
+      if (knownHeads[key] === undefined) await get().fetchCommitContext(cwd)
+      const expectedHead = knownHeads[key]
+      // No commit without a known HEAD: the host could not refuse a moved one.
+      if (expectedHead === undefined || expectedHead === null) {
+        throw new Error('HEAD could not be read. Refresh and try again.')
+      }
+      await gitApi.commit(cwd, summary, description, amend, expectedHead)
     } catch (error) {
       if (isPreconditionFailed(error)) await refreshAfterWrite(get, cwd)
       throw error
@@ -627,9 +631,8 @@ const commitContextRequests: Record<string, number> = {}
 
 /** Full sha of HEAD (`''`: unborn branch) as of the last commit-context fetch,
  * per tracked path: the `expectedHead` of the next commit. `null`: HEAD could not
- * be read, so a commit is refused until a fetch succeeds. Absent before the first
- * fetch and after a failed one (the commit then carries no precondition).
- * Control metadata. */
+ * be read. Absent before the first fetch and after a failed one. A commit needs a
+ * known value (it fetches one when absent). Control metadata. */
 const knownHeads: Record<string, string | null> = {}
 
 /** HEAD's full sha (`''` on an unborn branch); `null` when it cannot be read. */

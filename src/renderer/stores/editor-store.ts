@@ -368,13 +368,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }
         if (!result.success) {
           const conflict = result.code === COMMAND_RESULT_CODES.PRECONDITION_FAILED
+          // An unchecked write (an overwrite the user chose) whose outcome could
+          // not be confirmed has no hash to check a retry against: stop automatic
+          // saves and let the user decide again (Reload or Overwrite).
+          const needsDecision =
+            !conflict &&
+            !file.contentHash &&
+            file.tracksHash === true &&
+            UNCERTAIN_WRITE_CODES.has(result.code)
           const resetFiles = new Map(get().openFiles)
           const current = resetFiles.get(path)
           if (current) {
             resetFiles.set(path, {
               ...current,
               operationStatus: 'idle',
-              ...(conflict ? { externalConflict: true } : {})
+              ...(conflict || needsDecision ? { externalConflict: true } : {})
             })
             set({ openFiles: resetFiles })
           }

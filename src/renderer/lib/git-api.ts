@@ -160,7 +160,11 @@ export const gitApi = {
 
   createBranch: (cwd: string, branch: string, startRef?: string) =>
     isTauriContext()
-      ? ledgeredInvoke('git_create_branch', entityKeyOf(cwd, branch), { cwd, branch, startRef })
+      ? ledgeredInvoke('git_create_branch', entityKeyOf(cwd, branch, startRef), {
+          cwd,
+          branch,
+          startRef
+        })
       : webServerGit.createBranch(cwd, branch, startRef),
 
   stashSave: (cwd: string, message?: string, includeUntracked?: boolean) =>
