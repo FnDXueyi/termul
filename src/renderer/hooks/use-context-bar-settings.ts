@@ -16,8 +16,9 @@ export function useContextBarSettings(): void {
   useEffect(() => {
     async function loadSettings(): Promise<void> {
       try {
-        const result =
-          await persistenceApi.read<Partial<ContextBarSettings>>(PersistenceKeys.contextBarSettings)
+        const result = await persistenceApi.read<Partial<ContextBarSettings>>(
+          PersistenceKeys.contextBarSettings
+        )
 
         if (result.success && result.data) {
           // Merge with defaults to handle any new settings added in future versions.

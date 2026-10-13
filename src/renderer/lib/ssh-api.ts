@@ -1,5 +1,5 @@
-import { PersistenceKeys } from '@shared/types/persistence.types'
 import type { IpcResult } from '@shared/types/ipc.types'
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import type {
   ActivePortForward,
   PortForwardConfig,

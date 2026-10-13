@@ -130,6 +130,14 @@ const { mockUseSmoothWheelScroll } = vi.hoisted(() => ({
   mockUseSmoothWheelScroll: vi.fn(() => undefined)
 }))
 
+const { mockUsePersistenceErrorToasts } = vi.hoisted(() => ({
+  mockUsePersistenceErrorToasts: vi.fn(() => undefined)
+}))
+
+vi.mock('./hooks/use-persistence-error-toasts', () => ({
+  usePersistenceErrorToasts: mockUsePersistenceErrorToasts
+}))
+
 vi.mock('./hooks/use-smooth-wheel-scroll', () => ({
   useSmoothWheelScroll: mockUseSmoothWheelScroll
 }))
@@ -181,5 +189,10 @@ describe('TauriApp', () => {
   it('mounts useSmoothWheelScroll in AppEffects', () => {
     render(<TauriApp />)
     expect(mockUseSmoothWheelScroll).toHaveBeenCalledTimes(1)
+  })
+
+  it('mounts the store write error toasts in AppEffects (parity with App.tsx)', () => {
+    render(<TauriApp />)
+    expect(mockUsePersistenceErrorToasts).toHaveBeenCalledTimes(1)
   })
 })

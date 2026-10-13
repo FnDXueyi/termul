@@ -7,9 +7,10 @@
  * rebuilt on load from the active `cwd`.
  */
 
-import type { MentionMatch } from '@/components/chat/mention-menu-model'
 import { PersistenceKeys } from '@shared/types/persistence.types'
+import type { MentionMatch } from '@/components/chat/mention-menu-model'
 import { persistenceApi } from '@/lib/api'
+import { trimListToCap } from '@/lib/persistence-trim'
 
 export const MENTION_RECENTS_CAP = 20
 
@@ -102,10 +103,9 @@ export async function saveMentionRecents(
 ): Promise<void> {
   // Per-partition write — no read-modify-write, so concurrent saves for
   // different partitions cannot clobber each other.
-  const write = await persistenceApi.write(
-    mentionRecentsKey(projectId, cwd),
-    recents.map(toStoredRecent)
-  )
+  // Newest first: past the host's value cap the oldest recents go.
+  const stored = trimListToCap(recents.map(toStoredRecent), (kept) => kept, 'head').items
+  const write = await persistenceApi.write(mentionRecentsKey(projectId, cwd), stored)
   if (!write.success) {
     throw new Error(write.error ?? 'Failed to persist mention recents')
   }

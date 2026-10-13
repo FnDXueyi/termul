@@ -30,8 +30,7 @@ const MESSAGES: Record<PersistenceErrorCode, (label: string) => string> = {
   STORE_PARTITION_FULL: (label) => `The storage for this device is full; ${label} was not saved.`,
   STORE_NOT_HYDRATED: (label) =>
     `Could not save ${label}: its stored value could not be read. Reload the page to try again.`,
-  STORE_WRITE_FAILED: (label) =>
-    `The server could not write ${label} to disk; it was not saved.`,
+  STORE_WRITE_FAILED: (label) => `The server could not write ${label} to disk; it was not saved.`,
   STORE_BASE_REQUIRED: (label) =>
     `Could not save ${label}: this page has not loaded its stored value yet. Reload the page to try again.`,
   STORE_CAS_FAILED: (label) =>

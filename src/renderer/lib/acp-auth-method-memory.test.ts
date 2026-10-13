@@ -98,7 +98,9 @@ describe('acp auth-method memory persistence', () => {
   it('writes under the dedicated key and throws on failure', async () => {
     ;(persistenceApi.write as ReturnType<typeof vi.fn>).mockResolvedValue({ success: true })
     await saveAuthMethodMemory({ 'cfg-1': 'm1' })
-    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpAuthMethods, { 'cfg-1': 'm1' })
+    expect(persistenceApi.write).toHaveBeenCalledWith(PersistenceKeys.acpAuthMethods, {
+      'cfg-1': 'm1'
+    })
     ;(persistenceApi.write as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: 'disk full'

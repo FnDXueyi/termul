@@ -1,6 +1,5 @@
 /** Desktop ACP history persistence boundary. */
 
-import { PersistenceKeys } from '@shared/types/persistence.types'
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import type { PersistedSessionSummary } from '@shared/types/web-protocol.types'
 import type { ToolCall } from '@/lib/acp-api'
@@ -11,6 +10,8 @@ import { logFrontendError } from '@/lib/log-api'
 import { sanitizeDisplayText } from '@/lib/skill-tokens'
 import type { ChatMessage, SessionStatus } from '@/stores/acp-store'
 
+export const SESSION_INDEX_KEY = 'acp/sessions/index'
+export const WIPE_MIGRATION_KEY = 'acp/sessions/migrated-v2'
 export const INACTIVE_PAYLOAD_CACHE_BUDGET = 3
 
 /**
@@ -26,6 +27,10 @@ export const MAX_PINNED_PAYLOADS = 8
  * `MAX_LIVE_WINDOW_MESSAGES` (300) — only the recent transcript is needed
  * for the user to read + chat; the full payload loads on scroll-up. */
 export const HISTORY_TAIL_MESSAGE_LIMIT = 50
+
+export function sessionPayloadKey(id: string): string {
+  return `acp/sessions/${id}`
+}
 
 export interface SessionIndexEntry {
   id: string
@@ -868,7 +873,7 @@ export async function runHistoryWipeMigration(): Promise<void> {
   const rustState = await acpHistoryApi.listLegacy()
   if (rustState.legacyImportComplete) return
 
-  const indexResult = await persistenceApi.read<SessionIndexEntry[]>(PersistenceKeys.acpSessionsIndex)
+  const indexResult = await persistenceApi.read<SessionIndexEntry[]>(SESSION_INDEX_KEY)
   if (!indexResult.success && indexResult.code !== 'KEY_NOT_FOUND') {
     throw new Error(indexResult.error)
   }
@@ -878,7 +883,7 @@ export async function runHistoryWipeMigration(): Promise<void> {
   const legacyIndex = indexResult.success ? indexResult.data : []
   const payloads: SessionPayload[] = []
   for (const entry of legacyIndex) {
-    const payloadResult = await persistenceApi.read<SessionPayload>(PersistenceKeys.acpSession(entry.id))
+    const payloadResult = await persistenceApi.read<SessionPayload>(sessionPayloadKey(entry.id))
     if (!payloadResult.success || !payloadResult.data) {
       throw new Error(payloadResult.success ? 'Legacy payload is empty' : payloadResult.error)
     }
@@ -926,11 +931,11 @@ export async function runHistoryWipeMigration(): Promise<void> {
 
   try {
     for (const entry of legacyIndex) {
-      const result = await persistenceApi.delete(PersistenceKeys.acpSession(entry.id))
+      const result = await persistenceApi.delete(sessionPayloadKey(entry.id))
       if (!result.success) throw new Error(result.error)
     }
     if (indexResult.success) {
-      const result = await persistenceApi.delete(PersistenceKeys.acpSessionsIndex)
+      const result = await persistenceApi.delete(SESSION_INDEX_KEY)
       if (!result.success) throw new Error(result.error)
     }
     await acpHistoryApi.markLegacyImportComplete()
@@ -939,11 +944,11 @@ export async function runHistoryWipeMigration(): Promise<void> {
     // source so the next launch can retry instead of inheriting a partial set.
     const rollbackFailures: string[] = []
     for (const payload of payloads) {
-      const result = await persistenceApi.write(PersistenceKeys.acpSession(payload.metadata.id), payload)
+      const result = await persistenceApi.write(sessionPayloadKey(payload.metadata.id), payload)
       if (!result.success) rollbackFailures.push(result.error)
     }
     if (indexResult.success) {
-      const result = await persistenceApi.write(PersistenceKeys.acpSessionsIndex, legacyIndex)
+      const result = await persistenceApi.write(SESSION_INDEX_KEY, legacyIndex)
       if (!result.success) rollbackFailures.push(result.error)
     }
     if (rollbackFailures.length > 0) {

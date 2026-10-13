@@ -9,7 +9,13 @@ vi.mock('@/lib/api', () => ({
 }))
 
 import { persistenceApi } from '@/lib/api'
-import { loadAgentConfigs, looksLikeSecretValue, type StoredAgentConfig, saveAgentConfigs, validateAgentConfig } from './acp-agents-persistence'
+import {
+  loadAgentConfigs,
+  looksLikeSecretValue,
+  type StoredAgentConfig,
+  saveAgentConfigs,
+  validateAgentConfig
+} from './acp-agents-persistence'
 
 describe('validateAgentConfig', () => {
   it('requires non-empty name and command', () => {

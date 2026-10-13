@@ -26,7 +26,9 @@ export function useKeyboardShortcutsLoader(): void {
 
   useEffect(() => {
     async function load(): Promise<void> {
-      const result = await persistenceApi.read<KeyboardShortcutsConfig>(PersistenceKeys.keyboardShortcuts)
+      const result = await persistenceApi.read<KeyboardShortcutsConfig>(
+        PersistenceKeys.keyboardShortcuts
+      )
       if (result.success && result.data) {
         // Merge with defaults to handle new shortcuts added in updates
         setShortcuts(mergeWithDefaults(result.data))

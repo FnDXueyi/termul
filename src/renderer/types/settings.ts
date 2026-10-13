@@ -472,4 +472,3 @@ export function getDefaultKeyboardShortcuts(): KeyboardShortcutsConfig {
   }
   return webDefaults
 }
-

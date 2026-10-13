@@ -31,8 +31,6 @@ const DECLARED_SCOPES: Record<keyof typeof PersistenceKeys, KeyScope> = {
   acpMcpServers: 'sharedLww',
   acpMentionRecentsLegacy: 'device',
   acpMentionRecents: 'device',
-  acpSessionsIndex: 'device',
-  acpSession: 'device',
   sshProfiles: 'sharedCas',
   sessionsAutoSave: 'device',
   sessionsLegacyMigrated: 'device',

@@ -96,9 +96,6 @@ export const PersistenceKeys = {
   // own key: the caller passes the URI-encoded composite id.
   acpMentionRecentsLegacy: 'acp/mention-recents',
   acpMentionRecents: (partitionId: string): string => `acp/mention-recents/${partitionId}`,
-  // Pre-host chat history, kept only so the one-time import can read and clear it.
-  acpSessionsIndex: 'acp/sessions/index',
-  acpSession: (sessionId: string): string => `acp/sessions/${sessionId}`,
   // SSH profile metadata of the web client (shared, whole-value compare-and-set).
   sshProfiles: 'ssh/profiles',
   // The last crash-recovery session snapshot (device scope).

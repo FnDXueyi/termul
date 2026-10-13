@@ -264,7 +264,10 @@ describe('use-app-settings', () => {
     expect(layout.sidePanelVisible).toBe(false)
     expect(layout.sshSectionVisible).toBe(false)
     expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
-    expect(mockPersistenceWrite).not.toHaveBeenCalledWith(PersistenceKeys.appSettings, expect.anything())
+    expect(mockPersistenceWrite).not.toHaveBeenCalledWith(
+      PersistenceKeys.appSettings,
+      expect.anything()
+    )
     expect(mockPersistenceWriteDebounced).not.toHaveBeenCalledWith(
       PersistenceKeys.appSettings,
       expect.anything()
@@ -433,7 +436,10 @@ describe('use-app-settings', () => {
     expect(layout.railExpanded).toBe(true)
     expect(layout.sidePanelVisible).toBe(true)
     expect(layout.sshSectionVisible).toBe(true)
-    expect(mockPersistenceWrite).toHaveBeenCalledWith(PersistenceKeys.appSettings, DEFAULT_APP_SETTINGS)
+    expect(mockPersistenceWrite).toHaveBeenCalledWith(
+      PersistenceKeys.appSettings,
+      DEFAULT_APP_SETTINGS
+    )
   })
 
   it('clears all ACP timeout overrides in the backend when app settings are reset', async () => {

@@ -42,8 +42,10 @@ const {
   mockUseAgentChatNotification,
   mockUseRemoteProjects,
   mockUseWhatsNew,
+  mockUsePersistenceErrorToasts,
   mockInitNotificationPermissions
 } = vi.hoisted(() => ({
+  mockUsePersistenceErrorToasts: vi.fn(() => undefined),
   mockUseCrashRecovery: vi.fn(() => undefined),
   mockUseTerminalExitNotification: vi.fn(() => undefined),
   mockUseTerminalIdleNotification: vi.fn(() => undefined),
@@ -61,6 +63,10 @@ const {
 
 vi.mock('./hooks/use-crash-recovery', () => ({
   useCrashRecovery: mockUseCrashRecovery
+}))
+
+vi.mock('./hooks/use-persistence-error-toasts', () => ({
+  usePersistenceErrorToasts: mockUsePersistenceErrorToasts
 }))
 
 vi.mock('./hooks/use-terminal-exit-notification', () => ({
@@ -324,6 +330,12 @@ describe('App CAP-3 resilience wiring (web entry)', () => {
     render(<App />)
 
     expect(mockUseCrashRecovery).toHaveBeenCalledTimes(1)
+  })
+
+  it('mounts the store write error toasts in AppEffects (parity with TauriApp.tsx)', () => {
+    render(<App />)
+
+    expect(mockUsePersistenceErrorToasts).toHaveBeenCalledTimes(1)
   })
 
   it('mounts useTerminalExitNotification in AppEffects', () => {

@@ -391,6 +391,67 @@ describe('tauriPersistenceApi', () => {
     })
   })
 
+  describe('onPersistenceError', () => {
+    it('is a no-op bus: the plugin-store has no value cap, so it never reports', () => {
+      const listener = vi.fn()
+
+      const unsubscribe = tauriPersistenceApi.onPersistenceError(listener)
+
+      expect(typeof unsubscribe).toBe('function')
+      expect(() => unsubscribe()).not.toThrow()
+      expect(listener).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('flush when the window is left', () => {
+    function setVisibility(state: 'hidden' | 'visible'): void {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: state })
+    }
+
+    afterEach(() => {
+      setVisibility('visible')
+    })
+
+    it('flushes a debounced write when the page becomes hidden', async () => {
+      const pending = tauriPersistenceApi.writeDebounced('k', { a: 1 })
+
+      setVisibility('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+
+      await expect(pending).resolves.toEqual({ success: true, data: undefined })
+      expect(currentMockStore.set).toHaveBeenCalledWith('k', { _version: 1, data: { a: 1 } })
+    })
+
+    it('does not flush when the page becomes visible again', async () => {
+      void tauriPersistenceApi.writeDebounced('k', { a: 1 })
+
+      setVisibility('visible')
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(100)
+
+      expect(currentMockStore.set).not.toHaveBeenCalled()
+    })
+
+    it('flushes a debounced write on pagehide', async () => {
+      const pending = tauriPersistenceApi.writeDebounced('k', { a: 2 })
+
+      window.dispatchEvent(new Event('pagehide'))
+
+      await expect(pending).resolves.toEqual({ success: true, data: undefined })
+      expect(currentMockStore.set).toHaveBeenCalledWith('k', { _version: 1, data: { a: 2 } })
+    })
+
+    it('writes once when pagehide repeats', async () => {
+      const pending = tauriPersistenceApi.writeDebounced('k', 1)
+
+      window.dispatchEvent(new Event('pagehide'))
+      window.dispatchEvent(new Event('pagehide'))
+      await pending
+
+      expect(currentMockStore.set).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('readStamped', () => {
     it('reports revision 0 and no writer stamp for a stored value', async () => {
       currentMockStore.get.mockResolvedValue({ _version: 1, data: { a: 1 } })

@@ -19,7 +19,16 @@ import { persistenceApi } from '@/lib/api'
 import { syncMcpRegistryToProject } from '@/lib/tauri-remote-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { webServerMcpServers } from '@/lib/web-server-api'
-import { buildMcpServers, loadMcpServers, normalizeMcpRegistry, type StoredMcpServer, saveMcpServers, selectMcpServersForAgent, transportOf, validateMcpServer } from './acp-mcp-persistence'
+import {
+  buildMcpServers,
+  loadMcpServers,
+  normalizeMcpRegistry,
+  type StoredMcpServer,
+  saveMcpServers,
+  selectMcpServersForAgent,
+  transportOf,
+  validateMcpServer
+} from './acp-mcp-persistence'
 import { logFrontendError } from './log-api'
 
 const registry: StoredMcpServer[] = [

@@ -1,7 +1,13 @@
 import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useCallback, useEffect } from 'react'
 import { persistenceApi } from '@/lib/api'
+import { trimListToCap } from '@/lib/persistence-trim'
 import { type CommandHistoryEntry, useCommandHistoryStore } from '@/stores/command-history-store'
+
+/** The newest entries (the list is newest first) that fit the host's value cap. */
+function newestWithinCap(projectEntries: CommandHistoryEntry[]): readonly CommandHistoryEntry[] {
+  return trimListToCap(projectEntries, (kept) => kept, 'head').items
+}
 
 export function useCommandHistoryLoader(projectId: string | null): void {
   const setHistory = useCommandHistoryStore((state) => state.setHistory)
@@ -31,7 +37,10 @@ export function useSaveCommandHistory(projectId: string | null): () => Promise<v
   return useCallback(async () => {
     if (!projectId) return
     const projectEntries = entries.filter((e) => e.projectId === projectId)
-    await persistenceApi.write(PersistenceKeys.commandHistory(projectId), projectEntries)
+    await persistenceApi.write(
+      PersistenceKeys.commandHistory(projectId),
+      newestWithinCap(projectEntries)
+    )
   }, [projectId, entries])
 }
 
@@ -60,7 +69,10 @@ export function useAddCommand(): (
       // Persist after adding
       const { entries } = useCommandHistoryStore.getState()
       const projectEntries = entries.filter((e) => e.projectId === projectId)
-      await persistenceApi.write(PersistenceKeys.commandHistory(projectId), projectEntries)
+      await persistenceApi.write(
+        PersistenceKeys.commandHistory(projectId),
+        newestWithinCap(projectEntries)
+      )
     },
     [addCommand]
   )

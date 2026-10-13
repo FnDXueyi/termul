@@ -191,7 +191,7 @@ Browser tab work spans:
 The app stores local state using Tauri plugin store adapters:
 
 - `termul-data.json` — general app persistence
-- `termul-sessions.json` — session persistence
+- `termul-sessions.json` — legacy session file; a leftover entry is moved once into the `sessions/auto-save` key of `termul-data.json` and never read again
 - logical keys like `projects`, `terminals/{projectId}`, `snapshots/{projectId}`, `window-state`
 
 Project env vars are persisted in local store data, but secret-marked values are redacted before persistence and must be re-entered after app restart until secure OS storage is added.
