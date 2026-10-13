@@ -1,7 +1,9 @@
 import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { useEditorStore } from '@/stores/editor-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
+import { blockSaveOnDraftConflict } from './draft-conflict-save-guard'
 
 /** Single editor-tab close flow with the dirty-file confirm. */
 export function useEditorTabClose() {
@@ -14,7 +16,7 @@ export function useEditorTabClose() {
     if (fileState?.operationStatus === 'saving' || fileState?.operationStatus === 'reloading') {
       return false
     }
-    if (fileState?.isDirty) {
+    if (fileNeedsAttention(fileState)) {
       setDirtyCloseFilePath(filePath)
       return true
     }
@@ -25,6 +27,11 @@ export function useEditorTabClose() {
 
   const handleSaveThenClose = useCallback(async () => {
     if (dirtyCloseFilePath) {
+      // A draft conflict cannot be saved from here: reveal it, keep the tab.
+      if (blockSaveOnDraftConflict([dirtyCloseFilePath])) {
+        setDirtyCloseFilePath(null)
+        return
+      }
       const saved = await useEditorStore.getState().saveFile(dirtyCloseFilePath)
       if (!saved) {
         toast.error('Failed to save file. Changes were not discarded.')

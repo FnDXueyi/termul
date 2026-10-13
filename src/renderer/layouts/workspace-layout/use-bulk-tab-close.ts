@@ -6,6 +6,8 @@ import {
   isEditorTabBusy,
   NO_APPROVED_DIRTY
 } from '@/layouts/workspace-layout/bulk-close'
+import { blockSaveOnDraftConflict } from '@/layouts/workspace-layout/draft-conflict-save-guard'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { logFrontendError } from '@/lib/log-api'
 import { useConfirmTerminalClose } from '@/stores/app-settings-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
@@ -68,7 +70,7 @@ export function useBulkTabClose({
             useWorkspaceStore.getState().removeTab(editorTabId(filePath))
             break
           }
-          if (fileState.isDirty && !approvedDirty.has(filePath)) {
+          if (fileNeedsAttention(fileState) && !approvedDirty.has(filePath)) {
             void logFrontendError({
               level: 'warn',
               source: 'WorkspaceLayout.bulkClose',
@@ -147,7 +149,7 @@ export function useBulkTabClose({
       tabs
         .filter((tab): tab is WorkspaceTab & { type: 'editor' } => tab.type === 'editor')
         .map((tab) => tab.filePath)
-        .filter((filePath) => useEditorStore.getState().openFiles.get(filePath)?.isDirty === true)
+        .filter((filePath) => fileNeedsAttention(useEditorStore.getState().openFiles.get(filePath)))
     )
   }, [])
 
@@ -191,7 +193,7 @@ export function useBulkTabClose({
       const dirtyFilePaths = actionable
         .filter((tab): tab is WorkspaceTab & { type: 'editor' } => tab.type === 'editor')
         .map((tab) => tab.filePath)
-        .filter((filePath) => useEditorStore.getState().openFiles.get(filePath)?.isDirty === true)
+        .filter((filePath) => fileNeedsAttention(useEditorStore.getState().openFiles.get(filePath)))
       const confirmRequired =
         (confirmTerminalClose && terminalTabs.length > 0) || dirtyFilePaths.length > 0
 
@@ -231,6 +233,11 @@ export function useBulkTabClose({
         bulkClose.dirtyFilePaths.length > 0
           ? bulkApprovedDirtyPaths(bulkClose.tabs)
           : NO_APPROVED_DIRTY
+      // A draft-conflicted file cannot be saved here: reveal it, close nothing.
+      if (blockSaveOnDraftConflict(approvedDirty)) {
+        setBulkClose(null)
+        return
+      }
       for (const filePath of approvedDirty) {
         const saved = await useEditorStore.getState().saveFile(filePath)
         if (!saved) {

@@ -1,5 +1,6 @@
 import { useShallow } from 'zustand/shallow'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { useEditorStore } from '@/stores/editor-store'
 import { type TabBulkMenuProps, TabContextMenu } from './tab-context-menu'
 import { TabChrome } from './tabs/tab-chrome'
@@ -47,7 +48,7 @@ export function EditorTab({
     useShallow((state) => {
       const file = state.openFiles.get(tab.filePath)
       return {
-        isDirty: file?.isDirty ?? false,
+        isDirty: fileNeedsAttention(file),
         operationStatus: file?.operationStatus ?? 'idle'
       }
     })
