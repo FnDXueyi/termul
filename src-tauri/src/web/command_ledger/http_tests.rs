@@ -283,7 +283,13 @@ async fn a_lost_reply_to_a_rename_is_answered_with_the_original_outcome() {
 #[tokio::test]
 async fn a_workspace_write_without_a_command_id_is_refused() {
     let dir = TempDir::new("workspace-bare");
-    let app = app(host(dir.path()));
+    let mut state = host(dir.path());
+    state.workspace_manifest = Some(
+        crate::acp::WorkspaceManifestService::open(dir.path().join("manifests"))
+            .await
+            .expect("open manifest store"),
+    );
+    let app = app(state);
     let body = json!({
         "basedRevision": null,
         "manifest": { "projectId": "p1", "revision": 0, "updatedAt": 0 },
