@@ -189,7 +189,7 @@ describe('use-app-settings', () => {
     })
     expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       DEFAULT_APP_SETTINGS
     )
   })
