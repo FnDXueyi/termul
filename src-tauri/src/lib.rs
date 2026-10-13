@@ -1878,6 +1878,13 @@ pub fn run() {
             secure_storage::secure_storage_delete,
             // ACP (Agent Client Protocol) commands — ADR-003 P0
             acp::commands::acp_spawn_agent,
+            acp::commands::claude_accounts_list,
+            acp::commands::claude_accounts_add,
+            acp::commands::claude_accounts_login,
+            acp::commands::claude_accounts_rename,
+            acp::commands::claude_accounts_remove,
+            acp::commands::claude_accounts_set_default,
+            acp::commands::claude_accounts_set_project,
             acp::commands::acp_factory_key_status,
             acp::commands::acp_factory_key_save,
             acp::commands::acp_kill_agent,

@@ -482,7 +482,11 @@ export interface AcpState {
   degradedRecoverySessions: Record<SessionId, true>
 
   // Actions — lifecycle
-  spawnAgent: (config: Parameters<typeof acpApi.spawnAgent>[0]) => Promise<AgentId>
+  /** `projectId` selects the Claude Account of a managed Claude agent. */
+  spawnAgent: (
+    config: Parameters<typeof acpApi.spawnAgent>[0],
+    projectId?: string | null
+  ) => Promise<AgentId>
   killAgent: (agentId: AgentId) => Promise<void>
   /**
    * Headless ACP auth (spec-acp-terminal-auth): dismiss the BrowserAuthDialog

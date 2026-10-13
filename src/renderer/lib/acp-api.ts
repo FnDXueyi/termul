@@ -940,15 +940,18 @@ export async function acpFetchRegistrySnapshot(forceRefresh = false): Promise<Ac
   return getAcpTransport().fetchRegistrySnapshot(forceRefresh)
 }
 
-export async function acpSpawnAgent(config: AgentConfig): Promise<SpawnAgentResult> {
+export async function acpSpawnAgent(
+  config: AgentConfig,
+  projectId?: string | null
+): Promise<SpawnAgentResult> {
   const run = await ledgered(
     'spawn_agent',
     // args/env are digested (env can hold credentials): a changed launch is a
     // different spawn, and no raw value reaches the journal or engine state.
-    `${config.configId ?? ''}|${config.name}|${config.command}|${keyDigest(
+    `${config.configId ?? ''}|${config.name}|${config.command}|${projectId ?? ''}|${keyDigest(
       JSON.stringify([config.args, config.env, config.allowTerminal ?? false])
     )}`,
-    (call) => getAcpTransport().spawnAgent(config, call)
+    (call) => getAcpTransport().spawnAgent(config, call, projectId)
   )
   return run.result
 }

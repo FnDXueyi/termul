@@ -5,6 +5,7 @@
  * (`./desktop-transport`).
  */
 
+import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
 import {
   type HistoryMode,
   type PersistedSessionSummary,
@@ -162,7 +163,17 @@ export interface AcpTransport {
    * failures throw `AcpTransportError`.
    */
   probeMcpServer(server: McpServerConfig): Promise<ProbeResult>
-  spawnAgent(config: AgentConfig, options?: CommandCallOptions): Promise<SpawnAgentResult>
+  /** Claude Accounts of the host (ADR-0004); secret-free. */
+  listClaudeAccounts(): Promise<ClaudeAccountsSnapshot>
+  setDefaultClaudeAccount(accountId: string): Promise<void>
+  /** `null` returns the Project to the Default Account. */
+  setProjectClaudeAccount(projectId: string, accountId: string | null): Promise<void>
+  /** `projectId` selects the Claude Account of a managed Claude agent. */
+  spawnAgent(
+    config: AgentConfig,
+    options?: CommandCallOptions,
+    projectId?: string | null
+  ): Promise<SpawnAgentResult>
   killAgent(agentId: AgentId): Promise<void>
   listAgents(): Promise<AgentId[]>
   /**

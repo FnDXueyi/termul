@@ -225,7 +225,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
 
     void (async (): Promise<void> => {
       try {
-        const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd)
+        const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
         if (inFlightPrepared.get(key) !== task) {
           settle(null)
           return
@@ -349,7 +349,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
       }
       // null: cancelled or failed — re-check for a newer prepare before spawning.
     }
-    const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd)
+    const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
     if (!agentId) throw new Error(`failed to spawn agent for config ${configId}`)
     return get().createSession(agentId, trimmedCwd, mcpServers, projectId, opts)
   },

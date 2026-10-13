@@ -8,6 +8,7 @@
  * (`.message` is the human string callers already toast).
  */
 
+import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
 import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
@@ -898,8 +899,29 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
-  async spawnAgent(config: AgentConfig, options?: CommandCallOptions): Promise<SpawnAgentResult> {
-    return this.request<SpawnAgentResult>('spawn_agent', { config }, undefined, options)
+  async listClaudeAccounts(): Promise<ClaudeAccountsSnapshot> {
+    return this.request<ClaudeAccountsSnapshot>('list_claude_accounts', {})
+  }
+
+  async setDefaultClaudeAccount(accountId: string): Promise<void> {
+    await this.request('set_default_claude_account', { accountId })
+  }
+
+  async setProjectClaudeAccount(projectId: string, accountId: string | null): Promise<void> {
+    await this.request('set_project_claude_account', { projectId, accountId })
+  }
+
+  async spawnAgent(
+    config: AgentConfig,
+    options?: CommandCallOptions,
+    projectId?: string | null
+  ): Promise<SpawnAgentResult> {
+    return this.request<SpawnAgentResult>(
+      'spawn_agent',
+      { config, projectId: projectId ?? null },
+      undefined,
+      options
+    )
   }
 
   async killAgent(agentId: AgentId): Promise<void> {

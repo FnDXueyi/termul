@@ -565,11 +565,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
 
   pendingRestartVersions: {},
 
-  spawnAgent: async (config) => {
+  spawnAgent: async (config, projectId) => {
     const tempKey = config.name
     set((s) => ({ agentStatus: { ...s.agentStatus, [tempKey]: 'spawning' } }))
     try {
-      const result = await acpApi.spawnAgent(config)
+      const result = await acpApi.spawnAgent(config, projectId)
       const agentId = result.agentId
       set((s) => {
         // Drop the transient name-keyed `spawning` marker now that we have the

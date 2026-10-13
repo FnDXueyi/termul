@@ -16,7 +16,10 @@ impl ClaudeRuntimeProbe for SupportedRuntime {
         Ok(())
     }
 
-    async fn cli_authentication_status(&self) -> Result<Option<bool>, String> {
+    async fn cli_authentication_status(
+        &self,
+        _config_dir: Option<&Path>,
+    ) -> Result<Option<bool>, String> {
         Ok(Some(true))
     }
 }
@@ -29,7 +32,10 @@ impl ClaudeRuntimeProbe for UnsupportedRuntime {
         Err("Claude Agent ACP requires Node.js 22 or newer.".to_string())
     }
 
-    async fn cli_authentication_status(&self) -> Result<Option<bool>, String> {
+    async fn cli_authentication_status(
+        &self,
+        _config_dir: Option<&Path>,
+    ) -> Result<Option<bool>, String> {
         Ok(None)
     }
 }
@@ -42,7 +48,10 @@ impl ClaudeRuntimeProbe for SignedOutRuntime {
         Ok(())
     }
 
-    async fn cli_authentication_status(&self) -> Result<Option<bool>, String> {
+    async fn cli_authentication_status(
+        &self,
+        _config_dir: Option<&Path>,
+    ) -> Result<Option<bool>, String> {
         Ok(Some(false))
     }
 }

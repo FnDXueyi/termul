@@ -35,8 +35,8 @@ Account uses `~/.claude` itself.
 
 The shared parts of the account directory are symbolic links to `~/.claude`:
 `projects`, `settings.json`, `skills`, `plugins`, `rules`, `plans`,
-`file-history`, and `CLAUDE.md`. The login and `.claude.json` stay per
-Account.
+`file-history`, `agents`, `commands`, and `CLAUDE.md`. The login and
+`.claude.json` stay per Account.
 
 Termul never refreshes or writes Claude OAuth tokens. Claude Code owns them.
 

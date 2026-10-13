@@ -63,6 +63,7 @@ use crate::web::store::WebStore;
 mod access;
 mod agents;
 pub mod channel;
+mod claude_accounts;
 mod commands;
 mod dispatch;
 mod lifecycle;
@@ -79,6 +80,7 @@ mod watch;
 // for `tests.rs`' `use super::*` without widening visibility past `ws`.
 use access::*;
 use agents::*;
+use claude_accounts::*;
 use commands::*;
 use dispatch::*;
 use lifecycle::*;

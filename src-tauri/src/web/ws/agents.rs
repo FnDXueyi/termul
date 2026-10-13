@@ -21,6 +21,9 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 pub(super) struct SpawnAgentPayload {
     config: AgentConfig,
+    /// Selects the Claude Account of a managed Claude agent.
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 pub(super) async fn handle_spawn_agent(
@@ -43,7 +46,10 @@ pub(super) async fn handle_spawn_agent(
     if let Err(e) = crate::acp::config::validate_spawn_config(&mut parsed.config) {
         return acp_err_to_reply(id, e);
     }
-    match acp.spawn_with_command_id(parsed.config, command_id).await {
+    match acp
+        .spawn_with_command_id(parsed.config, command_id, parsed.project_id)
+        .await
+    {
         Ok(outcome) => ok_with_payload(id, &outcome),
         Err(e) => acp_err_to_reply(id, e),
     }

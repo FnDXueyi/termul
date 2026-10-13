@@ -256,7 +256,13 @@ export const WS_REQUEST_TYPES = [
   // Explicit host-default project change (updates `default_project_id`,
   // persists on file-backed hosts, publishes the project state to every
   // `projects` watcher).
-  'set_default_project'
+  'set_default_project',
+  // Claude Accounts (ADR-0004): list `{}` → `ClaudeAccountsSnapshot`; choose
+  // the Default `{ accountId }` or a Project Account `{ projectId, accountId |
+  // null }` → `{}`. Add, sign-in, rename and remove stay host-local.
+  'list_claude_accounts',
+  'set_default_claude_account',
+  'set_project_claude_account'
 ] as const
 
 /** Union of all WS request `type` strings. */
@@ -299,6 +305,9 @@ export const WS_COMMAND_CLASSES: Readonly<
   list_sessions: ['read', null],
   register_discovered_session: ['command', 'payload'],
   spawn_agent: ['create', 'entity'],
+  list_claude_accounts: ['read', null],
+  set_default_claude_account: ['idempotent', null],
+  set_project_claude_account: ['idempotent', null],
   kill_agent: ['idempotent', null],
   list_agents: ['read', null],
   authenticate: ['read', null],

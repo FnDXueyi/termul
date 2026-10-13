@@ -910,7 +910,8 @@ async function openHistorySessionInner(
     try {
       ensured = await ensureLiveAgent(get, set, meta.agentConfigId, meta.cwd, {
         silentSpawnFailure: true,
-        surfaceDefiniteRejection: true
+        surfaceDefiniteRejection: true,
+        projectId: meta.projectId ?? undefined
       })
     } catch (err) {
       // AD-5: a missing binary / invalid config is a definite rejection —

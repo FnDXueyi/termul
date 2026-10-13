@@ -469,7 +469,9 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
       try {
         // 1. Ensure a live agent for the target config (fresh spawn on a NEW
         //    configId; one-process-per-open-chat detaches same-config cases).
-        newAgentId = await ensureLiveAgent(get, set, toConfigId, cwd)
+        newAgentId = await ensureLiveAgent(get, set, toConfigId, cwd, {
+          projectId: oldSession.projectId
+        })
         if (!newAgentId) throw new Error(`failed to spawn agent for config ${toConfigId}`)
 
         // 2. Create the new session on the new agent's process.

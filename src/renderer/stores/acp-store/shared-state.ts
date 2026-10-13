@@ -21,6 +21,7 @@ import { __resetCommandEngineForTesting } from '@/lib/command-engine'
 import { __clearCommandJournalForTesting } from '@/lib/command-journal'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { useProjectStore } from '@/stores/project-store'
 import { agentReuseKey, configIdFromReuseKey, detachedReuseKey } from '../acp-reuse-keys'
 import { ephemeralSessionIds } from './ephemeral-ids'
 import { isReusableStatus } from './helpers'
@@ -585,6 +586,31 @@ export type EnsureLiveAgentOptions = {
    * attempt (the user's action is a new intent).
    */
   surfaceDefiniteRejection?: boolean
+  /**
+   * Project of the spawn; it selects the Claude Account of a managed Claude
+   * agent. Without it, the Project whose folder holds `cwd` is used.
+   */
+  projectId?: string
+}
+
+/**
+ * The Project whose folder is `cwd` or holds it (longest match), so a spawn
+ * with no explicit Project still uses that Project's Claude Account.
+ */
+export function projectIdForCwd(cwd: string): string | null {
+  const normalize = (path: string): string => path.replace(/[\\/]+$/, '')
+  const target = normalize(cwd)
+  let best: { id: string; length: number } | null = null
+  for (const project of useProjectStore.getState().projects) {
+    if (!project.path) continue
+    const root = normalize(project.path)
+    const inside =
+      target === root || target.startsWith(`${root}/`) || target.startsWith(`${root}\\`)
+    if (inside && (!best || root.length > best.length)) {
+      best = { id: project.id, length: root.length }
+    }
+  }
+  return best?.id ?? null
 }
 
 type AgentConfigLaunchFields = Pick<
@@ -665,14 +691,17 @@ export function ensureLiveAgent(
 
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
-      const agentId = await get().spawnAgent({
-        configId,
-        name: config.name,
-        command: config.command,
-        args: config.args,
-        env: config.env,
-        allowTerminal: config.allowTerminal
-      })
+      const agentId = await get().spawnAgent(
+        {
+          configId,
+          name: config.name,
+          command: config.command,
+          args: config.args,
+          env: config.env,
+          allowTerminal: config.allowTerminal
+        },
+        options.projectId || projectIdForCwd(trimmedCwd)
+      )
       definiteSpawnRejections.delete(reuseKey)
       if (get().agentConfigs.some((c) => c.id === configId)) {
         set((s) => ({ configToLiveAgent: { ...s.configToLiveAgent, [reuseKey]: agentId } }))

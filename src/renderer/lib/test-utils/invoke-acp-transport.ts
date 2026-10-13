@@ -10,6 +10,7 @@
  * `vi.unmock('@/lib/acp-transport/desktop-transport')`.
  */
 
+import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 import type { PersistedSessionSummary, WsAgentSummary } from '@shared/types/web-protocol.types'
 import { WS_ERROR_CODES } from '@shared/types/web-protocol.types'
@@ -136,8 +137,19 @@ export function createInvokeAcpTransport(): AcpTransport {
     fetchRegistrySnapshot: (forceRefresh = false) =>
       invoke<AcpRegistrySnapshot>('acp_fetch_registry_snapshot', { forceRefresh }),
     probeMcpServer: (server) => invoke<ProbeResult>('acp_probe_mcp_server', { server }),
-    spawnAgent: (config, options) =>
-      invokeCommand<SpawnAgentResult>('acp_spawn_agent', { config }, options),
+    listClaudeAccounts: () => invoke<ClaudeAccountsSnapshot>('claude_accounts_list'),
+    setDefaultClaudeAccount: async (accountId) => {
+      await invoke('claude_accounts_set_default', { accountId })
+    },
+    setProjectClaudeAccount: async (projectId, accountId) => {
+      await invoke('claude_accounts_set_project', { projectId, accountId })
+    },
+    spawnAgent: (config, options, projectId) =>
+      invokeCommand<SpawnAgentResult>(
+        'acp_spawn_agent',
+        { config, projectId: projectId ?? null },
+        options
+      ),
     killAgent: async (agentId) => {
       await invoke('acp_kill_agent', { agentId })
     },

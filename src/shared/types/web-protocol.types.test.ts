@@ -83,8 +83,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_REQUEST_TYPES).toContain('get_session_payload')
   })
 
-  it('exports exactly 48 request types including warm-pool promotion and host-owned session delete', () => {
-    expect(WS_REQUEST_TYPES).toHaveLength(48)
+  it('exports exactly 51 request types including warm-pool promotion and host-owned session delete', () => {
+    expect(WS_REQUEST_TYPES).toHaveLength(51)
     const expected = [
       'send_prompt',
       'cancel_prompt',
@@ -143,7 +143,11 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       'watch_project',
       'unwatch_project',
       // Explicit host-default project change.
-      'set_default_project'
+      'set_default_project',
+      // Claude Accounts: view and choose.
+      'list_claude_accounts',
+      'set_default_claude_account',
+      'set_project_claude_account'
     ]
     for (const name of expected) {
       expect(WS_REQUEST_TYPES).toContain(name)

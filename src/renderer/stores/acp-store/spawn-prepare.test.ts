@@ -1296,6 +1296,7 @@ describe('acp-store', () => {
     expect(caps).toEqual({ loadSession: true })
     expect(invoke).toHaveBeenNthCalledWith(1, 'acp_spawn_agent', {
       config: { name: 'X', command: 'x', args: [], env: {} },
+      projectId: null,
       commandId: expect.any(String)
     })
     expect(invoke).toHaveBeenNthCalledWith(2, 'acp_kill_agent', { agentId: 'agent-test' })

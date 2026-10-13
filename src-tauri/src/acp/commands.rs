@@ -22,7 +22,9 @@ use crate::acp::session_persistence::{AgentSwitchRecord, SessionIndexEntry, Sess
 use crate::web::prompt_turn::{run_prompt_turn, PromptReply, PromptTurnRequest};
 use crate::web::WsRelaySink;
 
+mod claude_accounts;
 mod ledgered;
+pub use claude_accounts::*;
 pub use ledgered::{
     run_ledgered, COMMAND_ACCEPTED, COMMAND_CONFLICT, COMMAND_IN_PROGRESS, INVALID_COMMAND_ID,
     OUTCOME_UNKNOWN,
@@ -39,6 +41,7 @@ pub async fn acp_spawn_agent(
     relay: State<'_, Arc<WsRelaySink>>,
     mut config: AgentConfig,
     command_id: Option<String>,
+    project_id: Option<String>,
 ) -> Result<SpawnOutcome, String> {
     // Shared with the WS `spawn_agent` handler: trim + non-empty
     // name/command/`configId` (OQ1). A rejection carries the stable
@@ -47,7 +50,7 @@ pub async fn acp_spawn_agent(
     validate_spawn_config(&mut config)?;
     // `commandId` makes a resend after a lost reply answer with the original
     // outcome (or the live agent stamped with it) instead of a second agent.
-    let payload = json!({ "config": &config });
+    let payload = json!({ "config": &config, "projectId": &project_id });
     let manager = Arc::clone(manager.inner());
     let spawner = Arc::clone(&manager);
     let stamp = command_id.clone();
@@ -57,7 +60,11 @@ pub async fn acp_spawn_agent(
         "acp_spawn_agent",
         command_id,
         payload,
-        async move { spawner.spawn_with_command_id(config, stamp).await },
+        async move {
+            spawner
+                .spawn_with_command_id(config, stamp, project_id)
+                .await
+        },
     )
     .await
 }

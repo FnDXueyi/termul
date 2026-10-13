@@ -14,6 +14,7 @@ pub mod atomic_file;
 pub mod browser_shim;
 pub mod catalog;
 pub mod chat_history_store;
+pub mod claude_accounts;
 pub mod claude_admin;
 pub mod claude_agent;
 pub mod client;
