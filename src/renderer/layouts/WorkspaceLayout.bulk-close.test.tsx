@@ -78,6 +78,8 @@ const {
   },
   mockWorkspaceStoreState: {
     activePaneId: 'pane-root',
+    activeProjectId: '',
+    parkedTrees: {},
     agentLauncherPaneId: null as string | null,
     root: {
       type: 'leaf' as const,

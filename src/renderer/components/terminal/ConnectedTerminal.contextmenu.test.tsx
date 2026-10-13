@@ -210,7 +210,14 @@ vi.mock('@/stores/terminal-store', async () => {
   ;(storeHook as unknown as { getState: () => typeof state }).getState = () => state
   return { useTerminalStore: storeHook }
 })
-vi.mock('@/stores/project-store', () => ({ useActiveProject: () => ({ path: '/project' }) }))
+vi.mock('@/stores/project-store', () => ({
+  useProjectStore: (
+    selector: (state: {
+      projects: Array<{ id: string; path: string }>
+      activeProjectId: string
+    }) => unknown
+  ) => selector({ projects: [{ id: 'project-a', path: '/project' }], activeProjectId: 'project-a' })
+}))
 vi.mock('@/stores/keyboard-shortcuts-store', async () => {
   const { vi: v } = await import('vitest')
   return {

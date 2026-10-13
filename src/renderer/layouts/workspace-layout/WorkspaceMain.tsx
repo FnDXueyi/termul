@@ -1,24 +1,19 @@
 import type { ShellInfo } from '@shared/types/ipc.types'
 import { motion } from 'framer-motion'
-import { lazy, Suspense, useMemo } from 'react'
+import { lazy, Suspense } from 'react'
 import { Outlet } from 'react-router-dom'
 import { ChatRoute } from '@/components/ChatRoute'
 import { FolderKanban } from '@/components/icons'
 import { StatusBar } from '@/components/StatusBar'
 import { useTopRow } from '@/components/shell/top-row-context'
 import { Button } from '@/components/ui/button'
-import { PaneRenderer } from '@/components/workspace/PaneRenderer'
+import { ProjectTreeHost, useMountedProjectIds } from '@/components/workspace/ProjectTreeHost'
 import { useMobileActiveLeaf } from '@/hooks/use-mobile-active-leaf'
 import { ShellSkeleton } from '@/layouts/workspace-layout/ShellSkeleton'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
 import { useDefaultShell } from '@/stores/app-settings-store'
 import { useTerminalActions } from '@/stores/terminal-store'
-import {
-  findPaneById,
-  useFullscreenPaneId,
-  usePaneRoot,
-  type WorkspaceTab
-} from '@/stores/workspace-store'
+import { useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
 
 const SSHWorkspace = lazy(() =>
@@ -58,7 +53,9 @@ export function WorkspaceMain({
   const { activeSSHProfile, sshProfileWithPassword, sshConn } = ssh
   const { renameTerminal } = useTerminalActions()
   const appDefaultShell = useDefaultShell()
-  const paneRoot = usePaneRoot()
+  // Every visited project's tree stays mounted; only the active one is visible.
+  const mountedProjectIds = useMountedProjectIds()
+  const activeTreeProjectId = useWorkspaceStore((state) => state.activeProjectId)
   // Flagged shell only: the SSH header is the top row when it owns the window
   // controls (no provider on the classic and mobile shells = unchanged).
   const topRowValue = useTopRow()
@@ -69,12 +66,6 @@ export function WorkspaceMain({
           windowControls: topRowValue.platform.windowControls
         }
       : undefined
-  const fullscreenPaneId = useFullscreenPaneId()
-  const fullscreenPane = useMemo(() => {
-    if (!fullscreenPaneId) return null
-    const pane = findPaneById(paneRoot, fullscreenPaneId)
-    return pane?.type === 'leaf' ? pane : null
-  }, [fullscreenPaneId, paneRoot])
   // Mobile shell only: a split synced from desktop collapses to the active
   // leaf (read-only; null on desktop so the desktop node is unchanged).
   const mobileActiveLeaf = useMobileActiveLeaf(isMobileWebShell)
@@ -110,26 +101,32 @@ export function WorkspaceMain({
           {isWorkspaceRoute ? (
             <>
               <ChatRoute />
-              <motion.div
-                key={fullscreenPaneId ? 'fullscreen' : 'normal'}
-                initial={{ opacity: 0.85, scale: 0.97 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.2, ease: 'easeOut' }}
-                className="h-full min-h-0 flex-1 overflow-hidden"
-              >
-                <PaneRenderer
-                  key={mobileActiveLeaf?.id}
-                  node={mobileActiveLeaf ?? fullscreenPane ?? paneRoot}
-                  onAddTerminal={handleAddTerminal}
-                  onAddBrowserTab={handleNewBrowserTab}
-                  onCloseTerminal={handleCloseTerminal}
-                  onRenameTerminal={renameTerminal}
-                  onCloseEditorTab={handleCloseEditorTab}
-                  onCloseTabs={handleCloseTabs}
-                  closingTerminalIds={closingTerminalIds}
-                  defaultShell={activeProject?.defaultShell || appDefaultShell}
-                />
-              </motion.div>
+              <div className="relative h-full min-h-0 flex-1 overflow-hidden">
+                {mountedProjectIds.map((projectId) => {
+                  const isActiveProject = projectId === activeTreeProjectId
+                  return (
+                    <ProjectTreeHost
+                      key={projectId}
+                      projectId={projectId}
+                      isActiveProject={isActiveProject}
+                      leafOverride={isActiveProject ? mobileActiveLeaf : null}
+                      onAddTerminal={handleAddTerminal}
+                      onAddBrowserTab={handleNewBrowserTab}
+                      onCloseTerminal={handleCloseTerminal}
+                      onRenameTerminal={renameTerminal}
+                      onCloseEditorTab={handleCloseEditorTab}
+                      onCloseTabs={handleCloseTabs}
+                      closingTerminalIds={closingTerminalIds}
+                      defaultShell={
+                        (isActiveProject
+                          ? activeProject
+                          : projects.find((project) => project.id === projectId)
+                        )?.defaultShell || appDefaultShell
+                      }
+                    />
+                  )
+                })}
+              </div>
             </>
           ) : (
             <div className="relative flex-1 overflow-hidden bg-background rounded-xl">

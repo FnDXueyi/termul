@@ -6,6 +6,7 @@
 import { useShallow } from 'zustand/shallow'
 import type { PaneNode } from '@/types/workspace.types'
 import { useWorkspaceStore } from './index'
+import { usePaneTree } from './pane-context'
 import { findPaneById, getAllLeafPanes } from './tree'
 import type { WorkspaceState, WorkspaceTab } from './types'
 
@@ -38,15 +39,15 @@ export function useActiveTabId(): string | null {
 }
 
 export function useActivePaneId(): string {
-  return useWorkspaceStore((state) => state.activePaneId)
+  return usePaneTree((tree) => tree.activePaneId)
 }
 
 export function useFullscreenPaneId(): string | null {
-  return useWorkspaceStore((state) => state.fullscreenPaneId)
+  return usePaneTree((tree) => tree.fullscreenPaneId)
 }
 
 export function useLeafCount(): number {
-  return useWorkspaceStore((state) => getAllLeafPanes(state.root).length)
+  return usePaneTree((tree) => getAllLeafPanes(tree.root).length)
 }
 
 export function usePaneRoot(): PaneNode {

@@ -48,8 +48,9 @@ import {
 } from '@/stores/app-settings-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
-import { useActiveProject } from '@/stores/project-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
+import { useProjectPaneContext } from '@/stores/workspace-store/pane-context'
 import type { TerminalModes, TerminalSpawnOptions } from '../../../shared/types/ipc.types'
 import {
   buildRehydrateSequences,
@@ -153,7 +154,12 @@ function ConnectedTerminalComponent({
   const isMobileWebShell = useMobileWebShell()
   const effectiveRendererPreference: 'auto' | 'webgl' | 'dom' =
     isMobileWebShell && rendererPreference === 'auto' ? 'dom' : rendererPreference
-  const activeProject = useActiveProject()
+  // The project this terminal's tree belongs to: a hidden ProjectTreeHost keeps
+  // its own project (not the visible one) for the spawn root path.
+  const hostProjectId = useProjectPaneContext()?.projectId
+  const treeProject = useProjectStore((state) =>
+    state.projects.find((p) => p.id === (hostProjectId || state.activeProjectId))
+  )
   const shortcuts = useKeyboardShortcutsStore((state) => state.shortcuts)
   // Story 10 (F1/F10): terminal-channel health — drives the non-blocking
   // reconnect/disconnected overlay. Stays 'connected' on Tauri desktop (the
@@ -186,8 +192,8 @@ function ConnectedTerminalComponent({
   // recovery, visibility restore) read fresh state without re-subscribing.
   const isMobileWebShellRef = useRef(isMobileWebShell)
   isMobileWebShellRef.current = isMobileWebShell
-  const activeProjectPathRef = useRef<string | undefined>(activeProject?.path)
-  activeProjectPathRef.current = activeProject?.path
+  const activeProjectPathRef = useRef<string | undefined>(treeProject?.path)
+  activeProjectPathRef.current = treeProject?.path
   const shortcutsRef = useRef(shortcuts)
   shortcutsRef.current = shortcuts
   const cleanupDataListenerRef = useRef<(() => void) | null>(null)
