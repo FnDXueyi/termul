@@ -72,12 +72,14 @@ describe('claudeAccountsApi management on desktop', () => {
     await expect(claudeAccountsApi.add('Work')).resolves.toMatchObject({ id: 'abc' })
     mockInvoke.mockResolvedValue(undefined)
     await claudeAccountsApi.login('abc')
+    await claudeAccountsApi.cancelLogin('abc')
     await claudeAccountsApi.rename('abc', 'Office')
     mockInvoke.mockResolvedValueOnce(['p1'])
     await expect(claudeAccountsApi.remove('abc')).resolves.toEqual(['p1'])
     expect(mockInvoke.mock.calls).toEqual([
       ['claude_accounts_add', { name: 'Work' }],
       ['claude_accounts_login', { accountId: 'abc' }],
+      ['claude_accounts_login_cancel', { accountId: 'abc' }],
       ['claude_accounts_rename', { accountId: 'abc', name: 'Office' }],
       ['claude_accounts_remove', { accountId: 'abc' }]
     ])
@@ -99,6 +101,7 @@ describe('claudeAccountsApi management on web', () => {
     for (const call of [
       () => claudeAccountsApi.add('Work'),
       () => claudeAccountsApi.login('abc'),
+      () => claudeAccountsApi.cancelLogin('abc'),
       () => claudeAccountsApi.rename('abc', 'Office'),
       () => claudeAccountsApi.remove('abc')
     ]) {

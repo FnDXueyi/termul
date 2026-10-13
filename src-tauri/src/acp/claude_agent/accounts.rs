@@ -12,6 +12,12 @@ use crate::acp::claude_accounts::{ClaudeAccount, ClaudeAccountsSnapshot, BUILTIN
 /// browser callback until then.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Cancel handle of each running browser login, by Account id.
+pub(super) type LoginCancels =
+    parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>;
+
+/// Error text of a cancelled login; the renderer treats it as a quiet stop.
+pub const LOGIN_CANCELLED: &str = "Sign-in was cancelled";
 
 impl ClaudeAgentService {
     #[cfg(test)]
@@ -93,7 +99,7 @@ impl ClaudeAgentService {
     pub async fn remove_account(&self, id: &str) -> Result<Vec<String>, String> {
         let store = self.account_store()?;
         if let Some(dir) = store.config_dir(id) {
-            match run_cli(&["auth", "logout"], Some(dir), LOGOUT_TIMEOUT).await {
+            match run_cli(&["auth", "logout"], Some(dir), LOGOUT_TIMEOUT, None).await {
                 Ok(true) => log::info!("[claude-accounts] account {id} signed out before removal"),
                 Ok(false) => {
                     log::warn!("[claude-accounts] sign-out of account {id} did not succeed")
@@ -104,6 +110,16 @@ impl ClaudeAgentService {
             }
         }
         store.remove(id)
+    }
+
+    /// Stop a running [`login_account`](Self::login_account) for `id`.
+    /// Returns `false` when no login for that Account is running.
+    pub fn cancel_login(&self, id: &str) -> bool {
+        let Some(cancel) = self.login_cancels.lock().remove(id) else {
+            return false;
+        };
+        log::info!("[claude-accounts] login cancelled for account {id}");
+        cancel.send(()).is_ok()
     }
 
     /// Run Anthropic's interactive `claude auth login` for one Account in the
@@ -133,7 +149,11 @@ impl ClaudeAgentService {
             store.config_dir(id)
         };
         log::info!("[claude-accounts] login started for account {id}");
-        match run_cli(&["auth", "login"], dir, LOGIN_TIMEOUT).await {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        self.login_cancels.lock().insert(id.to_string(), cancel_tx);
+        let result = run_cli(&["auth", "login"], dir, LOGIN_TIMEOUT, Some(cancel_rx)).await;
+        self.login_cancels.lock().remove(id);
+        match result {
             Ok(true) => {
                 log::info!("[claude-accounts] login finished for account {id}");
                 Ok(())
@@ -153,11 +173,13 @@ impl ClaudeAgentService {
 /// Run `claude <args>` with no terminal and discarded output. `Ok(true)` on
 /// exit code 0. The CLI output can hold account details, so it is never read.
 /// Stdin is an open pipe that is never written: `auth login` exits at stdin
-/// EOF before the browser callback can finish the login.
+/// EOF before the browser callback can finish the login. A message on
+/// `cancel` stops the CLI.
 async fn run_cli(
     args: &[&str],
     config_dir: Option<PathBuf>,
     timeout: Duration,
+    cancel: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<bool, String> {
     let Some(mut command) = claude_cli_command(args, config_dir.as_deref())? else {
         return Err("Claude Code CLI is not installed or is not on PATH".to_string());
@@ -170,7 +192,18 @@ async fn run_cli(
     let mut child = command
         .spawn()
         .map_err(|_| "Could not start the Claude CLI".to_string())?;
-    match tokio::time::timeout(timeout, child.wait()).await {
+    let waited = match cancel {
+        Some(cancel) => tokio::select! {
+            waited = tokio::time::timeout(timeout, child.wait()) => Some(waited),
+            Ok(()) = cancel => None,
+        },
+        None => Some(tokio::time::timeout(timeout, child.wait()).await),
+    };
+    let Some(waited) = waited else {
+        let _ = child.kill().await;
+        return Err(LOGIN_CANCELLED.to_string());
+    };
+    match waited {
         Ok(Ok(status)) => Ok(status.success()),
         Ok(Err(_)) => Err("The Claude CLI stopped unexpectedly".to_string()),
         Err(_) => Err("Claude sign-in timed out".to_string()),

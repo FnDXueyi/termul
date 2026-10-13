@@ -3,6 +3,7 @@ import {
   Download,
   FileText,
   Keyboard,
+  KeyRound,
   Monitor,
   Network,
   Palette,
@@ -22,6 +23,7 @@ const ALL_APP_PREF_CATEGORIES: SettingsCategory[] = [
   { id: 'behavior', label: 'Behavior', icon: <Sliders size={16} /> },
   { id: 'project-defaults', label: 'New Project Defaults', icon: <Monitor size={16} /> },
   { id: 'ai-agents', label: 'AI Agents', icon: <Bot size={16} /> },
+  { id: 'provider', label: 'Provider', icon: <KeyRound size={16} /> },
   { id: 'mcp-servers', label: 'MCP Servers', icon: <Network size={16} /> },
   { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
   { id: 'updates', label: 'Updates', icon: <Download size={16} /> },
@@ -131,6 +133,18 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     label: 'Turn Timeout',
     description: 'Maximum wall-clock duration for a single agent turn (hard cap).',
     keywords: ['acp', 'timeout', 'turn', 'hard cap', 'unlimited', 'wedge']
+  },
+  {
+    categoryId: 'provider',
+    label: 'Claude accounts',
+    description: 'Add Claude accounts, sign in, and choose the default account.',
+    keywords: ['provider', 'account', 'claude', 'login', 'sign in', 'subscription', 'switch']
+  },
+  {
+    categoryId: 'provider',
+    label: 'Usage and limits',
+    description: 'See how much of the 5-hour and weekly limits each account has used.',
+    keywords: ['usage', 'limit', 'rate limit', 'quota', 'reset']
   },
   {
     categoryId: 'mcp-servers',

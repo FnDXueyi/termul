@@ -1882,6 +1882,7 @@ pub fn run() {
             acp::commands::claude_accounts_usage,
             acp::commands::claude_accounts_add,
             acp::commands::claude_accounts_login,
+            acp::commands::claude_accounts_login_cancel,
             acp::commands::claude_accounts_rename,
             acp::commands::claude_accounts_remove,
             acp::commands::claude_accounts_set_default,

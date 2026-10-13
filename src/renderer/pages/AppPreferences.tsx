@@ -50,6 +50,7 @@ import { APP_PREF_CATEGORIES, APP_PREF_SEARCH_INDEX } from './app-preferences/ca
 import { DiagnosticsSection } from './app-preferences/diagnostics-section'
 import { McpServersSection } from './app-preferences/mcp-servers-section'
 import { ProjectDefaultsSection } from './app-preferences/project-defaults-section'
+import { ProviderSection } from './app-preferences/provider-section'
 import { ResetSection } from './app-preferences/reset-section'
 import { ShellSection } from './app-preferences/shell-section'
 import { ShortcutsSection } from './app-preferences/shortcuts-section'
@@ -327,6 +328,7 @@ export function AppPreferencesModal(): React.JSX.Element {
             handleAcpSessionNewTimeoutChange={handleAcpSessionNewTimeoutChange}
             handleAcpSessionReopenTimeoutChange={handleAcpSessionReopenTimeoutChange}
           />
+          <ProviderSection />
           <McpServersSection />
           {/* Keyboard Shortcuts Section */}
           <ShortcutsSection

@@ -45,6 +45,15 @@ pub async fn claude_accounts_login(
     service.login_account(&account_id).await
 }
 
+/// Stop a running browser login. Returns `false` when none was running.
+#[tauri::command]
+pub fn claude_accounts_login_cancel(
+    service: State<'_, Arc<ClaudeAgentService>>,
+    account_id: String,
+) -> bool {
+    service.cancel_login(&account_id)
+}
+
 #[tauri::command]
 pub fn claude_accounts_rename(
     service: State<'_, Arc<ClaudeAgentService>>,

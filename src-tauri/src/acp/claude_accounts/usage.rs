@@ -208,15 +208,29 @@ fn string_at(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_string)
 }
 
-/// A scope is a plain name or an object with a display name.
+/// A scope is a plain name, an object with a display name, or an object whose
+/// `model` / `surface` holds one (`{"model":{"display_name":"Fable"}}`).
 fn scope_name(scope: Option<&Value>) -> Option<String> {
     let scope = scope?;
     if let Some(name) = scope.as_str() {
         return Some(name.to_string());
     }
-    ["display_name", "name", "model"]
+    if let Some(name) = ["display_name", "name"]
         .iter()
         .find_map(|key| string_at(scope, key))
+    {
+        return Some(name);
+    }
+    ["model", "surface"]
+        .iter()
+        .find_map(|key| scope.get(key).filter(|v| !v.is_null()))
+        .and_then(|inner| {
+            inner.as_str().map(str::to_string).or_else(|| {
+                ["display_name", "name", "id"]
+                    .iter()
+                    .find_map(|key| string_at(inner, key))
+            })
+        })
 }
 
 /// Keep probe errors short and free of paths or account details.
