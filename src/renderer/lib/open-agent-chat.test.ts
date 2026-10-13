@@ -138,6 +138,12 @@ describe('openAgentChatInOwnProject', () => {
     request.mockRestore()
   })
 
+  it("drops the previous project's tab-focus pointer when it switches to the owner", () => {
+    setTabFocusedSessionId('s-a')
+    openAgentChatInOwnProject('s-b', 'test')
+    expect(getTabFocusedSessionId()).toBeNull()
+  })
+
   it('drops a tab-focus pointer on an unassigned chat when it switches to the owner', () => {
     acpRef.current.sessionIndex = [{ id: 's-stray', projectId: '__unassigned__' }]
     setTabFocusedSessionId('s-stray')

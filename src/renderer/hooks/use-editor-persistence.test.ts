@@ -1,13 +1,11 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mockPersistedTerminal, mockTerminal } from '@/lib/test-utils/terminal'
-import { useAcpStore } from '@/stores/acp-store'
 import {
   _resetDroppedLaunchPlaceholdersForTesting,
   setLiveLaunchSessionLookup,
   takeAllDroppedLaunchPlaceholders
 } from '@/stores/acp-store/live-turn'
-import { seedSession } from '@/stores/acp-store/testkit'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import type { ProjectWorkspace } from '@/stores/workspace-store'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'

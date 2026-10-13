@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { logFrontendError } from '@/lib/log-api'
-import { releaseUnassignedFocus } from '@/lib/release-unassigned-focus'
+import { releaseFocusNotOfProject } from '@/lib/release-stale-focus'
 import { useAcpStore } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -68,9 +68,10 @@ export function useProjectSwitch(source: string): ProjectSwitch {
         const { projects, activeProjectId, selectProject } = useProjectStore.getState()
         const project = projects.find((candidate) => candidate.id === projectId)
         if (!project || project.isArchived || projectId === activeProjectId) return 'ignored'
-        // An unassigned chat is retained by no project: clear the focus
-        // pointers so a later manifest write cannot inherit it on the target.
-        releaseUnassignedFocus()
+        // The focus pointers may still name the PREVIOUS project's chat (or an
+        // unassigned one): clear them so a later manifest write cannot
+        // inherit that session on the target project.
+        releaseFocusNotOfProject(projectId)
         const restored = requestMostRecentChat(projectId)
         selectProject(projectId)
         void logFrontendError({

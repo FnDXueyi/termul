@@ -1,7 +1,7 @@
 import { toast } from 'sonner'
 import { logFrontendError } from '@/lib/log-api'
 import { projectSwitch } from '@/lib/project-switch/coordinator'
-import { releaseUnassignedFocus } from '@/lib/release-unassigned-focus'
+import { releaseFocusNotOfProject } from '@/lib/release-stale-focus'
 import { sessionProjectId, useAcpStore } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -95,7 +95,7 @@ export function openAgentChatInOwnProject(
     message: `Opening chat ${sessionId} switches project ${activeProjectId} -> ${owner}`
   })
   // Same as the sidebar's project select (client-only on every surface).
-  releaseUnassignedFocus()
+  releaseFocusNotOfProject(owner)
   useProjectStore.getState().selectProject(owner)
   useSSHStore.getState().selectProfile(null)
   // An explicit open (not an effect-driven pick): it survives the pick the
