@@ -1,10 +1,11 @@
+import { flushPendingAutoSaves } from '@/lib/editor-auto-save'
+
 /**
  * Seam between the project-switch coordinator and the editor's pending
  * autosaves: `leave()` awaits this before persisting the leaving project, so
- * no debounced save is still in flight when its files are cleared.
- *
- * Intentionally empty until the editor-drafts work lands `flushPendingAutoSaves`
- * in `@/lib/editor-auto-save`; its owner replaces the body with a call to it
- * (one line), and nothing else about the coordinator changes.
+ * no debounced save is still in flight when its files are cleared. Best
+ * effort: a failing file stays unsaved and its draft is persisted.
  */
-export async function flushEditorWork(): Promise<void> {}
+export async function flushEditorWork(): Promise<void> {
+  await flushPendingAutoSaves()
+}

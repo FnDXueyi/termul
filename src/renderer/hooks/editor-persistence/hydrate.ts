@@ -13,7 +13,7 @@ import { loadPersistedTerminals } from '@/hooks/useTerminalAutoSave'
 import { filesystemApi, persistenceApi } from '@/lib/api'
 import { emptyStagedProject, type StagedProject } from '@/lib/project-switch/types'
 import type { EditorFileState } from '@/stores/editor-store'
-import { detectLanguage, getDefaultViewMode } from '@/stores/editor-store'
+import { detectLanguage, getDefaultViewMode, reconcileDraft } from '@/stores/editor-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import {
@@ -58,22 +58,15 @@ async function stageFile(filePath: string): Promise<EditorFileState | null> {
 }
 
 /**
- * Apply a persisted unsaved draft to the freshly read file. Current rule: the
- * draft wins when the file on disk is not newer than the draft's snapshot.
- * Isolated here so a draft/disk reconcile (conflict instead of a silent drop)
- * can replace it without touching the hydration flow.
+ * Apply a persisted unsaved draft to the freshly read file: the draft wins when
+ * the file on disk is not newer than the draft; a newer file shows a conflict.
  */
 function applyPersistedDraft(
   file: EditorFileState,
   persisted: PersistedEditorFile
 ): EditorFileState {
   if (!persisted.isDirty || !persisted.draftContent) return file
-  if (file.lastModified > persisted.lastModified) return file
-  return {
-    ...file,
-    content: persisted.draftContent,
-    isDirty: persisted.draftContent !== file.originalContent
-  }
+  return reconcileDraft(file, { content: persisted.draftContent, savedAt: persisted.lastModified })
 }
 
 function applyPersistedViewState(

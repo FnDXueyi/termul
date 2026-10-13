@@ -22,15 +22,20 @@ export function persistState(projectId: string): void {
 
   const openFiles: PersistedEditorFile[] = []
   editorState.openFiles.forEach((file: EditorFileState) => {
+    const conflict = file.draftConflict
     const persisted: PersistedEditorFile = {
       filePath: file.filePath,
       cursorPosition: file.cursorPosition,
       scrollTop: file.scrollTop,
       viewMode: file.viewMode,
-      isDirty: file.isDirty,
-      lastModified: file.lastModified
+      // An unresolved conflict persists as a dirty draft stamped with the
+      // draft's own save time so the next restore re-evaluates it.
+      isDirty: file.isDirty || conflict !== undefined,
+      lastModified: conflict ? conflict.draftSavedAt : file.lastModified
     }
-    if (file.isDirty) {
+    if (conflict) {
+      persisted.draftContent = conflict.draftContent
+    } else if (file.isDirty) {
       persisted.draftContent = file.content
     }
     openFiles.push(persisted)
