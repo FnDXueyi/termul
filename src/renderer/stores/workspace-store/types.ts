@@ -122,7 +122,12 @@ export interface WorkspaceState extends ProjectWorkspace {
   setActivePane: (paneId: string) => void
   togglePaneFullscreen: (paneId: string) => void
   clearFullscreenPane: () => void
-  updatePaneSizes: (splitId: string, sizes: number[]) => void
+  /**
+   * Resize a split. `projectId` targets that project's tree (a parked one
+   * lands in `parkedTrees`) so a hidden-but-mounted host never writes into the
+   * visible tree; omitted = the active tree.
+   */
+  updatePaneSizes: (splitId: string, sizes: number[], projectId?: string) => void
   collapsePane: (paneId: string) => void
   reorderTabsInPane: (paneId: string, orderedIds: string[]) => void
 

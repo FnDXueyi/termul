@@ -202,7 +202,18 @@ vi.mock('@/lib/file-path-links', async (importOriginal) => {
 })
 
 vi.mock('@/stores/project-store', () => ({
-  useActiveProject: vi.fn(() => ({ path: '/project-root' })),
+  useProjectStore: vi.fn(
+    (
+      selector: (state: {
+        projects: Array<{ id: string; path: string }>
+        activeProjectId: string
+      }) => unknown
+    ) =>
+      selector({
+        projects: [{ id: 'project-a', path: '/project-root' }],
+        activeProjectId: 'project-a'
+      })
+  ),
   useProjects: vi.fn(() => []),
   useActiveProjectId: vi.fn(() => 'project-a')
 }))

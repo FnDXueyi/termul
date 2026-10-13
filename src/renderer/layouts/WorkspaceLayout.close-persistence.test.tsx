@@ -65,6 +65,8 @@ const {
   },
   mockWorkspaceStoreState: {
     activePaneId: 'pane-root',
+    activeProjectId: '',
+    parkedTrees: {},
     agentLauncherPaneId: null,
     root: { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null },
     syncTerminalTabs: vi.fn(),
