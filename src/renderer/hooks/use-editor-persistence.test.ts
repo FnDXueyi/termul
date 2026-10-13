@@ -26,6 +26,14 @@ const { mockPersistenceRead, mockPersistenceWriteDebounced } = vi.hoisted(() => 
   mockPersistenceWriteDebounced: vi.fn()
 }))
 
+const { mockFlushPendingAutoSaves } = vi.hoisted(() => ({
+  mockFlushPendingAutoSaves: vi.fn()
+}))
+
+vi.mock('@/lib/editor-auto-save', () => ({
+  flushPendingAutoSaves: mockFlushPendingAutoSaves
+}))
+
 vi.mock('@/lib/api', () => ({
   persistenceApi: {
     read: mockPersistenceRead,
@@ -43,6 +51,7 @@ function createEditorFileState(filePath: string): {
   viewMode: 'code' | 'markdown'
   cursorPosition: { line: number; col: number }
   scrollTop: number
+  draftConflict?: { draftContent: string; draftSavedAt: number }
 } {
   return {
     filePath,
@@ -66,6 +75,7 @@ const mockEditorState = {
   updateScrollTop: vi.fn(),
   setViewMode: vi.fn(),
   updateContent: vi.fn(),
+  restoreDraft: vi.fn(),
   setActiveFilePath: vi.fn()
 }
 
@@ -266,6 +276,9 @@ beforeEach(() => {
   mockEditorState.updateScrollTop.mockReset()
   mockEditorState.setViewMode.mockReset()
   mockEditorState.updateContent.mockReset()
+  mockEditorState.restoreDraft.mockReset()
+  mockFlushPendingAutoSaves.mockReset()
+  mockFlushPendingAutoSaves.mockResolvedValue({ saved: [], failed: [] })
   mockEditorState.setActiveFilePath.mockReset()
 
   mockExplorerState.expandedDirs = new Set<string>()
@@ -736,8 +749,9 @@ describe('useEditorPersistence', () => {
 
     rerender({ currentProjectId: 'project-b' })
 
+    // B's restore starts after the autosave flush resolves (a microtask later).
     await waitFor(() => {
-      expect(mockWorkspaceState.resetLayout).toHaveBeenCalledTimes(1)
+      expect(mockPersistenceRead).toHaveBeenCalledTimes(2)
     })
 
     projectARead.resolve?.({
@@ -1112,6 +1126,139 @@ describe('useEditorPersistence', () => {
     expect(trueIndex).toBeGreaterThanOrEqual(0)
     expect(falseIndex).toBeGreaterThanOrEqual(0)
     expect(trueIndex).toBeLessThan(falseIndex)
+  })
+
+  it('restores a persisted draft through restoreDraft (newer-on-disk becomes a conflict, never dropped)', async () => {
+    mockEditorState.restoreDraft.mockReturnValue('conflict')
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        openFiles: [
+          {
+            filePath: '/projects/a/notes.md',
+            cursorPosition: { line: 1, col: 1 },
+            scrollTop: 0,
+            viewMode: 'code',
+            isDirty: true,
+            draftContent: 'my unsaved words',
+            lastModified: 1_000
+          }
+        ],
+        activeFilePath: '/projects/a/notes.md',
+        expandedDirs: [],
+        activeTabId: null
+      }
+    })
+
+    renderHook(() => useEditorPersistence('project-a'))
+
+    await waitFor(() => {
+      expect(mockEditorState.restoreDraft).toHaveBeenCalledWith('/projects/a/notes.md', {
+        content: 'my unsaved words',
+        savedAt: 1_000
+      })
+    })
+    expect(mockEditorState.updateContent).not.toHaveBeenCalled()
+  })
+
+  it('flushes pending autosaves before persisting the old project on a switch', async () => {
+    const order: string[] = []
+    mockFlushPendingAutoSaves.mockImplementation(async () => {
+      order.push('flush')
+      return { saved: [], failed: [] }
+    })
+    mockPersistenceWriteDebounced.mockImplementation((key: string) => {
+      order.push(`persist:${key}`)
+    })
+    mockPersistenceRead.mockResolvedValue({ success: false })
+
+    const { rerender } = renderHook(({ projectId }) => useEditorPersistence(projectId), {
+      initialProps: { projectId: 'project-a' }
+    })
+    await waitFor(() => {
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-a', false)
+    })
+    expect(order).toEqual([])
+
+    rerender({ projectId: 'project-b' })
+    await waitFor(() => {
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-b', false)
+    })
+
+    expect(order[0]).toBe('flush')
+    expect(order[1]).toBe('persist:editor-state/project-a')
+    expect(mockEditorState.clearAllFiles).toHaveBeenCalledTimes(2)
+  })
+
+  it('a switch superseded during the flush persists the real owner, not the intermediate project', async () => {
+    const flushGate = Promise.withResolvers<{ saved: string[]; failed: string[] }>()
+    mockFlushPendingAutoSaves.mockImplementationOnce(() => flushGate.promise)
+    mockPersistenceRead.mockResolvedValue({ success: false })
+
+    const { rerender } = renderHook(({ projectId }) => useEditorPersistence(projectId), {
+      initialProps: { projectId: 'project-a' }
+    })
+    await waitFor(() => {
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-a', false)
+    })
+
+    rerender({ projectId: 'project-b' }) // blocks in the flush
+    rerender({ projectId: 'project-c' })
+    await waitFor(() => {
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-c', false)
+    })
+    flushGate.resolve({ saved: [], failed: [] })
+    await waitFor(() => {
+      expect(mockSetManifestRestoreInProgress).toHaveBeenCalledWith('project-b', false)
+    })
+
+    const keys = mockPersistenceWriteDebounced.mock.calls.map((call: unknown[]) => call[0])
+    expect(keys).toEqual(['editor-state/project-a'])
+  })
+})
+
+describe('persistState draft conflicts', () => {
+  it('persists an unresolved draft conflict as a dirty draft stamped with the draft time', () => {
+    mockEditorState.openFiles.set('/projects/a/notes.md', {
+      ...createEditorFileState('/projects/a/notes.md'),
+      content: 'disk version',
+      originalContent: 'disk version',
+      isDirty: false,
+      lastModified: 9_000,
+      draftConflict: { draftContent: 'my draft', draftSavedAt: 1_000 }
+    })
+
+    persistState('project-a')
+
+    const written = mockPersistenceWriteDebounced.mock.calls[0][1] as {
+      openFiles: Array<{ isDirty: boolean; draftContent?: string; lastModified: number }>
+    }
+    expect(written.openFiles[0]).toMatchObject({
+      isDirty: true,
+      draftContent: 'my draft',
+      lastModified: 1_000
+    })
+  })
+
+  it('persists an ordinary dirty file with its buffer and disk timestamp', () => {
+    mockEditorState.openFiles.set('/projects/a/a.ts', {
+      ...createEditorFileState('/projects/a/a.ts'),
+      content: 'edited',
+      originalContent: 'orig',
+      isDirty: true,
+      lastModified: 5_000
+    })
+
+    persistState('project-a')
+
+    const written = mockPersistenceWriteDebounced.mock.calls[0][1] as {
+      openFiles: Array<{ isDirty: boolean; draftContent?: string; lastModified: number }>
+    }
+    expect(written.openFiles[0]).toMatchObject({
+      isDirty: true,
+      draftContent: 'edited',
+      lastModified: 5_000
+    })
   })
 })
 
