@@ -44,7 +44,7 @@ const REQUEST_TIMEOUT_MS = 15_000
  * refuses new input with INPUT_BLOCKED (buffered data is never silently
  * truncated). */
 const INPUT_BUFFER_MAX_CHARS = 8_192
-/** Wait before replaying input whose first run is still in progress on the host. */
+/** Wait before replaying buffered input whose first replay was not confirmed. */
 const IN_PROGRESS_FLUSH_RETRY_MS = 1_000
 const RECONNECT_MAX_ATTEMPTS = 10
 /** How long the page must stay hidden before a return triggers a proactive
@@ -781,7 +781,13 @@ export class WebTerminalClient {
   async write(terminalId: string, data: string): Promise<IpcResult<void>> {
     const tracker = this.trackers.get(terminalId)
     const socketOpen = this.socket?.readyState === this.WebSocketImpl.OPEN
-    if (socketOpen && (!tracker || tracker.exited || tracker.attachedSocket === this.socket)) {
+    // Input already waiting in the buffer goes first: a direct write now would
+    // overtake it. The delayed flush after a failed replay sends it in order.
+    const waiting = this.inputBuffers.has(terminalId)
+    if (
+      socketOpen &&
+      (!tracker || tracker.exited || (tracker.attachedSocket === this.socket && !waiting))
+    ) {
       return this.request('write', { terminalId, data }, randomUUID())
     }
     if (tracker && !tracker.exited && !tracker.disconnected && tracker.claim) {
@@ -892,17 +898,14 @@ export class WebTerminalClient {
           source: 'WebTerminalClient.flushInputBuffer',
           message: `buffered-input replay failed (${result.code}) — input re-buffered for the next re-attach`
         })
-        // The first run is still going: the socket stays up, so no re-attach
-        // will flush this. Try again soon, or newer keystrokes (sent direct)
-        // would overtake the stranded input.
-        if (result.code === COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS) {
-          setTimeout(() => {
-            const current = this.trackers.get(terminalId)
-            if (!this.disposed && current?.attachedSocket === this.socket) {
-              this.flushInputBuffer(terminalId)
-            }
-          }, IN_PROGRESS_FLUSH_RETRY_MS)
-        }
+        // While the socket stays attached no re-attach will flush this, and new
+        // keystrokes queue behind it (see `write`). Try again soon.
+        setTimeout(() => {
+          const current = this.trackers.get(terminalId)
+          if (!this.disposed && current?.attachedSocket === this.socket) {
+            this.flushInputBuffer(terminalId)
+          }
+        }, IN_PROGRESS_FLUSH_RETRY_MS)
         return
       }
       // A non-network replay failure drops the buffered input (the buffer
