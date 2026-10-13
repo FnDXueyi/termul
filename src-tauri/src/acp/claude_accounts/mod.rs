@@ -11,6 +11,7 @@
 //! store (OS keychain or `.credentials.json`), keyed by the config directory.
 
 pub mod links;
+pub mod usage;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

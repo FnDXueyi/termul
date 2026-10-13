@@ -1564,6 +1564,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (e.cost && Number.isFinite(e.cost.amount) && e.cost.amount > 0 && e.cost.currency) {
         next.cost = { amount: e.cost.amount, currency: e.cost.currency }
       }
+      const rateLimit = e.rateLimit ?? prev?.rateLimit
+      if (rateLimit) next.rateLimit = rateLimit
       return {
         sessionUsage: { ...s.sessionUsage, [e.sessionId]: next }
       }

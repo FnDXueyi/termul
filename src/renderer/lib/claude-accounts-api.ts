@@ -8,7 +8,11 @@
  * client manages Accounts with `termul-server claude account` on the host.
  */
 
-import type { ClaudeAccount, ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
+import type {
+  ClaudeAccount,
+  ClaudeAccountsSnapshot,
+  ClaudeAccountUsage
+} from '@shared/types/claude-accounts.types'
 import { invoke } from '@tauri-apps/api/core'
 import { getAcpTransport } from './acp-transport'
 import { logFrontendError } from './log-api'
@@ -45,6 +49,10 @@ export const claudeAccountsApi = {
 
   list: (): Promise<ClaudeAccountsSnapshot> =>
     logged('list', () => getAcpTransport().listClaudeAccounts()),
+
+  /** Usage of every Account; host-cached 5 min, `force` reuses reads under 60 s. */
+  usage: (force = false): Promise<ClaudeAccountUsage[]> =>
+    logged('usage', () => getAcpTransport().listClaudeUsage(force)),
 
   setDefault: (accountId: string): Promise<void> =>
     logged('setDefault', () => getAcpTransport().setDefaultClaudeAccount(accountId)),

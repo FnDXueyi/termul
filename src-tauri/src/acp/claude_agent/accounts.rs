@@ -19,7 +19,12 @@ impl ClaudeAgentService {
         self.accounts = Some(accounts);
     }
 
-    fn account_store(&self) -> Result<&Arc<ClaudeAccountStore>, String> {
+    #[cfg(test)]
+    pub(super) fn set_usage_probe_for_test(&mut self, probe: Arc<dyn super::ClaudeUsageProbe>) {
+        self.usage_probe = probe;
+    }
+
+    pub(super) fn account_store(&self) -> Result<&Arc<ClaudeAccountStore>, String> {
         self.accounts
             .as_ref()
             .ok_or_else(|| "Claude accounts are not available on this host".to_string())

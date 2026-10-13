@@ -1169,6 +1169,26 @@ describe('acp-store', () => {
     expect(usage?.source).toBe('reported')
   })
 
+  it('_onUsageUpdate keeps the latest Claude rate limit across updates without one', () => {
+    seedSession('s1', 'agent-1')
+    const rateLimit = {
+      status: 'allowed_warning',
+      resetsAt: 1_760_360_399,
+      kind: 'five_hour',
+      percent: 83,
+      overageInUse: false
+    }
+    const update = { agentId: 'agent-1', sessionId: 's1', size: 200_000 }
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 50_000, rateLimit })
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 60_000 })
+    const usage = useAcpStore.getState().sessionUsage.s1
+    expect(usage?.used).toBe(60_000)
+    expect(usage?.rateLimit).toEqual(rateLimit)
+    const rejected = { ...rateLimit, status: 'rejected', percent: 100 }
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 61_000, rateLimit: rejected })
+    expect(useAcpStore.getState().sessionUsage.s1?.rateLimit).toEqual(rejected)
+  })
+
   it('_onUsageUpdate ignores zero cost placeholders', () => {
     seedSession('s1', 'agent-1')
     useAcpStore.getState()._onUsageUpdate({

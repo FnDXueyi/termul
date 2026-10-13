@@ -126,6 +126,7 @@ pub const WS_COMMAND_CLASSES: &[(&str, CommandClass)] = &[
     ),
     ("spawn_agent", CommandClass::create()),
     ("list_claude_accounts", CommandClass::read()),
+    ("list_claude_usage", CommandClass::read()),
     ("set_default_claude_account", CommandClass::idempotent()),
     ("set_project_claude_account", CommandClass::idempotent()),
     ("kill_agent", CommandClass::idempotent()),

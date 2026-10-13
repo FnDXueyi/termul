@@ -8,7 +8,10 @@
  * (`.message` is the human string callers already toast).
  */
 
-import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
+import type {
+  ClaudeAccountsSnapshot,
+  ClaudeAccountUsage
+} from '@shared/types/claude-accounts.types'
 import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
@@ -901,6 +904,13 @@ export class WsAcpTransport implements AcpTransport {
 
   async listClaudeAccounts(): Promise<ClaudeAccountsSnapshot> {
     return this.request<ClaudeAccountsSnapshot>('list_claude_accounts', {})
+  }
+
+  async listClaudeUsage(force = false): Promise<ClaudeAccountUsage[]> {
+    const reply = await this.request<{ usage: ClaudeAccountUsage[] }>('list_claude_usage', {
+      force
+    })
+    return reply?.usage ?? []
   }
 
   async setDefaultClaudeAccount(accountId: string): Promise<void> {

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use crate::acp::claude_accounts::usage::ClaudeAccountUsage;
 use crate::acp::claude_accounts::{ClaudeAccount, ClaudeAccountsSnapshot};
 use crate::acp::ClaudeAgentService;
 
@@ -14,6 +15,16 @@ pub async fn claude_accounts_list(
     service: State<'_, Arc<ClaudeAgentService>>,
 ) -> Result<ClaudeAccountsSnapshot, String> {
     service.accounts_snapshot().await
+}
+
+/// Usage windows of every Account; `force` refreshes reads older than 60s.
+#[tauri::command]
+pub async fn claude_accounts_usage(
+    service: State<'_, Arc<ClaudeAgentService>>,
+    force: Option<bool>,
+) -> Result<Vec<ClaudeAccountUsage>, String> {
+    let service = Arc::clone(service.inner());
+    service.accounts_usage(force.unwrap_or(false)).await
 }
 
 #[tauri::command]

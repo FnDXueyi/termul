@@ -10,6 +10,7 @@ const { mockIsTauriContext, mockInvoke, transport } = vi.hoisted(() => ({
   mockInvoke: vi.fn(),
   transport: {
     listClaudeAccounts: vi.fn(),
+    listClaudeUsage: vi.fn(),
     setDefaultClaudeAccount: vi.fn(),
     setProjectClaudeAccount: vi.fn()
   }
@@ -31,6 +32,7 @@ const SNAPSHOT = {
 beforeEach(() => {
   vi.clearAllMocks()
   transport.listClaudeAccounts.mockResolvedValue(SNAPSHOT)
+  transport.listClaudeUsage.mockResolvedValue([])
   transport.setDefaultClaudeAccount.mockResolvedValue(undefined)
   transport.setProjectClaudeAccount.mockResolvedValue(undefined)
 })
@@ -44,6 +46,13 @@ describe.each([
   it('lists through the ACP transport', async () => {
     await expect(claudeAccountsApi.list()).resolves.toEqual(SNAPSHOT)
     expect(transport.listClaudeAccounts).toHaveBeenCalledOnce()
+    expect(mockInvoke).not.toHaveBeenCalled()
+  })
+
+  it('reads usage through the ACP transport, forced or not', async () => {
+    await claudeAccountsApi.usage()
+    await claudeAccountsApi.usage(true)
+    expect(transport.listClaudeUsage.mock.calls).toEqual([[false], [true]])
     expect(mockInvoke).not.toHaveBeenCalled()
   })
 

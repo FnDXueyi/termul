@@ -1879,6 +1879,7 @@ pub fn run() {
             // ACP (Agent Client Protocol) commands — ADR-003 P0
             acp::commands::acp_spawn_agent,
             acp::commands::claude_accounts_list,
+            acp::commands::claude_accounts_usage,
             acp::commands::claude_accounts_add,
             acp::commands::claude_accounts_login,
             acp::commands::claude_accounts_rename,
