@@ -7,6 +7,7 @@ import { setRouterNavigate } from '@/lib/router-navigate'
 import { checkWebAuthGate } from '@/lib/web-auth-gate'
 import { useAcpStore } from '@/stores/acp-store'
 import { wireConnectionStatusTracking } from '@/stores/connection-status-store'
+import { useWorkspaceStore } from '@/stores/workspace-store'
 
 interface UseWorkspaceBootOptions {
   navigate: NavigateFunction
@@ -52,6 +53,9 @@ export function useWorkspaceBoot({ navigate, activeProjectId }: UseWorkspaceBoot
   useEffect(() => {
     const persistBeforeUnload = () => {
       if (!activeProjectId) return
+      // A switch toward `activeProjectId` may still be loading: its tree is
+      // not the committed one, so its state is not ours to persist yet.
+      if (useWorkspaceStore.getState().activeProjectId !== activeProjectId) return
       void saveTerminalLayout(activeProjectId).catch((error) => {
         console.warn('Failed to persist terminal layout before reload:', error)
       })

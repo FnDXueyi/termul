@@ -1,6 +1,6 @@
 /**
- * #903 acceptance: two projects in one folder group share ONE global pane tree.
- * Switching p1 -> p2 -> p1 must show each project exactly its own chat tabs and
+ * #903 acceptance: two projects in one folder group each have their own pane
+ * tree (parked while the other is visible). Switching p1 -> p2 -> p1 must show each project exactly its own chat tabs and
  * must never write one project's chats into the other's `editor-state`. Real
  * workspace / lifetime / acp / project stores; only the transports are faked
  * (in-memory persistence map, no manifest, no editor/explorer I/O).
@@ -67,7 +67,13 @@ vi.mock('@/stores/editor-store', () => {
     openFile: vi.fn(async () => {}),
     setActiveFilePath: vi.fn()
   }
-  return { useEditorStore: { getState: () => state, subscribe: vi.fn(() => vi.fn()) } }
+  return {
+    useEditorStore: {
+      getState: () => state,
+      setState: vi.fn(),
+      subscribe: vi.fn(() => vi.fn())
+    }
+  }
 })
 
 vi.mock('@/stores/file-explorer-store', () => {
@@ -154,6 +160,7 @@ describe('#903 folder-group chat tab isolation', () => {
       closingSessionIds: {}
     })
     useWorkspaceStore.getState().resetLayout()
+    useWorkspaceStore.setState({ activeProjectId: '', parkedTrees: {} })
     useProjectStore.setState({ projects: [project('p1'), project('p2')], activeProjectId: 'p1' })
   })
 

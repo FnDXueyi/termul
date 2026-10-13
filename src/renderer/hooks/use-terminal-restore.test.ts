@@ -1,5 +1,6 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useProjectSwitchStatus } from '@/lib/project-switch/status-store'
 import {
   mockAttachResult,
   mockPersistedTerminal,
@@ -134,7 +135,15 @@ vi.mock('../stores/terminal-store', () => ({
   useProjectsWithErrors: () => new Set()
 }))
 
+// Which project's tree the workspace store shows. Null follows the project
+// store (the switch always committed); a value pins it (a switch that failed or
+// was superseded leaves another project visible).
+let committedProjectOverride: string | null = null
+
 const mockWorkspaceStore = {
+  get activeProjectId(): string {
+    return committedProjectOverride ?? mockProjectState.activeProjectId
+  },
   ensureTerminalTab: vi.fn(),
   getActivePaneLeaf: vi.fn(() => ({
     id: 'pane-active',
@@ -168,6 +177,13 @@ vi.mock('../stores/app-settings-store', () => ({
   }
 }))
 
+/** Let the restore's awaited continuation (after the switch settles) run. */
+async function settleMicrotasks(): Promise<void> {
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+  })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   vi.useRealTimers()
@@ -178,6 +194,8 @@ beforeEach(() => {
     (projectId: string) => `corr-${projectId}`
   )
   mockProjectState.activeProjectId = ''
+  committedProjectOverride = null
+  useProjectSwitchStatus.setState({ pending: null, failed: null })
   mockTerminalStoreState.terminals = []
   mockTerminalStoreState.activeTerminalId = ''
   mockAcpState.sessions = {}
@@ -334,6 +352,31 @@ describe('useTerminalRestore', () => {
 
     expect(mockWorkspaceStore.setActiveTab).not.toHaveBeenCalled()
     expect(mockTerminalStoreState.selectTerminal).toHaveBeenCalledWith('a-live')
+  })
+
+  it('does not touch the visible tree when the switch toward the project settles without committing it', async () => {
+    mockTerminalStoreState.terminals = [
+      mockTerminal({ id: 'a-live', projectId: 'project-a', name: 'A', ptyId: 'pty-a' })
+    ]
+    mockLoadPersistedTerminals.mockResolvedValue(null)
+    // A switch to project-a is loading; project-b stays visible.
+    committedProjectOverride = 'project-b'
+    useProjectSwitchStatus.setState({ pending: { projectId: 'project-a' } })
+
+    renderHook(() => {
+      mockProjectState.activeProjectId = 'project-a'
+      useTerminalRestore()
+    })
+    await waitFor(() => expect(mockLoadPersistedTerminals).toHaveBeenCalledWith('project-a'))
+    expect(mockWorkspaceStore.ensureTerminalTab).not.toHaveBeenCalled()
+
+    // The switch fails/is superseded: pending clears, but project-a never committed.
+    useProjectSwitchStatus.setState({ pending: null })
+    await settleMicrotasks()
+
+    expect(mockWorkspaceStore.ensureTerminalTab).not.toHaveBeenCalled()
+    expect(mockWorkspaceStore.setActiveTab).not.toHaveBeenCalled()
+    expect(mockTerminalStoreState.selectTerminal).not.toHaveBeenCalled()
   })
 
   it('prefers currently active live terminal when selecting a live terminal', async () => {
@@ -906,6 +949,47 @@ describe('useTerminalRestore', () => {
         expect.objectContaining({ projectId: 'project-a' })
       )
     })
+  })
+
+  it('skips the tab remap and terminal selection when the switch settles without committing the project', async () => {
+    mockTerminalStoreState.terminals = []
+    mockLoadPersistedTerminals.mockResolvedValue({
+      activeTerminalId: 'persisted-a',
+      terminals: [
+        mockPersistedTerminal({ id: 'persisted-a', name: 'A', cwd: '/projects/a', scrollback: [] })
+      ],
+      updatedAt: '2026-03-09T00:00:00.000Z'
+    })
+    mockListPreserved.mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: 'terminal-100-1',
+          shell: '/bin/bash',
+          cwd: '/projects/a',
+          pid: 11,
+          cols: 80,
+          rows: 24,
+          claim: 'fresh-claim-a'
+        }
+      ]
+    })
+    committedProjectOverride = 'project-b'
+    useProjectSwitchStatus.setState({ pending: { projectId: 'project-a' } })
+
+    renderHook(() => {
+      mockProjectState.activeProjectId = 'project-a'
+      useTerminalRestore()
+    })
+    await waitFor(() => expect(mockTerminalStoreState.setTerminals).toHaveBeenCalled())
+    // Held back while the switch is pending.
+    expect(mockWorkspaceStore.remapTerminalTabs).not.toHaveBeenCalled()
+
+    useProjectSwitchStatus.setState({ pending: null })
+    await settleMicrotasks()
+
+    expect(mockWorkspaceStore.remapTerminalTabs).not.toHaveBeenCalled()
+    expect(mockTerminalStoreState.selectTerminal).not.toHaveBeenCalled()
   })
 
   it('restores leftover preserved PTYs as their own tabs (resolved Q3)', async () => {

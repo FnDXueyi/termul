@@ -132,9 +132,9 @@ export default function WorkspaceLayout(): React.JSX.Element {
   // Editor state persistence
   useEditorPersistence(activeProjectId)
 
-  // Story 6: cross-client workspace manifest sync (load happens inside
-  // useEditorPersistence's restore flow via loadAndRestoreManifest; this hook
-  // wires the debounced write side + conflict surfacing).
+  // Story 6: cross-client workspace manifest sync (the manifest is read by the
+  // project-switch hydration (fetchManifestWorkspace); this hook wires the
+  // debounced write side + conflict surfacing).
   useWorkspaceManifestSync(activeProjectId)
 
   useTerminalTabSync({ terminals, activeProjectId })

@@ -6,6 +6,7 @@ import type { StateCreator } from 'zustand'
 import { navigateToChatSession } from '@/lib/router-navigate'
 import type { DropPosition, LeafNode, PaneDirection, SplitNode } from '@/types/workspace.types'
 import {
+  closeTabInWorkspace,
   createLeaf,
   findPaneById,
   findParentSplit,
@@ -325,58 +326,11 @@ export const createPaneSlice: StateCreator<WorkspaceState, [], [], PaneSliceStat
   },
 
   closeTab: (paneId: string, tabId: string): WorkspaceTab | null => {
-    const { root, activePaneId } = get()
-    let removedTab: WorkspaceTab | null = null
-
-    let newRoot = updateLeaf(root, paneId, (leaf) => {
-      const idx = leaf.tabs.findIndex((t) => t.id === tabId)
-      if (idx === -1) return leaf
-      removedTab = leaf.tabs[idx]
-      const newTabs = leaf.tabs.filter((t) => t.id !== tabId)
-      let newActive = leaf.activeTabId
-      if (leaf.activeTabId === tabId) {
-        if (newTabs.length > 0) {
-          const newIdx = Math.min(idx, newTabs.length - 1)
-          newActive = newTabs[newIdx].id
-        } else {
-          newActive = null
-        }
-      }
-      return { ...leaf, tabs: newTabs, activeTabId: newActive }
-    })
-
-    if (!removedTab) {
-      return null
-    }
-
-    // If pane is now empty and not the only pane, collapse it
-    const pane = findPaneById(newRoot, paneId)
-    if (pane && pane.type === 'leaf' && pane.tabs.length === 0) {
-      const leaves = getAllLeafPanes(newRoot)
-      if (leaves.length > 1) {
-        // Find sibling to focus
-        const parent = findParentSplit(newRoot, paneId)
-        let newActivePaneId = activePaneId
-        if (parent) {
-          const siblingIdx = parent.children.findIndex((c) => c.id !== paneId)
-          if (siblingIdx >= 0) {
-            const sibling = parent.children[siblingIdx]
-            const siblingLeaves = getAllLeafPanes(sibling)
-            newActivePaneId = siblingLeaves.length > 0 ? siblingLeaves[0].id : activePaneId
-          }
-        }
-        newRoot = removeNode(newRoot, paneId) ?? createLeaf()
-        set((state) => ({
-          root: newRoot,
-          activePaneId: newActivePaneId,
-          fullscreenPaneId: resolveFullscreenPaneId(newRoot, state.fullscreenPaneId)
-        }))
-        return removedTab
-      }
-    }
-
-    set({ root: newRoot })
-    return removedTab
+    const closed = closeTabInWorkspace(get(), paneId, tabId)
+    if (!closed) return null
+    const { root, activePaneId, fullscreenPaneId } = closed.workspace
+    set({ root, activePaneId, fullscreenPaneId })
+    return closed.removed
   },
 
   setActiveTab: (paneId: string, tabId: string): void => {
