@@ -251,10 +251,15 @@ function ToolCallCardComponent({
   // Show the readable RESULT only — never the raw input or the JSON envelope.
   // Structured content (diffs/text) is canonical; otherwise extract the output.
   const resultText = hasContent ? '' : readableOutput(toolCall.rawOutput)
-  const hasDetail = hasContent || resultText.length > 0 || terminalOutput.length > 0
   const status = toolCall.status
   const failed = status === 'failed'
   const isSubagent = isSubagentCall(toolCall)
+  // Diffs render as inline blocks. Anything else the call carries (text,
+  // terminal output) stays behind the collapsible row.
+  const inlineDiff = hasDiff && !isSubagent
+  const detailItems = inlineDiff ? content.filter((item) => item.type !== 'diff') : content
+  const hasDetail =
+    detailItems.length > 0 || (!inlineDiff && resultText.length > 0) || terminalOutput.length > 0
 
   // Collapsed by default for a clean, scannable list; a click reveals details.
   // Settle time is stamped only on an observed transition, so history-loaded
@@ -300,7 +305,7 @@ function ToolCallCardComponent({
     if (openFilePath) openFileAt(openFilePath)
   }, [openFilePath, openFileAt])
 
-  if (hasDiff && !isSubagent) {
+  if (inlineDiff && !hasDetail) {
     return (
       <div
         aria-busy={running || undefined}
@@ -365,6 +370,25 @@ function ToolCallCardComponent({
 
   return (
     <>
+      {inlineDiff ? (
+        <div
+          aria-busy={running || undefined}
+          data-status={status}
+          className="group/tool relative w-full overflow-hidden px-1"
+        >
+          {content.map((item, i) =>
+            item.type === 'diff' ? (
+              <EditDiffBlock
+                key={i}
+                diff={diffContent(item)}
+                running={running}
+                failed={failed}
+                onOpenFile={filePathContext ? openFileAt : undefined}
+              />
+            ) : null
+          )}
+        </div>
+      ) : null}
       <div
         aria-busy={running || undefined}
         data-status={status}
@@ -435,8 +459,8 @@ function ToolCallCardComponent({
           {hasDetail && !isSubagent && (
             <CollapseExpandMotion open={open} motion="chat">
               <div className="ml-4 flex flex-col gap-1.5 border-l border-border/50 px-2 pb-2 pt-1.5">
-                {hasContent ? (
-                  content.map((item, i) => renderContentItem(item, i, language, stream))
+                {detailItems.length > 0 ? (
+                  detailItems.map((item, i) => renderContentItem(item, i, language, stream))
                 ) : resultText ? (
                   <ResultBlock text={resultText} language={language} />
                 ) : terminalOutput ? (

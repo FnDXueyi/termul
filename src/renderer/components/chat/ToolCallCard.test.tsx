@@ -474,6 +474,24 @@ describe('ToolCallCard edit diffs', () => {
     expect(container.querySelectorAll('[data-diff-block]')).toHaveLength(2)
   })
 
+  it('keeps non-diff output behind the disclosure when a call also has a diff', () => {
+    render(
+      <Card
+        toolCall={edit([
+          diff,
+          { type: 'content', content: { type: 'text', text: 'wrote the helper' } }
+        ])}
+      />
+    )
+
+    expect(screen.getByText('B')).toBeInTheDocument()
+    expect(screen.queryByText('wrote the helper')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+
+    expect(screen.getByText('wrote the helper')).toBeInTheDocument()
+  })
+
   it('keeps the compact row when the call carries no diff', () => {
     render(<Card toolCall={{ ...edit([]), diffStat: { added: 3, removed: 1 } }} />)
 
