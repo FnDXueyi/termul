@@ -7,6 +7,7 @@ import { FolderKanban } from '@/components/icons'
 import { StatusBar } from '@/components/StatusBar'
 import { useTopRow } from '@/components/shell/top-row-context'
 import { Button } from '@/components/ui/button'
+import { ProjectSwitchIndicator } from '@/components/workspace/ProjectSwitchIndicator'
 import { ProjectTreeHost, useMountedProjectIds } from '@/components/workspace/ProjectTreeHost'
 import { useMobileActiveLeaf } from '@/hooks/use-mobile-active-leaf'
 import { ShellSkeleton } from '@/layouts/workspace-layout/ShellSkeleton'
@@ -102,6 +103,7 @@ export function WorkspaceMain({
             <>
               <ChatRoute />
               <div className="relative h-full min-h-0 flex-1 overflow-hidden">
+                <ProjectSwitchIndicator />
                 {mountedProjectIds.map((projectId) => {
                   const isActiveProject = projectId === activeTreeProjectId
                   return (
