@@ -8,6 +8,7 @@
  * (`.message` is the human string callers already toast).
  */
 
+import type { AcpCatalog } from '@shared/types/acp-catalog.types'
 import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
 import {
   type AcpAuthenticateReply,
@@ -243,15 +244,14 @@ export class WsAcpTransport implements AcpTransport {
   /** Sessions we should re-subscribe after reconnect. */
   private readonly subscribed = new Set<string>()
   /**
-   * The state watches (projects, chat-history index, agent roster): frames are
-   * routed here from `onMessage`, and every (re)connect resubscribes them.
+   * The watches (projects, chat-history index, agent roster, project file
+   * changes, store keys, terminal sets): frames are routed here from
+   * `onMessage`, and every (re)connect resubscribes them.
    */
   readonly watches = new WatchClient({
     request: (type, payload, timeoutMs) => this.request(type, payload, timeoutMs),
     isLive: () => this.isSocketLive()
   })
-  /** Projects whose `fs_changed` watch this connection must re-request after reconnect. */
-  private readonly watchedProjects = new Set<string>()
   /** Idempotent prompt_complete turn ids already delivered, scoped by session. */
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
@@ -756,6 +756,16 @@ export class WsAcpTransport implements AcpTransport {
     )
   }
 
+  /** `list_acp_catalog`: the host-resolved catalog (see {@link AcpTransport.listCatalog}). */
+  async listCatalog(refresh = false): Promise<AcpCatalog> {
+    return this.request<AcpCatalog>('list_acp_catalog', { refresh })
+  }
+
+  /** `set_catalog_opt_in`: persist the host catalog opt-in. */
+  async setCatalogOptIn(enabled: boolean): Promise<void> {
+    await this.request<unknown>('set_catalog_opt_in', { enabled })
+  }
+
   /**
    * CAP-6 / Story 8: probeRuntime is replaced by the host-resolved catalog.
    * The web client calls `acpCatalogApi.listCatalog()` (the facade) which
@@ -1032,26 +1042,6 @@ export class WsAcpTransport implements AcpTransport {
     }
   }
 
-  async watchProject(projectId: string): Promise<void> {
-    // Tracked BEFORE the reply: if the socket drops or the reply times out
-    // (the host may have registered the watch), the reconnect re-sends it.
-    // Only an explicit host refusal untracks it.
-    this.watchedProjects.add(projectId)
-    try {
-      await this.request('watch_project', { projectId })
-    } catch (error) {
-      const ambiguous =
-        error instanceof AcpTransportError && (error.code === 'closed' || error.code === 'timeout')
-      if (!ambiguous) this.watchedProjects.delete(projectId)
-      throw error
-    }
-  }
-
-  async unwatchProject(projectId: string): Promise<void> {
-    this.watchedProjects.delete(projectId)
-    await this.request('unwatch_project', { projectId })
-  }
-
   async loadSession(
     agentId: AgentId,
     sessionId: SessionId,
@@ -1279,7 +1269,6 @@ export class WsAcpTransport implements AcpTransport {
     // authenticated WS connection. The host runs the method on the agent
     // process (the provider owns the login UX, often opening its own
     // browser); Termul never invents a redirect URL or stores credentials.
-    // Mirrors the desktop `acp_authenticate` Tauri command.
     await this.connect()
     await this.request('authenticate_agent', { agentId, methodId, gateway }, undefined, options)
   }
@@ -1289,8 +1278,7 @@ export class WsAcpTransport implements AcpTransport {
    * the host's `AcpManager::deliver_auth_redirect` over the authenticated WS
    * connection. The host SSRF-guards (http(s) + loopback only) then replays
    * the URL to the agent's callback listener; the reply `{ status }` is the
-   * replay's HTTP status. Mirrors the desktop `acp_auth_deliver_redirect`
-   * Tauri command.
+   * replay's HTTP status.
    */
   async deliverAuthRedirect(
     agentId: AgentId,
@@ -1799,9 +1787,6 @@ export class WsAcpTransport implements AcpTransport {
           }
         }
       }
-      // Off the critical path: a slow or failing watch re-request must never
-      // delay or fail the reconnect (it handles its own errors).
-      void this.rewatchProjects()
       if (obsoleteSessions.length > 0) {
         void logFrontendError({
           level: 'warn',
@@ -1845,35 +1830,6 @@ export class WsAcpTransport implements AcpTransport {
       this.discardSocket('reconnect attempt failed')
       this.scheduleReconnect()
     }
-  }
-
-  /**
-   * The host keeps no watch state across connections, so re-request every
-   * project watch on the fresh socket, in parallel and each bounded by the
-   * resubscribe timeout. A watch the host refuses (project archived/removed
-   * while disconnected) or cannot confirm in time is dropped here AND reported
-   * to listeners as a local `fs_watch_ended`, so the filesystem facade forgets
-   * it and re-requests on its next `watchDirectory` instead of believing it is
-   * live. If the socket itself died, the watches are kept for the next
-   * reconnect pass. Never rejects.
-   */
-  private async rewatchProjects(): Promise<void> {
-    await Promise.all(
-      [...this.watchedProjects].map(async (projectId) => {
-        try {
-          await this.request('watch_project', { projectId }, RESUBSCRIBE_TIMEOUT_MS)
-        } catch (error) {
-          void logFrontendError({
-            level: 'warn',
-            source: 'WsAcpTransport.rewatchProjects',
-            message: `Re-watching project ${projectId} after reconnect failed: ${String(error)}`
-          })
-          if (!this.isSocketLive()) return
-          this.watchedProjects.delete(projectId)
-          this.emitLocal('fs_watch_ended', { projectId, reason: 'rewatch_failed' })
-        }
-      })
-    )
   }
 
   /** One per-session retry attempt (see {@link SessionResubscribeRetry}). */
@@ -2047,11 +2003,6 @@ export class WsAcpTransport implements AcpTransport {
   }
 
   private async handleEvent(evt: WsEvent): Promise<void> {
-    // The host ended a project watch: stop re-requesting it after reconnects.
-    if (evt.type === 'fs_watch_ended') {
-      const endedProject = (evt.payload as { projectId?: unknown } | null)?.projectId
-      if (typeof endedProject === 'string') this.watchedProjects.delete(endedProject)
-    }
     // #907 / CodeQL hardening: validate the event type against the shared
     // protocol registry BEFORE branching on it — the token send is gated by
     // a registry-validated boolean plus connection state, never the raw
@@ -2177,9 +2128,14 @@ export class WsAcpTransport implements AcpTransport {
       return
     }
 
-    // Agent-level / relay events (seq 0, or sid null): deliver immediately.
+    // The host sends no event without a session except `auth_required`
+    // (handled above): anything else is a protocol violation.
     if (evt.sid == null || evt.seq === 0) {
-      this.emitLocal(evt.type, evt.payload)
+      void logFrontendError({
+        level: 'warn',
+        source: 'WsAcpTransport.handleEvent',
+        message: `dropped an event without a session log position (${String(evt.type)})`
+      })
       return
     }
 
@@ -2340,10 +2296,10 @@ export class WsAcpTransport implements AcpTransport {
         serverHardCapMs > 0 ? Date.now() + serverHardCapMs + SEND_PROMPT_GRACE_MS : undefined
       // `authenticate_agent` is an interactive agent auth flow (the provider
       // may open a browser + wait for the user to sign in) — apply NO
-      // client-side timeout (0 = no timer), matching the desktop
-      // `acp_authenticate` path (which awaits the agent reply indefinitely)
-      // and the `send_prompt` unlimited-policy pattern. A reply, disconnect,
-      // or disposal resolves/rejects the pending request.
+      // client-side timeout (0 = no timer), matching the `send_prompt`
+      // unlimited-policy pattern (the host awaits the agent reply
+      // indefinitely). A reply, disconnect, or disposal resolves/rejects the
+      // pending request.
       const isAuthenticateAgent = type === 'authenticate_agent'
       // Per-request-type table (CLI-F2): each timer is >= the host's own bound
       // for that operation (install, catalog refresh, session open/reopen).

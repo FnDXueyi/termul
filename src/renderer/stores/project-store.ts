@@ -1,6 +1,5 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
-import { unpinProjectSessionPayloads } from '@/lib/acp-history-persistence'
 import { clearChatRoute } from '@/lib/router-navigate'
 import { randomUUID } from '@/lib/uuid'
 import type { EnvVariable, Project, ProjectColor, ProjectGroup, Worktree } from '@/types/project'
@@ -67,10 +66,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       projects: state.projects.map((p) => ({ ...p, isActive: p.id === id }))
     }))
     if (prev !== id) {
-      // Bound the payload cache: the switched-away project's sessions stop
-      // holding pins (their cache entries fall under the inactive budget;
-      // scroll-up refetches from the host — lossless).
-      unpinProjectSessionPayloads(prev)
       clearChatRoute()
     }
   },
@@ -100,10 +95,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       activeProjectId: newProject.id
     }))
     if (prev !== newProject.id) {
-      // Same payload-cache bound as `selectProject`: creating a project
-      // switches the active one away, so the previous project's pinned
-      // sessions must stop holding pin slots.
-      unpinProjectSessionPayloads(prev)
       clearChatRoute()
     }
     return newProject
@@ -133,10 +124,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       activeProjectId: nextActiveProjectId
     })
     if (wasActive && nextActiveProjectId !== activeProjectId) {
-      // Same payload-cache bound as `selectProject`: deleting the active
-      // project switches to another, so the deleted project's pinned
-      // sessions must stop holding pin slots.
-      unpinProjectSessionPayloads(activeProjectId)
       clearChatRoute()
     }
   },

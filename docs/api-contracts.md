@@ -268,7 +268,7 @@ methods carry `type` only — the renderer shows them disabled ("not supported")
 never sends them to `authenticate`. `logout` remains out of scope (Ask First).
 
 **2. Authenticate before `session/new`.** The store retains the advertised methods
-and, before creating a session (`acp_new_session`), runs `acp_authenticate`
+and, before creating a session (`create_session`), runs `authenticate_agent`
 (`authenticate(methodId)`) when the agent advertises auth:
 
 - exactly one method **of type `agent`** → authenticate that method, then create
@@ -334,7 +334,7 @@ recreated — the login terminal is an extra tab.
 **2b. Browser auth handoff (headless servers).** On POSIX the host injects a
 browser-open shim into the agent's PATH (`xdg-open` et al. append the URL to a
 sink file; `BROWSER` points at the shim). A driver-side watcher fans out
-`acp:browser_open_request` `{agentId, url}`; the renderer records it in
+`acp:browser_open_request` `{agentId, url}` (on web an `agents` watch delta, see State watches); the renderer records it in
 `pendingBrowserOpen[agentId]` (cleared on auth success, kill, or disconnect) and
 shows a dialog with the URL plus Open (system browser via `openerApi` on desktop,
 `window.open` on web), Copy, and a paste-back input. The user completes sign-in on
@@ -345,8 +345,7 @@ status and the same Open/Copy controls if browser popups are blocked. Its
 device-pairing flow completes when Droid confirms sign-in; paste-back remains
 available if the provider uses a localhost callback instead.
 
-- WS request `acp_deliver_auth_redirect {agentId, url}` / Tauri command
-  `acp_auth_deliver_redirect` → the host validates **http(s) scheme AND loopback
+- WS request `acp_deliver_auth_redirect {agentId, url}` → the host validates **http(s) scheme AND loopback
   host** (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`) — non-loopback is
   rejected before any fetch (SSRF guard) — then GETs the URL with redirects
   disabled and returns the HTTP status. The agent's own callback listener binds
@@ -514,13 +513,13 @@ duplicate plan UI.
   - Keeps optional `cost` only when `amount` is finite and `> 0` and `currency` is non-empty; otherwise omits cost (zero/placeholder costs are not stored).
 - TypeScript mirror: `UsageUpdateEvent` / `ACP_EVENTS.usageUpdate` in `src/renderer/lib/acp-api.ts`. Keep Rust and TypeScript field names (`agentId`, `sessionId`, `used`, `size`, `cost`) aligned.
 
-### `acp_send_prompt` errors
+### `send_prompt` errors
 
 When a *different* prompt is rejected because a turn is already in flight, Rust returns a string containing the stable code `ACP_TURN_IN_PROGRESS` (matched by renderer `ACP_TURN_IN_PROGRESS_CODE` in `prompt-queue-orchestration.ts`; on `/ws` the same case is `err.code: "rate_limited"`). Do not reword this prefix without updating both sides.
 
-### `acp_send_prompt` / WS `send_prompt` reply and `turnId` dedupe
+### `send_prompt` reply and `turnId` dedupe
 
-Both carriers run the same shared service (`src-tauri/src/web/prompt_turn.rs`). The reply is either the ACP stop reason string (the turn ran on this call) or a receipt object for a resend of a `turnId` the host already saw:
+Every carrier (the WebSocket and the desktop's Tauri channel) runs the same shared service (`src-tauri/src/web/prompt_turn.rs`). The reply is either the ACP stop reason string (the turn ran on this call) or a receipt object for a resend of a `turnId` the host already saw:
 
 - `{"receipt":"in_progress"}` — the same `turnId` is still running;
 - `{"receipt":"accepted"}` — the same `turnId` already finished (including by error, timeout or crash).
@@ -539,9 +538,9 @@ Every ending of an agent is announced to every connected client, never only to t
 
 The host reaps an agent only after `--agent-idle-window-secs` (default 1800) with no host-observed activity: no running turn, no unanswered approval, question or elicitation, no running agent-owned terminal and no reopen in flight. Connections, subscriptions and presence never keep an agent alive, and a disconnect never stops one.
 
-### `acp_send_prompt` durability ordering
+### `send_prompt` durability ordering
 
-Desktop prompt persistence mirrors the WS `send_prompt` handler so a transport failure can never erase an accepted user message. The command:
+The `send_prompt` handler persists the prompt so a transport failure can never erase an accepted user message. The handler:
 
 1. verifies authoritative session ownership (`AcpManager::owns_session`) — rejects a cross-agent session id before any durable write;
 2. claims the turn by `turnId` (above);
@@ -574,14 +573,31 @@ Every session subscription holds a bounded channel (256 items, plus room for the
 
 ### State watches
 
-The project list, the chat-history index and the agent roster are state, not session logs. They reach a client through `watch` instead of `seq = 0` broadcasts, which a client could miss, receive twice or never receive on a socket without a session subscription.
+The project list, the chat-history index, the agent roster, a project's file changes, shared store keys and a project's terminal set are state, not session logs. They reach a client through `watch` instead of `seq = 0` broadcasts, which a client could miss, receive twice or never receive on a socket without a session subscription.
 
-- `watch{watch, scope?}` with `watch` one of `projects`, `chat_history`, `agents` (scope is always `""`). The host queues one top-level frame `{"type":"watch","watch","scope","revision":{"hostEpoch","n":1},"reset":true,"state":...}` and then replies `{watch, scope, revision}`, so the client holds the state when the reply arrives. `unwatch{watch, scope?}` is idempotent. View-only connections may watch. An unknown watch or scope is `unsupported`; a full connection queue is `rate_limited`.
+- `watch{watch, scope?}` with `watch` one of `projects`, `chat_history`, `agents` (scope is always `""`), `fs` and `terminals` (scope = a project id) or `store` (scope = a store key: `shared/...`, or `device/<deviceId>/...` of the connection's own device; any other key is refused with `STORE_KEY_SCOPE`). The host queues one top-level frame `{"type":"watch","watch","scope","revision":{"hostEpoch","n":1},"reset":true,"state":...}` and then replies `{watch, scope, revision}`, so the client holds the state when the reply arrives. `unwatch{watch, scope?}` is idempotent. View-only connections may watch. An unknown watch or scope is `unsupported`; an `fs` watch of an unknown or archived project is `not_found`; a `store` watch on a host without a store is `STORE_UNAVAILABLE`; a full connection queue is `rate_limited`. `watch_project` and `unwatch_project` no longer exist.
 - Each change is a delta frame `{"type":"watch","watch","scope","revision":{"hostEpoch","n"},"delta":...}`. `n` counts per connection and watch, and a socket receives each watch once, whatever sessions it subscribed to. A second `watch` of the same watch replaces the subscription and restarts at `n = 1` with fresh state.
-- State and deltas: `projects` — state `{projects, defaultProjectId}` (what `GET /projects` returns), delta the replacement state; `chat_history` — state the persisted-session index (what `list_persisted_sessions` returns, empty without durable history), delta `{changed: [sessionId]}` (empty list: changed in bulk) which the client answers by refetching; `agents` — state the live agent summaries, delta `{event, payload}` for `agent_spawned`, `agent_crashed`, `agent_error` and `agent_disconnected` (a kill or an idle reap arrives as `agent_disconnected` with a `reason`; applying one is idempotent).
+- State and deltas: `projects` — state `{projects, defaultProjectId}` (what `GET /projects` returns), delta the replacement state; `chat_history` — state the persisted-session index (what `list_persisted_sessions` returns, empty without durable history), delta `{changed: [sessionId]}` (empty list: changed in bulk) which the client answers by refetching; `agents` — state the live agent summaries, delta `{event, payload}` for `agent_spawned`, `agent_crashed`, `agent_error` and `agent_disconnected` (a kill or an idle reap arrives as `agent_disconnected` with a `reason`; applying one is idempotent). `agents` also carries the transient `{event: "browser_open_request", payload: {agentId, url}}`, which is not roster state, so a delta lost to a gap is lost. `chat_history` also carries `{changed: [], event: "worktree_branch_renamed", payload: {worktreePath, oldBranch, newBranch}}` for a branch rename. `fs` — state `{root}` (a state after the first one tells the client to refresh its trees), delta `{root, paths}` for one debounced batch of changes, and a last delta `{ended: true, reason}` when the project is no longer watchable (the host then releases the subscription; the client asks again). `store` — state and delta `{exists, value?}`, the value the key holds after a write or delete from any connection. `terminals` — state and delta `{terminals: [{terminalId, projectId, cwd, attached}]}`, the project's terminals including detached ones, replaced after each spawn, kill, reap, first attach or last detach, with no claim credential (`list_preserved` still issues claims).
 - The host never waits to queue a delta. A delta that finds the connection queue full is dropped but keeps its `n`, so the next frame shows the hole. A `{"resync":true}` marker then takes the next `n` and is queued as soon as there is room, so a hole shows even when no later change comes.
 - The client applies a delta only when it is `n + 1` of the same `hostEpoch`. A skipped `n`, a different epoch (a new serve start), a `resync` marker or a reconnect makes it send `watch` again and rebuild from the fresh state.
-- `projects_changed` and `chat_history_changed` no longer exist, and the relay no longer sends `agent_spawned`, `agent_crashed`, `agent_error` or `agent_disconnected` without a session as `seq = 0` events. `browser_open_request`, `worktree_branch_renamed` and `fs_changed` keep their current delivery. The web client reads the watches: the project switcher rebuilds its list from `projects`, the chat-history sidebar installs the `chat_history` index and refetches on a delta, and the agent store reconciles its roster from `agents`.
+- `projects_changed` and `chat_history_changed` no longer exist, and the relay no longer sends `agent_spawned`, `agent_crashed`, `agent_error` or `agent_disconnected` without a session as `seq = 0` events. `browser_open_request`, `worktree_branch_renamed`, `fs_changed` and `fs_watch_ended` no longer exist either: the relay sends no `seq = 0` event except the `auth_required` handshake frame, and an agent-level event no watch carries is logged and dropped. The web client reads the watches: the project switcher rebuilds its list from `projects`, the chat-history sidebar installs the `chat_history` index and refetches on a delta, the agent store reconciles its roster from `agents` and takes `browser_open_request` from it, the explorer refreshes from `fs`, and `watchStoreKey` exposes the `store` watch.
+
+### Project registry commands
+
+One durable `ProjectRegistry` per host owns the project list: `termul-server` keeps it in its projects file, the desktop in `<app data dir>/projects.json` (locked beside `store.json`, opened once at setup, **not** cleared by `remote_server_stop`). Every command below runs through one host command service: it validates, writes the candidate to disk (temp file, fsync, rename) and only then swaps memory, so a failed write replies an error and changes nothing; then it publishes the new state to every `projects` watcher.
+
+| `/ws` request | HTTP | Request fields | Reply |
+| --- | --- | --- | --- |
+| `add_project` | `POST /projects` | `id` (client-minted), `name`, `path`, `color`, `isArchived?` | `{project}`. Repeating the same `id` and folder is ok; the same `id` with another folder is `duplicate` (`DUPLICATE`); a reserved id or an unusable folder is `unsupported` (`VALIDATION_ERROR`) |
+| `update_project` | `PUT /projects/{id}` | `projectId`, `name?`, `color?`, `isArchived?`, `cascade?` | `{}`; `not_found` for an unknown id |
+| `remove_project` | `DELETE /projects/{id}?cascade=` | `projectId`, `cascade?` | `{}`; an absent id is ok |
+| `set_default_project` | `POST /projects/default` | `projectId` | `{}`; `not_found` unless the project is registered, not archived and has a folder |
+
+- Add, update and remove are idempotent by `projectId`, so they carry no ledger `commandId`. Archiving or removing the default project clears the default; the default only changes through `set_default_project`.
+- `project_busy` (HTTP `IpcBody.code` `PROJECT_BUSY`): removing or archiving a project that still has live sessions (host-stamped `projectId`) or terminals is refused and nothing changes. `err.details` (HTTP `details`) is `{"sessions":[sessionId…],"terminals":[terminalId…]}`. With `cascade: true` (HTTP: `?cascade=true` on DELETE, `"cascade":true` in the PUT body) the host cancels and closes the bound sessions (an agent is stopped only when no other session uses it), force-kills the bound terminals, drops the project's fs watches, then removes or archives the project; session/terminal events fan out through their usual paths. If something cannot be stopped the project stays and `project_busy` lists the leftovers. While a remove or archive runs, `create_session` and terminal `spawn` for that project are refused `project_busy`.
+- `WsError` gains the optional `details` field (additive; today only `project_busy` sets it) and `IpcBody` the same `details`.
+- Registry file: schema 4 (`imported: bool` added to v3). A v1-v3 file loads and is copied to `<name>.pre-v4-<ts>.bak` before its first rewrite; a newer schema is refused and never overwritten; a corrupt file is copied to `<name>.corrupt-<ts>.bak`. The synthetic seed project (`--project-root` / desktop default) lives in memory only.
+- Tauri: `project_registry_import({projects: ProjectSummary[], defaultProjectId?}) -> {imported: boolean}` is the desktop's one-shot import of the renderer's old project list. It runs only while the file says nothing was imported, adds ids that are not registered (existing ids are kept, never overwritten), applies the default only when none is set (the synthetic seed does not count as one) and sets `imported` durably even for an empty list; a repeat replies `{imported: false}`. Until the renderer reads the registry through the projects watch, `remote_sync_projects` (full-list push) and `set_host_default_project` keep their behavior and are written through to `projects.json`.
 
 ## Notes
 

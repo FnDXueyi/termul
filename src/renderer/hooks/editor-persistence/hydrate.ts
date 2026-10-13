@@ -206,11 +206,7 @@ export async function hydrateProject(
     const persistedTerminalLayout = await loadPersistedTerminals(projectId)
     if (!isCurrent()) return abandoned
 
-    // Deserialize AFTER the await, right before the commit: the session index
-    // may land during it, and its prune only scans the committed tree —
-    // judging ownership earlier would let a now-known foreign chat slip in.
-    // Unknown ownership stays fail-open.
-    const restoredTree = deserializePaneTree(persisted.paneLayout, projectId)
+    const restoredTree = deserializePaneTree(persisted.paneLayout)
     const cleanTree = reconcileTerminalTabs(
       restoredTree,
       new Set(editorFiles.keys()),

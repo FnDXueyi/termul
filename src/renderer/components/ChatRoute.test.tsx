@@ -15,6 +15,7 @@ const {
   workspaceRootRef,
   mockAddAgentChatTab,
   mockOpenHistorySession,
+  mockOpenInOwnProject,
   mockNavigate,
   mockOpeningHistoryIds,
   mockRouteClosedChats,
@@ -94,6 +95,7 @@ const {
     workspaceRootRef,
     mockAddAgentChatTab,
     mockOpenHistorySession: vi.fn(),
+    mockOpenInOwnProject: vi.fn(),
     mockNavigate: vi.fn(),
     mockOpeningHistoryIds,
     mockRouteClosedChats,
@@ -103,7 +105,22 @@ const {
   }
 })
 
+vi.mock('@/lib/open-agent-chat', () => ({
+  openAgentChatInOwnProject: mockOpenInOwnProject
+}))
+
 vi.mock('@/stores/acp-store', () => ({
+  // Same field read as the real selector (live record, then the index).
+  sessionProjectId: (
+    state: {
+      sessions: Record<string, { projectId?: string } | undefined>
+      sessionIndex: Array<{ id: string; projectId: string }>
+    },
+    sessionId: string
+  ): string | undefined =>
+    state.sessions[sessionId]?.projectId ||
+    state.sessionIndex.find((entry) => entry.id === sessionId)?.projectId ||
+    undefined,
   useAcpStore: Object.assign(
     vi.fn((selector: (s: { openHistorySession: unknown }) => unknown) =>
       selector({ openHistorySession: mockOpenHistorySession })
@@ -159,7 +176,6 @@ vi.mock('@/lib/log-api', () => ({
 
 import { ChatRoute } from '@/components/ChatRoute'
 import { logFrontendError } from '@/lib/log-api'
-import { clearChatRoute } from '@/lib/router-navigate'
 
 type Rerender = (ui: ReactElement) => void
 
@@ -242,7 +258,7 @@ describe('ChatRoute tab activation (multi-project perf)', () => {
     acpStateRef.current = {}
     acpIndexRef.current = []
     activeProjectRef.current = 'p1'
-    vi.mocked(clearChatRoute).mockClear()
+    mockOpenInOwnProject.mockClear()
     vi.mocked(logFrontendError).mockClear()
     mockOpeningHistoryIds.current = {}
     mockRouteClosedChats.current = new Set<string>()
@@ -654,32 +670,31 @@ describe('ChatRoute tab activation (multi-project perf)', () => {
     expect(tasksStarted).toBe(1)
   })
 
-  describe('foreign-project route guard', () => {
-    it('does not insert a live chat owned by another project; clears the route instead', () => {
+  describe('route of a chat owned by another project', () => {
+    it('opens a live chat in its own project instead of inserting the tab here', () => {
       acpStateRef.current = { 's-a': { status: 'active', projectId: 'p2' } }
       renderChatRoute('/c/s-a')
+      expect(mockOpenInOwnProject).toHaveBeenCalledWith('s-a', 'ChatRoute')
       expect(mockAddAgentChatTab).not.toHaveBeenCalled()
-      expect(clearChatRoute).toHaveBeenCalledWith('s-a')
-      expect(logFrontendError).toHaveBeenCalledWith(
-        expect.objectContaining({ level: 'warn', source: 'ChatRoute' })
-      )
+      expect(mockOpenHistorySession).not.toHaveBeenCalled()
       expect(chatTab(workspaceRootRef.current, 's-a')).toBeUndefined()
     })
 
-    it('does not open a history chat the index attributes to another project', () => {
+    it('loads a closed chat the index attributes to another project and opens it in that project', () => {
       acpIndexRef.current = [{ id: 's-a', projectId: 'p2' }]
+      mockOpenHistorySession.mockResolvedValue(undefined)
       renderChatRoute('/c/s-a')
-      expect(mockOpenHistorySession).not.toHaveBeenCalled()
+      expect(mockOpenInOwnProject).toHaveBeenCalledWith('s-a', 'ChatRoute')
+      expect(mockOpenHistorySession).toHaveBeenCalledWith('s-a')
       expect(mockAddAgentChatTab).not.toHaveBeenCalled()
-      expect(clearChatRoute).toHaveBeenCalledWith('s-a')
     })
 
-    it('skips the insert when the opened record reveals a foreign owner', async () => {
+    it('opens in the owner project when the opened record only then reveals the owner', async () => {
       mockOpenHistorySession.mockImplementation(async (id: string) => {
         acpStateRef.current = { [id]: { status: 'active', projectId: 'p2' } }
       })
       renderChatRoute('/c/s-a')
-      await vi.waitFor(() => expect(clearChatRoute).toHaveBeenCalledWith('s-a'))
+      await vi.waitFor(() => expect(mockOpenInOwnProject).toHaveBeenCalledWith('s-a', 'ChatRoute'))
       expect(mockOpenHistorySession).toHaveBeenCalledWith('s-a')
       expect(mockAddAgentChatTab).not.toHaveBeenCalled()
     })
@@ -699,7 +714,7 @@ describe('ChatRoute tab activation (multi-project perf)', () => {
         's-stub',
         's-other'
       ])
-      expect(clearChatRoute).not.toHaveBeenCalled()
+      expect(mockOpenInOwnProject).not.toHaveBeenCalled()
     })
   })
 })

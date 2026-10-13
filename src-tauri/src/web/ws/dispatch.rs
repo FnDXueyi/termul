@@ -37,8 +37,6 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
     let acp = &env.acp;
     let relay = &env.relay;
     let registry = &env.registry;
-    let registry_persistence = env.registry_persistence.as_ref();
-    let projects_file = env.projects_file.as_deref();
     let out_tx = &env.out_tx;
     let subscribed_clients = &*env.subscriptions;
     let history_mode = env.history_mode;
@@ -131,70 +129,23 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         "register_discovered_session" => {
             handle_register_discovered_session(id, &req.payload, acp, relay).await
         }
-        // Per-project fs watch (`fs_changed` goes only to subscribed
-        // connections): refcounted in `relay.fs_watches()`, released on
-        // `unwatch_project`, connection close, or project archive/remove.
-        "watch_project" => handle_watch_project(id, &req.payload, relay, registry, out_tx),
-        "unwatch_project" => handle_unwatch_project(id, &req.payload, relay, out_tx),
-        // State watches (projects, chat-history index, agent roster): the
-        // full state now, deltas under a contiguous revision after.
+        // Watches (projects, chat-history index, agent roster, project file
+        // changes, store keys, project terminal set): the full state now,
+        // deltas under a contiguous revision after. A project's file watcher
+        // is refcounted in `relay.fs_watches()`, released on `unwatch`,
+        // connection close, or project archive/remove.
         "watch" => handle_watch(id, &req.payload, env),
         "unwatch" => handle_unwatch(id, &req.payload, env),
-        // Explicit host-default change (Epic 7 — cross-client continuity).
-        // Updates the host's
-        // `default_project_id`, persists to `FileProjectRegistry` (VPS, with
-        // rollback), and publishes the project state to every watcher. Any
-        // authenticated client can set the default for now (Epic 2 wires auth).
-        "set_default_project" => {
-            handle_set_default_project(
-                id,
-                &req.payload,
-                relay,
-                registry,
-                registry_persistence,
-                projects_file,
-            )
-            .await
-        }
-        // Option B: project-list mutations. The standalone server is a
-        // first-class project-list authority; these persist to
-        // `FileProjectRegistry` (VPS, with rollback) + publish
-        // the project state. Mirrors the `POST /projects`,
-        // `PUT /projects/{id}`, `DELETE /projects/{id}` HTTP routes
-        // (transport parity). Any authenticated client for now (Epic 2).
-        "add_project" => {
-            handle_add_project(
-                id,
-                &req.payload,
-                relay,
-                registry,
-                registry_persistence,
-                projects_file,
-            )
-            .await
-        }
-        "update_project" => {
-            handle_update_project(
-                id,
-                &req.payload,
-                relay,
-                registry,
-                registry_persistence,
-                projects_file,
-            )
-            .await
-        }
-        "remove_project" => {
-            handle_remove_project(
-                id,
-                &req.payload,
-                relay,
-                registry,
-                registry_persistence,
-                projects_file,
-            )
-            .await
-        }
+        // Project registry commands — one command service shared with the
+        // HTTP routes and the desktop (`web::project_registry::commands`):
+        // each validates, persists to the durable registry, then notifies.
+        // Add / update / remove are idempotent by `projectId`; a remove or
+        // archive of a busy project is refused `project_busy` unless
+        // `cascade` is set. `set_default_project` is the only default change.
+        "set_default_project" => handle_set_default_project(id, &req.payload, env).await,
+        "add_project" => handle_add_project(id, &req.payload, env).await,
+        "update_project" => handle_update_project(id, &req.payload, env).await,
+        "remove_project" => handle_remove_project(id, &req.payload, env).await,
         "spawn_agent" => handle_spawn_agent(id, &req.payload, acp, req.command_id.clone()).await,
         // Claude Accounts: view and choose only. Add, sign-in, rename and
         // remove stay on the host (desktop UI / `termul-server claude account`).
@@ -229,8 +180,8 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         // localStorage stub) so settings / layout / command history / SSH
         // profiles survive browser switches + server restarts.
         "store_read" => handle_store_read(id, &req.payload, store, identity).await,
-        "store_write" => handle_store_write(id, &req.payload, store, identity).await,
-        "store_delete" => handle_store_delete(id, &req.payload, store, identity).await,
+        "store_write" => handle_store_write(id, &req.payload, store, identity, relay).await,
+        "store_delete" => handle_store_delete(id, &req.payload, store, identity, relay).await,
         "kill_agent" => handle_kill_agent(id, &req.payload, acp).await,
         "list_agents" => handle_list_agents(id, acp).await,
         // CAP: ACP agent `authenticate` method (agent-advertised auth, e.g.

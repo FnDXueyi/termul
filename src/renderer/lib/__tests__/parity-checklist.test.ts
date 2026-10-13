@@ -560,27 +560,13 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
-  // CAP-6 / Story 8: ACP Catalog parity. Mirrors the Workspace Manifest block:
-  // the host-resolved catalog ships on THREE transports (Tauri command
-  // `acp_list_catalog` / `acp_set_catalog_opt_in`, HTTP `GET /acp/catalog` /
-  // `POST /acp/catalog/opt-in`, WS `list_acp_catalog` / `set_catalog_opt_in`).
-  // This block pins the TS-side parity (the Rust-side parity — router route +
-  // ws handler + Tauri command registration — is covered by the Rust test
-  // suite).
+  // CAP-6 / Story 8: ACP Catalog parity. The host-resolved catalog ships on
+  // two carriers: HTTP `GET /acp/catalog` / `POST /acp/catalog/opt-in` (web)
+  // and the `/ws` requests `list_acp_catalog` / `set_catalog_opt_in` (desktop
+  // channel and web). This block pins the TS-side parity (the Rust-side parity
+  // — router route + ws handler — is covered by the Rust test suite).
   describe('ACP Catalog parity (CAP-6)', () => {
-    const TauriAdapter = join(LIB_DIR, 'tauri-acp-catalog-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-acp-catalog-api.ts')
-
-    it('tauri-acp-catalog-api.ts exists and exports the factory', () => {
-      expect(existsSync(TauriAdapter), 'tauri-acp-catalog-api.ts should exist').toBe(true)
-      expect(
-        fileContains(
-          'tauri-acp-catalog-api.ts',
-          /export\s+(const|function)\s+\bcreateTauriAcpCatalogApi\b/
-        ),
-        'should export createTauriAcpCatalogApi'
-      ).toBe(true)
-    })
 
     it('web-acp-catalog-api.ts exists and exports the singleton', () => {
       expect(existsSync(WebAdapter), 'web-acp-catalog-api.ts should exist').toBe(true)
@@ -590,25 +576,10 @@ describe('Parity Checklist Automation', () => {
       ).toBe(true)
     })
 
-    it('facade singleton exists and branches Tauri vs web by isTauriContext()', () => {
-      const facade = join(LIB_DIR, 'acp-catalog-api.ts')
-      expect(existsSync(facade), 'acp-catalog-api.ts should exist').toBe(true)
-      const content = readFileSync(facade, 'utf-8')
-      expect(content).toMatch(/isTauriContext\(\)/)
-      expect(content).toMatch(/createTauriAcpCatalogApi/)
-      expect(content).toMatch(/webAcpCatalogApi/)
-    })
-
     it('api.ts exports the acpCatalogApi singleton', () => {
       const apiPath = join(LIB_DIR, 'api.ts')
       const content = readFileSync(apiPath, 'utf-8')
       expect(content).toMatch(/export\s*\{[^}]*\bacpCatalogApi\b[^}]*\}/)
-    })
-
-    it('Tauri adapter invokes the catalog commands (list_catalog + set_catalog_opt_in)', () => {
-      const content = readFileSync(TauriAdapter, 'utf-8')
-      expect(content).toMatch(/acp_list_catalog/)
-      expect(content).toMatch(/acp_set_catalog_opt_in/)
     })
 
     it('Web adapter hits the catalog routes (GET /acp/catalog + POST /acp/catalog/opt-in)', () => {
@@ -617,19 +588,6 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/\/acp\/catalog\/opt-in/)
       // Network/parse failures must map to `NETWORK_ERROR`.
       expect(content).toMatch(/NETWORK_ERROR/)
-    })
-
-    it('both adapters expose listCatalog + setCatalogOptIn + isCatalogOptedIn on the typed facade', () => {
-      const tauri = readFileSync(TauriAdapter, 'utf-8')
-      const web = readFileSync(WebAdapter, 'utf-8')
-      for (const method of ['listCatalog', 'setCatalogOptIn', 'isCatalogOptedIn']) {
-        expect(tauri, `tauri-acp-catalog-api.ts should implement ${method}`).toMatch(
-          new RegExp(`\\b${method}\\s*\\(`)
-        )
-        expect(web, `web-acp-catalog-api.ts should implement ${method}`).toMatch(
-          new RegExp(`\\b${method}\\s*\\(`)
-        )
-      }
     })
 
     it('shared types file exists with expected exports', () => {
@@ -660,24 +618,12 @@ describe('Parity Checklist Automation', () => {
   })
 
   // CAP-6 / Story 9: ACP Install parity. The host-owned verified-atomic
-  // install ships on THREE transports (Tauri command `acp_install_agent`,
-  // HTTP `POST /acp/install`, WS `install_acp_agent`). This block pins the
-  // TS-side parity (the Rust-side parity — router route + ws handler + Tauri
-  // command registration — is covered by the Rust test suite).
+  // install ships on two carriers: HTTP `POST /acp/install` (web) and the
+  // `/ws` request `install_acp_agent` (desktop channel and web). This block
+  // pins the TS-side parity (the Rust-side parity — router route + ws handler
+  // — is covered by the Rust test suite).
   describe('ACP Install parity (CAP-6)', () => {
-    const TauriAdapter = join(LIB_DIR, 'tauri-acp-install-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-acp-install-api.ts')
-
-    it('tauri-acp-install-api.ts exists and exports the factory', () => {
-      expect(existsSync(TauriAdapter), 'tauri-acp-install-api.ts should exist').toBe(true)
-      expect(
-        fileContains(
-          'tauri-acp-install-api.ts',
-          /export\s+(const|function)\s+\bcreateTauriAcpInstallApi\b/
-        ),
-        'should export createTauriAcpInstallApi'
-      ).toBe(true)
-    })
 
     it('web-acp-install-api.ts exists and exports the singleton', () => {
       expect(existsSync(WebAdapter), 'web-acp-install-api.ts should exist').toBe(true)
@@ -687,24 +633,10 @@ describe('Parity Checklist Automation', () => {
       ).toBe(true)
     })
 
-    it('facade singleton exists and branches Tauri vs web by isTauriContext()', () => {
-      const facade = join(LIB_DIR, 'acp-install-api.ts')
-      expect(existsSync(facade), 'acp-install-api.ts should exist').toBe(true)
-      const content = readFileSync(facade, 'utf-8')
-      expect(content).toMatch(/isTauriContext\(\)/)
-      expect(content).toMatch(/createTauriAcpInstallApi/)
-      expect(content).toMatch(/webAcpInstallApi/)
-    })
-
     it('api.ts exports the acpInstallApi singleton', () => {
       const apiPath = join(LIB_DIR, 'api.ts')
       const content = readFileSync(apiPath, 'utf-8')
       expect(content).toMatch(/export\s*\{[^}]*\bacpInstallApi\b[^}]*\}/)
-    })
-
-    it('Tauri adapter invokes the install command (acp_install_agent)', () => {
-      const content = readFileSync(TauriAdapter, 'utf-8')
-      expect(content).toMatch(/acp_install_agent/)
     })
 
     it('Web adapter hits the install route (POST /acp/install)', () => {
@@ -712,17 +644,6 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/\/acp\/install/)
       // Network/parse failures must map to `NETWORK_ERROR`.
       expect(content).toMatch(/NETWORK_ERROR/)
-    })
-
-    it('both adapters expose installAgent on the typed facade', () => {
-      const tauri = readFileSync(TauriAdapter, 'utf-8')
-      const web = readFileSync(WebAdapter, 'utf-8')
-      expect(tauri, 'tauri-acp-install-api.ts should implement installAgent').toMatch(
-        /\binstallAgent\s*\(/
-      )
-      expect(web, 'web-acp-install-api.ts should implement installAgent').toMatch(
-        /\binstallAgent\s*\(/
-      )
     })
 
     it('shared types file exists with expected exports', () => {
@@ -871,7 +792,6 @@ describe('Parity Checklist Automation', () => {
       'session_payload.rs'
     )
     const ManagerRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'manager')
-    const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'commands.rs')
     const WsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'ws')
     const ProtoTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
     const AcpApi = join(LIB_DIR, 'acp-api.ts')
@@ -895,12 +815,6 @@ describe('Parity Checklist Automation', () => {
       const content = readRustModule(ManagerRust)
       expect(content).toMatch(/fn record_agent_switch/)
       expect(content).toMatch(/EVENT_AGENT_SWITCH/)
-    })
-
-    it('acp/commands.rs registers the acp_record_agent_switch Tauri command', () => {
-      expect(existsSync(CommandsRust), 'acp/commands.rs should exist').toBe(true)
-      const content = readFileSync(CommandsRust, 'utf-8')
-      expect(content).toMatch(/pub async fn acp_record_agent_switch/)
     })
 
     it('web/ws serves the record_agent_switch route (web parity)', () => {
@@ -928,7 +842,6 @@ describe('Parity Checklist Automation', () => {
       // dir (same layout as acp-store.ts) — grep the whole surface.
       const transportContent = readTsModule(AcpTransport.replace(/\.ts$/, ''))
       expect(transportContent).toMatch(/recordAgentSwitch/)
-      expect(transportContent).toMatch(/acp_record_agent_switch/)
       expect(transportContent).toMatch(/'record_agent_switch'/)
     })
 
@@ -982,11 +895,10 @@ describe('Parity Checklist Automation', () => {
   // negotiated capabilities + auth methods + stable namespace — the renderer
   // populates them synchronously from the response. This block pins the Rust
   // `SpawnOutcome` struct + the TS `SpawnAgentResult` shape + the WS request
-  // type + the Tauri command + the `agent_spawned` event channel.
+  // type + the `agent_spawned` event channel.
   describe('Agent Spawn Metadata parity (CAP-4)', () => {
     const AcpApi = join(LIB_DIR, 'acp-api.ts')
     const ProtoTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
-    const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'commands.rs')
     const ManagerRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'acp', 'manager')
 
     it('Rust SpawnOutcome carries capabilities + auth_methods + stable_namespace', () => {
@@ -1014,12 +926,6 @@ describe('Parity Checklist Automation', () => {
       const content = readFileSync(ProtoTypes, 'utf-8')
       expect(content).toMatch(/'spawn_agent'/)
       expect(content).toMatch(/agent_spawned/) // the event channel (reliability tier)
-    })
-
-    it('Tauri command acp_spawn_agent is registered', () => {
-      expect(existsSync(CommandsRust), 'acp/commands.rs should exist').toBe(true)
-      const content = readFileSync(CommandsRust, 'utf-8')
-      expect(content).toMatch(/acp_spawn_agent/)
     })
   })
 
@@ -1965,49 +1871,49 @@ describe('Parity Checklist Automation', () => {
   })
 })
 
-// #856 (web explorer live refresh): the FS-change event must land on BOTH
-// surfaces — the server-side notify watcher broadcasting `fs_changed` over
-// the control WS (Rust: web/fs_watcher + web/sink) and the shared protocol
-// registry (web-protocol.types.ts) + the renderer filesystem facade's web
-// bridge that dispatches through the SAME onFileChanged chain the desktop
-// tauri-plugin-fs watcher feeds. This block pins all four pieces.
+// #856 (web explorer live refresh): the FS-change push must land on BOTH
+// surfaces — the server-side notify watcher publishing `fs` watch deltas over
+// the control WS (Rust: web/fs_watcher + web/watch) and the shared protocol
+// registry (web-protocol.types.ts) + the renderer filesystem facade's watch
+// that dispatches through the SAME onFileChanged chain the desktop
+// tauri-plugin-fs watcher feeds. This block pins the pieces.
 describe('Web FS watcher parity (#856)', () => {
   const root = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const ProtoTypes = join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts')
   const FsFacade = join(LIB_DIR, 'tauri-filesystem-api.ts')
 
-  it('web/fs_watcher is a refcounted per-projectId notify watch hub', () => {
+  it('web/fs_watcher is a refcounted per-projectId notify watch hub that publishes through the watch hub', () => {
     const watcher = join(root, 'web', 'fs_watcher')
     expect(existsSync(watcher), 'web/fs_watcher module should exist').toBe(true)
     const content = readRustModule(watcher)
     expect(content).toMatch(/recommended_watcher/)
     expect(content).toMatch(/RecursiveMode::Recursive/)
     expect(content).toMatch(/pub struct FsWatchHub/)
-    expect(content).toMatch(/FsChangedPayload/)
-    expect(content).toMatch(/"fs_changed"/)
+    expect(content).toMatch(/WatchKind::Fs/)
+    expect(content).not.toMatch(/"fs_changed"|"fs_watch_ended"/)
   })
 
-  it('ws/watch.rs handles watch_project / unwatch_project and dispatch routes them', () => {
+  it('ws/watch.rs serves the fs watch through watch / unwatch; the per-project requests are gone', () => {
     const handlers = readFileSync(join(root, 'web', 'ws', 'watch.rs'), 'utf-8')
-    expect(handlers).toMatch(/fn handle_watch_project/)
-    expect(handlers).toMatch(/fn handle_unwatch_project/)
+    expect(handlers).toMatch(/WatchKind::Fs =>/)
+    expect(handlers).not.toMatch(/handle_watch_project|handle_unwatch_project/)
     const dispatch = readFileSync(join(root, 'web', 'ws', 'dispatch.rs'), 'utf-8')
-    expect(dispatch).toMatch(/"watch_project"/)
-    expect(dispatch).toMatch(/"unwatch_project"/)
+    expect(dispatch).not.toMatch(/"watch_project"|"unwatch_project"/)
   })
 
-  it('web-protocol.types.ts registers fs_changed (event type + reliable tier)', () => {
+  it('web-protocol.types.ts names the fs watch and no longer registers fs_changed or watch_project', () => {
     expect(existsSync(ProtoTypes), 'web-protocol.types.ts should exist').toBe(true)
     const content = readFileSync(ProtoTypes, 'utf-8')
-    expect(content).toMatch(/'fs_changed'/)
-    expect(content).toMatch(/fs_changed: WS_RELAY_TIERS\.RELIABLE/)
+    expect(content).toMatch(/'fs',/)
+    expect(content).not.toMatch(/'fs_changed'|'fs_watch_ended'|'watch_project'|'unwatch_project'/)
   })
 
-  it('the filesystem facade bridges fs_changed into the shared callback chain on web', () => {
+  it('the filesystem facade watches the fs scope and feeds the shared callback chain on web', () => {
     expect(existsSync(FsFacade), 'tauri-filesystem-api.ts should exist').toBe(true)
     const content = readFileSync(FsFacade, 'utf-8')
-    expect(content).toMatch(/wireWebFsChangedBridge/)
-    expect(content).toMatch(/'acp:fs_changed'/)
+    expect(content).toMatch(/startProjectFsWatch/)
+    expect(content).toMatch(/watches\.subscribe<FsWatchState, FsWatchDelta>/)
+    expect(content).not.toMatch(/acp:fs_changed|wireWebFsChangedBridge/)
   })
 })
 
@@ -2130,11 +2036,13 @@ describe('Worktree branch rename parity (shell revamp story 16)', () => {
     expect(readFileSync(LibRust, 'utf-8')).toMatch(/commands::worktree_rename_branch,/)
   })
 
-  it('the worktree_branch_renamed event is in the protocol registry and the history refetch list', () => {
+  it('the worktree_branch_renamed rename is a chat_history watch delta, not a registered event', () => {
     const protocol = readFileSync(ProtocolTypes, 'utf-8')
-    expect(protocol).toMatch(/'worktree_branch_renamed'/)
-    expect(protocol).toMatch(/worktree_branch_renamed: WS_RELAY_TIERS\.RELIABLE/)
-    expect(readFileSync(SinkRust, 'utf-8')).toMatch(/"worktree_branch_renamed"/)
+    expect(protocol).not.toMatch(/worktree_branch_renamed: WS_RELAY_TIERS/)
+    expect(protocol).toMatch(/event\?: 'worktree_branch_renamed'/)
+    const bridge = readFileSync(SinkRust, 'utf-8')
+    expect(bridge).toMatch(/"worktree_branch_renamed"/)
+    expect(bridge).toMatch(/publish_worktree_branch_renamed/)
   })
 
   it('both renderer roots mount useWorktreeBranchRenamed next to useAcpHistory', () => {

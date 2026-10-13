@@ -1,24 +1,23 @@
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
-import { chatForeignToProject } from '@/lib/acp-session-ownership'
 import { getTabFocusedSessionId, setTabFocusedSessionId } from '@/lib/web-tab-session'
-import { useAcpStore } from '@/stores/acp-store'
+import { sessionProjectId, useAcpStore } from '@/stores/acp-store'
+
+type FocusState = Pick<ReturnType<typeof useAcpStore.getState>, 'sessions' | 'sessionIndex'>
 
 /**
  * Whether the focus pointer for `sessionId` must not carry over to `projectId`:
- * the chat belongs to another project, or the host stamped it unassigned (it
- * is listed everywhere but retained by no project, so no project's manifest
- * may inherit it as its focus).
+ * the session record names another project, or the host stamped it unassigned
+ * (listed everywhere but retained by no project, so no project's manifest may
+ * inherit it as its focus). A read of the session record, not a filter on any
+ * tree's content.
  */
-function focusMustNotCarryOver(
-  sessionId: string,
-  projectId: string,
-  acp: ReturnType<typeof useAcpStore.getState>
-): boolean {
-  if (chatForeignToProject(sessionId, projectId, acp)) return true
-  const owner =
+function focusMustNotCarryOver(sessionId: string, projectId: string, acp: FocusState): boolean {
+  const owner = sessionProjectId(acp, sessionId)
+  if (owner !== undefined) return owner !== projectId
+  const raw =
     acp.sessions[sessionId]?.projectId ||
     acp.sessionIndex.find((entry) => entry.id === sessionId)?.projectId
-  return owner === UNASSIGNED_PROJECT_ID
+  return raw === UNASSIGNED_PROJECT_ID
 }
 
 /**
@@ -26,7 +25,7 @@ function focusMustNotCarryOver(
  * that must not become `projectId`'s focus. Run before selecting a project so a
  * later manifest write cannot persist the previous project's chat on it.
  */
-export function releaseFocusNotOwnedBy(projectId: string): void {
+export function releaseFocusNotOfProject(projectId: string): void {
   const acp = useAcpStore.getState()
   if (acp.activeSessionId && focusMustNotCarryOver(acp.activeSessionId, projectId, acp)) {
     useAcpStore.setState({ activeSessionId: null })

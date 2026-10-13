@@ -3,7 +3,7 @@ import type { EditorFileState } from '@/stores/editor-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileExplorerStore } from '@/stores/file-explorer-store'
 import { findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
-import { chatForeignToProject, serializePaneTree } from './pane-tree'
+import { serializePaneTree } from './pane-tree'
 import { editorStateKey, type PersistedEditorFile, type PersistedEditorState } from './types'
 
 /**
@@ -51,13 +51,7 @@ export function persistState(projectId: string): void {
       const pane = findPaneById(workspaceState.root, workspaceState.activePaneId)
       return pane && pane.type === 'leaf' ? pane.activeTabId : null
     })(),
-    // Project ownership filter (see retainVisibleAgentChats): agent-chat tabs
-    // of OTHER projects can be present when this project's state is saved.
-    // Persisting them seeds cross-project tab leaks on restore.
-    paneLayout: serializePaneTree(workspaceState.root, {
-      // Keep when NOT known-foreign (fail-open — see chatForeignToProject).
-      agentChatOwnedBy: (sessionId) => !chatForeignToProject(sessionId, projectId)
-    }),
+    paneLayout: serializePaneTree(workspaceState.root),
     activePaneId: workspaceState.activePaneId
   }
 

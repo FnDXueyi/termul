@@ -4,10 +4,10 @@
 //! through, plus the standalone Axum server (Stories 1.2–1.3) and the live WS
 //! relay (Story 1.4).
 //!
-//! - Desktop registers a [`sink::TauriEventSink`] (`acp:*` Tauri events).
-//! - Standalone `termul-server` registers a live [`sink::WsRelaySink`] (Story
-//!   1.4 — owns per-session event logs + seq counters + subscriber set) and
-//!   calls [`serve`].
+//! - Desktop and standalone `termul-server` both register a live
+//!   [`sink::WsRelaySink`] (owns per-session event logs + seq counters +
+//!   subscriber set). The desktop renderer reads it over a Tauri
+//!   `ipc::Channel` ([`ws::channel`]); `termul-server` calls [`serve`].
 //! - Dev static serving of `dist-web/` is [`assets`] (Story 1.3); production
 //!   rust-embed embedding/serving is complete.
 //!
@@ -61,8 +61,8 @@ pub mod ws;
 pub use config::ServerConfig;
 pub use permissions::PermissionRendezvous;
 pub use permissions::QuestionRendezvous;
-pub use project_registry::{seed_from_file, ProjectListPayload, ProjectRegistry, ProjectSummary};
-pub use sink::{fan_out, EventSink, EventStream, StreamItem, TauriEventSink, WsRelaySink};
+pub use project_registry::{ProjectListPayload, ProjectRegistry, ProjectSummary};
+pub use sink::{fan_out, EventSink, EventStream, StreamItem, WsRelaySink};
 pub use ws::{AppState, HistoryMode, ReliabilityTier, RuntimePolicy, SequencedEvent, WsErrorCode};
 
 use std::future::Future;
@@ -102,13 +102,12 @@ pub(crate) fn test_pty_manager() -> Arc<PtyManager> {
 /// machine. It is threaded into the `/canvas/*` routes and shut down
 /// (stdin-EOF → kill) in the serve cleanup, after Axum drains.
 ///
-/// `registry` is the in-memory [`ProjectRegistry`] the router reads for
-/// `GET /projects` + `switch_project` cwd resolution. The standalone binary
-/// seeds it from the file-backed [`crate::acp::project_registry::FileProjectRegistry`]
-/// at startup (VPS mode — `projects_file` resolves from `--projects-file` /
-/// `$TERMUL_PROJECTS_FILE` / the state-dir default); the desktop host seeds
-/// it via `remote_sync_projects` and calls [`serve_router`] directly (it
-/// never reaches this `serve` wrapper).
+/// `registry` is the host's durable [`ProjectRegistry`] the router reads for
+/// `GET /projects` + `switch_project` cwd resolution and writes through the
+/// project command service. The standalone binary opens it at startup from its
+/// projects file (`--projects-file` / `$TERMUL_PROJECTS_FILE` / the state-dir
+/// default); the desktop host builds its own once at setup and calls
+/// [`serve_router`] directly (it never reaches this `serve` wrapper).
 ///
 /// `workspace_manifest` is the host-owned [`WorkspaceManifestService`] for
 /// CAP-5 / Story 5 — atomically persists one versioned workspace manifest per
@@ -352,6 +351,8 @@ pub async fn serve_router(
     ws_relay.watches().renew_epoch();
     info!(target: "termul::web::watch", "watch hub host epoch renewed for this serve start");
     let store_for_gc = Arc::clone(&store);
+    // Every change of a project's terminal set reaches its `terminals` watchers.
+    crate::web::watch::attach_terminal_set_observer(&pty, &ws_relay);
     let socket_shutdown = connections.shutdown.clone();
     let app = router::router(
         Arc::clone(&acp),
