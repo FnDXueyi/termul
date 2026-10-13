@@ -461,7 +461,10 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
   })
 
-  it('agent_disconnected preserves a content session transcript instead of blanking', () => {
+  it.each([
+    'crashed',
+    'reaped'
+  ] as const)('agent_disconnected(%s) preserves a content session transcript instead of blanking', (reason) => {
     seedSession('s1', 'agent-1', false)
     useAcpStore.setState({
       messages: {
@@ -477,7 +480,7 @@ describe('acp-store', () => {
         ]
       }
     })
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason })
     const state = useAcpStore.getState()
     // The session record survives (not deleted) and its transcript is kept in
     // memory so the pane shows history + "disconnected" — not a blank chat.
