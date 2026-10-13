@@ -687,6 +687,11 @@ export function markSessionPayloadPinned(id: string): void {
   }
 }
 
+/** Session ids whose cached payload is pinned right now. */
+export function getPinnedSessionPayloadIds(): string[] {
+  return [...pinnedPayloads]
+}
+
 export function unpinSessionPayload(id: string): void {
   pinnedPayloads.delete(id)
   evictInactivePayloads()

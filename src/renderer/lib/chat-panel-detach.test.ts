@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { unpinSessionPayloadMock } = vi.hoisted(() => ({ unpinSessionPayloadMock: vi.fn() }))
+const { unpinSessionPayloadMock, pinnedIds } = vi.hoisted(() => ({
+  unpinSessionPayloadMock: vi.fn(),
+  pinnedIds: [] as string[]
+}))
 vi.mock('./acp-history-persistence', async (orig) => ({
   ...(await orig<typeof import('./acp-history-persistence')>()),
-  unpinSessionPayload: unpinSessionPayloadMock
+  unpinSessionPayload: unpinSessionPayloadMock,
+  getPinnedSessionPayloadIds: () => [...pinnedIds]
 }))
 
 import { useAcpStore } from '@/stores/acp-store'
@@ -36,6 +40,7 @@ describe('startChatPanelDetach', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     unpinSessionPayloadMock.mockClear()
+    pinnedIds.length = 0
     useAcpStore.setState(FRESH)
     useWorkspaceStore.setState({ activeProjectId: '', parkedTrees: {} })
     useWorkspaceStore.getState().activateProject('p1', treeWith('pane-1', ['s1']))
@@ -55,6 +60,15 @@ describe('startChatPanelDetach', () => {
     await afterPaintAndDebounce()
     expect(unpinSessionPayloadMock).toHaveBeenCalledTimes(1)
     expect(unpinSessionPayloadMock).toHaveBeenCalledWith('s1')
+  })
+
+  it('releases a pin that was taken before the watcher started and is in no tab', async () => {
+    stop()
+    pinnedIds.push('orphan', 's1')
+    stop = startChatPanelDetach()
+    await afterPaintAndDebounce()
+    expect(unpinSessionPayloadMock).toHaveBeenCalledTimes(1)
+    expect(unpinSessionPayloadMock).toHaveBeenCalledWith('orphan')
   })
 
   it('does not detach a session that is back in a tab before the debounce fires', async () => {

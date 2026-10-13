@@ -14,7 +14,7 @@
 import { sessionTurnBusy, useAcpStore } from '@/stores/acp-store'
 import type { AcpState } from '@/stores/acp-store/types'
 import { getAgentChatSessionIdsInAllTrees, useWorkspaceStore } from '@/stores/workspace-store'
-import { unpinSessionPayload } from './acp-history-persistence'
+import { getPinnedSessionPayloadIds, unpinSessionPayload } from './acp-history-persistence'
 
 /** Quiet time after paint before a tab-less session is detached. */
 export const CHAT_PANEL_DETACH_DEBOUNCE_MS = 250
@@ -93,6 +93,12 @@ export function startChatPanelDetach(): () => void {
       sessionId,
       scheduleAfterPaint(() => attempt(sessionId))
     )
+  }
+
+  // Pins taken before this watcher started (a hot reload, or a chat that left
+  // its tab first) would otherwise never be released.
+  for (const sessionId of getPinnedSessionPayloadIds()) {
+    if (!inTabs.has(sessionId)) schedule(sessionId)
   }
 
   const unsubscribeWorkspace = useWorkspaceStore.subscribe((state, prev) => {
