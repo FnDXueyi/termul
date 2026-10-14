@@ -1218,6 +1218,26 @@ fn it_git_get_log_all_includes_commits_on_other_branches() {
 }
 
 #[test]
+fn it_git_get_log_returns_output_larger_than_the_pipe_buffer() {
+    if git_missing() {
+        return;
+    }
+    let repo = init_repo("log-big");
+    std::fs::write(repo.join("a.txt"), "x\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    // One 200 KB subject: the log output is far past the ~64 KB pipe buffer,
+    // which an undrained read would stall on until the timeout.
+    let msg_file = repo.join("msg.tmp");
+    std::fs::write(&msg_file, "s".repeat(200_000)).unwrap();
+    git(&repo, &["commit", "-q", "-F", "msg.tmp"]);
+
+    let commits = git_get_log(repo.to_str().unwrap(), None, true).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].subject.len(), 200_000);
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[test]
 fn it_commit_writes_multiline_body() {
     if git_missing() {
         return;

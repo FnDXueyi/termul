@@ -16,6 +16,7 @@ mod commands;
 mod commit_detail;
 mod commit_stamp;
 mod diff_stat;
+mod git_exec;
 mod polling;
 mod resolve;
 mod types;
@@ -45,6 +46,7 @@ pub use commands::{
 };
 pub use commit_detail::{
     git_get_commit_detail, git_get_commit_file_diff, CommitDetailError, GitCommitDetail,
+    GitCommitFileDiff,
 };
 pub use diff_stat::{git_get_diff_stat, DiffStatError, GitDiffStat};
 pub use resolve::{resolve_executable, resolve_git_binary};
@@ -567,5 +569,7 @@ impl GitTracker {
 mod commit_detail_tests;
 #[cfg(test)]
 mod diff_stat_tests;
+#[cfg(test)]
+mod git_exec_tests;
 #[cfg(test)]
 mod tests;

@@ -1,3 +1,4 @@
+use super::git_exec::{run_git_capture, StdoutCap, GIT_READ_TIMEOUT_MS};
 use super::*;
 
 pub fn git_get_status_detail(cwd: &str) -> Result<Vec<GitStatusDetail>, String> {
@@ -530,8 +531,9 @@ pub fn git_get_log(cwd: &str, limit: Option<u32>, all: bool) -> Result<Vec<GitCo
         args.push("--all");
     }
 
-    let output = GitTracker::run_git_command(cwd, &args)
-        .ok_or_else(|| "Failed to run git log".to_string())?;
+    // Drained capture: `--all` output easily passes the pipe buffer.
+    let output = run_git_capture(cwd, StdoutCap::Unbounded, &args, GIT_READ_TIMEOUT_MS)
+        .map_err(|e| format!("Failed to run git log: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

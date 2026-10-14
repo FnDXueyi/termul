@@ -4,23 +4,58 @@
 //! One shared function — [`git_get_commit_detail`] — backs both the Tauri
 //! command and the `POST /git/commit-detail` web route.
 //!
-//! The files are the diff against the commit's first parent (the empty tree
-//! for a root commit), with rename detection, the same view a merge commit
-//! shows in `git log --first-parent -p`. The list is capped at
-//! [`MAX_COMMIT_FILES`] entries; `files_truncated` tells the caller. The hash
-//! is validated as hex before it reaches git, so it can never be read as an
-//! option. File contents are never read or logged.
+//! The files are the diff against the commit's first parent (`--root` for a
+//! root commit), with rename detection, the same view a merge commit shows in
+//! `git log --first-parent -p`. The list is capped at [`MAX_COMMIT_FILES`]
+//! entries; `files_truncated` tells the caller.
+//!
+//! The request hash is only a lookup key. It must be hex, and it is resolved
+//! with `rev-parse <hash>^{commit}` so a blob or tree id is refused; every
+//! later git call gets the resolved full ids (validated as hex of the repo's
+//! length) and `--end-of-options` before them, so no id can be read as an
+//! option. File contents are never read into logs.
 
+use super::git_exec::{empty_tree_for, git_stdout, GitRunError, StdoutCap};
 use super::*;
 
-/// Object id of git's well-known empty tree; the diff base of a root commit.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Maximum changed files returned for one commit; the rest are dropped.
 pub(super) const MAX_COMMIT_FILES: usize = 1000;
-/// `show` and `diff-tree` on a large commit can outlast the 2s poll default.
-const COMMIT_DETAIL_GIT_TIMEOUT_MS: u64 = 15_000;
+/// Largest file diff returned; a bigger one is reported as `too_large`.
+pub(super) const MAX_FILE_DIFF_BYTES: usize = 2 * 1024 * 1024;
 /// Field and record separators of the `git show` format below.
 const FIELD_SEP: char = '\0';
+
+/// One-letter status of a changed file. Serialized as the letter itself,
+/// matching the renderer's `GitCommitFileStatus`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GitCommitFileStatus {
+    #[serde(rename = "A")]
+    Added,
+    #[serde(rename = "M")]
+    Modified,
+    #[serde(rename = "D")]
+    Deleted,
+    #[serde(rename = "R")]
+    Renamed,
+    #[serde(rename = "C")]
+    Copied,
+    #[serde(rename = "T")]
+    TypeChanged,
+}
+
+impl GitCommitFileStatus {
+    fn from_letter(letter: char) -> Option<Self> {
+        match letter {
+            'A' => Some(Self::Added),
+            'M' => Some(Self::Modified),
+            'D' => Some(Self::Deleted),
+            'R' => Some(Self::Renamed),
+            'C' => Some(Self::Copied),
+            'T' => Some(Self::TypeChanged),
+            _ => None,
+        }
+    }
+}
 
 /// One file changed by a commit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,8 +65,7 @@ pub struct GitCommitFile {
     pub path: String,
     /// Path before the commit, for a rename or copy only.
     pub old_path: Option<String>,
-    /// One-letter status: `A`, `M`, `D`, `R`, `C` or `T`.
-    pub status: String,
+    pub status: GitCommitFileStatus,
     /// Added lines; `None` for a binary file.
     pub added: Option<u64>,
     /// Removed lines; `None` for a binary file.
@@ -42,7 +76,8 @@ pub struct GitCommitFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCommitDetail {
-    /// Full 40-char hash (the request may be abbreviated).
+    /// Full hash: 40 hex characters, or 64 in a SHA-256 repository (the
+    /// request may be abbreviated).
     pub hash: String,
     pub author_email: String,
     /// Full commit message (subject, blank line, body), trailing newline trimmed.
@@ -54,20 +89,31 @@ pub struct GitCommitDetail {
     pub files_truncated: bool,
 }
 
+/// One file's diff in a commit. `diff` is empty when `too_large` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitFileDiff {
+    pub diff: String,
+    /// The diff is over [`MAX_FILE_DIFF_BYTES`] and was not returned.
+    pub too_large: bool,
+}
+
 /// Why a commit detail could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitDetailError {
-    /// The hash is not 4–40 hex characters.
+    /// The hash is not 4–64 hex characters.
     InvalidHash,
     /// A file path is absolute, empty, or leaves the repository.
     InvalidPath,
-    /// git could not be started, or it timed out.
-    GitUnavailable(String),
-    /// git ran and exited non-zero (unknown commit, not a repository, ...).
-    GitFailed {
-        command: &'static str,
-        detail: String,
-    },
+    /// git failed to run, timed out, or exited non-zero (unknown commit, the
+    /// hash names a blob or tree, not a repository, ...).
+    Git(GitRunError),
+}
+
+impl From<GitRunError> for CommitDetailError {
+    fn from(e: GitRunError) -> Self {
+        CommitDetailError::Git(e)
+    }
 }
 
 impl CommitDetailError {
@@ -76,7 +122,7 @@ impl CommitDetailError {
         match self {
             CommitDetailError::InvalidHash => "INVALID_COMMIT_HASH",
             CommitDetailError::InvalidPath => "INVALID_PATH",
-            _ => "GIT_COMMIT_DETAIL_ERROR",
+            CommitDetailError::Git(_) => "GIT_COMMIT_DETAIL_ERROR",
         }
     }
 }
@@ -86,24 +132,23 @@ impl std::fmt::Display for CommitDetailError {
         match self {
             CommitDetailError::InvalidHash => write!(f, "Not a commit hash"),
             CommitDetailError::InvalidPath => write!(f, "Not a repository-relative path"),
-            CommitDetailError::GitUnavailable(detail) => {
-                write!(f, "Failed to run git for commit detail: {detail}")
-            }
-            CommitDetailError::GitFailed { command, detail } if detail.is_empty() => {
-                write!(f, "git {command} failed")
-            }
-            CommitDetailError::GitFailed { command, detail } => {
-                write!(f, "git {command} failed: {detail}")
-            }
+            CommitDetailError::Git(e) => std::fmt::Display::fmt(e, f),
         }
     }
 }
 
 impl std::error::Error for CommitDetailError {}
 
-/// A commit hash or an unambiguous prefix: 4 to 40 hex characters.
+/// A commit hash or an unambiguous prefix: 4 to 64 hex characters (a full id
+/// is 40 in a SHA-1 repository and 64 in a SHA-256 one).
 pub(super) fn is_commit_hash(hash: &str) -> bool {
-    (4..=40).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    (4..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A full object id: exactly 40 or 64 hex characters. Git prints ids in this
+/// form, so anything else (for example a blob's content) is not an id.
+pub(super) fn is_object_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Read the message, author email, parents and changed files of `hash` in the
@@ -134,56 +179,84 @@ pub fn git_get_commit_detail(cwd: &str, hash: &str) -> Result<GitCommitDetail, C
     }
 }
 
-fn read_commit_detail(cwd: &str, hash: &str) -> Result<GitCommitDetail, CommitDetailError> {
+/// Resolve `hash` to the full id of a commit. `^{commit}` makes git refuse a
+/// blob or tree id (and peel a tag to its commit); the result must be a full
+/// object id before it is used anywhere else.
+fn resolve_commit(cwd: &str, hash: &str) -> Result<String, CommitDetailError> {
+    let spec = format!("{hash}^{{commit}}");
+    let stdout = git_stdout(
+        cwd,
+        "rev-parse",
+        StdoutCap::Unbounded,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ],
+    )
+    .map_err(|e| match e {
+        // `--quiet` prints nothing for an id that names no commit.
+        GitRunError::GitFailed { command, detail } if detail.is_empty() => GitRunError::GitFailed {
+            command,
+            detail: "unknown commit".to_string(),
+        },
+        other => other,
+    })?;
+    let full = String::from_utf8_lossy(&stdout).trim().to_string();
+    if !is_object_id(&full) {
+        return Err(unexpected_output("rev-parse"));
+    }
+    Ok(full)
+}
+
+fn unexpected_output(command: &'static str) -> CommitDetailError {
+    GitRunError::GitFailed {
+        command,
+        detail: "unexpected output".to_string(),
+    }
+    .into()
+}
+
+/// `(full hash, author email, parents, message)` of the commit `full`. Every
+/// id git printed must be a full object id of the same length.
+fn read_header(
+    cwd: &str,
+    full: &str,
+) -> Result<(String, String, Vec<String>, String), CommitDetailError> {
     // %H full hash, %ae author email, %P parents, %B raw message.
-    let header = run(
+    let header = git_stdout(
         cwd,
         "show",
+        StdoutCap::Unbounded,
         &[
             "show",
             "-s",
             "--no-color",
             "--format=%H%x00%ae%x00%P%x00%B",
-            hash,
+            "--end-of-options",
+            full,
         ],
     )?;
-    let (full_hash, author_email, parents, message) = parse_show_header(&header);
-    if full_hash.is_empty() {
-        return Err(CommitDetailError::GitFailed {
-            command: "show",
-            detail: "empty output".to_string(),
-        });
+    let (full_hash, author_email, parents, message) =
+        parse_show_header(&String::from_utf8_lossy(&header));
+    let ids_ok = is_object_id(&full_hash)
+        && parents
+            .iter()
+            .all(|p| is_object_id(p) && p.len() == full_hash.len());
+    if !ids_ok {
+        return Err(unexpected_output("show"));
     }
+    Ok((full_hash, author_email, parents, message))
+}
 
-    let base = parents.first().map(String::as_str).unwrap_or(EMPTY_TREE);
-    let numstat = run(
-        cwd,
-        "diff-tree",
-        &[
-            "diff-tree",
-            "-r",
-            "-z",
-            "-M",
-            "--no-color",
-            "--numstat",
-            base,
-            &full_hash,
-        ],
-    )?;
-    let name_status = run(
-        cwd,
-        "diff-tree",
-        &[
-            "diff-tree",
-            "-r",
-            "-z",
-            "-M",
-            "--no-color",
-            "--name-status",
-            base,
-            &full_hash,
-        ],
-    )?;
+fn read_commit_detail(cwd: &str, hash: &str) -> Result<GitCommitDetail, CommitDetailError> {
+    let full = resolve_commit(cwd, hash)?;
+    let (full_hash, author_email, parents, message) = read_header(cwd, &full)?;
+
+    let numstat = diff_tree(cwd, "--numstat", &full_hash, parents.first())?;
+    let name_status = diff_tree(cwd, "--name-status", &full_hash, parents.first())?;
     let (files, files_truncated) = merge_file_lists(
         parse_name_status_z(&name_status),
         parse_numstat_z(&numstat),
@@ -200,68 +273,101 @@ fn read_commit_detail(cwd: &str, hash: &str) -> Result<GitCommitDetail, CommitDe
     })
 }
 
+/// `git diff-tree -z <format>` of a commit against its first parent, or the
+/// whole tree for a root commit. Two runs (`--numstat`, `--name-status`) are
+/// joined by path: a combined `--raw --numstat -z` stream interleaves
+/// mode/id-prefixed records with count records, which costs a parser more
+/// than the spare process saves.
+fn diff_tree(
+    cwd: &str,
+    format: &'static str,
+    full: &str,
+    first_parent: Option<&String>,
+) -> Result<String, CommitDetailError> {
+    let mut args = vec![
+        "diff-tree",
+        "-r",
+        "-z",
+        "-M",
+        "--no-color",
+        "--no-commit-id",
+        format,
+    ];
+    match first_parent {
+        Some(parent) => args.extend(["--end-of-options", parent, full]),
+        None => args.extend(["--root", "--end-of-options", full]),
+    }
+    let stdout = git_stdout(cwd, "diff-tree", StdoutCap::Unbounded, &args)?;
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
 /// Unified diff of one file in `hash` against the commit's first parent (the
 /// empty tree for a root commit), for the read-only commit Diff tab. `old_path`
 /// (a rename's source) joins the pathspec so `-M` can pair the two sides.
-/// Both paths must be safe repo-relative paths; the hash must be hex.
+/// Both paths must be safe repo-relative paths; the hash must be hex and name
+/// a commit. A diff over [`MAX_FILE_DIFF_BYTES`] is not returned.
 pub fn git_get_commit_file_diff(
     cwd: &str,
     hash: &str,
     path: &str,
     old_path: Option<&str>,
-) -> Result<String, CommitDetailError> {
+) -> Result<GitCommitFileDiff, CommitDetailError> {
     if !is_commit_hash(hash) {
         log::warn!("[GitTracker] commit file diff refused a non-hash in {cwd}");
         return Err(CommitDetailError::InvalidHash);
     }
     let paths_ok = super::commands::is_safe_relative_path(path)
-        && old_path.map_or(true, super::commands::is_safe_relative_path);
+        && old_path.is_none_or(super::commands::is_safe_relative_path);
     if !paths_ok {
         log::warn!("[GitTracker] commit file diff refused an unsafe path in {cwd}");
         return Err(CommitDetailError::InvalidPath);
     }
 
-    let parents = run(
-        cwd,
-        "show",
-        &["show", "-s", "--no-color", "--format=%P", hash],
-    )?;
+    let full = resolve_commit(cwd, hash)?;
+    let (full, _, parents, _) = read_header(cwd, &full)?;
     let base = parents
-        .split_whitespace()
-        .next()
-        .unwrap_or(EMPTY_TREE)
-        .to_string();
+        .first()
+        .map(String::as_str)
+        .unwrap_or_else(|| empty_tree_for(full.len()));
     let mut args = vec![
         "diff",
         "--no-color",
         "--no-ext-diff",
         "-M",
-        &base,
-        hash,
+        "--end-of-options",
+        base,
+        &full,
         "--",
         path,
     ];
     if let Some(old) = old_path {
         args.push(old);
     }
-    let diff = run(cwd, "diff", &args)?;
-    log::debug!(
-        "[GitTracker] commit file diff for {cwd} {hash}: {} bytes",
-        diff.len()
-    );
-    Ok(diff)
-}
-
-fn run(cwd: &str, command: &'static str, args: &[&str]) -> Result<String, CommitDetailError> {
-    let output = GitTracker::run_git_command_with_timeout(cwd, args, COMMIT_DETAIL_GIT_TIMEOUT_MS)
-        .ok_or_else(|| CommitDetailError::GitUnavailable(format!("git {command}")))?;
-    if !output.status.success() {
-        return Err(CommitDetailError::GitFailed {
-            command,
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    // One byte past the cap tells "exactly at the cap" from "over it".
+    let stdout = git_stdout(
+        cwd,
+        "diff",
+        StdoutCap::Bytes(MAX_FILE_DIFF_BYTES + 1),
+        &args,
+    )?;
+    if stdout.len() > MAX_FILE_DIFF_BYTES {
+        log::info!(
+            "[GitTracker] commit file diff for {cwd} {full}: over {MAX_FILE_DIFF_BYTES} bytes, not returned"
+        );
+        return Ok(GitCommitFileDiff {
+            diff: String::new(),
+            too_large: true,
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let diff = String::from_utf8_lossy(&stdout).into_owned();
+    log::debug!(
+        "[GitTracker] commit file diff for {cwd} {full}: {} bytes",
+        diff.len()
+    );
+    Ok(GitCommitFileDiff {
+        diff,
+        too_large: false,
+    })
 }
 
 /// Split the `%H%x00%ae%x00%P%x00%B` output into its four fields. The message
@@ -285,26 +391,32 @@ pub(super) fn parse_show_header(stdout: &str) -> (String, String, Vec<String>, S
 }
 
 /// `(status, old_path, path)` rows from `diff-tree -z --name-status`:
-/// `M\0path\0`, or `R087\0old\0new\0` for a rename or copy.
-pub(super) fn parse_name_status_z(stdout: &str) -> Vec<(String, Option<String>, String)> {
+/// `M\0path\0`, or `R087\0old\0new\0` for a rename or copy. A row with a
+/// status the renderer has no letter for is skipped with a warning.
+pub(super) fn parse_name_status_z(
+    stdout: &str,
+) -> Vec<(GitCommitFileStatus, Option<String>, String)> {
     let mut rows = Vec::new();
     let mut parts = stdout.split(FIELD_SEP).filter(|p| !p.is_empty());
     while let Some(raw_status) = parts.next() {
-        let status = raw_status
-            .chars()
-            .next()
-            .map(String::from)
-            .unwrap_or_default();
-        if status == "R" || status == "C" {
-            let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
+        let letter = raw_status.chars().next();
+        // Read the paths first so a skipped row still consumes its fields.
+        let old_path = if matches!(letter, Some('R' | 'C')) {
+            let Some(old) = parts.next() else {
                 break;
             };
-            rows.push((status, Some(old.to_string()), new.to_string()));
+            Some(old.to_string())
         } else {
-            let Some(path) = parts.next() else {
-                break;
-            };
-            rows.push((status, None, path.to_string()));
+            None
+        };
+        let Some(path) = parts.next() else {
+            break;
+        };
+        match letter.and_then(GitCommitFileStatus::from_letter) {
+            Some(status) => rows.push((status, old_path, path.to_string())),
+            None => log::warn!(
+                "[GitTracker] commit detail skipped a file with unsupported status {raw_status:?}"
+            ),
         }
     }
     rows
@@ -341,7 +453,7 @@ pub(super) fn parse_numstat_z(stdout: &str) -> HashMap<String, (Option<u64>, Opt
 
 /// Join the status rows with their counts, in git's order, capped at `max`.
 pub(super) fn merge_file_lists(
-    rows: Vec<(String, Option<String>, String)>,
+    rows: Vec<(GitCommitFileStatus, Option<String>, String)>,
     stats: HashMap<String, (Option<u64>, Option<u64>)>,
     max: usize,
 ) -> (Vec<GitCommitFile>, bool) {

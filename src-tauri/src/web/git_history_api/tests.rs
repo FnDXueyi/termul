@@ -172,6 +172,7 @@ async fn commit_detail_serializes_camel_case_keys() {
         value["data"]["files"][0]["removed"],
         serde_json::Value::Null
     );
+    assert_eq!(value["data"]["files"][0]["status"], "M");
 }
 
 #[tokio::test]
@@ -219,7 +220,7 @@ async fn commit_detail_admits_non_loopback_peer_without_remote_writes() {
     );
 }
 
-async fn post_file_diff(state: AppState, body: serde_json::Value) -> IpcBody<String> {
+async fn post_file_diff(state: AppState, body: serde_json::Value) -> IpcBody<GitCommitFileDiff> {
     let bytes = serde_json::to_vec(&body).expect("serialize body");
     let resp = axum::Router::new()
         .route("/git/commit-file-diff", post(get_commit_file_diff))
@@ -255,8 +256,45 @@ async fn commit_file_diff_returns_the_unified_diff() {
     )
     .await;
     assert!(body.success, "file diff should succeed: {:?}", body.error);
-    let diff = body.data.expect("data");
-    assert!(diff.contains("+l1"), "{diff}");
+    let result = body.data.expect("data");
+    assert!(!result.too_large);
+    assert!(result.diff.contains("+l1"), "{}", result.diff);
+}
+
+#[tokio::test]
+async fn commit_file_diff_serializes_too_large_in_camel_case() {
+    let body = IpcBody::ok(GitCommitFileDiff {
+        diff: String::new(),
+        too_large: true,
+    });
+    let value = serde_json::to_value(body).expect("serialize");
+    assert_eq!(value["data"]["diff"], "");
+    assert_eq!(value["data"]["tooLarge"], true);
+}
+
+#[tokio::test]
+async fn commit_file_diff_refuses_a_blob_hash_without_running_its_content() {
+    if git_missing() {
+        return;
+    }
+    let root = TempDir::new("file-diff-blob");
+    repo_with_commit(root.path());
+    let target = root.path().join("pwned");
+    std::fs::write(
+        root.path().join("payload.tmp"),
+        format!("--output={}", target.display()),
+    )
+    .expect("write payload");
+    let blob = git(root.path(), &["hash-object", "-w", "payload.tmp"]);
+
+    let body = post_file_diff(
+        test_state(root.path()),
+        serde_json::json!({ "cwd": root.path().to_string_lossy(), "hash": blob, "path": "a.txt" }),
+    )
+    .await;
+    assert!(!body.success);
+    assert_eq!(body.code.as_deref(), Some("GIT_COMMIT_DETAIL_ERROR"));
+    assert!(!target.exists(), "blob content must never reach git");
 }
 
 #[tokio::test]

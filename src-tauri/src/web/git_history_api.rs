@@ -16,7 +16,7 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
 
-use crate::trackers::git_tracker::{self, GitCommitDetail};
+use crate::trackers::git_tracker::{self, GitCommitDetail, GitCommitFileDiff};
 use crate::web::fs_api::IpcBody;
 use crate::web::git_api::{cwd_string, resolve_cwd};
 use crate::web::ws::AppState;
@@ -83,16 +83,17 @@ pub struct GitCommitFileDiffRequest {
 }
 
 /// `POST /git/commit-file-diff` — one file's unified diff in a commit against
-/// its first parent (read-only commit Diff tab). Same READ guard as above.
+/// its first parent (read-only commit Diff tab). Same READ guard as above. The
+/// reply is `{ diff, tooLarge }`; a diff over the size cap has an empty `diff`.
 pub async fn get_commit_file_diff(
     State(state): State<AppState>,
     Json(req): Json<GitCommitFileDiffRequest>,
 ) -> impl IntoResponse {
-    let resolved = match resolve_cwd::<String>(&req.cwd, &state, None, false) {
+    let resolved = match resolve_cwd::<GitCommitFileDiff>(&req.cwd, &state, None, false) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    let cwd = match cwd_string::<String>(&resolved) {
+    let cwd = match cwd_string::<GitCommitFileDiff>(&resolved) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -109,17 +110,17 @@ pub async fn get_commit_file_diff(
     })
     .await;
     let body = match result {
-        Ok(Ok(diff)) => {
-            tracing::info!(path = %cwd_for_log, hash = %hash_for_log, bytes = diff.len(), "git commit file diff ok");
-            IpcBody::ok(diff)
+        Ok(Ok(result)) => {
+            tracing::info!(path = %cwd_for_log, hash = %hash_for_log, bytes = result.diff.len(), too_large = result.too_large, "git commit file diff ok");
+            IpcBody::ok(result)
         }
         Ok(Err(e)) => {
             tracing::warn!(path = %cwd_for_log, hash = %hash_for_log, error = %e, "git commit file diff failed");
-            IpcBody::<String>::err(e.to_string(), e.code())
+            IpcBody::<GitCommitFileDiff>::err(e.to_string(), e.code())
         }
         Err(e) => {
             tracing::error!(path = %cwd_for_log, error = %e, "git commit file diff task panicked");
-            IpcBody::<String>::err(
+            IpcBody::<GitCommitFileDiff>::err(
                 format!("git commit file diff task failed: {e}"),
                 "GIT_COMMIT_DETAIL_ERROR",
             )
