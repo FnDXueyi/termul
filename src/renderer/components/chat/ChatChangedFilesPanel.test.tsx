@@ -36,6 +36,12 @@ vi.mock('@/lib/utils', () => ({
   cn: (...parts: Array<string | false | undefined>) => parts.filter(Boolean).join(' ')
 }))
 
+vi.mock('@/components/file-explorer/MaterialFileIcon', () => ({
+  MaterialFileIcon: ({ name, extension }: { name: string; extension: string | null }) => (
+    <span data-testid="file-icon" data-name={name} data-extension={extension ?? ''} />
+  )
+}))
+
 vi.mock('sonner', () => ({
   toast: Object.assign(vi.fn(), {
     error: (...args: unknown[]) => toastErrorRef.current(...args)
@@ -119,6 +125,30 @@ describe('ChatChangedFilesPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /expand/i }))
     expect(await screen.findByText('foo.ts')).toBeInTheDocument()
     expect(screen.getByText('bar.ts')).toBeInTheDocument()
+  })
+
+  it('passes each row file name and last-dot extension to the file-type icon', async () => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'e1', path: 'src/foo.ts' }),
+      makeToolCall({ toolCallId: 'e2', path: 'src-tauri/src/mod.RS' }),
+      makeToolCall({ toolCallId: 'e3', path: 'docs/spec.test.md' }),
+      makeToolCall({ toolCallId: 'e4', path: 'Makefile' }),
+      makeToolCall({ toolCallId: 'e5', path: '.gitignore' }),
+      makeToolCall({ toolCallId: 'e6', path: 'C:\\repo\\App.TSX' })
+    ])
+    fireEvent.click(screen.getByRole('button', { name: /expand/i }))
+    await screen.findByText('foo.ts')
+    const icons = screen
+      .getAllByTestId('file-icon')
+      .map((el) => [el.dataset.name, el.dataset.extension])
+    expect(icons).toEqual([
+      ['foo.ts', '.ts'],
+      ['mod.RS', '.RS'],
+      ['spec.test.md', '.md'],
+      ['Makefile', ''],
+      ['.gitignore', ''],
+      ['App.TSX', '.TSX']
+    ])
   })
 
   it('opens the file in the editor when a row is clicked', async () => {
