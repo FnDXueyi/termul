@@ -31,6 +31,9 @@ interface CommitDetailPaneProps {
   onClose?: () => void
 }
 
+/** How long the selection must rest on a commit before its detail loads. */
+export const DETAIL_LOAD_DELAY_MS = 120
+
 const STATUS_CLASS: Partial<Record<GitCommitFileStatus, string>> = {
   A: 'text-success',
   D: 'text-destructive',
@@ -75,7 +78,7 @@ export function commitBody(message: string): string {
  * Right pane of the main-panel Git History: refs, subject, full message,
  * author, date, full hash, parents and the changed files. A file opens its
  * read-only diff in a tab. The detail loads once per commit through
- * `git-history-store`.
+ * `git-history-store`, once the selection has rested for {@link DETAIL_LOAD_DELAY_MS}.
  */
 export function CommitDetailPane({
   cwd,
@@ -88,8 +91,15 @@ export function CommitDetailPane({
   const entry = useGitHistoryStore((state) => state.details[commitDetailKey(cwd, commit.hash)])
   const loadCommitDetail = useGitHistoryStore((state) => state.loadCommitDetail)
 
+  // Holding an arrow key moves the selection through many commits; load only
+  // the one the selection settles on. A cached commit needs no wait.
   useEffect(() => {
-    void loadCommitDetail(cwd, commit.hash)
+    if (useGitHistoryStore.getState().details[commitDetailKey(cwd, commit.hash)]) {
+      void loadCommitDetail(cwd, commit.hash)
+      return
+    }
+    const timer = setTimeout(() => void loadCommitDetail(cwd, commit.hash), DETAIL_LOAD_DELAY_MS)
+    return () => clearTimeout(timer)
   }, [cwd, commit.hash, loadCommitDetail])
 
   const detail = entry?.detail ?? null

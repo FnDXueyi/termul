@@ -60,6 +60,11 @@ export function graphColumnWidth(geometry: GraphGeometry, laneCount: number): nu
   return geometry.padding * 2 + Math.max(1, laneCount) * geometry.laneWidth
 }
 
+/** Height of the graph column: one row pitch per commit. */
+export function graphColumnHeight(geometry: GraphGeometry, layout: GraphLayout): number {
+  return Math.max(1, layout.rows.length) * geometry.rowHeight
+}
+
 /** Hash -> row index, so parent-edge endpoints are an O(1) lookup. */
 export function rowIndexByHash(layout: GraphLayout): Map<string, number> {
   const map = new Map<string, number>()

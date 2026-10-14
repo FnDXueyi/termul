@@ -2,10 +2,8 @@ import type { GitCommit, GitCommitFile } from '@shared/types/ipc.types'
 import type React from 'react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { History } from '@/components/icons'
 import { Spinner } from '@/components/ui/spinner'
 import { clipboardApi } from '@/lib/clipboard-api'
-import { computeGraphLayout, type GraphLayout } from '@/lib/git-graph-layout'
 import { formatRelativeTime } from '@/lib/git-time'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
@@ -13,20 +11,21 @@ import { commitDetailKey, useGitHistoryStore } from '@/stores/git-history-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { AuthorAvatar } from './history/author-avatar'
 import { CommitDetailPane } from './history/commit-detail-pane'
-import { matchesCommitQuery } from './history/commit-filter'
+import { HistoryEmptyState } from './history/history-empty-state'
 import { HistoryToolbar } from './history/history-toolbar'
 import {
   DESKTOP_GRAPH_GEOMETRY,
+  graphColumnHeight,
   graphColumnWidth,
   LaneGraph,
-  RefChip,
-  rowIndexByHash
+  RefChip
 } from './history/lane-graph'
 import {
   DETAIL_PANE_MAX_WIDTH,
   DETAIL_PANE_MIN_WIDTH,
   useDetailPaneResize
 } from './history/use-detail-pane-resize'
+import { useCommitHistory } from './history/use-commit-history'
 
 interface GitHistoryViewProps {
   cwd: string
@@ -39,11 +38,17 @@ const OVERLAY_BELOW_WIDTH = 880
 /** Inset of the rows while filtering, when the graph column is hidden. */
 const FILTERED_INSET = 12
 
-function isTypingTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-  )
+/** Controls that own their keys: buttons, fields, menus and the Radix lists. */
+const OWN_KEYS_SELECTOR =
+  'button, a, input, textarea, select, [role=menu], [role=listbox], [role=option]'
+
+/** True when `target` is a control outside the commit list, so the tab-level
+ * shortcuts must leave its keys alone. Radix menus render in a portal, but
+ * React events still bubble through the tab, so they are matched by role. */
+function ownsItsKeys(target: EventTarget | null, list: HTMLElement | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (list?.contains(target)) return false
+  return target.isContentEditable || target.closest(OWN_KEYS_SELECTOR) !== null
 }
 
 /** Authors by commit count, most active first. */
@@ -55,16 +60,13 @@ function authorsOf(commits: GitCommit[]): string[] {
 
 /**
  * Desktop Git History tab in the main panel: toolbar, a commit table with the
- * lane graph, and a resizable commit detail pane. Keyboard: ↑/↓ select, Enter
- * opens the first changed file, Ctrl/Cmd+C copies the full hash, Esc hides
- * the details, `/` focuses the filter.
+ * lane graph, and a resizable commit detail pane. Keyboard, on the commit
+ * list: ↑/↓ select, Enter opens the first changed file, Ctrl/Cmd+C copies the
+ * full hash; on the tab but not on its buttons, fields or menus: Esc hides the
+ * details and `/` focuses the filter.
  */
 export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.JSX.Element {
-  const commits = useGitHistoryStore((state) => state.commits[cwd])
-  const isLoading = useGitHistoryStore((state) => state.loading[cwd] ?? false)
-  const error = useGitHistoryStore((state) => state.error[cwd] ?? null)
   const scope = useGitHistoryStore((state) => state.scope[cwd] ?? 'all')
-  const refreshLog = useGitHistoryStore((state) => state.refreshLog)
   const setScope = useGitHistoryStore((state) => state.setScope)
   const addCommitDiffTab = useWorkspaceStore((state) => state.addCommitDiffTab)
 
@@ -78,10 +80,17 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
   const filterRef = useRef<HTMLInputElement>(null)
   const idPrefix = useId()
   const pane = useDetailPaneResize()
-
-  useEffect(() => {
-    if (isVisible && commits === undefined) void refreshLog(cwd)
-  }, [isVisible, cwd, commits, refreshLog])
+  const {
+    commits: all,
+    hasLoaded,
+    layout,
+    rowByHash,
+    visible,
+    isFiltering,
+    isLoading,
+    error,
+    refresh
+  } = useCommitHistory(cwd, isVisible, { query, author })
 
   useEffect(() => {
     const node = rootRef.current
@@ -91,21 +100,7 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
     return () => observer.disconnect()
   }, [])
 
-  const all = commits ?? []
   const authors = useMemo(() => authorsOf(all), [all])
-  // The lane graph reflects true topology, so it is computed from the full
-  // commit list; a filtered subset hides it.
-  const layout: GraphLayout = useMemo(() => computeGraphLayout(all), [all])
-  const rowByHash = useMemo(() => rowIndexByHash(layout), [layout])
-  const q = query.trim().toLowerCase()
-  const isFiltering = q.length > 0 || author !== null
-  const visible = useMemo(
-    () =>
-      isFiltering
-        ? all.filter((c) => (!author || c.author === author) && (!q || matchesCommitQuery(c, q)))
-        : layout.rows.map((r) => r.commit),
-    [all, layout, isFiltering, author, q]
-  )
 
   // Keep a selection: the first commit on load, and again when the selected
   // commit leaves the list (refresh, scope change).
@@ -117,7 +112,7 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
   const selected = all.find((c) => c.hash === selectedHash) ?? null
   const geometry = DESKTOP_GRAPH_GEOMETRY
   const graphWidth = isFiltering ? FILTERED_INSET : graphColumnWidth(geometry, layout.laneCount)
-  const graphHeight = Math.max(1, layout.rows.length) * geometry.rowHeight
+  const graphHeight = graphColumnHeight(geometry, layout)
   const overlay = viewWidth > 0 && viewWidth < OVERLAY_BELOW_WIDTH
   const rowId = (hash: string) => `${idPrefix}-commit-${hash}`
 
@@ -165,8 +160,9 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
     select(visible[next].hash)
   }
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (isTypingTarget(event.target)) return
+  // Only the commit list takes the arrows, Enter and Ctrl/Cmd+C; every other
+  // control (file rows, buttons, menu items) keeps its own keys.
+  const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const mod = event.metaKey || event.ctrlKey
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       moveSelection(event.key === 'ArrowDown' ? 1 : -1)
@@ -175,9 +171,19 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
     } else if (mod && event.key.toLowerCase() === 'c') {
       if (!selectedHash || (window.getSelection()?.toString() ?? '') !== '') return
       void copyHash(selectedHash)
-    } else if (event.key === 'Escape' && detailOpen) {
+    } else {
+      return
+    }
+    event.preventDefault()
+  }
+
+  // `/` and Esc work from the list and from plain areas of the tab, not from
+  // buttons, fields or menus.
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (ownsItsKeys(event.target, listRef.current)) return
+    if (event.key === 'Escape' && detailOpen) {
       setDetailOpen(false)
-    } else if (event.key === '/' && !mod) {
+    } else if (event.key === '/' && !(event.metaKey || event.ctrlKey)) {
       filterRef.current?.focus()
     } else {
       return
@@ -204,7 +210,7 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
     : `${all.length} ${all.length === 1 ? 'commit' : 'commits'}`
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: keyboard shortcuts scoped to the history tab; the list and controls inside are the focus targets.
+    // biome-ignore lint/a11y/noStaticElementInteractions: `/` and Esc shortcuts scoped to the history tab; the list and controls inside are the focus targets.
     <div
       ref={rootRef}
       className="flex h-full w-full flex-col overflow-hidden bg-background"
@@ -222,12 +228,12 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
         onAuthorChange={setAuthor}
         countLabel={countLabel}
         isLoading={isLoading}
-        onRefresh={() => void refreshLog(cwd)}
+        onRefresh={refresh}
         detailOpen={detailOpen}
         onToggleDetail={() => setDetailOpen((open) => !open)}
       />
 
-      {commits === undefined && isLoading ? (
+      {!hasLoaded && isLoading ? (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
           <Spinner size={16} decorative className="mr-2" />
           Loading history...
@@ -242,6 +248,7 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
             aria-label="Commits"
             aria-activedescendant={selectedHash ? rowId(selectedHash) : undefined}
             tabIndex={0}
+            onKeyDown={handleListKeyDown}
             className="relative min-w-0 flex-1 overflow-auto focus-visible:outline-hidden"
           >
             <div
@@ -391,22 +398,6 @@ function CommitTableRow({
       <span className="w-20 shrink-0 pl-4 font-mono text-2xs text-muted-foreground">
         {commit.shortHash}
       </span>
-    </div>
-  )
-}
-
-function HistoryEmptyState({ error }: { error: string | null }): React.JSX.Element {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center p-8 text-center text-muted-foreground">
-      <div className="mb-4 flex size-12 items-center justify-center rounded-full bg-secondary text-muted-foreground/50">
-        <History size={24} />
-      </div>
-      <h3 className="mb-1 text-sm font-medium text-foreground">No commit history</h3>
-      <p className="max-w-[260px] text-xs">
-        {error
-          ? 'This folder may not be a Git repository, or git is unavailable.'
-          : 'There are no commits to show yet. Make your first commit to see it here.'}
-      </p>
     </div>
   )
 }

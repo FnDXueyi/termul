@@ -1,6 +1,6 @@
 import type { GitCommit, GitCommitDetail } from '@shared/types/ipc.types'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { getLog, getCommitDetail, writeText, addCommitDiffTab } = vi.hoisted(() => ({
   getLog: vi.fn(),
@@ -17,7 +17,7 @@ vi.mock('@/lib/git-api', () => ({ gitApi: { getLog, getCommitDetail } }))
 vi.mock('@/lib/clipboard-api', () => ({ clipboardApi: { writeText } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 
-import { useGitHistoryStore } from '@/stores/git-history-store'
+import { GIT_LOG_LIMIT, useGitHistoryStore } from '@/stores/git-history-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { GitHistoryView } from './GitHistoryView'
 
@@ -192,7 +192,7 @@ describe('GitHistoryView', () => {
     await act(async () => {
       useGitHistoryStore.getState().setScope(CWD, 'head')
     })
-    expect(getLog).toHaveBeenCalledWith(CWD, undefined, false)
+    expect(getLog).toHaveBeenCalledWith(CWD, GIT_LOG_LIMIT, false)
     expect(screen.getByRole('button', { name: 'Scope: Current branch' })).toBeInTheDocument()
   })
 
@@ -200,5 +200,115 @@ describe('GitHistoryView', () => {
     useGitHistoryStore.setState({ commits: { [CWD]: [] } })
     renderView()
     expect(screen.getByText('No commit history')).toBeInTheDocument()
+  })
+
+  describe('keyboard', () => {
+    function threeFiles(hash: string): GitCommitDetail {
+      return {
+        ...detailFor(hash),
+        files: [
+          { path: 'a.ts', oldPath: null, status: 'M', added: 1, removed: 0 },
+          { path: 'b.ts', oldPath: null, status: 'M', added: 1, removed: 0 },
+          { path: 'dir/c.ts', oldPath: 'dir/old-c.ts', status: 'R', added: 1, removed: 0 }
+        ]
+      }
+    }
+
+    it('leaves Enter on a file row to the button, so the third file opens, not the first', async () => {
+      getCommitDetail.mockImplementation(async (_cwd: string, hash: string) => threeFiles(hash))
+      renderView()
+      const third = (await screen.findByText('c.ts')).closest('button') as HTMLButtonElement
+
+      // A keydown that is not default-prevented lets the browser click the button.
+      expect(fireEvent.keyDown(third, { key: 'Enter' })).toBe(true)
+      expect(addCommitDiffTab).not.toHaveBeenCalled()
+
+      fireEvent.click(third)
+      expect(addCommitDiffTab).toHaveBeenCalledTimes(1)
+      expect(addCommitDiffTab).toHaveBeenCalledWith(
+        CWD,
+        full('c3c3c3c'),
+        'dir/c.ts',
+        'dir/old-c.ts'
+      )
+    })
+
+    it('does not run the list shortcuts from the detail pane buttons', async () => {
+      renderView()
+      await screen.findByText('qris.ts')
+      const copy = screen.getByRole('button', { name: 'Copy full hash' })
+      expect(fireEvent.keyDown(copy, { key: 'Enter' })).toBe(true)
+      expect(fireEvent.keyDown(copy, { key: 'ArrowDown' })).toBe(true)
+      expect(addCommitDiffTab).not.toHaveBeenCalled()
+      expect(selectedRow()).toHaveTextContent('Add QRIS payment')
+      expect(fireEvent.keyDown(copy, { key: 'Escape' })).toBe(true)
+      expect(screen.getByRole('complementary', { name: 'Commit detail' })).toBeInTheDocument()
+    })
+
+    it('ignores Enter and ArrowDown inside an open toolbar menu', async () => {
+      renderView()
+      await screen.findByText('qris.ts')
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Scope: All branches' }), {
+        key: 'Enter'
+      })
+      const menu = await screen.findByRole('menu')
+      const items = within(menu).getAllByRole('menuitemradio')
+
+      fireEvent.keyDown(items[0], { key: 'ArrowDown' })
+      fireEvent.keyDown(items[1], { key: 'Enter' })
+      fireEvent.keyDown(menu, { key: 'Escape' })
+
+      expect(addCommitDiffTab).not.toHaveBeenCalled()
+      expect(selectedRow()).toHaveTextContent('Add QRIS payment')
+      expect(screen.getByRole('complementary', { name: 'Commit detail' })).toBeInTheDocument()
+    })
+  })
+
+  describe('detail loading', () => {
+    beforeEach(() => vi.useFakeTimers())
+    afterEach(() => vi.useRealTimers())
+
+    it('loads only the commit the selection settles on', async () => {
+      renderView()
+      const list = screen.getByRole('listbox', { name: 'Commits' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(119)
+      })
+      expect(getCommitDetail).not.toHaveBeenCalled()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(getCommitDetail).toHaveBeenCalledTimes(1)
+      expect(getCommitDetail).toHaveBeenLastCalledWith(CWD, full('c3c3c3c'))
+
+      fireEvent.keyDown(list, { key: 'ArrowDown' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60)
+      })
+      fireEvent.keyDown(list, { key: 'ArrowDown' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120)
+      })
+
+      expect(getCommitDetail).toHaveBeenCalledTimes(2)
+      expect(getCommitDetail).toHaveBeenLastCalledWith(CWD, full('a1a1a1a'))
+    })
+
+    it('shows an already loaded commit without waiting', async () => {
+      renderView()
+      const list = screen.getByRole('listbox', { name: 'Commits' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120)
+      })
+      fireEvent.keyDown(list, { key: 'ArrowDown' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120)
+      })
+      expect(getCommitDetail).toHaveBeenCalledTimes(2)
+
+      fireEvent.keyDown(list, { key: 'ArrowUp' })
+      expect(screen.getByText('qris.ts')).toBeInTheDocument()
+      expect(getCommitDetail).toHaveBeenCalledTimes(2)
+    })
   })
 })

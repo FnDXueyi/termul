@@ -448,6 +448,17 @@ describe('GitHistoryPanel mobile shell', () => {
     expect(screen.getByText('No commits match "zzz"')).toBeInTheDocument()
   })
 
+  it('trims the query like the desktop filter does', () => {
+    const { container } = renderPanel()
+    const commits = makeCommits()
+
+    fireEvent.change(screen.getByLabelText('Filter commits'), { target: { value: '  Grace ' } })
+    expect(visibleTitles(container)).toEqual([`${commits[1].shortHash} — ${commits[1].subject}`])
+
+    fireEvent.change(screen.getByLabelText('Filter commits'), { target: { value: ' zzz ' } })
+    expect(screen.getByText('No commits match "zzz"')).toBeInTheDocument()
+  })
+
   it('lets a long unbroken query wrap in the no-match message instead of clipping sideways', () => {
     renderPanel()
 

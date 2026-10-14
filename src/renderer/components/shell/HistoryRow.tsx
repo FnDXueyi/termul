@@ -4,8 +4,18 @@ import { Check, ExternalLink, History } from '@/components/icons'
 import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { formatRelativeTime } from '@/lib/git-time'
 import { cn } from '@/lib/utils'
-import { useGitHistoryStore } from '@/stores/git-history-store'
+import { normalizePath } from '@/lib/working-copy'
+import { GIT_LOG_LIMIT, useGitHistoryStore } from '@/stores/git-history-store'
+import { type GitStatusState, useGitStatusStore } from '@/stores/git-status-store'
 import { findPaneContainingTab, gitHistoryTabId, useWorkspaceStore } from '@/stores/workspace-store'
+
+/** The commit-context fields a commit or a branch switch changes, as one string. */
+function headSignatureOf(state: Pick<GitStatusState, 'commitContexts'>, cwd: string): string {
+  const context = state.commitContexts[normalizePath(cwd)]
+  if (!context) return ''
+  const { branch, hasHead, lastSubject, ahead, behind } = context
+  return [branch, hasHead, lastSubject, ahead, behind].join('\u0000')
+}
 
 interface HistoryRowProps {
   cwd: string
@@ -13,29 +23,33 @@ interface HistoryRowProps {
 }
 
 /**
- * Bottom row of the shell Changes panel: the last commit and the commit count.
- * A click opens (or focuses) the Git History tab in the main panel; a check
+ * Bottom row of the shell Changes panel: the HEAD commit and the length of
+ * the HEAD history. It reads through its own HEAD-scoped log, so the History
+ * tab's scope does not change it, and reloads when the working copy's commit
+ * context (branch, last subject, ahead/behind) changes, as after a commit. A
+ * click opens (or focuses) the Git History tab in the main panel; a check
  * shows while that tab is open.
  */
 export function HistoryRow({ cwd, isVisible }: HistoryRowProps): React.JSX.Element {
-  const commits = useGitHistoryStore((state) => state.commits[cwd])
-  const isLoading = useGitHistoryStore((state) => state.loading[cwd] ?? false)
-  const refreshLog = useGitHistoryStore((state) => state.refreshLog)
+  const summary = useGitHistoryStore((state) => state.headSummary[cwd])
+  const refreshHeadSummary = useGitHistoryStore((state) => state.refreshHeadSummary)
+  const headSignature = useGitStatusStore((state) => headSignatureOf(state, cwd))
   const addGitHistoryTab = useWorkspaceStore((state) => state.addGitHistoryTab)
   const isOpen = useWorkspaceStore(
     (state) => findPaneContainingTab(state.root, gitHistoryTabId(cwd)) !== null
   )
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: headSignature is the reload trigger, not a value read inside the effect.
   useEffect(() => {
-    if (isVisible && commits === undefined && !isLoading) void refreshLog(cwd)
-  }, [isVisible, cwd, commits, isLoading, refreshLog])
+    if (isVisible) void refreshHeadSummary(cwd)
+  }, [isVisible, cwd, headSignature, refreshHeadSummary])
 
-  const last = commits?.[0]
-  const count = commits?.length ?? 0
+  const last = summary?.last
+  const count = summary?.count ?? 0
   const countLabel =
-    commits === undefined
+    summary === undefined
       ? ''
-      : `${count}${count >= 200 ? '+' : ''} ${count === 1 ? 'commit' : 'commits'}`
+      : `${count}${count >= GIT_LOG_LIMIT ? '+' : ''} ${count === 1 ? 'commit' : 'commits'}`
 
   return (
     <div className="shrink-0 border-t border-border p-2">
@@ -60,7 +74,7 @@ export function HistoryRow({ cwd, isVisible }: HistoryRowProps): React.JSX.Eleme
           <span className="truncate text-2xs text-muted-foreground">
             {last
               ? `${last.subject || '(no message)'} · ${formatRelativeTime(last.date)}`
-              : commits === undefined
+              : summary === undefined
                 ? 'Loading...'
                 : 'No commits yet'}
           </span>

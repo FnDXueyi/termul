@@ -1,24 +1,23 @@
 import type { GitCommit } from '@shared/types/ipc.types'
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useState } from 'react'
 import { History, RefreshCw, Search } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { PANEL_FIELD_CLASS, PANEL_FIELD_ICON_CLASS } from '@/components/ui/panel-styles'
 import { Spinner } from '@/components/ui/spinner'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
-import { computeGraphLayout, type GraphLayout } from '@/lib/git-graph-layout'
 import { formatRelativeTime } from '@/lib/git-time'
 import { cn } from '@/lib/utils'
-import { useGitHistoryStore } from '@/stores/git-history-store'
 import { GitHistoryView } from './GitHistoryView'
-import { matchesCommitQuery } from './history/commit-filter'
+import { HistoryEmptyState } from './history/history-empty-state'
 import {
+  graphColumnHeight,
   graphColumnWidth,
   LaneGraph,
   MOBILE_GRAPH_GEOMETRY,
-  RefChip,
-  rowIndexByHash
+  RefChip
 } from './history/lane-graph'
+import { useCommitHistory } from './history/use-commit-history'
 
 interface GitHistoryPanelProps {
   cwd: string
@@ -34,36 +33,13 @@ export function GitHistoryPanel({ cwd, isVisible }: GitHistoryPanelProps): React
 }
 
 function MobileGitHistory({ cwd, isVisible }: GitHistoryPanelProps): React.JSX.Element {
-  const commits = useGitHistoryStore((state) => state.commits[cwd])
-  const isLoading = useGitHistoryStore((state) => state.loading[cwd] ?? false)
-  const error = useGitHistoryStore((state) => state.error[cwd] ?? null)
-  const refreshLog = useGitHistoryStore((state) => state.refreshLog)
-
   const [searchQuery, setSearchQuery] = useState('')
-
-  useEffect(() => {
-    // Fetch on first reveal (or when no data yet) and on cwd change.
-    if (isVisible && commits === undefined) {
-      void refreshLog(cwd)
-    }
-  }, [isVisible, cwd, commits, refreshLog])
-
-  const filteredCommits = useMemo(() => {
-    const list = commits ?? []
-    if (!searchQuery.trim()) return list
-    const q = searchQuery.toLowerCase()
-    return list.filter((c) => matchesCommitQuery(c, q))
-  }, [commits, searchQuery])
-
-  // The lane graph reflects true topology, so it is computed from the full
-  // commit list, not the filtered view. Filtering only affects the row list.
-  const layout: GraphLayout = useMemo(() => computeGraphLayout(commits ?? []), [commits])
-  const rowByHash = useMemo(() => rowIndexByHash(layout), [layout])
+  const { commits, hasLoaded, layout, rowByHash, visible, isFiltering, isLoading, error, refresh } =
+    useCommitHistory(cwd, isVisible, { query: searchQuery })
 
   const geometry = MOBILE_GRAPH_GEOMETRY
   const graphWidth = graphColumnWidth(geometry, layout.laneCount)
-  const graphHeight = Math.max(1, layout.rows.length) * geometry.rowHeight
-  const isFiltering = searchQuery.trim().length > 0
+  const graphHeight = graphColumnHeight(geometry, layout)
 
   // Phone: two-line 44px rows, a full-width 16px filter field on its own row,
   // a 44px refresh and a plain scroll container.
@@ -79,7 +55,7 @@ function MobileGitHistory({ cwd, isVisible }: GitHistoryPanelProps): React.JSX.E
             variant="ghost"
             size="touch"
             className="w-11"
-            onClick={() => refreshLog(cwd)}
+            onClick={refresh}
             disabled={isLoading}
             title="Refresh history"
             aria-label="Refresh history"
@@ -100,10 +76,10 @@ function MobileGitHistory({ cwd, isVisible }: GitHistoryPanelProps): React.JSX.E
         </div>
       </div>
 
-      {commits === undefined && isLoading ? (
+      {!hasLoaded && isLoading ? (
         <LoadingState />
-      ) : (commits?.length ?? 0) === 0 ? (
-        <EmptyState error={error} />
+      ) : commits.length === 0 ? (
+        <HistoryEmptyState error={error} />
       ) : (
         <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain">
           <div className="relative" style={{ minHeight: isFiltering ? undefined : graphHeight }}>
@@ -123,12 +99,12 @@ function MobileGitHistory({ cwd, isVisible }: GitHistoryPanelProps): React.JSX.E
               className={isFiltering ? 'pl-3' : undefined}
               style={{ paddingLeft: isFiltering ? undefined : graphWidth }}
             >
-              {isFiltering && filteredCommits.length === 0 ? (
+              {isFiltering && visible.length === 0 ? (
                 <div className="break-words px-4 py-8 text-center text-sm text-muted-foreground">
-                  No commits match "{searchQuery}"
+                  No commits match "{searchQuery.trim()}"
                 </div>
               ) : (
-                (isFiltering ? filteredCommits : layout.rows.map((r) => r.commit)).map((commit) => (
+                visible.map((commit) => (
                   <MobileCommitRow
                     key={commit.hash}
                     commit={commit}
@@ -187,22 +163,6 @@ function MobileCommitRow({
         <span className="shrink-0 tabular-nums">{formatRelativeTime(commit.date)}</span>
         <span className="shrink-0 font-mono">{commit.shortHash}</span>
       </div>
-    </div>
-  )
-}
-
-function EmptyState({ error }: { error: string | null }): React.JSX.Element {
-  return (
-    <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
-      <div className="w-12 h-12 rounded-full bg-secondary flex items-center justify-center mb-4 text-muted-foreground/50">
-        <History size={24} />
-      </div>
-      <h3 className="text-sm font-medium text-foreground mb-1">No commit history</h3>
-      <p className="text-xs max-w-[260px]">
-        {error
-          ? 'This folder may not be a Git repository, or git is unavailable.'
-          : 'There are no commits to show yet. Make your first commit to see it here.'}
-      </p>
     </div>
   )
 }
