@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useAcpStoreVisible } from '@/hooks/use-acp-visible-store'
 import { buildPromptWithLoadedSkills, useAgentSkills } from '@/hooks/use-agent-skills'
+import { RECONNECT_GRACE_MS, useDelayedFlag } from '@/hooks/use-delayed-flag'
 import { useDockClearance } from '@/hooks/use-dock-clearance'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
@@ -212,6 +213,17 @@ export function AgentChatPanel({
   const hostOffline = useConnectionStatusStore((s) => s.controlChannel === 'host-offline')
   const promptCommand = useAcpStore((s) => s.promptCommandStates[sessionId])
   const recheckPromptCommand = useAcpStore((s) => s.recheckPromptCommand)
+  // Quiet resume: a socket replaced on returning to the tab usually reconnects
+  // (and settles any unconfirmed prompt) in well under a second, so the
+  // "Reconnecting…" overlay and the "Waiting to confirm" pill only show once the
+  // state has lasted the grace period. "Host offline" is not delayed. Above the
+  // early returns so the hook order never changes.
+  const showReconnecting = useDelayedFlag(transportReconnecting, RECONNECT_GRACE_MS)
+  const showTransportOverlay = transportReconnecting && (hostOffline || showReconnecting)
+  const showPromptReconcile = useDelayedFlag(
+    promptCommand != null && session?.activeTurn === true,
+    RECONNECT_GRACE_MS
+  )
 
   // Story 5.3 (AC1): OSK awareness on mobile web. On Tauri desktop, the hook
   // returns a no-OSK default and `useMobileWebShell()` is always false — the
@@ -771,7 +783,7 @@ export function AgentChatPanel({
             </button>
           </div>
         )}
-      {transportReconnecting && (
+      {showTransportOverlay && (
         // Story 5.3 (AC3, T5.3): transport-level reconnect overlay. This is
         // DISTINCT from the session-level "Reconnecting to agent…" banner
         // above (which fires when `openHistorySession` is in flight). Both can
@@ -818,7 +830,7 @@ export function AgentChatPanel({
         onEditMessage={seedComposer}
         onRetry={canOfferRetry ? handleRetry : undefined}
       />
-      {promptCommand && session.activeTurn && (
+      {showPromptReconcile && promptCommand && session.activeTurn && (
         // AD-6: the host has not yet confirmed the last prompt (the connection
         // dropped before the reply). Not an error — the same turn id is resent, and
         // the user can re-check it (same id; a new send only after a rejection).

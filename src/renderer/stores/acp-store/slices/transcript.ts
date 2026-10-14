@@ -47,6 +47,7 @@ import { useAcpStore } from '../index'
 import {
   activeWirePromptTurns,
   commitMessageCollectors,
+  echoedWirePromptTurns,
   handoffOnlyTurnIds,
   historySeqWatermarks,
   isHistoryCoveredEvent,
@@ -663,6 +664,7 @@ export function dropSessionTranscriptState(
   // wire-turn tracking — dies with the session: nothing may resend into it.
   clearPromptReconcile(sessionId)
   activeWirePromptTurns.delete(sessionId)
+  echoedWirePromptTurns.delete(sessionId)
   loadingOlderSessions.delete(sessionId)
   historySeqWatermarks.delete(sessionId)
   inFlightDurabilityProbes.delete(sessionId)
@@ -1027,12 +1029,21 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   },
 
   _onUserPrompt: (e, eventSeq) => {
+    // AD-6: an echo citing a turn id is the host's proof it ACCEPTED that
+    // command (the driver sequences it on acceptance). Both steps run before
+    // the replay-coverage drop, since a history-covered echo is the same proof:
+    // the echo of THIS client's open wire turn is recorded (`runPromptTurn`
+    // reads it when the dispatch reply is lost, so an accepted turn never
+    // enters pending-reconcile), and a prompt already waiting to confirm stops
+    // waiting and is never resent.
+    if (e.turnId) {
+      if (activeWirePromptTurns.get(e.sessionId) === e.turnId) {
+        echoedWirePromptTurns.set(e.sessionId, e.turnId)
+      }
+      clearPromptReconcileForTurn(e.sessionId, e.turnId)
+    }
     // CAP-3 replay contract: drop events the installed payload already covers.
     if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
-    // AD-6: an echo citing a turn id is the host's proof it ACCEPTED that
-    // command (the driver sequences it on acceptance), so a prompt that lost
-    // its reply stops waiting to confirm and is never resent.
-    if (e.turnId) clearPromptReconcileForTurn(e.sessionId, e.turnId)
     // Story 3: the echo of a summary-only handoff turn (no draft → no
     // optimistic user bubble) carries the summary wire text; it must not
     // render as a user bubble. The dispatch closure registered the turn id.

@@ -47,6 +47,7 @@ import { useAcpStore } from '../index'
 import {
   activeWirePromptTurns,
   commitMessageCollectors,
+  echoedWirePromptTurns,
   ephemeralSessionIds,
   persistSession,
   rejectCommitMessageCollector,
@@ -554,6 +555,7 @@ function endPromptTrackingForAgentFailure(
   for (const id of ended) {
     clearPromptReconcile(id)
     activeWirePromptTurns.delete(id)
+    echoedWirePromptTurns.delete(id)
   }
 }
 

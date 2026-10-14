@@ -50,6 +50,7 @@ import {
   activeWirePromptTurns,
   claimPromptTurnEnd,
   commitMessageCollectors,
+  echoedWirePromptTurns,
   inFlightPromotions,
   isHistoryCoveredEvent,
   nextSeq,
@@ -152,6 +153,7 @@ function scheduleTurnEnd(
       })
       if (closedTurn) {
         activeWirePromptTurns.delete(sessionId)
+        echoedWirePromptTurns.delete(sessionId)
         clearPromptReconcile(sessionId)
         const state = useAcpStore.getState()
         if (state.sessions[sessionId] && state.sessionIndex.some((e) => e.id === sessionId)) {
@@ -192,6 +194,7 @@ function scheduleTurnEnd(
     // the write can't resurrect a removed index entry.
     if (closedTurn) {
       activeWirePromptTurns.delete(sessionId)
+      echoedWirePromptTurns.delete(sessionId)
       clearPromptReconcile(sessionId)
       const state = useAcpStore.getState()
       if (state.sessions[sessionId] && state.sessionIndex.some((e) => e.id === sessionId)) {
@@ -419,6 +422,7 @@ export async function runPromptTurn(
   const failTurn = (err: unknown): void => {
     settleCommand(turnId, 'rejected')
     activeWirePromptTurns.delete(sessionId)
+    echoedWirePromptTurns.delete(sessionId)
     clearPromptReconcile(sessionId)
     const agentDead = isAgentDeadError(err)
     set((s) => {
@@ -485,6 +489,7 @@ export async function runPromptTurn(
     if (isPromptTurnInProgressError(err)) {
       settleCommand(turnId, 'rejected')
       activeWirePromptTurns.delete(sessionId)
+      echoedWirePromptTurns.delete(sessionId)
       // The empty-display dispatch has no optimistic user message to strip;
       // recover the wire blocks into the queue under the turn id so the
       // summary-only handoff is not lost when the new session is busy.
@@ -509,12 +514,14 @@ export async function runPromptTurn(
       return
     }
     // AD-6: losing the transport before the reply leaves the outcome UNKNOWN
-    // — the host may or may not hold this turn, whether or not its
-    // `user_prompt` echo already landed. The command becomes pending-reconcile:
-    // the turn stays open ("Waiting to confirm", no error banner) and the SAME
-    // turn id is resent once the transport recovers; the host answers with a
-    // receipt or the stop reason. Only a definite server rejection fails the
-    // turn, and Retry of a failed turn is a new intent with a new id.
+    // unless this turn's `user_prompt` echo already landed — the host
+    // sequences that echo on acceptance, so the command is then accepted and
+    // the resubscribed socket carries the rest of the turn. Otherwise the
+    // command becomes pending-reconcile: the turn stays open ("Waiting to
+    // confirm", no error banner) and the SAME turn id is resent once the
+    // transport recovers; the host answers with a receipt or the stop reason.
+    // Only a definite server rejection fails the turn, and Retry of a failed
+    // turn is a new intent with a new id.
     if (isOutcomeUncertainError(err)) {
       // The turn may have ended while the dispatch was in flight (stop reason /
       // terminator landed, Stop pressed, or a queued prompt already started
@@ -525,6 +532,17 @@ export async function runPromptTurn(
         activeWirePromptTurns.get(sessionId) !== turnId
       ) {
         settleCommand(turnId, 'accepted')
+        return
+      }
+      // The echo for this turn already arrived: the host accepted it, and the
+      // turn view ends only from its durable `prompt_complete`.
+      if (echoedWirePromptTurns.get(sessionId) === turnId) {
+        settleCommand(turnId, 'accepted')
+        void logFrontendError({
+          level: 'info',
+          source: 'acp-store.promptReceipt',
+          message: `Prompt turn ${turnId} on session ${sessionId} lost its reply after its user_prompt echo; accepted, awaiting its prompt_complete`
+        })
         return
       }
       beginPromptReconcile(sessionId, {
