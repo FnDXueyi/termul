@@ -100,6 +100,16 @@ fn is_reportable_below_root(path: &std::path::Path, root: &std::path::Path) -> b
     })
 }
 
+/// Whether a notify event is a change worth reporting. Access events are not:
+/// notify 8 watches `IN_OPEN` on Linux, so the host's own `/fs/read` of an
+/// open editor file (or `/fs/ls` of a directory) would come back as a change,
+/// the client would read again, and loop forever. A real write always also
+/// fires a `Modify` event, so dropping `Access(Close(Write))` loses nothing.
+#[must_use]
+fn is_change_event(kind: &notify::EventKind) -> bool {
+    !matches!(kind, notify::EventKind::Access(_))
+}
+
 /// Normalize a changed path for the wire: forward slashes, empty on
 /// failure. Pure.
 #[must_use]
@@ -502,6 +512,9 @@ async fn watch_root(
         let Ok(event) = result else {
             return;
         };
+        if !is_change_event(&event.kind) {
+            return;
+        }
         for path in event.paths {
             // A full channel drops that path — the next event for the
             // same tree lands anyway once the drain catches up (watchers
