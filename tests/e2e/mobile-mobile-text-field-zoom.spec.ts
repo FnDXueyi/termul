@@ -418,7 +418,7 @@ for (const phone of PHONES) {
       const questions = page.getByTestId('elicitation-questions')
       await expect(questions).toBeVisible({ timeout: 30_000 })
 
-      const other = page.getByPlaceholder('Or write your own response')
+      const other = page.getByPlaceholder('Something else? Type your own answer')
       await expectSafeFocus(other, touch, 'Question 1 write-your-own', { text: 'purple' })
       await touch(page.getByTestId('elicitation-question-q0').getByRole('button', { name: /Red/ }))
       await expect(questions).toContainText('2 of 2')
