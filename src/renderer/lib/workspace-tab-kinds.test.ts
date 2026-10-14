@@ -16,6 +16,13 @@ const SAMPLE_TABS: Record<WorkspaceTab['type'], WorkspaceTab> = {
   'agent-chat': { type: 'agent-chat', id: 'chat-s1', sessionId: 's1' },
   'git-history': { type: 'git-history', id: 'gh-1', cwd: '/repo' },
   diff: { type: 'diff', id: 'diff:abc', cwd: '/repo', path: 'src/a.ts', staged: false },
+  'commit-diff': {
+    type: 'commit-diff',
+    id: 'diff:def',
+    cwd: '/repo',
+    commit: 'e44b917'.padEnd(40, '0'),
+    path: 'src/a.ts'
+  },
   canvas: { type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }
 }
 
@@ -43,6 +50,10 @@ describe('WORKSPACE_TAB_KIND_TRAITS', () => {
 
   it('declares diff as persisted', () => {
     expect(WORKSPACE_TAB_KIND_TRAITS.diff).toEqual({ persisted: true })
+  })
+
+  it('declares commit-diff as persisted', () => {
+    expect(WORKSPACE_TAB_KIND_TRAITS['commit-diff']).toEqual({ persisted: true })
   })
 
   it('declares canvas as not persisted', () => {

@@ -62,6 +62,7 @@ export function useWorkspaceActions(): Pick<
   | 'addAgentChatTab'
   | 'addGitTab'
   | 'addGitHistoryTab'
+  | 'addCommitDiffTab'
   | 'addDiffTab'
   | 'addCanvasTab'
   | 'removeTab'
@@ -93,6 +94,7 @@ export function useWorkspaceActions(): Pick<
       addAgentChatTab: state.addAgentChatTab,
       addGitTab: state.addGitTab,
       addGitHistoryTab: state.addGitHistoryTab,
+      addCommitDiffTab: state.addCommitDiffTab,
       addDiffTab: state.addDiffTab,
       addCanvasTab: state.addCanvasTab,
       removeTab: state.removeTab,

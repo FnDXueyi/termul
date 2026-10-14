@@ -11,6 +11,7 @@ import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
 import { useShellAnnouncements } from '@/hooks/use-shell-announcements'
 import { closeAgentChat } from '@/lib/agent-chat-close'
 import { returnFocusAfterConfirm } from '@/lib/confirm-focus-return'
+import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import {
   holdSheetReturnTargets,
   recordSheetOpener,
@@ -226,6 +227,8 @@ export function MobileChatShell({
         return 'Git History'
       case 'diff':
         return fileBasename(activeTab.path)
+      case 'commit-diff':
+        return commitDiffTabLabel(activeTab.path, activeTab.commit)
       case 'browser':
         return browserTabLabel(activeBrowserTab)
       case 'canvas':

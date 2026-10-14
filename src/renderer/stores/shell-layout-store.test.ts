@@ -71,7 +71,7 @@ describe('shell-layout-store', () => {
   })
 
   describe('defaults', () => {
-    it('starts idle with the documented defaults and an open graph', () => {
+    it('starts idle with the documented defaults', () => {
       expect(state()).toMatchObject({
         status: 'idle',
         railExpanded: true,
@@ -80,8 +80,7 @@ describe('shell-layout-store', () => {
         sidePanelWidth: 260,
         sshSectionVisible: true,
         sshSectionHeight: 140,
-        graphHeight: 240,
-        graphOpen: true,
+        gitHistoryDetailWidth: 400,
         lastColumnTabByProject: {},
         worktreePickByProject: {}
       })
@@ -94,12 +93,12 @@ describe('shell-layout-store', () => {
         railWidth: 9999,
         sidePanelWidth: 1,
         sshSectionHeight: 399.6,
-        graphHeight: -5
+        gitHistoryDetailWidth: -5
       })
       expect(record.railWidth).toBe(SHELL_LAYOUT_BOUNDS.railWidth.max)
       expect(record.sidePanelWidth).toBe(SHELL_LAYOUT_BOUNDS.sidePanelWidth.min)
       expect(record.sshSectionHeight).toBe(400)
-      expect(record.graphHeight).toBe(SHELL_LAYOUT_BOUNDS.graphHeight.min)
+      expect(record.gitHistoryDetailWidth).toBe(SHELL_LAYOUT_BOUNDS.gitHistoryDetailWidth.min)
     })
 
     it('falls back to defaults for non-numbers and non-booleans', () => {
@@ -137,10 +136,10 @@ describe('shell-layout-store', () => {
       const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
       state().setRailWidth(300)
       state().setLastColumnTab('p1', 'explorer')
-      state().setGraphOpen(false)
+      state().setGitHistoryDetailWidth(500)
       expect(state().railWidth).toBe(200)
       expect(state().lastColumnTabByProject).toEqual({})
-      expect(state().graphOpen).toBe(true)
+      expect(state().gitHistoryDetailWidth).toBe(400)
       expect(mockWriteDebounced).not.toHaveBeenCalled()
       expect(debug).toHaveBeenCalled()
       debug.mockRestore()
@@ -174,14 +173,14 @@ describe('shell-layout-store', () => {
 
     it('loads an existing record, clamped, and never migrates', async () => {
       await hydrateWithRecord({
-        version: 1,
+        version: 2,
         railExpanded: false,
         railWidth: 5000,
         sidePanelVisible: false,
         sidePanelWidth: 400,
         sshSectionVisible: false,
         sshSectionHeight: 200,
-        graphHeight: 300,
+        gitHistoryDetailWidth: 500,
         lastColumnTabByProject: { p1: 'changes' },
         worktreePickByProject: { p1: 'c:/repo/wt' }
       })
@@ -193,13 +192,33 @@ describe('shell-layout-store', () => {
         sidePanelWidth: 400,
         sshSectionVisible: false,
         sshSectionHeight: 200,
-        graphHeight: 300,
+        gitHistoryDetailWidth: 500,
         lastColumnTabByProject: { p1: 'changes' },
         worktreePickByProject: { p1: 'c:/repo/wt' }
       })
       expect(mockLegacy).not.toHaveBeenCalled()
       expect(mockWrite).not.toHaveBeenCalled()
       expect(mockWriteDebounced).not.toHaveBeenCalled()
+    })
+
+    describe('a saved version 1 record', () => {
+      const V1 = { version: 1, railWidth: 250, graphHeight: 300 }
+
+      it('keeps its values, drops graphHeight and is saved as the current version', async () => {
+        await hydrateWithRecord(V1)
+        expect(state().railWidth).toBe(250)
+        expect(state().gitHistoryDetailWidth).toBe(400)
+        expect(mockWriteDebounced).toHaveBeenCalledTimes(1)
+        const saved = mockWriteDebounced.mock.calls[0][1] as Record<string, unknown>
+        expect(saved).toMatchObject({ version: 2, railWidth: 250, gitHistoryDetailWidth: 400 })
+        expect(saved).not.toHaveProperty('graphHeight')
+      })
+
+      it('does not save a record that is already the current version', async () => {
+        await hydrateWithRecord({ version: 2, railWidth: 250, gitHistoryDetailWidth: 340 })
+        expect(state().gitHistoryDetailWidth).toBe(340)
+        expect(mockWriteDebounced).not.toHaveBeenCalled()
+      })
     })
 
     it('goes unavailable on a read error: in-memory defaults, never a write', async () => {
@@ -226,11 +245,11 @@ describe('shell-layout-store', () => {
     })
 
     it('goes unavailable for a newer version and keeps the saved record untouched', async () => {
-      await hydrateWithRecord({ version: 2, railWidth: 333 })
+      await hydrateWithRecord({ version: 3, railWidth: 333 })
       expect(state().status).toBe('unavailable')
       expect(state().railWidth).toBe(200)
       expect(mockLog).toHaveBeenCalledWith(
-        expect.objectContaining({ level: 'warn', message: expect.stringContaining('version 2') })
+        expect.objectContaining({ level: 'warn', message: expect.stringContaining('version 3') })
       )
       state().setRailWidth(250)
       expect(state().railWidth).toBe(250)
@@ -260,14 +279,14 @@ describe('shell-layout-store', () => {
       expect(state().status).toBe('ready')
       expect(mockWrite).toHaveBeenCalledTimes(1)
       expect(mockWrite).toHaveBeenCalledWith(PersistenceKeys.shellLayout, {
-        version: 1,
+        version: 2,
         railExpanded: false,
         railWidth: 200,
         sidePanelVisible: false,
         sidePanelWidth: 400,
         sshSectionVisible: false,
         sshSectionHeight: 200,
-        graphHeight: 240,
+        gitHistoryDetailWidth: 400,
         lastColumnTabByProject: {},
         worktreePickByProject: { p1: 'c:/repo/.termul/worktrees/feat' }
       })
@@ -307,22 +326,22 @@ describe('shell-layout-store', () => {
       state().setRailWidth(9999)
       state().setSidePanelWidth(10)
       state().setSshSectionHeight(60.4)
-      state().setGraphHeight(9999)
+      state().setGitHistoryDetailWidth(9999)
       expect(state()).toMatchObject({
         railWidth: 360,
         sidePanelWidth: 220,
         sshSectionHeight: 60,
-        graphHeight: 600
+        gitHistoryDetailWidth: 560
       })
       expect(mockWriteDebounced).toHaveBeenCalledTimes(4)
       expect(mockWriteDebounced).toHaveBeenLastCalledWith(
         PersistenceKeys.shellLayout,
         expect.objectContaining({
-          version: 1,
+          version: 2,
           railWidth: 360,
           sidePanelWidth: 220,
           sshSectionHeight: 60,
-          graphHeight: 600
+          gitHistoryDetailWidth: 560
         })
       )
       expect(mockWrite).not.toHaveBeenCalled()
@@ -343,13 +362,9 @@ describe('shell-layout-store', () => {
       expect(mockWriteDebounced).not.toHaveBeenCalled()
     })
 
-    it('keeps graphOpen in memory only', () => {
-      state().setGraphOpen(false)
-      expect(state().graphOpen).toBe(false)
-      expect(mockWriteDebounced).not.toHaveBeenCalled()
+    it('does not persist the status', () => {
       state().setRailWidth(250)
       const snapshot = mockWriteDebounced.mock.calls.at(-1)?.[1] as Record<string, unknown>
-      expect(snapshot).not.toHaveProperty('graphOpen')
       expect(snapshot).not.toHaveProperty('status')
     })
 
@@ -431,7 +446,7 @@ describe('shell-layout-store', () => {
       release({
         success: true,
         data: {
-          version: 1,
+          version: 2,
           lastColumnTabByProject: { p1: 'chats', p2: 'explorer' },
           worktreePickByProject: { p1: 'c:/a', p2: 'c:/b' }
         }

@@ -97,6 +97,7 @@ export function useBulkTabClose({
         case 'git':
         case 'git-history':
         case 'diff':
+        case 'commit-diff':
           useWorkspaceStore.getState().removeTab(tab.id)
           break
         case 'agent-chat':

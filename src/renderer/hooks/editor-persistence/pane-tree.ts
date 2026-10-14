@@ -3,7 +3,13 @@ import { randomUUID } from '@/lib/uuid'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
-import { browserTabId, diffTabId, editorTabId, terminalTabId } from '@/stores/workspace-store'
+import {
+  browserTabId,
+  commitDiffTabId,
+  diffTabId,
+  editorTabId,
+  terminalTabId
+} from '@/stores/workspace-store'
 import type { Terminal } from '@/types/project'
 import type { PaneNode, SplitNode } from '@/types/workspace.types'
 import type { PersistedTerminalLayout } from '../../../shared/types/persistence.types'
@@ -33,6 +39,17 @@ export function serializePaneTree(node: PaneNode): PersistedPaneNode {
           return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
         case 'diff':
           return [{ type: 'diff', id: tab.id, cwd: tab.cwd, path: tab.path, staged: tab.staged }]
+        case 'commit-diff':
+          return [
+            {
+              type: 'commit-diff',
+              id: tab.id,
+              cwd: tab.cwd,
+              commit: tab.commit,
+              path: tab.path,
+              ...(tab.oldPath ? { oldPath: tab.oldPath } : {})
+            }
+          ]
         case 'canvas':
           // Not persisted (see WORKSPACE_TAB_KIND_TRAITS): the canvas re-opens
           // user-initiated.
@@ -204,6 +221,7 @@ export function reconcileTerminalTabs(
           case 'agent-chat':
           case 'git-history':
           case 'diff':
+          case 'commit-diff':
             return [tab]
           case 'canvas':
             // Canvas tabs: the daemon/iframe runtime is host-local state, never
@@ -259,6 +277,40 @@ export function reconcileTerminalTabs(
   }
 
   return normalizePaneTree(visit(root))
+}
+
+/** A persisted commit diff ref as a tab; a malformed ref is dropped with one warn. */
+function restoreCommitDiff(ref: {
+  id?: unknown
+  cwd?: unknown
+  commit?: unknown
+  path?: unknown
+  oldPath?: unknown
+}): WorkspaceTab[] {
+  // Never coerce a malformed commit diff ref: drop it with one warn.
+  if (
+    typeof ref.cwd !== 'string' ||
+    typeof ref.commit !== 'string' ||
+    typeof ref.path !== 'string'
+  ) {
+    void logFrontendError({
+      level: 'warn',
+      source: 'useEditorPersistence.deserializePaneTree',
+      message:
+        'Dropped malformed commit diff tab (cwd/commit/path invalid) during workspace restore'
+    })
+    return []
+  }
+  return [
+    {
+      type: 'commit-diff',
+      id: typeof ref.id === 'string' ? ref.id : commitDiffTabId(ref.cwd, ref.commit, ref.path),
+      cwd: ref.cwd,
+      commit: ref.commit,
+      path: ref.path,
+      ...(typeof ref.oldPath === 'string' ? { oldPath: ref.oldPath } : {})
+    }
+  ]
 }
 
 // Deserialize pane tree with full tab mapping
@@ -355,6 +407,8 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput): PaneNode
               }
             ]
           }
+          case 'commit-diff':
+            return restoreCommitDiff(tab)
           case 'terminal':
             return [
               {
