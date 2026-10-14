@@ -4,7 +4,7 @@
  * last column tab and worktree pick.
  *
  * Persistence runs only through `persistenceApi` under `PersistenceKeys.shellLayout`
- * (desktop plugin-store, web server store). A hydration gate protects the saved
+ * (the host store on every surface). A hydration gate protects the saved
  * record: nothing is written until the record has been read (or migrated), and
  * a store that could not read it (`unavailable`) stays usable in memory but
  * never writes, so defaults cannot overwrite a record that merely failed to load.
@@ -319,10 +319,10 @@ export const useShellLayoutStore = create<ShellLayoutState>((_set, get) => ({
     try {
       const result = await persistenceApi.delete(editorStateKey(projectId))
       if (!result.success && result.code !== 'KEY_NOT_FOUND') {
-        log('warn', `[shell] editor-state cleanup failed: ${result.code ?? 'UNKNOWN'}`)
+        log('warn', `[shell] workspace record cleanup failed: ${result.code ?? 'UNKNOWN'}`)
       }
     } catch {
-      log('warn', '[shell] editor-state cleanup failed: UNKNOWN')
+      log('warn', '[shell] workspace record cleanup failed: UNKNOWN')
     }
   }
 }))

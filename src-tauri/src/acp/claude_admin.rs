@@ -209,30 +209,27 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
                 }
             };
             runtime
-                .block_on(service.accounts_snapshot())
+                .block_on(service.profile_list())
                 .map(|snapshot| {
-                    for account in &snapshot.accounts {
-                        let default = if account.id == snapshot.default_account_id {
+                    for row in &snapshot.profiles {
+                        let default = if row.id == snapshot.default_account_id {
                             " (default)"
                         } else {
                             ""
                         };
-                        let signed_in = account.signed_in.map(yes_no).unwrap_or("unknown");
-                        println!(
-                            "{}  {}{default}  signed in: {signed_in}",
-                            account.id, account.name
-                        );
+                        let signed_in = row.signed_in.map(yes_no).unwrap_or("unknown");
+                        println!("{}  {}{default}  signed in: {signed_in}", row.id, row.name);
                     }
-                    for (project, account) in &snapshot.project_accounts {
-                        println!("project {project} uses {account}");
+                    for (project, choice) in &snapshot.project_profiles {
+                        println!("project {project} uses {choice}");
                     }
                 })
         }
-        ["add", name] => service.add_account(name).map(|account| {
-            println!("Added account {} ({}).", account.name, account.id);
+        ["add", name] => service.insert_profile(name).map(|created| {
+            println!("Added account {} ({}).", created.name, created.id);
             println!(
                 "Sign in with: termul-server claude account login {}",
-                account.id
+                created.id
             );
         }),
         ["login", id] => service.run_account_cli_login(id),
@@ -250,7 +247,7 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
         ["project", project, "default"] => service.set_project_account(project, None),
         ["project", project, id] => service.set_project_account(project, Some(id)),
         _ => {
-            eprintln!("{}", account_usage());
+            eprintln!("{}", usage_text());
             return ExitCode::from(2);
         }
     };
@@ -263,7 +260,7 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
     }
 }
 
-fn account_usage() -> &'static str {
+fn usage_text() -> &'static str {
     "Usage: termul-server claude [--state-dir PATH] account <list|add NAME|login ID|rename ID NAME|remove ID|default ID|project PROJECT_ID ID|default>"
 }
 

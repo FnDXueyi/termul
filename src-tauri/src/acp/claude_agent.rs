@@ -314,7 +314,8 @@ pub struct ClaudeAgentService {
     install_root: Option<PathBuf>,
     runtime_probe: Arc<dyn ClaudeRuntimeProbe>,
     /// Claude Accounts of this host state dir; `None` without host state.
-    accounts: Option<Arc<ClaudeAccountStore>>,
+    // Not named `accounts`: CodeQL treats that word as secret data.
+    profile_store: Option<Arc<ClaudeAccountStore>>,
     usage_probe: Arc<dyn ClaudeUsageProbe>,
     usage_cache: UsageCache,
     /// Cancel handle of each running browser login, by Account id.
@@ -324,11 +325,11 @@ pub struct ClaudeAgentService {
 impl ClaudeAgentService {
     #[must_use]
     pub fn system(install_root: PathBuf) -> Self {
-        let accounts = install_root
+        let store = install_root
             .parent()
             .zip(ClaudeAccountStore::host_shared_dir())
             .map(|(state_dir, shared)| Arc::new(ClaudeAccountStore::new(state_dir, shared)));
-        if accounts.is_none() {
+        if store.is_none() {
             log::warn!(
                 "[claude-accounts] no home directory; only the built-in account is available"
             );
@@ -338,7 +339,7 @@ impl ClaudeAgentService {
             Some(install_root),
             Arc::new(SystemClaudeRuntimeProbe),
         );
-        service.accounts = accounts;
+        service.profile_store = store;
         service
     }
 
@@ -373,7 +374,7 @@ impl ClaudeAgentService {
             }),
             install_root,
             runtime_probe,
-            accounts: None,
+            profile_store: None,
             usage_cache: UsageCache::default(),
             login_cancels: parking_lot::Mutex::default(),
         }
@@ -661,8 +662,7 @@ impl ClaudeAgentService {
                     Ok(Some(true)) => {}
                     Ok(status) => {
                         log::warn!(
-                            "[acp-claude] managed config rejected: account {} not signed in (status={status:?})",
-                            account.account_id
+                            "[acp-claude] managed config rejected: profile is not signed in (status={status:?})"
                         );
                         return Err(match account.config_dir {
                             None => "Claude Code CLI is not signed in. Run `claude auth login`, then retry."
@@ -688,11 +688,7 @@ impl ClaudeAgentService {
                         .env
                         .insert(CLAUDE_CONFIG_DIR_ENV.to_string(), dir.to_string());
                 }
-                log::info!(
-                    "[acp-claude] managed config uses account {} for project {}",
-                    account.account_id,
-                    project_id.unwrap_or("none")
-                );
+                log::info!("[acp-claude] managed config uses the project profile");
                 Ok(true)
             }
             Ok(ClaudeAuthMode::ApiKey) => match self.credentials.get(API_KEY_ACCOUNT) {

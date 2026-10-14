@@ -1,9 +1,10 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
-import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
+import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 import { AppPreferencesModal } from './AppPreferences'
 
 /**
@@ -359,7 +360,7 @@ describe.each([
     })
     expect(toggle).toHaveAttribute('aria-checked', 'true')
     expect(mockWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.objectContaining({ terminalScreenReaderMode: true })
     )
     await waitFor(() => {
@@ -380,7 +381,7 @@ describe.each([
     })
     expect(toggle).toHaveAttribute('aria-checked', 'false')
     expect(mockWriteDebounced).toHaveBeenLastCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.objectContaining({ terminalScreenReaderMode: false })
     )
     await waitFor(() => {
@@ -423,7 +424,7 @@ describe.each([
     })
     expect(toggle).toHaveAttribute('aria-checked', 'false')
     expect(mockWrite).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.objectContaining({ terminalScreenReaderMode: false })
     )
   })

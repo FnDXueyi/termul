@@ -100,10 +100,9 @@ fn server_config_bind_addr() {
         partition_gc_age_secs: DEFAULT_PARTITION_GC_AGE_SECS,
         partition_byte_budget: DEFAULT_PARTITION_BYTE_BUDGET,
         deprecation_warnings: Vec::new(),
-        project_root: PathBuf::from("/tmp"),
+        seed_project_root: None,
         projects_file: None,
         sessions_dir: None,
-        workspace_manifests_dir: None,
         acp_catalog_dir: None,
         store_file: None,
         allow_remote_writes: false,
@@ -127,10 +126,9 @@ fn server_config_bind_addr() {
         partition_gc_age_secs: DEFAULT_PARTITION_GC_AGE_SECS,
         partition_byte_budget: DEFAULT_PARTITION_BYTE_BUDGET,
         deprecation_warnings: Vec::new(),
-        project_root: PathBuf::from("/tmp"),
+        seed_project_root: None,
         projects_file: None,
         sessions_dir: None,
-        workspace_manifests_dir: None,
         acp_catalog_dir: None,
         store_file: None,
         allow_remote_writes: false,
@@ -165,14 +163,49 @@ fn from_args_defaults() {
         removed_flag_warnings(&cfg).is_empty(),
         "no removed flags passed => no removed-flag warnings"
     );
-    // PR-S4: project_root defaults to $HOME / $USERPROFILE when the env var
-    // is unset. The CI hosts in this repo all set $HOME, so the resolved
-    // value should be non-empty. We don't assert an exact path because the
-    // test environment may differ across platforms.
-    assert!(
-        !cfg.project_root.as_os_str().is_empty(),
-        "default project_root should resolve from $HOME when $TERMUL_PROJECT_ROOT is unset"
-    );
+}
+
+/// The removed `--project-root` flag still parses: it is validated, seeds one
+/// project (`seed_project_root`) and queues one startup warning. Without it
+/// (and without the env fallback) there is no seed and no warning — there is
+/// no default host project root any more.
+#[test]
+fn from_args_project_root_is_a_removed_flag_that_only_seeds() {
+    let _g = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
+    let saved = save_env(&["TERMUL_PROJECT_ROOT"]);
+    std::env::remove_var("TERMUL_PROJECT_ROOT");
+    let none = ServerConfig::from_args(Vec::<&str>::new()).expect("defaults");
+    let dir = tempdir_like("seed-root-flag");
+    let flagged =
+        ServerConfig::from_args(["--project-root", dir.to_str().unwrap()]).expect("flag parses");
+    std::env::set_var("TERMUL_PROJECT_ROOT", &dir);
+    let from_env = ServerConfig::from_args(Vec::<&str>::new()).expect("env parses");
+    restore_env(saved);
+
+    assert_eq!(none.seed_project_root, None, "no flag, no env: nothing is seeded");
+    assert!(none.deprecation_warnings.iter().all(|w| !w.contains("project-root")));
+
+    let canonical = dir.canonicalize().expect("canonical dir");
+    assert_eq!(flagged.seed_project_root.as_deref(), Some(canonical.as_path()));
+    let warnings: Vec<_> = flagged
+        .deprecation_warnings
+        .iter()
+        .filter(|w| w.contains("--project-root"))
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("removed option"));
+
+    assert_eq!(from_env.seed_project_root.as_deref(), Some(canonical.as_path()));
+    assert!(from_env.deprecation_warnings.iter().any(|w| w.contains("$TERMUL_PROJECT_ROOT")));
+    cleanup(&dir);
+}
+
+#[test]
+fn from_args_bad_project_root_fails_fast() {
+    let missing = std::env::temp_dir().join("termul-no-such-seed-root-dir");
+    let err = ServerConfig::from_args(["--project-root", missing.to_str().unwrap()])
+        .expect_err("a missing seed root must abort");
+    assert!(matches!(err, ParseCliError::Message(_)));
 }
 
 #[test]
@@ -419,36 +452,29 @@ fn from_args_unknown_option() {
     ));
 }
 
-// Patch 17: `--workspace-manifests-dir` CLI flag accept / missing /
-// empty-value tests (mirrors the `--event-log-capacity` test pattern).
-
+// `--workspace-manifests-dir` was removed with the workspace manifest: it is
+// parsed and ignored like the removed permission flags.
 #[test]
-fn from_args_accepts_workspace_manifests_dir() {
+fn from_args_removed_workspace_manifests_dir_parses_and_warns_once() {
     let cfg = ServerConfig::from_args(["--workspace-manifests-dir", "/var/lib/termul/manifests"])
-        .expect("parse");
-    assert_eq!(
-        cfg.workspace_manifests_dir,
-        Some(PathBuf::from("/var/lib/termul/manifests"))
-    );
-    // Other defaults stay intact.
-    assert_eq!(cfg.host, "127.0.0.1");
-    assert_eq!(cfg.port, 8080);
-}
-
-#[test]
-fn from_args_missing_workspace_manifests_dir_value() {
-    assert!(matches!(
-        ServerConfig::from_args(["--workspace-manifests-dir"]),
-        Err(ParseCliError::Message(_))
-    ));
-}
-
-#[test]
-fn from_args_rejects_empty_workspace_manifests_dir() {
-    assert!(matches!(
-        ServerConfig::from_args(["--workspace-manifests-dir", ""]),
-        Err(ParseCliError::Message(_))
-    ));
+        .expect("the removed flag still parses");
+    let warnings: Vec<_> = cfg
+        .deprecation_warnings
+        .iter()
+        .filter(|warning| warning.contains("--workspace-manifests-dir"))
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("'/var/lib/termul/manifests'"));
+    // A missing or empty value never aborts startup, and the next flag keeps its own value.
+    for args in [
+        vec!["--workspace-manifests-dir"],
+        vec!["--workspace-manifests-dir", ""],
+        vec!["--workspace-manifests-dir", "--port", "9091"],
+    ] {
+        ServerConfig::from_args(args).expect("a removed flag must not abort startup");
+    }
+    let cfg = ServerConfig::from_args(["--workspace-manifests-dir", "--port", "9091"]).unwrap();
+    assert_eq!(cfg.port, 9091);
 }
 
 #[test]
@@ -559,10 +585,9 @@ fn service_account_state_dir_falls_through_empty_env_var() {
         partition_gc_age_secs: DEFAULT_PARTITION_GC_AGE_SECS,
         partition_byte_budget: DEFAULT_PARTITION_BYTE_BUDGET,
         deprecation_warnings: Vec::new(),
-        project_root: PathBuf::from("/tmp"),
+        seed_project_root: None,
         projects_file: None,
         sessions_dir: None,
-        workspace_manifests_dir: None,
         acp_catalog_dir: None,
         store_file: None,
         allow_remote_writes: false,

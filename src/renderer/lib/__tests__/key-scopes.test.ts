@@ -1,34 +1,95 @@
-import { KEY_SCOPES, PersistenceKeys, scopedKey, scopeOf } from '@shared/types/persistence.types'
-import { describe, expect, it, vi } from 'vitest'
-import { PINNED_COMMANDS_KEY } from '@/hooks/use-pinned-commands'
-import { RECENT_COMMANDS_KEY } from '@/hooks/use-recent-commands'
 import {
-  APP_SETTINGS_KEY,
-  CONTEXT_BAR_SETTINGS_KEY,
-  KEYBOARD_SHORTCUTS_KEY,
-  TOC_SETTINGS_KEY
-} from '@/types/settings'
-import { ACP_AGENTS_KEY } from '../acp-agents-persistence'
-import { ACP_AUTH_METHODS_KEY } from '../acp-auth-method-memory'
-import { ACP_MCP_KEY } from '../acp-mcp-persistence'
+  KEY_SCOPES,
+  type KeyScope,
+  PersistenceKeys,
+  scopedKey,
+  scopeOf
+} from '@shared/types/persistence.types'
+import { describe, expect, it } from 'vitest'
 
-vi.mock('@/lib/api', () => ({ persistenceApi: {} }))
+/**
+ * The scope every `PersistenceKeys` entry must resolve to. A new entry needs a
+ * row here (the type forces it) and, when it is shared between devices, a line
+ * in `KEY_SCOPES` (the test below forces that).
+ */
+const DECLARED_SCOPES: Record<keyof typeof PersistenceKeys, KeyScope> = {
+  terminals: 'device',
+  snapshots: 'device',
+  projectPrefs: 'device',
+  windowState: 'device',
+  appSettings: 'sharedLww',
+  keyboardShortcuts: 'sharedLww',
+  contextBarSettings: 'sharedLww',
+  tocSettings: 'sharedLww',
+  pinnedCommands: 'sharedLww',
+  recentCommands: 'device',
+  commandHistory: 'device',
+  lastLaunchDraft: 'device',
+  chatDraft: 'device',
+  acpAgents: 'sharedLww',
+  acpAuthMethods: 'sharedLww',
+  acpMcpServers: 'sharedLww',
+  acpMentionRecentsLegacy: 'device',
+  acpMentionRecents: 'device',
+  sshProfiles: 'sharedCas',
+  sessionsAutoSave: 'device',
+  sessionsLegacyMigrated: 'device',
+  customAgents: 'sharedLww',
+  lastSelectedAgent: 'device',
+  lastComposerOptions: 'device',
+  agentModelCatalog: 'device',
+  mobileFileExplorerFolder: 'device',
+  activeProject: 'device',
+  workspace: 'device',
+  shellLayout: 'device'
+}
+
+/** The logical key an entry stands for; parametrized entries get sample ids. */
+function resolve(entry: string | ((...args: string[]) => string)): string {
+  return typeof entry === 'function' ? entry('p1', 's1') : entry
+}
+
+const entries = Object.entries(PersistenceKeys) as [
+  keyof typeof PersistenceKeys,
+  string | ((...args: string[]) => string)
+][]
+
+describe('PersistenceKeys', () => {
+  it('declares a scope for every entry and no scope for a missing entry', () => {
+    expect(entries.map(([name]) => name).sort()).toEqual(Object.keys(DECLARED_SCOPES).sort())
+  })
+
+  it('resolves every entry to its declared scope', () => {
+    for (const [name, entry] of entries) {
+      expect(scopeOf(resolve(entry)), name).toBe(DECLARED_SCOPES[name])
+    }
+  })
+
+  it('gives every entry a distinct key', () => {
+    const keys = entries.map(([, entry]) => resolve(entry))
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('builds parametrized keys from every argument', () => {
+    expect(PersistenceKeys.chatDraft('p1', 's1')).toBe('chat-draft/p1/s1')
+    expect(PersistenceKeys.commandHistory('p1')).toBe('projects/p1/command-history')
+    expect(PersistenceKeys.lastLaunchDraft('p1')).toBe('last-launch-draft/p1')
+    expect(PersistenceKeys.acpMentionRecents('p1%00%2Fwork')).toBe(
+      'acp/mention-recents/p1%00%2Fwork'
+    )
+  })
+
+  it('keeps every shared row of KEY_SCOPES backed by a PersistenceKeys entry', () => {
+    const declared = new Set(entries.map(([, entry]) => resolve(entry)))
+    for (const key of [...KEY_SCOPES.sharedLww, ...KEY_SCOPES.sharedCas]) {
+      expect(declared.has(key), key).toBe(true)
+    }
+  })
+})
 
 describe('scopeOf', () => {
-  it('classifies every shared-lww key from the spec table', () => {
-    for (const key of [
-      'settings/app',
-      'settings/keyboard-shortcuts',
-      'settings/context-bar',
-      'settings/toc',
-      'settings/pinned-commands',
-      'agents/custom',
-      'acp/agents',
-      'acp/auth-methods',
-      'acp/mcp-servers'
-    ]) {
-      expect(scopeOf(key), key).toBe('sharedLww')
-    }
+  it('classifies every shared-lww key', () => {
+    for (const key of KEY_SCOPES.sharedLww) expect(scopeOf(key), key).toBe('sharedLww')
     expect([...KEY_SCOPES.sharedLww]).toHaveLength(9)
   })
 
@@ -37,42 +98,10 @@ describe('scopeOf', () => {
     expect([...KEY_SCOPES.sharedCas]).toEqual(['ssh/profiles'])
   })
 
-  it('keeps every other key family device-scoped', () => {
-    const deviceKeys = [
-      PersistenceKeys.shellLayout,
-      PersistenceKeys.windowState,
-      PersistenceKeys.activeProject,
-      PersistenceKeys.projects,
-      PersistenceKeys.terminals('p1'),
-      PersistenceKeys.snapshots('p1'),
-      PersistenceKeys.workspace('p1'),
-      PersistenceKeys.lastSelectedAgent,
-      PersistenceKeys.lastComposerOptions('c1'),
-      PersistenceKeys.agentModelCatalog('c1'),
-      PersistenceKeys.mobileFileExplorerFolder('p1'),
-      'editor-state/p1',
-      'last-launch-draft/p1',
-      'chat-draft/p1/s1',
-      'settings/recent-commands',
-      'projects/p1/command-history',
-      'acp/mention-recents/p1',
-      'sessions/auto-save',
-      'project-prefs'
-    ]
-    for (const key of deviceKeys) expect(scopeOf(key), key).toBe('device')
-  })
-
-  it('agrees with the constants the renderer actually persists under', () => {
-    expect(scopeOf(APP_SETTINGS_KEY)).toBe('sharedLww')
-    expect(scopeOf(KEYBOARD_SHORTCUTS_KEY)).toBe('sharedLww')
-    expect(scopeOf(CONTEXT_BAR_SETTINGS_KEY)).toBe('sharedLww')
-    expect(scopeOf(TOC_SETTINGS_KEY)).toBe('sharedLww')
-    expect(scopeOf(PINNED_COMMANDS_KEY)).toBe('sharedLww')
-    expect(scopeOf(PersistenceKeys.customAgents)).toBe('sharedLww')
-    expect(scopeOf(ACP_AGENTS_KEY)).toBe('sharedLww')
-    expect(scopeOf(ACP_AUTH_METHODS_KEY)).toBe('sharedLww')
-    expect(scopeOf(ACP_MCP_KEY)).toBe('sharedLww')
-    expect(scopeOf(RECENT_COMMANDS_KEY)).toBe('device')
+  it('keeps keys outside the table device-scoped', () => {
+    for (const key of ['editor-state/p1', 'project-prefs', 'anything/else']) {
+      expect(scopeOf(key), key).toBe('device')
+    }
   })
 
   it('does not treat a key that merely starts like a shared key as shared', () => {

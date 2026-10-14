@@ -97,6 +97,7 @@ vi.mock('@/stores/workspace-store', () => {
   }
   return {
     getAllLeafPanes,
+    getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
     useWorkspaceStore: {
@@ -1037,7 +1038,7 @@ describe('acp-store', () => {
       ],
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('cfg-1', '/w')]: 'fresh-agent'
+        [agentReuseKey('cfg-1', '/w', 'p1')]: 'fresh-agent'
       },
       agents: {
         ...s.agents,
@@ -1090,7 +1091,7 @@ describe('acp-store', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('cfg-restart', '/w')]: 'fresh-agent'
+        [agentReuseKey('cfg-restart', '/w', 'p1')]: 'fresh-agent'
       },
       agents: {
         ...s.agents,

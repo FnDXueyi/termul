@@ -74,10 +74,6 @@ class FakeWebSocket {
   static CLOSING = 2
   static CLOSED = 3
   static autoOpen = true
-  /** projectId → err.code the host answers `watch_project` with (all sockets). */
-  static watchProjectRefusals: Record<string, string> = {}
-  /** When true, `watch_project` replies are held back (never answered). */
-  static holdWatchProjectReplies = false
   /** watch name → full state the host answers a `watch` request with. */
   static watchStates: Record<string, unknown> = {}
   /** `hostEpoch` of the watch frames the fake host sends. */
@@ -133,6 +129,10 @@ class FakeWebSocket {
   deletedSessions: string[] = []
   /** CAP-11: when true, the `delete_session` stub replies `not_found`. */
   deleteSessionNotFound = false
+  /** Project registry requests the fake host received, in order. */
+  projectRequests: Array<{ type: string; payload: Record<string, unknown> }> = []
+  /** When set, the project registry stubs reply with this instead of ok. */
+  projectErr: { code: string; message: string; details?: unknown } | null = null
   /** CAP-11 compat: when true, `list_agents` replies with bare id strings
    * (the pre-CAP-11 server shape) instead of summary objects. */
   listAgentsAsStrings = false
@@ -470,6 +470,30 @@ class FakeWebSocket {
       this.emitReply({ id: req.id, ok: true, payload: {} })
       return
     }
+    // Project registry commands: ok (`add_project` echoes the summary) unless
+    // `projectErr` makes the fake host refuse, like `project_busy`.
+    if (
+      req.type === 'add_project' ||
+      req.type === 'update_project' ||
+      req.type === 'remove_project' ||
+      req.type === 'set_default_project'
+    ) {
+      const payload = req.payload as Record<string, unknown>
+      this.projectRequests.push({ type: req.type, payload })
+      if (this.projectErr) {
+        this.emitReply({ id: req.id, ok: false, err: this.projectErr })
+        return
+      }
+      this.emitReply({
+        id: req.id,
+        ok: true,
+        payload:
+          req.type === 'add_project'
+            ? { project: { ...payload, path: payload.path, isArchived: false, isDefault: false } }
+            : {}
+      })
+      return
+    }
     if (req.type === 'kill_agent') {
       const payload = req.payload as { agentId?: string }
       if (!payload.agentId) {
@@ -559,18 +583,6 @@ class FakeWebSocket {
         })
       }
       this.emitReply({ id: req.id, ok: true, payload: { watch, scope: scope ?? '' } })
-      return
-    }
-    if (req.type === 'watch_project' || req.type === 'unwatch_project') {
-      const projectId = (req.payload as { projectId?: string }).projectId ?? ''
-      if (req.type === 'watch_project' && FakeWebSocket.holdWatchProjectReplies) return
-      const refusal =
-        req.type === 'watch_project' ? FakeWebSocket.watchProjectRefusals[projectId] : undefined
-      if (refusal) {
-        this.emitReply({ id: req.id, ok: false, err: { code: refusal, message: 'refused' } })
-        return
-      }
-      this.emitReply({ id: req.id, ok: true, payload: req.payload })
       return
     }
     this.emitReply({
@@ -757,6 +769,79 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
+  describe('project registry commands', () => {
+    async function connected(): Promise<{
+      transport: WsAcpTransport
+      socket: () => FakeWebSocket
+    }> {
+      let socket: FakeWebSocket | null = null
+      class CaptureSocket extends FakeWebSocket {
+        constructor(url: string) {
+          super(url)
+          socket = this
+        }
+      }
+      const transport = new WsAcpTransport({
+        url: 'ws://test/ws',
+        WebSocketImpl: CaptureSocket as unknown as typeof WebSocket
+      })
+      await transport.connect()
+      return { transport, socket: () => socket as unknown as FakeWebSocket }
+    }
+
+    it('sends add_project and returns the summary the host registered', async () => {
+      const { transport, socket } = await connected()
+
+      const project = await transport.addProject({
+        id: 'p1',
+        name: 'App',
+        path: '/app',
+        color: 'blue'
+      })
+
+      expect(socket().projectRequests).toEqual([
+        { type: 'add_project', payload: { id: 'p1', name: 'App', path: '/app', color: 'blue' } }
+      ])
+      expect(project).toMatchObject({ id: 'p1', name: 'App', path: '/app' })
+      transport.dispose()
+    })
+
+    it('sends cascade only when asked to, on remove and on archive', async () => {
+      const { transport, socket } = await connected()
+
+      await transport.removeProject('p1')
+      await transport.removeProject('p1', { cascade: true })
+      await transport.updateProject('p2', { isArchived: true })
+      await transport.updateProject('p2', { isArchived: true, cascade: true })
+      await transport.setDefaultProject('p3')
+
+      expect(socket().projectRequests).toEqual([
+        { type: 'remove_project', payload: { projectId: 'p1' } },
+        { type: 'remove_project', payload: { projectId: 'p1', cascade: true } },
+        { type: 'update_project', payload: { projectId: 'p2', isArchived: true } },
+        { type: 'update_project', payload: { projectId: 'p2', isArchived: true, cascade: true } },
+        { type: 'set_default_project', payload: { projectId: 'p3' } }
+      ])
+      transport.dispose()
+    })
+
+    it('surfaces a project_busy refusal with the bound entities on the error', async () => {
+      const { transport, socket } = await connected()
+      socket().projectErr = {
+        code: 'project_busy',
+        message: 'project has live sessions',
+        details: { sessions: ['s1', 's2'], terminals: ['t1'] }
+      }
+
+      await expect(transport.removeProject('p1')).rejects.toMatchObject({
+        name: 'AcpTransportError',
+        code: 'project_busy',
+        details: { sessions: ['s1', 's2'], terminals: ['t1'] }
+      })
+      transport.dispose()
+    })
+  })
+
   it('authenticate routes the agent `authenticate` method over WS (authenticate_agent)', async () => {
     // The web client must run the ACP agent-advertised `authenticate` method
     // (e.g. `pi_terminal_login`) on the host — NOT throw "is not available
@@ -866,7 +951,7 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
-  it('browser_open_request events reach onEvent subscribers', async () => {
+  it('drops an event without a session log position (the relay sends none but auth_required)', async () => {
     const transport = new WsAcpTransport({
       url: 'ws://test/ws',
       WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
@@ -874,18 +959,16 @@ describe('WsAcpTransport', () => {
     await transport.connect()
     const sock = (transport as unknown as { socket: FakeWebSocket }).socket
 
-    const seen: Array<{ agentId: string; url: string }> = []
-    transport.onEvent<{ agentId: string; url: string }>('acp:browser_open_request', (payload) =>
-      seen.push(payload)
-    )
+    const seen: unknown[] = []
+    transport.onEvent('acp:browser_open_request', (payload) => seen.push(payload))
     sock.emit({
       sid: null,
       seq: 0,
       type: 'browser_open_request',
       payload: { agentId: 'agent-1', url: 'https://auth.example.com/x' }
     })
-    await vi.waitFor(() => expect(seen).toHaveLength(1))
-    expect(seen[0]).toEqual({ agentId: 'agent-1', url: 'https://auth.example.com/x' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(seen).toEqual([])
 
     transport.dispose()
   })
@@ -1461,16 +1544,15 @@ describe('WsAcpTransport', () => {
     sock.emit({ sid: 's1', seq: 7, type: 'message_chunk', payload: { n: 7 } })
     await flushEvents(transport)
     expect(seen).toEqual([{ payload: { n: 7 }, eventSeq: 7 }])
-    // Agent-level / relay events carry no per-session seq: the listener
-    // receives undefined (never a 0 that a `seq <= watermark` check could
-    // misread as history-covered).
-    const agentEvents: Array<{ payload: unknown; eventSeq?: number }> = []
-    transport.onEvent('acp:agent_spawned', (p, eventSeq) => {
-      agentEvents.push({ payload: p, eventSeq })
+    // An event without a session log position (seq 0) is not delivered: the
+    // relay sends none, and a 0 must never reach a `seq <= watermark` check.
+    const agentEvents: unknown[] = []
+    transport.onEvent('acp:agent_spawned', (p) => {
+      agentEvents.push(p)
     })
     sock.emit({ sid: null, seq: 0, type: 'agent_spawned', payload: { agentId: 'a1' } })
     await flushEvents(transport)
-    expect(agentEvents).toEqual([{ payload: { agentId: 'a1' }, eventSeq: undefined }])
+    expect(agentEvents).toEqual([])
     expect(seen).toHaveLength(1)
     transport.dispose()
   })
@@ -2127,23 +2209,6 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
-  it('watchProject / unwatchProject send the per-project watch requests', async () => {
-    const transport = new WsAcpTransport({
-      url: 'ws://test/ws',
-      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
-    })
-    await transport.connect()
-    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
-    const lastFrame = () =>
-      JSON.parse(sock.sent.at(-1)!) as { type: string; payload: Record<string, string> }
-
-    await transport.watchProject?.('p-1')
-    expect(lastFrame()).toMatchObject({ type: 'watch_project', payload: { projectId: 'p-1' } })
-    await transport.unwatchProject?.('p-1')
-    expect(lastFrame()).toMatchObject({ type: 'unwatch_project', payload: { projectId: 'p-1' } })
-    transport.dispose()
-  })
-
   it('sendPrompt generates + sends a client turnId (Story 1.8 T3.1)', async () => {
     const transport = new WsAcpTransport({
       url: 'ws://test/ws',
@@ -2517,6 +2582,99 @@ describe('WsAcpTransport', () => {
 })
 
 // Story 5.3 (AC3, T6) — transport-level reconnect listener.
+describe('WsAcpTransport host-offline (Close 1001)', () => {
+  afterEach(() => {
+    _resetAcpTransportForTests(null)
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function closeWith1001(transport: WsAcpTransport): void {
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+    sock.readyState = FakeWebSocket.CLOSED
+    sock.onclose?.(new CloseEvent('close', { code: 1001 }))
+  }
+
+  it('reports host-offline and opens no socket until /health answers, then reconnects once', async () => {
+    vi.useFakeTimers()
+    const created: FakeWebSocket[] = []
+    class TrackedWebSocket extends FakeWebSocket {
+      constructor(...args: ConstructorParameters<typeof FakeWebSocket>) {
+        super(...args)
+        created.push(this)
+      }
+    }
+    let healthy = false
+    const health = vi.fn(async () => ({ ok: healthy }) as Response)
+    vi.stubGlobal('fetch', health)
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: TrackedWebSocket as unknown as typeof WebSocket
+    })
+    const states: string[] = []
+    transport.setConnectionStateListener((state) => states.push(state))
+    await transport.connect()
+    const before = created.length
+
+    closeWith1001(transport)
+    expect(transport.getConnectionState()).toBe('host-offline')
+    expect(states.at(-1)).toBe('host-offline')
+
+    // The fast backoff window passes: no socket opens, only slow health probes.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(created.length).toBe(before)
+    await expect(transport.connect()).rejects.toThrow(/offline/)
+
+    // The host stays down across two slow probes, then answers.
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(health).toHaveBeenCalled()
+    expect(created.length).toBe(before)
+    healthy = true
+    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(created.length).toBe(before + 1)
+    expect(transport.getConnectionState()).toBe('connected')
+    transport.dispose()
+  })
+
+  it('retryHostOffline asks /health at once', async () => {
+    vi.useFakeTimers()
+    const health = vi.fn(async () => ({ ok: true }) as Response)
+    vi.stubGlobal('fetch', health)
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    closeWith1001(transport)
+    expect(health).not.toHaveBeenCalled()
+    transport.retryHostOffline()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(health).toHaveBeenCalledTimes(1)
+    expect(transport.getConnectionState()).toBe('connected')
+    transport.dispose()
+  })
+
+  it('keeps the backoff loop for any other close code', async () => {
+    vi.useFakeTimers()
+    const health = vi.fn(async () => ({ ok: true }) as Response)
+    vi.stubGlobal('fetch', health)
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+    sock.readyState = FakeWebSocket.CLOSED
+    sock.onclose?.(new CloseEvent('close', { code: 1006 }))
+    expect(transport.getConnectionState()).not.toBe('host-offline')
+    await vi.advanceTimersByTimeAsync(600)
+    expect(health).not.toHaveBeenCalled()
+    expect((transport as unknown as { socket: FakeWebSocket }).socket).not.toBe(sock)
+    transport.dispose()
+  })
+})
+
 // Verifies the `setReconnectListener` callback fires `true` on
 // `scheduleReconnect` (WS drop) and `false` on `reconnect` success.
 describe('WsAcpTransport reconnect listener (Story 5.3)', () => {
@@ -2681,167 +2839,6 @@ describe('WsAcpTransport state watches', () => {
 
     expect(watchRequests(transport)).toEqual(['chat_history'])
     expect(states).toHaveLength(2)
-    transport.dispose()
-  })
-})
-
-// Per-project fs watch: the host keeps no watch state across connections, so
-// the transport re-sends `watch_project` after a reconnect and reports watches
-// it cannot restore.
-describe('WsAcpTransport project watches across reconnects', () => {
-  afterEach(() => {
-    FakeWebSocket.watchProjectRefusals = {}
-    FakeWebSocket.holdWatchProjectReplies = false
-    vi.useRealTimers()
-  })
-
-  async function connectedWithWatch(projectId: string): Promise<WsAcpTransport> {
-    const transport = new WsAcpTransport({
-      url: 'ws://test/ws',
-      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
-    })
-    await transport.connect()
-    await transport.watchProject?.(projectId)
-    return transport
-  }
-
-  const watchFrames = (transport: WsAcpTransport): string[] =>
-    (transport as unknown as { socket: FakeWebSocket }).socket.sent
-      .map((frame) => JSON.parse(frame) as { type: string; payload: { projectId?: string } })
-      .filter((frame) => frame.type === 'watch_project')
-      .map((frame) => frame.payload.projectId ?? '')
-
-  async function dropAndReconnect(transport: WsAcpTransport): Promise<void> {
-    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
-    // Backoff doubles per consecutive drop (500 ms, 1 s, …); cover the second.
-    await vi.advanceTimersByTimeAsync(2500)
-    await vi.advanceTimersByTimeAsync(50) // let the off-critical-path re-watch settle
-  }
-
-  it('re-sends watch_project for every watched project on the fresh socket', async () => {
-    vi.useFakeTimers()
-    const transport = await connectedWithWatch('p-1')
-    await transport.watchProject?.('p-2')
-
-    await dropAndReconnect(transport)
-
-    expect(watchFrames(transport).sort()).toEqual(['p-1', 'p-2'])
-    transport.dispose()
-  })
-
-  it('drops a watch the host refuses after reconnect and reports it as ended', async () => {
-    vi.useFakeTimers()
-    const transport = await connectedWithWatch('p-gone')
-    const ended: unknown[] = []
-    transport.onEvent('acp:fs_watch_ended', (payload) => ended.push(payload))
-    FakeWebSocket.watchProjectRefusals['p-gone'] = 'not_found'
-
-    await dropAndReconnect(transport)
-
-    expect(ended).toEqual([{ projectId: 'p-gone', reason: 'rewatch_failed' }])
-    // It is no longer re-requested on later reconnects.
-    FakeWebSocket.watchProjectRefusals = {}
-    await dropAndReconnect(transport)
-    expect(watchFrames(transport)).toEqual([])
-    transport.dispose()
-  })
-
-  it('stops re-sending a watch the host ended (fs_watch_ended)', async () => {
-    vi.useFakeTimers()
-    const transport = await connectedWithWatch('p-1')
-    ;(transport as unknown as { socket: FakeWebSocket }).socket.emit({
-      sid: null,
-      seq: 0,
-      type: 'fs_watch_ended',
-      payload: { projectId: 'p-1', reason: 'project_unavailable' }
-    })
-    await vi.advanceTimersByTimeAsync(10)
-
-    await dropAndReconnect(transport)
-
-    expect(watchFrames(transport)).toEqual([])
-    transport.dispose()
-  })
-
-  it('a watch in flight when the socket drops is tracked and re-sent after reconnect', async () => {
-    vi.useFakeTimers()
-    const transport = new WsAcpTransport({
-      url: 'ws://test/ws',
-      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
-    })
-    await transport.connect()
-    FakeWebSocket.holdWatchProjectReplies = true
-    const pending = transport.watchProject?.('p-1')
-    const settled = pending?.then(
-      () => 'ok',
-      () => 'rejected'
-    )
-
-    // The socket drops while the reply is outstanding: the request rejects.
-    FakeWebSocket.holdWatchProjectReplies = false
-    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
-    await vi.advanceTimersByTimeAsync(2500)
-    await vi.advanceTimersByTimeAsync(50)
-
-    expect(await settled).toBe('rejected')
-    expect(watchFrames(transport)).toEqual(['p-1'])
-    transport.dispose()
-  })
-
-  it('keeps tracking a watch whose reply timed out, and untracks one the host refuses', async () => {
-    vi.useFakeTimers()
-    const transport = new WsAcpTransport({
-      url: 'ws://test/ws',
-      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
-    })
-    await transport.connect()
-    const tracked = () => (transport as unknown as { watchedProjects: Set<string> }).watchedProjects
-
-    // No reply ever arrives: the request times out, but the host may have
-    // registered the watch, so it stays tracked for the next reconnect.
-    FakeWebSocket.holdWatchProjectReplies = true
-    const timedOut = transport.watchProject?.('p-slow')?.then(
-      () => 'ok',
-      (error: unknown) => (error as { code?: string }).code
-    )
-    await vi.advanceTimersByTimeAsync(10 * 60_000)
-    expect(await timedOut).toBe('timeout')
-    expect(tracked().has('p-slow')).toBe(true)
-
-    // An explicit host refusal on a live socket untracks it.
-    FakeWebSocket.holdWatchProjectReplies = false
-    FakeWebSocket.watchProjectRefusals['p-gone'] = 'not_found'
-    await expect(transport.watchProject?.('p-gone')).rejects.toMatchObject({ code: 'not_found' })
-    expect(tracked().has('p-gone')).toBe(false)
-    transport.dispose()
-  })
-
-  it('a re-watch whose reply never arrives does not hold the reconnect', async () => {
-    vi.useFakeTimers()
-    const transport = await connectedWithWatch('p-1')
-    const states: boolean[] = []
-    transport.setReconnectListener((reconnecting) => states.push(reconnecting))
-    FakeWebSocket.holdWatchProjectReplies = true
-
-    ;(transport as unknown as { socket: FakeWebSocket }).socket.close()
-    await vi.advanceTimersByTimeAsync(600)
-
-    // Reconnected (and the re-watch request went out) while its reply is held.
-    expect(states[states.length - 1]).toBe(false)
-    expect(watchFrames(transport)).toEqual(['p-1'])
-    transport.dispose()
-  })
-
-  it('a failing re-watch never delays or fails the reconnect itself', async () => {
-    vi.useFakeTimers()
-    const transport = await connectedWithWatch('p-1')
-    const states: boolean[] = []
-    transport.setReconnectListener((reconnecting) => states.push(reconnecting))
-    FakeWebSocket.watchProjectRefusals['p-1'] = 'internal'
-
-    await dropAndReconnect(transport)
-
-    expect(states[states.length - 1]).toBe(false)
     transport.dispose()
   })
 })

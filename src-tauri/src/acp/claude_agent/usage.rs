@@ -116,7 +116,7 @@ impl ClaudeAgentService {
         let now = chrono::Utc::now().timestamp_millis();
         if self.auth_mode().ok() == Some(ClaudeAuthMode::ApiKey) {
             return Ok(snapshot
-                .accounts
+                .profiles
                 .iter()
                 .map(|a| ClaudeAccountUsage {
                     account_id: a.id.clone(),
@@ -133,7 +133,7 @@ impl ClaudeAgentService {
         let stale: Vec<(String, Option<PathBuf>)> = {
             let cache = self.usage_cache.lock();
             snapshot
-                .accounts
+                .profiles
                 .iter()
                 .filter(|a| {
                     cache
@@ -172,7 +172,7 @@ impl ClaudeAgentService {
         }
         let cache = self.usage_cache.lock();
         Ok(snapshot
-            .accounts
+            .profiles
             .iter()
             .filter_map(|a| cache.get(&a.id).cloned())
             .collect())

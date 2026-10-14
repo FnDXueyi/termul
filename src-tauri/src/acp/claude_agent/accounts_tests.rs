@@ -146,7 +146,7 @@ async fn the_snapshot_reports_the_login_state_of_each_account() {
     });
     let snapshot = h.service.accounts_snapshot().await.unwrap();
     let states: Vec<(&str, Option<bool>)> = snapshot
-        .accounts
+        .profiles
         .iter()
         .map(|a| (a.name.as_str(), a.signed_in))
         .collect();

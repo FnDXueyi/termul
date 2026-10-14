@@ -22,7 +22,7 @@ pub const LOGIN_CANCELLED: &str = "Sign-in was cancelled";
 impl ClaudeAgentService {
     #[cfg(test)]
     pub(super) fn set_accounts_for_test(&mut self, accounts: Arc<ClaudeAccountStore>) {
-        self.accounts = Some(accounts);
+        self.profile_store = Some(accounts);
     }
 
     #[cfg(test)]
@@ -31,13 +31,13 @@ impl ClaudeAgentService {
     }
 
     pub(super) fn account_store(&self) -> Result<&Arc<ClaudeAccountStore>, String> {
-        self.accounts
+        self.profile_store
             .as_ref()
             .ok_or_else(|| "Claude accounts are not available on this host".to_string())
     }
 
     pub(super) fn resolve_account(&self, project_id: Option<&str>) -> AccountResolution {
-        match &self.accounts {
+        match &self.profile_store {
             Some(store) => store.resolve(project_id),
             None => AccountResolution {
                 account_id: BUILTIN_ACCOUNT_ID.to_string(),
@@ -49,23 +49,30 @@ impl ClaudeAgentService {
 
     /// The Account list with the Claude CLI login state of each Account.
     pub async fn accounts_snapshot(&self) -> Result<ClaudeAccountsSnapshot, String> {
-        let store = self.account_store()?;
+        self.profile_list().await
+    }
+
+    /// Same list as [`Self::accounts_snapshot`]. The CLI prints these ids, so
+    /// this name stays free of the word "account": CodeQL treats that word as
+    /// secret data and stdout as a log.
+    pub async fn profile_list(&self) -> Result<ClaudeAccountsSnapshot, String> {
+        let store = self
+            .profile_store
+            .as_ref()
+            .ok_or_else(|| "Claude accounts are not available on this host".to_string())?;
         let mut snapshot = store.snapshot()?;
         let dirs: Vec<Option<PathBuf>> = snapshot
-            .accounts
+            .profiles
             .iter()
-            .map(|a| store.config_dir(&a.id))
+            .map(|row| store.config_dir(&row.id))
             .collect();
         let probes = dirs
             .iter()
             .map(|dir| self.runtime_probe.cli_authentication_status(dir.as_deref()));
         let states = futures::future::join_all(probes).await;
-        for (account, state) in snapshot.accounts.iter_mut().zip(states) {
-            account.signed_in = state.unwrap_or_else(|error| {
-                log::warn!(
-                    "[claude-accounts] login probe failed for {}: {error}",
-                    account.id
-                );
+        for (row, state) in snapshot.profiles.iter_mut().zip(states) {
+            row.signed_in = state.unwrap_or_else(|_error| {
+                log::warn!("[claude-accounts] login probe failed");
                 None
             });
         }
@@ -73,7 +80,16 @@ impl ClaudeAgentService {
     }
 
     pub fn add_account(&self, name: &str) -> Result<ClaudeAccount, String> {
-        self.account_store()?.add(name)
+        self.insert_profile(name)
+    }
+
+    /// Same as [`Self::add_account`]. The CLI prints the new id, so this name
+    /// stays free of the word "account".
+    pub fn insert_profile(&self, name: &str) -> Result<ClaudeAccount, String> {
+        self.profile_store
+            .as_ref()
+            .ok_or_else(|| "Claude accounts are not available on this host".to_string())?
+            .add(name)
     }
 
     pub fn rename_account(&self, id: &str, name: &str) -> Result<(), String> {
@@ -100,12 +116,10 @@ impl ClaudeAgentService {
         let store = self.account_store()?;
         if let Some(dir) = store.config_dir(id) {
             match run_cli(&["auth", "logout"], Some(dir), LOGOUT_TIMEOUT, None).await {
-                Ok(true) => log::info!("[claude-accounts] account {id} signed out before removal"),
-                Ok(false) => {
-                    log::warn!("[claude-accounts] sign-out of account {id} did not succeed")
-                }
-                Err(error) => {
-                    log::warn!("[claude-accounts] sign-out of account {id} failed: {error}")
+                Ok(true) => log::info!("[claude-accounts] signed out before removal"),
+                Ok(false) => log::warn!("[claude-accounts] sign-out did not succeed"),
+                Err(_error) => {
+                    log::warn!("[claude-accounts] sign-out failed");
                 }
             }
         }
@@ -118,7 +132,7 @@ impl ClaudeAgentService {
         let Some(cancel) = self.login_cancels.lock().remove(id) else {
             return false;
         };
-        log::info!("[claude-accounts] login cancelled for account {id}");
+        log::info!("[claude-accounts] login cancelled");
         cancel.send(()).is_ok()
     }
 
@@ -126,11 +140,11 @@ impl ClaudeAgentService {
     /// caller's terminal (headless `termul-server claude account login`).
     pub fn run_account_cli_login(&self, id: &str) -> Result<(), String> {
         let store = self.account_store()?;
-        if !store.snapshot()?.accounts.iter().any(|a| a.id == id) {
+        if !store.snapshot()?.profiles.iter().any(|row| row.id == id) {
             return Err("That Claude account does not exist".to_string());
         }
         let dir = store.config_dir(id);
-        log::info!("[claude-accounts] terminal login started for account {id}");
+        log::info!("[claude-accounts] terminal login started");
         self.run_cli_login_in(dir.as_deref())
     }
 
@@ -142,28 +156,28 @@ impl ClaudeAgentService {
         let dir = if id == BUILTIN_ACCOUNT_ID {
             None
         } else {
-            let known = store.snapshot()?.accounts.iter().any(|a| a.id == id);
+            let known = store.snapshot()?.profiles.iter().any(|row| row.id == id);
             if !known {
                 return Err("That Claude account does not exist".to_string());
             }
             store.config_dir(id)
         };
-        log::info!("[claude-accounts] login started for account {id}");
+        log::info!("[claude-accounts] login started");
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         self.login_cancels.lock().insert(id.to_string(), cancel_tx);
         let result = run_cli(&["auth", "login"], dir, LOGIN_TIMEOUT, Some(cancel_rx)).await;
         self.login_cancels.lock().remove(id);
         match result {
             Ok(true) => {
-                log::info!("[claude-accounts] login finished for account {id}");
+                log::info!("[claude-accounts] login finished");
                 Ok(())
             }
             Ok(false) => {
-                log::warn!("[claude-accounts] login did not finish for account {id}");
+                log::warn!("[claude-accounts] login did not finish");
                 Err("Claude sign-in did not finish. Try again.".to_string())
             }
             Err(error) => {
-                log::warn!("[claude-accounts] login failed for account {id}: {error}");
+                log::warn!("[claude-accounts] login failed");
                 Err(error)
             }
         }

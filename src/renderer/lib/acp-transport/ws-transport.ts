@@ -8,19 +8,24 @@
  * (`.message` is the human string callers already toast).
  */
 
+import type { AcpCatalog } from '@shared/types/acp-catalog.types'
 import type {
   ClaudeAccountsSnapshot,
   ClaudeAccountUsage
 } from '@shared/types/claude-accounts.types'
+import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
+  type AddProjectPayload,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
+  type RemoveProjectPayload,
   type SessionCursorReply,
   type SessionSnapshotEvent,
   type SessionSubscribeReply,
+  type UpdateProjectPayload,
   WS_ERROR_CODES,
   WS_EVENT_TYPES,
   WS_WATCH_FRAME_TYPE,
@@ -64,6 +69,7 @@ import {
 import { webServerMcpProbe } from '@/lib/web-server-api'
 import { judgeEvent, SyncGate } from './cursor'
 import { toWsEventType } from './event-names'
+import { HOST_GOING_AWAY_CLOSE_CODE, HostOfflineMonitor } from './host-offline'
 import { HOST_SILENCE_LIMIT_MS, HostLiveness } from './liveness'
 import {
   type AcpConnectionState,
@@ -246,15 +252,14 @@ export class WsAcpTransport implements AcpTransport {
   /** Sessions we should re-subscribe after reconnect. */
   private readonly subscribed = new Set<string>()
   /**
-   * The state watches (projects, chat-history index, agent roster): frames are
-   * routed here from `onMessage`, and every (re)connect resubscribes them.
+   * The watches (projects, chat-history index, agent roster, project file
+   * changes, store keys, terminal sets): frames are routed here from
+   * `onMessage`, and every (re)connect resubscribes them.
    */
   readonly watches = new WatchClient({
     request: (type, payload, timeoutMs) => this.request(type, payload, timeoutMs),
     isLive: () => this.isSocketLive()
   })
-  /** Projects whose `fs_changed` watch this connection must re-request after reconnect. */
-  private readonly watchedProjects = new Set<string>()
   /** Idempotent prompt_complete turn ids already delivered, scoped by session. */
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
@@ -327,6 +332,13 @@ export class WsAcpTransport implements AcpTransport {
    * (a version mismatch reloads the page once via the shared helper).
    */
   private protocolHalted: AcpTransportError | null = null
+  /**
+   * The host closed the socket with `1001` (it stopped on purpose). While set,
+   * no backoff loop runs and `connect()` refuses to open a socket: the slow
+   * health probe (or a user retry) clears it once the host answers.
+   */
+  private hostOffline = false
+  private readonly hostProbe = new HostOfflineMonitor(() => this.onHostAnswered())
 
   constructor(opts?: { url?: string; WebSocketImpl?: typeof WebSocket }) {
     this.wsUrl =
@@ -359,6 +371,11 @@ export class WsAcpTransport implements AcpTransport {
    */
   getConnectionState(): AcpConnectionState {
     return this.connectionState
+  }
+
+  /** User retry (or a wake signal) while `host-offline`: ask `/health` now. */
+  retryHostOffline(): void {
+    this.hostProbe.probeNow()
   }
 
   /** Record + emit a connection-health transition (single funnel so the
@@ -446,6 +463,11 @@ export class WsAcpTransport implements AcpTransport {
     // AD-15: protocol mismatch / bad identity never recovers in this page
     // (a reload replaces the transport); keep refusing instead of churning.
     if (this.protocolHalted) throw this.protocolHalted
+    // The host stopped on purpose: do not open a socket against it. The health
+    // probe reconnects once the host answers.
+    if (this.hostOffline) {
+      throw new AcpTransportError('closed', 'host is offline')
+    }
     this.attachVisibilityListeners()
     if (this.socket?.readyState === WebSocket.OPEN && this.authed) return
     if (this.connecting) return this.connecting
@@ -464,6 +486,7 @@ export class WsAcpTransport implements AcpTransport {
     this.clearHeartbeat()
     this.clearStableTimer()
     this.sessionRetry.cancelAll()
+    this.hostProbe.stop()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -759,6 +782,16 @@ export class WsAcpTransport implements AcpTransport {
     )
   }
 
+  /** `list_acp_catalog`: the host-resolved catalog (see {@link AcpTransport.listCatalog}). */
+  async listCatalog(refresh = false): Promise<AcpCatalog> {
+    return this.request<AcpCatalog>('list_acp_catalog', { refresh })
+  }
+
+  /** `set_catalog_opt_in`: persist the host catalog opt-in. */
+  async setCatalogOptIn(enabled: boolean): Promise<void> {
+    await this.request<unknown>('set_catalog_opt_in', { enabled })
+  }
+
   /**
    * CAP-6 / Story 8: probeRuntime is replaced by the host-resolved catalog.
    * The web client calls `acpCatalogApi.listCatalog()` (the facade) which
@@ -955,6 +988,39 @@ export class WsAcpTransport implements AcpTransport {
     return this.request<boolean>('delete_session', payload)
   }
 
+  // --- Host project registry commands --------------------------------------
+
+  async addProject(project: AddProjectPayload): Promise<ProjectSummary> {
+    const reply = await this.request<{ project: ProjectSummary }>('add_project', project)
+    return reply.project
+  }
+
+  async updateProject(
+    projectId: string,
+    patch: {
+      name?: string
+      color?: string
+      isArchived?: boolean
+      path?: string
+      cascade?: boolean
+    }
+  ): Promise<void> {
+    const payload: UpdateProjectPayload = { projectId, ...patch }
+    await this.request<unknown>('update_project', payload)
+  }
+
+  async removeProject(projectId: string, options?: { cascade?: boolean }): Promise<void> {
+    const payload: RemoveProjectPayload = {
+      projectId,
+      ...(options?.cascade ? { cascade: true } : {})
+    }
+    await this.request<unknown>('remove_project', payload)
+  }
+
+  async setDefaultProject(projectId: string): Promise<void> {
+    await this.request<unknown>('set_default_project', { projectId })
+  }
+
   // --- WS-mapped session/prompt methods ------------------------------------
 
   async newSession(
@@ -1040,26 +1106,6 @@ export class WsAcpTransport implements AcpTransport {
         message: `promote_session succeeded for session ${sessionId} but the live subscribe failed; the next prompt will retry the subscribe: ${String(error)}`
       })
     }
-  }
-
-  async watchProject(projectId: string): Promise<void> {
-    // Tracked BEFORE the reply: if the socket drops or the reply times out
-    // (the host may have registered the watch), the reconnect re-sends it.
-    // Only an explicit host refusal untracks it.
-    this.watchedProjects.add(projectId)
-    try {
-      await this.request('watch_project', { projectId })
-    } catch (error) {
-      const ambiguous =
-        error instanceof AcpTransportError && (error.code === 'closed' || error.code === 'timeout')
-      if (!ambiguous) this.watchedProjects.delete(projectId)
-      throw error
-    }
-  }
-
-  async unwatchProject(projectId: string): Promise<void> {
-    this.watchedProjects.delete(projectId)
-    await this.request('unwatch_project', { projectId })
   }
 
   async loadSession(
@@ -1289,7 +1335,6 @@ export class WsAcpTransport implements AcpTransport {
     // authenticated WS connection. The host runs the method on the agent
     // process (the provider owns the login UX, often opening its own
     // browser); Termul never invents a redirect URL or stores credentials.
-    // Mirrors the desktop `acp_authenticate` Tauri command.
     await this.connect()
     await this.request('authenticate_agent', { agentId, methodId, gateway }, undefined, options)
   }
@@ -1299,8 +1344,7 @@ export class WsAcpTransport implements AcpTransport {
    * the host's `AcpManager::deliver_auth_redirect` over the authenticated WS
    * connection. The host SSRF-guards (http(s) + loopback only) then replays
    * the URL to the agent's callback listener; the reply `{ status }` is the
-   * replay's HTTP status. Mirrors the desktop `acp_auth_deliver_redirect`
-   * Tauri command.
+   * replay's HTTP status.
    */
   async deliverAuthRedirect(
     agentId: AgentId,
@@ -1374,7 +1418,7 @@ export class WsAcpTransport implements AcpTransport {
         settleErr(new AcpTransportError('closed', 'WebSocket error'))
       }
 
-      ws.onclose = () => {
+      ws.onclose = (ev?: { code?: number }) => {
         if (this.socket !== ws) {
           settleErr(new AcpTransportError('closed', 'superseded WebSocket closed before auth'))
           return
@@ -1386,7 +1430,10 @@ export class WsAcpTransport implements AcpTransport {
         this.clearStableTimer()
         this.sessionRetry.cancelAll()
         this.rejectAllPending('closed', 'WebSocket closed')
-        if (!this.disposed) this.scheduleReconnect()
+        if (!this.disposed) {
+          if (ev?.code === HOST_GOING_AWAY_CLOSE_CODE) this.enterHostOffline()
+          else this.scheduleReconnect()
+        }
         settleErr(new AcpTransportError('closed', 'WebSocket closed before auth'))
       }
 
@@ -1544,6 +1591,11 @@ export class WsAcpTransport implements AcpTransport {
   private validateOnResume(reason: string): void {
     if (this.disposed || this.tokenHalted) return
     this.awaySinceProbe = false
+    // The host is offline: a wake or network signal asks `/health` at once.
+    if (this.hostOffline) {
+      this.hostProbe.probeNow()
+      return
+    }
     // A pending backoff is cut short by any wake signal (attempt counter kept).
     if (this.expediteReconnect()) return
     // Handshake in flight: bounded by HANDSHAKE_TIMEOUT_MS, nothing to probe.
@@ -1590,7 +1642,7 @@ export class WsAcpTransport implements AcpTransport {
    * runs unchanged.
    */
   private forceReconnect(reason: string): void {
-    if (this.disposed) return
+    if (this.disposed || this.hostOffline) return
     // An active reconnect that has already progressed past socket creation
     // with a LIVE socket (resubscribe phase) is re-establishing the channel —
     // don't interfere. A pending timer, an in-flight `connect()` that hasn't
@@ -1700,12 +1752,46 @@ export class WsAcpTransport implements AcpTransport {
     this.resumeValidation = validation
   }
 
+  /**
+   * The host closed the socket with `1001`: it stopped on purpose, so a backoff
+   * loop would only churn. Hold the reconnect cycle open (chat keeps its
+   * "waiting" state and held prompts), report `host-offline`, and ask `/health`
+   * at a slow cadence until the host answers.
+   */
+  private enterHostOffline(): void {
+    this.hostOffline = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (!this.reconnecting) {
+      this.reconnecting = true
+      this.onReconnectStateChange?.(true)
+    }
+    this.emitConnectionState('host-offline')
+    void logFrontendError({
+      level: 'warn',
+      source: 'WsAcpTransport.hostOffline',
+      message: 'host closed the WebSocket with 1001 (host stopping); probing /health slowly'
+    })
+    this.hostProbe.start()
+  }
+
+  /** `/health` answered: leave `host-offline` and reconnect once. */
+  private onHostAnswered(): void {
+    if (this.disposed || !this.hostOffline) return
+    this.hostOffline = false
+    this.lastReconnectAttemptAt = Date.now()
+    this.emitConnectionState('reconnecting')
+    void this.reconnect()
+  }
+
   private scheduleReconnect(): void {
     // Issue #907 (F3): a token-class refusal must NOT re-arm the backoff
     // loop — every retry would re-send the same refused token forever (the
     // original 8s churn). The flag is cleared by the next successful
     // authenticate, after which normal reconnect behavior resumes.
-    if (this.tokenHalted || this.protocolHalted) return
+    if (this.tokenHalted || this.protocolHalted || this.hostOffline) return
     if (this.disposed || this.reconnectTimer) return
     // Exponential backoff with ±25 % jitter. The attempt counter is reset only
     // by `stableTimer` (60 s of stable connection), never merely on connect.
@@ -1809,9 +1895,6 @@ export class WsAcpTransport implements AcpTransport {
           }
         }
       }
-      // Off the critical path: a slow or failing watch re-request must never
-      // delay or fail the reconnect (it handles its own errors).
-      void this.rewatchProjects()
       if (obsoleteSessions.length > 0) {
         void logFrontendError({
           level: 'warn',
@@ -1855,35 +1938,6 @@ export class WsAcpTransport implements AcpTransport {
       this.discardSocket('reconnect attempt failed')
       this.scheduleReconnect()
     }
-  }
-
-  /**
-   * The host keeps no watch state across connections, so re-request every
-   * project watch on the fresh socket, in parallel and each bounded by the
-   * resubscribe timeout. A watch the host refuses (project archived/removed
-   * while disconnected) or cannot confirm in time is dropped here AND reported
-   * to listeners as a local `fs_watch_ended`, so the filesystem facade forgets
-   * it and re-requests on its next `watchDirectory` instead of believing it is
-   * live. If the socket itself died, the watches are kept for the next
-   * reconnect pass. Never rejects.
-   */
-  private async rewatchProjects(): Promise<void> {
-    await Promise.all(
-      [...this.watchedProjects].map(async (projectId) => {
-        try {
-          await this.request('watch_project', { projectId }, RESUBSCRIBE_TIMEOUT_MS)
-        } catch (error) {
-          void logFrontendError({
-            level: 'warn',
-            source: 'WsAcpTransport.rewatchProjects',
-            message: `Re-watching project ${projectId} after reconnect failed: ${String(error)}`
-          })
-          if (!this.isSocketLive()) return
-          this.watchedProjects.delete(projectId)
-          this.emitLocal('fs_watch_ended', { projectId, reason: 'rewatch_failed' })
-        }
-      })
-    )
   }
 
   /** One per-session retry attempt (see {@link SessionResubscribeRetry}). */
@@ -2051,17 +2105,17 @@ export class WsAcpTransport implements AcpTransport {
       pending.resolve(reply.payload)
     } else {
       pending.reject(
-        new AcpTransportError(reply.err.code, reply.err.message || reply.err.code, visibleAt)
+        new AcpTransportError(
+          reply.err.code,
+          reply.err.message || reply.err.code,
+          visibleAt,
+          reply.err.details
+        )
       )
     }
   }
 
   private async handleEvent(evt: WsEvent): Promise<void> {
-    // The host ended a project watch: stop re-requesting it after reconnects.
-    if (evt.type === 'fs_watch_ended') {
-      const endedProject = (evt.payload as { projectId?: unknown } | null)?.projectId
-      if (typeof endedProject === 'string') this.watchedProjects.delete(endedProject)
-    }
     // #907 / CodeQL hardening: validate the event type against the shared
     // protocol registry BEFORE branching on it — the token send is gated by
     // a registry-validated boolean plus connection state, never the raw
@@ -2187,9 +2241,14 @@ export class WsAcpTransport implements AcpTransport {
       return
     }
 
-    // Agent-level / relay events (seq 0, or sid null): deliver immediately.
+    // The host sends no event without a session except `auth_required`
+    // (handled above): anything else is a protocol violation.
     if (evt.sid == null || evt.seq === 0) {
-      this.emitLocal(evt.type, evt.payload)
+      void logFrontendError({
+        level: 'warn',
+        source: 'WsAcpTransport.handleEvent',
+        message: `dropped an event without a session log position (${String(evt.type)})`
+      })
       return
     }
 
@@ -2350,10 +2409,10 @@ export class WsAcpTransport implements AcpTransport {
         serverHardCapMs > 0 ? Date.now() + serverHardCapMs + SEND_PROMPT_GRACE_MS : undefined
       // `authenticate_agent` is an interactive agent auth flow (the provider
       // may open a browser + wait for the user to sign in) — apply NO
-      // client-side timeout (0 = no timer), matching the desktop
-      // `acp_authenticate` path (which awaits the agent reply indefinitely)
-      // and the `send_prompt` unlimited-policy pattern. A reply, disconnect,
-      // or disposal resolves/rejects the pending request.
+      // client-side timeout (0 = no timer), matching the `send_prompt`
+      // unlimited-policy pattern (the host awaits the agent reply
+      // indefinitely). A reply, disconnect, or disposal resolves/rejects the
+      // pending request.
       const isAuthenticateAgent = type === 'authenticate_agent'
       // Per-request-type table (CLI-F2): each timer is >= the host's own bound
       // for that operation (install, catalog refresh, session open/reopen).

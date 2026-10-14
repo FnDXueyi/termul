@@ -38,7 +38,6 @@ pub mod session;
 pub mod session_payload;
 pub mod session_persistence;
 pub mod terminal;
-pub mod workspace_manifest;
 
 // Re-exported for the renderer bridge (P1+) and `lib.rs` wiring. `AcpManager`
 // is used now (managed in `lib.rs`); the config/id types are part of the public
@@ -68,17 +67,11 @@ pub use install::{
 #[allow(unused_imports)]
 pub use manager::{AcpManager, AgentSummary, SessionCreationContext, SpawnOutcome};
 pub use session::AgentActivity;
-pub use project_registry::{FileProjectRegistry, VfsRoot};
+pub use project_registry::{FileProjectRegistry, ProjectRegistryError, RootCheck, VfsRoot};
 #[allow(unused_imports)]
 pub use session_persistence::{
     PersistedEventRecord, PersistedSessionStatus, SessionIndexEntry, SessionPersistence,
     SessionPersistenceError, SessionRegistration,
-};
-#[allow(unused_imports)]
-pub use workspace_manifest::{
-    EditorDescriptor, LeafNode, PaneDirection, PaneNode, SplitNode, TerminalDescriptor,
-    WorkspaceManifest, WorkspaceManifestError, WorkspaceManifestService, WriteOutcome,
-    WORKSPACE_MANIFEST_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

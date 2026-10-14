@@ -6,15 +6,10 @@
 use serde::Deserializer;
 
 use super::*;
-use crate::web::store::{unix_ms, Precondition, StoreError, WriteOutcome};
+use crate::web::store::{unix_ms, Precondition, StoreError, WriteOutcome, STORE_VALUE_MAX_BYTES};
+use crate::web::watch::publish_store;
 
 // --- Issue #613: server-side generic key-value store -------------------------
-
-/// Per-value serialized size cap for `store_write` (CAP-11). The whole-file
-/// 10 MiB cap inside `WebStore::write` still applies; this bound rejects a
-/// single oversized value BEFORE it reaches the store so the on-disk file
-/// stays untouched.
-pub(super) const STORE_VALUE_MAX_BYTES: usize = 256 * 1024;
 
 /// Shared `store_*` key validation (CAP-11): an empty or whitespace-only key
 /// is a `VALIDATION_ERROR`; the connection stays open and the store is never
@@ -128,6 +123,22 @@ fn store_error_reply(id: String, error: StoreError, io_code: &str) -> WsReply {
     WsReply::err_with_code(id, code, error.to_string())
 }
 
+/// A request that arrived over the desktop carrier first lets its device take
+/// over the pending plugin-store import, so it never sees a store that lacks
+/// the keys about to be imported. Other carriers never claim it.
+fn claim_for_desktop(
+    store: &WebStore,
+    identity: &ClientIdentity,
+    carrier: Carrier,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    if carrier == Carrier::Ipc {
+        store.claim_desktop_import(identity, now_ms)
+    } else {
+        Ok(())
+    }
+}
+
 fn task_failed(id: String, code: &str, error: tokio::task::JoinError) -> WsReply {
     tracing::warn!("store task failed: {error}");
     WsReply::err_with_code(id, code, format!("store task failed: {error}"))
@@ -141,6 +152,7 @@ pub(super) async fn handle_store_read(
     payload: &Value,
     store: Option<&Arc<WebStore>>,
     identity: Option<&ClientIdentity>,
+    carrier: Carrier,
 ) -> WsReply {
     let parsed: StoreReadPayload = match serde_json::from_value(payload.clone()) {
         Ok(p) => p,
@@ -153,8 +165,12 @@ pub(super) async fn handle_store_read(
     if let Some(reply) = validate_store_key(&id, &parsed.key) {
         return reply;
     }
-    let result =
-        tokio::task::spawn_blocking(move || store.read(&parsed.key, &identity, unix_ms())).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let now_ms = unix_ms();
+        claim_for_desktop(&store, &identity, carrier, now_ms)?;
+        store.read(&parsed.key, &identity, now_ms)
+    })
+    .await;
     match result {
         Ok(Ok(stamped)) => WsReply::ok(
             id,
@@ -176,6 +192,8 @@ pub(super) async fn handle_store_write(
     payload: &Value,
     store: Option<&Arc<WebStore>>,
     identity: Option<&ClientIdentity>,
+    carrier: Carrier,
+    relay: &Arc<WsRelaySink>,
 ) -> WsReply {
     let parsed: StoreWritePayload = match serde_json::from_value(payload.clone()) {
         Ok(p) => p,
@@ -212,22 +230,29 @@ pub(super) async fn handle_store_write(
         expected: parsed.expected,
         command_id: parsed.command_id,
     };
+    let watched = (store.clone(), parsed.key.clone(), identity.clone());
     let result = tokio::task::spawn_blocking(move || {
-        store.write(&parsed.key, parsed.value, precondition, &identity, unix_ms())
+        let now_ms = unix_ms();
+        claim_for_desktop(&store, &identity, carrier, now_ms)?;
+        store.write(&parsed.key, parsed.value, precondition, &identity, now_ms)
     })
     .await;
     match result {
         Ok(Ok(WriteOutcome::Device { revision })) => {
+            publish_store(relay, &watched.0, &watched.1, &watched.2);
             WsReply::ok(id, Some(json!({ "revision": revision })))
         }
         Ok(Ok(WriteOutcome::Shared {
             value,
             revision,
             merged,
-        })) => WsReply::ok(
-            id,
-            Some(json!({ "value": value, "revision": revision, "merged": merged })),
-        ),
+        })) => {
+            publish_store(relay, &watched.0, &watched.1, &watched.2);
+            WsReply::ok(
+                id,
+                Some(json!({ "value": value, "revision": revision, "merged": merged })),
+            )
+        }
         Ok(Err(error)) => store_error_reply(id, error, "STORE_WRITE_FAILED"),
         Err(join_err) => task_failed(id, "STORE_WRITE_FAILED", join_err),
     }
@@ -239,6 +264,8 @@ pub(super) async fn handle_store_delete(
     payload: &Value,
     store: Option<&Arc<WebStore>>,
     identity: Option<&ClientIdentity>,
+    carrier: Carrier,
+    relay: &Arc<WsRelaySink>,
 ) -> WsReply {
     let parsed: StoreDeletePayload = match serde_json::from_value(payload.clone()) {
         Ok(p) => p,
@@ -256,12 +283,20 @@ pub(super) async fn handle_store_delete(
         expected: parsed.expected,
         command_id: parsed.command_id,
     };
+    let watched = (store.clone(), parsed.key.clone(), identity.clone());
     let result = tokio::task::spawn_blocking(move || {
-        store.delete(&parsed.key, precondition, &identity, unix_ms())
+        let now_ms = unix_ms();
+        claim_for_desktop(&store, &identity, carrier, now_ms)?;
+        store.delete(&parsed.key, precondition, &identity, now_ms)
     })
     .await;
     match result {
-        Ok(Ok(existed)) => WsReply::ok(id, Some(json!({ "existed": existed }))),
+        Ok(Ok(existed)) => {
+            if existed {
+                publish_store(relay, &watched.0, &watched.1, &watched.2);
+            }
+            WsReply::ok(id, Some(json!({ "existed": existed })))
+        }
         Ok(Err(error)) => store_error_reply(id, error, "STORE_DELETE_FAILED"),
         Err(join_err) => task_failed(id, "STORE_DELETE_FAILED", join_err),
     }

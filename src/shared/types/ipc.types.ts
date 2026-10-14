@@ -1,6 +1,5 @@
 // IPC Result pattern from architecture.md
 import type { AcpCatalog } from './acp-catalog.types'
-import type { WorkspaceManifest, WriteOutcome } from './workspace-manifest.types'
 
 // ============================================================================
 // Domain-command carriers (AD-5): `X-Command-Id` header of the ledgered HTTP
@@ -182,34 +181,9 @@ export type TerminalIpcChannels = {
   'terminal:kill': (terminalId: string) => IpcResult<void>
 }
 
-// CAP-5 / Story 5: Workspace manifest IPC channels. Mirrors the three Tauri
-// commands (`workspace_manifest_get` / `_write` / `_delete`) and the three
-// HTTP routes (`GET /workspace/:projectId`, `POST /workspace/:projectId/write`,
-// `POST /workspace/:projectId/delete`) — both transports return the SAME
-// `IpcResult<...>` shape byte-for-byte. Conflict is a SUCCESS body variant of
-// `WriteOutcome` (NOT an error code); an excluded-field payload (`envVars`,
-// raw `claim`, `fullscreenPaneId`) fails serde `deny_unknown_fields` and maps
-// to `VALIDATION_ERROR` with no state change.
-//
-// Patch 11: the channel keys use the colon-separated pattern
-// (`workspace:manifest:get`, etc.) to mirror the existing
-// `TerminalIpcChannels` (`terminal:spawn`, `terminal:attach`, …). The Tauri
-// adapter's IPC_COMMANDS map uses the underscored Rust command names
-// (`workspace_manifest_get`); the channel map keys are a documentation /
-// type-safety surface, not the literal invoke() strings.
-export type WorkspaceManifestIpcChannels = {
-  'workspace:manifest:get': (projectId: string) => IpcResult<WorkspaceManifest | null>
-  'workspace:manifest:write': (
-    projectId: string,
-    basedRevision: number | null,
-    manifest: WorkspaceManifest
-  ) => IpcResult<WriteOutcome>
-  'workspace:manifest:delete': (projectId: string) => IpcResult<void>
-}
-
-// CAP-6 / Story 8: ACP catalog IPC channels. Mirrors the two Tauri commands
-// (`acp_list_catalog` / `acp_set_catalog_opt_in`) and the two HTTP routes
-// (`GET /acp/catalog` / `POST /acp/catalog/opt-in`) — both transports return
+// CAP-6 / Story 8: ACP catalog IPC channels. Mirrors the two `/ws` requests
+// (`list_acp_catalog` / `set_catalog_opt_in`) and the two HTTP routes
+// (`GET /acp/catalog` / `POST /acp/catalog/opt-in`) — both carriers return
 // the SAME `IpcResult<...>` shape byte-for-byte. The catalog is
 // credential-free, path-free, read-only host introspection. The opt-in is a
 // single boolean that gates CDN registry augmentation.
@@ -218,13 +192,10 @@ export type AcpCatalogIpcChannels = {
   'acp:catalog:set_opt_in': (enabled: boolean) => IpcResult<void>
 }
 
-// CAP-6 / Story 9: ACP install IPC channel. Mirrors the Tauri command
-// `acp_install_agent` and the HTTP route `POST /acp/install` — both transports
+// CAP-6 / Story 9: ACP install IPC channel. Mirrors the `/ws` request
+// `install_acp_agent` and the HTTP route `POST /acp/install` — both carriers
 // return the SAME `IpcResult<InstallOutcome>` shape byte-for-byte. The request
 // is `{ agentId }` only; the host resolves everything from the trusted catalog.
-// The declared channel type is honest about the actual invoke payload shape:
-// the Tauri adapter wraps `agentId` in a `request` object (Tauri's convention
-// for single-struct-arg commands), so the channel signature reflects that.
 import type { InstallOutcome } from './acp-install.types'
 export type AcpInstallIpcChannels = {
   'acp:install:install_agent': (request: { agentId: string }) => IpcResult<InstallOutcome>
@@ -584,14 +555,47 @@ export interface PersistenceWriteOpts {
   // Idempotency id; a resend of the same write reuses it so the host can
   // recognise its own applied write.
   commandId?: string
+  // The caller re-reads and resends a write that lost a compare-and-set race.
+  // Such a conflict is not reported on the error bus; set it on every attempt
+  // except the last one, so only the final failure reaches the user.
+  retrying?: boolean
 }
 
 // A read that also reports the host's per-key revision stamp.
 export interface StampedValue<T> {
   value: T
-  // 0 = key absent (desktop plugin-store has no revisions and always reports 0).
+  // 0 = key absent.
   revision: number
   clientInstanceId: string | null
+}
+
+// Codes of failed store writes that the user must hear about: the value was
+// not saved and the writer cannot fix it alone.
+export const PERSISTENCE_ERROR_CODES = [
+  'STORE_VALUE_TOO_LARGE',
+  'STORE_PARTITION_FULL',
+  'STORE_NOT_HYDRATED',
+  'STORE_WRITE_FAILED',
+  'STORE_BASE_REQUIRED',
+  'STORE_CAS_FAILED'
+] as const
+
+export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number]
+
+// One failed write, by logical key.
+export interface PersistenceErrorEvent {
+  key: string
+  code: PersistenceErrorCode
+  message: string
+}
+
+export type PersistenceErrorListener = (event: PersistenceErrorEvent) => void
+
+// What a store key holds, as a watch reports it (the stored envelope is unwrapped).
+export interface PersistenceKeyChange<T = unknown> {
+  // `false` when the key is absent (never written, or deleted).
+  exists: boolean
+  data?: T
 }
 
 // Persistence API for renderer
@@ -602,6 +606,14 @@ export interface PersistenceApi {
   writeDebounced: <T>(key: string, data: T) => Promise<IpcResult<void>>
   flushPendingWrites: () => Promise<IpcResult<void>>
   delete: (key: string) => Promise<IpcResult<void>>
+  // Subscribe to failed writes (any caller, debounced or not). Returns the
+  // unsubscribe function.
+  onPersistenceError: (listener: PersistenceErrorListener) => () => void
+  // Report each change another device or tab makes to a key (by logical key),
+  // once this page has read it. Echoes of this page's own writes are not
+  // reported. Returns the unsubscribe function. Every real surface has it;
+  // it is optional so a partial test double need not carry it.
+  watchShared?: (key: string, listener: (change: PersistenceKeyChange) => void) => () => void
 }
 
 // System API for renderer

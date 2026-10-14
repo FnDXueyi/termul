@@ -130,7 +130,8 @@ describe('sshApi (web branch)', () => {
     await api.saveProfile(profile())
 
     expect(mockPersistenceApi.write).toHaveBeenCalledWith('ssh/profiles', [expect.anything()], {
-      expected: null
+      expected: null,
+      retrying: true
     })
   })
 
@@ -143,8 +144,8 @@ describe('sshApi (web branch)', () => {
     await api.deleteProfile('drop')
 
     expect(mockPersistenceApi.write.mock.calls.map((c) => c[2])).toEqual([
-      { expected: stored },
-      { expected: stored }
+      { expected: stored, retrying: true },
+      { expected: stored, retrying: true }
     ])
   })
 
@@ -163,8 +164,8 @@ describe('sshApi (web branch)', () => {
 
     expect(result.success).toBe(true)
     expect(mockPersistenceApi.write.mock.calls.map((c) => c[2])).toEqual([
-      { expected: first },
-      { expected: second }
+      { expected: first, retrying: true },
+      { expected: second, retrying: true }
     ])
     expect((mockPersistenceApi.write.mock.calls[1][1] as SSHProfile[]).map((p) => p.id)).toEqual([
       'a',
@@ -183,6 +184,14 @@ describe('sshApi (web branch)', () => {
     })
     expect(await api.saveProfile(profile())).toMatchObject({ code: 'STORE_CAS_FAILED' })
     expect(mockPersistenceApi.write).toHaveBeenCalledTimes(5)
+    // Only the last lost race is reported to the user.
+    expect(mockPersistenceApi.write.mock.calls.map((c) => c[2].retrying)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false
+    ])
 
     mockPersistenceApi.write.mockReset()
     mockPersistenceApi.write.mockResolvedValue({

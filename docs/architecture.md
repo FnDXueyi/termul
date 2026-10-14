@@ -130,7 +130,7 @@ This is a strongly store-driven architecture with hooks providing side-effect or
 
 Hooks such as:
 
-- `use-projects-persistence`
+- `use-project-registry`
 - `use-terminal-restore`
 - `useTerminalAutoSave`
 - `use-file-watcher`
@@ -225,10 +225,13 @@ This is one of the most custom parts of the app architecture.
 
 ### Renderer-Side Persistence
 
-The renderer uses Tauri plugin-store adapters through versioned persistence APIs
-for settings and lightweight application data. Desktop ACP chat transcripts are
-an exception: they are owned by a Rust file store under Tauri app data, with a
-lightweight index and one atomic JSON payload per session.
+The renderer keeps settings and lightweight application data in the host store
+through one versioned persistence facade on every surface: browsers and phones
+reach it over a WebSocket, the desktop over its Tauri channel connection to the
+host store it runs in-process. Keys are scoped per device or shared (see
+`docs/api-contracts.md`). Desktop ACP chat transcripts are an exception: they
+are owned by a Rust file store under Tauri app data, with a lightweight index
+and one atomic JSON payload per session.
 
 Primary persisted domains include:
 
@@ -245,7 +248,7 @@ Primary persisted domains include:
 
 `src/shared/types/persistence.types.ts` defines structures like:
 
-- `PersistedProjectData`
+- `ProjectPrefsRecord` (per-device project settings and sidebar layout; the project list itself lives in the host registry)
 - `PersistedTerminalLayout`
 - `PersistedSnapshotList`
 - `WindowState`
@@ -256,7 +259,7 @@ Primary persisted domains include:
 - version-wrapped persisted records
 - atomic Rust replacement for desktop ACP payload/index files
 - bounded renderer LRU for inactive full chat payloads; trimmed live sessions stay pinned
-- verified, fail-closed legacy ACP import from `termul-data.json`
+- verified, fail-closed legacy ACP import from the retired `termul-data.json` (now itself imported once into the host store)
 - desktop shared-live browser history reads durable files on demand instead of renderer clones
 - transcript/scrollback persistence for restore scenarios
 - session stores separated from general app data store

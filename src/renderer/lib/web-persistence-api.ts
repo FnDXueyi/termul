@@ -1,41 +1,46 @@
 /**
- * Web persistence API (issue #613).
+ * Persistence facade over the host store (issue #613, scoped in #1073).
  *
- * Persists web-client app state (settings, terminal layout, editor state,
- * command history, snapshots, SSH profiles) to the termul-server's
- * server-side JSON store over the authenticated `/ws` protocol instead of
- * per-browser localStorage, so state survives browser switches, refreshes,
- * and device changes.
- *
- * Implements the same `PersistenceApi` interface as the desktop
- * `tauriPersistenceApi` (plugin-store). Values are stored versioned
- * (`{ _version, data }`) exactly like the desktop store so a store file
- * stays readable by either implementation.
+ * Persists app state (settings, terminal layout, editor state, command
+ * history, snapshots, SSH profiles) to the host's server-side JSON store over
+ * the authenticated `/ws` store requests, so state survives browser switches,
+ * refreshes and device changes. It is the one `PersistenceApi` of every
+ * surface: browsers and phones reach the host over a WebSocket, the desktop
+ * over the Tauri Channel carrier (the `WebSocketImpl` option, see
+ * `persistence-api.ts`). Values are stored versioned (`{ _version, data }`).
  */
 
-import type {
-  IpcResult,
-  PersistenceApi,
-  PersistenceWriteOpts,
-  StampedValue
+import {
+  type IpcResult,
+  PERSISTENCE_ERROR_CODES,
+  type PersistenceApi,
+  type PersistenceErrorCode,
+  type PersistenceErrorListener,
+  type PersistenceKeyChange,
+  type PersistenceWriteOpts,
+  type StampedValue
 } from '@shared/types/ipc.types'
 import { scopedKey, scopeOf } from '@shared/types/persistence.types'
 import {
+  type StoreWatchState,
   WS_ERROR_CODES,
   type WsRequest,
   type WsRequestType
 } from '@shared/types/web-protocol.types'
 import { randomUUID } from '@/lib/uuid'
-import { resolveWsUrl } from './acp-transport'
+import { getAcpTransport, resolveWsUrl } from './acp-transport'
+import { HOST_GOING_AWAY_CLOSE_CODE, probeHostHealth } from './acp-transport/host-offline'
 import { HANDSHAKE_TIMEOUT_MS } from './acp-transport/ws-transport-timing'
 import { findUnresolvedCommand, openCommand, resolveCommand } from './command-journal'
 import { logFrontendError } from './log-api'
+import { STORE_VALUE_MAX_BYTES, STORED_VALUE_VERSION, storedValueBytes } from './persistence-trim'
+import { deepEqual, isRecord, SharedWatchTracker } from './shared-key-watch'
 import { getWebAuthToken } from './web-auth-token'
 import { buildAuthenticatePayload, getDeviceId } from './web-client-identity'
 import { clearProtocolMismatchLatch, handleProtocolVersionMismatch } from './web-protocol-reload'
 
 const DEBOUNCE_MS = 500
-const CURRENT_VERSION = 1
+const CURRENT_VERSION = STORED_VALUE_VERSION
 
 /** Transport-level failure carrying the server's stable error `code`. */
 interface StoreError {
@@ -71,13 +76,30 @@ export class WebStoreSocket {
    * version mismatch reloads the page once via the shared helper).
    */
   private halted: StoreError | null = null
+  /**
+   * The host closed the socket with `1001` (it stopped). This socket has no
+   * reconnect loop (every request connects on demand), so the flag only makes
+   * the next request ask `GET /health` once instead of opening a doomed socket.
+   */
+  private hostOffline = false
   private readonly pending = new Map<string, PendingRequest>()
   private readonly wsUrl: string
   private readonly wsCtor: typeof WebSocket
   private readonly deviceId: string | undefined
+  private readonly authToken: () => string | null
+  private readonly keepAliveMs: number
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null
 
-  constructor(opts?: { url?: string; WebSocketImpl?: typeof WebSocket; deviceId?: string }) {
+  constructor(opts?: {
+    url?: string
+    WebSocketImpl?: typeof WebSocket
+    deviceId?: string
+    authToken?: () => string | null
+    keepAliveMs?: number
+  }) {
     this.deviceId = opts?.deviceId
+    this.authToken = opts?.authToken ?? (() => getWebAuthToken() ?? 'dev')
+    this.keepAliveMs = opts?.keepAliveMs ?? 0
     this.wsUrl =
       opts?.url ?? (typeof window !== 'undefined' ? resolveWsUrl() : 'ws://127.0.0.1:8080/ws')
     this.wsCtor = opts?.WebSocketImpl ?? WebSocket
@@ -87,6 +109,14 @@ export class WebStoreSocket {
     if (this.halted) throw this.halted
     if (this.socket?.readyState === WebSocket.OPEN && this.authed) return
     if (this.connecting) return this.connecting
+    if (this.hostOffline) {
+      if (!(await probeHostHealth())) {
+        throw { code: 'HOST_OFFLINE', message: 'host is offline' } satisfies StoreError
+      }
+      this.hostOffline = false
+      if (this.socket?.readyState === WebSocket.OPEN && this.authed) return
+      if (this.connecting) return this.connecting
+    }
     this.connecting = this.open()
     try {
       await this.connecting
@@ -143,6 +173,7 @@ export class WebStoreSocket {
         void this.authenticate().then(() => {
           this.authed = true
           clearProtocolMismatchLatch()
+          this.startKeepAlive()
           settleOk()
         }, settleErr)
       }
@@ -180,9 +211,11 @@ export class WebStoreSocket {
         settleErr({ code: 'WS_ERROR', message: 'WebSocket error' })
       }
 
-      ws.onclose = () => {
+      ws.onclose = (ev?: { code?: number }) => {
+        this.stopKeepAlive()
         this.socket = null
         this.authed = false
+        if (ev?.code === HOST_GOING_AWAY_CLOSE_CODE) this.hostOffline = true
         this.rejectAll({ code: 'WS_ERROR', message: 'WebSocket closed' })
         settleErr({ code: 'WS_ERROR', message: 'WebSocket closed' })
       }
@@ -228,10 +261,12 @@ export class WebStoreSocket {
       // CAP-1 interim gate: present the resolved web auth token (URL #token=
       // fragment → localStorage), falling back to the legacy 'dev' placeholder that
       // ungated servers accept. Mirrors WsAcpTransport's auth_required handling.
+      // A carrier that is its own auth boundary (the desktop Channel) passes
+      // `authToken: () => null` and presents none.
       const frame: WsRequest = {
         id,
         type: 'authenticate',
-        payload: buildAuthenticatePayload(getWebAuthToken() ?? 'dev', this.deviceId)
+        payload: buildAuthenticatePayload(this.authToken(), this.deviceId)
       }
       this.pending.set(id, {
         resolve: () => resolve(),
@@ -249,7 +284,27 @@ export class WebStoreSocket {
     })
   }
 
+  /**
+   * A carrier with no transport-level pong (the desktop Channel) has the host
+   * close a connection that sends no frame for a while. A `ping` request every
+   * `keepAliveMs` keeps the idle connection open, so a later write does not race
+   * the host closing it.
+   */
+  private startKeepAlive(): void {
+    this.stopKeepAlive()
+    if (this.keepAliveMs <= 0) return
+    this.keepAliveTimer = setInterval(() => {
+      if (this.authed) void this.request('ping', {}).catch(() => undefined)
+    }, this.keepAliveMs)
+  }
+
+  private stopKeepAlive(): void {
+    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer)
+    this.keepAliveTimer = null
+  }
+
   private haltHandshake(err: StoreError): void {
+    this.stopKeepAlive()
     this.halted = err
     try {
       this.socket?.close()
@@ -273,10 +328,9 @@ export class WebStoreSocket {
   }
 }
 
-/** Largest serialized value the host accepts (mirrors `STORE_VALUE_MAX_BYTES`). */
-const STORE_VALUE_MAX_BYTES = 256 * 1024
-
-const utf8 = new TextEncoder()
+function isPersistenceErrorCode(code: string): code is PersistenceErrorCode {
+  return (PERSISTENCE_ERROR_CODES as readonly string[]).includes(code)
+}
 
 interface StoredValue<T> {
   _version: number
@@ -306,24 +360,7 @@ export interface WebPersistenceApi extends PersistenceApi {
    * from the value written. Returns the unsubscribe function.
    */
   onSharedChange: (key: string, listener: SharedChangeListener) => () => void
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (Array.isArray(a) && Array.isArray(b)) {
-    return a.length === b.length && a.every((item, i) => deepEqual(item, b[i]))
-  }
-  if (isRecord(a) && isRecord(b)) {
-    const keys = Object.keys(a)
-    return (
-      keys.length === Object.keys(b).length && keys.every((k) => k in b && deepEqual(a[k], b[k]))
-    )
-  }
-  return false
+  watchShared: (key: string, listener: (change: PersistenceKeyChange) => void) => () => void
 }
 
 function unwrap<T>(raw: unknown): T {
@@ -353,6 +390,10 @@ export function createWebPersistenceApi(opts?: {
   WebSocketImpl?: typeof WebSocket
   /** Test seam: the device partition to use instead of the page's stored id. */
   deviceId?: string
+  /** The `authenticate` token; default the page's web token (`null` presents none). */
+  authToken?: () => string | null
+  /** Send an app-level `ping` this often while connected (default: never). */
+  keepAliveMs?: number
 }): WebPersistenceApi {
   const socket = new WebStoreSocket(opts)
   const pendingDebounce = new Map<string, PendingDebounceEntry>()
@@ -363,6 +404,8 @@ export function createWebPersistenceApi(opts?: {
   /** Last known stored (wrapped) value of shared/cas keys: the default `expected`. */
   const casValues = new Map<string, unknown>()
   const listeners = new Map<string, Set<SharedChangeListener>>()
+  const errorListeners = new Set<PersistenceErrorListener>()
+  const watchTracker = new SharedWatchTracker()
   /** Per host key operation chain: replies must land in request order. */
   const chains = new Map<string, Promise<unknown>>()
 
@@ -454,6 +497,7 @@ export function createWebPersistenceApi(opts?: {
       )
       if (!result.success) {
         unhydrated.add(hostKey)
+        watchTracker.readFailed(hostKey)
         return result
       }
       const reply = result.data
@@ -462,6 +506,10 @@ export function createWebPersistenceApi(opts?: {
       unhydrated.delete(hostKey)
       revisions.set(hostKey, raw === null ? 0 : revision)
       if (scopeOf(logicalKey) === 'sharedCas') casValues.set(hostKey, raw)
+      watchTracker.read(
+        hostKey,
+        raw === null ? { exists: false } : { exists: true, data: unwrap(raw) }
+      )
       if (raw === null) {
         return failure('KEY_NOT_FOUND', `Key not found: ${logicalKey}`)
       }
@@ -484,7 +532,42 @@ export function createWebPersistenceApi(opts?: {
     return flushOrSupersede(logicalKey, () => sendWrite(logicalKey, data, writeOpts))
   }
 
+  /** Tells every error listener about a failed write; returns `result` unchanged. */
+  function reportFailure<T>(
+    logicalKey: string,
+    result: IpcResult<T>,
+    retrying = false
+  ): IpcResult<T> {
+    if (result.success || !isPersistenceErrorCode(result.code)) return result
+    // The caller resends a lost compare-and-set race itself; only its last
+    // failure is worth the user's attention.
+    if (retrying && result.code === 'STORE_CAS_FAILED') return result
+    const event = { key: logicalKey, code: result.code, message: result.error }
+    for (const listener of Array.from(errorListeners)) {
+      try {
+        listener(event)
+      } catch (err) {
+        void logFrontendError({
+          level: 'warn',
+          source: 'WebPersistenceApi.onPersistenceError',
+          message: `persistence-error listener for ${logicalKey} threw: ${String(err)}`
+        })
+      }
+    }
+    return result
+  }
+
   function sendWrite<T>(
+    logicalKey: string,
+    data: T,
+    writeOpts?: PersistenceWriteOpts
+  ): Promise<IpcResult<void>> {
+    return attemptWrite(logicalKey, data, writeOpts).then((result) =>
+      reportFailure(logicalKey, result, writeOpts?.retrying)
+    )
+  }
+
+  function attemptWrite<T>(
     logicalKey: string,
     data: T,
     writeOpts?: PersistenceWriteOpts
@@ -492,7 +575,7 @@ export function createWebPersistenceApi(opts?: {
     const hostKey = scopedKey(logicalKey, deviceId())
     const scope = scopeOf(logicalKey)
     const wrapped: StoredValue<T> = { _version: CURRENT_VERSION, data }
-    const size = utf8.encode(JSON.stringify(wrapped)).length
+    const size = storedValueBytes(data)
     if (size > STORE_VALUE_MAX_BYTES) {
       return Promise.resolve(
         failure(
@@ -524,10 +607,18 @@ export function createWebPersistenceApi(opts?: {
         payload.expected = expected
         payload.commandId = casCommandId(kind, intent, writeOpts?.commandId)
       }
+      watchTracker.sendStarted(hostKey, { exists: true, data })
       const result = await toResult(() => socket.request<StoreWriteReply>('store_write', payload))
       if (kind) settleCas(kind, intent, result)
-      if (!result.success) return result
+      if (!result.success) {
+        watchTracker.sendSettled(hostKey, null)
+        return result
+      }
       const reply = result.data
+      watchTracker.sendSettled(hostKey, {
+        exists: true,
+        data: scope === 'device' || reply?.value === undefined ? data : unwrap(reply.value)
+      })
       if (typeof reply?.revision === 'number') revisions.set(hostKey, reply.revision)
       if (scope === 'sharedCas') casValues.set(hostKey, reply?.value ?? wrapped)
       if (scope === 'sharedLww' && reply?.value !== undefined) {
@@ -540,6 +631,10 @@ export function createWebPersistenceApi(opts?: {
   }
 
   function sendDelete(logicalKey: string): Promise<IpcResult<void>> {
+    return attemptDelete(logicalKey).then((result) => reportFailure(logicalKey, result))
+  }
+
+  function attemptDelete(logicalKey: string): Promise<IpcResult<void>> {
     const hostKey = scopedKey(logicalKey, deviceId())
     const scope = scopeOf(logicalKey)
     return serialized(hostKey, async () => {
@@ -557,8 +652,10 @@ export function createWebPersistenceApi(opts?: {
         payload.expected = expected
         payload.commandId = casCommandId(kind, intent, undefined)
       }
+      watchTracker.sendStarted(hostKey, { exists: false })
       const result = await toResult(() => socket.request('store_delete', payload))
       if (kind) settleCas(kind, intent, result)
+      watchTracker.sendSettled(hostKey, result.success ? { exists: false } : null)
       if (!result.success) return result
       if (scope !== 'device') revisions.set(hostKey, 0)
       if (scope === 'sharedCas') casValues.set(hostKey, null)
@@ -655,6 +752,17 @@ export function createWebPersistenceApi(opts?: {
 
     flushPendingWrites,
 
+    onPersistenceError(listener: PersistenceErrorListener): () => void {
+      errorListeners.add(listener)
+      return () => {
+        errorListeners.delete(listener)
+      }
+    },
+
+    watchShared(key: string, listener: (change: PersistenceKeyChange) => void): () => void {
+      return watchTracker.watch(scopedKey(key, deviceId()), watchStoreKey, listener)
+    },
+
     onSharedChange(key: string, listener: SharedChangeListener): () => void {
       const set = listeners.get(key) ?? new Set<SharedChangeListener>()
       set.add(listener)
@@ -665,4 +773,39 @@ export function createWebPersistenceApi(opts?: {
       }
     }
   }
+}
+
+/** What a store key holds, as a watch reports it (the stored envelope is unwrapped). */
+export type StoreKeyChange<T = unknown> = PersistenceKeyChange<T>
+
+function changeOf<T>(state: StoreWatchState | null | undefined): StoreKeyChange<T> {
+  if (!state?.exists) return { exists: false }
+  const stored = state.value as { _version?: unknown; data?: T } | null
+  return stored && typeof stored === 'object' && 'data' in stored
+    ? { exists: true, data: stored.data }
+    : { exists: true, data: state.value as T }
+}
+
+/**
+ * Watch one store key: `onChange` gets what the key holds now (once the socket
+ * is up, and again after a reconnect or a lost delta) and after every write or
+ * delete. `key` is a full scoped key: `shared/...` (changes from any device) or
+ * `device/<own deviceId>/...`. The host refuses any other key
+ * (`STORE_KEY_SCOPE`). Returns the unsubscribe. The desktop's transport watches
+ * over the same Channel carrier as every other surface's over its socket.
+ */
+export function watchStoreKey<T = unknown>(
+  key: string,
+  onChange: (change: StoreKeyChange<T>) => void
+): () => void {
+  const watches = getAcpTransport().watches
+  if (!watches) return () => undefined
+  return watches.subscribe<StoreWatchState, StoreWatchState>(
+    'store',
+    {
+      onState: (state) => onChange(changeOf<T>(state)),
+      onDelta: (delta) => onChange(changeOf<T>(delta))
+    },
+    key
+  )
 }

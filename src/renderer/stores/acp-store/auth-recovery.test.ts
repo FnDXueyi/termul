@@ -283,7 +283,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'devin-terminal-login', name: 'Terminal login', type: 'terminal', args: ['--login'] }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') return { sessionId: 's1' }
@@ -392,7 +395,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       // Authenticate-on-demand: the picker only appears after session/new
@@ -429,7 +435,7 @@ describe('acp provider authentication & recovery', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('acp-registry:factory-droid', '/work')]: 'agent-factory'
+        [agentReuseKey('acp-registry:factory-droid', '/work', 'p1')]: 'agent-factory'
       }
     }))
     let newSessionCalls = 0
@@ -460,7 +466,7 @@ describe('acp provider authentication & recovery', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('acp-registry:factory-droid', '/work')]: 'agent-factory'
+        [agentReuseKey('acp-registry:factory-droid', '/work', 'p1')]: 'agent-factory'
       }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -492,7 +498,7 @@ describe('acp provider authentication & recovery', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey(configId, '/work')]: 'agent-factory'
+        [agentReuseKey(configId, '/work', 'p1')]: 'agent-factory'
       }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -517,7 +523,7 @@ describe('acp provider authentication & recovery', () => {
     useAcpStore.setState((s) => ({
       configToLiveAgent: {
         ...s.configToLiveAgent,
-        [agentReuseKey('acp-registry:factory-droid', '/work')]: 'agent-factory'
+        [agentReuseKey('acp-registry:factory-droid', '/work', 'p1')]: 'agent-factory'
       }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -538,7 +544,7 @@ describe('acp provider authentication & recovery', () => {
   })
   it('detaches a credential-changed agent without closing its live sessions', async () => {
     const configId = 'acp-registry:factory-droid'
-    const reuseKey = agentReuseKey(configId, '/work')
+    const reuseKey = agentReuseKey(configId, '/work', 'p1')
     const prepareKey = prepareChatKey(configId, '/work', undefined)
     useAcpStore.setState((s) => ({
       configToLiveAgent: { ...s.configToLiveAgent, [reuseKey]: 'old-agent' },
@@ -588,7 +594,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let newSessionCalls = 0
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -653,7 +662,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') throw authRequiredError()
@@ -666,7 +678,7 @@ describe('acp provider authentication & recovery', () => {
     })
     // The live agent must survive a multi-auth failure so method clicks stay wired.
     expect(useAcpStore.getState().agents['agent-9']).toBeDefined()
-    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work')]).toBe(
+    expect(useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]).toBe(
       'agent-9'
     )
     expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'acp_kill_agent')).toHaveLength(0)
@@ -855,7 +867,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Codex', command: 'codex', args: [], env: {} })
     seedLiveAgent('agent-9', [])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') {
@@ -934,7 +949,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Cursor', command: 'cursor', args: [], env: {} })
     seedLiveAgent('agent-9', [{ id: 'cursor_login', name: 'Cursor' }])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let newSessionCalls = 0
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -972,7 +990,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Pi', command: 'pi', args: [], env: {} })
     seedLiveAgent('agent-9', [])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') throw 'the stream was destroyed'
@@ -986,7 +1007,7 @@ describe('acp provider authentication & recovery', () => {
     expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'acp_kill_agent')).toHaveLength(1)
     expect(useAcpStore.getState().agents['agent-9']).toBeUndefined()
     expect(
-      useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work')]
+      useAcpStore.getState().configToLiveAgent[agentReuseKey('cfg-1', '/work', 'p1')]
     ).toBeUndefined()
   })
 
@@ -1255,8 +1276,8 @@ describe('acp provider authentication & recovery', () => {
     // `authenticate` round-trip. The auth-failed prepare must retry on its
     // own so the banner clears.
     seedLiveAgent('agent-1', [{ id: 'devin-browser', name: 'Browser sign-in', type: 'agent' }])
-    const reuseKey = 'cfg-1\0/work'
-    const errKey = `${reuseKey}\0`
+    const reuseKey = agentReuseKey('cfg-1', '/work', 'p1')
+    const errKey = 'cfg-1\0/work\0'
     useAcpStore.setState((s) => ({
       agentConfigs: [
         ...s.agentConfigs,
@@ -1298,7 +1319,7 @@ describe('acp provider authentication & recovery', () => {
     // cwd. The canonical key for the same agent still re-prepares normally.
     seedLiveAgent('agent-1', [{ id: 'devin-browser', name: 'Browser sign-in', type: 'agent' }])
     const configId = 'cfg-1'
-    const canonicalKey = agentReuseKey(configId, '/work')
+    const canonicalKey = agentReuseKey(configId, '/work', 'p1')
     const detachedKey = `${canonicalKey}\0agent-1`
     useAcpStore.setState((s) => ({
       agentConfigs: [
@@ -1351,7 +1372,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     const order: string[] = []
     let newSessionCalls = 0
@@ -1387,7 +1411,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') throw authRequiredError()
@@ -1411,7 +1438,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') throw authRequiredError()
@@ -1442,7 +1472,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'devin-terminal-login', name: 'Terminal login', type: 'terminal', args: ['--login'] }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_new_session') throw authRequiredError()
@@ -1470,7 +1503,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_authenticate') throw new Error('authentication denied by provider')
@@ -1505,7 +1541,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_authenticate') throw new Error('connection reset')
@@ -1530,7 +1569,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Cursor', command: 'cursor', args: [], env: {} })
     seedLiveAgent('agent-9', [{ id: 'cursor_login', name: 'Cursor' }])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let newSessionCalls = 0
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -1885,7 +1927,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Cursor', command: 'cursor', args: [], env: {} })
     seedLiveAgent('agent-9', [{ id: 'cursor_login', name: 'Cursor' }])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     let newSessionCalls = 0
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -1923,7 +1968,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_authenticate') return undefined
@@ -1954,7 +2002,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'api_key', name: 'API Key' }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     const gates: Array<() => void> = []
     let newSessionCalls = 0
@@ -2007,7 +2058,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'devin-terminal-login', name: 'Terminal login', type: 'terminal', args: ['--login'] }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
       if (cmd === 'acp_authenticate') return undefined
@@ -2035,7 +2089,10 @@ describe('acp provider authentication & recovery', () => {
       .saveAgentConfig({ id: 'cfg-1', name: 'Devin', command: 'devin', args: ['acp'], env: {} })
     seedLiveAgent('agent-9', [{ id: 'devin-browser', name: 'Browser sign-in', type: 'agent' }])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     const gates: Array<() => void> = []
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
@@ -2067,7 +2124,10 @@ describe('acp provider authentication & recovery', () => {
       { id: 'devin-terminal-login', name: 'Terminal login', type: 'terminal', args: ['--login'] }
     ])
     useAcpStore.setState((s) => ({
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey('cfg-1', '/work')]: 'agent-9' }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
     }))
     const gates: Array<() => void> = []
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
