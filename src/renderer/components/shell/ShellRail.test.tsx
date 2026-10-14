@@ -224,24 +224,23 @@ describe('ShellRail', () => {
       expect(props.onShortcutsOpenChange).toHaveBeenCalledWith(true)
     })
 
-    it('has the Rail and Side panel toggles in the Rail header on desktop and web', () => {
+    it('has only the Termul mark in the Rail header, and the one toggle first in the footer', () => {
       for (const tauri of [true, false]) {
         tauriRef.current = tauri
         const { unmount } = renderRail()
         const header = screen.getByTestId('rail-header')
-        const rail = within(header).getByRole('button', { name: 'Expand or collapse projects' })
-        const side = within(header).getByRole('button', { name: 'Show or hide side panel' })
-        expect(rail).toHaveAttribute('aria-pressed', 'true')
-        expect(side).toHaveAttribute('aria-pressed', 'true')
-        // Header is above Search; the Projects header row has no toggle.
-        const nav = screen.getByRole('navigation', { name: 'Projects' })
+        expect(within(header).getByTestId('shell-brand-mark')).toBeInTheDocument()
+        expect(within(header).queryAllByRole('button')).toHaveLength(0)
+
+        // The toggle sits bottom-left: the first button of the footer row,
+        // after every other Rail button.
+        const toggles = screen.getAllByRole('button', { name: 'Expand or collapse projects' })
+        expect(toggles).toHaveLength(1)
+        expect(toggles[0]).toHaveAttribute('aria-pressed', 'true')
+        const settings = screen.getByRole('button', { name: 'Settings' })
         expect(
-          header.compareDocumentPosition(within(nav).getByRole('button', { name: 'Search' })) &
-            Node.DOCUMENT_POSITION_FOLLOWING
+          toggles[0].compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING
         ).toBeTruthy()
-        expect(screen.getAllByRole('button', { name: 'Expand or collapse projects' })).toHaveLength(
-          1
-        )
         unmount()
       }
     })
@@ -251,7 +250,7 @@ describe('ShellRail', () => {
       const { unmount } = renderRail()
       const header = screen.getByTestId('rail-header')
       expect(header).toHaveAttribute('data-tauri-drag-region')
-      for (const button of within(header).getAllByRole('button')) {
+      for (const button of within(header).queryAllByRole('button')) {
         expect(button).not.toHaveAttribute('data-tauri-drag-region')
       }
       unmount()
@@ -259,12 +258,6 @@ describe('ShellRail', () => {
       tauriRef.current = false
       renderRail()
       expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
-    })
-
-    it('persists the Side panel toggle through the panel visibility path', () => {
-      renderRail()
-      fireEvent.click(screen.getByRole('button', { name: 'Show or hide side panel' }))
-      expect(updatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', false)
     })
 
     it('occludes native webviews while the + menu is open', async () => {
@@ -345,36 +338,37 @@ describe('ShellRail', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('shows only the icons: toggle, project switcher, Column tabs, Search, Canvas, SSH, Settings', () => {
+    it('shows only the icons: project stack, Column tabs, Search, Canvas, SSH, Settings', () => {
       renderRail()
 
       const nav = screen.getByRole('navigation', { name: 'Projects' })
       const names = within(nav)
         .getAllByRole('button')
         .map((button) => button.getAttribute('aria-label'))
+      // The Rail toggle is the last item, under Settings (bottom-left).
       expect(names).toEqual([
-        'Expand or collapse projects',
         'Switch project (Alpha)',
+        // Other open projects (not archived) follow the active one.
+        'Open Beta',
         'Chats',
         'Explorer',
         'Changes',
         'Search',
         'Open canvas',
         'SSH hosts',
-        'Settings'
+        'Settings',
+        'Expand or collapse projects'
       ])
-      expect(
-        within(nav).getByRole('button', { name: 'Expand or collapse projects' })
-      ).toHaveAttribute('aria-pressed', 'false')
       expect(within(nav).queryByText('Projects')).not.toBeInTheDocument()
       expect(within(nav).queryByTestId('ssh-section')).not.toBeInTheDocument()
       expect(screen.getByTestId('shell-rail')).toHaveStyle({ width: '48px' })
-      // The top 40px is an empty band, drag space on desktop.
+      // The top 40px band is drag space on desktop. Without traffic lights
+      // the Termul mark sits in it.
       const band = screen.getByTestId('rail-top-band')
       expect(band).toHaveClass('h-10')
-      expect(band).toBeEmptyDOMElement()
       expect(band).toHaveAttribute('data-tauri-drag-region')
-      // Settings is pinned at the bottom.
+      expect(within(band).getByTestId('shell-brand-mark')).toBeInTheDocument()
+      // Settings and the toggle are pinned at the bottom.
       expect(screen.getByRole('button', { name: 'Settings' }).parentElement).toHaveClass('mt-auto')
     })
 
@@ -396,7 +390,7 @@ describe('ShellRail', () => {
   })
 
   describe('expand and collapse', () => {
-    it('flips through the persisted path and keeps the chosen state', async () => {
+    it('flips through the persisted path from the same bottom-left toggle', async () => {
       tauriRef.current = false
       renderRail()
       const nav = screen.getByTestId('shell-rail')

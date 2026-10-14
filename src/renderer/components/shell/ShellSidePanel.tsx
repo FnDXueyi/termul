@@ -1,7 +1,6 @@
 import type { ComponentProps } from 'react'
 import { SidePanelColumn } from '@/components/shell/SidePanelColumn'
-import { TopRowToggleStrip } from '@/components/shell/TopRowToggleStrip'
-import { useTopRow } from '@/components/shell/top-row-context'
+import { useTopRow, useTopRowPlatform } from '@/components/shell/top-row-context'
 import { ExplorerColumn } from '@/layouts/workspace-layout/ExplorerColumn'
 import { useSidebarVisible } from '@/stores/sidebar-store'
 
@@ -13,34 +12,28 @@ type ShellSidePanelProps = Omit<ComponentProps<typeof ExplorerColumn>, 'sidePane
  * toggle; it follows `sidePanelVisible` through the explorer projection hook)
  * and the Column tabs panel is injected through its `sidePanel` slot.
  *
- * Rail expanded: the column header is the Side panel's part of the top row.
- * Rail collapsed: a left stack puts the toggle strip above the column (the
- * strip stays when the column is hidden, so the toggles remain reachable).
+ * In both Rail states the column header is the Side panel's part of the top
+ * row. With the Rail collapsed on macOS the column starts under the traffic
+ * lights, so its header takes extra clearance. Nothing sits above the column,
+ * so a hidden Side panel leaves no gap.
  */
 export function ShellSidePanel(props: ShellSidePanelProps): React.JSX.Element {
   const railExpanded = useSidebarVisible()
   const dragRegion = useTopRow()?.platform.dragRegions ?? false
+  const { trafficLights } = useTopRowPlatform()
 
-  const column = (
+  return (
     <ExplorerColumn
       {...props}
       sidePanel={
         props.activeProject ? (
           <SidePanelColumn
             activeProject={props.activeProject}
-            dragRegion={railExpanded && dragRegion}
+            dragRegion={dragRegion}
+            trafficLightInset={!railExpanded && trafficLights}
           />
         ) : undefined
       }
     />
-  )
-
-  if (railExpanded) return column
-
-  return (
-    <div className="flex h-full shrink-0 flex-col" data-testid="side-panel-stack">
-      <TopRowToggleStrip />
-      <div className="flex min-h-0 flex-1">{column}</div>
-    </div>
   )
 }

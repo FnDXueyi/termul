@@ -279,6 +279,25 @@ describe('ChatsList card content', () => {
     render(<ChatsList project={project} />)
     expect(screen.getByTitle('Chat a')).toHaveAttribute('aria-current', 'true')
     expect(screen.getByTitle('Chat b')).not.toHaveAttribute('aria-current')
+    // Selected uses the keycap, the same surface as the Rail's active project.
+    expect(screen.getByTitle('Chat a').parentElement).toHaveClass('keycap')
+    expect(screen.getByTitle('Chat b').parentElement).not.toHaveClass('keycap')
+  })
+
+  it('puts the title on line 1 and the model on line 2', () => {
+    setIndex([entry('a', { modelName: 'Opus' })])
+    render(<ChatsList project={project} />)
+    const [line1, line2] = Array.from(screen.getByTitle('Chat a').children)
+    expect(line1).toHaveTextContent('Chat a')
+    expect(line2).toHaveTextContent('Opus')
+  })
+
+  it('keeps a closed chat at full opacity and says Closed', () => {
+    setIndex([entry('a', { status: 'closed' })])
+    render(<ChatsList project={project} />)
+    const card = screen.getByTitle('Chat a')
+    expect(card.parentElement).not.toHaveClass('opacity-60')
+    expect(within(card).getByText(/^Closed · /)).toBeInTheDocument()
   })
 })
 

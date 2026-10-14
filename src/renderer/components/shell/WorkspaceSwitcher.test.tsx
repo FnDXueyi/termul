@@ -128,6 +128,14 @@ describe('WorkspaceSwitcher', () => {
       expect(screen.getByRole('button', { name: /feat\/a/ })).toBeInTheDocument()
     })
 
+    it('shows the branch in its own case, not as an uppercase section label', () => {
+      useShellLayoutStore.setState({ worktreePickByProject: { p1: 'e:/proj/.termul/worktrees/a' } })
+      renderSwitcher()
+      const label = screen.getByText('feat/a')
+      expect(label).not.toHaveClass('label-panel')
+      expect(label.closest('button')).toHaveClass('text-foreground')
+    })
+
     it('reads Workspace for a pruned or outside-root pick', () => {
       useShellLayoutStore.setState({
         worktreePickByProject: { p1: 'e:/proj/.termul/worktrees/gone' }

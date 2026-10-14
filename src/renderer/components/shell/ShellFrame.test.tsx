@@ -305,6 +305,24 @@ describe('ShellFrame', () => {
       expect(dragRegions()).toHaveLength(0)
     })
 
+    it('starts the main card below the traffic lights only with the Rail collapsed on macOS', () => {
+      platformRef.mac = true
+      useShellLayoutStore.setState({ railExpanded: false })
+      const { unmount } = renderFrame(withProject)
+      expect(screen.getByRole('main')).toHaveClass('mt-9')
+      unmount()
+
+      useShellLayoutStore.setState({ railExpanded: true })
+      const second = renderFrame(withProject)
+      expect(screen.getByRole('main')).not.toHaveClass('mt-9')
+      second.unmount()
+
+      platformRef.mac = false
+      useShellLayoutStore.setState({ railExpanded: false })
+      renderFrame(withProject)
+      expect(screen.getByRole('main')).not.toHaveClass('mt-9')
+    })
+
     it('keeps workspaceMain mounted when the mode flips between fallback and panes', () => {
       const { rerenderFrame } = renderFrame()
       rerenderFrame(withProject)

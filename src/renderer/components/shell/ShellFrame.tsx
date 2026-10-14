@@ -9,7 +9,9 @@ import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
 import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
+import { cn } from '@/lib/utils'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
+import { useSidebarVisible } from '@/stores/sidebar-store'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useFullscreenPaneId, usePaneRoot } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
@@ -69,6 +71,7 @@ export function ShellFrame({
   appModals
 }: ShellFrameProps): React.JSX.Element {
   const isThemePickerOpen = useThemePickerOpen()
+  const railExpanded = useSidebarVisible()
   const { activeSSHProfileId, handleSSHConnect, handleSelectSSHProfile } = ssh
 
   const paneRoot = usePaneRoot()
@@ -124,7 +127,15 @@ export function ShellFrame({
               <div className="flex-1 flex min-h-0 h-full overflow-hidden min-w-0">
                 <ShellSidePanel activeProject={activeProject} ssh={ssh} />
 
-                <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
+                <main
+                  className={cn(
+                    'flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip',
+                    // Rail collapsed on macOS: start below the traffic lights in
+                    // both Side panel states, so hiding the panel only moves the
+                    // main card sideways, never down.
+                    !railExpanded && platform.trafficLights && 'mt-9'
+                  )}
+                >
                   {roles.controlsOwner === 'fallback-bar' && <TopRowFallbackBar />}
                   {workspaceMain}
                 </main>

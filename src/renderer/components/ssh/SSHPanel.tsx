@@ -230,7 +230,7 @@ export function SSHPanel({
                           {profile.name}
                         </span>
                         {showAddresses && (
-                          <span className="truncate font-mono text-3xs text-muted-foreground">
+                          <span className="truncate font-mono text-2xs text-muted-foreground">
                             {addressLabel(profile)}
                           </span>
                         )}
