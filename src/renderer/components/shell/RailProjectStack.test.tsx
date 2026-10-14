@@ -89,6 +89,21 @@ describe('RailProjectStack', () => {
     expect(names).toEqual(['Switch project (A)', 'Open E', 'Open C', 'Open B', 'Open D'])
   })
 
+  it('lists the switcher popover in the same Rail order', () => {
+    // cmdk scrolls the selected item into view; jsdom has no layout.
+    Element.prototype.scrollIntoView = vi.fn()
+    useProjectStore.setState({ groups: [{ id: 'g1', name: 'One', projectIds: ['c', 'b'] }] })
+    renderStack(ids('a', 'b', 'c', 'd'))
+    fireEvent.click(screen.getByRole('button', { name: 'Switch project (A)' }))
+    const paths = screen.getAllByRole('option').map((option) => option.textContent)
+    expect(paths.slice(0, 4).map((text) => text?.match(/\/repo\/(\w)/)?.[1])).toEqual([
+      'c',
+      'b',
+      'a',
+      'd'
+    ])
+  })
+
   it('keeps list order when statuses change, so no icon moves under the pointer', () => {
     const { names: before, rerenderStack } = renderStack(ids('a', 'b', 'c', 'd', 'e'))
     expect(before).toEqual(['Switch project (A)', 'Open B', 'Open C', 'Open D', 'Open E'])

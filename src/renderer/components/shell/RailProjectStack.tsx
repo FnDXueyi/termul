@@ -90,15 +90,16 @@ export function RailProjectStack({
   const storeGroups = useProjectStore((state) => state.groups)
   const groups = useMemo(() => storeGroups ?? [], [storeGroups])
 
+  const ordered = useMemo(() => orderRailProjects(projects, groups), [projects, groups])
   const others = useMemo(
-    () => orderRailProjects(projects, groups).filter((project) => project.id !== activeProject?.id),
-    [projects, groups, activeProject?.id]
+    () => ordered.filter((project) => project.id !== activeProject?.id),
+    [ordered, activeProject?.id]
   )
   const shown = others.slice(0, RAIL_STACK_OTHERS)
   const hidden = others.slice(RAIL_STACK_OTHERS)
   const hiddenNeedsYou = hidden.reduce((sum, project) => sum + status(project.id).attentionCount, 0)
 
-  const switcherProps = { projects, activeProject, openProject, onNewProject }
+  const switcherProps = { projects: ordered, activeProject, openProject, onNewProject }
   const moreLabel = `${hidden.length} more projects`
 
   return (
