@@ -2011,6 +2011,7 @@ describe('Claude Accounts parity (ADR-0004)', () => {
     for (const command of [
       'claude_accounts_add',
       'claude_accounts_login',
+      'claude_accounts_login_cancel',
       'claude_accounts_rename',
       'claude_accounts_remove'
     ]) {

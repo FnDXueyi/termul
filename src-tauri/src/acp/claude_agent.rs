@@ -318,6 +318,8 @@ pub struct ClaudeAgentService {
     profile_store: Option<Arc<ClaudeAccountStore>>,
     usage_probe: Arc<dyn ClaudeUsageProbe>,
     usage_cache: UsageCache,
+    /// Cancel handle of each running browser login, by Account id.
+    login_cancels: accounts::LoginCancels,
 }
 
 impl ClaudeAgentService {
@@ -374,6 +376,7 @@ impl ClaudeAgentService {
             runtime_probe,
             profile_store: None,
             usage_cache: UsageCache::default(),
+            login_cancels: parking_lot::Mutex::default(),
         }
     }
 

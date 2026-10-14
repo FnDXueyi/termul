@@ -153,6 +153,12 @@ async fn the_snapshot_reports_the_login_state_of_each_account() {
     assert_eq!(states, vec![("Default", Some(true)), ("Work", Some(false))]);
 }
 
+#[test]
+fn cancelling_without_a_running_login_is_a_no_op() {
+    let h = host(|_| None);
+    assert!(!h.service.cancel_login("default"));
+}
+
 #[tokio::test]
 async fn a_service_without_host_state_has_no_accounts() {
     let service = ClaudeAgentService::without_host_state();

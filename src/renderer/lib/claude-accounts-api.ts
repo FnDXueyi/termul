@@ -18,6 +18,14 @@ import { getAcpTransport } from './acp-transport'
 import { logFrontendError } from './log-api'
 import { isTauriContext } from './tauri-runtime'
 
+/** The host's error text for a sign-in the user cancelled. */
+export const CLAUDE_LOGIN_CANCELLED = 'Sign-in was cancelled'
+
+export function isClaudeLoginCancelled(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.includes(CLAUDE_LOGIN_CANCELLED)
+}
+
 export class ClaudeAccountsUnsupportedError extends Error {
   constructor(action: string) {
     super(`${action} a Claude account is available only in the desktop app.`)
@@ -70,6 +78,12 @@ export const claudeAccountsApi = {
   login: (accountId: string): Promise<void> =>
     desktopOnly('login', 'Signing in to', () =>
       invoke<void>('claude_accounts_login', { accountId })
+    ),
+
+  /** Stop a running sign-in; resolves `false` when none was running. */
+  cancelLogin: (accountId: string): Promise<boolean> =>
+    desktopOnly('cancelLogin', 'Cancelling the sign-in of', () =>
+      invoke<boolean>('claude_accounts_login_cancel', { accountId })
     ),
 
   rename: (accountId: string, name: string): Promise<void> =>

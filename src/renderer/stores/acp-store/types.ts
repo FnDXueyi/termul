@@ -697,7 +697,8 @@ export interface AcpState {
   /** Restart the agent for a crashed chat and replay the last user prompt.
    * User-initiated (Retry click) — honors ADR-003's no-silent-respawn (the crash
    * is still surfaced; respawn only happens on explicit user action). */
-  retryCrashedSession: (sessionId: SessionId) => Promise<void>
+  /** Reopen on a fresh agent and (unless `resend: false`) send the last user prompt again. */
+  retryCrashedSession: (sessionId: SessionId, options?: { resend?: boolean }) => Promise<void>
   /** Re-run prepare for a failed chat launch (status 'error' +
    * `launchConfigId`) against the recorded agent config. On success the real
    * session replaces the placeholder and the tab remaps; on failure the

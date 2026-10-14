@@ -55,6 +55,13 @@ fn the_sdk_limits_list_becomes_windows() {
 }
 
 #[test]
+fn a_nested_model_scope_names_the_window() {
+    let reply = r#"{"rate_limits_available":true,"rate_limits":{"limits":[{"kind":"weekly_scoped","group":"weekly","percent":0,"resets_at":null,"scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}}"#;
+    let usage = parse_probe_output("a1", reply, 0);
+    assert_eq!(usage.windows[0].scope.as_deref(), Some("Fable"));
+}
+
+#[test]
 fn a_window_that_has_not_started_has_no_reset_time() {
     let reply = r#"{"subscription_type":"team","rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","group":"session","percent":0,"resets_at":null,"severity":"normal"}]}}"#;
     let usage = parse_probe_output("a1", reply, 0);
