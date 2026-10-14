@@ -1,6 +1,8 @@
 import type { SSHProfile } from '@shared/types/ssh.types'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useProjectStore } from '@/stores/project-store'
+import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { SSH_HOSTS_TAB, type SSHSession, useSSHStore } from '@/stores/ssh-store'
 import { SSHWorkspace } from './SSHWorkspace'
 
@@ -88,10 +90,46 @@ describe('SSHWorkspace header', () => {
 
   it('is the window top row with topRow', () => {
     const { container } = render(
-      <SSHWorkspace topRow={{ dragRegion: true, windowControls: true }} />
+      <SSHWorkspace topRow={{ dragRegion: true, windowControls: true, showSidePanel: true }} />
     )
     expect(container.querySelectorAll('[data-tauri-drag-region]').length).toBeGreaterThan(0)
     expect(screen.getByTestId('window-controls')).toBeInTheDocument()
+  })
+
+  describe('Show side panel button', () => {
+    const topRow = { dragRegion: true, windowControls: false, showSidePanel: true }
+
+    beforeEach(() => {
+      resetShellLayoutStoreForTests()
+      useShellLayoutStore.setState({ status: 'unavailable', sidePanelVisible: false })
+      useProjectStore.setState({
+        projects: [{ id: 'proj', name: 'Proj', path: '/repo' }] as never,
+        activeProjectId: 'proj'
+      })
+    })
+
+    it('starts the header while the Side panel is hidden', () => {
+      render(<SSHWorkspace topRow={topRow} />)
+      const slot = screen.getByTestId('show-side-panel-slot')
+      expect(within(slot).getByRole('button', { name: 'Show side panel' })).toBeInTheDocument()
+      expect(slot.nextElementSibling).toBe(screen.getAllByRole('tablist')[0])
+    })
+
+    it('is absent while the Side panel is visible', () => {
+      useShellLayoutStore.setState({ sidePanelVisible: true })
+      render(<SSHWorkspace topRow={topRow} />)
+      expect(screen.queryByTestId('show-side-panel-slot')).toBeNull()
+    })
+
+    it('is absent when the header does not own it, or the project has no folder', () => {
+      const { unmount } = render(<SSHWorkspace topRow={{ ...topRow, showSidePanel: false }} />)
+      expect(screen.queryByTestId('show-side-panel-slot')).toBeNull()
+      unmount()
+
+      useProjectStore.setState({ projects: [{ id: 'proj', name: 'Proj' }] as never })
+      render(<SSHWorkspace topRow={topRow} />)
+      expect(screen.queryByTestId('show-side-panel-slot')).toBeNull()
+    })
   })
 })
 

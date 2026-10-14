@@ -2,14 +2,17 @@ import { type ReactNode, useMemo } from 'react'
 import { useLocation } from 'react-router-dom'
 import { ResizeEdges } from '@/components/ResizeEdges'
 import { ShellRail } from '@/components/shell/ShellRail'
-import { ShellSidePanel } from '@/components/shell/ShellSidePanel'
+import { SidePanelColumn } from '@/components/shell/SidePanelColumn'
 import { TopRowFallbackBar } from '@/components/shell/TopRowFallbackBar'
 import { TopRowProvider } from '@/components/shell/top-row-context'
+import { getTrafficLightInset } from '@/components/shell/traffic-light-inset'
 import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
+import { ExplorerColumn } from '@/layouts/workspace-layout/ExplorerColumn'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
 import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
+import { useSidebarVisible } from '@/stores/sidebar-store'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useFullscreenPaneId, usePaneRoot } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
@@ -69,6 +72,7 @@ export function ShellFrame({
   appModals
 }: ShellFrameProps): React.JSX.Element {
   const isThemePickerOpen = useThemePickerOpen()
+  const railExpanded = useSidebarVisible()
   const { activeSSHProfileId, handleSSHConnect, handleSelectSSHProfile } = ssh
 
   const paneRoot = usePaneRoot()
@@ -84,6 +88,7 @@ export function ShellFrame({
     [paneRoot, fullscreenPaneId, mode]
   )
   const platform = useMemo(() => getTopRowPlatform(), [])
+  const trafficLightInset = getTrafficLightInset(platform, railExpanded)
 
   // Native browser webviews paint above the DOM: hide them while a shell
   // popover is open so it is never drawn underneath.
@@ -122,9 +127,24 @@ export function ShellFrame({
               {/* No gap here: the Side panel owns its 8px gutter so its resize handle
                   sits on the main container border. */}
               <div className="flex-1 flex min-h-0 h-full overflow-hidden min-w-0">
-                <ShellSidePanel activeProject={activeProject} ssh={ssh} />
+                {/* `ExplorerColumn` stays the outer shell (reveal motion,
+                    visibility, SSH file browser); the Column tabs panel is
+                    injected through its `sidePanel` slot. */}
+                <ExplorerColumn
+                  activeProject={activeProject}
+                  ssh={ssh}
+                  sidePanel={
+                    activeProject ? <SidePanelColumn activeProject={activeProject} /> : undefined
+                  }
+                />
 
-                <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
+                <main
+                  className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip"
+                  // Rail collapsed on macOS: start below the traffic lights in
+                  // both Side panel states, so hiding the panel only moves the
+                  // main card sideways, never down.
+                  style={trafficLightInset ? { marginTop: trafficLightInset.mainTopPx } : undefined}
+                >
                   {roles.controlsOwner === 'fallback-bar' && <TopRowFallbackBar />}
                   {workspaceMain}
                 </main>

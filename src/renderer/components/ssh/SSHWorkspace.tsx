@@ -2,6 +2,10 @@ import type { SSHProfile } from '@shared/types/ssh.types'
 import { useMemo } from 'react'
 import { toast } from 'sonner'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import {
+  ShowSidePanelSlot,
+  useShowSidePanelVisible
+} from '@/components/shell/SidePanelVisibilityButtons'
 import { WindowControls } from '@/components/shell/TopRowChrome'
 import { hostLabel } from '@/lib/ssh-messages'
 import { closeSSHSession, openSSHSession, requestCloseSSHSession } from '@/lib/ssh-sessions'
@@ -26,9 +30,10 @@ interface SSHWorkspaceProps {
   /**
    * The header is the window top row. `dragRegion` marks its empty space as
    * a window drag region; `windowControls` renders the window controls flush
-   * at its right end.
+   * at its right end; `showSidePanel` puts the Show side panel button at its
+   * start while the Side panel is hidden.
    */
-  topRow?: { dragRegion: boolean; windowControls: boolean }
+  topRow?: { dragRegion: boolean; windowControls: boolean; showSidePanel: boolean }
 }
 
 /** Placeholder profile for a tab whose host was deleted meanwhile. */
@@ -55,6 +60,8 @@ export function SSHWorkspace({ topRow }: SSHWorkspaceProps): React.JSX.Element {
   const pendingClose = useSSHPendingClose()
   const { setActiveTab, duplicateProfile, toggleFavorite, importConfig } = useSSHActions()
   const dialogs = useSSHPanelDialogs()
+  // The slot brings its own start padding, so the header drops its own.
+  const showSidePanel = useShowSidePanelVisible() && Boolean(topRow?.showSidePanel)
 
   const profileById = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles])
   const pendingSession = sessions.find((s) => s.id === pendingClose)
@@ -88,10 +95,12 @@ export function SSHWorkspace({ topRow }: SSHWorkspaceProps): React.JSX.Element {
       <div
         className={cn(
           'flex h-10 shrink-0 items-center gap-2 border-b border-border',
-          topRow ? 'pl-2' : 'px-2'
+          !topRow && 'px-2',
+          topRow && !showSidePanel && 'pl-2'
         )}
         data-tauri-drag-region={topRow?.dragRegion ? true : undefined}
       >
+        {showSidePanel && <ShowSidePanelSlot />}
         <SSHSessionTabs
           sessions={sessions}
           profiles={profiles}

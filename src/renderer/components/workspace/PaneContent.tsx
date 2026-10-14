@@ -9,6 +9,7 @@ import {
   LAUNCHER_EXIT_REDUCED_MS,
   LAUNCHER_EXIT_WINDOW_MS
 } from '@/components/agents/launcher/launcher-motion'
+import { ShowSidePanelSlot } from '@/components/shell/SidePanelVisibilityButtons'
 import { usePaneTopRow } from '@/components/shell/top-row-context'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
@@ -276,6 +277,7 @@ export function PaneContent({
           onCloseTabs={onCloseTabs}
           defaultShell={defaultShell}
           topRow={topRow ?? undefined}
+          leading={topRow?.leftEdge ? <ShowSidePanelSlot /> : undefined}
         />
       )}
 

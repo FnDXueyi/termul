@@ -1,6 +1,6 @@
 import type { ShellInfo } from '@shared/types/ipc.types'
 import { AnimatePresence, useReducedMotion } from 'framer-motion'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { Maximize2, Minimize2 } from '@/components/icons'
 import { WindowControls } from '@/components/shell/TopRowChrome'
@@ -59,6 +59,11 @@ interface WorkspaceTabBarProps {
    * renders the window controls flush at its right end. Unset = classic bar.
    */
   topRow?: { dragRegion: boolean; windowControls: boolean }
+  /**
+   * Content at the start of the bar, before the tabs (the Show side panel
+   * slot). Unset = the bar starts with tabs.
+   */
+  leading?: ReactNode
 }
 
 export function WorkspaceTabBar({
@@ -73,7 +78,8 @@ export function WorkspaceTabBar({
   onCloseEditorTab,
   onCloseTabs,
   defaultShell,
-  topRow
+  topRow,
+  leading
 }: WorkspaceTabBarProps): React.JSX.Element {
   const { setActiveTab, setActivePane, togglePaneFullscreen } = useWorkspaceStore(
     useShallow((state) => ({
@@ -410,6 +416,7 @@ export function WorkspaceTabBar({
           handleDrop(paneId, 'center', e)
         }}
       >
+        {leading}
         <div
           className="relative flex items-center h-full min-w-0 flex-1 overflow-hidden"
           data-tauri-drag-region={dragAttr}
