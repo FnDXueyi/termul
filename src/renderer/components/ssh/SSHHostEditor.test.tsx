@@ -46,6 +46,35 @@ beforeEach(() => {
 })
 
 describe('new host', () => {
+  it('previews where the session signs in as the fields change', () => {
+    renderEditor()
+    const preview = screen.getByTestId('ssh-host-editor-preview')
+    expect(preview).toHaveTextContent('user@host')
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'web.example' } })
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'deploy' } })
+    expect(preview).toHaveTextContent('deploy@web.example')
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '2222' } })
+    expect(preview).toHaveTextContent('deploy@web.example:2222')
+  })
+
+  it('shows an invalid port as typed instead of falling back to 22', () => {
+    renderEditor()
+    const preview = screen.getByTestId('ssh-host-editor-preview')
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'web.example' } })
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'deploy' } })
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '70000' } })
+    expect(preview).toHaveTextContent('deploy@web.example:70000')
+    fireEvent.change(screen.getByLabelText('Port'), { target: { value: '22' } })
+    expect(preview.textContent).toBe('deploy@web.example')
+  })
+
+  it('groups the fields under Connection, Sign-in and Organize', () => {
+    renderEditor()
+    for (const name of ['Connection', 'Sign-in', 'Organize']) {
+      expect(screen.getByRole('group', { name })).toBeInTheDocument()
+    }
+  })
+
   it('validates inline and focuses the first problem instead of saving', async () => {
     const { onSaved } = renderEditor()
     fireEvent.change(screen.getByLabelText('Port'), { target: { value: '70000' } })
