@@ -61,4 +61,23 @@ async fn a_host_without_state_reports_no_accounts() {
     let acp = Arc::new(AcpManager::new(vec![]));
     let reply = handle_list_claude_accounts("1".into(), &acp).await;
     assert!(!reply.ok);
+    let reply = handle_list_claude_usage("2".into(), &json!({ "force": true }), &acp).await;
+    assert_eq!(reply.err.unwrap().code, "unsupported");
+}
+
+#[tokio::test]
+async fn usage_in_api_key_mode_lists_every_account_without_a_probe() {
+    let (root, acp) = manager_with_account();
+    std::fs::write(root.path().join("claude-auth-mode"), b"api-key").unwrap();
+    let reply = handle_list_claude_usage("1".into(), &json!({}), &acp).await;
+    assert!(reply.ok);
+    let usage = &reply.payload.unwrap()["usage"];
+    let ids: Vec<&str> = usage
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["accountId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["default", "ab12"]);
+    assert_eq!(usage[0]["status"], "unavailable");
 }

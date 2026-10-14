@@ -1092,6 +1092,9 @@ pub struct UsageUpdateEvent {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<UsageCostEvent>,
+    /// Claude plan rate-limit state, when the Claude ACP adapter sends it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<crate::acp::claude_accounts::usage::ClaudeRateLimit>,
 }
 
 // Story 1.1 (AC7): the legacy `events::emit(app, event, payload)` free function

@@ -23,8 +23,10 @@ const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 
 mod accounts;
 mod cli;
+mod usage;
 
 use cli::{claude_cli_command, SystemClaudeRuntimeProbe};
+use usage::{ClaudeUsageProbe, SystemClaudeUsageProbe, UsageCache};
 
 /// Extract the major version from Node's canonical `vMAJOR.MINOR.PATCH` output.
 pub fn parse_node_major(output: &str) -> Option<u64> {
@@ -314,6 +316,8 @@ pub struct ClaudeAgentService {
     /// Claude Accounts of this host state dir; `None` without host state.
     // Not named `accounts`: CodeQL treats that word as secret data.
     profile_store: Option<Arc<ClaudeAccountStore>>,
+    usage_probe: Arc<dyn ClaudeUsageProbe>,
+    usage_cache: UsageCache,
 }
 
 impl ClaudeAgentService {
@@ -363,9 +367,13 @@ impl ClaudeAgentService {
     ) -> Self {
         Self {
             credentials,
+            usage_probe: Arc::new(SystemClaudeUsageProbe {
+                install_root: install_root.clone(),
+            }),
             install_root,
             runtime_probe,
             profile_store: None,
+            usage_cache: UsageCache::default(),
         }
     }
 

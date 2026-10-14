@@ -240,6 +240,9 @@ export const WS_REQUEST_TYPES = [
   // the Default `{ accountId }` or a Project Account `{ projectId, accountId |
   // null }` → `{}`. Add, sign-in, rename and remove stay host-local.
   'list_claude_accounts',
+  // `{ force? }` → `{ usage: ClaudeAccountUsage[] }`; reads are cached 5 min
+  // on the host (a forced read still reuses one younger than 60 s).
+  'list_claude_usage',
   'set_default_claude_account',
   'set_project_claude_account'
 ] as const
@@ -285,6 +288,7 @@ export const WS_COMMAND_CLASSES: Readonly<
   register_discovered_session: ['command', 'payload'],
   spawn_agent: ['create', 'entity'],
   list_claude_accounts: ['read', null],
+  list_claude_usage: ['read', null],
   set_default_claude_account: ['idempotent', null],
   set_project_claude_account: ['idempotent', null],
   kill_agent: ['idempotent', null],

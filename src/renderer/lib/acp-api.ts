@@ -15,6 +15,7 @@
  * host-local domain command). Callers (the store) normalize it (toast, etc.).
  */
 
+import type { ClaudeRateLimit } from '@shared/types/claude-accounts.types'
 import {
   type AgentCapabilities,
   isProviderErrorCode,
@@ -683,6 +684,8 @@ export interface UsageUpdateEvent {
   used: number
   size: number
   cost?: UsageCost | null
+  /** Claude plan rate-limit state, when the Claude ACP adapter sends it. */
+  rateLimit?: ClaudeRateLimit | null
 }
 
 /** Agent-reported context window state for a session. */
@@ -692,6 +695,8 @@ export interface SessionUsage {
   /** First `used` snapshot for this session — static agent bootstrap prefix. */
   baselineUsed: number
   cost?: UsageCost
+  /** Latest Claude plan rate-limit state of the session's Account. */
+  rateLimit?: ClaudeRateLimit
   updatedAt: number
   source: 'reported'
 }

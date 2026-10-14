@@ -110,6 +110,24 @@ termul-server claude account project <project-id> default
 termul-server claude account remove <id>
 ```
 
+### Account usage
+
+Termul reads the usage windows of each Account (5-hour session, weekly, and
+per-model weekly windows, with percent used and reset time) through the Claude
+Agent SDK that ships with the managed Claude ACP package. It runs a short
+`node` probe with the Account's `CLAUDE_CONFIG_DIR`, so Claude Code uses and
+refreshes its own login; Termul never reads a token, and the probe prints only
+the limits and the plan type. The probe asks only for plan limits
+(`skipBehaviors`), writes no session file, and loads no MCP servers or user
+settings. Reads are cached on the host for 5 minutes; a forced refresh reuses a
+read younger than 60 seconds. An Account with no login reads as `signed_out`;
+API-key mode reads as `unavailable`. The SDK usage call is experimental, so an
+unknown reply shape yields no windows instead of an error.
+
+During a turn, the Claude ACP adapter also attaches the live rate-limit state
+(`allowed`, `allowed_warning`, or `rejected`, with reset time and percent) to
+`usage_update` events. Termul forwards it as `rateLimit` on `acp:usage_update`.
+
 `remove` signs the Claude CLI out of that Account, deletes its folder (never
 the shared folder), and moves its Projects back to the Default Account. The
 built-in Account cannot be removed. On Windows, a link that cannot be created
@@ -122,8 +140,8 @@ Authenticated remote users can launch Claude ACP through the host and use the
 host's configured credential. Credential status and management remain local to
 the server host's CLI. There are no HTTP or WS routes for reading or changing
 Claude credentials. A remote client can list the Accounts (names, ids, and
-signed-in state) and choose the Default or a Project Account
-(`list_claude_accounts`, `set_default_claude_account`,
+signed-in state) and their usage, and choose the Default or a Project Account
+(`list_claude_accounts`, `list_claude_usage`, `set_default_claude_account`,
 `set_project_claude_account`); view-only connections can only list. Adding,
 signing in, renaming and removing an Account stay on the host.
 

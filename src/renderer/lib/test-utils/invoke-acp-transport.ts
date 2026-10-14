@@ -15,7 +15,10 @@
  */
 
 import type { AcpCatalog } from '@shared/types/acp-catalog.types'
-import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
+import type {
+  ClaudeAccountsSnapshot,
+  ClaudeAccountUsage
+} from '@shared/types/claude-accounts.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 import type { ProjectSummary } from '@shared/types/web-projects.types'
 import type { PersistedSessionSummary, WsAgentSummary } from '@shared/types/web-protocol.types'
@@ -160,6 +163,8 @@ export function createInvokeAcpTransport(): AcpTransport {
       invoke<AcpRegistrySnapshot>('acp_fetch_registry_snapshot', { forceRefresh }),
     probeMcpServer: (server) => invoke<ProbeResult>('acp_probe_mcp_server', { server }),
     listClaudeAccounts: () => invoke<ClaudeAccountsSnapshot>('claude_accounts_list'),
+    listClaudeUsage: (force = false) =>
+      invoke<ClaudeAccountUsage[]>('claude_accounts_usage', { force }),
     setDefaultClaudeAccount: async (accountId) => {
       await invoke('claude_accounts_set_default', { accountId })
     },

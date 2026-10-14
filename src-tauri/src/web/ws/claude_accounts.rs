@@ -1,6 +1,7 @@
-//! Claude Account WS handlers: list the Accounts and choose the Default or a
-//! Project Account. Adding, signing in, renaming, and removing an Account stay
-//! on the host (desktop UI or `termul-server claude account`), because they
+//! Claude Account WS handlers: list the Accounts and their usage, and choose
+//! the Default or a Project Account. Adding, signing in, renaming, and
+//! removing an Account stay on the host (desktop UI or
+//! `termul-server claude account`), because they
 //! start a browser login or delete login state on the host.
 
 use super::*;
@@ -26,6 +27,30 @@ pub(super) async fn handle_list_claude_accounts(id: String, acp: &Arc<AcpManager
         Ok(snapshot) => ok_with_payload(id, &snapshot),
         Err(error) => {
             warn!(error = %error, "list_claude_accounts failed");
+            WsReply::err(id, WsErrorCode::Unsupported, error)
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ListClaudeUsagePayload {
+    #[serde(default)]
+    force: bool,
+}
+
+/// `list_claude_usage { force? }` → the usage windows of every Account.
+pub(super) async fn handle_list_claude_usage(
+    id: String,
+    payload: &Value,
+    acp: &Arc<AcpManager>,
+) -> WsReply {
+    let parsed: ListClaudeUsagePayload =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    match acp.claude_agent().accounts_usage(parsed.force).await {
+        Ok(usage) => ok_with_payload(id, &json!({ "usage": usage })),
+        Err(error) => {
+            warn!(error = %error, "list_claude_usage failed");
             WsReply::err(id, WsErrorCode::Unsupported, error)
         }
     }

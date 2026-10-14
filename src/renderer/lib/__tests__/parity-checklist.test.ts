@@ -1997,6 +1997,7 @@ describe('Claude Accounts parity (ADR-0004)', () => {
     const dispatch = read('web', 'ws', 'dispatch.rs')
     for (const request of [
       'list_claude_accounts',
+      'list_claude_usage',
       'set_default_claude_account',
       'set_project_claude_account'
     ]) {

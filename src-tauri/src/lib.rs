@@ -1878,6 +1878,7 @@ pub fn run() {
             // add, sign-in, rename and remove stay here; list and selection
             // also travel over `/ws`.
             acp::commands::claude_accounts_list,
+            acp::commands::claude_accounts_usage,
             acp::commands::claude_accounts_add,
             acp::commands::claude_accounts_login,
             acp::commands::claude_accounts_rename,
