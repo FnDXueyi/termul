@@ -512,6 +512,89 @@ fn it_tree_hash_is_refused() {
     assert!(git_get_commit_file_diff(repo.to_str().unwrap(), &tree, "a.txt", None).is_err());
 }
 
+/// A signed commit with `log.showSignature` prints GPG text before `%H`.
+/// The detail read must ignore that config.
+#[cfg(unix)]
+#[test]
+fn it_signed_commit_detail_ignores_show_signature() {
+    use std::os::unix::fs::PermissionsExt;
+    if git_missing()
+        || std::process::Command::new("gpg")
+            .arg("--version")
+            .output()
+            .is_err()
+    {
+        return;
+    }
+    let home = unique_temp_dir("gpg-home");
+    std::fs::set_permissions(&*home, std::fs::Permissions::from_mode(0o700))
+        .expect("gpg home mode");
+    let home_s = home.to_str().unwrap();
+    let gen = std::process::Command::new("gpg")
+        .env("GNUPGHOME", home_s)
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-gen-key",
+            "Termul Test <t@example.com>",
+            "ed25519",
+            "sign",
+            "never",
+        ])
+        .output()
+        .expect("run gpg");
+    assert!(
+        gen.status.success(),
+        "gpg keygen failed: {}",
+        String::from_utf8_lossy(&gen.stderr)
+    );
+    let listed = std::process::Command::new("gpg")
+        .env("GNUPGHOME", home_s)
+        .args(["--batch", "--list-secret-keys", "--with-colons"])
+        .output()
+        .expect("list gpg keys");
+    let fpr = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut cols = line.split(':');
+            (cols.next()? == "fpr")
+                .then(|| cols.nth(8).unwrap_or("").to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .expect("signing fingerprint");
+
+    let repo = init_repo("show-sig");
+    git(&repo, &["config", "gpg.format", "openpgp"]);
+    git(&repo, &["config", "gpg.program", "gpg"]);
+    git(&repo, &["config", "user.signingkey", &fpr]);
+    git(&repo, &["config", "log.showSignature", "true"]);
+    write(&repo, "a.txt", b"one\n");
+    git(&repo, &["add", "-A"]);
+    let signed = std::process::Command::new("git")
+        .current_dir(&*repo)
+        .env("GNUPGHOME", home_s)
+        .args(["commit", "-q", "-S", "-m", "signed init"])
+        .output()
+        .expect("signed commit");
+    assert!(
+        signed.status.success(),
+        "signed commit failed: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let hash = git(&repo, &["rev-parse", "HEAD"]);
+
+    let d = detail(&repo, &hash);
+    assert_eq!(d.hash, hash);
+    assert_eq!(d.message, "signed init");
+    assert_eq!(d.author_email, "t@example.com");
+    let diff = file_diff(&repo, &hash, "a.txt", None);
+    assert!(!diff.too_large);
+    assert!(diff.diff.contains("+one"), "{}", diff.diff);
+}
+
 #[test]
 fn it_annotated_tag_resolves_to_its_commit() {
     if git_missing() {

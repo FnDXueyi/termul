@@ -12,8 +12,10 @@
 //! The request hash is only a lookup key. It must be hex, and it is resolved
 //! with `rev-parse <hash>^{commit}` so a blob or tree id is refused; every
 //! later git call gets the resolved full ids (validated as hex of the repo's
-//! length) and `--end-of-options` before them, so no id can be read as an
-//! option. File contents are never read into logs.
+//! length). A hex id cannot be an option, so these calls omit
+//! `--end-of-options` (Git 2.30). `git show` passes `--no-show-signature` so
+//! `log.showSignature` cannot put GPG text in front of the header. File
+//! contents are never read into logs.
 
 use super::git_exec::{empty_tree_for, git_stdout, GitRunError, StdoutCap};
 use super::*;
@@ -183,18 +185,14 @@ pub fn git_get_commit_detail(cwd: &str, hash: &str) -> Result<GitCommitDetail, C
 /// blob or tree id (and peel a tag to its commit); the result must be a full
 /// object id before it is used anywhere else.
 fn resolve_commit(cwd: &str, hash: &str) -> Result<String, CommitDetailError> {
+    // `hash` is hex, so `spec` cannot be an option. Omit `--end-of-options`
+    // (Git 2.30); older git would fail this lookup for every commit.
     let spec = format!("{hash}^{{commit}}");
     let stdout = git_stdout(
         cwd,
         "rev-parse",
         StdoutCap::Unbounded,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ],
+        &["rev-parse", "--verify", "--quiet", &spec],
     )
     .map_err(|e| match e {
         // `--quiet` prints nothing for an id that names no commit.
@@ -226,6 +224,8 @@ fn read_header(
     full: &str,
 ) -> Result<(String, String, Vec<String>, String), CommitDetailError> {
     // %H full hash, %ae author email, %P parents, %B raw message.
+    // `--no-show-signature` overrides `log.showSignature`, which writes GPG
+    // text to stdout before the format and makes the hash field unreadable.
     let header = git_stdout(
         cwd,
         "show",
@@ -234,8 +234,8 @@ fn read_header(
             "show",
             "-s",
             "--no-color",
+            "--no-show-signature",
             "--format=%H%x00%ae%x00%P%x00%B",
-            "--end-of-options",
             full,
         ],
     )?;
@@ -294,8 +294,8 @@ fn diff_tree(
         format,
     ];
     match first_parent {
-        Some(parent) => args.extend(["--end-of-options", parent, full]),
-        None => args.extend(["--root", "--end-of-options", full]),
+        Some(parent) => args.extend([parent.as_str(), full]),
+        None => args.extend(["--root", full]),
     }
     let stdout = git_stdout(cwd, "diff-tree", StdoutCap::Unbounded, &args)?;
     Ok(String::from_utf8_lossy(&stdout).into_owned())
@@ -334,7 +334,6 @@ pub fn git_get_commit_file_diff(
         "--no-color",
         "--no-ext-diff",
         "-M",
-        "--end-of-options",
         base,
         &full,
         "--",
