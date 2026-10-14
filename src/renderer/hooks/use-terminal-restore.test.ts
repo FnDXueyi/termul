@@ -19,6 +19,14 @@ const { mockToastError } = vi.hoisted(() => ({ mockToastError: vi.fn() }))
 
 vi.mock('sonner', () => ({ toast: { error: mockToastError } }))
 
+const { mockHasCachedTerminal } = vi.hoisted(() => ({
+  mockHasCachedTerminal: vi.fn((_ptyId: string) => false)
+}))
+
+vi.mock('@/components/terminal/terminal-cache', () => ({
+  hasCachedTerminal: mockHasCachedTerminal
+}))
+
 const { mockRecordTerminalContinuityEvent, mockBeginProjectContinuityCorrelation } = vi.hoisted(
   () => ({
     mockRecordTerminalContinuityEvent: vi.fn(),
@@ -197,6 +205,8 @@ beforeEach(() => {
   mockBeginProjectContinuityCorrelation.mockImplementation(
     (projectId: string) => `corr-${projectId}`
   )
+  mockHasCachedTerminal.mockReset()
+  mockHasCachedTerminal.mockReturnValue(false)
   mockProjectState.activeProjectId = ''
   committedProjectOverride = null
   useProjectSwitchStatus.setState({ pending: null, failed: null })
@@ -714,6 +724,71 @@ describe('useTerminalRestore', () => {
       expect.stringContaining('project-a:')
     )
     vi.useRealTimers()
+  })
+
+  describe('reconciling persisted history into live terminals', () => {
+    async function reconcileLiveTerminal(
+      overrides: Partial<ReturnType<typeof mockTerminal>>
+    ): Promise<Record<string, unknown> | undefined> {
+      mockTerminalStoreState.terminals = [
+        mockTerminal({
+          id: 'a-live',
+          projectId: 'project-a',
+          name: 'A',
+          ptyId: 'pty-a',
+          ...overrides
+        })
+      ]
+      mockLoadPersistedTerminals.mockResolvedValue({
+        activeTerminalId: 'a-live',
+        terminals: [
+          mockPersistedTerminal({
+            id: 'a-live',
+            name: 'A',
+            cwd: '/projects/a',
+            scrollback: [],
+            transcript: 'persisted output\r\n'
+          })
+        ],
+        updatedAt: '2026-03-09T00:00:00.000Z'
+      })
+
+      renderHook(() => {
+        mockProjectState.activeProjectId = 'project-a'
+        useTerminalRestore()
+      })
+
+      await waitFor(() => {
+        expect(mockTerminalStoreState.setTerminals).toHaveBeenCalled()
+      })
+      const setCall = mockTerminalStoreState.setTerminals.mock.calls[0]?.[0] as Array<
+        Record<string, unknown>
+      >
+      return setCall.find((t) => t.id === 'a-live')
+    }
+
+    it('takes the persisted transcript for a live terminal with no xterm', async () => {
+      const reconciled = await reconcileLiveTerminal({ rendererAttachmentCount: 0 })
+      expect(reconciled?.transcript).toBe('persisted output\r\n')
+    })
+
+    it('skips the persisted transcript when the xterm is cached', async () => {
+      mockHasCachedTerminal.mockImplementation((ptyId: string) => ptyId === 'pty-a')
+      const reconciled = await reconcileLiveTerminal({ rendererAttachmentCount: 0 })
+      expect(mockHasCachedTerminal).toHaveBeenCalledWith('pty-a')
+      expect(reconciled?.transcript).toBeUndefined()
+    })
+
+    it('skips the persisted transcript when a renderer is attached', async () => {
+      const reconciled = await reconcileLiveTerminal({ rendererAttachmentCount: 1 })
+      expect(reconciled?.transcript).toBeUndefined()
+    })
+
+    it('keeps the live missed-output transcript of a cached xterm', async () => {
+      mockHasCachedTerminal.mockReturnValue(true)
+      const reconciled = await reconcileLiveTerminal({ transcript: 'missed\r\n' })
+      expect(reconciled?.transcript).toBe('missed\r\n')
+    })
   })
 
   // Project Switch Terminal Preservation tests

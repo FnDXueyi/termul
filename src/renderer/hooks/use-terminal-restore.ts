@@ -2,6 +2,7 @@ import type { PreservedTerminalEntry } from '@shared/types/ipc.types'
 import { WEB_TERMINAL_ERROR_CODES } from '@shared/types/web-terminal-protocol.types'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { hasCachedTerminal } from '@/components/terminal/terminal-cache'
 import { resolveAgentEnv } from '@/lib/agent-launch'
 import { getBuiltInAgent } from '@/lib/agents/agent-registry'
 import { loadCustomAgents } from '@/lib/agents/custom-agents'
@@ -722,10 +723,18 @@ function reconcilePersistedHistoryIntoLiveTerminals(
       return terminal
     }
 
+    // A cached or mounted xterm already shows the persisted output, and it
+    // writes any store transcript as output it missed: taking the persisted
+    // copy would print it twice. Only its own missed-output transcript stays.
+    const xtermHoldsOutput =
+      (terminal.rendererAttachmentCount ?? 0) > 0 ||
+      (terminal.ptyId !== undefined && hasCachedTerminal(terminal.ptyId))
+
     return {
       ...terminal,
       pendingScrollback: terminal.pendingScrollback ?? persistedTerminal.scrollback,
-      transcript: terminal.transcript ?? persistedTerminal.transcript,
+      transcript:
+        terminal.transcript ?? (xtermHoldsOutput ? undefined : persistedTerminal.transcript),
       // R3: also carry the captured DEC modes so a pane-transition remount can
       // replay them (the live tracker is reset on unmount→remount). Prefer the
       // persisted snapshot when present so a stale in-memory pendingModes can't

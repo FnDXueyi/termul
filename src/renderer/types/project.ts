@@ -92,6 +92,12 @@ export interface Terminal {
   pendingScrollback?: string[] // Legacy text snapshot to restore on terminal mount
   transcript?: string // Raw PTY transcript used for ANSI/styling-preserving restoration
   /**
+   * True once `transcript` lost its head to a size or hidden-buffer trim since
+   * the last consume, so it no longer continues the screen a cached xterm
+   * holds. Cleared by `consumeTranscript`.
+   */
+  transcriptTrimmed?: boolean
+  /**
    * Captured DEC private-mode snapshot (R3) to replay before `pendingScrollback`
    * on terminal mount, so an alt-screen TUI (vim/tmux/less) restores its
    * screen/modes. Optional — absence degrades to content-only restore.
