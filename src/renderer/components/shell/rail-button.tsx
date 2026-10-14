@@ -24,6 +24,8 @@ interface RailButtonProps {
   /** Muted second line in the tooltip (e.g. why the action is disabled). */
   hint?: string
   'aria-label': string
+  /** Accessible description: status that is not part of the name (the click does not act on it). */
+  description?: string
   disabled?: boolean
   /** Sets `aria-pressed` and the keycap "you are here" surface. */
   pressed?: boolean
@@ -39,6 +41,7 @@ export function RailButton({
   label,
   hint,
   'aria-label': ariaLabel,
+  description,
   disabled = false,
   pressed,
   badge,
@@ -55,6 +58,7 @@ export function RailButton({
       }}
       className={railButtonClass(pressed ?? false, size)}
       aria-label={ariaLabel}
+      aria-description={description}
       aria-pressed={pressed}
       aria-disabled={disabled || undefined}
       disabled={disabled}

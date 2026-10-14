@@ -3,133 +3,163 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectRowStatus } from '@/components/sidebar/indicators'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import type { Project } from '@/types/project'
-import { pickShownProjects, RAIL_STACK_OTHERS, RailProjectStack } from './RailProjectStack'
+import { useProjectStore } from '@/stores/project-store'
+import type { Project, ProjectGroup } from '@/types/project'
+import { RAIL_STACK_OTHERS, RailProjectStack } from './RailProjectStack'
 
-const { statusRef, navigateSpy } = vi.hoisted(() => ({
+const { statusRef, openProject } = vi.hoisted(() => ({
   statusRef: { current: {} as Record<string, Partial<ProjectRowStatus>> },
-  navigateSpy: vi.fn()
+  openProject: vi.fn()
 }))
 
-vi.mock('@/components/sidebar/use-project-row-status', () => ({
-  useProjectRowStatus: () => (id: string) => ({
-    live: null,
-    attentionCount: 0,
-    crashed: false,
-    ...statusRef.current[id]
+vi.mock('@/components/sidebar/use-project-rail', () => ({
+  useProjectRail: () => ({
+    status: (id: string) => ({
+      live: null,
+      attentionCount: 0,
+      crashed: false,
+      ...statusRef.current[id]
+    }),
+    openProject,
+    openNeedsYou: vi.fn()
   })
 }))
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
-  return { ...actual, useNavigate: () => navigateSpy }
-})
 
 const project = (id: string, extra: Partial<Project> = {}): Project =>
   ({ id, name: id.toUpperCase(), color: 'blue', path: `/repo/${id}`, ...extra }) as Project
 
-function renderStack(projects: Project[], activeId = 'a') {
-  const onSelectProject = vi.fn()
-  render(
+const ids = (...list: string[]): Project[] => list.map((id) => project(id))
+const many = ids('a', 'b', 'c', 'd', 'e', 'f', 'g')
+
+function stackView(projects: Project[], activeId = 'a') {
+  return (
     <MemoryRouter>
       <TooltipProvider>
         <RailProjectStack
           projects={projects}
           activeProject={projects.find((p) => p.id === activeId)}
-          onSelectProject={onSelectProject}
+          onSelectProject={vi.fn()}
           onNewProject={vi.fn()}
         />
       </TooltipProvider>
     </MemoryRouter>
   )
-  const stack = screen.getByTestId('rail-project-stack')
-  const names = within(stack)
+}
+
+function stackNames(): (string | null)[] {
+  return within(screen.getByTestId('rail-project-stack'))
     .getAllByRole('button')
     .map((button) => button.getAttribute('aria-label'))
-  return { onSelectProject, names }
+}
+
+function renderStack(projects: Project[], activeId = 'a') {
+  const view = render(stackView(projects, activeId))
+  return {
+    names: stackNames(),
+    rerenderStack: () => view.rerender(stackView(projects, activeId))
+  }
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
   statusRef.current = {}
+  useProjectStore.setState({ groups: [] })
 })
 
 describe('RailProjectStack', () => {
   it('puts the active project first on the keycap, then the other open projects', () => {
-    const { names } = renderStack([project('a'), project('b'), project('z', { isArchived: true })])
+    const { names } = renderStack([...ids('a', 'b'), project('z', { isArchived: true })])
     expect(names).toEqual(['Switch project (A)', 'Open B'])
     expect(screen.getByRole('button', { name: 'Switch project (A)' })).toHaveClass('keycap')
   })
 
-  it('switches project and goes to the workspace from an icon', () => {
-    const { onSelectProject } = renderStack([project('a'), project('b')])
+  it('opens the project from an icon, as the main click of an expanded row', () => {
+    renderStack(ids('a', 'b'))
     fireEvent.click(screen.getByRole('button', { name: 'Open B' }))
-    expect(onSelectProject).toHaveBeenCalledWith('b')
-    expect(navigateSpy).toHaveBeenCalledWith('/')
+    expect(openProject).toHaveBeenCalledWith('b')
+  })
+
+  it('lists the others in the expanded Rail order: groups first, then ungrouped', () => {
+    const groups: ProjectGroup[] = [
+      { id: 'g1', name: 'One', projectIds: ['e', 'c'] },
+      { id: 'g2', name: 'Two', projectIds: ['b'] }
+    ]
+    useProjectStore.setState({ groups })
+    const { names } = renderStack(ids('a', 'b', 'c', 'd', 'e'))
+    expect(names).toEqual(['Switch project (A)', 'Open E', 'Open C', 'Open B', 'Open D'])
   })
 
   it('keeps list order when statuses change, so no icon moves under the pointer', () => {
+    const { names: before, rerenderStack } = renderStack(ids('a', 'b', 'c', 'd', 'e'))
+    expect(before).toEqual(['Switch project (A)', 'Open B', 'Open C', 'Open D', 'Open E'])
+
     statusRef.current = {
       c: { live: 'activity' },
       d: { crashed: true },
       e: { attentionCount: 2 }
     }
-    const { names } = renderStack([
-      project('a'),
-      project('b'),
-      project('c'),
-      project('d'),
-      project('e')
-    ])
-    expect(names).toEqual([
-      'Switch project (A)',
-      'Open B',
-      'Open C, Running',
-      'Open D, Terminal crashed',
-      'Open E, 2 need you'
-    ])
+    rerenderStack()
+    expect(stackNames()).toEqual(before)
+  })
+
+  it('names a status in the description, not in the name', () => {
+    statusRef.current = { c: { live: 'activity' }, d: { crashed: true }, e: { attentionCount: 2 } }
+    renderStack(ids('a', 'b', 'c', 'd', 'e'))
+    expect(screen.getByRole('button', { name: 'Open B' })).not.toHaveAccessibleDescription()
+    expect(screen.getByRole('button', { name: 'Open C' })).toHaveAccessibleDescription('Running')
+    expect(screen.getByRole('button', { name: 'Open D' })).toHaveAccessibleDescription(
+      'Terminal crashed'
+    )
+    expect(screen.getByRole('button', { name: 'Open E' })).toHaveAccessibleDescription('2 need you')
   })
 
   it(`shows ${RAIL_STACK_OTHERS} others and puts the rest behind "+N"`, () => {
-    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id) => project(id))
-    const { names } = renderStack(many)
-    expect(names).toHaveLength(1 + RAIL_STACK_OTHERS + 1)
-    expect(names.at(-1)).toBe('2 more projects')
-    expect(screen.getByRole('button', { name: '2 more projects' })).toHaveTextContent('+2')
-  })
-
-  it('puts a hidden project that needs you in the last visible slot', () => {
-    statusRef.current = { g: { attentionCount: 1 } }
-    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id) => project(id))
     const { names } = renderStack(many)
     expect(names).toEqual([
       'Switch project (A)',
       'Open B',
       'Open C',
       'Open D',
-      'Open G, 1 needs you',
+      'Open E',
       '2 more projects'
     ])
-  })
-})
-
-describe('pickShownProjects', () => {
-  const item = (id: string, attentionCount = 0) => ({
-    id,
-    status: { live: null, attentionCount, crashed: false } as ProjectRowStatus
+    expect(screen.getByRole('button', { name: '2 more projects' })).toHaveTextContent('+2')
   })
 
-  it('keeps the first ones in order when nothing hidden needs you', () => {
-    const others = ['b', 'c', 'd'].map((id) => item(id))
-    expect(pickShownProjects(others, 2).map((o) => o.id)).toEqual(['b', 'c'])
+  it('keeps a hidden project that needs you hidden, in list order', () => {
+    statusRef.current = { g: { attentionCount: 1 } }
+    const { names } = renderStack(many)
+    expect(names).toEqual([
+      'Switch project (A)',
+      'Open B',
+      'Open C',
+      'Open D',
+      'Open E',
+      '2 more projects, 1 needs you'
+    ])
   })
 
-  it('does not swap when a shown project already needs you', () => {
-    const others = [item('b', 1), item('c'), item('d', 3)]
-    expect(pickShownProjects(others, 2).map((o) => o.id)).toEqual(['b', 'c'])
-  })
+  describe('"+N" needs-you badge', () => {
+    it('is absent when no hidden project needs you, even if a shown one does', () => {
+      statusRef.current = { b: { attentionCount: 3 } }
+      renderStack(many)
+      const more = screen.getByRole('button', { name: '2 more projects' })
+      expect(more).toHaveTextContent(/^\+2$/)
+    })
 
-  it('swaps the first hidden project that needs you into the last slot', () => {
-    const others = [item('b'), item('c'), item('d'), item('e', 2), item('f', 1)]
-    expect(pickShownProjects(others, 3).map((o) => o.id)).toEqual(['b', 'c', 'e'])
+    it('adds one combined count of the chats that need you in hidden projects', () => {
+      statusRef.current = { f: { attentionCount: 2 }, g: { attentionCount: 1 } }
+      renderStack(many)
+      const more = screen.getByRole('button', { name: '2 more projects, 3 need you' })
+      expect(within(more).getByText('+2')).toBeInTheDocument()
+      expect(within(more).getByText('3')).toBeInTheDocument()
+    })
+
+    it('caps the count at 9+', () => {
+      statusRef.current = { f: { attentionCount: 12 } }
+      renderStack(many)
+      const more = screen.getByRole('button', { name: '2 more projects, 12 need you' })
+      expect(within(more).getByText('9+')).toBeInTheDocument()
+    })
   })
 })

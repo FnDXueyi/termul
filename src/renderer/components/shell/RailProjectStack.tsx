@@ -1,12 +1,13 @@
 import { useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { AlertTriangle } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
 import { ProjectSwitcher } from '@/components/shell/ProjectSwitcher'
 import { RailButton } from '@/components/shell/rail-button'
 import type { ProjectRowStatus } from '@/components/sidebar/indicators'
-import { useProjectRowStatus } from '@/components/sidebar/use-project-row-status'
+import { orderRailProjects } from '@/components/sidebar/rail-project-order'
+import { useProjectRail } from '@/components/sidebar/use-project-rail'
 import { needsYouLabel } from '@/lib/agent-chat-attention'
+import { useProjectStore } from '@/stores/project-store'
 import type { Project } from '@/types/project'
 
 /** Other projects shown as icons under the active one; the rest go behind "+N". */
@@ -19,27 +20,24 @@ interface RailProjectStackProps {
   onNewProject: () => void
 }
 
-/**
- * The other projects to show, in list order so an icon never moves under the
- * pointer when a status changes. When a project behind "+N" needs you and no
- * shown one does, it takes the last visible slot.
- */
-export function pickShownProjects<T extends { status: ProjectRowStatus }>(
-  others: T[],
-  limit: number
-): T[] {
-  const shown = others.slice(0, limit)
-  if (others.length <= limit || shown.some((o) => o.status.attentionCount > 0)) return shown
-  const urgent = others.slice(limit).find((o) => o.status.attentionCount > 0)
-  return urgent ? [...shown.slice(0, limit - 1), urgent] : shown
-}
-
-/** Tooltip and accessible-name suffix for the one badge a project icon shows. */
+/** Tooltip and accessible description of the one badge a project icon shows. */
 function statusHint(status: ProjectRowStatus): string | undefined {
   if (status.attentionCount > 0) return needsYouLabel(status.attentionCount)
   if (status.crashed) return 'Terminal crashed'
   if (status.live === 'activity') return 'Running'
   return undefined
+}
+
+/** Warning count on an icon's top-right corner: how many chats need you. */
+function NeedsYouBadge({ count }: { count: number }): React.JSX.Element {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute -top-1 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-3xs font-semibold tabular-nums text-warning-foreground ring-2 ring-background"
+    >
+      {count > 9 ? '9+' : count}
+    </span>
+  )
 }
 
 /**
@@ -48,16 +46,7 @@ function statusHint(status: ProjectRowStatus): string | undefined {
  * (primary dot, blue is for live work only).
  */
 function StatusBadge({ status }: { status: ProjectRowStatus }): React.JSX.Element | null {
-  if (status.attentionCount > 0) {
-    return (
-      <span
-        aria-hidden="true"
-        className="pointer-events-none absolute -top-1 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-3xs font-semibold tabular-nums text-warning-foreground ring-2 ring-background"
-      >
-        {status.attentionCount > 9 ? '9+' : status.attentionCount}
-      </span>
-    )
-  }
+  if (status.attentionCount > 0) return <NeedsYouBadge count={status.attentionCount} />
   if (status.crashed) {
     return (
       <span
@@ -82,8 +71,11 @@ function StatusBadge({ status }: { status: ProjectRowStatus }): React.JSX.Elemen
 /**
  * Collapsed Rail projects: the active project (the Project switcher trigger,
  * on the keycap), then up to {@link RAIL_STACK_OTHERS} other open projects
- * with their status in list order, then "+N" for the rest (the same
- * switcher). See {@link pickShownProjects} for the one exception.
+ * with their status, in the expanded Rail's order (so an icon never moves
+ * under the pointer when a status changes), then "+N" for the rest (the same
+ * switcher). The "+N" button carries one needs-you badge when a hidden
+ * project needs you. An icon's click is the expanded row's main click
+ * (`openProject`); the status is a badge and a description, not an action.
  */
 export function RailProjectStack({
   projects,
@@ -91,50 +83,74 @@ export function RailProjectStack({
   onSelectProject,
   onNewProject
 }: RailProjectStackProps): React.JSX.Element {
-  const navigate = useNavigate()
-  const projectStatus = useProjectRowStatus()
+  const { status, openProject } = useProjectRail({
+    activeProjectId: activeProject?.id,
+    onSelectProject
+  })
+  const storeGroups = useProjectStore((state) => state.groups)
+  const groups = useMemo(() => storeGroups ?? [], [storeGroups])
 
-  const { shown, hiddenCount } = useMemo(() => {
-    const others = projects
-      .filter((project) => !project.isArchived && project.id !== activeProject?.id)
-      .map((project) => ({ project, status: projectStatus(project.id) }))
-    return {
-      shown: pickShownProjects(others, RAIL_STACK_OTHERS),
-      hiddenCount: Math.max(0, others.length - RAIL_STACK_OTHERS)
-    }
-  }, [projects, activeProject?.id, projectStatus])
+  const others = useMemo(
+    () => orderRailProjects(projects, groups).filter((project) => project.id !== activeProject?.id),
+    [projects, groups, activeProject?.id]
+  )
+  const shown = others.slice(0, RAIL_STACK_OTHERS)
+  const hidden = others.slice(RAIL_STACK_OTHERS)
+  const hiddenNeedsYou = hidden.reduce((sum, project) => sum + status(project.id).attentionCount, 0)
 
-  const switcherProps = { projects, activeProject, onSelectProject, onNewProject }
+  const switcherProps = { projects, activeProject, openProject, onNewProject }
+  const moreLabel = `${hidden.length} more projects`
 
   return (
     <div className="flex flex-col items-center gap-0.5" data-testid="rail-project-stack">
-      <ProjectSwitcher {...switcherProps} pressed={Boolean(activeProject)} />
+      <ProjectSwitcher
+        {...switcherProps}
+        label={activeProject ? `Switch project (${activeProject.name})` : 'Switch project'}
+        pressed={Boolean(activeProject)}
+        trigger={
+          activeProject ? (
+            <ProjectIcon project={activeProject} size={20} />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="size-5 rounded border border-dashed border-muted-foreground/60"
+            />
+          )
+        }
+      />
 
-      {shown.map(({ project, status }) => {
-        const hint = statusHint(status)
+      {shown.map((project) => {
+        const projectStatus = status(project.id)
+        const hint = statusHint(projectStatus)
         return (
           <RailButton
             key={project.id}
             label={project.name}
             hint={hint}
-            aria-label={hint ? `Open ${project.name}, ${hint}` : `Open ${project.name}`}
-            badge={<StatusBadge status={status} />}
-            onClick={() => {
-              onSelectProject(project.id)
-              navigate('/')
-            }}
+            aria-label={`Open ${project.name}`}
+            description={hint}
+            badge={<StatusBadge status={projectStatus} />}
+            onClick={() => openProject(project.id)}
           >
             <ProjectIcon project={project} size={20} />
           </RailButton>
         )
       })}
 
-      {hiddenCount > 0 && (
-        <ProjectSwitcher {...switcherProps} label={`${hiddenCount} more projects`}>
-          <span className="text-2xs font-semibold tabular-nums text-muted-foreground">
-            +{hiddenCount}
-          </span>
-        </ProjectSwitcher>
+      {hidden.length > 0 && (
+        <ProjectSwitcher
+          {...switcherProps}
+          label={hiddenNeedsYou > 0 ? `${moreLabel}, ${needsYouLabel(hiddenNeedsYou)}` : moreLabel}
+          pressed={false}
+          trigger={
+            <>
+              <span className="text-2xs font-semibold tabular-nums text-muted-foreground">
+                +{hidden.length}
+              </span>
+              {hiddenNeedsYou > 0 && <NeedsYouBadge count={hiddenNeedsYou} />}
+            </>
+          }
+        />
       )}
     </div>
   )

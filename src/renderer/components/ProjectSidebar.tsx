@@ -1,13 +1,9 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
-import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { toast } from '@/hooks/use-toast'
 import { dialogApi, shellApi } from '@/lib/api'
-import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project, ProjectColor, ProjectGroup } from '@/types/project'
 import { ColorPickerPopover } from './ColorPickerPopover'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -21,9 +17,10 @@ import {
 } from './sidebar/project-context-menu'
 import { ProjectList } from './sidebar/project-list'
 import { ProjectSettingsDialog } from './sidebar/project-settings-dialog'
+import { layoutRailProjects } from './sidebar/rail-project-order'
 import { SSHResizableSection } from './sidebar/ssh-section'
 import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
-import { useProjectRowStatus } from './sidebar/use-project-row-status'
+import { useProjectRail } from './sidebar/use-project-rail'
 
 /** Projects header icon button: the panel button plus a 14px glyph. */
 const HEADER_ICON_BUTTON = `${PANEL_ICON_BUTTON_CLASS} cursor-pointer [&_svg]:size-3.5`
@@ -48,7 +45,6 @@ export function ProjectSidebar({
   onSelectSSHProfile,
   activeSSHProfileId
 }: ProjectSidebarProps): React.JSX.Element {
-  const navigate = useNavigate()
   const {
     selectProject,
     addProject,
@@ -137,30 +133,11 @@ export function ProjectSidebar({
     void fetchShells()
   }, [])
 
-  const projectStatus = useProjectRowStatus()
-  const { firstNeedsYouSessionId } = useAgentChatProjectSignals()
-
-  const openProject = useCallback(
-    (projectId: string) => {
-      onSelectProject(projectId)
-      navigate('/')
-    },
-    [navigate, onSelectProject]
-  )
-  const openNeedsYou = useCallback(
-    (projectId: string) => {
-      const sessionId = firstNeedsYouSessionId[projectId]
-      if (sessionId && projectId === activeProjectId) {
-        useWorkspaceStore.getState().addAgentChatTab(sessionId)
-        return
-      }
-      if (sessionId) {
-        useAgentChatLifetimeStore.getState().requestFocus(projectId, sessionId)
-      }
-      openProject(projectId)
-    },
-    [activeProjectId, firstNeedsYouSessionId, openProject]
-  )
+  const {
+    status: projectStatus,
+    openProject,
+    openNeedsYou
+  } = useProjectRail({ activeProjectId, onSelectProject })
   const handleCreateGroupSubmit = useCallback(
     (name: string) => {
       const newGroupId = addGroup(name)
@@ -338,34 +315,12 @@ export function ProjectSidebar({
     return map
   }, [activeProjects])
 
-  // Group mapping for rendering
-  const groupedProjectIds = useMemo(() => {
-    const ids = new Set<string>()
-    groups.forEach((g) => {
-      g.projectIds.forEach((pid) => {
-        ids.add(pid)
-      })
-    })
-    return ids
-  }, [groups])
-
-  const groupProjectsMap = useMemo(() => {
-    return groups.map((g) => {
-      const projectsInGroup = g.projectIds
-        .map((pid) => activeProjects.find((p) => p.id === pid))
-        .filter((p): p is Project => p !== undefined)
-      return {
-        group: g,
-        projects: projectsInGroup
-      }
-    })
-  }, [groups, activeProjects])
-
-  const ungroupedActiveProjects = useMemo(() => {
-    return activeProjects.filter((p) => !groupedProjectIds.has(p.id))
-  }, [activeProjects, groupedProjectIds])
-
-  const visibleGroups = groupProjectsMap
+  // Groups in group order, then the ungrouped projects: the same order the
+  // collapsed Rail's stack reads.
+  const { groups: visibleGroups, ungrouped: ungroupedActiveProjects } = useMemo(
+    () => layoutRailProjects(projects, groups),
+    [projects, groups]
+  )
 
   // With groups, "Groups" and "Projects" headers sit inside the list, so the
   // sidebar's own Projects header steps aside. With no group (or nothing to
