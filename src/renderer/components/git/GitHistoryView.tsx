@@ -25,8 +25,8 @@ import {
 import {
   DETAIL_PANE_MAX_WIDTH,
   DETAIL_PANE_MIN_WIDTH,
-  useDetailPaneWidth
-} from './history/use-detail-pane-width'
+  useDetailPaneResize
+} from './history/use-detail-pane-resize'
 
 interface GitHistoryViewProps {
   cwd: string
@@ -77,7 +77,7 @@ export function GitHistoryView({ cwd, isVisible }: GitHistoryViewProps): React.J
   const listRef = useRef<HTMLDivElement>(null)
   const filterRef = useRef<HTMLInputElement>(null)
   const idPrefix = useId()
-  const pane = useDetailPaneWidth()
+  const pane = useDetailPaneResize()
 
   useEffect(() => {
     if (isVisible && commits === undefined) void refreshLog(cwd)
