@@ -1,62 +1,47 @@
-import { Columns3, PanelLeft } from '@/components/icons'
+import { PanelLeftCollapse, PanelLeftExpand } from '@/components/icons'
+import { railButtonClass } from '@/components/shell/rail-button'
 import { RAIL_TOGGLE_LABEL, useRailToggle } from '@/components/shell/use-rail-toggle'
-import {
-  SIDE_PANEL_TOGGLE_LABEL,
-  useSidePanelToggle
-} from '@/components/shell/use-side-panel-toggle'
-import { FOCUS_RING_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
-import { isTauriContext } from '@/lib/tauri-runtime'
-import { cn } from '@/lib/utils'
+import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
-/** Desktop: the titlebar toggle look (full-height, 16px glyph, hover wash). */
-const DESKTOP_TOGGLE_CLASS = `inline-flex h-full cursor-pointer items-center px-3 transition-colors duration-150 ease-out hover:bg-foreground/[0.03] ${FOCUS_RING_CLASS} focus-visible:ring-inset`
-
-interface ToggleProps {
-  label: string
-  pressed: boolean
-  onClick: () => void
-  icon: typeof PanelLeft
+/** "Label (Ctrl+B)" when a shortcut is bound, else the label alone. */
+export function withShortcut(label: string, shortcut: string | undefined): string {
+  return shortcut ? `${label} (${shortcut})` : label
 }
 
-function TopRowToggle({ label, pressed, onClick, icon: Icon }: ToggleProps): React.JSX.Element {
-  const desktop = isTauriContext()
-  return (
-    <button
-      type="button"
-      onClick={(event) => {
-        event.stopPropagation()
-        onClick()
-      }}
-      className={desktop ? DESKTOP_TOGGLE_CLASS : PANEL_ICON_BUTTON_CLASS}
-      title={label}
-      aria-label={label}
-      aria-pressed={pressed}
-    >
-      <Icon
-        size={desktop ? 16 : 14}
-        className={cn(pressed ? 'text-foreground' : 'text-muted-foreground')}
-      />
-    </button>
-  )
-}
-
-/** Expands or collapses the Rail. */
+/**
+ * Expands or collapses the Rail. It sits in the Rail's bottom-left corner,
+ * at the same point in both Rail states, so it can be clicked again without
+ * moving the pointer. The glyph names the next action (collapse when
+ * expanded, expand when collapsed); the accessible name and `aria-pressed`
+ * stay stable. No keycap: pressed here means "expanded", not "you are here".
+ */
 export function RailToggleButton(): React.JSX.Element {
   const { expanded, toggle } = useRailToggle()
+  const shortcut = useShortcutLabel('sidebarToggle')
+  const Icon = expanded ? PanelLeftCollapse : PanelLeftExpand
   return (
-    <TopRowToggle label={RAIL_TOGGLE_LABEL} pressed={expanded} onClick={toggle} icon={PanelLeft} />
-  )
-}
-
-/** Shows or hides the Side panel. */
-export function SidePanelToggleButton(): React.JSX.Element {
-  const { visible, toggle } = useSidePanelToggle()
-  return (
-    <TopRowToggle
-      label={SIDE_PANEL_TOGGLE_LABEL}
-      pressed={visible}
-      onClick={toggle}
-      icon={Columns3}
-    />
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation()
+            toggle()
+          }}
+          className={railButtonClass(false)}
+          aria-label={RAIL_TOGGLE_LABEL}
+          aria-pressed={expanded}
+          data-testid="rail-toggle"
+        >
+          <Icon size={16} aria-hidden="true" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="right" className="px-2.5 py-1.5 text-xs">
+        <span className="text-popover-foreground">
+          {withShortcut(expanded ? 'Collapse projects' : 'Expand projects', shortcut)}
+        </span>
+      </TooltipContent>
+    </Tooltip>
   )
 }

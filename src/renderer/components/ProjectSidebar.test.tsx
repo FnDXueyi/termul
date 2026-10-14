@@ -998,17 +998,19 @@ describe('ProjectSidebar rail rows', () => {
     expect(await screen.findByText('Create New Group')).toBeInTheDocument()
   })
 
-  it('shows +N −M from the git-status store at rest, and gear + chip on hover', () => {
+  it('shows +N −M at rest, and on hover overlays gear + chip without reflowing the row', () => {
     useGitStatusStore.setState({ diffStats: { '/repo/two': { added: 3, removed: 1 } } })
     renderWithRouter({ projects: gitProjects })
 
     const row = screen.getByTestId('project-item-2')
     const stat = within(row).getByTestId('project-diff-stat')
     expect(stat).toHaveTextContent('+3 −1')
-    // The stat gives way to the settings gear on hover or focus.
-    expect(stat.parentElement).toHaveClass('group-hover:hidden', 'group-focus-within:hidden')
-    const gear = within(row).getByLabelText('Settings for Project Two')
-    expect(gear.parentElement).toHaveClass('hidden', 'group-hover:flex', 'group-focus-within:flex')
+    // The stat keeps its place; the actions sit on top of the name box's end.
+    expect(stat.parentElement).not.toHaveClass('group-hover:hidden')
+    const actions = within(row).getByTestId('project-row-actions')
+    expect(actions).toHaveClass('absolute', 'hidden', 'group-hover:flex', 'group-focus-within:flex')
+    expect(actions).toContainElement(within(row).getByLabelText('Settings for Project Two'))
+    expect(actions.parentElement).toContainElement(stat)
   })
 
   it('shows one side only for a one-sided stat and nothing for a clean tree', () => {
@@ -1025,14 +1027,13 @@ describe('ProjectSidebar rail rows', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('keeps the always-visible gear and chip on an active row with no stat', () => {
+  it('hides the gear and chip on an active row at rest, so the name keeps the room', () => {
     renderWithRouter({ projects: gitProjects, activeProjectId: '1' })
 
     const gear = within(screen.getByTestId('project-item-1')).getByLabelText(
       'Settings for Project One'
     )
-    expect(gear.parentElement).toHaveClass('flex', 'opacity-100')
-    expect(gear.parentElement).not.toHaveClass('hidden')
+    expect(gear.parentElement).toHaveClass('hidden', 'group-hover:flex', 'group-focus-within:flex')
   })
 
   it('watches each git project, refreshes right after, and unwatches on unmount', () => {

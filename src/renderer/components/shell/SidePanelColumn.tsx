@@ -16,6 +16,7 @@ import type { Project } from '@/types/project'
 import { ChangesPanel } from './ChangesPanel'
 import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
+import { HideSidePanelButton } from './SidePanelVisibilityButtons'
 import { useColumnWorkingCopy } from './use-column-working-copy'
 import { useSidePanelResize } from './use-side-panel-resize'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
@@ -27,10 +28,15 @@ const FileExplorer = lazy(() =>
 interface SidePanelColumnProps {
   activeProject: Project
   /**
-   * The header is part of the window top row (expanded Rail on desktop): it
+   * The header is part of the window top row (desktop, both Rail states): it
    * becomes a drag region. Defaults to a non-draggable header.
    */
   dragRegion?: boolean
+  /**
+   * The column starts under the macOS traffic lights (Rail collapsed): the
+   * header takes 8px more start padding so its content clears them.
+   */
+  trafficLightInset?: boolean
 }
 
 const TAB_LABELS: Record<ShellLastColumnTab, string> = {
@@ -40,7 +46,7 @@ const TAB_LABELS: Record<ShellLastColumnTab, string> = {
 }
 
 /**
- * Shell Side panel: a header with the New chat button,
+ * Shell Side panel: a header with the New chat and Hide panel buttons,
  * the Chats / Explorer / Changes Column tabs and the selected tab's body. The
  * last tab is remembered per project. The tabs render only while the Rail is
  * expanded; collapsed, the Rail's own icons select the tab. Mounted through
@@ -48,7 +54,8 @@ const TAB_LABELS: Record<ShellLastColumnTab, string> = {
  */
 export function SidePanelColumn({
   activeProject,
-  dragRegion = false
+  dragRegion = false,
+  trafficLightInset = false
 }: SidePanelColumnProps): React.JSX.Element {
   const projectId = activeProject.id
   const { cwd } = useColumnWorkingCopy(activeProject)
@@ -91,17 +98,23 @@ export function SidePanelColumn({
           'bg-background text-foreground'
         )}
       >
-        <div className={PANEL_HEADER_CLASS} data-tauri-drag-region={dragAttr}>
+        <div
+          className={cn(PANEL_HEADER_CLASS, trafficLightInset && 'pl-6')}
+          data-tauri-drag-region={dragAttr}
+        >
           <WorkspaceSwitcher project={activeProject} />
-          <button
-            type="button"
-            onClick={handleNewChat}
-            className={PANEL_ICON_BUTTON_CLASS}
-            title="New chat"
-            aria-label="New chat"
-          >
-            <Plus size={14} aria-hidden="true" />
-          </button>
+          <div className="flex shrink-0 items-center">
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className={PANEL_ICON_BUTTON_CLASS}
+              title="New chat"
+              aria-label="New chat"
+            >
+              <Plus size={14} aria-hidden="true" />
+            </button>
+            <HideSidePanelButton />
+          </div>
         </div>
 
         {railExpanded && (

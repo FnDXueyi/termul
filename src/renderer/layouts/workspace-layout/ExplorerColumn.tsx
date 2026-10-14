@@ -100,11 +100,13 @@ export function ExplorerColumn({
       ) : (
         !isExplorerVisible &&
         activeProject?.path &&
+        workspaceOpen &&
         !isTauriContext() && (
-          // Web-only slim edge toggle so a hidden file explorer
-          // stays re-openable. Desktop re-opens via the
-          // Rail and top row toggles. Its enter is deferred until the column's
-          // collapse exits (edgeToggleMotion).
+          // Web-only slim edge toggle so a hidden file explorer stays
+          // re-openable in the SSH workspace, which has no pane tab bar. With
+          // panes, the Show side panel button at the start of the left tab bar
+          // re-opens it (desktop and web). Its enter is deferred until the
+          // column's collapse exits (edgeToggleMotion).
           <motion.div
             key="explorer-edge-toggle"
             className={cn('flex-shrink-0 flex items-start overflow-hidden', sidePanel && 'mr-2')}

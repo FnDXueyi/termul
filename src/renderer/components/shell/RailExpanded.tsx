@@ -1,4 +1,4 @@
-import { Edit2, FolderKanban } from '@/components/icons'
+import { Edit2, Search } from '@/components/icons'
 import { ProjectSidebar } from '@/components/ProjectSidebar'
 import { RailFooter } from '@/components/shell/RailFooter'
 import { RailHeader } from '@/components/shell/RailHeader'
@@ -59,7 +59,7 @@ export function RailExpanded({
         <RailRow
           label="Search"
           chip={searchShortcut}
-          icon={<FolderKanban size={16} />}
+          icon={<Search size={16} />}
           onClick={onOpenCommandPalette}
         />
         <RailRow

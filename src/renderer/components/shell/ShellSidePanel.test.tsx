@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TopRowProvider } from '@/components/shell/top-row-context'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
@@ -10,19 +10,21 @@ import { ShellSidePanel } from './ShellSidePanel'
 vi.mock('@/components/shell/SidePanelColumn', () => ({
   SidePanelColumn: ({
     activeProject,
-    dragRegion
+    dragRegion,
+    trafficLightInset
   }: {
     activeProject: Project
     dragRegion?: boolean
+    trafficLightInset?: boolean
   }) => (
-    <div data-testid="side-panel-column" data-drag={String(Boolean(dragRegion))}>
+    <div
+      data-testid="side-panel-column"
+      data-drag={String(Boolean(dragRegion))}
+      data-inset={String(Boolean(trafficLightInset))}
+    >
       {activeProject.id}
     </div>
   )
-}))
-vi.mock('@/components/shell/TopRowToggles', () => ({
-  RailToggleButton: () => <button type="button">rail-toggle</button>,
-  SidePanelToggleButton: () => <button type="button">side-toggle</button>
 }))
 vi.mock('@/components/shell/ShellRail', () => ({ COLLAPSED_WIDTH: 48 }))
 vi.mock('@/layouts/workspace-layout/ExplorerColumn', () => ({
@@ -35,6 +37,7 @@ const ssh = {} as SSHWorkspaceState
 const roles: TopRowRoles = {
   topEdgeLeafIds: new Set(),
   rightmostLeafId: null,
+  leftmostLeafId: null,
   controlsOwner: 'pane'
 }
 const desktop: TopRowPlatform = { dragRegions: true, windowControls: true, trafficLights: false }
@@ -100,49 +103,29 @@ describe('ShellSidePanel', () => {
       useShellLayoutStore.setState({ railExpanded: false })
     })
 
-    it('stacks the toggle strip above the column; the header is not a drag region', () => {
+    it('returns the explorer column as is: nothing above it, so a hidden panel leaves no gap', () => {
+      const { container } = renderPanel(desktop)
+      expect(container.firstElementChild).toBe(screen.getByTestId('explorer-column'))
+      expect(screen.queryByTestId('top-row-toggle-strip')).toBeNull()
+    })
+
+    it('keeps the header in the top row (drag region on desktop)', () => {
       renderPanel(desktop)
-      const stack = screen.getByTestId('side-panel-stack')
-      const strip = within(stack).getByTestId('top-row-toggle-strip')
-      expect(within(strip).getByText('rail-toggle')).toBeInTheDocument()
-      expect(within(strip).getByText('side-toggle')).toBeInTheDocument()
-      expect(
-        strip.compareDocumentPosition(within(stack).getByTestId('explorer-column')) &
-          Node.DOCUMENT_POSITION_FOLLOWING
-      ).toBeTruthy()
-      expect(screen.getByTestId('side-panel-column')).toHaveAttribute('data-drag', 'false')
+      expect(screen.getByTestId('side-panel-column')).toHaveAttribute('data-drag', 'true')
     })
 
-    it('keeps the strip when there is no column to show', () => {
-      renderPanel(desktop, null)
-      expect(screen.getByTestId('top-row-toggle-strip')).toBeInTheDocument()
-      expect(screen.queryByTestId('side-panel-column')).toBeNull()
-    })
+    it('adds the traffic-light inset on macOS only', () => {
+      const { unmount } = renderPanel(mac)
+      expect(screen.getByTestId('side-panel-column')).toHaveAttribute('data-inset', 'true')
+      unmount()
 
-    it('marks the strip root and its spacer as drag regions, never the toggles', () => {
       renderPanel(desktop)
-      const strip = screen.getByTestId('top-row-toggle-strip')
-      expect(strip).toHaveAttribute('data-tauri-drag-region')
-      expect(strip.querySelectorAll('[data-tauri-drag-region]')).toHaveLength(1)
-      for (const button of within(strip).getAllByRole('button')) {
-        expect(button).not.toHaveAttribute('data-tauri-drag-region')
-      }
-      expect(screen.queryByTestId('traffic-light-clearance')).toBeNull()
+      expect(screen.getByTestId('side-panel-column')).toHaveAttribute('data-inset', 'false')
     })
+  })
 
-    it('adds a 24px clearance before the toggles on macOS', () => {
-      renderPanel(mac)
-      const clearance = screen.getByTestId('traffic-light-clearance')
-      expect(clearance).toHaveStyle({ width: '24px' })
-      expect(clearance).toHaveAttribute('data-tauri-drag-region')
-      const strip = screen.getByTestId('top-row-toggle-strip')
-      expect(strip.firstElementChild).toBe(clearance)
-    })
-
-    it('has no drag region on web', () => {
-      renderPanel({ dragRegions: false, windowControls: false, trafficLights: false })
-      expect(document.querySelector('[data-tauri-drag-region]')).toBeNull()
-      expect(screen.getByTestId('top-row-toggle-strip')).toBeInTheDocument()
-    })
+  it('adds no inset with the Rail expanded, even on macOS', () => {
+    renderPanel(mac)
+    expect(screen.getByTestId('side-panel-column')).toHaveAttribute('data-inset', 'false')
   })
 })

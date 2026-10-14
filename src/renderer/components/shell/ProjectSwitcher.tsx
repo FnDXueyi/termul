@@ -34,6 +34,12 @@ interface ProjectSwitcherProps {
   activeProject: Project | undefined
   onSelectProject: (id: string) => void
   onNewProject: () => void
+  /** Accessible name of the trigger. Defaults to "Switch project (<active>)". */
+  label?: string
+  /** Trigger content. Defaults to the active Project's icon. */
+  children?: React.ReactNode
+  /** The trigger takes the keycap "you are here" surface while closed. */
+  pressed?: boolean
 }
 
 /**
@@ -46,7 +52,10 @@ export function ProjectSwitcher({
   projects,
   activeProject,
   onSelectProject,
-  onNewProject
+  onNewProject,
+  label: labelOverride,
+  children,
+  pressed = false
 }: ProjectSwitcherProps): React.JSX.Element {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
@@ -71,7 +80,8 @@ export function ProjectSwitcher({
     navigate('/')
   }
 
-  const label = activeProject ? `Switch project (${activeProject.name})` : 'Switch project'
+  const label =
+    labelOverride ?? (activeProject ? `Switch project (${activeProject.name})` : 'Switch project')
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -80,19 +90,20 @@ export function ProjectSwitcher({
           <PopoverTrigger asChild>
             <button
               type="button"
-              className={railButtonClass(open)}
+              className={railButtonClass(open || pressed)}
               aria-label={label}
               aria-haspopup="dialog"
               aria-expanded={open}
             >
-              {activeProject ? (
-                <ProjectIcon project={activeProject} size={20} />
-              ) : (
-                <span
-                  aria-hidden="true"
-                  className="size-5 rounded border border-dashed border-muted-foreground/60"
-                />
-              )}
+              {children ??
+                (activeProject ? (
+                  <ProjectIcon project={activeProject} size={20} />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className="size-5 rounded border border-dashed border-muted-foreground/60"
+                  />
+                ))}
             </button>
           </PopoverTrigger>
         </TooltipTrigger>

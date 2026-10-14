@@ -5,10 +5,8 @@ import { PANEL_HEADER_CLASS, PANEL_ICON_BUTTON_CLASS } from '@/components/ui/pan
 import { useAgentChatProjectSignals } from '@/hooks/use-agent-chat-attention'
 import { toast } from '@/hooks/use-toast'
 import { dialogApi, shellApi } from '@/lib/api'
-import { useProjectsWithActiveAgentChat } from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { useProjectActions, useProjectStore } from '@/stores/project-store'
-import { useProjectsWithActivity, useProjectsWithErrors } from '@/stores/terminal-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project, ProjectColor, ProjectGroup } from '@/types/project'
 import { ColorPickerPopover } from './ColorPickerPopover'
@@ -17,7 +15,6 @@ import { NewGroupModal } from './NewGroupModal'
 import { NewWorktreeModal } from './NewWorktreeModal'
 import { AddProjectMenu } from './sidebar/add-project-menu'
 import { GroupContextMenuContent } from './sidebar/group-context-menu'
-import { type ProjectRowStatus, resolveProjectLiveState } from './sidebar/indicators'
 import {
   ArchivedProjectContextMenuContent,
   ProjectContextMenuContent
@@ -26,6 +23,7 @@ import { ProjectList } from './sidebar/project-list'
 import { ProjectSettingsDialog } from './sidebar/project-settings-dialog'
 import { SSHResizableSection } from './sidebar/ssh-section'
 import type { ColorPickerState, ProjectSidebarProps } from './sidebar/types'
+import { useProjectRowStatus } from './sidebar/use-project-row-status'
 
 /** Projects header icon button: the panel button plus a 14px glyph. */
 const HEADER_ICON_BUTTON = `${PANEL_ICON_BUTTON_CLASS} cursor-pointer [&_svg]:size-3.5`
@@ -139,12 +137,8 @@ export function ProjectSidebar({
     void fetchShells()
   }, [])
 
-  // Optimized subscription: only re-render sidebar if which projects have activity changes.
-  // This prevents re-renders when terminal text output changes.
-  const [projectActivityIds, projectErrorIds] = [useProjectsWithActivity(), useProjectsWithErrors()]
-  const agentChatActivityIds = useProjectsWithActiveAgentChat()
-  const { attentionCounts, firstNeedsYouSessionId, runningProjectIds } =
-    useAgentChatProjectSignals()
+  const projectStatus = useProjectRowStatus()
+  const { firstNeedsYouSessionId } = useAgentChatProjectSignals()
 
   const openProject = useCallback(
     (projectId: string) => {
@@ -167,18 +161,6 @@ export function ProjectSidebar({
     },
     [activeProjectId, firstNeedsYouSessionId, openProject]
   )
-  const projectStatus = useCallback(
-    (projectId: string): ProjectRowStatus => ({
-      live: resolveProjectLiveState(
-        projectActivityIds.includes(projectId) || agentChatActivityIds.includes(projectId),
-        runningProjectIds.has(projectId)
-      ),
-      attentionCount: attentionCounts[projectId] ?? 0,
-      crashed: projectErrorIds.has(projectId)
-    }),
-    [projectActivityIds, agentChatActivityIds, runningProjectIds, attentionCounts, projectErrorIds]
-  )
-
   const handleCreateGroupSubmit = useCallback(
     (name: string) => {
       const newGroupId = addGroup(name)

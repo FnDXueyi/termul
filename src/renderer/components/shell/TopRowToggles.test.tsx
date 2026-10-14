@@ -1,39 +1,44 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import * as appSettingsHooks from '@/hooks/use-app-settings'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
-import { RailToggleButton, SidePanelToggleButton } from './TopRowToggles'
+import { RailToggleButton, withShortcut } from './TopRowToggles'
 
-const { tauriRef, mockToastError } = vi.hoisted(() => ({
-  tauriRef: { current: true },
-  mockToastError: vi.fn()
-}))
-
+const { mockToastError } = vi.hoisted(() => ({ mockToastError: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { error: mockToastError } }))
-vi.mock('@/lib/tauri-runtime', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/tauri-runtime')>('@/lib/tauri-runtime')
-  return { ...actual, isTauriContext: () => tauriRef.current }
-})
 
 const updatePanelVisibility = vi.fn((panel: string, visible: boolean) => {
   if (panel === 'sidebarVisible') useShellLayoutStore.getState().setRailExpanded(visible)
-  if (panel === 'fileExplorerVisible') useShellLayoutStore.setState({ sidePanelVisible: visible })
   return Promise.resolve()
 })
 
+function renderToggle() {
+  render(
+    <TooltipProvider delayDuration={0}>
+      <RailToggleButton />
+    </TooltipProvider>
+  )
+  return screen.getByRole('button', { name: 'Expand or collapse projects' })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
-  tauriRef.current = true
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'unavailable' })
   vi.spyOn(appSettingsHooks, 'useUpdatePanelVisibility').mockReturnValue(updatePanelVisibility)
 })
 
+describe('withShortcut', () => {
+  it('appends a bound shortcut and leaves the label alone without one', () => {
+    expect(withShortcut('Hide side panel', 'Ctrl+B')).toBe('Hide side panel (Ctrl+B)')
+    expect(withShortcut('Hide side panel', undefined)).toBe('Hide side panel')
+  })
+})
+
 describe('RailToggleButton', () => {
-  it('is named and follows the Rail state', async () => {
-    render(<RailToggleButton />)
-    const toggle = screen.getByRole('button', { name: 'Expand or collapse projects' })
-    expect(toggle).toHaveAttribute('title', 'Expand or collapse projects')
+  it('keeps a stable name and follows the Rail state', async () => {
+    const toggle = renderToggle()
     expect(toggle).toHaveAttribute('aria-pressed', 'true')
 
     fireEvent.click(toggle)
@@ -41,53 +46,32 @@ describe('RailToggleButton', () => {
     await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'))
   })
 
-  it('toasts when saving fails', async () => {
-    updatePanelVisibility.mockRejectedValueOnce(new Error('disk full'))
-    render(<RailToggleButton />)
-    fireEvent.click(screen.getByRole('button', { name: 'Expand or collapse projects' }))
-    await waitFor(() => expect(mockToastError).toHaveBeenCalledWith('disk full'))
-  })
-})
-
-describe('SidePanelToggleButton', () => {
-  it('is named and follows the Side panel state', async () => {
-    render(<SidePanelToggleButton />)
-    const toggle = screen.getByRole('button', { name: 'Show or hide side panel' })
-    expect(toggle).toHaveAttribute('title', 'Show or hide side panel')
-    expect(toggle).toHaveAttribute('aria-pressed', 'true')
-
-    fireEvent.click(toggle)
-    expect(updatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', false)
-    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'))
-
-    fireEvent.click(toggle)
-    expect(updatePanelVisibility).toHaveBeenLastCalledWith('fileExplorerVisible', true)
+  it('uses the 36px rail button look, with no keycap while expanded', () => {
+    const toggle = renderToggle()
+    expect(toggle).toHaveClass('size-9', 'rounded-lg')
+    expect(toggle).not.toHaveClass('keycap')
+    expect(toggle.querySelector('svg')).toHaveAttribute('width', '16')
   })
 
-  it('uses the generic message when the error is not an Error', async () => {
-    updatePanelVisibility.mockRejectedValueOnce('nope')
-    render(<SidePanelToggleButton />)
-    fireEvent.click(screen.getByRole('button', { name: 'Show or hide side panel' }))
+  it('swaps the glyph: collapse when expanded, expand when collapsed', async () => {
+    const toggle = renderToggle()
+    expect(toggle.querySelector('[data-termul-icon="PanelLeftCollapse"]')).not.toBeNull()
+
+    fireEvent.click(toggle)
     await waitFor(() =>
-      expect(mockToastError).toHaveBeenCalledWith('Failed to update side panel visibility')
+      expect(toggle.querySelector('[data-termul-icon="PanelLeftExpand"]')).not.toBeNull()
     )
   })
-})
 
-describe('look', () => {
-  it('uses the full-height titlebar look with a 16px glyph on desktop', () => {
-    render(<SidePanelToggleButton />)
-    const toggle = screen.getByRole('button', { name: 'Show or hide side panel' })
-    expect(toggle).toHaveClass('h-full', 'px-3')
-    expect(toggle.querySelector('svg')).toHaveAttribute('width', '16')
-    expect(toggle).not.toHaveAttribute('data-tauri-drag-region')
+  it('names the next action and its shortcut in the tooltip', async () => {
+    const toggle = renderToggle()
+    fireEvent.focus(toggle)
+    expect((await screen.findAllByText(/^Collapse projects \(.*B\)$/)).length).toBeGreaterThan(0)
   })
 
-  it('uses the 28px panel icon button with a 14px glyph on web', () => {
-    tauriRef.current = false
-    render(<RailToggleButton />)
-    const toggle = screen.getByRole('button', { name: 'Expand or collapse projects' })
-    expect(toggle).toHaveClass('size-7', 'rounded-md')
-    expect(toggle.querySelector('svg')).toHaveAttribute('width', '14')
+  it('toasts when saving fails', async () => {
+    updatePanelVisibility.mockRejectedValueOnce(new Error('disk full'))
+    fireEvent.click(renderToggle())
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledWith('disk full'))
   })
 })
