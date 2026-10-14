@@ -8,8 +8,8 @@ export interface ProjectClaudeAccountDraft {
   value: string | null
   dirty: boolean
   setValue: (accountId: string | null) => void
-  /** Write the choice to the host; resolves when it is saved. */
-  save: () => Promise<void>
+  /** Write the choice to the host; resolves `true` when it changed something. */
+  save: () => Promise<boolean>
   reset: () => void
 }
 
@@ -32,10 +32,11 @@ export function useProjectClaudeAccountDraft(
   }, [saved, dirty])
 
   const save = useCallback(async () => {
-    if (!projectId || !dirty) return
+    if (!projectId || !dirty) return false
     await claudeAccountsApi.setProjectAccount(projectId, value)
     setDirty(false)
     await accounts.reload()
+    return true
   }, [projectId, dirty, value, accounts])
 
   return {

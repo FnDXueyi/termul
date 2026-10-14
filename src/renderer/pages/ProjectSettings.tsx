@@ -36,6 +36,7 @@ import { availableColors, getColorClasses } from '@/lib/colors'
 import { mergeEnvVars, parseEnvFile, resolveProjectEnvPath } from '@/lib/env-parser'
 import type { SettingsSearchEntry } from '@/lib/settings-search'
 import { cn } from '@/lib/utils'
+import { applyProjectClaudeAccount } from '@/stores/claude-account-switch'
 import {
   useActiveProject,
   useActiveProjectId,
@@ -267,11 +268,17 @@ export function ProjectSettingsModal() {
         defaultShell: shell,
         symlinkDirs: normalizedSymlinkDirs
       })
-      void claudeAccountDraft.save().catch((err) => {
-        toast.error(
-          `Could not save the Claude account: ${err instanceof Error ? err.message : String(err)}`
-        )
-      })
+      const projectId = activeProject.id
+      void claudeAccountDraft
+        .save()
+        .then((changed) => {
+          if (changed) void applyProjectClaudeAccount(projectId)
+        })
+        .catch((err) => {
+          toast.error(
+            `Could not save the Claude account: ${err instanceof Error ? err.message : String(err)}`
+          )
+        })
       setEnvVars(normalizedEnvVars)
       setSymlinkDirs(normalizedSymlinkDirs)
       setHasChanges(false)
