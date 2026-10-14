@@ -3,7 +3,7 @@
  */
 
 import type { StateCreator } from 'zustand'
-import { diffTabIdentity } from '@/lib/diff-tab-identity'
+import { commitDiffTabId, diffTabIdentity } from '@/lib/diff-tab-identity'
 import { logFrontendError } from '@/lib/log-api'
 import { navigateToChatSession } from '@/lib/router-navigate'
 import {
@@ -37,6 +37,7 @@ type TabsSliceState = Pick<
   | 'addGitTab'
   | 'addGitHistoryTab'
   | 'addDiffTab'
+  | 'addCommitDiffTab'
   | 'addCanvasTab'
   | 'remapAgentChatSession'
   | 'removeTab'
@@ -335,6 +336,42 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
 
     const tab: WorkspaceTab = { type: 'diff', id, cwd, path: identity.path, staged }
     get().addTabToPane(paneId, tab)
+  },
+
+  addCommitDiffTab: (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string,
+    targetPaneId?: string
+  ): void => {
+    const relPath = diffTabIdentity(cwd, path, false).path
+    const id = commitDiffTabId(cwd, hash, path)
+    const { root, activePaneId, agentLauncherPaneId } = get()
+    const existing = findPaneContainingTab(root, id)
+    if (existing) {
+      const { fullscreenPaneId } = get()
+      const leavesFullscreen = fullscreenPaneId !== null && fullscreenPaneId !== existing.id
+      set({
+        root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
+        activePaneId: leavesFullscreen
+          ? existing.id
+          : resolveActivePaneId(fullscreenPaneId, existing.id),
+        fullscreenPaneId: leavesFullscreen ? null : fullscreenPaneId,
+        agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
+      })
+      return
+    }
+    const tab: WorkspaceTab = {
+      type: 'diff',
+      id,
+      cwd,
+      path: relPath,
+      staged: false,
+      commit: hash,
+      ...(oldPath ? { oldPath: diffTabIdentity(cwd, oldPath, false).path } : {})
+    }
+    get().addTabToPane(targetPaneId ?? activePaneId, tab)
   },
 
   // Canvas singleton-per-project (AD-7): the tab id is derived from the

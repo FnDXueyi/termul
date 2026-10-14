@@ -47,3 +47,9 @@ export function diffTabId(cwd: string, path: string, staged: boolean): string {
   const { workingCopy, path: relPath, staged: side } = diffTabIdentity(cwd, path, staged)
   return `diff:${stableHash(JSON.stringify([workingCopy, relPath, side ? 'staged' : 'unstaged']))}`
 }
+
+/** Commit Diff tab id: one file at one commit (read-only), same `diff:` space. */
+export function commitDiffTabId(cwd: string, hash: string, path: string): string {
+  const { workingCopy, path: relPath } = diffTabIdentity(cwd, path, false)
+  return `diff:${stableHash(JSON.stringify([workingCopy, relPath, 'commit', hash]))}`
+}

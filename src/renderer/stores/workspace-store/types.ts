@@ -26,6 +26,11 @@ export type WorkspaceTab =
       cwd: string
       path: string
       staged: boolean
+      /** Set for a read-only commit diff (Git History): the file at this full
+       * hash against the commit's first parent. `staged` is then `false`. */
+      commit?: string
+      /** A renamed file's path before the commit (commit diffs only). */
+      oldPath?: string
     }
   | {
       /** OpenPencil canvas tab (singleton per project — AD-7): the id is a
@@ -169,6 +174,14 @@ export interface WorkspaceState extends ProjectWorkspace {
    * Open (or activate) the Git History tab for `cwd`, same reuse semantics.
    */
   addGitHistoryTab: (cwd: string, targetPaneId?: string) => void
+  /** Open (or focus) the read-only diff of one file at a commit. */
+  addCommitDiffTab: (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string,
+    targetPaneId?: string
+  ) => void
   /**
    * Open (or focus) the Diff tab for one file side. Identity is the canonical
    * `(cwd, path, staged)` triple (`diffTabId`); a repeat open focuses the
