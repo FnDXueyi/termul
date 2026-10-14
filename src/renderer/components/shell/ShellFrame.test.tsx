@@ -252,6 +252,23 @@ describe('ShellFrame', () => {
       expect(dragRegions()).toHaveLength(0)
     })
 
+    it('runs the Rail full height beside the gutter: the gutter tops only the right column', () => {
+      renderFrame(withProject)
+      const rail = screen.getByTestId('rail')
+      const gutter = screen.getByTestId('top-gutter')
+      const row = screen.getByTestId('shell-row')
+
+      // The Rail is not under the gutter and not inside the padded row.
+      expect(rail.parentElement).not.toBe(gutter.parentElement)
+      expect(row).not.toContainElement(rail)
+      // The gutter and the row share the right column, beside the Rail.
+      expect(gutter.parentElement).toBe(row.parentElement)
+      expect(rail.parentElement).toBe(gutter.parentElement?.parentElement)
+      // `pl-2` is the 8px gap between the Rail and the Side panel.
+      expect(row).toHaveClass('pb-2', 'pr-2', 'pl-2')
+      expect(row).toContainElement(screen.getByTestId('side-panel'))
+    })
+
     it('renders the fallback bar with the controls when there is no project', () => {
       renderFrame()
       const bar = screen.getByTestId('top-row-fallback-bar')

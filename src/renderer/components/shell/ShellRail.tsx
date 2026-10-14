@@ -79,7 +79,8 @@ export function ShellRail({
         aria-label="Projects"
         data-testid="shell-rail"
         data-expanded={expanded}
-        className="relative h-full shrink-0 overflow-hidden bg-background"
+        data-rail-surface
+        className="group/rail relative h-full shrink-0 overflow-hidden bg-sidebar"
         initial={false}
         animate={{ width: targetWidth }}
         transition={{ duration, ease: EASE_OUT }}

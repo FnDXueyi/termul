@@ -89,7 +89,7 @@ export function SSHPopover({
                     <span
                       aria-hidden="true"
                       data-testid="rail-ssh-connected-dot"
-                      className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-success ring-2 ring-background"
+                      className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-success ring-2 ring-sidebar"
                     />
                   )}
                 </button>

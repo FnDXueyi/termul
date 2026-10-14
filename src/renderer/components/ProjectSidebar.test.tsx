@@ -534,11 +534,12 @@ describe('ProjectSidebar', () => {
     expect(onSelectProject).toHaveBeenCalledWith('2')
   })
 
-  it('renders the Projects section flat on bg-background with a label-panel header', () => {
+  it('renders the Projects section flat on the Rail surface with a label-panel header', () => {
     const { container } = renderWithRouter({})
 
+    // No fill of its own: it inherits the Rail's sidebar surface.
     const root = container.firstElementChild
-    expect(root).toHaveClass('bg-background')
+    expect(root).not.toHaveClass('bg-background')
     expect(root).not.toHaveClass('bg-sidebar')
     expect(screen.getByText('Projects')).toHaveClass('label-panel')
     expect(screen.getByRole('button', { name: 'Add project or folder group' })).toHaveClass(
@@ -567,7 +568,7 @@ describe('ProjectSidebar', () => {
     const idleActions = within(screen.getByTestId('project-item-2')).getByTestId(
       'project-row-actions'
     )
-    expect(activeActions).toHaveClass('from-muted')
+    expect(activeActions).toHaveClass('from-[var(--rail-keycap)]')
     expect(idleActions).toHaveClass('from-row-hover-solid')
     expect(idleActions).toHaveClass('group-hover:flex', 'group-focus-within:flex')
   })

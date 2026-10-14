@@ -1,7 +1,5 @@
 import { useEffect, useRef } from 'react'
 import { Palette, SlidersHorizontal } from '@/components/icons'
-import { RailRow } from '@/components/shell/RailRow'
-import { RailToggleButton } from '@/components/shell/RailToggleButton'
 import { RailButton, railButtonClass } from '@/components/shell/rail-button'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
 import { TitleBarShortcutsPopover } from '@/components/TitleBarShortcutsPopover'
@@ -15,8 +13,9 @@ interface RailFooterProps {
 }
 
 /**
- * Expanded Rail footer, one row: the Rail toggle, the Settings row, then the
- * 28px Theme picker and Shortcuts buttons. Closing the picker or the shortcuts
+ * Expanded Rail footer, one row of 28px icon buttons: Settings at the left
+ * (centered on the Rail icon column, x = 24), then the Theme picker and
+ * Shortcuts grouped at the right. Closing the picker or the shortcuts
  * popover returns focus to its button when focus fell to the page body.
  */
 export function RailFooter({
@@ -47,19 +46,20 @@ export function RailFooter({
   }, [isThemePickerOpen])
 
   return (
-    // One row: the Rail toggle (bottom-left, x center 24 like the collapsed
-    // Rail), Settings in the free width, then the two 28px icon buttons.
-    <div className="flex shrink-0 items-center gap-0.5 px-1.5 pb-2 pt-1">
-      <RailToggleButton />
-      <div className="min-w-0 flex-1">
-        <RailRow
-          label="Settings"
-          hint={settingsShortcut}
-          icon={<SlidersHorizontal size={16} />}
-          pressed={settingsView === 'app'}
-          onClick={() => useSettingsModalStore.getState().openApp()}
-        />
-      </div>
+    // `pl-2.5` puts the 28px Settings button's center at x = 24 (the icon
+    // column); `pr-1.5` lines Shortcuts up with the header's Rail toggle.
+    <div className="flex shrink-0 items-center gap-0.5 pb-2 pl-2.5 pr-1.5 pt-1">
+      <RailButton
+        label="Settings"
+        hint={settingsShortcut}
+        size="sm"
+        aria-label="Settings"
+        pressed={settingsView === 'app'}
+        onClick={() => useSettingsModalStore.getState().openApp()}
+      >
+        <SlidersHorizontal size={16} />
+      </RailButton>
+      <div className="min-w-0 flex-1" />
 
       <div ref={buttonsRef} className="flex shrink-0 items-center gap-0.5">
         <RailButton
