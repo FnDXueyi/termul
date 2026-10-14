@@ -51,6 +51,13 @@ vi.mock('@/stores/canvas-store', () => ({
   )
 }))
 
+// MaterialFileIcon pulls in the app-settings store + an SVG resolver; stub it
+// with the inputs it resolves from.
+vi.mock('@/components/file-explorer/MaterialFileIcon', () => ({
+  MaterialFileIcon: ({ name, extension }: { name: string; extension: string | null }) => (
+    <span data-testid="file-icon" data-name={name} data-extension={extension ?? ''} />
+  )
+}))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: mockLogFrontendError }))
 
 vi.mock('react-router-dom', async () => {
@@ -299,6 +306,30 @@ describe('MobileDrawerSectionList editors', () => {
     renderList({ section: 'editors' })
 
     expect(screen.getByText('No open editors')).toBeInTheDocument()
+  })
+
+  it('gives an editor row its file-type icon, not a pencil', () => {
+    seedTabs([
+      { type: 'editor', id: 'edit-/proj/a.ts', filePath: '/proj/a.ts' },
+      { type: 'editor', id: 'edit-/proj/Makefile', filePath: '/proj/Makefile' },
+      { type: 'editor', id: 'edit-/proj/.env', filePath: '/proj/.env' },
+      { type: 'editor', id: 'edit-/proj/types.d.ts', filePath: '/proj/types.d.ts' },
+      { type: 'editor', id: 'edit-C:\\proj\\Main.CS', filePath: 'C:\\proj\\Main.CS' }
+    ])
+    renderList({ section: 'editors' })
+
+    const icon = (name: string) =>
+      within(screen.getByRole('button', { name })).getByTestId('file-icon')
+    expect(icon('a.ts')).toHaveAttribute('data-name', 'a.ts')
+    expect(icon('a.ts')).toHaveAttribute('data-extension', 'ts')
+    expect(icon('Makefile')).toHaveAttribute('data-extension', '')
+    expect(icon('.env')).toHaveAttribute('data-extension', '')
+    expect(icon('types.d.ts')).toHaveAttribute('data-extension', 'ts')
+    expect(icon('Main.CS')).toHaveAttribute('data-name', 'Main.CS')
+    expect(icon('Main.CS')).toHaveAttribute('data-extension', 'CS')
+    expect(
+      screen.getByRole('group', { name: 'Editors' }).querySelector('svg[data-termul-icon="Pencil"]')
+    ).not.toBeInTheDocument()
   })
 
   it('gives the canvas row a label and the Edit2 icon', () => {
