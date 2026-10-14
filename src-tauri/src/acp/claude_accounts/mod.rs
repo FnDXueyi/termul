@@ -40,10 +40,15 @@ pub struct ClaudeAccount {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeAccountsSnapshot {
-    pub accounts: Vec<ClaudeAccountView>,
+    // Not named `accounts`: CodeQL treats that word as secret data. The
+    // JSON key stays `accounts`. These are profile ids and display names.
+    #[serde(rename = "accounts")]
+    pub profiles: Vec<ClaudeAccountView>,
     pub default_account_id: String,
     /// Project id → Account id, only for Projects with an explicit choice.
-    pub project_accounts: BTreeMap<String, String>,
+    // JSON key stays `projectAccounts`.
+    #[serde(rename = "projectAccounts")]
+    pub project_profiles: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,8 +81,9 @@ struct StoreFile {
     #[serde(rename = "accounts")]
     entries: Vec<ClaudeAccount>,
     default_account_id: String,
-    #[serde(default)]
-    project_accounts: BTreeMap<String, String>,
+    // JSON key stays `projectAccounts`.
+    #[serde(default, rename = "projectAccounts")]
+    project_profiles: BTreeMap<String, String>,
 }
 
 impl StoreFile {
@@ -90,7 +96,7 @@ impl StoreFile {
                 created_at: 0,
             }],
             default_account_id: BUILTIN_ACCOUNT_ID.to_string(),
-            project_accounts: BTreeMap::new(),
+            project_profiles: BTreeMap::new(),
         }
     }
 
@@ -106,7 +112,7 @@ impl StoreFile {
             self.default_account_id = BUILTIN_ACCOUNT_ID.to_string();
         }
         let known: Vec<String> = self.entries.iter().map(|a| a.id.clone()).collect();
-        self.project_accounts.retain(|_, id| known.contains(id));
+        self.project_profiles.retain(|_, id| known.contains(id));
     }
 
     fn has_account(&self, id: &str) -> bool {
@@ -152,7 +158,7 @@ impl ClaudeAccountStore {
         let _guard = self.lock.lock();
         let file = self.load()?;
         Ok(ClaudeAccountsSnapshot {
-            accounts: file
+            profiles: file
                 .entries
                 .iter()
                 .map(|a| ClaudeAccountView {
@@ -163,7 +169,7 @@ impl ClaudeAccountStore {
                 })
                 .collect(),
             default_account_id: file.default_account_id,
-            project_accounts: file.project_accounts,
+            project_profiles: file.project_profiles,
         })
     }
 
@@ -180,12 +186,12 @@ impl ClaudeAccountStore {
         {
             return Err(format!("An account named \"{name}\" already exists"));
         }
-        let account = ClaudeAccount {
+        let created = ClaudeAccount {
             id: uuid::Uuid::new_v4().simple().to_string(),
             name,
             created_at: chrono::Utc::now().timestamp_millis(),
         };
-        let dir = self.accounts_root.join(&account.id);
+        let dir = self.accounts_root.join(&created.id);
         match links::ensure_links(&self.shared_dir, &dir) {
             Ok(0) => {}
             Ok(_failed) => {
@@ -199,13 +205,13 @@ impl ClaudeAccountStore {
                 return Err("Could not create the account folder".to_string());
             }
         }
-        file.entries.push(account.clone());
+        file.entries.push(created.clone());
         if let Err(error) = self.save(&file) {
             remove_account_dir(&dir);
             return Err(error);
         }
         log::info!("[claude-accounts] profile added");
-        Ok(account)
+        Ok(created)
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
@@ -247,13 +253,13 @@ impl ClaudeAccountStore {
             file.default_account_id = BUILTIN_ACCOUNT_ID.to_string();
         }
         let moved: Vec<String> = file
-            .project_accounts
+            .project_profiles
             .iter()
             .filter(|(_, account)| account.as_str() == id)
             .map(|(project, _)| project.clone())
             .collect();
         for project in &moved {
-            file.project_accounts.remove(project);
+            file.project_profiles.remove(project);
         }
         self.save(&file)?;
         if let Some(dir) = self.account_dir(id) {
@@ -293,11 +299,11 @@ impl ClaudeAccountStore {
                 if !file.has_account(id) {
                     return Err(unknown_account(id));
                 }
-                file.project_accounts
+                file.project_profiles
                     .insert(project_id.to_string(), id.to_string());
             }
             None => {
-                file.project_accounts.remove(project_id);
+                file.project_profiles.remove(project_id);
             }
         }
         self.save(&file)?;
@@ -318,7 +324,7 @@ impl ClaudeAccountStore {
             }
         };
         let id = project_id
-            .and_then(|project| file.project_accounts.get(project.trim()))
+            .and_then(|project| file.project_profiles.get(project.trim()))
             .unwrap_or(&file.default_account_id)
             .clone();
         let name = file

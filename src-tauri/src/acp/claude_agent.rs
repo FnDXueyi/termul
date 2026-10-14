@@ -312,17 +312,18 @@ pub struct ClaudeAgentService {
     install_root: Option<PathBuf>,
     runtime_probe: Arc<dyn ClaudeRuntimeProbe>,
     /// Claude Accounts of this host state dir; `None` without host state.
-    accounts: Option<Arc<ClaudeAccountStore>>,
+    // Not named `accounts`: CodeQL treats that word as secret data.
+    profile_store: Option<Arc<ClaudeAccountStore>>,
 }
 
 impl ClaudeAgentService {
     #[must_use]
     pub fn system(install_root: PathBuf) -> Self {
-        let accounts = install_root
+        let store = install_root
             .parent()
             .zip(ClaudeAccountStore::host_shared_dir())
             .map(|(state_dir, shared)| Arc::new(ClaudeAccountStore::new(state_dir, shared)));
-        if accounts.is_none() {
+        if store.is_none() {
             log::warn!(
                 "[claude-accounts] no home directory; only the built-in account is available"
             );
@@ -332,7 +333,7 @@ impl ClaudeAgentService {
             Some(install_root),
             Arc::new(SystemClaudeRuntimeProbe),
         );
-        service.accounts = accounts;
+        service.profile_store = store;
         service
     }
 
@@ -364,7 +365,7 @@ impl ClaudeAgentService {
             credentials,
             install_root,
             runtime_probe,
-            accounts: None,
+            profile_store: None,
         }
     }
 

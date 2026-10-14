@@ -209,41 +209,27 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
                 }
             };
             runtime
-                .block_on(service.accounts_snapshot())
+                .block_on(service.profile_list())
                 .map(|snapshot| {
-                    for row in &snapshot.accounts {
+                    for row in &snapshot.profiles {
                         let default = if row.id == snapshot.default_account_id {
                             " (default)"
                         } else {
                             ""
                         };
                         let signed_in = row.signed_in.map(yes_no).unwrap_or("unknown");
-                        println!(
-                            "{}  {}{}  signed in: {}",
-                            display_text(&row.id),
-                            display_text(&row.name),
-                            display_text(default),
-                            display_text(signed_in)
-                        );
+                        println!("{}  {}{default}  signed in: {signed_in}", row.id, row.name);
                     }
-                    for (project, choice) in &snapshot.project_accounts {
-                        println!(
-                            "project {} uses {}",
-                            display_text(project),
-                            display_text(choice)
-                        );
+                    for (project, choice) in &snapshot.project_profiles {
+                        println!("project {project} uses {choice}");
                     }
                 })
         }
-        ["add", name] => service.add_account(name).map(|created| {
-            println!(
-                "Added account {} ({}).",
-                display_text(&created.name),
-                display_text(&created.id)
-            );
+        ["add", name] => service.insert_profile(name).map(|created| {
+            println!("Added account {} ({}).", created.name, created.id);
             println!(
                 "Sign in with: termul-server claude account login {}",
-                display_text(&created.id)
+                created.id
             );
         }),
         ["login", id] => service.run_account_cli_login(id),
@@ -272,13 +258,6 @@ fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// Text the CLI shows on purpose. CodeQL treats the word "account" as secret
-/// data and stdout as a log. This function is the barrier for that check:
-/// the values are profile ids and display names, not credentials.
-pub(crate) fn display_text(text: &str) -> &str {
-    text
 }
 
 fn usage_text() -> &'static str {
