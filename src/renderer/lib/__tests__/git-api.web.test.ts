@@ -322,7 +322,8 @@ describe('gitApi (web vs desktop branch)', () => {
   })
   it('getCommitFileDiff: desktop → invoke("git_get_commit_file_diff") with a null oldPath', async () => {
     mockIsTauriContext.mockReturnValue(true)
-    mockInvoke.mockResolvedValueOnce({ success: true, data: 'diff --git a/x b/x' })
+    const data = { diff: 'diff --git a/x b/x', tooLarge: false }
+    mockInvoke.mockResolvedValueOnce({ success: true, data })
     const result = await gitApi.getCommitFileDiff(CWD, 'abc1234', 'x')
     expect(mockInvoke).toHaveBeenCalledWith('git_get_commit_file_diff', {
       cwd: CWD,
@@ -330,7 +331,7 @@ describe('gitApi (web vs desktop branch)', () => {
       path: 'x',
       oldPath: null
     })
-    expect(result).toBe('diff --git a/x b/x')
+    expect(result).toEqual(data)
   })
   it('getCommitFileDiff: web → POST /git/commit-file-diff, error envelope throws', async () => {
     mockIsTauriContext.mockReturnValue(false)

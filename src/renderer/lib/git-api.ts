@@ -2,6 +2,7 @@ import type {
   GitCommit,
   GitCommitContext,
   GitCommitDetail,
+  GitCommitFileDiff,
   GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
@@ -104,9 +105,9 @@ export const gitApi = {
     hash: string,
     path: string,
     oldPath?: string
-  ): Promise<string> => {
+  ): Promise<GitCommitFileDiff> => {
     if (isTauriContext()) {
-      const res = await invokeIpc<string>('git_get_commit_file_diff', {
+      const res = await invokeIpc<GitCommitFileDiff>('git_get_commit_file_diff', {
         cwd,
         hash,
         path,

@@ -268,14 +268,16 @@ export interface GitCommit {
   subject: string
 }
 
+/** How a commit changed a file: added, modified, deleted, renamed, copied or type-changed. */
+export type GitCommitFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T'
+
 /** One file changed by a commit (diff against the first parent). */
 export interface GitCommitFile {
   /** Path after the commit (the new path of a rename). */
   path: string
   /** Path before the commit, for a rename or copy only. */
   oldPath: string | null
-  /** One-letter status: `A`, `M`, `D`, `R`, `C` or `T`. */
-  status: string
+  status: GitCommitFileStatus
   /** Added lines; `null` for a binary file. */
   added: number | null
   /** Removed lines; `null` for a binary file. */
@@ -284,7 +286,7 @@ export interface GitCommitFile {
 
 /** What the Git History detail pane shows beyond the log row. */
 export interface GitCommitDetail {
-  /** Full 40-char hash. */
+  /** Full hash (40 hex characters, or 64 in a SHA-256 repository). */
   hash: string
   authorEmail: string
   /** Full commit message: subject, blank line, body. */
@@ -294,6 +296,14 @@ export interface GitCommitDetail {
   files: GitCommitFile[]
   /** More files changed than the host returns; `files` holds the first ones. */
   filesTruncated: boolean
+}
+
+/** One file's unified diff in a commit, for the read-only commit Diff tab. */
+export interface GitCommitFileDiff {
+  /** Unified diff text; empty when `tooLarge`. */
+  diff: string
+  /** The diff is larger than the host cap, so the host did not send it. */
+  tooLarge: boolean
 }
 
 /**
@@ -351,7 +361,12 @@ export interface GitApi {
   getLog: (cwd: string, limit?: number, all?: boolean) => Promise<GitCommit[]>
   getCommitDetail: (cwd: string, hash: string) => Promise<GitCommitDetail>
   /** One file's unified diff in a commit against its first parent. */
-  getCommitFileDiff: (cwd: string, hash: string, path: string, oldPath?: string) => Promise<string>
+  getCommitFileDiff: (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string
+  ) => Promise<GitCommitFileDiff>
   /** `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch); a moved HEAD refuses the commit (`precondition_failed`). */
   commit: (
     cwd: string,

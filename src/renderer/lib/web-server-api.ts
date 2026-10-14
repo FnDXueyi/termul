@@ -25,6 +25,7 @@ import type {
   GitCommit,
   GitCommitContext,
   GitCommitDetail,
+  GitCommitFileDiff,
   GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
@@ -300,8 +301,8 @@ export const webServerGit = {
     hash: string,
     path: string,
     oldPath?: string
-  ): Promise<string> {
-    const res = await postJson<string>('/git/commit-file-diff', {
+  ): Promise<GitCommitFileDiff> {
+    const res = await postJson<GitCommitFileDiff>('/git/commit-file-diff', {
       cwd,
       hash,
       path,
