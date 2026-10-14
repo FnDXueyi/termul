@@ -154,7 +154,6 @@ fn resolve_executable_from_path(command: &str) -> Option<String> {
 pub use acp::{
     AcpCatalogService, AcpInstallService, AcpManager, ChatHistoryStore, ClaudeAgentService,
     ClaudeAuthMode, ClaudeAuthStatus, SessionPersistence,
-    WorkspaceManifestService,
 };
 // Host-injected `plan` MCP tool: the `--internal-mcp-plan-server`
 // subcommand branch in `main.rs` + `server_main.rs` reaches `host_mcp::CHILD_ARG`
@@ -1152,6 +1151,16 @@ pub fn run() {
                 web::store::StorePolicy::default(),
             ) {
                 Ok(store) => {
+                    // The retired workspace manifests move into the first
+                    // device that adopts the store (renamed afterwards).
+                    let store = store.with_legacy_manifests(web::store::legacy_manifests_dir(
+                        &app_data_dir,
+                    ));
+                    // The retired plugin-store file `termul-data.json` moves
+                    // into the first device that reaches the store over the
+                    // desktop carrier (renamed afterwards).
+                    let store = store
+                        .with_desktop_legacy(web::store::desktop_legacy_file(&app_data_dir));
                     app.manage(remote::SharedLiveData {
                         store: Arc::new(store),
                         data_dir: app_data_dir.clone(),
@@ -1391,43 +1400,6 @@ pub fn run() {
             app.manage(chat_history_store);
             app.manage(commands::HostHistoryStore(session_persistence.clone()));
 
-            // CAP-5 / Story 5: open the host-owned workspace-manifests root
-            // under `<app_data_dir>/workspace-manifests`. The desktop owns its
-            // own root — NEVER shared with a standalone `termul-server` on the
-            // same machine (two processes on one JSONL store would corrupt
-            // both). `None` degrades to fresh-only mode (the
-            // `workspace_manifest_*` commands return `Ok(None)` / idempotent
-            // success; the web routes follow suit).
-            let workspace_manifests_root = handle
-                .path()
-                .app_data_dir()
-                .map_err(|error| format!("failed to resolve app data directory: {error}"))?
-                .join("workspace-manifests");
-            let workspace_manifest_service =
-                match tauri::async_runtime::block_on(WorkspaceManifestService::open(
-                    workspace_manifests_root.clone(),
-                )) {
-                    Ok(service) => {
-                        log::info!(
-                            "[workspace-manifest] host service ready path={}",
-                            service.root().display()
-                        );
-                        Some(service)
-                    }
-                    Err(error) => {
-                        // Degrade, don't crash: workspace manifests become
-                        // fresh-only, the app must still boot.
-                        log::error!(
-                            "[workspace-manifest] host service unavailable path={} error={error}",
-                            workspace_manifests_root.display()
-                        );
-                        None
-                    }
-                };
-            app.manage(commands::HostWorkspaceManifestStore::new(
-                workspace_manifest_service.clone(),
-            ));
-
             // CAP-6 / Story 8: open the host-owned ACP catalog root under
             // `<app_data_dir>/acp-catalog`. The desktop owns its own root —
             // NEVER shared with a standalone `termul-server` on the same
@@ -1605,7 +1577,6 @@ pub fn run() {
                     pty: pty_manager.clone(),
                     relay: ws_relay,
                     registry: Arc::clone(&project_registry),
-                    workspace_manifest: workspace_manifest_service.clone(),
                     acp_catalog: acp_catalog_service.clone(),
                     acp_install: acp_install_service.clone(),
                     store: handle.state::<remote::SharedLiveData>().store.clone(),
@@ -1937,8 +1908,6 @@ pub fn run() {
             commands::remote_server_start,
             commands::remote_server_stop,
             commands::remote_server_status,
-            commands::remote_sync_projects,
-            commands::set_host_default_project,
             commands::project_registry_import,
             commands::remote_sync_chat_history,
             commands::remote_sync_mcp_registry,
@@ -1954,10 +1923,6 @@ pub fn run() {
             commands::acp_history_get_legacy,
             // Frontend error forwarding (issue #244)
             commands::log_frontend_error,
-            // Workspace manifest (CAP-5 / Story 5)
-            commands::workspace_manifest_get,
-            commands::workspace_manifest_write,
-            commands::workspace_manifest_delete,
             // Agentation annotation service (issue #451, Epic 1)
             agentation::agentation_create_session,
             agentation::agentation_list_sessions,

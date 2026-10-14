@@ -156,14 +156,16 @@ impl ProjectRegistry {
         })
     }
 
-    /// Patch a project's display fields and archived flag. `NotFound` when the
-    /// id is not registered.
+    /// Patch a project's display fields, archived flag and root. `path` is the
+    /// canonical root (the caller validated it). `NotFound` when the id is not
+    /// registered.
     pub(super) fn commit_update(
         &self,
         project_id: &str,
         name: Option<String>,
         color: Option<String>,
         is_archived: Option<bool>,
+        path: Option<String>,
     ) -> Result<Committed<()>, ProjectCommandError> {
         self.commit(|data| {
             let Some(project) = data.projects.iter_mut().find(|p| p.id == project_id) else {
@@ -180,8 +182,24 @@ impl ProjectRegistry {
             if let Some(is_archived) = is_archived {
                 project.is_archived = is_archived;
             }
+            if let Some(path) = path {
+                project.path = Some(path);
+            }
             Ok(())
         })
+    }
+
+    /// `true` when `project_id` is registered with a root and `canonical` is a
+    /// different directory. A pathless project has no root to leave.
+    pub(super) fn moves_root(&self, project_id: &str, canonical: &Path) -> bool {
+        self.get(project_id)
+            .and_then(|project| project.path)
+            .is_some_and(|existing| {
+                let existing = existing.trim();
+                !existing.is_empty()
+                    && Path::new(existing) != canonical
+                    && !std::fs::canonicalize(existing).is_ok_and(|resolved| resolved == canonical)
+            })
     }
 
     /// Remove a project. An absent id is `Ok(false)` (idempotent).
@@ -210,37 +228,6 @@ impl ProjectRegistry {
             }
             data.default_project_id = Some(project_id.to_string());
             Ok(())
-        })
-    }
-
-    /// Replace the whole list (the desktop renderer's transitional push).
-    /// The new default is chosen by `derive(projects, current default)` under
-    /// the commit lock, so a concurrent explicit default change is never
-    /// overwritten by a stale read. The reserved unassigned id never
-    /// registers. Returns the stored default.
-    pub(super) fn commit_replace_all(
-        &self,
-        mut projects: Vec<ProjectSummary>,
-        derive: impl FnOnce(&[ProjectSummary], Option<&str>) -> Option<String>,
-    ) -> Result<Committed<Option<String>>, ProjectCommandError> {
-        let before = projects.len();
-        projects.retain(|p| p.id != UNASSIGNED_PROJECT_ID);
-        if projects.len() != before {
-            tracing::warn!(
-                target: "termul::web::project_registry",
-                "replace: dropped a project carrying the reserved unassigned id"
-            );
-        }
-        let committed = self.commit(|data| {
-            data.default_project_id = derive(&projects, data.default_project_id.as_deref());
-            data.projects = projects;
-            data.seeded = false;
-            Ok(())
-        })?;
-        let stored = self.inner.lock().default_project_id.clone();
-        Ok(Committed {
-            value: stored,
-            changed: committed.changed,
         })
     }
 

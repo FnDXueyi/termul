@@ -40,6 +40,16 @@
 //! Partitions are bounded: a device partition has a byte budget and a stale
 //! one (device unseen for the GC age and not connected) is swept ([`gc`]).
 //!
+//! The retired per-project workspace manifests are imported once, into the
+//! first device that adopts the store ([`manifest_import`]); a parked
+//! `editor-state/<projectId>` key is adopted as `workspace/<projectId>`.
+//!
+//! The desktop's retired plugin-store file `termul-data.json` is imported once,
+//! into the first device that reaches the store over the desktop carrier
+//! ([`desktop_import`]); its own marker (`host.desktopImported`) keeps it
+//! apart from the adoption above, which a shared-live client may have done long
+//! before.
+//!
 //! Exposed to browsers as the `store_read` / `store_write` / `store_delete`
 //! WS requests (see `ws/store.rs`). The client debounces high-frequency
 //! writes, so write volume here is low.
@@ -48,114 +58,36 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde_json::Value;
 use tracing::{info, warn};
 
-use crate::acp::atomic_file::{self, NewerSchema};
+use crate::acp::atomic_file;
 use crate::web::command_ledger::is_valid_command_id;
 use crate::web::config::{
     ServerConfig, DEFAULT_PARTITION_BYTE_BUDGET, DEFAULT_PARTITION_GC_AGE_SECS,
 };
 use crate::web::ws::ClientIdentity;
 
+mod desktop_import;
+mod errors;
 mod gc;
 mod legacy;
 mod lww;
+mod manifest_import;
 mod records;
 mod scope;
 
+pub use desktop_import::{desktop_legacy_file, DESKTOP_LEGACY_FILE};
+pub use errors::{StoreError, WebStoreError};
 pub use gc::spawn_gc_task;
 pub use records::{Record, STORE_SCHEMA_VERSION};
 pub use scope::{classify, KeyScope};
 use records::{decode, encode, envelope_overhead, DecodeFailure, ExtraKeys, HostMeta};
 use scope::{device_prefix, partition_of};
-
-/// Why [`WebStore::open`] refused to open the store file. Both variants are
-/// startup-fatal for the host that hit them.
-#[derive(Debug)]
-pub enum WebStoreError {
-    /// The file was written by a newer host (`schemaVersion` above
-    /// [`STORE_SCHEMA_VERSION`]); it was not modified.
-    NewerSchema(NewerSchema),
-    /// An older (or unversioned) file could not be backed up before
-    /// migration, so the migration was not attempted and the file was not
-    /// modified.
-    MigrationBackup { path: PathBuf, source: io::Error },
-}
-
-impl std::fmt::Display for WebStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NewerSchema(error) => write!(f, "web store {error}"),
-            Self::MigrationBackup { path, source } => write!(
-                f,
-                "web store '{}' is an older schema and could not be backed up \
-                 before migration: {source}; refusing to open it, the file was left untouched",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for WebStoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::NewerSchema(error) => Some(error),
-            Self::MigrationBackup { source, .. } => Some(source),
-        }
-    }
-}
-
-/// Why a store operation was refused or failed.
-#[derive(Debug)]
-pub enum StoreError {
-    /// The store could not be read at startup; nothing is served from it.
-    Unavailable,
-    /// The key is outside the three scopes or in another device's partition.
-    Scope(String),
-    /// A shared/lww key exists and the write named no `baseRevision`.
-    BaseRequired,
-    /// The shared key's current value is not the `expected` one (or, for a
-    /// shared/lww delete, changed since `baseRevision`).
-    CasFailed(String),
-    /// The write would push the device partition past its byte budget.
-    PartitionFull { used: usize, budget: u64 },
-    /// A precondition the scope requires is missing or malformed.
-    Invalid(String),
-    /// The file could not be written (including the 10 MiB file cap).
-    Io(io::Error),
-}
-
-impl std::fmt::Display for StoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable => write!(f, "server store is unavailable"),
-            Self::Scope(message) | Self::CasFailed(message) | Self::Invalid(message) => {
-                write!(f, "{message}")
-            }
-            Self::BaseRequired => write!(
-                f,
-                "this shared key already exists: read it first and send its revision as baseRevision"
-            ),
-            Self::PartitionFull { used, budget } => write!(
-                f,
-                "device partition would use {used} bytes (budget {budget}); delete something first"
-            ),
-            Self::Io(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-impl From<io::Error> for StoreError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
 
 /// Partition limits, from [`ServerConfig`] (one default each, in
 /// `web/config.rs`).
@@ -229,6 +161,19 @@ pub enum WriteOutcome {
 /// Maximum size of the `data` payload a write may persist.
 const MAX_DATA_BYTES: usize = 10 * 1024 * 1024;
 
+/// Per-value serialized size cap for `store_write` (CAP-11). The whole-file
+/// cap above still applies; this bound rejects a single oversized value BEFORE
+/// it reaches the store so the on-disk file stays untouched.
+pub const STORE_VALUE_MAX_BYTES: usize = 256 * 1024;
+
+/// Where a host kept the retired per-project workspace manifests under its
+/// data directory (`<app data dir>` on desktop, `<state dir>` for
+/// `termul-server`).
+#[must_use]
+pub fn legacy_manifests_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("workspace-manifests")
+}
+
 /// Unix milliseconds now.
 #[must_use]
 pub fn unix_ms() -> u64 {
@@ -246,6 +191,12 @@ struct State {
     last_seen_dirty: bool,
     /// When the file was last written (unix ms).
     last_flush_ms: u64,
+    /// The retired workspace-manifest directory, while its one-shot import
+    /// into the first adopting device is still pending.
+    import_dir: Option<PathBuf>,
+    /// The desktop plugin-store file, read at startup, while its one-shot
+    /// import into the first desktop-carrier device is still pending.
+    desktop_import: Option<Arc<desktop_import::DesktopImport>>,
 }
 
 /// Most deleted-key revision floors kept in the host metadata.
@@ -323,6 +274,8 @@ impl WebStore {
                         host: loaded.host,
                         last_seen_dirty: false,
                         last_flush_ms: now_ms,
+                        import_dir: None,
+                        desktop_import: None,
                     };
                     if loaded.migrated {
                         Self::migrate(&path, &bytes, &extra, &mut state, now_ms)?;
@@ -387,7 +340,22 @@ impl WebStore {
             host: HostMeta::default(),
             last_seen_dirty: false,
             last_flush_ms: now_ms,
+            import_dir: None,
+            desktop_import: None,
         }
+    }
+
+    /// Import the retired workspace manifests under `dir` into the first
+    /// device that adopts the store (see [`manifest_import`]). A no-op when a
+    /// device already adopted or `dir` does not exist.
+    #[must_use]
+    pub fn with_legacy_manifests(self, dir: PathBuf) -> Self {
+        if let Some(state) = self.inner.lock().as_mut() {
+            if state.host.adopted.is_none() && dir.is_dir() {
+                state.import_dir = Some(dir);
+            }
+        }
+        self
     }
 
     fn migrate(
@@ -432,9 +400,9 @@ impl WebStore {
     }
 
     /// What every request does first, under the lock: mark the device seen,
-    /// let the first authenticated device adopt the parked pre-v2 keys
-    /// (atomically, in one write), and flush a last-seen update that has
-    /// waited an hour.
+    /// let the first authenticated device adopt the parked pre-v2 keys and the
+    /// retired workspace manifests (atomically, in one write), and flush a
+    /// last-seen update that has waited an hour.
     fn enter(
         &self,
         state: &mut State,
@@ -442,21 +410,11 @@ impl WebStore {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         state.touch(&identity.device_id, now_ms);
-        if !state.host.legacy.is_empty()
-            && state.host.adopted.is_none()
+        if state.host.adopted.is_none()
+            && (!state.host.legacy.is_empty() || state.import_dir.is_some())
             && device_prefix(&identity.device_id).is_some()
         {
-            let mut next = state.clone();
-            if legacy::adopt(&mut next.data, &mut next.host, &identity.device_id, now_ms) {
-                next.persist(&self.path, &self.extra, now_ms)?;
-                info!(
-                    target: "termul::web::store",
-                    device_id = %ClientIdentity::log_label(&identity.device_id),
-                    adopted = state.host.legacy.len(),
-                    "device adopted the pre-v2 store keys"
-                );
-                *state = next;
-            }
+            self.adopt(state, identity, now_ms)?;
         }
         if state.last_seen_dirty && now_ms.saturating_sub(state.last_flush_ms) >= gc::LAST_SEEN_FLUSH_MS
         {
@@ -468,6 +426,79 @@ impl WebStore {
             }
         }
         Ok(())
+    }
+
+    /// The first device to ask adopts what no device owned yet. The file is
+    /// written once; only after that does the manifest directory move aside,
+    /// so a failed write leaves both the state and the import pending.
+    fn adopt(
+        &self,
+        state: &mut State,
+        identity: &ClientIdentity,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let manifests = state.import_dir.clone();
+        let workspaces = manifests
+            .as_deref()
+            .map(manifest_import::read_workspaces)
+            .unwrap_or_default();
+        let mut next = state.clone();
+        next.import_dir = None;
+        let mut adoption = legacy::adopt(
+            &mut next.data,
+            &mut next.host,
+            &identity.device_id,
+            now_ms,
+            workspaces,
+        );
+        if let Some(adoption) = adoption.as_mut() {
+            self.fit_adopted_workspaces(&mut next, &identity.device_id, adoption);
+            next.persist(&self.path, &self.extra, now_ms)?;
+        }
+        if let Some(dir) = &manifests {
+            manifest_import::retire_dir(dir, now_ms);
+        }
+        if let Some(adoption) = adoption {
+            info!(
+                target: "termul::web::store",
+                device_id = %ClientIdentity::log_label(&identity.device_id),
+                parked = adoption.parked,
+                workspaces = adoption.workspaces.len(),
+                "device adopted the pre-v2 store keys"
+            );
+        }
+        *state = next;
+        Ok(())
+    }
+
+    /// Keep the adopting device's partition within the byte budget that every
+    /// later write enforces: an adoption that overshot it would make each write
+    /// that grows the partition fail. The imported workspaces that do not fit
+    /// (the last ones by project id) are dropped with a warning; they stay in
+    /// the renamed manifest directory.
+    fn fit_adopted_workspaces(
+        &self,
+        next: &mut State,
+        device_id: &str,
+        adoption: &mut legacy::Adoption,
+    ) {
+        let Some(prefix) = device_prefix(device_id) else {
+            return;
+        };
+        let budget = self.policy.partition_byte_budget;
+        let mut used = next.partition_bytes(&prefix);
+        while used as u64 > budget {
+            let Some(key) = adoption.workspaces.pop() else {
+                break;
+            };
+            if let Some(record) = next.data.remove(&key) {
+                used -= records::record_bytes(&key, &record);
+            }
+            warn!(
+                target: "termul::web::store",
+                "dropped the imported workspace '{key}': the device partition would exceed its {budget} byte budget"
+            );
+        }
     }
 
     /// Read `key` for the connection `identity`. A key that cannot be read is
@@ -712,11 +743,15 @@ fn check_expected(current: Option<&Record>, expected: &Value) -> Result<(), Stor
 }
 
 #[cfg(test)]
+mod desktop_import_tests;
+#[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
 mod legacy_tests;
 #[cfg(test)]
 mod lww_tests;
+#[cfg(test)]
+mod manifest_import_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]

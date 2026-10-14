@@ -417,6 +417,15 @@ export const handoffOnlyTurnIds = new Set<string>()
  */
 export const activeWirePromptTurns = new Map<SessionId, string>()
 
+/**
+ * Wire `turnId` of the latest turn THIS client dispatched whose `user_prompt`
+ * echo has landed, per session. The host sequences that echo on acceptance, so
+ * a dispatch whose reply is lost after its echo arrived is already known to be
+ * accepted and needs no pending-reconcile. Cleared alongside every
+ * `activeWirePromptTurns` delete so it stays bounded.
+ */
+export const echoedWirePromptTurns = new Map<SessionId, string>()
+
 const ENDED_PROMPT_TURN_LIMIT = 256
 const endedPromptTurnIds = new Set<string>()
 
@@ -441,6 +450,7 @@ export function _resetPromptReconcileForTesting(): void {
   __clearCommandJournalForTesting()
   definiteSpawnRejections.clear()
   activeWirePromptTurns.clear()
+  echoedWirePromptTurns.clear()
   endedPromptTurnIds.clear()
 }
 

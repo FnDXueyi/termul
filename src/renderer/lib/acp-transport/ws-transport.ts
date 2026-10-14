@@ -10,15 +10,19 @@
 
 import type { AcpCatalog } from '@shared/types/acp-catalog.types'
 import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
+import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
+  type AddProjectPayload,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
+  type RemoveProjectPayload,
   type SessionCursorReply,
   type SessionSnapshotEvent,
   type SessionSubscribeReply,
+  type UpdateProjectPayload,
   WS_ERROR_CODES,
   WS_EVENT_TYPES,
   WS_WATCH_FRAME_TYPE,
@@ -62,6 +66,7 @@ import {
 import { webServerMcpProbe } from '@/lib/web-server-api'
 import { judgeEvent, SyncGate } from './cursor'
 import { toWsEventType } from './event-names'
+import { HOST_GOING_AWAY_CLOSE_CODE, HostOfflineMonitor } from './host-offline'
 import { HOST_SILENCE_LIMIT_MS, HostLiveness } from './liveness'
 import {
   type AcpConnectionState,
@@ -324,6 +329,13 @@ export class WsAcpTransport implements AcpTransport {
    * (a version mismatch reloads the page once via the shared helper).
    */
   private protocolHalted: AcpTransportError | null = null
+  /**
+   * The host closed the socket with `1001` (it stopped on purpose). While set,
+   * no backoff loop runs and `connect()` refuses to open a socket: the slow
+   * health probe (or a user retry) clears it once the host answers.
+   */
+  private hostOffline = false
+  private readonly hostProbe = new HostOfflineMonitor(() => this.onHostAnswered())
 
   constructor(opts?: { url?: string; WebSocketImpl?: typeof WebSocket }) {
     this.wsUrl =
@@ -356,6 +368,11 @@ export class WsAcpTransport implements AcpTransport {
    */
   getConnectionState(): AcpConnectionState {
     return this.connectionState
+  }
+
+  /** User retry (or a wake signal) while `host-offline`: ask `/health` now. */
+  retryHostOffline(): void {
+    this.hostProbe.probeNow()
   }
 
   /** Record + emit a connection-health transition (single funnel so the
@@ -443,6 +460,11 @@ export class WsAcpTransport implements AcpTransport {
     // AD-15: protocol mismatch / bad identity never recovers in this page
     // (a reload replaces the transport); keep refusing instead of churning.
     if (this.protocolHalted) throw this.protocolHalted
+    // The host stopped on purpose: do not open a socket against it. The health
+    // probe reconnects once the host answers.
+    if (this.hostOffline) {
+      throw new AcpTransportError('closed', 'host is offline')
+    }
     this.attachVisibilityListeners()
     if (this.socket?.readyState === WebSocket.OPEN && this.authed) return
     if (this.connecting) return this.connecting
@@ -461,6 +483,7 @@ export class WsAcpTransport implements AcpTransport {
     this.clearHeartbeat()
     this.clearStableTimer()
     this.sessionRetry.cancelAll()
+    this.hostProbe.stop()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -955,6 +978,39 @@ export class WsAcpTransport implements AcpTransport {
     return this.request<boolean>('delete_session', payload)
   }
 
+  // --- Host project registry commands --------------------------------------
+
+  async addProject(project: AddProjectPayload): Promise<ProjectSummary> {
+    const reply = await this.request<{ project: ProjectSummary }>('add_project', project)
+    return reply.project
+  }
+
+  async updateProject(
+    projectId: string,
+    patch: {
+      name?: string
+      color?: string
+      isArchived?: boolean
+      path?: string
+      cascade?: boolean
+    }
+  ): Promise<void> {
+    const payload: UpdateProjectPayload = { projectId, ...patch }
+    await this.request<unknown>('update_project', payload)
+  }
+
+  async removeProject(projectId: string, options?: { cascade?: boolean }): Promise<void> {
+    const payload: RemoveProjectPayload = {
+      projectId,
+      ...(options?.cascade ? { cascade: true } : {})
+    }
+    await this.request<unknown>('remove_project', payload)
+  }
+
+  async setDefaultProject(projectId: string): Promise<void> {
+    await this.request<unknown>('set_default_project', { projectId })
+  }
+
   // --- WS-mapped session/prompt methods ------------------------------------
 
   async newSession(
@@ -1352,7 +1408,7 @@ export class WsAcpTransport implements AcpTransport {
         settleErr(new AcpTransportError('closed', 'WebSocket error'))
       }
 
-      ws.onclose = () => {
+      ws.onclose = (ev?: { code?: number }) => {
         if (this.socket !== ws) {
           settleErr(new AcpTransportError('closed', 'superseded WebSocket closed before auth'))
           return
@@ -1364,7 +1420,10 @@ export class WsAcpTransport implements AcpTransport {
         this.clearStableTimer()
         this.sessionRetry.cancelAll()
         this.rejectAllPending('closed', 'WebSocket closed')
-        if (!this.disposed) this.scheduleReconnect()
+        if (!this.disposed) {
+          if (ev?.code === HOST_GOING_AWAY_CLOSE_CODE) this.enterHostOffline()
+          else this.scheduleReconnect()
+        }
         settleErr(new AcpTransportError('closed', 'WebSocket closed before auth'))
       }
 
@@ -1522,6 +1581,11 @@ export class WsAcpTransport implements AcpTransport {
   private validateOnResume(reason: string): void {
     if (this.disposed || this.tokenHalted) return
     this.awaySinceProbe = false
+    // The host is offline: a wake or network signal asks `/health` at once.
+    if (this.hostOffline) {
+      this.hostProbe.probeNow()
+      return
+    }
     // A pending backoff is cut short by any wake signal (attempt counter kept).
     if (this.expediteReconnect()) return
     // Handshake in flight: bounded by HANDSHAKE_TIMEOUT_MS, nothing to probe.
@@ -1568,7 +1632,7 @@ export class WsAcpTransport implements AcpTransport {
    * runs unchanged.
    */
   private forceReconnect(reason: string): void {
-    if (this.disposed) return
+    if (this.disposed || this.hostOffline) return
     // An active reconnect that has already progressed past socket creation
     // with a LIVE socket (resubscribe phase) is re-establishing the channel —
     // don't interfere. A pending timer, an in-flight `connect()` that hasn't
@@ -1678,12 +1742,46 @@ export class WsAcpTransport implements AcpTransport {
     this.resumeValidation = validation
   }
 
+  /**
+   * The host closed the socket with `1001`: it stopped on purpose, so a backoff
+   * loop would only churn. Hold the reconnect cycle open (chat keeps its
+   * "waiting" state and held prompts), report `host-offline`, and ask `/health`
+   * at a slow cadence until the host answers.
+   */
+  private enterHostOffline(): void {
+    this.hostOffline = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    if (!this.reconnecting) {
+      this.reconnecting = true
+      this.onReconnectStateChange?.(true)
+    }
+    this.emitConnectionState('host-offline')
+    void logFrontendError({
+      level: 'warn',
+      source: 'WsAcpTransport.hostOffline',
+      message: 'host closed the WebSocket with 1001 (host stopping); probing /health slowly'
+    })
+    this.hostProbe.start()
+  }
+
+  /** `/health` answered: leave `host-offline` and reconnect once. */
+  private onHostAnswered(): void {
+    if (this.disposed || !this.hostOffline) return
+    this.hostOffline = false
+    this.lastReconnectAttemptAt = Date.now()
+    this.emitConnectionState('reconnecting')
+    void this.reconnect()
+  }
+
   private scheduleReconnect(): void {
     // Issue #907 (F3): a token-class refusal must NOT re-arm the backoff
     // loop — every retry would re-send the same refused token forever (the
     // original 8s churn). The flag is cleared by the next successful
     // authenticate, after which normal reconnect behavior resumes.
-    if (this.tokenHalted || this.protocolHalted) return
+    if (this.tokenHalted || this.protocolHalted || this.hostOffline) return
     if (this.disposed || this.reconnectTimer) return
     // Exponential backoff with ±25 % jitter. The attempt counter is reset only
     // by `stableTimer` (60 s of stable connection), never merely on connect.
@@ -1997,7 +2095,12 @@ export class WsAcpTransport implements AcpTransport {
       pending.resolve(reply.payload)
     } else {
       pending.reject(
-        new AcpTransportError(reply.err.code, reply.err.message || reply.err.code, visibleAt)
+        new AcpTransportError(
+          reply.err.code,
+          reply.err.message || reply.err.code,
+          visibleAt,
+          reply.err.details
+        )
       )
     }
   }

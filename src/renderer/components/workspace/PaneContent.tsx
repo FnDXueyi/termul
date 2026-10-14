@@ -18,6 +18,11 @@ import { useProjectStore } from '@/stores/project-store'
 import { useTerminalActions, useTerminalStore } from '@/stores/terminal-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
+import {
+  useIsPaneProjectActive,
+  usePaneTree,
+  useProjectPaneContext
+} from '@/stores/workspace-store/pane-context'
 import type { LeafNode } from '@/types/workspace.types'
 import { DropZoneOverlay } from './DropZoneOverlay'
 import { WorkspaceTabBar } from './WorkspaceTabBar'
@@ -84,28 +89,33 @@ export function PaneContent({
   )
 
   // CRITICAL FIX: Only subscribe to terminals' essential properties (not output!)
-  // and ENSURE we only show terminals belonging to the active project to prevent "leaks"
-  const activeProjectId = useProjectStore((state) => state.activeProjectId)
+  // and ENSURE we only show terminals belonging to this tree's project to prevent "leaks".
+  // Inside a ProjectTreeHost that is the host's project (a hidden tree keeps showing
+  // its own terminals); without one it is the active project.
+  const hostProjectId = useProjectPaneContext()?.projectId
+  const isActiveProject = useIsPaneProjectActive()
+  const treeProjectId = useProjectStore((state) => hostProjectId || state.activeProjectId)
   const terminalsInPane = useTerminalStore(
     useShallow((state) =>
-      state.terminals.filter((t) => terminalIdsInPane.has(t.id) && t.projectId === activeProjectId)
+      state.terminals.filter((t) => terminalIdsInPane.has(t.id) && t.projectId === treeProjectId)
     )
   )
 
-  // FIX: Batch workspace store subscriptions with useShallow to prevent cascading re-renders
-  const { activePaneId, fullscreenPaneId, agentLauncherPaneId, setActivePane } = useWorkspaceStore(
-    useShallow((state) => ({
-      activePaneId: state.activePaneId,
-      fullscreenPaneId: state.fullscreenPaneId,
-      agentLauncherPaneId: state.agentLauncherPaneId,
-      setActivePane: state.setActivePane
+  // This tree's own pane state: the flat fields when its project is active, its
+  // parked tree otherwise — a hidden tree never re-renders for the active one.
+  const { activePaneId, fullscreenPaneId, agentLauncherPaneId } = usePaneTree(
+    useShallow((tree) => ({
+      activePaneId: tree.activePaneId,
+      fullscreenPaneId: tree.fullscreenPaneId,
+      agentLauncherPaneId: tree.agentLauncherPaneId
     }))
   )
+  const setActivePane = useWorkspaceStore((state) => state.setActivePane)
 
   // Flagged shell only: this pane's part of the window top row (null otherwise).
   const topRow = usePaneTopRow(pane.id)
 
-  const hasMultiplePanes = useWorkspaceStore((state) => getAllLeafPanes(state.root).length > 1)
+  const hasMultiplePanes = usePaneTree((tree) => getAllLeafPanes(tree.root).length > 1)
 
   const { setTerminalPtyId } = useTerminalActions()
   const { isDragging, previewTarget } = usePaneDnd()
@@ -115,6 +125,9 @@ export function PaneContent({
   const isFullscreenPane = fullscreenPaneId === pane.id
   const isActivePane = activePaneId === pane.id
   const activeTab = pane.tabs.find((t) => t.id === pane.activeTabId)
+  // Only the visible project has a visible tab: a hidden tree's panels stay
+  // mounted but see `isVisible=false` (no focus, fit, stream renders or webview).
+  const visibleTabId = isActiveProject ? activeTab?.id : undefined
   const activeTerminalIdInPane = activeTab?.type === 'terminal' ? activeTab.terminalId : null
   const panePreviewPosition =
     previewTarget?.paneId === pane.id && !isFullscreenPane ? previewTarget.position : null
@@ -165,6 +178,8 @@ export function PaneContent({
   }, [terminalsInPane])
 
   const handleFocus = useCallback(() => {
+    // A hidden tree is inert; never let a stray event move the visible tree's focus.
+    if (!isActiveProject) return
     if (!isActivePane) {
       setActivePane(pane.id)
     }
@@ -179,7 +194,7 @@ export function PaneContent({
         store.setTerminalNeedsAttention(activeTerminalIdInPane, false)
       }
     }
-  }, [isActivePane, setActivePane, pane.id, activeTerminalIdInPane])
+  }, [isActiveProject, isActivePane, setActivePane, pane.id, activeTerminalIdInPane])
 
   // Keyboard parity for the mouse acknowledgment above: a keystroke directed at this
   // pane's visible terminal is an explicit "I'm looking at it" signal, so clear the
@@ -306,7 +321,7 @@ export function PaneContent({
                 // we overlay the agent loading icon on top until the renderer
                 // attaches — see the overlay div after ConnectedTerminal.
                 if (!terminal.ptyId) {
-                  const isVisible = activeTab?.id === tab.id
+                  const isVisible = visibleTabId === tab.id
                   const isAgent = terminal.kind === 'agent' && !!terminal.agentId
                   return (
                     <div
@@ -332,7 +347,7 @@ export function PaneContent({
                     </div>
                   )
                 }
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 const isAgentLoading =
                   terminal.kind === 'agent' &&
                   !!terminal.agentId &&
@@ -394,10 +409,14 @@ export function PaneContent({
                 )
               })}
 
+            {/* The editor store is one global store swapped per project, so a
+                hidden tree's editor tabs would show another project's files:
+                render them only while this project is on screen. */}
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'editor' } => t.type === 'editor')
+              .filter(() => isActiveProject)
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -413,7 +432,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'browser' } => t.type === 'browser')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -429,7 +448,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'canvas' } => t.type === 'canvas')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -449,7 +468,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'git' } => t.type === 'git')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -465,7 +484,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'git-history' } => t.type === 'git-history')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -481,7 +500,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'diff' } => t.type === 'diff')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
@@ -502,7 +521,7 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'agent-chat' } => t.type === 'agent-chat')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   // Mount fade: a chat tab that appears while the launcher
                   // exits reveals its content gradually — the text doesn't
@@ -533,7 +552,7 @@ export function PaneContent({
                 stays pointer-events-none — the launcher root re-enables them
                 while present — so the fresh tab is interactive mid-exit. */}
             <AnimatePresence initial={false}>
-              {pane.tabs.length === 0 ? (
+              {isActiveProject && pane.tabs.length === 0 ? (
                 <motion.div
                   key={`agent-launcher-${pane.id}`}
                   className="pointer-events-none absolute inset-0"
@@ -567,7 +586,7 @@ export function PaneContent({
           pointer-events-none (the launcher root re-enables hits while
           present) so the pane is interactive mid-exit. */}
       <AnimatePresence initial={false}>
-        {agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
+        {isActiveProject && agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
           <motion.div
             key={`agent-launcher-overlay-${pane.id}`}
             className={cn(

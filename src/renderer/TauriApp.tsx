@@ -37,13 +37,15 @@ import { useGitStatus } from './hooks/use-git-status'
 import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useKeyboardShortcutsLoader } from './hooks/use-keyboard-shortcuts'
 import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
+import { usePersistenceErrorToasts } from './hooks/use-persistence-error-toasts'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
 import { useProjectGitBranch } from './hooks/use-project-git-branch'
 import { useProjectIcon } from './hooks/use-project-icon'
-import { useProjectsAutoSave, useProjectsLoader } from './hooks/use-projects-persistence'
+import { useProjectRegistry } from './hooks/use-project-registry'
 import { useRemoteProjects } from './hooks/use-remote-projects'
 import { useShellLayoutHydration } from './hooks/use-shell-layout-hydration'
 import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
+import { useSSHSessionEvents } from './hooks/use-ssh-session-events'
 import { useTerminalDetachedOutput } from './hooks/use-terminal-detached-output'
 import { useTerminalExitNotification } from './hooks/use-terminal-exit-notification'
 import { useTerminalIdleNotification } from './hooks/use-terminal-idle-notification'
@@ -71,10 +73,14 @@ function AppEffects(): null {
     ensureClientIdentity()
   }, [])
 
+  // Toast when a store write fails (value too large, partition full, ...).
+  // Mounted on both renderer roots for parity.
+  usePersistenceErrorToasts()
   useTerminalAutoSave()
   useTerminalRestore()
   useCrashRecovery()
   useTerminalDetachedOutput()
+  useSSHSessionEvents()
   useCwd()
   useGitBranch()
   useProjectGitBranch()
@@ -87,8 +93,7 @@ function AppEffects(): null {
   useAppliedColorThemeSync()
   useAppliedUiZoomSync()
   useKeyboardShortcutsLoader()
-  useProjectsLoader()
-  useProjectsAutoSave()
+  useProjectRegistry()
   useShellLayoutHydration()
   useMenuUpdaterListener()
   useUpdateCheck()

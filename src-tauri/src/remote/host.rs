@@ -46,7 +46,7 @@ use tokio::process::Child;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager, WorkspaceManifestService};
+use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager};
 use crate::pty::PtyManager;
 use crate::web::auth::{self, WebAuth, WebAuthOrigin, WebAuthResolution};
 use crate::web::sink::WsRelaySink;
@@ -271,12 +271,6 @@ impl RemoteServerState {
     /// start wins the slot race, the loser signals its spawned task to drain
     /// before returning `Err` (no orphaned second server).
     ///
-    /// `workspace_manifest` is the desktop's own `WorkspaceManifestService`
-    /// (opened under `<app_data_dir>/workspace-manifests` in `lib.rs`).
-    /// Threaded through to `serve_router` so the web/remote client can
-    /// read/write a project's manifest through `/workspace/*`. `None`
-    /// degrades to fresh-only mode.
-    ///
     /// `acp_catalog` is the desktop's own `AcpCatalogService` (opened under
     /// `<app_data_dir>/acp-catalog` in `lib.rs`). Threaded through to
     /// `serve_router` so the web/remote client can resolve the catalog through
@@ -307,7 +301,6 @@ impl RemoteServerState {
         requested_bind_mode: RemoteBindMode,
         tunnel_planned: bool,
         data: &SharedLiveData,
-        workspace_manifest: Option<Arc<WorkspaceManifestService>>,
         acp_catalog: Option<Arc<AcpCatalogService>>,
         acp_install: Option<Arc<AcpInstallService>>,
     ) -> Result<RemoteStatus, String> {
@@ -353,68 +346,6 @@ impl RemoteServerState {
                 }
             };
 
-        // Resolve the seed root for the shared-live server from the registry's
-        // default-project path, NOT the user home dir. The boundary itself is
-        // the project registry (any registered project); this root only seeds
-        // one registered project when the registry is still empty (the first
-        // renderer project sync replaces it), so a freshly started host does
-        // not reject everything. The registry carries display paths (not
-        // canonical forms), so we run the result through
-        // `resolve_and_validate_project_root` so `ServerConfig::project_root`
-        // is a canonical absolute path to an existing directory — exactly like
-        // the standalone `termul-server`.
-        //
-        // Fallback chain:
-        // 1. Registry default project path → canonicalize.
-        // 2. `default_project_root()` ($TERMUL_PROJECT_ROOT / $HOME) → canonicalize.
-        // 3. None discoverable → fatal (the server cannot enforce a boundary).
-        //
-        // A transient canonicalization failure on the registry default (deleted
-        // between sync and start) falls through to the home fallback rather
-        // than refusing to start; the next renderer project sync replaces the
-        // seed. A `warn!` is logged so the operator notices.
-        let project_root = {
-            // 1. Try the registry's default-project path first.
-            let from_registry = registry.default_project_path().and_then(|p| {
-                match crate::web::config::resolve_and_validate_project_root(std::path::Path::new(
-                    &p,
-                )) {
-                    Ok(canonical) => Some(canonical),
-                    Err(e) => {
-                        warn!(
-                            "shared-live: registry default project path '{}' failed \
-                                 canonicalization: {}; falling back to home",
-                            p, e
-                        );
-                        None
-                    }
-                }
-            });
-            if let Some(root) = from_registry {
-                root
-            } else {
-                // 2. Empty registry / bad default → home fallback + warn.
-                let raw_root = crate::web::config::default_project_root().ok_or_else(|| {
-                    "could not determine project root for shared-live server: \
-                     set $TERMUL_PROJECT_ROOT or ensure $HOME is available"
-                        .to_string()
-                })?;
-                warn!(
-                    "shared-live started with no usable registry default; seed root \
-                     fell back to home ({}). If the registry is empty, /skills, /git/*, \
-                     /search/* reject any project outside this tree until a project is \
-                     synced; registered projects are unaffected.",
-                    raw_root.display()
-                );
-                crate::web::config::resolve_and_validate_project_root(&raw_root).map_err(|e| {
-                    format!(
-                        "shared-live server refused to start: {e} \
-                         (set $TERMUL_PROJECT_ROOT to a valid directory)"
-                    )
-                })?
-            }
-        };
-
         let cfg = ServerConfig {
             host: bind_mode.host().to_string(),
             // OS-assigned ephemeral port (avoids fixed-port conflicts).
@@ -428,18 +359,14 @@ impl RemoteServerState {
             partition_gc_age_secs: crate::web::config::DEFAULT_PARTITION_GC_AGE_SECS,
             partition_byte_budget: crate::web::config::DEFAULT_PARTITION_BYTE_BUDGET,
             deprecation_warnings: Vec::new(),
-            project_root,
+            // The desktop host never seeds a project: its registry is the
+            // durable `<app_data_dir>/projects.json`, fed by the renderer.
+            seed_project_root: None,
             // The desktop's durable registry (`<app_data_dir>/projects.json`)
             // is built once at setup and passed to `start`; the config path
             // is standalone-only.
             projects_file: None,
             sessions_dir: None,
-            // CAP-5 / Story 5: this path-override field is standalone-only.
-            // The desktop shared-live host passes its already-opened
-            // `WorkspaceManifestService` directly to `serve_router` (see the
-            // `workspace_manifest` argument below), so no path is resolved
-            // from the config here — `None` degrades nothing on this path.
-            workspace_manifests_dir: None,
             acp_catalog_dir: None,
             // The shared-live store is the desktop's single instance, passed to
             // `serve_router` below; this path override is never consulted.
@@ -476,11 +403,8 @@ impl RemoteServerState {
             pty.exit_code_tracker(),
             ws_relay,
             registry,
-            None,
-            None,
             cfg,
             shutdown,
-            workspace_manifest,
             acp_catalog,
             acp_install,
             Arc::clone(&data.store),

@@ -1,6 +1,5 @@
 // IPC Result pattern from architecture.md
 import type { AcpCatalog } from './acp-catalog.types'
-import type { WorkspaceManifest, WriteOutcome } from './workspace-manifest.types'
 
 // ============================================================================
 // Domain-command carriers (AD-5): `X-Command-Id` header of the ledgered HTTP
@@ -180,31 +179,6 @@ export type TerminalIpcChannels = {
   'terminal:write': (terminalId: string, data: string) => IpcResult<void>
   'terminal:resize': (terminalId: string, cols: number, rows: number) => IpcResult<void>
   'terminal:kill': (terminalId: string) => IpcResult<void>
-}
-
-// CAP-5 / Story 5: Workspace manifest IPC channels. Mirrors the three Tauri
-// commands (`workspace_manifest_get` / `_write` / `_delete`) and the three
-// HTTP routes (`GET /workspace/:projectId`, `POST /workspace/:projectId/write`,
-// `POST /workspace/:projectId/delete`) — both transports return the SAME
-// `IpcResult<...>` shape byte-for-byte. Conflict is a SUCCESS body variant of
-// `WriteOutcome` (NOT an error code); an excluded-field payload (`envVars`,
-// raw `claim`, `fullscreenPaneId`) fails serde `deny_unknown_fields` and maps
-// to `VALIDATION_ERROR` with no state change.
-//
-// Patch 11: the channel keys use the colon-separated pattern
-// (`workspace:manifest:get`, etc.) to mirror the existing
-// `TerminalIpcChannels` (`terminal:spawn`, `terminal:attach`, …). The Tauri
-// adapter's IPC_COMMANDS map uses the underscored Rust command names
-// (`workspace_manifest_get`); the channel map keys are a documentation /
-// type-safety surface, not the literal invoke() strings.
-export type WorkspaceManifestIpcChannels = {
-  'workspace:manifest:get': (projectId: string) => IpcResult<WorkspaceManifest | null>
-  'workspace:manifest:write': (
-    projectId: string,
-    basedRevision: number | null,
-    manifest: WorkspaceManifest
-  ) => IpcResult<WriteOutcome>
-  'workspace:manifest:delete': (projectId: string) => IpcResult<void>
 }
 
 // CAP-6 / Story 8: ACP catalog IPC channels. Mirrors the two `/ws` requests
@@ -581,14 +555,47 @@ export interface PersistenceWriteOpts {
   // Idempotency id; a resend of the same write reuses it so the host can
   // recognise its own applied write.
   commandId?: string
+  // The caller re-reads and resends a write that lost a compare-and-set race.
+  // Such a conflict is not reported on the error bus; set it on every attempt
+  // except the last one, so only the final failure reaches the user.
+  retrying?: boolean
 }
 
 // A read that also reports the host's per-key revision stamp.
 export interface StampedValue<T> {
   value: T
-  // 0 = key absent (desktop plugin-store has no revisions and always reports 0).
+  // 0 = key absent.
   revision: number
   clientInstanceId: string | null
+}
+
+// Codes of failed store writes that the user must hear about: the value was
+// not saved and the writer cannot fix it alone.
+export const PERSISTENCE_ERROR_CODES = [
+  'STORE_VALUE_TOO_LARGE',
+  'STORE_PARTITION_FULL',
+  'STORE_NOT_HYDRATED',
+  'STORE_WRITE_FAILED',
+  'STORE_BASE_REQUIRED',
+  'STORE_CAS_FAILED'
+] as const
+
+export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number]
+
+// One failed write, by logical key.
+export interface PersistenceErrorEvent {
+  key: string
+  code: PersistenceErrorCode
+  message: string
+}
+
+export type PersistenceErrorListener = (event: PersistenceErrorEvent) => void
+
+// What a store key holds, as a watch reports it (the stored envelope is unwrapped).
+export interface PersistenceKeyChange<T = unknown> {
+  // `false` when the key is absent (never written, or deleted).
+  exists: boolean
+  data?: T
 }
 
 // Persistence API for renderer
@@ -599,6 +606,14 @@ export interface PersistenceApi {
   writeDebounced: <T>(key: string, data: T) => Promise<IpcResult<void>>
   flushPendingWrites: () => Promise<IpcResult<void>>
   delete: (key: string) => Promise<IpcResult<void>>
+  // Subscribe to failed writes (any caller, debounced or not). Returns the
+  // unsubscribe function.
+  onPersistenceError: (listener: PersistenceErrorListener) => () => void
+  // Report each change another device or tab makes to a key (by logical key),
+  // once this page has read it. Echoes of this page's own writes are not
+  // reported. Returns the unsubscribe function. Every real surface has it;
+  // it is optional so a partial test double need not carry it.
+  watchShared?: (key: string, listener: (change: PersistenceKeyChange) => void) => () => void
 }
 
 // System API for renderer

@@ -1079,6 +1079,7 @@ pub(super) fn test_env(
         acp_install: None,
         store: None,
         identity: Arc::new(std::sync::OnceLock::new()),
+        carrier: Carrier::Ws,
         web_auth: None,
         out_tx: out_tx.clone(),
         subscriptions: Arc::clone(subscriptions),
@@ -1969,10 +1970,7 @@ pub(super) fn ws_test_app_state() -> AppState {
         registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
             &std::env::temp_dir(),
         ),
-        registry_persistence: None,
-        projects_file: None,
         history_mode: HistoryMode::LiveOnly,
-        workspace_manifest: None,
         acp_catalog: None,
         acp_install: None,
         store: None,
@@ -3695,8 +3693,7 @@ fn project_summary_for_test(
 
 /// `set_default_project` WS request (Epic 7): updates the host default and
 /// writes it through to the durable registry file. Mirrors the
-/// `set_host_default_project` Tauri command + `POST /projects/default` HTTP
-/// route (transport parity).
+/// `POST /projects/default` HTTP route (transport parity).
 #[tokio::test]
 async fn handle_set_default_project_updates_host_default_and_persists() {
     let dir = tempfile::tempdir().unwrap();

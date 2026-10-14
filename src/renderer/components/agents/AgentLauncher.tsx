@@ -621,7 +621,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // deleted by the empty-value branch — a sent launch never lingers. Restored
   // text is taken as-is: skill/file tokens it may carry are validated at
   // launch (buildPromptParts toasts on a missing path), matching the chat.
-  const launchDraftKey = activeProjectId ? `last-launch-draft/${activeProjectId}` : null
+  const launchDraftKey = activeProjectId ? PersistenceKeys.lastLaunchDraft(activeProjectId) : null
   const launchDraftHydratedRef = useRef(false)
   const launchDraftValueRef = useRef(prompt)
   launchDraftValueRef.current = prompt

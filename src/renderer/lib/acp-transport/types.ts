@@ -7,9 +7,12 @@
 
 import type { AcpCatalog } from '@shared/types/acp-catalog.types'
 import type { ClaudeAccountsSnapshot } from '@shared/types/claude-accounts.types'
+import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
+  type AddProjectPayload,
   type HistoryMode,
   type PersistedSessionSummary,
+  type ProjectBusyDetails,
   type SessionSnapshotEvent,
   WS_ERROR_CODES,
   type WsAgentSummary
@@ -50,12 +53,15 @@ export class AcpTransportError extends Error {
    * when the reply carried one. Absent on transport-local failures.
    */
   readonly visibleAt?: number
+  /** The host's structured context for the code: the bound entities of a `project_busy` refusal. */
+  readonly details?: ProjectBusyDetails
 
-  constructor(code: string, message: string, visibleAt?: number) {
+  constructor(code: string, message: string, visibleAt?: number, details?: ProjectBusyDetails) {
     super(code === WS_ERROR_CODES.OUTCOME_UNKNOWN ? OUTCOME_UNKNOWN_MESSAGE : message)
     this.name = 'AcpTransportError'
     this.code = code
     if (visibleAt !== undefined) this.visibleAt = visibleAt
+    if (details !== undefined) this.details = details
   }
 }
 
@@ -119,9 +125,17 @@ export function isOutcomeUncertainError(error: unknown): error is AcpTransportEr
  * connect in flight; `connected` = socket open + authed; `reconnecting` =
  * drop detected, backoff retry in progress; `disconnected` = gave up (the
  * terminal channel exhausts its retry budget; the control channel retries
- * forever and never reaches this state).
+ * forever and never reaches this state); `host-offline` = the host stopped on
+ * purpose (`Close(1001)`): no backoff loop runs, a slow health probe or a user
+ * retry decides when to reconnect.
  */
-export type AcpConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+export type AcpConnectionState =
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+  /** The host closed the socket with `1001` (it stopped); no reconnect loop runs. */
+  | 'host-offline'
 
 /**
  * A session replay cursor. `lastSeq` is only meaningful against the host log
@@ -357,9 +371,31 @@ export interface AcpTransport {
    */
   deliverAuthRedirect(agentId: AgentId, url: string, options?: CommandCallOptions): Promise<number>
   /**
-   * Web/remote only: the watches (projects, chat-history index, agent roster,
-   * project file changes, store keys, terminal sets). Absent on Tauri IPC
-   * (desktop), where those stores are local.
+   * Host project registry commands (`add_project`, `update_project`,
+   * `remove_project`, `set_default_project`), the same on every carrier. Each
+   * is idempotent by project id and has no `commandId`; the result reaches the
+   * renderer through the `projects` watch. A remove or archive that finds live
+   * sessions or terminals bound to the project throws an
+   * {@link AcpTransportError} with code `project_busy` and `details` listing
+   * them; the same call with `cascade: true` makes the host stop them first.
+   */
+  addProject(project: AddProjectPayload): Promise<ProjectSummary>
+  updateProject(
+    projectId: string,
+    patch: {
+      name?: string
+      color?: string
+      isArchived?: boolean
+      path?: string
+      cascade?: boolean
+    }
+  ): Promise<void>
+  removeProject(projectId: string, options?: { cascade?: boolean }): Promise<void>
+  setDefaultProject(projectId: string): Promise<void>
+  /**
+   * The watches (projects, chat-history index, agent roster, project file
+   * changes, store keys, terminal sets), on every carrier: the desktop speaks
+   * `/ws` over its Channel too.
    */
   readonly watches?: WatchClient
   historyMode?(): HistoryMode | 'tauri_store'
@@ -407,6 +443,11 @@ export interface AcpTransport {
    * emitted before wiring are reflected. Only on the WS transport.
    */
   getConnectionState?(): AcpConnectionState
+  /**
+   * Ask the host `GET /health` now while the state is `host-offline`, and
+   * reconnect when it answers. No-op in any other state. Only on the WS transport.
+   */
+  retryHostOffline?(): void
   setRecoveryHandler?(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
