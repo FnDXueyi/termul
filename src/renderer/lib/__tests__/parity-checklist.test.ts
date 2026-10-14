@@ -2030,3 +2030,77 @@ describe('Claude Accounts parity (ADR-0004)', () => {
     expect(read('acp', 'manager', 'mod.rs')).toMatch(/project_id: Option<String>/)
   })
 })
+
+// Git History commit detail + commit file diff (main-panel Git History tab).
+// Source-grep checks pin that one shared Rust function backs each Tauri command
+// AND its web read route, and that the renderer facade reaches both.
+describe('Git History commit detail parity', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const GitApiFacade = join(LIB_DIR, 'git-api.ts')
+  const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'git_history_api.rs')
+  const ServiceRust = join(SRC_TAURI, 'trackers', 'git_tracker', 'commit_detail.rs')
+  const CommandsGitRust = join(SRC_TAURI, 'commands', 'git.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+
+  const OPS = [
+    {
+      method: 'getCommitDetail',
+      command: 'git_get_commit_detail',
+      route: '/git/commit-detail',
+      handler: 'get_commit_detail',
+      payload: 'GitCommitDetail'
+    },
+    {
+      method: 'getCommitFileDiff',
+      command: 'git_get_commit_file_diff',
+      route: '/git/commit-file-diff',
+      handler: 'get_commit_file_diff',
+      payload: 'GitCommitFileDiff'
+    }
+  ] as const
+
+  for (const op of OPS) {
+    it(`git-api.ts branches ${op.method} on isTauriContext() between invoke and webServerGit`, () => {
+      const content = readFileSync(GitApiFacade, 'utf-8')
+      expect(content).toMatch(new RegExp(`${op.method}: async`))
+      expect(content).toMatch(new RegExp(`invokeIpc<\\w+>\\('${op.command}'`))
+      expect(content).toMatch(new RegExp(`webServerGit\\.${op.method}\\(`))
+    })
+
+    it(`web-server-api.ts exposes webServerGit.${op.method} hitting ${op.route}`, () => {
+      const content = readFileSync(WebAdapter, 'utf-8')
+      expect(content).toMatch(new RegExp(`async ${op.method}\\(`))
+      expect(content).toContain(`'${op.route}'`)
+    })
+
+    it(`router.rs registers ${op.route} in BOTH router variants`, () => {
+      const content = readFileSync(RouterRust, 'utf-8')
+      const occurrences = content.split(`"${op.route}"`).length - 1
+      expect(occurrences, 'both router() and router_with_static() register the route').toBe(2)
+    })
+
+    it(`git_history_api.rs ${op.handler} is a READ route through resolve_cwd and the shared service`, () => {
+      const content = readFileSync(RouteRust, 'utf-8')
+      expect(content).toMatch(new RegExp(`pub async fn ${op.handler}`))
+      expect(content).toContain(`resolve_cwd::<${op.payload}>(&req.cwd, &state, None, false)`)
+      expect(content).toMatch(new RegExp(`git_tracker::${op.command}`))
+    })
+
+    it(`the Tauri command ${op.command} is defined and registered over the shared service`, () => {
+      const command = readFileSync(CommandsGitRust, 'utf-8')
+      expect(command).toMatch(new RegExp(`pub async fn ${op.command}`))
+      expect(command).toMatch(new RegExp(`git_tracker::${op.command}`))
+      expect(readFileSync(LibRust, 'utf-8')).toContain(`commands::${op.command},`)
+      expect(readFileSync(ServiceRust, 'utf-8')).toMatch(new RegExp(`pub fn ${op.command}`))
+    })
+  }
+
+  it('git_history_api.rs logs through tracing and runs git off the async runtime', () => {
+    const content = readFileSync(RouteRust, 'utf-8')
+    expect(content).toMatch(/IpcBody/)
+    expect(content).toMatch(/spawn_blocking/)
+    expect(content).toMatch(/tracing::/)
+  })
+})

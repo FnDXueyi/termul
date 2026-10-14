@@ -1852,6 +1852,8 @@ pub fn run() {
             commands::git_unstage_hunk,
             commands::git_discard,
             commands::git_get_log,
+            commands::git_get_commit_detail,
+            commands::git_get_commit_file_diff,
             commands::git_commit,
             commands::git_push,
             commands::git_get_commit_context,

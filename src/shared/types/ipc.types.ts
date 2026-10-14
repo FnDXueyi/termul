@@ -268,6 +268,44 @@ export interface GitCommit {
   subject: string
 }
 
+/** How a commit changed a file: added, modified, deleted, renamed, copied or type-changed. */
+export type GitCommitFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T'
+
+/** One file changed by a commit (diff against the first parent). */
+export interface GitCommitFile {
+  /** Path after the commit (the new path of a rename). */
+  path: string
+  /** Path before the commit, for a rename or copy only. */
+  oldPath: string | null
+  status: GitCommitFileStatus
+  /** Added lines; `null` for a binary file. */
+  added: number | null
+  /** Removed lines; `null` for a binary file. */
+  removed: number | null
+}
+
+/** What the Git History detail pane shows beyond the log row. */
+export interface GitCommitDetail {
+  /** Full hash (40 hex characters, or 64 in a SHA-256 repository). */
+  hash: string
+  authorEmail: string
+  /** Full commit message: subject, blank line, body. */
+  message: string
+  /** Parent full hashes, first-parent first. */
+  parents: string[]
+  files: GitCommitFile[]
+  /** More files changed than the host returns; `files` holds the first ones. */
+  filesTruncated: boolean
+}
+
+/** One file's unified diff in a commit, for the read-only commit Diff tab. */
+export interface GitCommitFileDiff {
+  /** Unified diff text; empty when `tooLarge`. */
+  diff: string
+  /** The diff is larger than the host cap, so the host did not send it. */
+  tooLarge: boolean
+}
+
 /**
  * Resolved project icon (spec-project-icon). Runtime-neutral contract shared
  * by both transports: `project_icon_resolve` (Tauri `IpcResult` data) and
@@ -319,7 +357,16 @@ export interface GitApi {
   stage: (cwd: string, path: string) => Promise<void>
   unstage: (cwd: string, path: string) => Promise<void>
   discard: (cwd: string, path: string) => Promise<void>
-  getLog: (cwd: string, limit?: number) => Promise<GitCommit[]>
+  /** `all`: every branch, tag and remote ref instead of `HEAD` only. */
+  getLog: (cwd: string, limit?: number, all?: boolean) => Promise<GitCommit[]>
+  getCommitDetail: (cwd: string, hash: string) => Promise<GitCommitDetail>
+  /** One file's unified diff in a commit against its first parent. */
+  getCommitFileDiff: (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string
+  ) => Promise<GitCommitFileDiff>
   /** `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch); a moved HEAD refuses the commit (`precondition_failed`). */
   commit: (
     cwd: string,

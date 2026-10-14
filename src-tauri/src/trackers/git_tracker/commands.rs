@@ -1,3 +1,4 @@
+use super::git_exec::{run_git_capture, StdoutCap, GIT_READ_TIMEOUT_MS};
 use super::*;
 
 pub fn git_get_status_detail(cwd: &str) -> Result<Vec<GitStatusDetail>, String> {
@@ -502,19 +503,20 @@ const LOG_RECORD_SEP: char = '\u{1e}';
 /// subjects containing spaces, pipes, or other punctuation cannot break parsing.
 /// `--parents` yields parent SHAs (for graph topology), `--decorate=full`
 /// yields ref names, and `--topo-order` emits commits child-before-parent so the
-/// renderer's lane layout never sees a parent before its child.
+/// renderer's lane layout never sees a parent before its child. `all` walks
+/// every branch, tag and remote ref (`--all`) instead of `HEAD` only.
 ///
 /// A *benign* failure (a repo with no commits yet, or a path that is not a git
 /// repository) is reported as an empty history so the UI shows an empty state.
 /// Any other non-zero exit (corrupt `.git`, unreadable objects, permission
 /// errors) is propagated as an error so real failures are surfaced.
-pub fn git_get_log(cwd: &str, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
+pub fn git_get_log(cwd: &str, limit: Option<u32>, all: bool) -> Result<Vec<GitCommit>, String> {
     let limit = limit
         .unwrap_or(GIT_LOG_DEFAULT_LIMIT)
         .clamp(1, GIT_LOG_MAX_LIMIT);
     let limit_str = limit.to_string();
 
-    let args = [
+    let mut args = vec![
         "log",
         "--no-color",
         "--topo-order",
@@ -524,9 +526,14 @@ pub fn git_get_log(cwd: &str, limit: Option<u32>) -> Result<Vec<GitCommit>, Stri
         "--decorate=full",
         "--pretty=format:%H%x00%h%x00%P%x00%D%x00%an%x00%aI%x00%s%x1e",
     ];
+    // Every branch, tag and remote ref instead of `HEAD` only.
+    if all {
+        args.push("--all");
+    }
 
-    let output = GitTracker::run_git_command(cwd, &args)
-        .ok_or_else(|| "Failed to run git log".to_string())?;
+    // Drained capture: `--all` output easily passes the pipe buffer.
+    let output = run_git_capture(cwd, StdoutCap::Unbounded, &args, GIT_READ_TIMEOUT_MS)
+        .map_err(|e| format!("Failed to run git log: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

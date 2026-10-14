@@ -24,6 +24,8 @@ import type {
   FileInfo,
   GitCommit,
   GitCommitContext,
+  GitCommitDetail,
+  GitCommitFileDiff,
   GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
@@ -278,12 +280,35 @@ export const webServerGit = {
     if (!res.success) throw ipcFailureError(res)
   },
 
-  async getLog(cwd: string, limit?: number): Promise<GitCommit[]> {
+  async getLog(cwd: string, limit?: number, all = false): Promise<GitCommit[]> {
     const res = await postJson<GitCommit[]>('/git/log', {
       cwd,
-      ...(limit !== undefined ? { limit } : {})
+      ...(limit !== undefined ? { limit } : {}),
+      ...(all ? { all } : {})
     })
     if (!res.success) throw new Error(res.error)
+    return res.data
+  },
+
+  async getCommitDetail(cwd: string, hash: string): Promise<GitCommitDetail> {
+    const res = await postJson<GitCommitDetail>('/git/commit-detail', { cwd, hash })
+    if (!res.success) throw ipcFailureError(res)
+    return res.data
+  },
+
+  async getCommitFileDiff(
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string
+  ): Promise<GitCommitFileDiff> {
+    const res = await postJson<GitCommitFileDiff>('/git/commit-file-diff', {
+      cwd,
+      hash,
+      path,
+      ...(oldPath ? { oldPath } : {})
+    })
+    if (!res.success) throw ipcFailureError(res)
     return res.data
   },
 
