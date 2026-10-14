@@ -22,7 +22,6 @@ import { normalizePath } from '@/lib/working-copy'
 
 export const LEGACY_EXPLORER_WIDTH_KEY = 'termul:file-explorer-width'
 export const LEGACY_SSH_HEIGHT_KEY = 'termul-ssh-panel-height'
-export const LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY = 'termul.git-history.detail-width'
 
 /** Raw legacy values; each is `null`/`undefined` when it was absent. */
 export interface LegacyShellLayoutSources {
@@ -32,8 +31,6 @@ export interface LegacyShellLayoutSources {
   explorerWidth: string | null
   /** Raw `localStorage` string for the SSH panel height. */
   sshHeight: string | null
-  /** Raw `localStorage` string for the Git History detail pane width. */
-  gitHistoryDetailWidth: string | null
   /** Raw persisted `projects` data; desktop only. */
   projects: unknown
 }
@@ -93,10 +90,6 @@ export function buildMigratedShellLayout(legacy: LegacyShellLayoutSources): Shel
     parseLegacyInt(legacy.sshHeight),
     SHELL_LAYOUT_BOUNDS.sshSectionHeight
   )
-  record.gitHistoryDetailWidth = clampToBounds(
-    parseLegacyInt(legacy.gitHistoryDetailWidth),
-    SHELL_LAYOUT_BOUNDS.gitHistoryDetailWidth
-  )
   record.worktreePickByProject = legacyWorktreePicks(legacy.projects)
   return record
 }
@@ -109,7 +102,7 @@ export function countLegacyShellLayoutSources(
   const flags = ['sidebarVisible', 'fileExplorerVisible', 'sshPanelVisible'].filter(
     (field) => typeof settings[field] === 'boolean'
   ).length
-  const widths = [legacy.explorerWidth, legacy.sshHeight, legacy.gitHistoryDetailWidth].filter(
+  const widths = [legacy.explorerWidth, legacy.sshHeight].filter(
     (raw) => parseLegacyInt(raw) !== null
   ).length
   return { flags, widths, picks: Object.keys(legacyWorktreePicks(legacy.projects)).length }
@@ -146,17 +139,6 @@ export async function readLegacyShellLayoutSources(): Promise<LegacyShellLayoutS
     appSettings,
     explorerWidth: readLocalStorage(LEGACY_EXPLORER_WIDTH_KEY),
     sshHeight: readLocalStorage(LEGACY_SSH_HEIGHT_KEY),
-    gitHistoryDetailWidth: readLocalStorage(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY),
     projects
   }
-}
-
-/**
- * Carries the legacy Git History detail width into a saved record older than
- * the current version (which has no such field): the clamped value when the
- * old key exists, else `null` (keep the default).
- */
-export function legacyGitHistoryDetailWidth(): number | null {
-  const parsed = parseLegacyInt(readLocalStorage(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY))
-  return parsed === null ? null : clampToBounds(parsed, SHELL_LAYOUT_BOUNDS.gitHistoryDetailWidth)
 }

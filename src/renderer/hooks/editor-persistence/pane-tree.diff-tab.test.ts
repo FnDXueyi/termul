@@ -85,25 +85,6 @@ describe('diff tab persistence', () => {
     expect(restored.tabs[0].id).not.toBe(diffTabId('/r', 'a.ts', false))
   })
 
-  it('migrates a saved diff ref that carries a commit to a commit-diff tab', () => {
-    const hash = 'c'.repeat(40)
-    const id = commitDiffTabId('/r', hash, 'a.ts')
-    const persisted = {
-      type: 'leaf',
-      id: 'pane-1',
-      tabs: [
-        { type: 'diff', id, cwd: '/r', path: 'a.ts', staged: false, commit: hash, oldPath: 'o.ts' }
-      ],
-      activeTabId: id
-    } as unknown as PersistedPaneNodeInput
-
-    const restored = deserializePaneTree(persisted) as LeafNode
-    expect(restored.tabs).toEqual([
-      { type: 'commit-diff', id, cwd: '/r', commit: hash, path: 'a.ts', oldPath: 'o.ts' }
-    ])
-    expect(restored.activeTabId).toBe(id)
-  })
-
   it('drops a malformed commit diff ref', () => {
     const persisted = {
       type: 'leaf',

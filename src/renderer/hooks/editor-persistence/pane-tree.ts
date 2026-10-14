@@ -279,7 +279,7 @@ export function reconcileTerminalTabs(
   return normalizePaneTree(visit(root))
 }
 
-/** A persisted commit diff ref (or a pre-split `diff` ref that carried a `commit`) as a tab. */
+/** A persisted commit diff ref as a tab; a malformed ref is dropped with one warn. */
 function restoreCommitDiff(ref: {
   id?: unknown
   cwd?: unknown
@@ -383,11 +383,6 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput): PaneNode
               }
             ]
           case 'diff': {
-            // Pre-split saves stored a commit diff as a `diff` ref with a
-            // `commit`: restore it as a `commit-diff` tab.
-            const legacyCommit = (tab as { commit?: unknown }).commit
-            if (typeof legacyCommit === 'string')
-              return restoreCommitDiff({ ...tab, commit: legacyCommit })
             // Never coerce a malformed diff ref: drop it with one warn.
             if (
               typeof tab.cwd !== 'string' ||

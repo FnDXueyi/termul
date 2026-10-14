@@ -21,7 +21,6 @@ import { logFrontendError } from '@/lib/log-api'
 import {
   buildMigratedShellLayout,
   countLegacyShellLayoutSources,
-  legacyGitHistoryDetailWidth,
   readLegacyShellLayoutSources
 } from '@/lib/shell-layout-migration'
 import {
@@ -171,11 +170,8 @@ async function runHydration(): Promise<void> {
         return
       }
       const record = sanitizeShellLayout(result.data)
-      // A record older than the current version: carry the legacy detail
-      // pane width over once, then save it as the current version.
+      // A record older than the current version is saved as the current one.
       const upgraded = typeof version !== 'number' || version < SHELL_LAYOUT_VERSION
-      const legacyWidth = upgraded ? legacyGitHistoryDetailWidth() : null
-      if (legacyWidth !== null) record.gitHistoryDetailWidth = legacyWidth
       set({ ...record, status: 'ready' })
       if (!flushPendingRemovals() && upgraded) persistSnapshot()
       log('info', '[shell] shell layout hydrated')

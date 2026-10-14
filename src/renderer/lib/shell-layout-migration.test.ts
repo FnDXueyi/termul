@@ -3,10 +3,8 @@ import {
   buildMigratedShellLayout,
   countLegacyShellLayoutSources,
   LEGACY_EXPLORER_WIDTH_KEY,
-  LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY,
   LEGACY_SSH_HEIGHT_KEY,
   type LegacyShellLayoutSources,
-  legacyGitHistoryDetailWidth,
   readLegacyShellLayoutSources
 } from './shell-layout-migration'
 import { defaultShellLayoutRecord } from './shell-layout-record'
@@ -23,7 +21,6 @@ const EMPTY: LegacyShellLayoutSources = {
   appSettings: null,
   explorerWidth: null,
   sshHeight: null,
-  gitHistoryDetailWidth: null,
   projects: null
 }
 
@@ -51,7 +48,6 @@ describe('buildMigratedShellLayout', () => {
       appSettings: { sidebarVisible: false, fileExplorerVisible: false, sshPanelVisible: false },
       explorerWidth: '400',
       sshHeight: '200',
-      gitHistoryDetailWidth: '480',
       projects: projectsWith('w1')
     })
     expect(record).toEqual({
@@ -61,7 +57,6 @@ describe('buildMigratedShellLayout', () => {
       sshSectionVisible: false,
       sidePanelWidth: 400,
       sshSectionHeight: 200,
-      gitHistoryDetailWidth: 480,
       worktreePickByProject: { p1: 'c:/r/wt' }
     })
   })
@@ -128,10 +123,9 @@ describe('countLegacyShellLayoutSources', () => {
         appSettings: { sidebarVisible: true, sshPanelVisible: 'x' },
         explorerWidth: '300',
         sshHeight: 'NaN',
-        gitHistoryDetailWidth: '440',
         projects: projectsWith('w1')
       })
-    ).toEqual({ flags: 1, widths: 2, picks: 1 })
+    ).toEqual({ flags: 1, widths: 1, picks: 1 })
   })
 })
 
@@ -145,7 +139,6 @@ describe('readLegacyShellLayoutSources', () => {
   it('reads raw settings/app, projects and the two localStorage keys on desktop', async () => {
     localStorage.setItem(LEGACY_EXPLORER_WIDTH_KEY, '321')
     localStorage.setItem(LEGACY_SSH_HEIGHT_KEY, '111')
-    localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, '450')
     mockRead.mockImplementation(async (key: string) => ({
       success: true,
       data: key === 'settings/app' ? { sidebarVisible: false } : { projects: [] }
@@ -157,7 +150,6 @@ describe('readLegacyShellLayoutSources', () => {
       appSettings: { sidebarVisible: false },
       explorerWidth: '321',
       sshHeight: '111',
-      gitHistoryDetailWidth: '450',
       projects: { projects: [] }
     })
     expect(mockRead).toHaveBeenCalledWith('settings/app')
@@ -186,19 +178,5 @@ describe('readLegacyShellLayoutSources', () => {
 
     expect(sources).toEqual(EMPTY)
     getItem.mockRestore()
-  })
-})
-
-describe('legacyGitHistoryDetailWidth', () => {
-  beforeEach(() => localStorage.clear())
-
-  it('is the clamped stored width, or null when absent or not a number', () => {
-    expect(legacyGitHistoryDetailWidth()).toBeNull()
-    localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, 'abc')
-    expect(legacyGitHistoryDetailWidth()).toBeNull()
-    localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, '10')
-    expect(legacyGitHistoryDetailWidth()).toBe(320)
-    localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, '480')
-    expect(legacyGitHistoryDetailWidth()).toBe(480)
   })
 })

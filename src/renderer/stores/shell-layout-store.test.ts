@@ -1,6 +1,5 @@
 import { PersistenceKeys } from '@shared/types/persistence.types'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY } from '@/lib/shell-layout-migration'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import {
   defaultShellLayoutRecord,
@@ -67,7 +66,6 @@ describe('shell-layout-store', () => {
       appSettings: null,
       explorerWidth: null,
       sshHeight: null,
-      gitHistoryDetailWidth: null,
       projects: null
     })
   })
@@ -205,7 +203,6 @@ describe('shell-layout-store', () => {
 
     describe('a saved version 1 record', () => {
       const V1 = { version: 1, railWidth: 250, graphHeight: 300 }
-      afterEach(() => localStorage.removeItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY))
 
       it('keeps its values, drops graphHeight and is saved as the current version', async () => {
         await hydrateWithRecord(V1)
@@ -217,15 +214,7 @@ describe('shell-layout-store', () => {
         expect(saved).not.toHaveProperty('graphHeight')
       })
 
-      it('carries the legacy detail pane width over once, clamped', async () => {
-        localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, '9000')
-        await hydrateWithRecord(V1)
-        expect(state().gitHistoryDetailWidth).toBe(560)
-        expect(mockWriteDebounced.mock.calls[0][1]).toMatchObject({ gitHistoryDetailWidth: 560 })
-      })
-
-      it('ignores the legacy key once the record is the current version', async () => {
-        localStorage.setItem(LEGACY_GIT_HISTORY_DETAIL_WIDTH_KEY, '500')
+      it('does not save a record that is already the current version', async () => {
         await hydrateWithRecord({ version: 2, railWidth: 250, gitHistoryDetailWidth: 340 })
         expect(state().gitHistoryDetailWidth).toBe(340)
         expect(mockWriteDebounced).not.toHaveBeenCalled()
@@ -275,7 +264,6 @@ describe('shell-layout-store', () => {
         appSettings: { sidebarVisible: false, fileExplorerVisible: false, sshPanelVisible: false },
         explorerWidth: '400',
         sshHeight: '200',
-        gitHistoryDetailWidth: '480',
         projects: {
           projects: [
             {
@@ -298,7 +286,7 @@ describe('shell-layout-store', () => {
         sidePanelWidth: 400,
         sshSectionVisible: false,
         sshSectionHeight: 200,
-        gitHistoryDetailWidth: 480,
+        gitHistoryDetailWidth: 400,
         lastColumnTabByProject: {},
         worktreePickByProject: { p1: 'c:/repo/.termul/worktrees/feat' }
       })
@@ -481,7 +469,6 @@ describe('shell-layout-store', () => {
         appSettings: null,
         explorerWidth: null,
         sshHeight: null,
-        gitHistoryDetailWidth: null,
         projects: {
           projects: [
             { id: 'p1', activeWorktreeId: 'w1', worktrees: [{ id: 'w1', path: 'C:/r/wt1' }] },
