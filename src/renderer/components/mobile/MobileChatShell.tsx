@@ -11,13 +11,13 @@ import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
 import { useShellAnnouncements } from '@/hooks/use-shell-announcements'
 import { closeAgentChat } from '@/lib/agent-chat-close'
 import { returnFocusAfterConfirm } from '@/lib/confirm-focus-return'
+import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import {
   holdSheetReturnTargets,
   recordSheetOpener,
   setSheetFocusDestination,
   sheetCloseAutoFocus
 } from '@/lib/sheet-focus-return'
-import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { returnToWorkspaceRoute } from '@/lib/workspace-route'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'

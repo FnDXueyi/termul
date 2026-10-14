@@ -20,12 +20,12 @@ import {
   LaneGraph,
   RefChip
 } from './history/lane-graph'
+import { useCommitHistory } from './history/use-commit-history'
 import {
   DETAIL_PANE_MAX_WIDTH,
   DETAIL_PANE_MIN_WIDTH,
   useDetailPaneResize
 } from './history/use-detail-pane-resize'
-import { useCommitHistory } from './history/use-commit-history'
 
 interface GitHistoryViewProps {
   cwd: string
