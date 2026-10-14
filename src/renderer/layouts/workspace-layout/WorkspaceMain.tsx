@@ -63,7 +63,8 @@ export function WorkspaceMain({
     topRowValue?.roles.controlsOwner === 'ssh-header'
       ? {
           dragRegion: topRowValue.platform.dragRegions,
-          windowControls: topRowValue.platform.windowControls
+          windowControls: topRowValue.platform.windowControls,
+          showSidePanel: topRowValue.roles.showPanelOwner === 'ssh-header'
         }
       : undefined
   // Mobile shell only: a split synced from desktop collapses to the active

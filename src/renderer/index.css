@@ -272,6 +272,20 @@
     --shimmer-band: 400%;
     --shimmer-ease: linear;
 
+    /* Rail row hover surface: the 3% foreground wash of the State table
+       (docs/design/colors.md). One strength feeds both forms: --row-hover is
+       the translucent wash (stacks on a group surface); --row-hover-solid is
+       the same wash flattened over the page, for a fade that must end in the
+       row's own colour. Both follow applyColorTheme through --foreground and
+       --background. */
+    --row-hover-strength: 3%;
+    --row-hover: oklch(var(--foreground) / var(--row-hover-strength));
+    --row-hover-solid: color-mix(
+      in oklab,
+      oklch(var(--foreground)) var(--row-hover-strength),
+      oklch(var(--background))
+    );
+
     /* Project colors */
     --project-blue: 0.625 0.187 259.7;
     --project-purple: 0.557 0.251 301.9;

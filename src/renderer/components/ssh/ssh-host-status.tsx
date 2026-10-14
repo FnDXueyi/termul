@@ -87,5 +87,5 @@ export function SSHHostStateWord({
   className?: string
 }): React.JSX.Element {
   const { word, wordClass } = HOST_STATE[state]
-  return <span className={cn('text-3xs', wordClass, className)}>{word}</span>
+  return <span className={cn('text-2xs', wordClass, className)}>{word}</span>
 }

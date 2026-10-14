@@ -1,13 +1,8 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { lazy, type ReactNode, Suspense } from 'react'
-import {
-  FileExplorerToggleButton,
-  panelEdgeToggleButtonClass
-} from '@/components/TitlebarPanelToggles'
-import { edgeToggleMotion, panelRevealMotion } from '@/layouts/workspace-layout/panel-motion'
+import { panelRevealMotion } from '@/layouts/workspace-layout/panel-motion'
 import { ShellSkeleton } from '@/layouts/workspace-layout/ShellSkeleton'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
-import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { useFileExplorerVisible } from '@/stores/file-explorer-store'
 import type { Project } from '@/types/project'
@@ -97,23 +92,7 @@ export function ExplorerColumn({
             </AnimatePresence>
           </div>
         </motion.div>
-      ) : (
-        !isExplorerVisible &&
-        activeProject?.path &&
-        !isTauriContext() && (
-          // Web-only slim edge toggle so a hidden file explorer
-          // stays re-openable. Desktop re-opens via the
-          // Rail and top row toggles. Its enter is deferred until the column's
-          // collapse exits (edgeToggleMotion).
-          <motion.div
-            key="explorer-edge-toggle"
-            className={cn('flex-shrink-0 flex items-start overflow-hidden', sidePanel && 'mr-2')}
-            {...edgeToggleMotion(reducedMotion)}
-          >
-            <FileExplorerToggleButton className={panelEdgeToggleButtonClass} />
-          </motion.div>
-        )
-      )}
+      ) : null}
     </AnimatePresence>
   )
 }

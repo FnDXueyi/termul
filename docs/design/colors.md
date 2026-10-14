@@ -45,6 +45,7 @@ The default light theme (`termul-light`) uses the paper ramp. Page, card, and po
 | State | On `background` / `card` | On `popover` |
 | --- | --- | --- |
 | Hover | `bg-foreground/[0.03]` | `bg-foreground/[0.06]` |
+| Rail row hover (hover and focus-within) | `bg-row-hover`; a fade that ends in it uses `from-row-hover-solid` | n/a |
 | Selected / you are here | `.keycap` (index.css) | `Check` icon, no fill |
 | Active segment in a track | `.keycap` | `bg-foreground/10` |
 | Focus | neutral `ring` | neutral `ring` |
