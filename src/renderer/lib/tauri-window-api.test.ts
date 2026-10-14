@@ -98,26 +98,25 @@ describe('createTauriWindowApi close behavior', () => {
     expect(hide).not.toHaveBeenCalled()
   })
 
-  it('reports an app-close owner only while a close listener is registered', async () => {
+  it('counts an app-close owner from registration until cleanup', async () => {
     vi.resetModules()
     const { createTauriWindowApi, hasAppCloseOwner } = await import('./tauri-window-api')
     expect(hasAppCloseOwner()).toBe(false)
 
     const cleanup = createTauriWindowApi().onCloseRequested(vi.fn(async () => false))
-    await vi.waitFor(() => expect(hasAppCloseOwner()).toBe(true))
+    expect(hasAppCloseOwner()).toBe(true)
 
+    cleanup()
     cleanup()
     expect(hasAppCloseOwner()).toBe(false)
   })
 
-  it('does not count a close listener disposed before it registered', async () => {
+  it('releases the app-close owner when registration fails', async () => {
     vi.resetModules()
+    onCloseRequested.mockRejectedValueOnce(new Error('listen failed'))
     const { createTauriWindowApi, hasAppCloseOwner } = await import('./tauri-window-api')
 
-    createTauriWindowApi().onCloseRequested(vi.fn(async () => false))()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(hasAppCloseOwner()).toBe(false)
+    createTauriWindowApi().onCloseRequested(vi.fn(async () => false))
+    await vi.waitFor(() => expect(hasAppCloseOwner()).toBe(false))
   })
 })

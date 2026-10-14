@@ -139,20 +139,20 @@ export function createTauriWindowApi(): WindowApi {
           event.preventDefault()
         }
       })
-      let disposed = false
-      let counted = false
-      void unlisten.then(
-        () => {
-          if (disposed) return
-          counted = true
-          appCloseOwners += 1
-        },
-        () => undefined
-      )
+      // Count the owner before registration settles: an unprevented close in
+      // that window would quit the app, while an early count at worst ignores
+      // one click that arrives before this listener is live.
+      appCloseOwners += 1
+      let counted = true
+      const release = (): void => {
+        if (!counted) return
+        counted = false
+        appCloseOwners -= 1
+      }
+      void unlisten.catch(release)
       // Return sync cleanup function - unwrap the Promise
       return () => {
-        disposed = true
-        if (counted) appCloseOwners -= 1
+        release()
         void unlisten.then((fn) => fn())
       }
     },
