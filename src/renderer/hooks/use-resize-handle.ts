@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 
-/** Keyboard resize step (px) shared by the shell resize handles. */
-export const RESIZE_KEY_STEP = 16
+/** Keyboard resize step (px). */
+const RESIZE_KEY_STEP = 16
 
 export interface ResizeHandleOptions {
   /** Axis the pointer moves along: `x` for a width, `y` for a height. */
