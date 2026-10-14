@@ -60,6 +60,7 @@ describe('top-row selectors', () => {
     expect(roles.rightmostLeafId).toBe('C')
     expect(roles.leftmostLeafId).toBe('C')
     expect(roles.controlsOwner).toBe('pane')
+    expect(roles.showPanelOwner).toBe('pane')
   })
 
   it('ignores a fullscreen id that is not in the tree', () => {
@@ -70,11 +71,13 @@ describe('top-row selectors', () => {
   it('gives the SSH header and the fallback bar the controls with no pane roles', () => {
     const ssh = selectTopRowRoles({ root: H(A, B), fullscreenPaneId: null, mode: 'ssh' })
     expect(ssh.controlsOwner).toBe('ssh-header')
+    expect(ssh.showPanelOwner).toBe('ssh-header')
     expect(ssh.topEdgeLeafIds.size).toBe(0)
     expect(ssh.rightmostLeafId).toBeNull()
     expect(ssh.leftmostLeafId).toBeNull()
     const fallback = selectTopRowRoles({ root: H(A, B), fullscreenPaneId: null, mode: 'fallback' })
     expect(fallback.controlsOwner).toBe('fallback-bar')
+    expect(fallback.showPanelOwner).toBe('fallback-bar')
     expect(fallback.topEdgeLeafIds.size).toBe(0)
     expect(fallback.rightmostLeafId).toBeNull()
     expect(fallback.leftmostLeafId).toBeNull()

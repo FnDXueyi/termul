@@ -9,6 +9,9 @@ export type TopRowMode = 'panes' | 'ssh' | 'fallback'
 /** Who renders the window controls (Windows/Linux desktop). */
 export type TopRowControlsOwner = 'pane' | 'ssh-header' | 'fallback-bar'
 
+/** Who renders the Show side panel button while the Side panel is hidden. */
+export type TopRowShowPanelOwner = 'pane' | 'ssh-header' | 'fallback-bar'
+
 export interface TopRowRoles {
   /** Pane leaves whose tab bar touches the top edge of the main area. */
   topEdgeLeafIds: ReadonlySet<string>
@@ -17,6 +20,8 @@ export interface TopRowRoles {
   /** The top-edge leaf that is leftmost (it owns the Show side panel button). */
   leftmostLeafId: string | null
   controlsOwner: TopRowControlsOwner
+  /** Owner of the Show side panel button (the leftmost leaf's tab bar in `pane` mode). */
+  showPanelOwner: TopRowShowPanelOwner
 }
 
 export interface TopRowPlatform {
@@ -70,8 +75,9 @@ export function getLeftmostTopEdgeLeafId(root: PaneNode): string | null {
 }
 
 /**
- * The single place that decides who owns the window controls. A fullscreen
- * pane is the whole tree. SSH and the fallback bar carry no pane roles.
+ * The single place that decides who owns the window controls and the Show
+ * side panel button. A fullscreen pane is the whole tree. SSH and the fallback
+ * bar carry no pane roles, so each renders the button in its own bar.
  */
 export function selectTopRowRoles({
   root,
@@ -87,7 +93,8 @@ export function selectTopRowRoles({
       topEdgeLeafIds: new Set(),
       rightmostLeafId: null,
       leftmostLeafId: null,
-      controlsOwner: 'ssh-header'
+      controlsOwner: 'ssh-header',
+      showPanelOwner: 'ssh-header'
     }
   }
   if (mode === 'fallback') {
@@ -95,7 +102,8 @@ export function selectTopRowRoles({
       topEdgeLeafIds: new Set(),
       rightmostLeafId: null,
       leftmostLeafId: null,
-      controlsOwner: 'fallback-bar'
+      controlsOwner: 'fallback-bar',
+      showPanelOwner: 'fallback-bar'
     }
   }
   const effective = resolveEffectiveRoot(root, fullscreenPaneId)
@@ -103,7 +111,8 @@ export function selectTopRowRoles({
     topEdgeLeafIds: getTopEdgeLeafIds(effective),
     rightmostLeafId: getRightmostTopEdgeLeafId(effective),
     leftmostLeafId: getLeftmostTopEdgeLeafId(effective),
-    controlsOwner: 'pane'
+    controlsOwner: 'pane',
+    showPanelOwner: 'pane'
   }
 }
 

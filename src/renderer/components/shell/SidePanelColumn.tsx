@@ -16,7 +16,9 @@ import type { Project } from '@/types/project'
 import { ChangesPanel } from './ChangesPanel'
 import { ChatsList } from './ChatsList'
 import { ColumnTabs, columnPanelId, columnTabId } from './ColumnTabs'
-import { HideSidePanelButton } from './SidePanelVisibilityButtons'
+import { SidePanelVisibilityButton } from './SidePanelVisibilityButtons'
+import { useTopRowPlatform } from './top-row-context'
+import { useTrafficLightInset } from './traffic-light-inset'
 import { useColumnWorkingCopy } from './use-column-working-copy'
 import { useSidePanelResize } from './use-side-panel-resize'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
@@ -27,16 +29,6 @@ const FileExplorer = lazy(() =>
 
 interface SidePanelColumnProps {
   activeProject: Project
-  /**
-   * The header is part of the window top row (desktop, both Rail states): it
-   * becomes a drag region. Defaults to a non-draggable header.
-   */
-  dragRegion?: boolean
-  /**
-   * The column starts under the macOS traffic lights (Rail collapsed): the
-   * header takes 8px more start padding so its content clears them.
-   */
-  trafficLightInset?: boolean
 }
 
 const TAB_LABELS: Record<ShellLastColumnTab, string> = {
@@ -51,16 +43,18 @@ const TAB_LABELS: Record<ShellLastColumnTab, string> = {
  * last tab is remembered per project. The tabs render only while the Rail is
  * expanded; collapsed, the Rail's own icons select the tab. Mounted through
  * `ExplorerColumn`'s `sidePanel` slot, never in SSH mode.
+ *
+ * The header is the Side panel's part of the window top row (both Rail
+ * states): a drag region on desktop. With the Rail collapsed on macOS the
+ * column starts under the traffic lights, so the header takes the inset from
+ * `useTrafficLightInset`.
  */
-export function SidePanelColumn({
-  activeProject,
-  dragRegion = false,
-  trafficLightInset = false
-}: SidePanelColumnProps): React.JSX.Element {
+export function SidePanelColumn({ activeProject }: SidePanelColumnProps): React.JSX.Element {
   const projectId = activeProject.id
   const { cwd } = useColumnWorkingCopy(activeProject)
   const railExpanded = useSidebarVisible()
-  const dragAttr = dragRegion ? true : undefined
+  const dragAttr = useTopRowPlatform().dragRegions ? true : undefined
+  const trafficLightInset = useTrafficLightInset()
 
   const selected: ShellLastColumnTab = useLastColumnTab(projectId) ?? 'chats'
   const changedCount = useGitStatusStore(selectChangedFileCount(cwd))
@@ -99,7 +93,10 @@ export function SidePanelColumn({
         )}
       >
         <div
-          className={cn(PANEL_HEADER_CLASS, trafficLightInset && 'pl-6')}
+          className={PANEL_HEADER_CLASS}
+          style={
+            trafficLightInset ? { paddingLeft: trafficLightInset.panelHeaderStartPx } : undefined
+          }
           data-tauri-drag-region={dragAttr}
         >
           <WorkspaceSwitcher project={activeProject} />
@@ -113,7 +110,7 @@ export function SidePanelColumn({
             >
               <Plus size={14} aria-hidden="true" />
             </button>
-            <HideSidePanelButton />
+            <SidePanelVisibilityButton action="hide" />
           </div>
         </div>
 

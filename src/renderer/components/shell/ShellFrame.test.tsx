@@ -7,6 +7,7 @@ import {
   useNativeWebviewOccluded
 } from '@/hooks/use-native-webview-occlusion'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
+import { useProjectStore } from '@/stores/project-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useThemePickerStore } from '@/stores/theme-picker-store'
 import { ShellFrame, type ShellFrameProps } from './ShellFrame'
@@ -36,7 +37,6 @@ vi.mock('@/hooks/use-pane-dnd', () => ({
 }))
 const railProps: { current: ShellRailProps | null } = { current: null }
 vi.mock('@/components/shell/ShellRail', () => ({
-  COLLAPSED_WIDTH: 48,
   ShellRail: (props: ShellRailProps) => {
     railProps.current = props
     return <div data-testid="rail" />
@@ -113,6 +113,7 @@ describe('ShellFrame', () => {
     resetNativeWebviewOcclusionForTests()
     resetShellLayoutStoreForTests()
     useShellLayoutStore.setState({ status: 'unavailable' })
+    useProjectStore.setState({ projects: [] })
     useThemePickerStore.getState().close()
     railProps.current = null
     platformRef.tauri = true
@@ -276,6 +277,27 @@ describe('ShellFrame', () => {
       expect(screen.queryByTestId('top-row-fallback-bar')).not.toBeInTheDocument()
     })
 
+    it('puts the Show side panel button in the fallback bar while the panel is hidden', () => {
+      useProjectStore.setState({ projects: [oneProject] as never, activeProjectId: 'p1' })
+      useShellLayoutStore.setState({ sidePanelVisible: false })
+      const { unmount } = renderFrame(withProject, '/snapshots')
+      expect(screen.getByTestId('top-row-fallback-bar')).toContainElement(
+        screen.getByRole('button', { name: 'Show side panel' })
+      )
+      unmount()
+
+      useShellLayoutStore.setState({ sidePanelVisible: true })
+      renderFrame(withProject, '/snapshots')
+      expect(screen.queryByRole('button', { name: 'Show side panel' })).not.toBeInTheDocument()
+    })
+
+    it('leaves the Show side panel button to the pane tab bars in panes mode', () => {
+      useProjectStore.setState({ projects: [oneProject] as never, activeProjectId: 'p1' })
+      useShellLayoutStore.setState({ sidePanelVisible: false })
+      renderFrame(withProject)
+      expect(screen.queryByRole('button', { name: 'Show side panel' })).not.toBeInTheDocument()
+    })
+
     it('leaves the controls to the pane tab bars in panes mode', () => {
       renderFrame(withProject)
       expect(screen.queryByTestId('top-row-fallback-bar')).not.toBeInTheDocument()
@@ -309,18 +331,18 @@ describe('ShellFrame', () => {
       platformRef.mac = true
       useShellLayoutStore.setState({ railExpanded: false })
       const { unmount } = renderFrame(withProject)
-      expect(screen.getByRole('main')).toHaveClass('mt-9')
+      expect(screen.getByRole('main')).toHaveStyle({ marginTop: '36px' })
       unmount()
 
       useShellLayoutStore.setState({ railExpanded: true })
       const second = renderFrame(withProject)
-      expect(screen.getByRole('main')).not.toHaveClass('mt-9')
+      expect(screen.getByRole('main').style.marginTop).toBe('')
       second.unmount()
 
       platformRef.mac = false
       useShellLayoutStore.setState({ railExpanded: false })
       renderFrame(withProject)
-      expect(screen.getByRole('main')).not.toHaveClass('mt-9')
+      expect(screen.getByRole('main').style.marginTop).toBe('')
     })
 
     it('keeps workspaceMain mounted when the mode flips between fallback and panes', () => {

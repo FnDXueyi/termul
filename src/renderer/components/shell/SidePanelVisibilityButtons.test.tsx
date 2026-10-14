@@ -4,11 +4,7 @@ import * as appSettingsHooks from '@/hooks/use-app-settings'
 import { useProjectStore } from '@/stores/project-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Project } from '@/types/project'
-import {
-  HideSidePanelButton,
-  ShowSidePanelButton,
-  ShowSidePanelSlot
-} from './SidePanelVisibilityButtons'
+import { ShowSidePanelSlot, SidePanelVisibilityButton } from './SidePanelVisibilityButtons'
 
 const { mockToastError } = vi.hoisted(() => ({ mockToastError: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { error: mockToastError } }))
@@ -28,9 +24,9 @@ beforeEach(() => {
   vi.spyOn(appSettingsHooks, 'useUpdatePanelVisibility').mockReturnValue(updatePanelVisibility)
 })
 
-describe('HideSidePanelButton', () => {
+describe('SidePanelVisibilityButton hide', () => {
   it('hides the panel and names its shortcut', () => {
-    render(<HideSidePanelButton />)
+    render(<SidePanelVisibilityButton action="hide" />)
     const button = screen.getByRole('button', { name: 'Hide side panel' })
     expect(button.getAttribute('title')).toMatch(/^Hide side panel \(.*B\)$/)
     fireEvent.click(button)
@@ -39,7 +35,7 @@ describe('HideSidePanelButton', () => {
 
   it('toasts the generic message when the error is not an Error', async () => {
     updatePanelVisibility.mockRejectedValueOnce('nope')
-    render(<HideSidePanelButton />)
+    render(<SidePanelVisibilityButton action="hide" />)
     fireEvent.click(screen.getByRole('button', { name: 'Hide side panel' }))
     await waitFor(() =>
       expect(mockToastError).toHaveBeenCalledWith('Failed to update side panel visibility')
@@ -47,10 +43,10 @@ describe('HideSidePanelButton', () => {
   })
 })
 
-describe('ShowSidePanelButton', () => {
+describe('SidePanelVisibilityButton show', () => {
   it('shows the hidden panel', () => {
     useShellLayoutStore.setState({ sidePanelVisible: false })
-    render(<ShowSidePanelButton />)
+    render(<SidePanelVisibilityButton action="show" />)
     fireEvent.click(screen.getByRole('button', { name: 'Show side panel' }))
     expect(updatePanelVisibility).toHaveBeenCalledWith('fileExplorerVisible', true)
   })

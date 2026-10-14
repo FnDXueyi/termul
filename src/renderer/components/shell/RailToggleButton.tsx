@@ -1,13 +1,8 @@
 import { PanelLeftCollapse, PanelLeftExpand } from '@/components/icons'
 import { railButtonClass } from '@/components/shell/rail-button'
 import { RAIL_TOGGLE_LABEL, useRailToggle } from '@/components/shell/use-rail-toggle'
-import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
+import { useShortcutLabel, withShortcut } from '@/components/shell/use-shortcut-label'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-
-/** "Label (Ctrl+B)" when a shortcut is bound, else the label alone. */
-export function withShortcut(label: string, shortcut: string | undefined): string {
-  return shortcut ? `${label} (${shortcut})` : label
-}
 
 /**
  * Expands or collapses the Rail. It sits in the Rail's bottom-left corner,

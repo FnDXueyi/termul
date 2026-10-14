@@ -1,11 +1,12 @@
 import { Edit2, Search, SlidersHorizontal } from '@/components/icons'
 import { RailColumnIcons } from '@/components/shell/RailColumnIcons'
 import { RailProjectStack } from '@/components/shell/RailProjectStack'
+import { RailToggleButton } from '@/components/shell/RailToggleButton'
 import { RailButton } from '@/components/shell/rail-button'
 import { ShellBrandMark } from '@/components/shell/ShellBrandMark'
 import { SSHPopover } from '@/components/shell/SSHPopover'
-import { RailToggleButton } from '@/components/shell/TopRowToggles'
 import { useTopRowPlatform } from '@/components/shell/top-row-context'
+import { useTrafficLightInset } from '@/components/shell/traffic-light-inset'
 import { useShortcutLabel } from '@/components/shell/use-shortcut-label'
 import { useSettingsModalStore, useSettingsModalView } from '@/stores/settings-modal-store'
 import type { Project } from '@/types/project'
@@ -46,6 +47,7 @@ export function RailCollapsed({
 }: RailCollapsedProps): React.JSX.Element {
   const settingsView = useSettingsModalView()
   const platform = useTopRowPlatform()
+  const underTrafficLights = useTrafficLightInset() !== null
   const searchShortcut = useShortcutLabel('commandPalette')
   const settingsShortcut = useShortcutLabel('settings')
 
@@ -59,9 +61,9 @@ export function RailCollapsed({
         data-testid="rail-top-band"
         data-tauri-drag-region={platform.dragRegions ? true : undefined}
       >
-        {!platform.trafficLights && <ShellBrandMark dragRegion={platform.dragRegions} />}
+        {!underTrafficLights && <ShellBrandMark dragRegion={platform.dragRegions} />}
       </div>
-      {platform.trafficLights && <ShellBrandMark dragRegion={platform.dragRegions} />}
+      {underTrafficLights && <ShellBrandMark dragRegion={platform.dragRegions} />}
 
       {/* Projects, the Side panel tabs and the actions scroll together on a
           short window; Settings stays pinned at the bottom. */}

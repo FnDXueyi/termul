@@ -83,7 +83,8 @@ function roles(
     topEdgeLeafIds: new Set(topEdge),
     rightmostLeafId: rightmost,
     leftmostLeafId: leftmost,
-    controlsOwner: 'pane'
+    controlsOwner: 'pane',
+    showPanelOwner: 'pane'
   }
 }
 

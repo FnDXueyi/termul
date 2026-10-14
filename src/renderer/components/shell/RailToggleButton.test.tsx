@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import * as appSettingsHooks from '@/hooks/use-app-settings'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
-import { RailToggleButton, withShortcut } from './TopRowToggles'
+import { RailToggleButton } from './RailToggleButton'
 
 const { mockToastError } = vi.hoisted(() => ({ mockToastError: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { error: mockToastError } }))
@@ -29,13 +29,6 @@ beforeEach(() => {
   vi.spyOn(appSettingsHooks, 'useUpdatePanelVisibility').mockReturnValue(updatePanelVisibility)
 })
 
-describe('withShortcut', () => {
-  it('appends a bound shortcut and leaves the label alone without one', () => {
-    expect(withShortcut('Hide side panel', 'Ctrl+B')).toBe('Hide side panel (Ctrl+B)')
-    expect(withShortcut('Hide side panel', undefined)).toBe('Hide side panel')
-  })
-})
-
 describe('RailToggleButton', () => {
   it('keeps a stable name and follows the Rail state', async () => {
     const toggle = renderToggle()
@@ -46,11 +39,8 @@ describe('RailToggleButton', () => {
     await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'))
   })
 
-  it('uses the 36px rail button look, with no keycap while expanded', () => {
-    const toggle = renderToggle()
-    expect(toggle).toHaveClass('size-9', 'rounded-lg')
-    expect(toggle).not.toHaveClass('keycap')
-    expect(toggle.querySelector('svg')).toHaveAttribute('width', '16')
+  it('does not take the keycap surface while expanded: pressed means expanded, not "you are here"', () => {
+    expect(renderToggle()).not.toHaveClass('keycap')
   })
 
   it('swaps the glyph: collapse when expanded, expand when collapsed', async () => {

@@ -7,7 +7,8 @@ const roles: TopRowRoles = {
   topEdgeLeafIds: new Set(['A', 'B']),
   rightmostLeafId: 'B',
   leftmostLeafId: 'A',
-  controlsOwner: 'pane'
+  controlsOwner: 'pane',
+  showPanelOwner: 'pane'
 }
 const desktop: TopRowPlatform = { dragRegions: true, windowControls: true, trafficLights: false }
 
