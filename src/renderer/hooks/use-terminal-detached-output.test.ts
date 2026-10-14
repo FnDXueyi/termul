@@ -1,7 +1,7 @@
 import { renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useTerminalStore } from '@/stores/terminal-store'
-import { useTerminalDetachedOutput } from './use-terminal-detached-output'
+import { flushDetachedOutputNow, useTerminalDetachedOutput } from './use-terminal-detached-output'
 
 const { mockOnData, mockAppendTranscript, mockFindTerminalByPtyId, mockLogFrontendError } =
   vi.hoisted(() => ({
@@ -113,6 +113,36 @@ describe('useTerminalDetachedOutput', () => {
     expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', 'streaming output')
 
     unmount()
+  })
+
+  it('flushDetachedOutputNow drains a buffered detached chunk before the frame fires', () => {
+    const { unmount, emit } = mountHook()
+
+    emit('pty-a', 'late chunk')
+    expect(mockAppendTranscript).not.toHaveBeenCalled()
+
+    // A renderer attaches before the frame: the chunk must still reach the
+    // transcript now, so the remount reads it in order.
+    mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 1, isAppHidden: false })
+    flushDetachedOutputNow()
+
+    expect(mockAppendTranscript).toHaveBeenCalledTimes(1)
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', 'late chunk')
+    // The scheduled frame was cancelled and finds nothing left to flush.
+    runScheduledFrames()
+    expect(mockAppendTranscript).toHaveBeenCalledTimes(1)
+
+    unmount()
+  })
+
+  it('flushDetachedOutputNow is a no-op once the hook unmounts', () => {
+    const { unmount, emit } = mountHook()
+    emit('pty-a', 'drained on unmount')
+    unmount()
+    mockAppendTranscript.mockClear()
+
+    expect(() => flushDetachedOutputNow()).not.toThrow()
+    expect(mockAppendTranscript).not.toHaveBeenCalled()
   })
 
   it('skips transcript capture for visible terminals with an attached renderer', () => {

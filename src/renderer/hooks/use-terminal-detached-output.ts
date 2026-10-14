@@ -101,6 +101,20 @@ function pushChunk(buffer: PendingBuffer, chunk: string): void {
   }
 }
 
+/** Synchronous drain of the mounted hook's coalescing buffers; null when unmounted. */
+let flushDetachedOutputHandle: (() => void) | null = null
+
+/**
+ * Append every buffered detached chunk to the store transcript right now
+ * instead of on the next frame. A remounting renderer calls this before it
+ * reads the transcript: otherwise chunks captured while it was detached would
+ * land in the transcript after it attached, and be replayed on a later remount
+ * behind newer output. No-op when the hook is not mounted.
+ */
+export function flushDetachedOutputNow(): void {
+  flushDetachedOutputHandle?.()
+}
+
 /**
  * Captures PTY output only when a renderer-side replay buffer is actually needed.
  * This is exclusively for the detached-terminal case — when no ConnectedTerminal
@@ -188,6 +202,7 @@ export function useTerminalDetachedOutput(): void {
     // on every store change delivers those buffers as soon as the record
     // appears — no new chunk required.
     const unsubscribeStore = useTerminalStore.subscribe(flushPending)
+    flushDetachedOutputHandle = flushPending
 
     const unsubscribe = terminalApi.onData((ptyId: string, data: Uint8Array) => {
       if (!data || data.length === 0) {
@@ -275,6 +290,7 @@ export function useTerminalDetachedOutput(): void {
         })
       }
       pendingBuffers.clear()
+      if (flushDetachedOutputHandle === flushPending) flushDetachedOutputHandle = null
       unsubscribeStore()
       unsubscribe()
     }
