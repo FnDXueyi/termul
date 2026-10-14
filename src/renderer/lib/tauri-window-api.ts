@@ -153,7 +153,11 @@ export function createTauriWindowApi(): WindowApi {
       // Return sync cleanup function - unwrap the Promise
       return () => {
         release()
-        void unlisten.then((fn) => fn())
+        // A failed registration is already handled (and released) above.
+        void unlisten.then(
+          (fn) => fn(),
+          () => undefined
+        )
       }
     },
 

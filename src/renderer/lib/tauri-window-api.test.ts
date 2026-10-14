@@ -116,7 +116,12 @@ describe('createTauriWindowApi close behavior', () => {
     onCloseRequested.mockRejectedValueOnce(new Error('listen failed'))
     const { createTauriWindowApi, hasAppCloseOwner } = await import('./tauri-window-api')
 
-    createTauriWindowApi().onCloseRequested(vi.fn(async () => false))
+    const cleanup = createTauriWindowApi().onCloseRequested(vi.fn(async () => false))
     await vi.waitFor(() => expect(hasAppCloseOwner()).toBe(false))
+
+    // The cleanup after a failed registration must not raise an unhandled rejection.
+    cleanup()
+    await Promise.resolve()
+    expect(hasAppCloseOwner()).toBe(false)
   })
 })
