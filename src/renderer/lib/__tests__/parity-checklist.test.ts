@@ -2057,7 +2057,7 @@ describe('Git History commit detail parity', () => {
       command: 'git_get_commit_file_diff',
       route: '/git/commit-file-diff',
       handler: 'get_commit_file_diff',
-      payload: 'String'
+      payload: 'GitCommitFileDiff'
     }
   ] as const
 
