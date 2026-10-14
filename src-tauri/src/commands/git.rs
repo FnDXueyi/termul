@@ -1,8 +1,9 @@
 use super::{validate_project_path, IpcResult};
 use crate::acp::destructive_guard::{ensure_no_active_turn_in_checkout, start_ref_rewrites_tree};
 use crate::acp::AcpManager;
-use crate::trackers::git_tracker::{DiffStatError, GitDiffStat};
+use crate::trackers::git_tracker::{CommitDetailError, GitCommitDetail};
 use crate::trackers::git_tracker::{CommitFailure, CommitStamp};
+use crate::trackers::git_tracker::{DiffStatError, GitDiffStat};
 use crate::trackers::{GitCommit, GitStatusDetail};
 use crate::web::command_ledger::{
     fingerprint_of, no_entity, run_domain, run_domain_released, DomainRan, PRECONDITION_FAILED_PREFIX,
@@ -126,10 +127,76 @@ pub async fn git_discard(
 
 /// Read commit history for the repository at `cwd` as structured rows for the
 /// history/graph view. `limit` caps the number of commits (clamped backend-side;
-/// defaults to 200). Read-only.
+/// defaults to 200); `all` walks every ref instead of `HEAD`. Read-only.
 #[tauri::command]
-pub async fn git_get_log(cwd: String, limit: Option<u32>) -> Result<Vec<GitCommit>, String> {
-    crate::trackers::git_tracker::git_get_log(&cwd, limit).map_err(|e: String| e)
+pub async fn git_get_log(
+    cwd: String,
+    limit: Option<u32>,
+    all: Option<bool>,
+) -> Result<Vec<GitCommit>, String> {
+    crate::trackers::git_tracker::git_get_log(&cwd, limit, all.unwrap_or(false))
+        .map_err(|e: String| e)
+}
+
+/// Message, author email, parents and changed files of one commit for the
+/// Git History detail pane. Read-only; the same shared function backs
+/// `POST /git/commit-detail`. A hash that is not 4–40 hex characters is refused
+/// before git runs (`INVALID_COMMIT_HASH`).
+#[tauri::command]
+pub async fn git_get_commit_detail(
+    cwd: String,
+    hash: String,
+) -> Result<IpcResult<GitCommitDetail>, String> {
+    let cwd = match validate_project_path(&cwd) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::warn!("[git_get_commit_detail] invalid cwd: {e}");
+            return Ok(IpcResult::error(e, "PATH_VALIDATION_FAILED"));
+        }
+    };
+    let result: Result<GitCommitDetail, CommitDetailError> =
+        tokio::task::spawn_blocking(move || {
+            crate::trackers::git_tracker::git_get_commit_detail(&cwd, &hash)
+        })
+        .await
+        .map_err(|e| format!("git commit detail task failed: {e}"))?;
+    Ok(match result {
+        Ok(detail) => IpcResult::success(detail),
+        Err(e) => IpcResult::error(e.to_string(), e.code()),
+    })
+}
+
+/// Unified diff of one file in a commit against its first parent, for the
+/// read-only commit Diff tab. Same shared function as
+/// `POST /git/commit-file-diff`. `old_path` is a rename's source path.
+#[tauri::command]
+pub async fn git_get_commit_file_diff(
+    cwd: String,
+    hash: String,
+    path: String,
+    old_path: Option<String>,
+) -> Result<IpcResult<String>, String> {
+    let cwd = match validate_project_path(&cwd) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::warn!("[git_get_commit_file_diff] invalid cwd: {e}");
+            return Ok(IpcResult::error(e, "PATH_VALIDATION_FAILED"));
+        }
+    };
+    let result: Result<String, CommitDetailError> = tokio::task::spawn_blocking(move || {
+        crate::trackers::git_tracker::git_get_commit_file_diff(
+            &cwd,
+            &hash,
+            &path,
+            old_path.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("git commit file diff task failed: {e}"))?;
+    Ok(match result {
+        Ok(diff) => IpcResult::success(diff),
+        Err(e) => IpcResult::error(e.to_string(), e.code()),
+    })
 }
 
 /// Create a commit from the staged index. `amend` rewrites HEAD instead of

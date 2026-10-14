@@ -34,6 +34,7 @@ use crate::web::connection_runtime::ConnectionRuntime;
 use crate::web::fs_api;
 use crate::web::git_api;
 use crate::web::git_diff_stat_api;
+use crate::web::git_history_api;
 use crate::web::git_hunk_api;
 use crate::web::install_api;
 use crate::web::log_api;
@@ -241,6 +242,14 @@ pub fn router(
         .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
+        .route(
+            "/git/commit-detail",
+            post(git_history_api::get_commit_detail),
+        )
+        .route(
+            "/git/commit-file-diff",
+            post(git_history_api::get_commit_file_diff),
+        )
         .route("/git/commit", post(git_api::commit))
         .route("/git/push", post(git_api::push))
         .route("/git/commit-context", post(git_api::get_commit_context))
@@ -554,6 +563,14 @@ pub fn router_with_static(
         .route("/git/unstage-hunk", post(git_hunk_api::unstage_hunk))
         .route("/git/discard", post(git_api::discard))
         .route("/git/log", post(git_api::get_log))
+        .route(
+            "/git/commit-detail",
+            post(git_history_api::get_commit_detail),
+        )
+        .route(
+            "/git/commit-file-diff",
+            post(git_history_api::get_commit_file_diff),
+        )
         .route("/git/commit", post(git_api::commit))
         .route("/git/push", post(git_api::push))
         .route("/git/commit-context", post(git_api::get_commit_context))

@@ -268,6 +268,34 @@ export interface GitCommit {
   subject: string
 }
 
+/** One file changed by a commit (diff against the first parent). */
+export interface GitCommitFile {
+  /** Path after the commit (the new path of a rename). */
+  path: string
+  /** Path before the commit, for a rename or copy only. */
+  oldPath: string | null
+  /** One-letter status: `A`, `M`, `D`, `R`, `C` or `T`. */
+  status: string
+  /** Added lines; `null` for a binary file. */
+  added: number | null
+  /** Removed lines; `null` for a binary file. */
+  removed: number | null
+}
+
+/** What the Git History detail pane shows beyond the log row. */
+export interface GitCommitDetail {
+  /** Full 40-char hash. */
+  hash: string
+  authorEmail: string
+  /** Full commit message: subject, blank line, body. */
+  message: string
+  /** Parent full hashes, first-parent first. */
+  parents: string[]
+  files: GitCommitFile[]
+  /** More files changed than the host returns; `files` holds the first ones. */
+  filesTruncated: boolean
+}
+
 /**
  * Resolved project icon (spec-project-icon). Runtime-neutral contract shared
  * by both transports: `project_icon_resolve` (Tauri `IpcResult` data) and
@@ -319,7 +347,11 @@ export interface GitApi {
   stage: (cwd: string, path: string) => Promise<void>
   unstage: (cwd: string, path: string) => Promise<void>
   discard: (cwd: string, path: string) => Promise<void>
-  getLog: (cwd: string, limit?: number) => Promise<GitCommit[]>
+  /** `all`: every branch, tag and remote ref instead of `HEAD` only. */
+  getLog: (cwd: string, limit?: number, all?: boolean) => Promise<GitCommit[]>
+  getCommitDetail: (cwd: string, hash: string) => Promise<GitCommitDetail>
+  /** One file's unified diff in a commit against its first parent. */
+  getCommitFileDiff: (cwd: string, hash: string, path: string, oldPath?: string) => Promise<string>
   /** `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch); a moved HEAD refuses the commit (`precondition_failed`). */
   commit: (
     cwd: string,
