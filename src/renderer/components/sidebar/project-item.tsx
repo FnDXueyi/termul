@@ -90,7 +90,7 @@ export const ProjectItem = memo(function ProjectItem({
               'rounded-lg',
               RAIL_ROW_INSET_CLASS,
               'transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              isActive ? 'keycap text-foreground' : 'hover:bg-foreground/[0.03]'
+              isActive ? 'keycap text-foreground' : 'hover:bg-row-hover focus-within:bg-row-hover'
             )}
             aria-current={isActive ? 'page' : undefined}
             aria-label={`Project: ${project.name}${isActive ? ' (active)' : ''}`}
@@ -136,10 +136,9 @@ export const ProjectItem = memo(function ProjectItem({
                   className={cn(
                     'absolute inset-y-0 right-0 hidden items-center gap-1 bg-gradient-to-l to-transparent pl-6 group-hover:flex group-focus-within:flex',
                     // The fade ends in the row's own surface: keycap when
-                    // active, the hover wash otherwise.
-                    isActive
-                      ? 'from-muted from-60%'
-                      : 'from-[color-mix(in_oklab,oklch(var(--foreground))_3%,oklch(var(--background)))] from-60%'
+                    // active, the hover wash otherwise. It shows under the
+                    // same conditions as the wash (hover and focus-within).
+                    isActive ? 'from-muted from-60%' : 'from-row-hover-solid from-60%'
                   )}
                   data-testid="project-row-actions"
                 >

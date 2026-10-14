@@ -554,7 +554,22 @@ describe('ProjectSidebar', () => {
     expect(activeRow).toHaveClass('keycap', 'h-8', 'rounded-lg')
     expect(activeRow).not.toHaveClass('bg-sidebar-accent')
     expect(idleRow).not.toHaveClass('keycap')
-    expect(idleRow).toHaveClass('hover:bg-foreground/[0.03]')
+    // The wash shows under the same conditions as the actions it sits under.
+    expect(idleRow).toHaveClass('hover:bg-row-hover', 'focus-within:bg-row-hover')
+  })
+
+  it('ends the actions fade in the row surface: keycap when active, the hover wash otherwise', () => {
+    renderWithRouter({ activeProjectId: '1' })
+
+    const activeActions = within(screen.getByTestId('project-item-1')).getByTestId(
+      'project-row-actions'
+    )
+    const idleActions = within(screen.getByTestId('project-item-2')).getByTestId(
+      'project-row-actions'
+    )
+    expect(activeActions).toHaveClass('from-muted')
+    expect(idleActions).toHaveClass('from-row-hover-solid')
+    expect(idleActions).toHaveClass('group-hover:flex', 'group-focus-within:flex')
   })
 
   it('shows a "Crashed" mark (no pulse) on a project with a crashed terminal', () => {
