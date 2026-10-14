@@ -493,6 +493,19 @@ describe('MobileChatShell', () => {
         ],
         ['git changes', [{ type: 'git', id: 'g1', cwd: '/proj' }], 'Git Changes'],
         ['git history', [{ type: 'git-history', id: 'gh1', cwd: '/proj' }], 'Git History'],
+        [
+          'a commit diff',
+          [
+            {
+              type: 'commit-diff',
+              id: 'diff:1',
+              cwd: '/proj',
+              commit: 'e44b917'.padEnd(40, '0'),
+              path: 'src/a.ts'
+            }
+          ],
+          'a.ts @ e44b917'
+        ],
         ['a browser tab', [{ type: 'browser', id: 'br1', browserTabId: 'b1' }], 'Example Site'],
         [
           'a canvas tab',

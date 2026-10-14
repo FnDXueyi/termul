@@ -17,6 +17,11 @@ const diffTabs = (): WorkspaceTab[] =>
     leaf.tabs.filter((t) => t.type === 'diff')
   )
 
+const diffKindTabs = (): WorkspaceTab[] =>
+  leavesOf(useWorkspaceStore.getState().root).flatMap((leaf) =>
+    leaf.tabs.filter((t) => t.type === 'diff' || t.type === 'commit-diff')
+  )
+
 describe('workspace-store addDiffTab', () => {
   beforeEach(() => {
     useWorkspaceStore.setState(() => {
@@ -134,15 +139,16 @@ describe('workspace-store addCommitDiffTab', () => {
     store.addCommitDiffTab('/repo', HASH, 'src/new.ts', 'src/old.ts')
     store.addCommitDiffTab('/repo/', HASH, 'src/new.ts', 'src/old.ts')
 
-    const tabs = diffTabs()
+    const tabs = diffKindTabs()
     expect(tabs).toHaveLength(1)
     expect(tabs[0]).toMatchObject({
+      type: 'commit-diff',
       cwd: '/repo',
       path: 'src/new.ts',
-      staged: false,
       commit: HASH,
       oldPath: 'src/old.ts'
     })
+    expect(tabs[0]).not.toHaveProperty('staged')
     expect((useWorkspaceStore.getState().root as LeafNode).activeTabId).toBe(tabs[0].id)
   })
 
@@ -152,7 +158,7 @@ describe('workspace-store addCommitDiffTab', () => {
     store.addCommitDiffTab('/repo', HASH, 'src/a.ts')
     store.addCommitDiffTab('/repo', 'f'.repeat(40), 'src/a.ts')
 
-    const tabs = diffTabs()
+    const tabs = diffKindTabs()
     expect(tabs).toHaveLength(3)
     expect(new Set(tabs.map((t) => t.id)).size).toBe(3)
     expect(tabs[1]).not.toHaveProperty('oldPath')

@@ -510,22 +510,34 @@ export function PaneContent({
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
                     <Suspense fallback={<PaneSkeleton />}>
-                      {tab.commit ? (
-                        <CommitDiffTab
-                          cwd={tab.cwd}
-                          commit={tab.commit}
-                          path={tab.path}
-                          oldPath={tab.oldPath}
-                          isVisible={isVisible}
-                        />
-                      ) : (
-                        <DiffTab
-                          cwd={tab.cwd}
-                          path={tab.path}
-                          staged={tab.staged}
-                          isVisible={isVisible}
-                        />
-                      )}
+                      <DiffTab
+                        cwd={tab.cwd}
+                        path={tab.path}
+                        staged={tab.staged}
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'commit-diff' } => t.type === 'commit-diff')
+              .map((tab) => {
+                const isVisible = visibleTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <CommitDiffTab
+                        cwd={tab.cwd}
+                        commit={tab.commit}
+                        path={tab.path}
+                        oldPath={tab.oldPath}
+                        isVisible={isVisible}
+                      />
                     </Suspense>
                   </div>
                 )

@@ -1,4 +1,4 @@
-import type { GitCommit, GitCommitFile } from '@shared/types/ipc.types'
+import type { GitCommit, GitCommitFile, GitCommitFileStatus } from '@shared/types/ipc.types'
 import type React from 'react'
 import { useEffect } from 'react'
 import {
@@ -31,13 +31,13 @@ interface CommitDetailPaneProps {
   onClose?: () => void
 }
 
-const STATUS_CLASS: Record<string, string> = {
+const STATUS_CLASS: Partial<Record<GitCommitFileStatus, string>> = {
   A: 'text-success',
   D: 'text-destructive',
   M: 'text-warning'
 }
 
-const STATUS_LABEL: Record<string, string> = {
+const STATUS_LABEL: Record<GitCommitFileStatus, string> = {
   A: 'Added',
   C: 'Copied',
   D: 'Deleted',
@@ -287,7 +287,7 @@ function FileRow({ file, onOpen }: { file: GitCommitFile; onOpen: () => void }):
           'w-3 shrink-0 text-center font-mono text-2xs font-semibold',
           STATUS_CLASS[file.status] ?? 'text-muted-foreground'
         )}
-        title={STATUS_LABEL[file.status] ?? file.status}
+        title={STATUS_LABEL[file.status]}
       >
         {file.status}
       </span>

@@ -6,6 +6,7 @@ const { getCommitFileDiff } = vi.hoisted(() => ({ getCommitFileDiff: vi.fn() }))
 vi.mock('@/lib/git-api', () => ({ gitApi: { getCommitFileDiff } }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 
+import { logFrontendError } from '@/lib/log-api'
 import { CommitDiffTab } from './CommitDiffTab'
 
 const HASH = 'e44b917'.padEnd(40, '0')
@@ -27,7 +28,7 @@ describe('CommitDiffTab', () => {
   })
 
   it('loads once when shown and labels the side with the short hash', async () => {
-    getCommitFileDiff.mockResolvedValue(DIFF)
+    getCommitFileDiff.mockResolvedValue({ diff: DIFF, tooLarge: false })
     const { rerender } = render(
       <CommitDiffTab cwd="/r" commit={HASH} path="src/a.ts" isVisible={false} />
     )
@@ -44,18 +45,30 @@ describe('CommitDiffTab', () => {
   })
 
   it('has no hunk stage actions (read-only)', async () => {
-    getCommitFileDiff.mockResolvedValue(DIFF)
+    getCommitFileDiff.mockResolvedValue({ diff: DIFF, tooLarge: false })
     render(<CommitDiffTab cwd="/r" commit={HASH} path="src/a.ts" isVisible />)
     await waitFor(() => expect(screen.getByText(/newLine/)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /stage/i })).toBeNull()
   })
 
   it('shows a Retry state on failure and loads again', async () => {
-    getCommitFileDiff.mockRejectedValueOnce(new Error('bad revision')).mockResolvedValueOnce(DIFF)
+    getCommitFileDiff
+      .mockRejectedValueOnce(new Error('bad revision'))
+      .mockResolvedValueOnce({ diff: DIFF, tooLarge: false })
     render(<CommitDiffTab cwd="/r" commit={HASH} path="src/a.ts" oldPath="src/old.ts" isVisible />)
     expect(await screen.findByText('bad revision')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.getByText(/newLine/)).toBeInTheDocument())
     expect(getCommitFileDiff).toHaveBeenLastCalledWith('/r', HASH, 'src/a.ts', 'src/old.ts')
+  })
+
+  it('shows a read-only placeholder and logs at info level when the diff is too large', async () => {
+    getCommitFileDiff.mockResolvedValue({ diff: '', tooLarge: true })
+    render(<CommitDiffTab cwd="/r" commit={HASH} path="src/a.ts" isVisible />)
+    expect(await screen.findByText('This diff is too large to show.')).toBeInTheDocument()
+    expect(screen.queryByText('No diff available')).toBeNull()
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'info', source: 'CommitDiffTab.load' })
+    )
   })
 })

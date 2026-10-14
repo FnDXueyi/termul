@@ -105,8 +105,10 @@ interface GitDiffPaneProps {
   currentDiff: string | null | undefined
   diffViewMode: GitDiffViewMode
   onDiffViewModeChange: (mode: GitDiffViewMode) => void
-  onStageHunk: GitActions['runStageHunk']
-  onUnstageHunk: GitActions['runUnstageHunk']
+  /** Required unless `readOnly`. */
+  onStageHunk?: GitActions['runStageHunk']
+  /** Required unless `readOnly`. */
+  onUnstageHunk?: GitActions['runUnstageHunk']
   /** Mobile only: returns to the file list. */
   onBack?: () => void
   /** A failed load: shown instead of the loading / empty states, with a Retry. */
@@ -115,9 +117,12 @@ interface GitDiffPaneProps {
   controlsDisabled?: boolean
   /** Why the controls are disabled; shown under the header when set. */
   disabledReason?: string | null
-  /** Replaces the Staged / Working tree chip (e.g. `at e44b917`) and makes the
-   * diff read-only: no hunk actions. Used for commit diffs. */
+  /** Replaces the Staged / Working tree chip (e.g. `at e44b917`). Display text only. */
   sideLabel?: string
+  /** Replaces the "No diff available" text when the diff is empty (e.g. too large to load). */
+  emptyNotice?: { title: string; detail?: string }
+  /** No hunk or line actions, whatever the callbacks. Used for commit diffs. */
+  readOnly?: boolean
 }
 
 /** Diff header (file, side label, delta, Inline | Split track) and diff body. */
@@ -134,7 +139,9 @@ export function GitDiffPane({
   failure,
   controlsDisabled = false,
   disabledReason = null,
-  sideLabel
+  sideLabel,
+  emptyNotice,
+  readOnly = false
 }: GitDiffPaneProps) {
   const isMobile = variant === 'mobile'
   const chrome = CHROME[variant]
@@ -224,9 +231,9 @@ export function GitDiffPane({
               diff={currentDiff}
               mode={diffViewMode}
               filePath={selectedFile}
-              diffSide={sideLabel ? undefined : selectedStaged ? 'staged' : 'unstaged'}
-              onStageHunk={onStageHunk}
-              onUnstageHunk={onUnstageHunk}
+              diffSide={readOnly ? undefined : selectedStaged ? 'staged' : 'unstaged'}
+              onStageHunk={readOnly ? undefined : onStageHunk}
+              onUnstageHunk={readOnly ? undefined : onUnstageHunk}
             />
           </fieldset>
         ) : (
@@ -234,11 +241,15 @@ export function GitDiffPane({
             <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center mb-3 text-muted-foreground/60">
               <FileText size={18} />
             </div>
-            <h3 className="text-sm font-medium text-foreground mb-1">No diff available</h3>
-            <p className="text-xs max-w-[260px]">
-              This file may be ignored by Git, unchanged relative to the selected base, or
-              unavailable for diff preview.
-            </p>
+            <h3 className="text-sm font-medium text-foreground mb-1">
+              {emptyNotice?.title ?? 'No diff available'}
+            </h3>
+            {(emptyNotice ? emptyNotice.detail : true) && (
+              <p className="text-xs max-w-[260px]">
+                {emptyNotice?.detail ??
+                  'This file may be ignored by Git, unchanged relative to the selected base, or unavailable for diff preview.'}
+              </p>
+            )}
           </div>
         )}
       </ScrollArea>

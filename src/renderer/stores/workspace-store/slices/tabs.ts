@@ -43,6 +43,39 @@ type TabsSliceState = Pick<
   | 'removeTab'
 >
 
+interface TabsStoreAccess {
+  get: () => WorkspaceState
+  set: (partial: Partial<WorkspaceState>) => void
+}
+
+/**
+ * Focus the tab `id` in whichever pane holds it, or add `makeTab()` to the
+ * target (default: active) pane. Only the fullscreen pane renders while one is
+ * active, so focusing a tab held by another pane leaves fullscreen first.
+ */
+function focusOrAddTab(
+  { get, set }: TabsStoreAccess,
+  id: string,
+  makeTab: () => WorkspaceTab,
+  targetPaneId?: string
+): void {
+  const { root, activePaneId, agentLauncherPaneId, fullscreenPaneId } = get()
+  const existing = findPaneContainingTab(root, id)
+  if (existing) {
+    const leavesFullscreen = fullscreenPaneId !== null && fullscreenPaneId !== existing.id
+    set({
+      root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
+      activePaneId: leavesFullscreen
+        ? existing.id
+        : resolveActivePaneId(fullscreenPaneId, existing.id),
+      fullscreenPaneId: leavesFullscreen ? null : fullscreenPaneId,
+      agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
+    })
+    return
+  }
+  get().addTabToPane(targetPaneId ?? activePaneId, makeTab())
+}
+
 export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceState> = (
   set,
   get
@@ -314,30 +347,16 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
     // stored path later reaches git as a pathspec and keys the diff cache.
     const identity = diffTabIdentity(cwd, path, staged)
     const id = diffTabId(cwd, path, staged)
-    const { root, activePaneId, agentLauncherPaneId } = get()
-    const paneId = targetPaneId ?? activePaneId
-
-    const existing = findPaneContainingTab(root, id)
-    if (existing) {
-      // Only the fullscreen pane renders while one is active, so focusing a tab
-      // held by another pane would leave it hidden: leave fullscreen first.
-      const { fullscreenPaneId } = get()
-      const leavesFullscreen = fullscreenPaneId !== null && fullscreenPaneId !== existing.id
-      set({
-        root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
-        activePaneId: leavesFullscreen
-          ? existing.id
-          : resolveActivePaneId(fullscreenPaneId, existing.id),
-        fullscreenPaneId: leavesFullscreen ? null : fullscreenPaneId,
-        agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
-      })
-      return
-    }
-
-    const tab: WorkspaceTab = { type: 'diff', id, cwd, path: identity.path, staged }
-    get().addTabToPane(paneId, tab)
+    focusOrAddTab(
+      { get, set },
+      id,
+      () => ({ type: 'diff', id, cwd, path: identity.path, staged }),
+      targetPaneId
+    )
   },
 
+  // Commit diff tab (Git History): read-only, one file at one commit. Same
+  // reuse and fullscreen rules as the working-copy diff tab.
   addCommitDiffTab: (
     cwd: string,
     hash: string,
@@ -347,31 +366,19 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
   ): void => {
     const relPath = diffTabIdentity(cwd, path, false).path
     const id = commitDiffTabId(cwd, hash, path)
-    const { root, activePaneId, agentLauncherPaneId } = get()
-    const existing = findPaneContainingTab(root, id)
-    if (existing) {
-      const { fullscreenPaneId } = get()
-      const leavesFullscreen = fullscreenPaneId !== null && fullscreenPaneId !== existing.id
-      set({
-        root: updateLeaf(root, existing.id, (l) => ({ ...l, activeTabId: id })),
-        activePaneId: leavesFullscreen
-          ? existing.id
-          : resolveActivePaneId(fullscreenPaneId, existing.id),
-        fullscreenPaneId: leavesFullscreen ? null : fullscreenPaneId,
-        agentLauncherPaneId: agentLauncherPaneId === existing.id ? null : agentLauncherPaneId
-      })
-      return
-    }
-    const tab: WorkspaceTab = {
-      type: 'diff',
+    focusOrAddTab(
+      { get, set },
       id,
-      cwd,
-      path: relPath,
-      staged: false,
-      commit: hash,
-      ...(oldPath ? { oldPath: diffTabIdentity(cwd, oldPath, false).path } : {})
-    }
-    get().addTabToPane(targetPaneId ?? activePaneId, tab)
+      () => ({
+        type: 'commit-diff',
+        id,
+        cwd,
+        commit: hash,
+        path: relPath,
+        ...(oldPath ? { oldPath: diffTabIdentity(cwd, oldPath, false).path } : {})
+      }),
+      targetPaneId
+    )
   },
 
   // Canvas singleton-per-project (AD-7): the tab id is derived from the

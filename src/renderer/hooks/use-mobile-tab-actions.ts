@@ -134,7 +134,12 @@ export function useMobileTabActions({
         useWorkspaceStore.getState().removeTab(tab.id)
         return false
       }
-      if (tab.type === 'git' || tab.type === 'git-history' || tab.type === 'diff') {
+      if (
+        tab.type === 'git' ||
+        tab.type === 'git-history' ||
+        tab.type === 'diff' ||
+        tab.type === 'commit-diff'
+      ) {
         useWorkspaceStore.getState().removeTab(tab.id)
         return false
       }

@@ -1032,6 +1032,13 @@ describe('WorkspaceTabBar', () => {
       path: 'src/a.ts',
       staged: false
     }
+    const commitDiffTab: WorkspaceTab = {
+      type: 'commit-diff',
+      id: 'diff:def',
+      cwd: '/repo',
+      commit: 'e44b917'.padEnd(40, '0'),
+      path: 'src/a.ts'
+    }
 
     const TAB_LABEL: Array<{ kind: TabContextMenuKind; tab: WorkspaceTab; label: string }> = [
       { kind: 'terminal', tab: terminalTab, label: 'Terminal 1' },
@@ -1040,6 +1047,7 @@ describe('WorkspaceTabBar', () => {
       { kind: 'git', tab: gitTab1, label: 'Git Changes' },
       { kind: 'git-history', tab: gitHistoryTab, label: 'Git History' },
       { kind: 'diff', tab: diffTab, label: 'a.ts' },
+      { kind: 'commit-diff', tab: commitDiffTab, label: 'a.ts @ e44b917' },
       // No ACP session is seeded; the tab labels itself from the mocked index
       // title.
       { kind: 'agent-chat', tab: agentChatTab, label: 'Chat 1' }

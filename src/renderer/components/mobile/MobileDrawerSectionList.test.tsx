@@ -164,6 +164,13 @@ function seedAllTabTypes(): void {
       { type: 'editor', id: 'edit-/proj/a.ts', filePath: '/proj/a.ts' },
       { type: 'git', id: 'git-/proj', cwd: '/proj' },
       { type: 'git-history', id: 'git-history-/proj', cwd: '/proj' },
+      {
+        type: 'commit-diff',
+        id: 'diff:c1',
+        cwd: '/proj',
+        commit: 'e44b917'.padEnd(40, '0'),
+        path: 'src/c.ts'
+      },
       { type: 'browser', id: 'browser-b1', browserTabId: 'b1' },
       { type: 'canvas', id: 'canvas-p1', projectId: 'p1', docPath: '/proj/docs/Plan.op' },
       CHAT_TAB
@@ -293,7 +300,7 @@ describe('MobileDrawerSectionList editors', () => {
     renderList({ section: 'editors' })
 
     const group = screen.getByRole('group', { name: 'Editors' })
-    for (const label of ['a.ts', 'Git Changes', 'Example Site', 'Plan.op']) {
+    for (const label of ['a.ts', 'Git Changes', 'c.ts @ e44b917', 'Example Site', 'Plan.op']) {
       expect(within(group).getByRole('button', { name: label })).toHaveClass('min-h-11')
       expect(within(group).getByRole('button', { name: `Close ${label}` })).toHaveClass('size-11')
     }

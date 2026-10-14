@@ -46,12 +46,11 @@ describe('diff tab persistence', () => {
     const tree = leaf(
       [
         {
-          type: 'diff',
+          type: 'commit-diff',
           id,
           cwd: '/r',
-          path: 'src/new.ts',
-          staged: false,
           commit: hash,
+          path: 'src/new.ts',
           oldPath: 'src/old.ts'
         }
       ],
@@ -60,7 +59,14 @@ describe('diff tab persistence', () => {
 
     const serialized = serializePaneTree(tree)
     if (serialized.type !== 'leaf') throw new Error('expected leaf')
-    expect(serialized.tabs[0]).toMatchObject({ commit: hash, oldPath: 'src/old.ts' })
+    expect(serialized.tabs[0]).toEqual({
+      type: 'commit-diff',
+      id,
+      cwd: '/r',
+      commit: hash,
+      path: 'src/new.ts',
+      oldPath: 'src/old.ts'
+    })
     expect(deserializePaneTree(serialized)).toEqual(tree)
   })
 
@@ -69,13 +75,44 @@ describe('diff tab persistence', () => {
     const persisted = {
       type: 'leaf',
       id: 'pane-1',
-      tabs: [{ type: 'diff', cwd: '/r', path: 'a.ts', staged: false, commit: hash }],
+      tabs: [{ type: 'commit-diff', cwd: '/r', commit: hash, path: 'a.ts' }],
       activeTabId: null
     } as unknown as PersistedPaneNodeInput
 
     const restored = deserializePaneTree(persisted) as LeafNode
+    expect(restored.tabs[0]).toMatchObject({ type: 'commit-diff', commit: hash })
     expect(restored.tabs[0].id).toBe(commitDiffTabId('/r', hash, 'a.ts'))
     expect(restored.tabs[0].id).not.toBe(diffTabId('/r', 'a.ts', false))
+  })
+
+  it('migrates a saved diff ref that carries a commit to a commit-diff tab', () => {
+    const hash = 'c'.repeat(40)
+    const id = commitDiffTabId('/r', hash, 'a.ts')
+    const persisted = {
+      type: 'leaf',
+      id: 'pane-1',
+      tabs: [
+        { type: 'diff', id, cwd: '/r', path: 'a.ts', staged: false, commit: hash, oldPath: 'o.ts' }
+      ],
+      activeTabId: id
+    } as unknown as PersistedPaneNodeInput
+
+    const restored = deserializePaneTree(persisted) as LeafNode
+    expect(restored.tabs).toEqual([
+      { type: 'commit-diff', id, cwd: '/r', commit: hash, path: 'a.ts', oldPath: 'o.ts' }
+    ])
+    expect(restored.activeTabId).toBe(id)
+  })
+
+  it('drops a malformed commit diff ref', () => {
+    const persisted = {
+      type: 'leaf',
+      id: 'pane-1',
+      tabs: [{ type: 'commit-diff', cwd: '/r', path: 'a.ts' }],
+      activeTabId: null
+    } as unknown as PersistedPaneNodeInput
+
+    expect((deserializePaneTree(persisted) as LeafNode).tabs).toEqual([])
   })
 
   it('survives reconcile (a diff tab is kept like the other non-terminal kinds)', () => {

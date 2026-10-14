@@ -1,10 +1,15 @@
 import { FileDiff } from '@/components/icons'
-import { TabContextMenu } from '../tab-context-menu'
+import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
+import { TabContextMenu, type TabContextMenuKind } from '../tab-context-menu'
 import { TabChrome } from './tab-chrome'
 import type { TabInlineProps } from './types'
 
 interface DiffTabInlineProps extends TabInlineProps {
-  tab: { type: 'diff'; id: string; cwd: string; path: string; staged: boolean; commit?: string }
+  tab: { type: 'diff'; id: string; cwd: string; path: string; staged: boolean }
+}
+
+interface CommitDiffTabInlineProps extends TabInlineProps {
+  tab: { type: 'commit-diff'; id: string; cwd: string; commit: string; path: string }
 }
 
 /** Repo-relative POSIX path -> its last segment (the tab label). */
@@ -13,8 +18,10 @@ function basename(path: string): string {
   return segments[segments.length - 1] ?? path
 }
 
-export function DiffTabInline({
-  tab,
+function DiffTabChrome({
+  kind,
+  label,
+  title,
   isActive,
   isDragging,
   isDropTarget,
@@ -26,13 +33,13 @@ export function DiffTabInline({
   onDragLeave,
   onDrop,
   bulkMenu
-}: DiffTabInlineProps): React.JSX.Element {
-  const shortHash = tab.commit?.slice(0, 7)
-  const side = shortHash ? `at ${shortHash}` : tab.staged ? 'Staged' : 'Working tree'
-  const name = basename(tab.path)
-  const label = shortHash ? `${name} @ ${shortHash}` : tab.staged ? `${name} (staged)` : name
+}: TabInlineProps & {
+  kind: TabContextMenuKind
+  label: string
+  title: string
+}): React.JSX.Element {
   return (
-    <TabContextMenu kind="diff" onClose={onClose} {...bulkMenu}>
+    <TabContextMenu kind={kind} onClose={onClose} {...bulkMenu}>
       <TabChrome
         isActive={isActive}
         isDragging={isDragging}
@@ -46,9 +53,37 @@ export function DiffTabInline({
         onDrop={onDrop}
         icon={<FileDiff size={12} />}
         label={label}
-        title={`${tab.path} (${side})`}
+        title={title}
         pinClose={isActive}
       />
     </TabContextMenu>
+  )
+}
+
+export function DiffTabInline({ tab, ...props }: DiffTabInlineProps): React.JSX.Element {
+  const side = tab.staged ? 'Staged' : 'Working tree'
+  const name = basename(tab.path)
+  return (
+    <DiffTabChrome
+      {...props}
+      kind="diff"
+      label={tab.staged ? `${name} (staged)` : name}
+      title={`${tab.path} (${side})`}
+    />
+  )
+}
+
+/** Read-only diff of one file at one commit: `a.ts @ e44b917`. */
+export function CommitDiffTabInline({
+  tab,
+  ...props
+}: CommitDiffTabInlineProps): React.JSX.Element {
+  return (
+    <DiffTabChrome
+      {...props}
+      kind="commit-diff"
+      label={commitDiffTabLabel(tab.path, tab.commit)}
+      title={`${tab.path} (at ${tab.commit.slice(0, 7)})`}
+    />
   )
 }

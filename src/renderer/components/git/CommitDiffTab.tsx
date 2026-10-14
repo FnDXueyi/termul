@@ -15,9 +15,10 @@ interface CommitDiffTabProps {
   isVisible: boolean
 }
 
-type LoadState = { diff: string | null; error: string | null }
+type LoadState = { diff: string | null; tooLarge: boolean; error: string | null }
 
-const NO_HUNK_ACTION = async (): Promise<void> => {}
+const LOADING: LoadState = { diff: null, tooLarge: false, error: null }
+const TOO_LARGE_NOTICE = { title: 'This diff is too large to show.' }
 
 /**
  * Main-area read-only Diff tab for one file at one commit (Git History). The
@@ -31,7 +32,7 @@ export function CommitDiffTab({
   oldPath,
   isVisible
 }: CommitDiffTabProps): React.JSX.Element {
-  const [state, setState] = useState<LoadState>({ diff: null, error: null })
+  const [state, setState] = useState<LoadState>(LOADING)
   const [diffViewMode, setDiffViewMode] = useState<GitDiffViewMode>(loadGitDiffViewMode)
   const requested = useRef(false)
   const mounted = useRef(true)
@@ -45,11 +46,18 @@ export function CommitDiffTab({
 
   const load = useCallback((): void => {
     requested.current = true
-    setState({ diff: null, error: null })
+    setState(LOADING)
     gitApi
       .getCommitFileDiff(cwd, commit, path, oldPath)
-      .then((diff) => {
-        if (mounted.current) setState({ diff, error: null })
+      .then(({ diff, tooLarge }) => {
+        if (tooLarge) {
+          void logFrontendError({
+            level: 'info',
+            source: 'CommitDiffTab.load',
+            message: `commit file diff too large to show for ${commit.slice(0, 12)}`
+          })
+        }
+        if (mounted.current) setState({ diff, tooLarge, error: null })
       })
       .catch((cause: unknown) => {
         const message = cause instanceof Error ? cause.message : String(cause)
@@ -58,7 +66,7 @@ export function CommitDiffTab({
           source: 'CommitDiffTab.load',
           message: `commit file diff failed for ${commit.slice(0, 12)}: ${message}`
         })
-        if (mounted.current) setState({ diff: null, error: message })
+        if (mounted.current) setState({ diff: null, tooLarge: false, error: message })
       })
   }, [cwd, commit, path, oldPath])
 
@@ -76,8 +84,8 @@ export function CommitDiffTab({
         currentDiff={state.error === null ? state.diff : undefined}
         diffViewMode={diffViewMode}
         onDiffViewModeChange={setDiffViewMode}
-        onStageHunk={NO_HUNK_ACTION}
-        onUnstageHunk={NO_HUNK_ACTION}
+        readOnly
+        emptyNotice={state.tooLarge ? TOO_LARGE_NOTICE : undefined}
         failure={state.error === null ? undefined : { detail: state.error, onRetry: load }}
       />
     </div>

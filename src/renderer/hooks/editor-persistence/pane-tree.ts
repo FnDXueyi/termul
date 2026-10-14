@@ -38,14 +38,15 @@ export function serializePaneTree(node: PaneNode): PersistedPaneNode {
         case 'git-history':
           return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
         case 'diff':
+          return [{ type: 'diff', id: tab.id, cwd: tab.cwd, path: tab.path, staged: tab.staged }]
+        case 'commit-diff':
           return [
             {
-              type: 'diff',
+              type: 'commit-diff',
               id: tab.id,
               cwd: tab.cwd,
+              commit: tab.commit,
               path: tab.path,
-              staged: tab.staged,
-              ...(tab.commit ? { commit: tab.commit } : {}),
               ...(tab.oldPath ? { oldPath: tab.oldPath } : {})
             }
           ]
@@ -220,6 +221,7 @@ export function reconcileTerminalTabs(
           case 'agent-chat':
           case 'git-history':
           case 'diff':
+          case 'commit-diff':
             return [tab]
           case 'canvas':
             // Canvas tabs: the daemon/iframe runtime is host-local state, never
@@ -275,6 +277,40 @@ export function reconcileTerminalTabs(
   }
 
   return normalizePaneTree(visit(root))
+}
+
+/** A persisted commit diff ref (or a pre-split `diff` ref that carried a `commit`) as a tab. */
+function restoreCommitDiff(ref: {
+  id?: unknown
+  cwd?: unknown
+  commit?: unknown
+  path?: unknown
+  oldPath?: unknown
+}): WorkspaceTab[] {
+  // Never coerce a malformed commit diff ref: drop it with one warn.
+  if (
+    typeof ref.cwd !== 'string' ||
+    typeof ref.commit !== 'string' ||
+    typeof ref.path !== 'string'
+  ) {
+    void logFrontendError({
+      level: 'warn',
+      source: 'useEditorPersistence.deserializePaneTree',
+      message:
+        'Dropped malformed commit diff tab (cwd/commit/path invalid) during workspace restore'
+    })
+    return []
+  }
+  return [
+    {
+      type: 'commit-diff',
+      id: typeof ref.id === 'string' ? ref.id : commitDiffTabId(ref.cwd, ref.commit, ref.path),
+      cwd: ref.cwd,
+      commit: ref.commit,
+      path: ref.path,
+      ...(typeof ref.oldPath === 'string' ? { oldPath: ref.oldPath } : {})
+    }
+  ]
 }
 
 // Deserialize pane tree with full tab mapping
@@ -347,6 +383,11 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput): PaneNode
               }
             ]
           case 'diff': {
+            // Pre-split saves stored a commit diff as a `diff` ref with a
+            // `commit`: restore it as a `commit-diff` tab.
+            const legacyCommit = (tab as { commit?: unknown }).commit
+            if (typeof legacyCommit === 'string')
+              return restoreCommitDiff({ ...tab, commit: legacyCommit })
             // Never coerce a malformed diff ref: drop it with one warn.
             if (
               typeof tab.cwd !== 'string' ||
@@ -361,25 +402,18 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput): PaneNode
               })
               return []
             }
-            const commit = typeof tab.commit === 'string' ? tab.commit : undefined
-            const oldPath = typeof tab.oldPath === 'string' ? tab.oldPath : undefined
             return [
               {
                 type: 'diff',
-                id:
-                  typeof tab.id === 'string'
-                    ? tab.id
-                    : commit
-                      ? commitDiffTabId(tab.cwd, commit, tab.path)
-                      : diffTabId(tab.cwd, tab.path, tab.staged),
+                id: typeof tab.id === 'string' ? tab.id : diffTabId(tab.cwd, tab.path, tab.staged),
                 cwd: tab.cwd,
                 path: tab.path,
-                staged: tab.staged,
-                ...(commit ? { commit } : {}),
-                ...(oldPath ? { oldPath } : {})
+                staged: tab.staged
               }
             ]
           }
+          case 'commit-diff':
+            return restoreCommitDiff(tab)
           case 'terminal':
             return [
               {

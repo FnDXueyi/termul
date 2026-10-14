@@ -1,20 +1,15 @@
 import type React from 'react'
+import { projectColors } from '@/lib/colors'
 import { cn } from '@/lib/utils'
+import type { ProjectColor } from '@/types/project'
 
-// Avatar fills cycle through the project palette tokens (see index.css).
-const AVATAR_COLORS = [
-  'oklch(var(--project-orange))',
-  'oklch(var(--project-green))',
-  'oklch(var(--project-purple))',
-  'oklch(var(--project-blue))',
-  'oklch(var(--project-cyan))',
-  'oklch(var(--project-pink))'
-]
+// Avatar fills cycle through the project palette.
+const AVATAR_COLORS: ProjectColor[] = ['orange', 'green', 'purple', 'blue', 'cyan', 'pink']
 
 function avatarColor(name: string): string {
   let hash = 0
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0
-  return AVATAR_COLORS[hash % AVATAR_COLORS.length]
+  return projectColors[AVATAR_COLORS[hash % AVATAR_COLORS.length]].bg
 }
 
 /** Initial on a palette dot, stable per author name. Decorative: the name is
@@ -34,13 +29,13 @@ export function AuthorAvatar({
       aria-hidden="true"
       className={cn(
         'inline-flex shrink-0 items-center justify-center rounded-full font-semibold leading-none text-background',
+        avatarColor(name),
         className
       )}
       style={{
         width: size,
         height: size,
-        fontSize: Math.round(size * 0.56),
-        backgroundColor: avatarColor(name)
+        fontSize: Math.round(size * 0.56)
       }}
     >
       {initial}

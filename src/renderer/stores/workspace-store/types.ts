@@ -26,10 +26,17 @@ export type WorkspaceTab =
       cwd: string
       path: string
       staged: boolean
-      /** Set for a read-only commit diff (Git History): the file at this full
-       * hash against the commit's first parent. `staged` is then `false`. */
-      commit?: string
-      /** A renamed file's path before the commit (commit diffs only). */
+    }
+  | {
+      /** Read-only diff of one file at one commit (Git History): the file at
+       * `commit` (full hash) against the commit's first parent. The id is
+       * `commitDiffTabId(cwd, commit, path)`. */
+      type: 'commit-diff'
+      id: string
+      cwd: string
+      commit: string
+      path: string
+      /** A renamed file's path before the commit. */
       oldPath?: string
     }
   | {

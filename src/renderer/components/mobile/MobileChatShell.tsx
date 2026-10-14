@@ -17,6 +17,7 @@ import {
   setSheetFocusDestination,
   sheetCloseAutoFocus
 } from '@/lib/sheet-focus-return'
+import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { returnToWorkspaceRoute } from '@/lib/workspace-route'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
@@ -226,6 +227,8 @@ export function MobileChatShell({
         return 'Git History'
       case 'diff':
         return fileBasename(activeTab.path)
+      case 'commit-diff':
+        return commitDiffTabLabel(activeTab.path, activeTab.commit)
       case 'browser':
         return browserTabLabel(activeBrowserTab)
       case 'canvas':

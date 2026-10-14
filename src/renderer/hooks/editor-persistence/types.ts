@@ -53,8 +53,14 @@ interface PersistedDiffTabRef {
   cwd: string
   path: string
   staged: boolean
-  /** Read-only commit diff: the full hash (absent for a working-copy diff). */
-  commit?: string
+}
+
+interface PersistedCommitDiffTabRef {
+  type: 'commit-diff'
+  id: string
+  cwd: string
+  commit: string
+  path: string
   oldPath?: string
 }
 
@@ -66,6 +72,7 @@ export type PersistedTabRef =
   | PersistedAgentChatTabRef
   | PersistedGitHistoryTabRef
   | PersistedDiffTabRef
+  | PersistedCommitDiffTabRef
 
 // Compile-time check: the persisted ref union must cover exactly the kinds the
 // traits table declares as persisted (a mismatch makes this assignment error).
