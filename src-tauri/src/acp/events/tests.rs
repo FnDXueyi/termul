@@ -358,6 +358,13 @@ fn usage_update_serializes_camel_case() {
             amount: 0.045,
             currency: "USD".to_string(),
         }),
+        rate_limit: Some(crate::acp::claude_accounts::usage::ClaudeRateLimit {
+            status: "allowed_warning".to_string(),
+            resets_at: Some(1_760_360_399),
+            kind: Some("five_hour".to_string()),
+            percent: Some(83.0),
+            overage_in_use: false,
+        }),
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["agentId"], "a");
@@ -366,6 +373,9 @@ fn usage_update_serializes_camel_case() {
     assert_eq!(value["size"], 200_000);
     assert_eq!(value["cost"]["amount"], 0.045);
     assert_eq!(value["cost"]["currency"], "USD");
+    assert_eq!(value["rateLimit"]["status"], "allowed_warning");
+    assert_eq!(value["rateLimit"]["resetsAt"], 1_760_360_399);
+    assert_eq!(value["rateLimit"]["overageInUse"], false);
 }
 
 /// Issue #411: `AskUserQuestionEvent` serializes camelCase with a stable
@@ -417,9 +427,11 @@ fn usage_update_omits_none_cost() {
         used: 1_000,
         size: 128_000,
         cost: None,
+        rate_limit: None,
     };
     let value = serde_json::to_value(&event).unwrap();
     assert!(value.get("cost").is_none());
+    assert!(value.get("rateLimit").is_none());
 }
 
 /// Build a Model-category `select` option for the derivation tests.

@@ -182,7 +182,8 @@ describe('warm session pool', () => {
   async function seedConnectedAgent(
     configId: string,
     agentId: string,
-    cwd = '/work'
+    cwd = '/work',
+    projectId = 'p1'
   ): Promise<void> {
     await useAcpStore.getState().saveAgentConfig({
       id: configId,
@@ -194,7 +195,10 @@ describe('warm session pool', () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, [agentId]: { id: agentId, capabilities: null } },
       agentStatus: { ...s.agentStatus, [agentId]: 'connected' },
-      configToLiveAgent: { ...s.configToLiveAgent, [agentReuseKey(configId, cwd)]: agentId }
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey(configId, cwd, projectId)]: agentId
+      }
     }))
   }
 
@@ -431,7 +435,7 @@ describe('warm session pool', () => {
     expect(state.sessions[first]?.agentId).toBe('factory-first')
     expect(state.sessions[first]?.configOptions[0]?.currentValue).toBe('glm-5.3-flash')
     expect(state.sessions['factory-2']?.agentId).toBe('factory-second')
-    expect(state.configToLiveAgent[agentReuseKey(configId, '/work')]).toBe('factory-second')
+    expect(state.configToLiveAgent[agentReuseKey(configId, '/work', 'p1')]).toBe('factory-second')
     expect(Object.entries(state.configToLiveAgent)).toContainEqual([
       expect.stringContaining('factory-first'),
       'factory-first'
@@ -452,8 +456,9 @@ describe('warm session pool', () => {
 
     useAcpStore.getState().detachAgentForNewCredentials(configId, '/work')
     const mapping = useAcpStore.getState().configToLiveAgent
-    expect(mapping[agentReuseKey(configId, '/work')]).toBeUndefined()
-    expect(mapping[`${agentReuseKey(configId, '/work')}\0factory-live`]).toBe('factory-live')
+    const reuseKey = agentReuseKey(configId, '/work', 'p1')
+    expect(mapping[reuseKey]).toBeUndefined()
+    expect(mapping[`${reuseKey}\0factory-live`]).toBe('factory-live')
     expect(useAcpStore.getState().sessions['factory-chat']?.status).not.toBe('closed')
     expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('acp_kill_agent', expect.anything())
   })
@@ -476,7 +481,7 @@ describe('warm session pool', () => {
 
   it('retargetWarmPool keeps pooled sessions for other cwds (project switch-back)', async () => {
     await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-1')
-    await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-2')
+    await seedConnectedAgent('cfg-a', 'agent-a', '/work/proj-2', 'p2')
     vi.mocked(invoke).mockResolvedValueOnce({ sessionId: 'sess-1' })
     useAcpStore.getState().prepareChat('cfg-a', '/work/proj-1', undefined, 'p1')
     const key1 = prepareChatKey('cfg-a', '/work/proj-1', undefined)

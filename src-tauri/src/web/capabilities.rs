@@ -234,6 +234,8 @@ pub fn ws_requirement(request_type: &str) -> Requirement {
         | "list_sessions"
         | "list_agents"
         | "list_acp_catalog"
+        | "list_claude_accounts"
+        | "list_claude_usage"
         | "store_read" => Requirement::View,
         "store_write" | "store_delete" => Requirement::DeviceStore,
         _ => Requirement::Write,

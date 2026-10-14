@@ -123,6 +123,10 @@ pub const WS_COMMAND_CLASSES: &[(&str, CommandClass)] = &[
         CommandClass::command(Replay::Payload),
     ),
     ("spawn_agent", CommandClass::create()),
+    ("list_claude_accounts", CommandClass::read()),
+    ("list_claude_usage", CommandClass::read()),
+    ("set_default_claude_account", CommandClass::idempotent()),
+    ("set_project_claude_account", CommandClass::idempotent()),
     ("kill_agent", CommandClass::idempotent()),
     ("list_agents", CommandClass::read()),
     ("authenticate", CommandClass::read()),
@@ -188,7 +192,7 @@ pub fn class_of(request_type: &str) -> Option<(&'static str, CommandClass)> {
 fn identifying_fields(request_type: &str) -> &'static [&'static str] {
     match request_type {
         "create_session" => &["agentId", "cwd", "projectId"],
-        "spawn_agent" => &["config.name", "config.command", "config.configId"],
+        "spawn_agent" => &["config.name", "config.command", "config.configId", "projectId"],
         "load_session" | "resume_session" => &["agentId", "sessionId", "cwd"],
         "close_session" | "dispose_ephemeral_session" | "promote_session"
         | "delete_agent_session" => &["agentId", "sessionId"],

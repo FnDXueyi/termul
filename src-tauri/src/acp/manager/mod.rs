@@ -593,6 +593,12 @@ impl AcpManager {
         .await
     }
 
+    /// The host's Claude auth and Account service.
+    #[must_use]
+    pub fn claude_agent(&self) -> &Arc<crate::acp::claude_agent::ClaudeAgentService> {
+        &self.claude_agent
+    }
+
     /// Spawn an ACP agent: launch the subprocess, complete `initialize`, and
     /// register the agent. Emits `acp:agent_spawned` on success. Returns a
     /// [`SpawnOutcome`] carrying the authoritative capabilities, auth methods,
@@ -600,21 +606,23 @@ impl AcpManager {
     /// synchronously from the response (CAP-4: the spawn response — not the
     /// async event — is the source of truth).
     pub async fn spawn(&self, config: AgentConfig) -> Result<SpawnOutcome, String> {
-        self.spawn_with_command_id(config, None).await
+        self.spawn_with_command_id(config, None, None).await
     }
 
     /// [`spawn`](Self::spawn) stamping the client `commandId` on the agent, so
     /// a resent `spawn_agent` finds it ([`Self::spawn_outcome_by_command_id`]).
+    /// `project_id` selects the Claude Account of a managed Claude agent.
     pub async fn spawn_with_command_id(
         &self,
         mut config: AgentConfig,
         command_id: Option<String>,
+        project_id: Option<String>,
     ) -> Result<SpawnOutcome, String> {
         crate::acp::factory_key::normalize_launch_args(&mut config);
         crate::acp::factory_key::inject(&mut config)?;
         let host_auth_ready = self
             .claude_agent
-            .prepare_managed_config(&mut config)
+            .prepare_managed_config_for_project(&mut config, project_id.as_deref())
             .await?;
         self.spawn_with_sinks(config, host_auth_ready, self.sinks.clone(), command_id)
             .await

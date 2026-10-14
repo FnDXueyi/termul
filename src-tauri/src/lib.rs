@@ -1874,7 +1874,18 @@ pub fn run() {
             secure_storage::secure_storage_delete,
             // ACP host-local commands. Agent, session, prompt, permission,
             // catalog and install requests travel over the `/ws` channel carrier
-            // (`ws_channel_*`), not a per-domain command.
+            // (`ws_channel_*`), not a per-domain command. Claude Account
+            // add, sign-in, rename and remove stay here; list and selection
+            // also travel over `/ws`.
+            acp::commands::claude_accounts_list,
+            acp::commands::claude_accounts_usage,
+            acp::commands::claude_accounts_add,
+            acp::commands::claude_accounts_login,
+            acp::commands::claude_accounts_login_cancel,
+            acp::commands::claude_accounts_rename,
+            acp::commands::claude_accounts_remove,
+            acp::commands::claude_accounts_set_default,
+            acp::commands::claude_accounts_set_project,
             acp::commands::acp_factory_key_status,
             acp::commands::acp_factory_key_save,
             acp::commands::codex_cli_auth_status,

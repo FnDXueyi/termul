@@ -83,6 +83,8 @@ fn view_only_may_read_but_not_mutate() {
         "list_sessions",
         "list_agents",
         "list_acp_catalog",
+        "list_claude_accounts",
+        "list_claude_usage",
         "store_read",
     ] {
         assert!(
@@ -112,6 +114,8 @@ fn view_only_may_read_but_not_mutate() {
         "update_project",
         "remove_project",
         "set_default_project",
+        "set_default_claude_account",
+        "set_project_claude_account",
         "switch_project",
         "set_catalog_opt_in",
         "install_acp_agent",

@@ -1979,3 +1979,54 @@ describe('Watch hub parity (projects, chat history, agent roster)', () => {
     expect(protocol).not.toMatch(/^\s*'(projects_changed|chat_history_changed)',?$/m)
   })
 })
+
+describe('Claude Accounts parity (ADR-0004)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const read = (...parts: string[]): string => readFileSync(join(SRC_TAURI, ...parts), 'utf-8')
+  const desktopTransport = readFileSync(
+    join(LIB_DIR, 'acp-transport', 'desktop-transport.ts'),
+    'utf-8'
+  )
+  const wsTransport = readFileSync(join(LIB_DIR, 'acp-transport', 'ws-transport.ts'), 'utf-8')
+  const facade = readFileSync(join(LIB_DIR, 'claude-accounts-api.ts'), 'utf-8')
+
+  it('desktop and web reach the same list/default/project operations', () => {
+    // Desktop speaks /ws over the Tauri Channel carrier, so it inherits these.
+    expect(desktopTransport).toMatch(/class DesktopAcpTransport extends WsAcpTransport/)
+    expect(desktopTransport).not.toMatch(/ClaudeAccount|ClaudeUsage/)
+    const dispatch = read('web', 'ws', 'dispatch.rs')
+    for (const request of [
+      'list_claude_accounts',
+      'list_claude_usage',
+      'set_default_claude_account',
+      'set_project_claude_account'
+    ]) {
+      expect(wsTransport).toContain(`'${request}'`)
+      expect(dispatch).toContain(`"${request}" => handle_${request}`)
+    }
+  })
+
+  it('add, sign-in, rename and remove are desktop-only and gated in the facade', () => {
+    const dispatch = read('web', 'ws', 'dispatch.rs')
+    for (const command of [
+      'claude_accounts_add',
+      'claude_accounts_login',
+      'claude_accounts_login_cancel',
+      'claude_accounts_rename',
+      'claude_accounts_remove'
+    ]) {
+      expect(facade).toContain(`'${command}'`)
+      expect(read('lib.rs')).toContain(`acp::commands::${command}`)
+    }
+    expect(dispatch).not.toMatch(/"(add|login|rename|remove)_claude_account"/)
+    expect(facade).toMatch(/if \(!isTauriContext\(\)\) return Promise\.reject/)
+  })
+
+  it('the spawn sends the projectId that selects the account on every carrier', () => {
+    // Desktop and the browser share the /ws spawn_agent handler. The host
+    // command file no longer has a per-domain spawn command.
+    expect(wsTransport).toMatch(/'spawn_agent',\s*\{ config, projectId: projectId \?\? null \}/)
+    expect(read('web', 'ws', 'agents.rs')).toMatch(/project_id: Option<String>/)
+    expect(read('acp', 'manager', 'mod.rs')).toMatch(/project_id: Option<String>/)
+  })
+})

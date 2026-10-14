@@ -567,11 +567,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
 
   pendingRestartVersions: {},
 
-  spawnAgent: async (config) => {
+  spawnAgent: async (config, projectId) => {
     const tempKey = config.name
     set((s) => ({ agentStatus: { ...s.agentStatus, [tempKey]: 'spawning' } }))
     try {
-      const result = await acpApi.spawnAgent(config)
+      const result = await acpApi.spawnAgent(config, projectId)
       const agentId = result.agentId
       set((s) => {
         // Drop the transient name-keyed `spawning` marker now that we have the
@@ -716,7 +716,10 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       if (isDetachedReuseKey(reuseKey)) continue
       const { configId, cwd } = parseReuseKey(reuseKey)
       for (const [errKey, err] of Object.entries(get().prepareChatErrors)) {
-        if (!errKey.startsWith(`${reuseKey}\0`)) continue
+        // Prepare keys stay `configId\0cwd\0mcpKey`. A Project-scoped reuse
+        // key has more segments, so match the config and cwd, not the prefix.
+        const parsedError = parseReuseKey(errKey)
+        if (parsedError.configId !== configId || parsedError.cwd !== cwd) continue
         if (err.category !== 'auth' && err.category !== 'multi-auth') continue
         get().cancelPreparedChat(errKey)
         get().prepareChat(configId, cwd, undefined, projectId)

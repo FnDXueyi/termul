@@ -670,7 +670,8 @@ async function openHistorySessionInner(
     if (!isSessionOwnedByOtherError(err) || !meta.agentConfigId || !meta.cwd) return false
     const { adopted } = await adoptHostOwnedAgent(set, id, meta.agentConfigId, meta.cwd, {
       allowDesktop: true,
-      isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration)
+      isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration),
+      projectId: meta.projectId
     })
     if (!adopted) return false
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return true
@@ -862,7 +863,8 @@ async function openHistorySessionInner(
       meta.cwd,
       {
         allowDesktop: turnLive,
-        isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration)
+        isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration),
+        projectId: meta.projectId
       }
     )
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
@@ -910,7 +912,8 @@ async function openHistorySessionInner(
     try {
       ensured = await ensureLiveAgent(get, set, meta.agentConfigId, meta.cwd, {
         silentSpawnFailure: true,
-        surfaceDefiniteRejection: true
+        surfaceDefiniteRejection: true,
+        projectId: meta.projectId ?? undefined
       })
     } catch (err) {
       // AD-5: a missing binary / invalid config is a definite rejection —
@@ -1875,7 +1878,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       if (isSessionOwnedByOtherError(err) && meta.agentConfigId) {
         const { adopted } = await adoptHostOwnedAgent(set, id, meta.agentConfigId, cwd, {
           allowDesktop: true,
-          isCurrent: () => isCurrentSessionReopen(id, generation)
+          isCurrent: () => isCurrentSessionReopen(id, generation),
+          projectId: meta.projectId
         })
         // The awaited adoption is an async gap: a newer reopen may own this
         // session now — abandon rather than stamping the attach. Matches the
@@ -1920,7 +1924,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     }
   },
 
-  retryCrashedSession: async (sessionId) => {
+  retryCrashedSession: async (sessionId, options) => {
     // Dedupe concurrent Retry clicks: only one relaunch+replay+resend per session.
     if (inFlightCrashedRetries.has(sessionId)) return
     inFlightCrashedRetries.add(sessionId)
@@ -1947,6 +1951,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       // transcript + let the resume error show — do not blank.
       const reopened = get().sessions[sessionId]
       if (!reopened || reopened.status === 'closed') return
+      if (options?.resend === false) return
       // Re-send the last user prompt to produce a fresh assistant turn (retry).
       // `switch-splice:` records are projected pre-switch history — retrying
       // one would re-send the OLD agent's prompt to the new session.

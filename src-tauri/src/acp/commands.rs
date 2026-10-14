@@ -3,9 +3,9 @@
 //! Everything with a `/ws` request type (agents, sessions, prompts,
 //! permissions, catalog, install) is served by the shared `/ws` dispatch over
 //! the desktop's `ipc::Channel` carrier (`web::ws::channel`), not by a command
-//! here. What stays is host-local by design: the factory key, the Codex CLI
-//! login probe, runtime and MCP probes, MCP OAuth, and the ACP timeout
-//! overrides.
+//! here. What stays is host-local by design: Claude Account management, the
+//! factory key, the Codex CLI login probe, runtime and MCP probes, MCP OAuth,
+//! and the ACP timeout overrides.
 
 use std::sync::Arc;
 
@@ -13,6 +13,9 @@ use tauri::State;
 
 use crate::acp::config::AgentConfig;
 use crate::acp::manager::AcpManager;
+
+mod claude_accounts;
+pub use claude_accounts::*;
 
 /// Whether the host OS keychain currently holds a Factory Droid API key.
 #[tauri::command]

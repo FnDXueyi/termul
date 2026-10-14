@@ -147,6 +147,12 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         "update_project" => handle_update_project(id, &req.payload, env).await,
         "remove_project" => handle_remove_project(id, &req.payload, env).await,
         "spawn_agent" => handle_spawn_agent(id, &req.payload, acp, req.command_id.clone()).await,
+        // Claude Accounts: view and choose only. Add, sign-in, rename and
+        // remove stay on the host (desktop UI / `termul-server claude account`).
+        "list_claude_accounts" => handle_list_claude_accounts(id, acp).await,
+        "list_claude_usage" => handle_list_claude_usage(id, &req.payload, acp).await,
+        "set_default_claude_account" => handle_set_default_claude_account(id, &req.payload, acp),
+        "set_project_claude_account" => handle_set_project_claude_account(id, &req.payload, acp),
         // CAP-6 / Story 8: host-owned ACP catalog resolution. The catalog
         // carries the host's OS/arch/runtime availability + per-agent
         // resolved `SupportedAcpAgentStatus`. The web client never probes

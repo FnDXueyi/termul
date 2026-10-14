@@ -6,6 +6,10 @@
  */
 
 import type { AcpCatalog } from '@shared/types/acp-catalog.types'
+import type {
+  ClaudeAccountsSnapshot,
+  ClaudeAccountUsage
+} from '@shared/types/claude-accounts.types'
 import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AddProjectPayload,
@@ -187,7 +191,19 @@ export interface AcpTransport {
    * failures throw `AcpTransportError`.
    */
   probeMcpServer(server: McpServerConfig): Promise<ProbeResult>
-  spawnAgent(config: AgentConfig, options?: CommandCallOptions): Promise<SpawnAgentResult>
+  /** Claude Accounts of the host (ADR-0004); secret-free. */
+  listClaudeAccounts(): Promise<ClaudeAccountsSnapshot>
+  /** Usage of every Account; host-cached 5 min, `force` reuses reads under 60 s. */
+  listClaudeUsage(force?: boolean): Promise<ClaudeAccountUsage[]>
+  setDefaultClaudeAccount(accountId: string): Promise<void>
+  /** `null` returns the Project to the Default Account. */
+  setProjectClaudeAccount(projectId: string, accountId: string | null): Promise<void>
+  /** `projectId` selects the Claude Account of a managed Claude agent. */
+  spawnAgent(
+    config: AgentConfig,
+    options?: CommandCallOptions,
+    projectId?: string | null
+  ): Promise<SpawnAgentResult>
   killAgent(agentId: AgentId): Promise<void>
   listAgents(): Promise<AgentId[]>
   /**

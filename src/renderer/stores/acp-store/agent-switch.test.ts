@@ -3202,6 +3202,8 @@ describe('composer option fidelity', () => {
 
     it('switchAgent applies armed picks to the NEW session before the handoff prompt', async () => {
       vi.mocked(invoke).mockImplementation(async (command: string, args?: unknown) => {
+        if (command === 'acp_spawn_agent')
+          return { agentId: 'agent-new', capabilities: {}, authMethods: [] }
         if (command === 'acp_new_session')
           return {
             sessionId: 's-new',
@@ -3303,6 +3305,8 @@ describe('composer option fidelity', () => {
       // Gate session/new so switchAgent stays in-flight while a pick lands.
       let resolveNewSession!: (value: unknown) => void
       vi.mocked(invoke).mockImplementation(async (command: string) => {
+        if (command === 'acp_spawn_agent')
+          return { agentId: 'agent-new', capabilities: {}, authMethods: [] }
         if (command === 'acp_new_session')
           return await new Promise((resolve) => {
             resolveNewSession = resolve

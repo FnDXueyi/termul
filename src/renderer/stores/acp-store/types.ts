@@ -347,7 +347,7 @@ export interface AcpState {
   // User-configured agents (persisted, distinct from the live `agents` map)
   agentConfigs: StoredAgentConfig[]
   /**
-   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd)`) to its
+   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd, projectId)`) to its
    * live spawned AgentId (for reuse). Keyed by config+cwd — not config alone —
    * so the same configured agent runs an independent process per project/cwd
    * and one process's disconnect can't cascade to another project's sessions.
@@ -482,7 +482,11 @@ export interface AcpState {
   degradedRecoverySessions: Record<SessionId, true>
 
   // Actions — lifecycle
-  spawnAgent: (config: Parameters<typeof acpApi.spawnAgent>[0]) => Promise<AgentId>
+  /** `projectId` selects the Claude Account of a managed Claude agent. */
+  spawnAgent: (
+    config: Parameters<typeof acpApi.spawnAgent>[0],
+    projectId?: string | null
+  ) => Promise<AgentId>
   killAgent: (agentId: AgentId) => Promise<void>
   /**
    * Headless ACP auth (spec-acp-terminal-auth): dismiss the BrowserAuthDialog
@@ -693,7 +697,8 @@ export interface AcpState {
   /** Restart the agent for a crashed chat and replay the last user prompt.
    * User-initiated (Retry click) — honors ADR-003's no-silent-respawn (the crash
    * is still surfaced; respawn only happens on explicit user action). */
-  retryCrashedSession: (sessionId: SessionId) => Promise<void>
+  /** Reopen on a fresh agent and (unless `resend: false`) send the last user prompt again. */
+  retryCrashedSession: (sessionId: SessionId, options?: { resend?: boolean }) => Promise<void>
   /** Re-run prepare for a failed chat launch (status 'error' +
    * `launchConfigId`) against the recorded agent config. On success the real
    * session replaces the placeholder and the tab remaps; on failure the

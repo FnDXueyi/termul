@@ -37,7 +37,7 @@ async fn add_is_idempotent_by_id_and_refuses_another_path() {
 
     let first = send(&env, "add_project", add.clone()).await;
     let repeat = send(&env, "add_project", add).await;
-    assert!(first.ok && repeat.ok, "{:?} {:?}", first.err, repeat.err);
+    assert!(first.ok && repeat.ok);
     assert_eq!(first.payload.unwrap()["project"]["id"], "p-1");
     assert_eq!(host.registry.len(), 1);
 
@@ -96,7 +96,7 @@ async fn cascade_remove_stops_everything_then_removes_and_fans_out() {
         json!({ "projectId": "p-1", "cascade": true }),
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     assert!(!host.registry.contains("p-1"));
     assert!(host.live_sessions("a1").is_empty());
     assert!(host.pty.get(&terminal).is_none());
@@ -128,7 +128,7 @@ async fn archive_is_guarded_and_honors_cascade_over_ws() {
         json!({ "projectId": "p-1", "isArchived": true, "cascade": true }),
     )
     .await;
-    assert!(archived.ok, "{:?}", archived.err);
+    assert!(archived.ok);
     assert!(host.registry.get("p-1").unwrap().is_archived);
     assert!(host.live_sessions("a1").is_empty());
 }

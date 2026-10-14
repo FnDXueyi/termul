@@ -2,6 +2,7 @@ import type { Editor } from '@tiptap/core'
 import { useReducedMotion } from 'framer-motion'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { ClaudeAccountChip } from '@/components/chat/claude-account/ClaudeAccountChip'
 import { Paperclip } from '@/components/icons'
 import { useAgentSkills } from '@/hooks/use-agent-skills'
 import { useAttachmentDropZone } from '@/hooks/use-attachment-drop-zone'
@@ -689,6 +690,7 @@ export function ChatInputBar({
                   {modelSelector}
                   {agentModeChip}
                   <div className="flex-1" />
+                  <ClaudeAccountChip sessionId={session.id} compact />
                   <ContextUsageIndicator usage={sessionUsage} messages={messages} />
                   {sendButton}
                 </div>
@@ -700,6 +702,7 @@ export function ChatInputBar({
                     Same treatment as the launcher toolbar. */}
                     <AttachFilesButton onClick={() => void pickFiles()} disabled={!canPick} />
                     {mcpBadge}
+                    <ClaudeAccountChip sessionId={session.id} />
                   </div>
                   <div
                     className={cn(

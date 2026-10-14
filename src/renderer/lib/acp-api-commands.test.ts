@@ -105,6 +105,17 @@ describe('acp-api ledgered commands', () => {
     expect(ids[1]).not.toBe(ids[0])
   })
 
+  it('passes the projectId that selects the Claude account, and keys the spawn by it', async () => {
+    const spawnAgent = vi.fn(async () => ({ agentId: 'a1', capabilities: {}, authMethods: [] }))
+    _setAcpTransportForTests({ spawnAgent, dispose: () => {} } as unknown as AcpTransport)
+    const config = { name: 'Claude', command: 'node', args: ['x.js'], env: {} }
+    await acpSpawnAgent(config, 'office')
+    await acpSpawnAgent(config, 'side')
+    expect(spawnAgent.mock.calls.map((call) => call[2])).toEqual(['office', 'side'])
+    const [first, second] = spawnAgent.mock.calls.map((call) => call[1]?.commandId)
+    expect(first).not.toBe(second)
+  })
+
   it('outcome_unknown surfaces to the caller without a resend', async () => {
     sent.mockRejectedValue(new AcpTransportError('outcome_unknown', 'no longer known'))
     await expect(acpCloseSession('agent-1', 's1')).rejects.toMatchObject({
