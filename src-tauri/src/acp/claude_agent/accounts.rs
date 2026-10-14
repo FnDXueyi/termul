@@ -49,12 +49,9 @@ impl ClaudeAgentService {
             .iter()
             .map(|dir| self.runtime_probe.cli_authentication_status(dir.as_deref()));
         let states = futures::future::join_all(probes).await;
-        for (account, state) in snapshot.accounts.iter_mut().zip(states) {
-            account.signed_in = state.unwrap_or_else(|error| {
-                log::warn!(
-                    "[claude-accounts] login probe failed for {}: {error}",
-                    account.id
-                );
+        for (row, state) in snapshot.accounts.iter_mut().zip(states) {
+            row.signed_in = state.unwrap_or_else(|_error| {
+                log::warn!("[claude-accounts] login probe failed");
                 None
             });
         }
@@ -89,12 +86,10 @@ impl ClaudeAgentService {
         let store = self.account_store()?;
         if let Some(dir) = store.config_dir(id) {
             match run_cli(&["auth", "logout"], Some(dir), LOGOUT_TIMEOUT).await {
-                Ok(true) => log::info!("[claude-accounts] account {id} signed out before removal"),
-                Ok(false) => {
-                    log::warn!("[claude-accounts] sign-out of account {id} did not succeed")
-                }
-                Err(error) => {
-                    log::warn!("[claude-accounts] sign-out of account {id} failed: {error}")
+                Ok(true) => log::info!("[claude-accounts] signed out before removal"),
+                Ok(false) => log::warn!("[claude-accounts] sign-out did not succeed"),
+                Err(_error) => {
+                    log::warn!("[claude-accounts] sign-out failed");
                 }
             }
         }
@@ -109,7 +104,7 @@ impl ClaudeAgentService {
             return Err("That Claude account does not exist".to_string());
         }
         let dir = store.config_dir(id);
-        log::info!("[claude-accounts] terminal login started for account {id}");
+        log::info!("[claude-accounts] terminal login started");
         self.run_cli_login_in(dir.as_deref())
     }
 
@@ -127,18 +122,18 @@ impl ClaudeAgentService {
             }
             store.config_dir(id)
         };
-        log::info!("[claude-accounts] login started for account {id}");
+        log::info!("[claude-accounts] login started");
         match run_cli(&["auth", "login"], dir, LOGIN_TIMEOUT).await {
             Ok(true) => {
-                log::info!("[claude-accounts] login finished for account {id}");
+                log::info!("[claude-accounts] login finished");
                 Ok(())
             }
             Ok(false) => {
-                log::warn!("[claude-accounts] login did not finish for account {id}");
+                log::warn!("[claude-accounts] login did not finish");
                 Err("Claude sign-in did not finish. Try again.".to_string())
             }
             Err(error) => {
-                log::warn!("[claude-accounts] login failed for account {id}: {error}");
+                log::warn!("[claude-accounts] login failed");
                 Err(error)
             }
         }

@@ -31,6 +31,9 @@ jobs:
             build-mode: none
           - language: rust
             build-mode: none
+            # scope/name:path. A bare directory is rejected. Rust only: the pack
+            # extends codeql/rust-all and must not load for other languages.
+            packs: "termul/models:.github/codeql/extensions/termul-models"
           - language: actions
             build-mode: none
 
@@ -45,6 +48,8 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-extended
+          # Model pack for the Rust job only. Empty for the other languages.
+          packs: ${{ matrix.packs || '' }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
 

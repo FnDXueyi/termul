@@ -663,7 +663,7 @@ async fn store_write_then_read_roundtrips_with_a_stamp() {
         &store,
     )
     .await;
-    assert!(write.ok, "write ok: {:?}", write.err);
+    assert!(write.ok, "write ok");
     assert_eq!(write.payload, Some(json!({ "revision": 1 })));
 
     let read = handle_request_with_store(
@@ -686,7 +686,7 @@ async fn store_read_missing_key_is_revision_zero_with_a_null_value() {
         &store,
     )
     .await;
-    assert!(reply.ok, "missing key is not an error: {:?}", reply.err);
+    assert!(reply.ok, "missing key is not an error");
     assert_eq!(
         reply.payload,
         Some(json!({ "value": null, "revision": 0, "clientInstanceId": null }))
@@ -708,7 +708,7 @@ async fn store_delete_removes_and_reports_existed() {
             &store,
         )
         .await;
-        assert!(del.ok, "delete ok: {:?}", del.err);
+        assert!(del.ok, "delete ok");
         assert_eq!(del.payload, Some(json!({ "existed": existed })));
     }
     let _ = std::fs::remove_dir_all(dir);
@@ -787,7 +787,7 @@ async fn store_write_rejects_value_over_256kib() {
         r#"{{"id":"r2","type":"store_write","payload":{{"key":"device/dev-a/big","value":"{exact}"}}}}"#
     );
     let reply = handle_request_with_store(&frame, &store).await;
-    assert!(reply.ok, "exactly-256-KiB value is accepted: {:?}", reply.err);
+    assert!(reply.ok, "exactly-256-KiB value is accepted");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1742,7 +1742,7 @@ async fn handle_list_agents_returns_identity_summaries() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"list_agents","payload":{}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
     .await;
-    assert!(reply.ok, "list_agents should succeed: {:?}", reply.err);
+    assert!(reply.ok, "list_agents should succeed");
     let entries = reply
         .payload
         .as_ref()
@@ -1844,7 +1844,7 @@ async fn delete_session_removes_host_persisted_record() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "delete ok: {:?}", reply.err);
+    assert!(reply.ok, "delete ok");
     // Typed idempotent delete contract: a removed record reports true.
     assert_eq!(reply.payload, Some(json!({ "deleted": true })));
     // Gone from the host index.
@@ -1947,7 +1947,7 @@ async fn handle_resume_session_ok_reply_carries_null_replay_snapshot() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-1","sessionId":"sess-1","cwd":"/tmp"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
         .await;
-    assert!(reply.ok, "resume ok: {:?}", reply.err);
+    assert!(reply.ok, "resume ok");
     let payload = reply.payload.expect("ok payload");
     assert_eq!(payload.get("replaySnapshot"), Some(&Value::Null));
     // No history/replay fields leak into the reply (contract 1).
@@ -2353,7 +2353,7 @@ async fn handle_promote_session_ok_on_known_agent() {
         &acp,
     )
     .await;
-    assert!(reply.ok, "promote_session failed: {:?}", reply.err);
+    assert!(reply.ok, "promote_session failed");
     assert_eq!(reply.payload, Some(json!({})));
 }
 
@@ -2564,7 +2564,7 @@ fn handle_respond_permission_needs_no_subscription() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let reply = block_on(route(r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-A","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
+    assert!(reply.ok, "ticket-only answer");
 }
 
 /// Story 1.7 (verification gap #4 + happy path): a valid `respond_permission`
@@ -2579,7 +2579,7 @@ fn handle_respond_permission_resolves_then_second_is_already_resolved() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let ok_reply = block_on(route(r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(ok_reply.ok, "first response wins: {:?}", ok_reply.err);
+    assert!(ok_reply.ok, "first response wins");
     // Second frame for the same requestId → already_resolved (tombstone).
     let stale_reply = block_on(route(r#"{"id":"r2","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
     assert!(!stale_reply.ok);
@@ -2705,7 +2705,7 @@ fn handle_answer_question_needs_no_subscription() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let reply = block_on(route(r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-A","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
+    assert!(reply.ok, "ticket-only answer");
 }
 
 /// Issue #411: a valid `answer_question` from a subscribed connection
@@ -2718,7 +2718,7 @@ fn handle_answer_question_resolves_then_second_is_already_resolved() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let ok_reply = block_on(route(r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(ok_reply.ok, "first answer wins: {:?}", ok_reply.err);
+    assert!(ok_reply.ok, "first answer wins");
     let stale_reply = block_on(route(r#"{"id":"r2","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
     assert!(!stale_reply.ok);
     assert_eq!(stale_reply.err.unwrap().code, "already_resolved");
@@ -2786,7 +2786,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub2","type":"subscribe","payload":{"sessionId":"fresh"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs2)));
-    assert!(reply_ok.ok, "{:?}", reply_ok.err);
+    assert!(reply_ok.ok);
     assert_eq!(subs2.len(), 1);
 
     // Re-subscribe same session replaces prior ClientId (no leak).
@@ -2795,7 +2795,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub3","type":"subscribe","payload":{"sessionId":"fresh"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs2)));
-    assert!(reply_resub.ok, "{:?}", reply_resub.err);
+    assert!(reply_resub.ok);
     assert_eq!(subs2.len(), 1);
 
     // Evicted log + omit lastSeq → live-only succeeds (not stale).
@@ -2805,7 +2805,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub4","type":"subscribe","payload":{"sessionId":"s1"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs3)));
-    assert!(reply_live.ok, "{:?}", reply_live.err);
+    assert!(reply_live.ok);
 
     // Drain any replay/live.
     while rx.try_recv().is_ok() {}
@@ -2922,7 +2922,7 @@ async fn open_persisted_session_is_read_only() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     assert_eq!(subs.len(), 1);
 
     assert_eq!(
@@ -2999,7 +2999,7 @@ async fn open_persisted_session_catalog_branch_admits_finalized_session() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     let payload = reply.payload.unwrap();
     assert!(
         payload["replayed"].as_u64().unwrap() >= 1,
@@ -3719,7 +3719,7 @@ async fn handle_set_default_project_updates_host_default_and_persists() {
         &env,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     let snap = registry.snapshot();
     assert_eq!(snap.default_project_id.as_deref(), Some("p-2"));
     assert!(!snap.projects[0].is_default);
@@ -3787,7 +3787,7 @@ async fn handle_set_default_project_publishes_to_all_watchers() {
         &env,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     let mut deltas = Vec::new();
     while let Ok(Outbound::Watch(frame)) = rx.try_recv() {
         deltas.push(frame);
@@ -3830,16 +3830,8 @@ async fn handle_resume_session_rejected_mid_turn_maps_to_session_owned_by_other(
     assert!(!reply.ok, "mid-turn cross-agent resume must fail");
     let err = reply.err.expect("err envelope");
     assert_eq!(err.code, "session_owned_by_other");
-    assert!(
-        err.message.contains("ACP_SESSION_OWNED_BY_OTHER"),
-        "message carries the stable prefix: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("agent-original"),
-        "message names the owning agent: {}",
-        err.message
-    );
+    assert!(err.message.contains("ACP_SESSION_OWNED_BY_OTHER"));
+    assert!(err.message.contains("agent-original"));
 }
 
 /// `list_agents` carries the issue-#837 payload extension: every summary
@@ -3858,7 +3850,7 @@ async fn handle_list_agents_reports_owned_sessions() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"list_agents","payload":{}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
     .await;
-    assert!(reply.ok, "list_agents should succeed: {:?}", reply.err);
+    assert!(reply.ok, "list_agents should succeed");
     let entries = reply
         .payload
         .as_ref()

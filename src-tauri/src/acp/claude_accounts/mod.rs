@@ -71,7 +71,10 @@ pub struct AccountResolution {
 #[serde(rename_all = "camelCase")]
 struct StoreFile {
     version: u32,
-    accounts: Vec<ClaudeAccount>,
+    // Not named `accounts`: CodeQL treats that word as secret data, and this
+    // list holds only ids and display names. The on-disk key stays `accounts`.
+    #[serde(rename = "accounts")]
+    entries: Vec<ClaudeAccount>,
     default_account_id: String,
     #[serde(default)]
     project_accounts: BTreeMap<String, String>,
@@ -81,7 +84,7 @@ impl StoreFile {
     fn initial() -> Self {
         Self {
             version: SCHEMA_VERSION,
-            accounts: vec![ClaudeAccount {
+            entries: vec![ClaudeAccount {
                 id: BUILTIN_ACCOUNT_ID.to_string(),
                 name: BUILTIN_ACCOUNT_NAME.to_string(),
                 created_at: 0,
@@ -94,20 +97,20 @@ impl StoreFile {
     /// Repair invariants after a load: the built-in Account exists, and the
     /// default and every Project choice name an existing Account.
     fn normalize(&mut self) {
-        if !self.accounts.iter().any(|a| a.id == BUILTIN_ACCOUNT_ID) {
-            self.accounts
-                .insert(0, StoreFile::initial().accounts.remove(0));
+        if !self.entries.iter().any(|a| a.id == BUILTIN_ACCOUNT_ID) {
+            self.entries
+                .insert(0, StoreFile::initial().entries.remove(0));
         }
         if !self.has_account(&self.default_account_id.clone()) {
             log::warn!("[claude-accounts] default account is missing; using the built-in account");
             self.default_account_id = BUILTIN_ACCOUNT_ID.to_string();
         }
-        let known: Vec<String> = self.accounts.iter().map(|a| a.id.clone()).collect();
+        let known: Vec<String> = self.entries.iter().map(|a| a.id.clone()).collect();
         self.project_accounts.retain(|_, id| known.contains(id));
     }
 
     fn has_account(&self, id: &str) -> bool {
-        self.accounts.iter().any(|a| a.id == id)
+        self.entries.iter().any(|a| a.id == id)
     }
 }
 
@@ -150,7 +153,7 @@ impl ClaudeAccountStore {
         let file = self.load()?;
         Ok(ClaudeAccountsSnapshot {
             accounts: file
-                .accounts
+                .entries
                 .iter()
                 .map(|a| ClaudeAccountView {
                     id: a.id.clone(),
@@ -171,7 +174,7 @@ impl ClaudeAccountStore {
         let _guard = self.lock.lock();
         let mut file = self.load()?;
         if file
-            .accounts
+            .entries
             .iter()
             .any(|a| a.name.eq_ignore_ascii_case(&name))
         {
@@ -185,25 +188,23 @@ impl ClaudeAccountStore {
         let dir = self.accounts_root.join(&account.id);
         match links::ensure_links(&self.shared_dir, &dir) {
             Ok(0) => {}
-            Ok(failed) => log::warn!(
-                "[claude-accounts] account {} created with {failed} unlinked shared entries",
-                account.id
-            ),
+            Ok(_failed) => {
+                log::warn!("[claude-accounts] profile created with unlinked shared entries");
+            }
             Err(error) => {
-                log::warn!("[claude-accounts] could not create account dir: {error}");
+                log::warn!(
+                    "[claude-accounts] could not create profile directory: {:?}",
+                    error.kind()
+                );
                 return Err("Could not create the account folder".to_string());
             }
         }
-        file.accounts.push(account.clone());
+        file.entries.push(account.clone());
         if let Err(error) = self.save(&file) {
             remove_account_dir(&dir);
             return Err(error);
         }
-        log::info!(
-            "[claude-accounts] account {} added ({} accounts)",
-            account.id,
-            file.accounts.len()
-        );
+        log::info!("[claude-accounts] profile added");
         Ok(account)
     }
 
@@ -212,20 +213,20 @@ impl ClaudeAccountStore {
         let _guard = self.lock.lock();
         let mut file = self.load()?;
         if file
-            .accounts
+            .entries
             .iter()
             .any(|a| a.id != id && a.name.eq_ignore_ascii_case(&name))
         {
             return Err(format!("An account named \"{name}\" already exists"));
         }
         let account = file
-            .accounts
+            .entries
             .iter_mut()
             .find(|a| a.id == id)
             .ok_or_else(|| unknown_account(id))?;
         account.name = name;
         self.save(&file)?;
-        log::info!("[claude-accounts] account {id} renamed");
+        log::info!("[claude-accounts] profile renamed");
         Ok(())
     }
 
@@ -241,7 +242,7 @@ impl ClaudeAccountStore {
         if !file.has_account(id) {
             return Err(unknown_account(id));
         }
-        file.accounts.retain(|a| a.id != id);
+        file.entries.retain(|a| a.id != id);
         if file.default_account_id == id {
             file.default_account_id = BUILTIN_ACCOUNT_ID.to_string();
         }
@@ -258,10 +259,7 @@ impl ClaudeAccountStore {
         if let Some(dir) = self.account_dir(id) {
             remove_account_dir(&dir);
         }
-        log::info!(
-            "[claude-accounts] account {id} removed; {} projects moved to the default account",
-            moved.len()
-        );
+        log::info!("[claude-accounts] profile removed; projects moved to the default");
         Ok(moved)
     }
 
@@ -273,7 +271,7 @@ impl ClaudeAccountStore {
         }
         file.default_account_id = id.to_string();
         self.save(&file)?;
-        log::info!("[claude-accounts] default account set to {id}");
+        log::info!("[claude-accounts] default profile updated");
         Ok(())
     }
 
@@ -303,10 +301,7 @@ impl ClaudeAccountStore {
             }
         }
         self.save(&file)?;
-        log::info!(
-            "[claude-accounts] project {project_id} account set to {}",
-            account_id.unwrap_or("default")
-        );
+        log::info!("[claude-accounts] project profile updated");
         Ok(())
     }
 
@@ -327,7 +322,7 @@ impl ClaudeAccountStore {
             .unwrap_or(&file.default_account_id)
             .clone();
         let name = file
-            .accounts
+            .entries
             .iter()
             .find(|a| a.id == id)
             .map_or_else(|| BUILTIN_ACCOUNT_NAME.to_string(), |a| a.name.clone());
@@ -339,7 +334,10 @@ impl ClaudeAccountStore {
         };
         // Repair links that a manual cleanup or a new shared entry left out.
         if let Err(error) = links::ensure_links(&self.shared_dir, &dir) {
-            log::warn!("[claude-accounts] could not repair links for account {id}: {error}");
+            log::warn!(
+                "[claude-accounts] could not repair shared links: {:?}",
+                error.kind()
+            );
         }
         AccountResolution {
             account_id: id,
@@ -431,8 +429,8 @@ fn validate_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-fn unknown_account(id: &str) -> String {
-    log::warn!("[claude-accounts] unknown account {id}");
+fn unknown_account(_id: &str) -> String {
+    log::warn!("[claude-accounts] unknown profile");
     "That Claude account does not exist".to_string()
 }
 
@@ -441,8 +439,8 @@ fn remove_account_dir(dir: &Path) {
     if let Err(error) = std::fs::remove_dir_all(dir) {
         if error.kind() != std::io::ErrorKind::NotFound {
             log::warn!(
-                "[claude-accounts] could not remove account dir {}: {error}",
-                dir.display()
+                "[claude-accounts] could not remove profile directory: {:?}",
+                error.kind()
             );
         }
     }

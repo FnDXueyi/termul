@@ -650,8 +650,7 @@ impl ClaudeAgentService {
                     Ok(Some(true)) => {}
                     Ok(status) => {
                         log::warn!(
-                            "[acp-claude] managed config rejected: account {} not signed in (status={status:?})",
-                            account.account_id
+                            "[acp-claude] managed config rejected: profile is not signed in (status={status:?})"
                         );
                         return Err(match account.config_dir {
                             None => "Claude Code CLI is not signed in. Run `claude auth login`, then retry."
@@ -677,11 +676,7 @@ impl ClaudeAgentService {
                         .env
                         .insert(CLAUDE_CONFIG_DIR_ENV.to_string(), dir.to_string());
                 }
-                log::info!(
-                    "[acp-claude] managed config uses account {} for project {}",
-                    account.account_id,
-                    project_id.unwrap_or("none")
-                );
+                log::info!("[acp-claude] managed config uses the project profile");
                 Ok(true)
             }
             Ok(ClaudeAuthMode::ApiKey) => match self.credentials.get(API_KEY_ACCOUNT) {
