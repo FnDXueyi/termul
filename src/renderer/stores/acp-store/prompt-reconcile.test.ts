@@ -599,7 +599,12 @@ describe('prompt pending-reconcile (AD-6)', () => {
     expect(useAcpStore.getState().promptCommandStates.s1?.phase).toBe('pending-reconcile')
     historySeqWatermarks.set('s1', 10)
     useAcpStore.getState()._onUserPrompt(
-      { agentId: 'agent-1', sessionId: 's1', turnId, content: [{ type: 'text', text: 'deploy' }] },
+      {
+        agentId: 'agent-1',
+        sessionId: 's1',
+        turnId,
+        content: [{ type: 'text', text: 'deploy' }]
+      },
       5
     )
     expect(useAcpStore.getState().promptCommandStates.s1).toBeUndefined()
