@@ -129,8 +129,7 @@ pub(in crate::web::ws) struct HandlerEnv {
     pub(in crate::web::ws) acp: Arc<AcpManager>,
     pub(in crate::web::ws) relay: Arc<WsRelaySink>,
     pub(in crate::web::ws) registry: Arc<ProjectRegistry>,
-    pub(in crate::web::ws) registry_persistence: Option<Arc<parking_lot::Mutex<FileProjectRegistry>>>,
-    pub(in crate::web::ws) projects_file: Option<Arc<PathBuf>>,
+    pub(in crate::web::ws) pty: Arc<PtyManager>,
     pub(in crate::web::ws) history_mode: HistoryMode,
     pub(in crate::web::ws) acp_catalog: Option<Arc<crate::acp::AcpCatalogService>>,
     pub(in crate::web::ws) acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
@@ -138,6 +137,9 @@ pub(in crate::web::ws) struct HandlerEnv {
     /// The connection's authenticated identity; empty until `authenticate`
     /// succeeds (request tasks only run after it).
     pub(in crate::web::ws) identity: Arc<OnceLock<ClientIdentity>>,
+    /// The carrier the connection arrived on (the desktop's `store_*` requests
+    /// claim the pending plugin-store import).
+    pub(in crate::web::ws) carrier: Carrier,
     pub(in crate::web::ws) web_auth: Option<Arc<WebAuth>>,
     /// This connection's outbound queue.
     pub(in crate::web::ws) out_tx: OutboundSender,
@@ -156,13 +158,13 @@ impl HandlerEnv {
             acp: Arc::clone(&state.acp),
             relay: Arc::clone(&state.relay),
             registry: Arc::clone(&state.registry),
-            registry_persistence: state.registry_persistence.clone(),
-            projects_file: state.projects_file.clone(),
+            pty: Arc::clone(&state.pty),
             history_mode: state.history_mode,
             acp_catalog: state.acp_catalog.clone(),
             acp_install: state.acp_install.clone(),
             store: state.store.clone(),
             identity: Arc::clone(&conn.identity),
+            carrier: conn.access.carrier(),
             web_auth: state.web_auth.clone(),
             out_tx,
             subscriptions: Arc::clone(&conn.subscriptions),

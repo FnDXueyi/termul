@@ -670,7 +670,8 @@ async function openHistorySessionInner(
     if (!isSessionOwnedByOtherError(err) || !meta.agentConfigId || !meta.cwd) return false
     const { adopted } = await adoptHostOwnedAgent(set, id, meta.agentConfigId, meta.cwd, {
       allowDesktop: true,
-      isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration)
+      isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration),
+      projectId: meta.projectId
     })
     if (!adopted) return false
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return true
@@ -862,7 +863,8 @@ async function openHistorySessionInner(
       meta.cwd,
       {
         allowDesktop: turnLive,
-        isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration)
+        isCurrent: () => !deletedMidOpen() && isCurrentSessionReopen(id, reopenGeneration),
+        projectId: meta.projectId
       }
     )
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
@@ -1379,17 +1381,10 @@ async function applyIndexEntries(
   // fallback. Live sessions win over index absence (a just-failed launch is
   // local-only until the host learns about it). Runs only on a successful
   // load: the throw path above preserves tabs when the index cannot be read.
-  // Also prunes tabs the now-loaded index proves FOREIGN to the active
-  // project (inserted fail-open before ownership was known): the pane tree
-  // is shared, so such a tab renders another project's chat here. The
-  // session keeps running and is handed back to its owner's retained set
-  // first, so switching to the owner reattaches it (lossless even in the
-  // render gap where the owner's tabs are still mounted mid-switch).
+  // Scans every project's tree: a parked tree's corpse tab goes too.
   pruneRestoredChatTabs({
     liveSessionIds,
-    indexedSessionIds: new Set(merged.map((e) => e.id)),
-    ownership: get(),
-    activeProjectId: useProjectStore.getState().activeProjectId
+    indexedSessionIds: new Set(merged.map((e) => e.id))
   })
   await recoverDroppedLaunchChats(merged)
 }
@@ -1883,7 +1878,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       if (isSessionOwnedByOtherError(err) && meta.agentConfigId) {
         const { adopted } = await adoptHostOwnedAgent(set, id, meta.agentConfigId, cwd, {
           allowDesktop: true,
-          isCurrent: () => isCurrentSessionReopen(id, generation)
+          isCurrent: () => isCurrentSessionReopen(id, generation),
+          projectId: meta.projectId
         })
         // The awaited adoption is an async gap: a newer reopen may own this
         // session now — abandon rather than stamping the attach. Matches the

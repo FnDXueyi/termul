@@ -663,7 +663,7 @@ async fn store_write_then_read_roundtrips_with_a_stamp() {
         &store,
     )
     .await;
-    assert!(write.ok, "write ok: {:?}", write.err);
+    assert!(write.ok, "write ok");
     assert_eq!(write.payload, Some(json!({ "revision": 1 })));
 
     let read = handle_request_with_store(
@@ -686,7 +686,7 @@ async fn store_read_missing_key_is_revision_zero_with_a_null_value() {
         &store,
     )
     .await;
-    assert!(reply.ok, "missing key is not an error: {:?}", reply.err);
+    assert!(reply.ok, "missing key is not an error");
     assert_eq!(
         reply.payload,
         Some(json!({ "value": null, "revision": 0, "clientInstanceId": null }))
@@ -708,7 +708,7 @@ async fn store_delete_removes_and_reports_existed() {
             &store,
         )
         .await;
-        assert!(del.ok, "delete ok: {:?}", del.err);
+        assert!(del.ok, "delete ok");
         assert_eq!(del.payload, Some(json!({ "existed": existed })));
     }
     let _ = std::fs::remove_dir_all(dir);
@@ -787,7 +787,7 @@ async fn store_write_rejects_value_over_256kib() {
         r#"{{"id":"r2","type":"store_write","payload":{{"key":"device/dev-a/big","value":"{exact}"}}}}"#
     );
     let reply = handle_request_with_store(&frame, &store).await;
-    assert!(reply.ok, "exactly-256-KiB value is accepted: {:?}", reply.err);
+    assert!(reply.ok, "exactly-256-KiB value is accepted");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1073,13 +1073,13 @@ pub(super) fn test_env(
         acp: Arc::clone(acp),
         relay: Arc::clone(relay),
         registry: Arc::clone(registry),
-        registry_persistence: None,
-        projects_file: None,
+        pty: crate::web::test_pty_manager(),
         history_mode: HistoryMode::LiveOnly,
         acp_catalog: None,
         acp_install: None,
         store: None,
         identity: Arc::new(std::sync::OnceLock::new()),
+        carrier: Carrier::Ws,
         web_auth: None,
         out_tx: out_tx.clone(),
         subscriptions: Arc::clone(subscriptions),
@@ -1743,7 +1743,7 @@ async fn handle_list_agents_returns_identity_summaries() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"list_agents","payload":{}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
     .await;
-    assert!(reply.ok, "list_agents should succeed: {:?}", reply.err);
+    assert!(reply.ok, "list_agents should succeed");
     let entries = reply
         .payload
         .as_ref()
@@ -1845,7 +1845,7 @@ async fn delete_session_removes_host_persisted_record() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "delete ok: {:?}", reply.err);
+    assert!(reply.ok, "delete ok");
     // Typed idempotent delete contract: a removed record reports true.
     assert_eq!(reply.payload, Some(json!({ "deleted": true })));
     // Gone from the host index.
@@ -1948,7 +1948,7 @@ async fn handle_resume_session_ok_reply_carries_null_replay_snapshot() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"resume_session","payload":{"agentId":"agent-1","sessionId":"sess-1","cwd":"/tmp"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
         .await;
-    assert!(reply.ok, "resume ok: {:?}", reply.err);
+    assert!(reply.ok, "resume ok");
     let payload = reply.payload.expect("ok payload");
     assert_eq!(payload.get("replaySnapshot"), Some(&Value::Null));
     // No history/replay fields leak into the reply (contract 1).
@@ -1970,10 +1970,7 @@ pub(super) fn ws_test_app_state() -> AppState {
         registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
             &std::env::temp_dir(),
         ),
-        registry_persistence: None,
-        projects_file: None,
         history_mode: HistoryMode::LiveOnly,
-        workspace_manifest: None,
         acp_catalog: None,
         acp_install: None,
         store: None,
@@ -2354,7 +2351,7 @@ async fn handle_promote_session_ok_on_known_agent() {
         &acp,
     )
     .await;
-    assert!(reply.ok, "promote_session failed: {:?}", reply.err);
+    assert!(reply.ok, "promote_session failed");
     assert_eq!(reply.payload, Some(json!({})));
 }
 
@@ -2565,7 +2562,7 @@ fn handle_respond_permission_needs_no_subscription() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let reply = block_on(route(r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-A","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
+    assert!(reply.ok, "ticket-only answer");
 }
 
 /// Story 1.7 (verification gap #4 + happy path): a valid `respond_permission`
@@ -2580,7 +2577,7 @@ fn handle_respond_permission_resolves_then_second_is_already_resolved() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let ok_reply = block_on(route(r#"{"id":"r1","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(ok_reply.ok, "first response wins: {:?}", ok_reply.err);
+    assert!(ok_reply.ok, "first response wins");
     // Second frame for the same requestId → already_resolved (tombstone).
     let stale_reply = block_on(route(r#"{"id":"r2","type":"respond_permission","payload":{"agentId":"a1","requestId":"perm-1","optionId":"allow"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
     assert!(!stale_reply.ok);
@@ -2706,7 +2703,7 @@ fn handle_answer_question_needs_no_subscription() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let reply = block_on(route(r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-A","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(reply.ok, "ticket-only answer: {:?}", reply.err);
+    assert!(reply.ok, "ticket-only answer");
 }
 
 /// Issue #411: a valid `answer_question` from a subscribed connection
@@ -2719,7 +2716,7 @@ fn handle_answer_question_resolves_then_second_is_already_resolved() {
     let (tx, _rx) = test_outbound();
     let registry = Arc::new(ProjectRegistry::new());
     let ok_reply = block_on(route(r#"{"id":"r1","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
-    assert!(ok_reply.ok, "first answer wins: {:?}", ok_reply.err);
+    assert!(ok_reply.ok, "first answer wins");
     let stale_reply = block_on(route(r#"{"id":"r2","type":"answer_question","payload":{"agentId":"a1","questionId":"q-1","values":["plan-a"]}}"#, &test_env(&acp, &relay, &registry, &tx, &subs)));
     assert!(!stale_reply.ok);
     assert_eq!(stale_reply.err.unwrap().code, "already_resolved");
@@ -2787,7 +2784,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub2","type":"subscribe","payload":{"sessionId":"fresh"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs2)));
-    assert!(reply_ok.ok, "{:?}", reply_ok.err);
+    assert!(reply_ok.ok);
     assert_eq!(subs2.len(), 1);
 
     // Re-subscribe same session replaces prior ClientId (no leak).
@@ -2796,7 +2793,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub3","type":"subscribe","payload":{"sessionId":"fresh"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs2)));
-    assert!(reply_resub.ok, "{:?}", reply_resub.err);
+    assert!(reply_resub.ok);
     assert_eq!(subs2.len(), 1);
 
     // Evicted log + omit lastSeq → live-only succeeds (not stale).
@@ -2806,7 +2803,7 @@ fn handle_subscribe_ok_and_stale() {
         .build()
         .unwrap()
         .block_on(route(r#"{"id":"sub4","type":"subscribe","payload":{"sessionId":"s1"}}"#, &test_env(&acp, &relay, &registry, &tx, &subs3)));
-    assert!(reply_live.ok, "{:?}", reply_live.err);
+    assert!(reply_live.ok);
 
     // Drain any replay/live.
     while rx.try_recv().is_ok() {}
@@ -2923,7 +2920,7 @@ async fn open_persisted_session_is_read_only() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     assert_eq!(subs.len(), 1);
 
     assert_eq!(
@@ -3000,7 +2997,7 @@ async fn open_persisted_session_catalog_branch_admits_finalized_session() {
         HistoryMode::Server,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     let payload = reply.payload.unwrap();
     assert!(
         payload["replayed"].as_u64().unwrap() >= 1,
@@ -3679,151 +3676,88 @@ async fn get_session_payload_standalone_corrupt_log_is_unsupported() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// `set_default_project` WS request (Epic 7): updates the host default,
-/// persists to the `FileProjectRegistry` (VPS, rollback-safe), and
-/// broadcasts `projects_changed`. Mirrors the `set_host_default_project`
-/// Tauri command + `POST /projects/default` HTTP route (transport parity).
+fn project_summary_for_test(
+    id: &str,
+    path: Option<&str>,
+    archived: bool,
+) -> crate::web::project_registry::ProjectSummary {
+    crate::web::project_registry::ProjectSummary {
+        id: id.to_string(),
+        name: format!("Proj {id}"),
+        color: "blue".to_string(),
+        path: path.map(str::to_string),
+        is_archived: archived,
+        is_default: false,
+    }
+}
+
+/// `set_default_project` WS request (Epic 7): updates the host default and
+/// writes it through to the durable registry file. Mirrors the
+/// `POST /projects/default` HTTP route (transport parity).
 #[tokio::test]
 async fn handle_set_default_project_updates_host_default_and_persists() {
-    let relay = Arc::new(WsRelaySink::new());
-    let registry = Arc::new(ProjectRegistry::new());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("projects.json");
+    let registry = Arc::new(ProjectRegistry::open_durable(&file, crate::acp::RootCheck::Lenient).unwrap());
     registry.set(
         vec![
-            crate::web::project_registry::ProjectSummary {
-                id: "p-1".to_string(),
-                name: "Proj p-1".to_string(),
-                color: "blue".to_string(),
-                path: Some("/a".to_string()),
-                is_archived: false,
-                is_default: true,
-            },
-            crate::web::project_registry::ProjectSummary {
-                id: "p-2".to_string(),
-                name: "Proj p-2".to_string(),
-                color: "green".to_string(),
-                path: Some("/b".to_string()),
-                is_archived: false,
-                is_default: false,
-            },
+            project_summary_for_test("p-1", Some("/a"), false),
+            project_summary_for_test("p-2", Some("/b"), false),
         ],
         Some("p-1".to_string()),
     );
-    let file_registry = FileProjectRegistry::from_roots(
-        vec![
-            crate::acp::VfsRoot {
-                id: "p-1".to_string(),
-                name: "Proj p-1".to_string(),
-                path: PathBuf::from("/a"),
-                color: "blue".to_string(),
-                is_archived: false,
-                mcp_servers: vec![],
-            },
-            crate::acp::VfsRoot {
-                id: "p-2".to_string(),
-                name: "Proj p-2".to_string(),
-                path: PathBuf::from("/b"),
-                color: "green".to_string(),
-                is_archived: false,
-                mcp_servers: vec![],
-            },
-        ],
-        Some("p-1".to_string()),
-    );
-    let file_registry = Arc::new(parking_lot::Mutex::new(file_registry));
-    let path = std::env::temp_dir().join(format!(
-        "termul-ws-set-default-{}-{}.json",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let relay = Arc::new(WsRelaySink::new());
+    let (tx, _rx) = test_outbound();
+    let env = test_env(&acp, &relay, &registry, &tx, &Arc::new(Subscriptions::default()));
 
-    let reply = handle_set_default_project(
-        "r1".to_string(),
-        &json!({ "projectId": "p-2" }),
-        &relay,
-        &registry,
-        Some(&file_registry),
-        Some(&path),
+    let reply = route(
+        r#"{"id":"r1","type":"set_default_project","payload":{"projectId":"p-2"}}"#,
+        &env,
     )
     .await;
-    let saved = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    assert!(reply.ok, "{:?}", reply.err);
-    // In-memory registry default + flags updated.
+    assert!(reply.ok);
     let snap = registry.snapshot();
     assert_eq!(snap.default_project_id.as_deref(), Some("p-2"));
     assert!(!snap.projects[0].is_default);
     assert!(snap.projects[1].is_default);
-    // File registry persisted (VPS mode).
-    assert_eq!(file_registry.lock().default_project_id(), Some("p-2"));
-    let saved = saved.expect("persisted file written");
-    let v: Value = serde_json::from_str(&saved).expect("valid json");
-    assert_eq!(v["schemaVersion"], 3);
-    assert_eq!(v["defaultProjectId"], "p-2");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&file).expect("persisted")).unwrap();
+    assert_eq!(saved["schemaVersion"], 4);
+    assert_eq!(saved["defaultProjectId"], "p-2");
 }
 
 /// `set_default_project` WS request with an unknown/archived/pathless id →
 /// `NOT_FOUND` (validation rejects before any mutation or persistence).
 #[tokio::test]
 async fn handle_set_default_project_unknown_id_is_not_found() {
-    let relay = Arc::new(WsRelaySink::new());
-    let registry = Arc::new(ProjectRegistry::new());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("projects.json");
+    let registry = Arc::new(ProjectRegistry::open_durable(&file, crate::acp::RootCheck::Lenient).unwrap());
     registry.set(
         vec![
-            crate::web::project_registry::ProjectSummary {
-                id: "p-1".to_string(),
-                name: "Proj p-1".to_string(),
-                color: "blue".to_string(),
-                path: Some("/a".to_string()),
-                is_archived: false,
-                is_default: true,
-            },
-            crate::web::project_registry::ProjectSummary {
-                id: "p-archived".to_string(),
-                name: "Archived".to_string(),
-                color: "blue".to_string(),
-                path: Some("/b".to_string()),
-                is_archived: true,
-                is_default: false,
-            },
-            crate::web::project_registry::ProjectSummary {
-                id: "p-pathless".to_string(),
-                name: "Pathless".to_string(),
-                color: "blue".to_string(),
-                path: None,
-                is_archived: false,
-                is_default: false,
-            },
+            project_summary_for_test("p-1", Some("/a"), false),
+            project_summary_for_test("p-archived", Some("/b"), true),
+            project_summary_for_test("p-pathless", None, false),
         ],
         Some("p-1".to_string()),
     );
-    let path = std::env::temp_dir().join(format!(
-        "termul-ws-set-default-nf-{}-{}.json",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+    let written = std::fs::read(&file).unwrap();
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let relay = Arc::new(WsRelaySink::new());
+    let (tx, _rx) = test_outbound();
+    let env = test_env(&acp, &relay, &registry, &tx, &Arc::new(Subscriptions::default()));
     for bad in ["missing", "p-archived", "p-pathless"] {
         let reply = handle_set_default_project(
             "r1".to_string(),
             &json!({ "projectId": bad }),
-            &relay,
-            &registry,
-            None,
-            Some(&path),
+            &env,
         )
         .await;
         assert!(!reply.ok, "{bad} should be rejected");
         assert_eq!(reply.err.unwrap().code, "not_found");
-        // Default unchanged.
-        assert_eq!(
-            registry.snapshot().default_project_id.as_deref(),
-            Some("p-1")
-        );
+        assert_eq!(registry.snapshot().default_project_id.as_deref(), Some("p-1"));
     }
-    // No file was written (validation rejected before persistence).
-    assert!(
-        !path.exists(),
-        "no file should be written on validation failure"
-    );
+    assert_eq!(std::fs::read(&file).unwrap(), written, "nothing was rewritten");
 }
 
 /// `set_default_project` changes the host default and publishes the project
@@ -3832,17 +3766,7 @@ async fn handle_set_default_project_unknown_id_is_not_found() {
 async fn handle_set_default_project_publishes_to_all_watchers() {
     let relay = Arc::new(WsRelaySink::new());
     let registry = Arc::new(ProjectRegistry::new());
-    registry.set(
-        vec![crate::web::project_registry::ProjectSummary {
-            id: "p-1".to_string(),
-            name: "Proj p-1".to_string(),
-            color: "blue".to_string(),
-            path: Some("/a".to_string()),
-            is_archived: false,
-            is_default: false,
-        }],
-        None,
-    );
+    registry.set(vec![project_summary_for_test("p-1", Some("/a"), false)], None);
     // A watcher with no session subscription proves the delta reaches it.
     let (out, mut rx) = outbound_channel(16, 15);
     relay
@@ -3850,17 +3774,17 @@ async fn handle_set_default_project_publishes_to_all_watchers() {
         .subscribe(crate::web::watch::WatchKind::Projects, "", &out, || json!(null))
         .expect("watch");
     let _state = rx.try_recv().expect("full-state frame");
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let (tx, _out) = test_outbound();
+    let env = test_env(&acp, &relay, &registry, &tx, &Arc::new(Subscriptions::default()));
 
     let reply = handle_set_default_project(
         "r1".to_string(),
         &json!({ "projectId": "p-1" }),
-        &relay,
-        &registry,
-        None,
-        None,
+        &env,
     )
     .await;
-    assert!(reply.ok, "{:?}", reply.err);
+    assert!(reply.ok);
     let mut deltas = Vec::new();
     while let Ok(Outbound::Watch(frame)) = rx.try_recv() {
         deltas.push(frame);
@@ -3903,16 +3827,8 @@ async fn handle_resume_session_rejected_mid_turn_maps_to_session_owned_by_other(
     assert!(!reply.ok, "mid-turn cross-agent resume must fail");
     let err = reply.err.expect("err envelope");
     assert_eq!(err.code, "session_owned_by_other");
-    assert!(
-        err.message.contains("ACP_SESSION_OWNED_BY_OTHER"),
-        "message carries the stable prefix: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("agent-original"),
-        "message names the owning agent: {}",
-        err.message
-    );
+    assert!(err.message.contains("ACP_SESSION_OWNED_BY_OTHER"));
+    assert!(err.message.contains("agent-original"));
 }
 
 /// `list_agents` carries the issue-#837 payload extension: every summary
@@ -3931,7 +3847,7 @@ async fn handle_list_agents_reports_owned_sessions() {
     let registry = Arc::new(ProjectRegistry::new());
     let reply = route(r#"{"id":"r1","type":"list_agents","payload":{}}"#, &test_env(&acp, &relay, &registry, &tx, &subs))
     .await;
-    assert!(reply.ok, "list_agents should succeed: {:?}", reply.err);
+    assert!(reply.ok, "list_agents should succeed");
     let entries = reply
         .payload
         .as_ref()
@@ -3942,7 +3858,7 @@ async fn handle_list_agents_reports_owned_sessions() {
     assert_eq!(entries[0]["ownsSession"], json!(["sess-1"]));
 }
 
-// ---- watch_project / unwatch_project ----
+// ---- watch / unwatch of a project's file changes (`fs`) ----
 
 fn watch_fixture(
     id: &str,
@@ -3972,54 +3888,77 @@ fn reply_code(reply: &WsReply) -> Option<String> {
         .map(str::to_string)
 }
 
-#[tokio::test]
-async fn watch_and_unwatch_project_manage_the_connections_subscription() {
-    let (relay, registry, dir, tx, _rx) = watch_fixture("ok");
-    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
-
-    let reply = handle_watch_project(
-        "w1".into(),
-        &json!({ "projectId": project }),
-        &relay,
-        &registry,
-        &tx,
-    );
-    assert!(reply.ok, "watch of a registered project succeeds");
-    assert_eq!(relay.fs_watches().subscriber_count(project), 1);
-
-    let reply = handle_unwatch_project("u1".into(), &json!({ "projectId": project }), &relay, &tx);
-    assert!(reply.ok);
-    assert_eq!(relay.fs_watches().watched_project_count(), 0);
-
-    // Idempotent for a registered project.
-    let again = handle_unwatch_project("u2".into(), &json!({ "projectId": project }), &relay, &tx);
-    assert!(again.ok);
-    let _ = std::fs::remove_dir_all(&dir);
+/// Route one `watch` / `unwatch` request over the given fixture.
+async fn watch_request(
+    fixture: &(Arc<WsRelaySink>, Arc<ProjectRegistry>, std::path::PathBuf, OutboundSender, OutboundReceiver),
+    type_: &str,
+    payload: Value,
+) -> WsReply {
+    let (relay, registry, _dir, tx, _rx) = fixture;
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let subs = Arc::new(Subscriptions::default());
+    let frame = json!({ "id": type_, "type": type_, "payload": payload });
+    route(&frame.to_string(), &test_env(&acp, relay, registry, tx, &subs)).await
 }
 
 #[tokio::test]
-async fn watch_refuses_unknown_archived_and_malformed_and_unwatch_is_idempotent() {
-    let (relay, registry, dir, tx, _rx) = watch_fixture("refuse");
+async fn fs_watch_and_unwatch_manage_the_connections_subscription() {
+    let fixture = watch_fixture("ok");
+    let relay = Arc::clone(&fixture.0);
+    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
+    let payload = json!({ "watch": "fs", "scope": project });
+
+    let reply = watch_request(&fixture, "watch", payload.clone()).await;
+    assert!(reply.ok, "watch of a registered project succeeds");
+    assert_eq!(relay.fs_watches().subscriber_count(project), 1);
+    assert_eq!(
+        relay.watches().subscriber_count(crate::web::watch::WatchKind::Fs, project),
+        1
+    );
+
+    let reply = watch_request(&fixture, "unwatch", payload.clone()).await;
+    assert!(reply.ok);
+    assert_eq!(relay.fs_watches().watched_project_count(), 0);
+    assert_eq!(
+        relay.watches().subscriber_count(crate::web::watch::WatchKind::Fs, project),
+        0
+    );
+
+    // Idempotent for a registered project.
+    assert!(watch_request(&fixture, "unwatch", payload).await.ok);
+    let _ = std::fs::remove_dir_all(&fixture.2);
+}
+
+#[tokio::test]
+async fn fs_watch_refuses_unknown_archived_and_malformed_and_unwatch_is_idempotent() {
+    let fixture = watch_fixture("refuse");
+    let relay = Arc::clone(&fixture.0);
+    let registry = Arc::clone(&fixture.1);
     let project = crate::web::project_registry::SEEDED_PROJECT_ID;
 
-    let unknown = json!({ "projectId": "nope" });
-    let w = handle_watch_project("w".into(), &unknown, &relay, &registry, &tx);
+    let unknown = json!({ "watch": "fs", "scope": "nope" });
+    let w = watch_request(&fixture, "watch", unknown.clone()).await;
     assert_eq!(reply_code(&w).as_deref(), Some("not_found"));
     // Unwatch is idempotent: an id the connection never watched is a success.
-    let u = handle_unwatch_project("u".into(), &unknown, &relay, &tx);
-    assert!(u.ok);
+    assert!(watch_request(&fixture, "unwatch", unknown).await.ok);
     assert!(registry.update(project, None, None, Some(true)));
-    let w = handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx);
+    let w = watch_request(&fixture, "watch", json!({ "watch": "fs", "scope": project })).await;
     assert_eq!(reply_code(&w).as_deref(), Some("not_found"), "archived project");
 
-    for payload in [json!({}), json!({ "projectId": "  " })] {
-        let w = handle_watch_project("w".into(), &payload, &relay, &registry, &tx);
-        assert_eq!(reply_code(&w).as_deref(), Some("unsupported"));
-        let u = handle_unwatch_project("u".into(), &payload, &relay, &tx);
+    // No scope, a blank scope, an unknown watch: refused as unsupported.
+    for payload in [
+        json!({ "watch": "fs" }),
+        json!({ "watch": "fs", "scope": "  " }),
+        json!({ "watch": "nope" }),
+        json!({}),
+    ] {
+        let w = watch_request(&fixture, "watch", payload.clone()).await;
+        assert_eq!(reply_code(&w).as_deref(), Some("unsupported"), "{payload}");
+        let u = watch_request(&fixture, "unwatch", payload).await;
         assert_eq!(reply_code(&u).as_deref(), Some("unsupported"));
     }
     assert_eq!(relay.fs_watches().watched_project_count(), 0);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&fixture.2);
 }
 
 /// Connection close releases the connection's watch through the same cleanup
@@ -4027,12 +3966,15 @@ async fn watch_refuses_unknown_archived_and_malformed_and_unwatch_is_idempotent(
 /// without `run()`.
 #[tokio::test]
 async fn connection_cleanup_releases_fs_watch_subscriptions() {
-    let (relay, registry, dir, tx, _rx) = watch_fixture("cleanup");
+    let fixture = watch_fixture("cleanup");
+    let relay = Arc::clone(&fixture.0);
+    let tx = fixture.3.clone();
     let project = crate::web::project_registry::SEEDED_PROJECT_ID;
     let subscribed = Arc::new(Subscriptions::default());
 
     for use_run in [true, false] {
-        let reply = handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx);
+        let reply =
+            watch_request(&fixture, "watch", json!({ "watch": "fs", "scope": project })).await;
         assert!(reply.ok);
         assert_eq!(relay.fs_watches().subscriber_count(project), 1);
         let cleanup = ConnectionCleanup::new(Arc::clone(&relay), Arc::clone(&subscribed))
@@ -4044,19 +3986,26 @@ async fn connection_cleanup_releases_fs_watch_subscriptions() {
         }
         assert_eq!(relay.fs_watches().subscriber_count(project), 0);
         assert_eq!(relay.fs_watches().watched_project_count(), 0);
+        assert_eq!(
+            relay.watches().subscriber_count(crate::web::watch::WatchKind::Fs, project),
+            0
+        );
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&fixture.2);
 }
 
 /// A client that unwatches after its project was archived/removed (which
-/// already dropped the subscription) still gets a success.
+/// already ended the watch) still gets a success.
 #[tokio::test]
 async fn unwatch_after_the_project_was_archived_succeeds() {
-    let (relay, registry, dir, tx, _rx) = watch_fixture("gone");
+    let fixture = watch_fixture("gone");
+    let relay = Arc::clone(&fixture.0);
+    let registry = Arc::clone(&fixture.1);
     let project = crate::web::project_registry::SEEDED_PROJECT_ID;
-    assert!(handle_watch_project("w".into(), &json!({ "projectId": project }), &relay, &registry, &tx).ok);
+    let payload = json!({ "watch": "fs", "scope": project });
+    assert!(watch_request(&fixture, "watch", payload.clone()).await.ok);
     // Archive only once the watcher is live, so a LIVE subscription is what
-    // gets dropped (not a task that finds the project gone on first lookup).
+    // gets ended (not a task that finds the project gone on first lookup).
     assert!(relay.fs_watches().wait_armed(project, Duration::from_secs(10)).await);
     assert!(registry.update(project, None, None, Some(true)));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
@@ -4064,28 +4013,15 @@ async fn unwatch_after_the_project_was_archived_succeeds() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(relay.fs_watches().watched_project_count(), 0);
+    assert_eq!(
+        relay.watches().subscriber_count(crate::web::watch::WatchKind::Fs, project),
+        0,
+        "the host released the hub subscription with its notice"
+    );
 
-    let u = handle_unwatch_project("u".into(), &json!({ "projectId": project }), &relay, &tx);
+    let u = watch_request(&fixture, "unwatch", payload).await;
     assert!(u.ok, "unwatch after the project vanished must succeed");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The `watch_project` / `unwatch_project` request types reach their handlers
-/// through the real dispatch (`handle_request`), not just by direct call.
-#[tokio::test]
-async fn watch_requests_are_routed_by_handle_request() {
-    let (relay, registry, dir, tx, _rx) = watch_fixture("dispatch");
-    let acp = Arc::new(AcpManager::new(vec![]));
-    let project = crate::web::project_registry::SEEDED_PROJECT_ID;
-    let subs = Arc::new(Subscriptions::default());
-    for (type_, expect_subscribers) in [("watch_project", 1), ("unwatch_project", 0)] {
-        let frame = json!({ "id": type_, "type": type_, "payload": { "projectId": project } });
-        let reply = route(&frame.to_string(), &test_env(&acp, &relay, &registry, &tx, &subs))
-        .await;
-        assert!(reply.ok, "{type_} must be dispatched and succeed");
-        assert_eq!(relay.fs_watches().subscriber_count(project), expect_subscribers);
-    }
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&fixture.2);
 }
 
 /// The log epoch travels on the wire: `subscribe`, `recover_session_snapshot`

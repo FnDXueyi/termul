@@ -153,8 +153,7 @@ fn resolve_executable_from_path(command: &str) -> Option<String> {
 // Re-exports for commands
 pub use acp::{
     AcpCatalogService, AcpInstallService, AcpManager, ChatHistoryStore, ClaudeAgentService,
-    ClaudeAuthMode, ClaudeAuthStatus, FileProjectRegistry, SessionPersistence,
-    WorkspaceManifestService,
+    ClaudeAuthMode, ClaudeAuthStatus, SessionPersistence,
 };
 // Host-injected `plan` MCP tool: the `--internal-mcp-plan-server`
 // subcommand branch in `main.rs` + `server_main.rs` reaches `host_mcp::CHILD_ARG`
@@ -168,12 +167,7 @@ pub use acp::host_mcp;
 pub use acp::claude_admin;
 pub use pty::PtyManager;
 pub use trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
-// Desktop ACP event sink: wraps the Tauri `AppHandle` so the dispatcher's
-// `Vec<Arc<dyn EventSink>>` fan-out reaches the renderer as `acp:*` events
-// (byte-for-byte unchanged from before Story 1.1). The headless `termul-server`
-// binary (Story 1.2) will instead pass a `WsRelaySink`-backed list with no
-// `AppHandle` at all.
-use web::{PermissionRendezvous, ProjectRegistry, QuestionRendezvous, TauriEventSink, WsRelaySink};
+use web::{PermissionRendezvous, ProjectRegistry, QuestionRendezvous, WsRelaySink};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1157,6 +1151,16 @@ pub fn run() {
                 web::store::StorePolicy::default(),
             ) {
                 Ok(store) => {
+                    // The retired workspace manifests move into the first
+                    // device that adopts the store (renamed afterwards).
+                    let store = store.with_legacy_manifests(web::store::legacy_manifests_dir(
+                        &app_data_dir,
+                    ));
+                    // The retired plugin-store file `termul-data.json` moves
+                    // into the first device that reaches the store over the
+                    // desktop carrier (renamed afterwards).
+                    let store = store
+                        .with_desktop_legacy(web::store::desktop_legacy_file(&app_data_dir));
                     app.manage(remote::SharedLiveData {
                         store: Arc::new(store),
                         data_dir: app_data_dir.clone(),
@@ -1167,6 +1171,55 @@ pub fn run() {
                     return Ok(());
                 }
             }
+
+            // The ONE durable project registry (AD-17): opened here, before any
+            // sink or carrier is wired, from the locked `app_data_dir`. It
+            // survives shared-live stop/start (stop never clears it) and is the
+            // list `GET /projects`, the web boundary and the project commands
+            // read. A newer-schema file refuses startup untouched; a corrupt
+            // one is copied aside and replaced by an empty registry so the
+            // desktop still starts.
+            let projects_file = data_lock::desktop_projects_file(&app_data_dir);
+            let project_registry = match ProjectRegistry::open_durable(
+                &projects_file,
+                acp::RootCheck::Lenient,
+            ) {
+                Ok(registry) => registry,
+                Err(error @ acp::ProjectRegistryError::BadSchemaVersion { .. }) => {
+                    refuse_startup(&handle, &error.to_string());
+                    return Ok(());
+                }
+                Err(error) => {
+                    // Only a parse failure copied the file aside; a read failure
+                    // (for example permission denied) left it in place and keeps
+                    // every later save failing until it can be read again.
+                    let (log_note, dialog_note) = match &error {
+                        acp::ProjectRegistryError::Parse(_) => (
+                            "starting with an empty project list (the corrupt file was copied aside)",
+                            "It started with an empty list; the unreadable file was kept next to it as a .corrupt backup.",
+                        ),
+                        _ => (
+                            "starting with an empty project list (the file was not changed; project changes are not saved until it can be read)",
+                            "It started with an empty list. Project changes will not be saved until the file can be read.",
+                        ),
+                    };
+                    log::error!(
+                        "[startup] could not load the project registry '{}': {error}; {log_note}",
+                        projects_file.display()
+                    );
+                    handle
+                        .dialog()
+                        .message(format!(
+                            "Termul could not read its saved project list ({error}). {dialog_note}"
+                        ))
+                        .title("Project list unavailable")
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                    ProjectRegistry::empty_durable(&projects_file)
+                }
+            };
+            let project_registry = Arc::new(project_registry);
+            app.manage(Arc::clone(&project_registry));
 
             // Window chrome is configured before show(). macOS overlay settings
             // live in tauri.conf.json — avoid set_decorations(true) there because
@@ -1347,43 +1400,6 @@ pub fn run() {
             app.manage(chat_history_store);
             app.manage(commands::HostHistoryStore(session_persistence.clone()));
 
-            // CAP-5 / Story 5: open the host-owned workspace-manifests root
-            // under `<app_data_dir>/workspace-manifests`. The desktop owns its
-            // own root — NEVER shared with a standalone `termul-server` on the
-            // same machine (two processes on one JSONL store would corrupt
-            // both). `None` degrades to fresh-only mode (the
-            // `workspace_manifest_*` commands return `Ok(None)` / idempotent
-            // success; the web routes follow suit).
-            let workspace_manifests_root = handle
-                .path()
-                .app_data_dir()
-                .map_err(|error| format!("failed to resolve app data directory: {error}"))?
-                .join("workspace-manifests");
-            let workspace_manifest_service =
-                match tauri::async_runtime::block_on(WorkspaceManifestService::open(
-                    workspace_manifests_root.clone(),
-                )) {
-                    Ok(service) => {
-                        log::info!(
-                            "[workspace-manifest] host service ready path={}",
-                            service.root().display()
-                        );
-                        Some(service)
-                    }
-                    Err(error) => {
-                        // Degrade, don't crash: workspace manifests become
-                        // fresh-only, the app must still boot.
-                        log::error!(
-                            "[workspace-manifest] host service unavailable path={} error={error}",
-                            workspace_manifests_root.display()
-                        );
-                        None
-                    }
-                };
-            app.manage(commands::HostWorkspaceManifestStore::new(
-                workspace_manifest_service.clone(),
-            ));
-
             // CAP-6 / Story 8: open the host-owned ACP catalog root under
             // `<app_data_dir>/acp-catalog`. The desktop owns its own root —
             // NEVER shared with a standalone `termul-server` on the same
@@ -1477,30 +1493,26 @@ pub fn run() {
 
             // Create ACP Manager — spawns/owns ACP agent subprocesses.
             //
-            // Desktop mode fans ACP events out to TWO sinks: `TauriEventSink`
-            // (the renderer's `acp:*` events, byte-for-byte unchanged) and a
-            // `WsRelaySink` (the shared-live web server's per-session event log
-            // + subscriber set). `fan_out` serializes once and fans N, so adding
-            // the second sink does not change the `TauriEventSink` payloads.
-            // With host persistence attached, the relay additionally durables
-            // every session-scoped event (the same seam the standalone server
-            // uses) — transport-agnostic, so desktop-origin and browser-origin
-            // sessions are persisted identically.
+            // Desktop mode has ONE event sink: the `WsRelaySink` (per-session
+            // event log + subscriber set). The renderer reads it through its
+            // `/ws` channel carrier, a phone/browser through the shared-live
+            // web server — the same relay, the same seq numbers. With host
+            // persistence attached, the relay additionally durables every
+            // session-scoped event (the same seam the standalone server uses),
+            // so desktop-origin and browser-origin sessions are persisted
+            // identically.
             //
             // The shared-live web server (`remote/host.rs`) pulls both
             // `Arc<AcpManager>` and `Arc<WsRelaySink>` as Tauri state and serves
             // the desktop's live sessions to a browser/phone over the LAN.
-            let mut sinks: Vec<Arc<dyn crate::web::EventSink>> =
-                vec![Arc::new(TauriEventSink::new(handle.clone()))];
             let (ws_relay, acp_manager) = match &session_persistence {
                 Some(persistence) => {
                     let relay = Arc::new(WsRelaySink::with_persistence(
                         4096,
                         Arc::clone(persistence),
                     ));
-                    sinks.push(relay.clone());
                     let manager = Arc::new(AcpManager::with_persistence_and_claude_agent(
-                        sinks,
+                        vec![relay.clone()],
                         Arc::clone(persistence),
                         Arc::clone(&claude_agent_service),
                     ));
@@ -1508,23 +1520,19 @@ pub fn run() {
                 }
                 None => {
                     let relay = Arc::new(WsRelaySink::new());
-                    sinks.push(relay.clone());
                     let manager = Arc::new(AcpManager::with_claude_agent(
-                        sinks,
+                        vec![relay.clone()],
                         Arc::clone(&claude_agent_service),
                     ));
                     (relay, manager)
                 }
             };
-            // Attach the permission and question rendezvous so a phone can
-            // answer `acp:permission_request` and structured questions over WS.
-            // The desktop renderer answers through the `acp_respond_permission`
-            // and `acp_answer_question` Tauri commands (direct `AcpManager`
-            // calls); the agent's single-use `take_permission` /
-            // `take_question` gate makes the first answer win, and the commands
-            // tell the rendezvous so the ticket and the session's queue slot
-            // are released. Tickets have no timer, so no runtime handle is
-            // needed here.
+            // Attach the permission and question rendezvous: every `/ws` client
+            // (the desktop renderer's channel, a phone, a browser) answers
+            // `acp:permission_request` and structured questions through them.
+            // The agent's single-use `take_permission` / `take_question` gate
+            // makes the first answer win. Tickets have no timer, so no runtime
+            // handle is needed here.
             let rendezvous = Arc::new(PermissionRendezvous::new(Arc::clone(&acp_manager)));
             ws_relay.set_rendezvous(rendezvous);
             let question_rendezvous = Arc::new(QuestionRendezvous::new(Arc::clone(&acp_manager)));
@@ -1547,26 +1555,15 @@ pub fn run() {
                 browser_automation::DesktopBrowserHost::new(
                     handle.clone(),
                     browser_tab_manager.clone(),
-                    // Same fan-out the ACP manager uses: Tauri events to the
-                    // desktop renderer + WS relay so remote clients see the
-                    // consent prompt and tab open/close too.
-                    vec![
-                        Arc::new(TauriEventSink::new(handle.clone()))
-                            as Arc<dyn crate::web::EventSink>,
-                        ws_relay.clone(),
-                    ],
+                    // Same sink the ACP manager uses: the relay carries the
+                    // consent prompt and tab open/close to every `/ws` client
+                    // (the desktop renderer's channel, phones, browsers).
+                    vec![ws_relay.clone()],
                 ),
             );
 
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));
-
-            // In-memory project registry (Epic-4 bridge) — renderer-fed via
-            // `remote_sync_projects`; the source for `GET /projects` +
-            // `switch_project` cwd resolution on the shared-live web server.
-            // Lives only while the server runs; cleared on `remote_server_stop`.
-            let project_registry = Arc::new(ProjectRegistry::new());
-            app.manage(Arc::clone(&project_registry));
 
             // The desktop's own `/ws` relay carrier: the renderer speaks the
             // `/ws` contract over one Tauri `ipc::Channel` per connection
@@ -1579,8 +1576,7 @@ pub fn run() {
                     acp: acp_manager,
                     pty: pty_manager.clone(),
                     relay: ws_relay,
-                    registry: project_registry,
-                    workspace_manifest: workspace_manifest_service.clone(),
+                    registry: Arc::clone(&project_registry),
                     acp_catalog: acp_catalog_service.clone(),
                     acp_install: acp_install_service.clone(),
                     store: handle.state::<remote::SharedLiveData>().store.clone(),
@@ -1876,8 +1872,11 @@ pub fn run() {
             secure_storage::secure_storage_set,
             secure_storage::secure_storage_get,
             secure_storage::secure_storage_delete,
-            // ACP (Agent Client Protocol) commands — ADR-003 P0
-            acp::commands::acp_spawn_agent,
+            // ACP host-local commands. Agent, session, prompt, permission,
+            // catalog and install requests travel over the `/ws` channel carrier
+            // (`ws_channel_*`), not a per-domain command. Claude Account
+            // add, sign-in, rename and remove stay here; list and selection
+            // also travel over `/ws`.
             acp::commands::claude_accounts_list,
             acp::commands::claude_accounts_usage,
             acp::commands::claude_accounts_add,
@@ -1888,31 +1887,7 @@ pub fn run() {
             acp::commands::claude_accounts_set_project,
             acp::commands::acp_factory_key_status,
             acp::commands::acp_factory_key_save,
-            acp::commands::acp_kill_agent,
-            acp::commands::acp_list_agents,
-            acp::commands::acp_list_agent_details,
-            acp::commands::acp_new_session,
-            acp::commands::acp_load_session,
-            acp::commands::acp_resume_session,
-            acp::commands::acp_close_session,
-            acp::commands::acp_dispose_ephemeral_session,
-            acp::commands::acp_list_sessions,
-            acp::commands::acp_register_discovered_session,
-            acp::commands::acp_promote_session,
-            acp::commands::acp_send_prompt,
-            acp::commands::acp_record_agent_switch,
-            acp::commands::acp_cancel_prompt,
-            acp::commands::acp_set_config_option,
-            acp::commands::acp_set_mode,
-            acp::commands::acp_set_model,
-            acp::commands::acp_respond_permission,
-            acp::commands::acp_answer_question,
-            acp::commands::acp_authenticate,
-            acp::commands::acp_logout,
             acp::commands::codex_cli_auth_status,
-            acp::commands::acp_delete_agent_session,
-            acp::commands::acp_respond_elicitation,
-            acp::commands::acp_auth_deliver_redirect,
             acp::commands::acp_probe_runtime,
             acp::commands::acp_set_turn_timeout,
             acp::commands::acp_set_turn_idle_timeout,
@@ -1922,11 +1897,6 @@ pub fn run() {
             acp::commands::acp_mcp_oauth_start,
             acp::commands::acp_mcp_oauth_has_token,
             acp::commands::acp_mcp_oauth_disconnect,
-            // CAP-6 / Story 8: ACP catalog (host-owned resolution).
-            acp::commands::acp_list_catalog,
-            acp::commands::acp_set_catalog_opt_in,
-            // CAP-6 / Story 9: ACP install (host-owned verified-atomic install).
-            acp::commands::acp_install_agent,
             acp_registry_snapshot::acp_fetch_registry_snapshot,
             acp_binary_install::acp_install_registry_binary,
             // Desktop updater: channel manifest fetch (CSP/CORS-free server-side
@@ -1939,8 +1909,7 @@ pub fn run() {
             commands::remote_server_start,
             commands::remote_server_stop,
             commands::remote_server_status,
-            commands::remote_sync_projects,
-            commands::set_host_default_project,
+            commands::project_registry_import,
             commands::remote_sync_chat_history,
             commands::remote_sync_mcp_registry,
             // Desktop ACP renderer-history storage
@@ -1955,10 +1924,6 @@ pub fn run() {
             commands::acp_history_get_legacy,
             // Frontend error forwarding (issue #244)
             commands::log_frontend_error,
-            // Workspace manifest (CAP-5 / Story 5)
-            commands::workspace_manifest_get,
-            commands::workspace_manifest_write,
-            commands::workspace_manifest_delete,
             // Agentation annotation service (issue #451, Epic 1)
             agentation::agentation_create_session,
             agentation::agentation_list_sessions,

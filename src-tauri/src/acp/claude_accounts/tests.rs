@@ -34,10 +34,10 @@ fn is_link_to(link: &Path, target: &Path) -> bool {
 fn a_new_store_has_only_the_builtin_default_account() {
     let f = fixture();
     let snapshot = store(&f).snapshot().unwrap();
-    assert_eq!(snapshot.accounts.len(), 1);
-    assert!(snapshot.accounts[0].builtin);
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert!(snapshot.profiles[0].builtin);
     assert_eq!(snapshot.default_account_id, BUILTIN_ACCOUNT_ID);
-    assert!(snapshot.project_accounts.is_empty());
+    assert!(snapshot.project_profiles.is_empty());
     assert_eq!(store(&f).resolve(Some("p1")).config_dir, None);
 }
 
@@ -127,7 +127,7 @@ fn remove_moves_projects_back_and_keeps_shared_data() {
     assert!(f.shared.join("settings.json").is_file());
     let snapshot = s.snapshot().unwrap();
     assert_eq!(snapshot.default_account_id, BUILTIN_ACCOUNT_ID);
-    assert!(snapshot.project_accounts.is_empty());
+    assert!(snapshot.project_profiles.is_empty());
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn rename_changes_the_name_and_rejects_duplicates() {
     assert!(s
         .snapshot()
         .unwrap()
-        .accounts
+        .profiles
         .iter()
         .any(|a| a.name == "Office"));
     assert!(s.rename(&work.id, "personal").is_err());
@@ -219,7 +219,7 @@ fn a_stale_project_choice_falls_back_to_the_default() {
     let s = store(&f);
     let snapshot = s.snapshot().unwrap();
     assert_eq!(snapshot.default_account_id, BUILTIN_ACCOUNT_ID);
-    assert!(snapshot.project_accounts.is_empty());
+    assert!(snapshot.project_profiles.is_empty());
     assert_eq!(s.resolve(Some("p1")).account_id, BUILTIN_ACCOUNT_ID);
 }
 

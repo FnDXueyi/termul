@@ -1,8 +1,9 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
-import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
+import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 import {
   useAppSettingsLoader,
   useResetAppSettings,
@@ -166,7 +167,7 @@ describe('use-app-settings', () => {
     })
     expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       DEFAULT_APP_SETTINGS
     )
   })
@@ -188,7 +189,7 @@ describe('use-app-settings', () => {
     })
     expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       DEFAULT_APP_SETTINGS
     )
   })
@@ -207,7 +208,7 @@ describe('use-app-settings', () => {
 
     await waitFor(() => {
       expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-        APP_SETTINGS_KEY,
+        PersistenceKeys.appSettings,
         expect.objectContaining({ colorTheme: 'termul', appearanceMode: 'light' })
       )
     })
@@ -226,7 +227,7 @@ describe('use-app-settings', () => {
 
     await waitFor(() => {
       expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-        APP_SETTINGS_KEY,
+        PersistenceKeys.appSettings,
         expect.objectContaining({ appearanceMode: 'dark' })
       )
     })
@@ -245,7 +246,7 @@ describe('use-app-settings', () => {
 
     await waitFor(() => {
       expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-        APP_SETTINGS_KEY,
+        PersistenceKeys.appSettings,
         expect.objectContaining({ terminalRenderer: 'dom' })
       )
     })
@@ -263,9 +264,12 @@ describe('use-app-settings', () => {
     expect(layout.sidePanelVisible).toBe(false)
     expect(layout.sshSectionVisible).toBe(false)
     expect(useAppSettingsStore.getState().settings).toEqual(DEFAULT_APP_SETTINGS)
-    expect(mockPersistenceWrite).not.toHaveBeenCalledWith(APP_SETTINGS_KEY, expect.anything())
+    expect(mockPersistenceWrite).not.toHaveBeenCalledWith(
+      PersistenceKeys.appSettings,
+      expect.anything()
+    )
     expect(mockPersistenceWriteDebounced).not.toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.anything()
     )
     // The shell-layout store persists through its own key (debounced).
@@ -303,7 +307,7 @@ describe('use-app-settings', () => {
 
     expect(useAppSettingsStore.getState().settings.terminalFontSize).toBe(16)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.objectContaining({ terminalFontSize: 16 })
     )
   })
@@ -378,7 +382,7 @@ describe('use-app-settings', () => {
       expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(true)
       expect(mockPersistenceWriteDebounced).toHaveBeenCalledTimes(1)
       // The whole settings object, not a patch: every other key rides along.
-      expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(APP_SETTINGS_KEY, {
+      expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(PersistenceKeys.appSettings, {
         ...DEFAULT_APP_SETTINGS,
         terminalScreenReaderMode: true
       })
@@ -397,7 +401,7 @@ describe('use-app-settings', () => {
 
       expect(useAppSettingsStore.getState().settings.terminalScreenReaderMode).toBe(false)
       expect(mockPersistenceWrite).toHaveBeenCalledWith(
-        APP_SETTINGS_KEY,
+        PersistenceKeys.appSettings,
         expect.objectContaining({ terminalScreenReaderMode: false })
       )
     })
@@ -412,7 +416,7 @@ describe('use-app-settings', () => {
     expect(useAppSettingsStore.getState().settings.appearanceMode).toBe('light')
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledTimes(1)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      APP_SETTINGS_KEY,
+      PersistenceKeys.appSettings,
       expect.objectContaining({ colorTheme: 'dracula', appearanceMode: 'light' })
     )
   })
@@ -432,7 +436,10 @@ describe('use-app-settings', () => {
     expect(layout.railExpanded).toBe(true)
     expect(layout.sidePanelVisible).toBe(true)
     expect(layout.sshSectionVisible).toBe(true)
-    expect(mockPersistenceWrite).toHaveBeenCalledWith(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
+    expect(mockPersistenceWrite).toHaveBeenCalledWith(
+      PersistenceKeys.appSettings,
+      DEFAULT_APP_SETTINGS
+    )
   })
 
   it('clears all ACP timeout overrides in the backend when app settings are reset', async () => {

@@ -72,7 +72,7 @@ export interface ProjectWorkspace {
   /**
    * Pane id of the dedicated agent-browser pane (spec-acp-browser-automation-v2
    * CAP-3). Runtime-only state, never part of the persisted workspace
-   * manifest; re-validated against the pane tree on every open.
+   * record; re-validated against the pane tree on every open.
    */
   agentBrowserPaneId: string | null
 }
@@ -122,7 +122,12 @@ export interface WorkspaceState extends ProjectWorkspace {
   setActivePane: (paneId: string) => void
   togglePaneFullscreen: (paneId: string) => void
   clearFullscreenPane: () => void
-  updatePaneSizes: (splitId: string, sizes: number[]) => void
+  /**
+   * Resize a split. `projectId` targets that project's tree (a parked one
+   * lands in `parkedTrees`) so a hidden-but-mounted host never writes into the
+   * visible tree; omitted = the active tree.
+   */
+  updatePaneSizes: (splitId: string, sizes: number[], projectId?: string) => void
   collapsePane: (paneId: string) => void
   reorderTabsInPane: (paneId: string, orderedIds: string[]) => void
 

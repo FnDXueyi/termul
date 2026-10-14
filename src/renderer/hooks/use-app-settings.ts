@@ -1,12 +1,14 @@
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi } from '@/lib/api'
+import { useSharedKeySync } from '@/lib/shared-key-sync'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import { setSidebarVisible } from '@/stores/sidebar-store'
 import { setSSHPanelVisible } from '@/stores/ssh-panel-store'
 import type { AppSettings, AppSettingsUpdate } from '@/types/settings'
-import { APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS } from '@/types/settings'
+import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 
 type PanelSettingKey = 'sidebarVisible' | 'fileExplorerVisible' | 'sshPanelVisible'
 
@@ -27,65 +29,80 @@ const RETIRED_SETTING_KEYS = [
   'orphanDetectionTimeout'
 ] as const
 
+/**
+ * Fills a stored settings record in from the defaults and drops or rewrites
+ * what an older version wrote. `changed` tells that the stored record differs
+ * from the result.
+ */
+function normalizeStoredSettings(data: AppSettings): { settings: AppSettings; changed: boolean } {
+  // Merge with defaults to handle any missing keys from older versions
+  let settings: AppSettings = { ...DEFAULT_APP_SETTINGS, ...data }
+  let changed = false
+
+  // The per-project terminal limit moved to the host, and a live PTY no
+  // longer expires by inactivity. Drop the retired keys an older version
+  // persisted so they are not carried forward.
+  const retiredKeys = RETIRED_SETTING_KEYS.filter((key) => key in settings)
+  if (retiredKeys.length > 0) {
+    const current: Record<string, unknown> = { ...settings }
+    for (const key of retiredKeys) delete current[key]
+    settings = current as unknown as AppSettings
+    changed = true
+  }
+
+  const rawAppearance = data.appearanceMode as string | undefined
+  const hasLegacyLightThemeId = settings.colorTheme.endsWith('-light')
+
+  if (hasLegacyLightThemeId) {
+    settings = {
+      ...settings,
+      colorTheme: normalizeThemeFamilyId(settings.colorTheme),
+      appearanceMode: settings.appearanceMode ?? 'light'
+    }
+    changed = true
+  }
+
+  if (rawAppearance === undefined && !hasLegacyLightThemeId) {
+    settings = { ...settings, appearanceMode: 'dark' }
+    changed = true
+  }
+
+  if (rawAppearance === 'system') {
+    settings = { ...settings, appearanceMode: getSystemAppearance() }
+    changed = true
+  } else if (settings.appearanceMode !== 'light' && settings.appearanceMode !== 'dark') {
+    settings = { ...settings, appearanceMode: 'dark' }
+    changed = true
+  }
+
+  // Migrate persisted "canvas" renderer preference to "dom"
+  // xterm 6.0 removed @xterm/addon-canvas; DOM is now the built-in fallback
+  if ((settings as unknown as Record<string, unknown>).terminalRenderer === 'canvas') {
+    settings = { ...settings, terminalRenderer: 'dom' as const }
+    changed = true
+  }
+  return { settings, changed }
+}
+
 export function useAppSettingsLoader(): void {
   const setSettings = useAppSettingsStore((state) => state.setSettings)
 
+  // A change another device or tab saved: show it without a reload.
+  useSharedKeySync<AppSettings>(PersistenceKeys.appSettings, (change) => {
+    if (change.exists && change.data) setSettings(normalizeStoredSettings(change.data).settings)
+  })
+
   useEffect(() => {
     async function load(): Promise<void> {
-      const result = await persistenceApi.read<AppSettings>(APP_SETTINGS_KEY)
+      const result = await persistenceApi.read<AppSettings>(PersistenceKeys.appSettings)
       let settings: AppSettings
 
       if (result.success && result.data) {
-        // Merge with defaults to handle any missing keys from older versions
-        settings = { ...DEFAULT_APP_SETTINGS, ...result.data }
-        let shouldPersistSettings = false
-
-        // The per-project terminal limit moved to the host, and a live PTY no
-        // longer expires by inactivity. Drop the retired keys an older version
-        // persisted so they are not carried forward.
-        const retiredKeys = RETIRED_SETTING_KEYS.filter((key) => key in settings)
-        if (retiredKeys.length > 0) {
-          const current: Record<string, unknown> = { ...settings }
-          for (const key of retiredKeys) delete current[key]
-          settings = current as unknown as AppSettings
-          shouldPersistSettings = true
-        }
-
-        const rawAppearance = result.data.appearanceMode as string | undefined
-        const hasLegacyLightThemeId = settings.colorTheme.endsWith('-light')
-
-        if (hasLegacyLightThemeId) {
-          settings = {
-            ...settings,
-            colorTheme: normalizeThemeFamilyId(settings.colorTheme),
-            appearanceMode: settings.appearanceMode ?? 'light'
-          }
-          shouldPersistSettings = true
-        }
-
-        if (rawAppearance === undefined && !hasLegacyLightThemeId) {
-          settings = { ...settings, appearanceMode: 'dark' }
-          shouldPersistSettings = true
-        }
-
-        if (rawAppearance === 'system') {
-          settings = { ...settings, appearanceMode: getSystemAppearance() }
-          shouldPersistSettings = true
-        } else if (settings.appearanceMode !== 'light' && settings.appearanceMode !== 'dark') {
-          settings = { ...settings, appearanceMode: 'dark' }
-          shouldPersistSettings = true
-        }
-
-        // Migrate persisted "canvas" renderer preference to "dom"
-        // xterm 6.0 removed @xterm/addon-canvas; DOM is now the built-in fallback
-        if ((settings as unknown as Record<string, unknown>).terminalRenderer === 'canvas') {
-          settings = { ...settings, terminalRenderer: 'dom' as const }
-          shouldPersistSettings = true
-        }
-
+        const normalized = normalizeStoredSettings(result.data)
+        settings = normalized.settings
         setSettings(settings)
-        if (shouldPersistSettings) {
-          void persistenceApi.writeDebounced(APP_SETTINGS_KEY, settings)
+        if (normalized.changed) {
+          void persistenceApi.writeDebounced(PersistenceKeys.appSettings, settings)
         }
       } else {
         settings = DEFAULT_APP_SETTINGS
@@ -132,7 +149,7 @@ export function useUpdateAppSetting<K extends keyof AppSettings>(): (
       // Use callback to get the latest state after update
       // Note: Zustand updates are synchronous, so getState() after updateSetting() returns updated state
       const updatedSettings = useAppSettingsStore.getState().settings
-      await persistenceApi.writeDebounced(APP_SETTINGS_KEY, updatedSettings)
+      await persistenceApi.writeDebounced(PersistenceKeys.appSettings, updatedSettings)
     },
     [updateSetting]
   )
@@ -145,7 +162,7 @@ export function useUpdateAppSettings(): (updates: AppSettingsUpdate) => Promise<
     async (updates: AppSettingsUpdate) => {
       updateSettings(updates)
       const updatedSettings = useAppSettingsStore.getState().settings
-      await persistenceApi.writeDebounced(APP_SETTINGS_KEY, updatedSettings)
+      await persistenceApi.writeDebounced(PersistenceKeys.appSettings, updatedSettings)
     },
     [updateSettings]
   )
@@ -175,7 +192,7 @@ export function useResetAppSettings(): () => Promise<void> {
     applyPanelVisibility('fileExplorerVisible', true)
     applyPanelVisibility('sshPanelVisible', true)
 
-    await persistenceApi.write(APP_SETTINGS_KEY, DEFAULT_APP_SETTINGS)
+    await persistenceApi.write(PersistenceKeys.appSettings, DEFAULT_APP_SETTINGS)
     // Clear the in-process ACP timeout overrides too (mirrors the load
     // hook's push, so a reset doesn't leave stale overrides in the Rust core).
     try {

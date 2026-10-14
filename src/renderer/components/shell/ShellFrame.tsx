@@ -5,7 +5,6 @@ import { ShellRail } from '@/components/shell/ShellRail'
 import { ShellSidePanel } from '@/components/shell/ShellSidePanel'
 import { TopRowFallbackBar } from '@/components/shell/TopRowFallbackBar'
 import { TopRowProvider } from '@/components/shell/top-row-context'
-import { WorkspaceConflictBanner } from '@/components/workspace/WorkspaceConflictBanner'
 import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
@@ -75,7 +74,7 @@ export function ShellFrame({
   const paneRoot = usePaneRoot()
   const fullscreenPaneId = useFullscreenPaneId()
   const pathname = useLocation().pathname
-  const mode: TopRowMode = ssh.activeSSHProfile
+  const mode: TopRowMode = ssh.workspaceOpen
     ? 'ssh'
     : projects.length === 0 || !isWorkspaceRoutePath(pathname)
       ? 'fallback'
@@ -126,7 +125,6 @@ export function ShellFrame({
                 <ShellSidePanel activeProject={activeProject} ssh={ssh} />
 
                 <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
-                  <WorkspaceConflictBanner />
                   {roles.controlsOwner === 'fallback-bar' && <TopRowFallbackBar />}
                   {workspaceMain}
                 </main>

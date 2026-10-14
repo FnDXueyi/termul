@@ -1,10 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { RECONNECT_GRACE_MS } from '@/hooks/use-delayed-flag'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { commandToken } from '@/lib/skill-tokens'
 import { mockAcpSession } from '@/lib/test-utils/acp'
 import type { AcpSession } from '@/stores/acp-store'
 import { useConsentCardHost } from '@/stores/browser-consent-card-store'
+import { useConnectionStatusStore } from '@/stores/connection-status-store'
 
 const {
   mockOpen,
@@ -438,6 +440,13 @@ function seedLiveSession(id: string, lastError: string | null = null): void {
   sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'closed', lastError })
 }
 
+/** Advance fake timers past a render-driven delay (e.g. the reconnect grace period). */
+function advanceTimers(ms: number): void {
+  act(() => {
+    vi.advanceTimersByTime(ms)
+  })
+}
+
 /** A prompt command waiting to confirm (AD-6), as the store publishes it. */
 function pendingCommand(outcomeUnknown: boolean): Record<string, unknown> {
   return {
@@ -653,43 +662,129 @@ describe('AgentChatPanel OSK + reconnect overlay (Story 5.3)', () => {
     expect(root.style.paddingBottom).toBe('')
   })
 
-  it('renders the transport reconnect overlay when transportReconnecting is true (AC3)', () => {
-    seedLiveSession('s1')
-    transportReconnectingRef.current = true
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-    // The overlay reuses AgentConnectionLamp (warning/pulse) and shows "Reconnecting…"
-    expect(screen.getByText(/Reconnecting/)).toBeInTheDocument()
-    expect(screen.getByRole('status')).toBeInTheDocument()
-  })
+  describe('reconnect grace period', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
 
-  it('does not render the transport reconnect overlay when transportReconnecting is false (AC3)', () => {
-    seedLiveSession('s1')
-    transportReconnectingRef.current = false
-    render(<AgentChatPanel sessionId="s1" isVisible />)
-    // The transport-level overlay must be absent. (The session-level
-    // "Reconnecting to agent…" banner is also absent because the session
-    // isn't closed + reopening.)
-    expect(screen.queryByText(/^Reconnecting$/)).toBeNull()
-    expect(screen.queryByRole('status')).toBeNull()
-  })
+    afterEach(() => {
+      vi.useRealTimers()
+      useConnectionStatusStore.setState({ controlChannel: 'connecting' })
+    })
 
-  it('the reconnect overlay container is pointer-events-none (non-blocking, AC3)', () => {
-    seedLiveSession('s1')
-    transportReconnectingRef.current = true
-    const { container } = render(<AgentChatPanel sessionId="s1" isVisible />)
-    // The overlay chip lives at top-right; it must not block clicks on
-    // already-rendered messages.
-    const status = screen.getByRole('status')
-    const overlay = status.closest('[class*="pointer-events-none"]')
-    expect(overlay).not.toBeNull()
-    void container
+    it('renders the transport reconnect overlay once reconnecting lasts the grace period, until it ends (AC3, long reconnect)', () => {
+      seedLiveSession('s1')
+      transportReconnectingRef.current = true
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      // Inside the grace period: nothing yet.
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      advanceTimers(RECONNECT_GRACE_MS - 1)
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      advanceTimers(1)
+      // The overlay reuses AgentConnectionLamp (warning/pulse) and shows "Reconnecting…"
+      expect(screen.getByText(/Reconnecting/)).toBeInTheDocument()
+      expect(screen.getByRole('status')).toBeInTheDocument()
+      // Stays up for as long as the reconnect lasts…
+      advanceTimers(10_000)
+      expect(screen.getByText(/Reconnecting/)).toBeInTheDocument()
+      // …and goes away at once when it ends.
+      transportReconnectingRef.current = false
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+    })
+
+    it('never renders the overlay for a reconnect shorter than the grace period (quick reconnect)', () => {
+      seedLiveSession('s1')
+      transportReconnectingRef.current = true
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      advanceTimers(300)
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      transportReconnectingRef.current = false
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      advanceTimers(RECONNECT_GRACE_MS * 2)
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+    })
+
+    it('shows "Host offline" immediately, without the grace period', () => {
+      seedLiveSession('s1')
+      useConnectionStatusStore.setState({ controlChannel: 'host-offline' })
+      transportReconnectingRef.current = true
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.getByRole('status')).toHaveTextContent('Host offline')
+    })
+
+    it('the reconnect overlay container is pointer-events-none (non-blocking, AC3)', () => {
+      seedLiveSession('s1')
+      transportReconnectingRef.current = true
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      advanceTimers(RECONNECT_GRACE_MS)
+      // The overlay chip lives at top-right; it must not block clicks on
+      // already-rendered messages.
+      const status = screen.getByRole('status')
+      const overlay = status.closest('[class*="pointer-events-none"]')
+      expect(overlay).not.toBeNull()
+    })
+
+    it('does not render the transport reconnect overlay when transportReconnecting is false (AC3)', () => {
+      seedLiveSession('s1')
+      transportReconnectingRef.current = false
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      advanceTimers(RECONNECT_GRACE_MS * 2)
+      // The transport-level overlay must be absent. (The session-level
+      // "Reconnecting to agent…" banner is also absent because the session
+      // isn't closed + reopening.)
+      expect(screen.queryByText(/Reconnecting/)).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+    })
   })
 })
 
 describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     promptCommandStatesRef.current = {}
     transportReconnectingRef.current = false
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('never renders the pill when the reconcile resolves within the grace period', () => {
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      activeTurn: true,
+      openTurnId: 'turn-1'
+    })
+    promptCommandStatesRef.current = { s1: pendingCommand(false) }
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(300)
+    expect(screen.queryByText(/Waiting to confirm/)).toBeNull()
+    // The same-id resend confirmed the turn (~300 ms on a return reconnect).
+    promptCommandStatesRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS * 2)
+    expect(screen.queryByText(/Waiting to confirm/)).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('hides the pill at once when the reconcile resolves after it showed', () => {
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      activeTurn: true,
+      openTurnId: 'turn-1'
+    })
+    promptCommandStatesRef.current = { s1: pendingCommand(false) }
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS)
+    expect(screen.getByRole('status')).toHaveTextContent('Waiting to confirm')
+    promptCommandStatesRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.queryByText(/Waiting to confirm/)).toBeNull()
   })
 
   it('shows a non-error "Waiting to confirm" status while the prompt is unconfirmed', () => {
@@ -701,6 +796,7 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
     })
     promptCommandStatesRef.current = { s1: pendingCommand(false) }
     render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS)
     expect(screen.getByRole('status')).toHaveTextContent('Waiting to confirm')
     // Not a failure: no error banner / Retry affordance.
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
@@ -716,6 +812,7 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
     })
     promptCommandStatesRef.current = { s1: pendingCommand(true) }
     render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS)
     expect(screen.getByRole('status')).toHaveTextContent('Outcome unknown — check')
     // Still not a failure, and no new-send Retry while the command is unresolved.
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
@@ -734,6 +831,7 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
       s1: { ...pendingCommand(true), phase: 'pending', checking: true }
     }
     render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS)
     expect(screen.getByRole('status')).toHaveTextContent('Checking…')
     expect(screen.getByRole('button', { name: 'Re-check' })).toBeDisabled()
   })
@@ -747,6 +845,7 @@ describe('AgentChatPanel waiting-to-confirm state (AD-6)', () => {
     })
     promptCommandStatesRef.current = { other: pendingCommand(false) }
     render(<AgentChatPanel sessionId="s1" isVisible />)
+    advanceTimers(RECONNECT_GRACE_MS)
     expect(screen.queryByText(/Waiting to confirm/)).toBeNull()
   })
 })

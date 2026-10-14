@@ -75,7 +75,7 @@ export interface PromptReceipt {
   receipt: 'in_progress' | 'accepted'
 }
 
-/** `send_prompt` / `acp_send_prompt` result: a stop reason or a receipt. */
+/** `send_prompt` result: a stop reason or a receipt. */
 export type PromptDispatchResult = StopReason | PromptReceipt
 
 export function isPromptReceipt(value: unknown): value is PromptReceipt {
@@ -304,7 +304,7 @@ export interface ProbeResult {
   error?: string
   wwwAuthenticateHeader?: string
 }
-/** Wire type forwarded verbatim to the backend `acp_new_session` command. */
+/** Wire type forwarded verbatim to the backend `create_session` request. */
 export type McpServer = McpServerConfig
 
 export interface AgentConfig {
@@ -411,10 +411,9 @@ export interface BrowserOpenRequestEvent {
 }
 
 /**
- * Authoritative spawn result returned by `acp_spawn_agent` (Tauri) and
- * `spawn_agent` (WS) — the single contract for both transports (CAP-4: the
- * spawn response — not the async `acp:agent_spawned` event — is the source of
- * truth). The renderer populates `capabilities` + `authMethods` synchronously
+ * Authoritative spawn result returned by the `spawn_agent` WS request — the
+ * single contract for every carrier (CAP-4: the spawn response — not the async
+ * `acp:agent_spawned` event — is the source of truth). The renderer populates `capabilities` + `authMethods` synchronously
  * from this response, eliminating the former 250ms no-auth fallback.
  */
 export interface SpawnAgentResult {
@@ -791,9 +790,8 @@ export async function acpInstallRegistryBinary(
  * CAP-6 / Story 9: host-owned verified-atomic install. The request is
  * `{ agentId }` only; the host resolves everything (archive URL, cmd, args,
  * sha256) from the trusted catalog. The outcome `{ command, args }` flows
- * through `installedBinaryConfig` → `saveAgentConfig` unchanged. Mirrors the
- * `acp_install_agent` Tauri command + `POST /acp/install` + WS
- * `install_acp_agent` byte-for-byte.
+ * through `installedBinaryConfig` → `saveAgentConfig` unchanged. Mirrors
+ * `POST /acp/install` + WS `install_acp_agent` byte-for-byte.
  */
 export async function acpInstallAcpAgent(
   agentId: string
@@ -834,13 +832,15 @@ export async function listMcpTools(server: McpServerConfig): Promise<McpToolInfo
 }
 // --- MCP OAuth (desktop: Tauri command, web: HTTP route) -------------------
 
-/** Start the OAuth flow for an MCP server URL. On desktop, opens the system
+/** Start the OAuth flow for an MCP server URL on behalf of `projectId` (the
+ * web host authorizes the URL against that project's MCP list; the desktop
+ * Tauri command authorizes nothing and takes the URL only). On desktop, opens the system
  * browser and waits for the callback (the Tauri command blocks until the
  * token is stored). On web, opens a blank window first (preserves transient
  * user activation for the popup), navigates it to the auth URL once returned,
  * then polls the status endpoint until the token is stored. Throws on
  * failure (discovery, registration, timeout). */
-export async function startMcpOAuth(serverUrl: string): Promise<void> {
+export async function startMcpOAuth(projectId: string, serverUrl: string): Promise<void> {
   if (isTauriContext()) {
     await invoke('acp_mcp_oauth_start', { serverUrl })
     return
@@ -854,7 +854,7 @@ export async function startMcpOAuth(serverUrl: string): Promise<void> {
   }
   let authUrl: string
   try {
-    const result = await webServerMcpOAuth.start(serverUrl)
+    const result = await webServerMcpOAuth.start(projectId, serverUrl)
     if (!result.success) {
       throw new Error(result.error ?? 'OAuth start failed')
     }
@@ -872,7 +872,7 @@ export async function startMcpOAuth(serverUrl: string): Promise<void> {
   const deadline = Date.now() + POLL_TIMEOUT_MS
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
-    const status = await webServerMcpOAuth.status(serverUrl)
+    const status = await webServerMcpOAuth.status(projectId, serverUrl)
     if (status.success && status.data?.hasToken) {
       return
     }
@@ -880,24 +880,25 @@ export async function startMcpOAuth(serverUrl: string): Promise<void> {
   throw new Error('OAuth flow timed out — user did not complete authorization in time')
 }
 
-/** Check whether a stored OAuth token exists for a server URL. */
-export async function hasMcpOAuthToken(serverUrl: string): Promise<boolean> {
+/** Check whether a stored OAuth token exists for a server URL (`projectId` is
+ * validated by the web host; the desktop command takes the URL only). */
+export async function hasMcpOAuthToken(projectId: string, serverUrl: string): Promise<boolean> {
   if (isTauriContext()) {
     return invoke<boolean>('acp_mcp_oauth_has_token', { serverUrl })
   }
-  const result = await webServerMcpOAuth.status(serverUrl)
+  const result = await webServerMcpOAuth.status(projectId, serverUrl)
   return result.success && result.data ? result.data.hasToken : false
 }
 
 /** Delete the stored OAuth token for a server URL (the "Disconnect" action).
  * On web, inspects the IpcResult and throws when `success: false`. On desktop,
  * the Tauri invoke path propagates failures as before. */
-export async function disconnectMcpOAuth(serverUrl: string): Promise<void> {
+export async function disconnectMcpOAuth(projectId: string, serverUrl: string): Promise<void> {
   if (isTauriContext()) {
     await invoke('acp_mcp_oauth_disconnect', { serverUrl })
     return
   }
-  const result = await webServerMcpOAuth.disconnect(serverUrl)
+  const result = await webServerMcpOAuth.disconnect(projectId, serverUrl)
   if (!result.success) {
     throw new Error(result.error ?? 'OAuth disconnect failed')
   }
@@ -1148,9 +1149,8 @@ export async function acpRegisterDiscoveredSession(input: {
 
 /**
  * CAP-2 (spec-in-chat-agent-switch): durably record an agent-switch marker.
- * Host is the sole author — the Tauri command (`acp_record_agent_switch`)
- * and the WS route (`record_agent_switch`) author ONE `agent_switch`
- * record: the host relay numbers it, persists it and delivers the same event
+ * Host is the sole author — the WS route (`record_agent_switch`) authors ONE
+ * `agent_switch` record: the host relay numbers it, persists it and delivers the same event
  * live under that seq; the host then flushes. Throws on a host
  * write failure (record absent, no partial state — the caller surfaces it).
  */

@@ -5,13 +5,17 @@
  * (`./desktop-transport`).
  */
 
+import type { AcpCatalog } from '@shared/types/acp-catalog.types'
 import type {
   ClaudeAccountsSnapshot,
   ClaudeAccountUsage
 } from '@shared/types/claude-accounts.types'
+import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
+  type AddProjectPayload,
   type HistoryMode,
   type PersistedSessionSummary,
+  type ProjectBusyDetails,
   type SessionSnapshotEvent,
   WS_ERROR_CODES,
   type WsAgentSummary
@@ -52,12 +56,15 @@ export class AcpTransportError extends Error {
    * when the reply carried one. Absent on transport-local failures.
    */
   readonly visibleAt?: number
+  /** The host's structured context for the code: the bound entities of a `project_busy` refusal. */
+  readonly details?: ProjectBusyDetails
 
-  constructor(code: string, message: string, visibleAt?: number) {
+  constructor(code: string, message: string, visibleAt?: number, details?: ProjectBusyDetails) {
     super(code === WS_ERROR_CODES.OUTCOME_UNKNOWN ? OUTCOME_UNKNOWN_MESSAGE : message)
     this.name = 'AcpTransportError'
     this.code = code
     if (visibleAt !== undefined) this.visibleAt = visibleAt
+    if (details !== undefined) this.details = details
   }
 }
 
@@ -121,9 +128,17 @@ export function isOutcomeUncertainError(error: unknown): error is AcpTransportEr
  * connect in flight; `connected` = socket open + authed; `reconnecting` =
  * drop detected, backoff retry in progress; `disconnected` = gave up (the
  * terminal channel exhausts its retry budget; the control channel retries
- * forever and never reaches this state).
+ * forever and never reaches this state); `host-offline` = the host stopped on
+ * purpose (`Close(1001)`): no backoff loop runs, a slow health probe or a user
+ * retry decides when to reconnect.
  */
-export type AcpConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected'
+export type AcpConnectionState =
+  | 'connecting'
+  | 'connected'
+  | 'reconnecting'
+  | 'disconnected'
+  /** The host closed the socket with `1001` (it stopped); no reconnect loop runs. */
+  | 'host-offline'
 
 /**
  * A session replay cursor. `lastSeq` is only meaningful against the host log
@@ -139,16 +154,26 @@ export interface AcpTransport {
     request: InstallAcpRegistryBinaryRequest
   ): Promise<InstallAcpRegistryBinaryOutcome>
   /**
-   * CAP-6 / Story 9: host-owned verified-atomic install. The web/remote
-   * transport falls back to the `acpInstallApi` facade (Tauri vs HTTP
-   * resolved at runtime); the desktop transport delegates to the new
-   * `acp_install_agent` Tauri command. The request is `{ agentId }` only; the
-   * host resolves everything from the trusted catalog.
+   * Host-owned verified-atomic install (`install_acp_agent`). Every carrier
+   * sends it over `/ws`. The request is `{ agentId }` only; the host resolves
+   * everything from the trusted catalog.
    */
   installAcpAgent(
     agentId: string,
     options?: CommandCallOptions
   ): Promise<InstallAcpRegistryBinaryOutcome>
+  /**
+   * Host-resolved ACP catalog (`list_acp_catalog`): OS/arch/runtime
+   * availability plus per-agent status. `refresh` bypasses the host's TTL.
+   * Failures throw {@link AcpTransportError} carrying the host's
+   * SCREAMING_SNAKE_CASE code (`ACP_CATALOG_UNAVAILABLE`, `CATALOG_LOAD_FAILED`).
+   */
+  listCatalog(refresh?: boolean): Promise<AcpCatalog>
+  /**
+   * Persist the host-side catalog opt-in (`set_catalog_opt_in`) that gates the
+   * CDN registry augmentation. Failures throw {@link AcpTransportError}.
+   */
+  setCatalogOptIn(enabled: boolean): Promise<void>
   probeRuntime(): Promise<AcpRuntimeAvailability>
   setTurnTimeout(secs: number | null): Promise<void>
   setTurnIdleTimeout(secs: number | null): Promise<void>
@@ -183,8 +208,8 @@ export interface AcpTransport {
   listAgents(): Promise<AgentId[]>
   /**
    * CAP-11: identity-rich agent summaries (`{ id, name, configId?, namespace?,
-   * capabilities, ownsSession? }`). WS: the `list_agents` reply; desktop: the
-   * `acp_list_agent_details` command. `listAgents` keeps returning bare ids.
+   * capabilities, ownsSession? }`): the `list_agents` reply. `listAgents` keeps
+   * returning bare ids.
    * `ownsSession` (issue #837) is the agent's owned-session set — current
    * servers always send it; older servers omit it (treated as unknown/none).
    */
@@ -280,9 +305,8 @@ export interface AcpTransport {
   /**
    * CAP-2 (spec-in-chat-agent-switch): durably record an agent-switch
    * marker. Host is the sole author — one `agent_switch` record that the
-   * relay numbers, persists and delivers live under the same seq.
-   * Tauri: `acp_record_agent_switch`; WS: `record_agent_switch`. Throws on
-   * a host write failure (no partial state).
+   * relay numbers, persists and delivers live under the same seq. WS:
+   * `record_agent_switch`. Throws on a host write failure (no partial state).
    */
   recordAgentSwitch(
     sessionId: SessionId,
@@ -347,21 +371,36 @@ export interface AcpTransport {
    * Headless ACP auth paste-back (spec-acp-terminal-auth): deliver a
    * user-pasted loopback OAuth redirect URL to the agent's callback listener
    * on the host. The host validates http(s) + loopback-only before fetching
-   * (SSRF guard) and returns the replay's HTTP status. Tauri:
-   * `acp_auth_deliver_redirect`; WS: `acp_deliver_auth_redirect`.
+   * (SSRF guard) and returns the replay's HTTP status. WS:
+   * `acp_deliver_auth_redirect`.
    */
   deliverAuthRedirect(agentId: AgentId, url: string, options?: CommandCallOptions): Promise<number>
   /**
-   * Web/remote only: subscribe THIS connection to a registered project's
-   * `fs_changed` events (`watch_project`). Unknown/archived project rejects
-   * with `not_found`. The transport re-sends it after a reconnect.
+   * Host project registry commands (`add_project`, `update_project`,
+   * `remove_project`, `set_default_project`), the same on every carrier. Each
+   * is idempotent by project id and has no `commandId`; the result reaches the
+   * renderer through the `projects` watch. A remove or archive that finds live
+   * sessions or terminals bound to the project throws an
+   * {@link AcpTransportError} with code `project_busy` and `details` listing
+   * them; the same call with `cascade: true` makes the host stop them first.
    */
-  watchProject?(projectId: string): Promise<void>
-  /** Web/remote only: drop this connection's `watch_project` subscription. */
-  unwatchProject?(projectId: string): Promise<void>
+  addProject(project: AddProjectPayload): Promise<ProjectSummary>
+  updateProject(
+    projectId: string,
+    patch: {
+      name?: string
+      color?: string
+      isArchived?: boolean
+      path?: string
+      cascade?: boolean
+    }
+  ): Promise<void>
+  removeProject(projectId: string, options?: { cascade?: boolean }): Promise<void>
+  setDefaultProject(projectId: string): Promise<void>
   /**
-   * Web/remote only: the state watches (projects, chat-history index, agent
-   * roster). Absent on Tauri IPC (desktop), where those stores are local.
+   * The watches (projects, chat-history index, agent roster, project file
+   * changes, store keys, terminal sets), on every carrier: the desktop speaks
+   * `/ws` over its Channel too.
    */
   readonly watches?: WatchClient
   historyMode?(): HistoryMode | 'tauri_store'
@@ -409,6 +448,11 @@ export interface AcpTransport {
    * emitted before wiring are reflected. Only on the WS transport.
    */
   getConnectionState?(): AcpConnectionState
+  /**
+   * Ask the host `GET /health` now while the state is `host-offline`, and
+   * reconnect when it answers. No-op in any other state. Only on the WS transport.
+   */
+  retryHostOffline?(): void
   setRecoveryHandler?(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },

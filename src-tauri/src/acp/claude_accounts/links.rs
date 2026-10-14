@@ -34,11 +34,14 @@ pub fn ensure_links(shared: &Path, account: &Path) -> io::Result<usize> {
     for name in SHARED_DIRS {
         let target = shared.join(name);
         if let Err(error) = fs::create_dir_all(&target) {
-            log::warn!("[claude-accounts] could not create shared dir {name}: {error}");
+            log::warn!(
+                "[claude-accounts] could not create shared dir {name}: {:?}",
+                error.kind()
+            );
             failed += 1;
             continue;
         }
-        if !link_entry(&target, &account.join(name), true) {
+        if !link_entry(&target, &account.join(name), name, true) {
             failed += 1;
         }
     }
@@ -47,7 +50,7 @@ pub fn ensure_links(shared: &Path, account: &Path) -> io::Result<usize> {
         if !target.is_file() {
             continue;
         }
-        if !link_entry(&target, &account.join(name), false) {
+        if !link_entry(&target, &account.join(name), name, false) {
             failed += 1;
         }
     }
@@ -66,15 +69,15 @@ pub fn remove_links(account: &Path) {
         if is_link {
             if let Err(error) = remove_link(&link, is_dir) {
                 log::warn!(
-                    "[claude-accounts] could not remove link {}: {error}",
-                    link.display()
+                    "[claude-accounts] could not remove shared entry {name}: {:?}",
+                    error.kind()
                 );
             }
         }
     }
 }
 
-fn link_entry(target: &Path, link: &Path, is_dir: bool) -> bool {
+fn link_entry(target: &Path, link: &Path, name: &str, is_dir: bool) -> bool {
     match fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
             if fs::read_link(link).is_ok_and(|current| current == target) {
@@ -82,24 +85,21 @@ fn link_entry(target: &Path, link: &Path, is_dir: bool) -> bool {
             }
             if let Err(error) = remove_link(link, is_dir) {
                 log::warn!(
-                    "[claude-accounts] could not replace link {}: {error}",
-                    link.display()
+                    "[claude-accounts] could not replace shared entry {name}: {:?}",
+                    error.kind()
                 );
                 return false;
             }
         }
         Ok(_) => {
-            log::warn!(
-                "[claude-accounts] {} is a real entry, not a link; leaving it",
-                link.display()
-            );
+            log::warn!("[claude-accounts] shared entry {name} is a real file; leaving it");
             return false;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             log::warn!(
-                "[claude-accounts] could not read {}: {error}",
-                link.display()
+                "[claude-accounts] could not read shared entry {name}: {:?}",
+                error.kind()
             );
             return false;
         }
@@ -108,8 +108,8 @@ fn link_entry(target: &Path, link: &Path, is_dir: bool) -> bool {
         Ok(()) => true,
         Err(error) => {
             log::warn!(
-                "[claude-accounts] could not link {}: {error}",
-                link.display()
+                "[claude-accounts] could not link shared entry {name}: {:?}",
+                error.kind()
             );
             false
         }

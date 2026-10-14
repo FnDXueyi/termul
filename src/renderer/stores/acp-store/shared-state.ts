@@ -22,7 +22,13 @@ import { __clearCommandJournalForTesting } from '@/lib/command-journal'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useProjectStore } from '@/stores/project-store'
-import { agentReuseKey, configIdFromReuseKey, detachedReuseKey } from '../acp-reuse-keys'
+import {
+  agentReuseKey,
+  configIdFromReuseKey,
+  detachedReuseKey,
+  isDetachedReuseKey,
+  parseReuseKey
+} from '../acp-reuse-keys'
 import { ephemeralSessionIds } from './ephemeral-ids'
 import { isReusableStatus } from './helpers'
 import type { AcpSession, AcpState, ChatMessage, CommitMessageCollector } from './types'
@@ -204,13 +210,14 @@ export function persistSession(
 }
 
 /**
- * In-flight pre-warm spawns, keyed by `agentReuseKey(configId, cwd)`. Held
+ * In-flight pre-warm spawns, keyed by `agentReuseKey(configId, cwd, projectId)`. Held
  * outside reactive state (promises don't belong in the store) so `prewarmAgent`,
  * `startChat`, and `deleteAgentConfig` can dedupe against a warm that is still
  * spawning for the same config+cwd. The reactive `warmingConfigs` flag mirrors
  * membership for the UI.
  */
 export const inFlightWarms = new Map<string, Promise<AgentId | null>>()
+
 /** The same spawns, un-swallowed: what a joining caller judges by its own options. */
 const inFlightWarmOutcomes = new Map<string, Promise<AgentId | null>>()
 
@@ -410,6 +417,15 @@ export const handoffOnlyTurnIds = new Set<string>()
  */
 export const activeWirePromptTurns = new Map<SessionId, string>()
 
+/**
+ * Wire `turnId` of the latest turn THIS client dispatched whose `user_prompt`
+ * echo has landed, per session. The host sequences that echo on acceptance, so
+ * a dispatch whose reply is lost after its echo arrived is already known to be
+ * accepted and needs no pending-reconcile. Cleared alongside every
+ * `activeWirePromptTurns` delete so it stays bounded.
+ */
+export const echoedWirePromptTurns = new Map<SessionId, string>()
+
 const ENDED_PROMPT_TURN_LIMIT = 256
 const endedPromptTurnIds = new Set<string>()
 
@@ -434,6 +450,7 @@ export function _resetPromptReconcileForTesting(): void {
   __clearCommandJournalForTesting()
   definiteSpawnRejections.clear()
   activeWirePromptTurns.clear()
+  echoedWirePromptTurns.clear()
   endedPromptTurnIds.clear()
 }
 
@@ -489,8 +506,9 @@ export function _handoffOnlyTurnIdsForTesting(): ReadonlySet<string> {
  *
  * Adoption seeds the store's agent presence (`agents` + `agentStatus`) from
  * the summary's capabilities and registers the reuse key
- * (`agentReuseKey(configId, cwd)`) → host agent id, so every later
- * `ensureLiveAgent`/`prepareChat` for that config+cwd reuses the host process.
+ * (`agentReuseKey(configId, cwd, projectId)`) → host agent id, so every later
+ * `ensureLiveAgent`/`prepareChat` for that config, cwd, and Project reuses the
+ * host process.
  *
  * Desktop skips the lookup by default (`isTauriContext()`): the desktop store
  * already owns its agents in memory. A reload while a turn is still running
@@ -509,7 +527,7 @@ export async function adoptHostOwnedAgent(
   sessionId: SessionId,
   configId: string,
   cwd: string,
-  options?: { allowDesktop?: boolean; isCurrent?: () => boolean }
+  options?: { allowDesktop?: boolean; isCurrent?: () => boolean; projectId?: string | null }
 ): Promise<{ adopted: AgentId | null; listingTrusted: boolean }> {
   const trimmedCwd = cwd.trim()
   if ((!options?.allowDesktop && isTauriContext()) || trimmedCwd.length === 0) {
@@ -548,7 +566,8 @@ export async function adoptHostOwnedAgent(
     source: 'acp-store.adoptHostOwnedAgent',
     message: `Reusing host agent ${match.id} that owns session ${sessionId} instead of spawning a duplicate`
   })
-  const reuseKey = agentReuseKey(configId, trimmedCwd)
+  const projectId = (options?.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
   set((s) => ({
     agents: {
       ...s.agents,
@@ -636,7 +655,8 @@ export function ensureLiveAgent(
   const config = get().agentConfigs.find((c) => c.id === configId)
   if (!config) return Promise.resolve(null)
 
-  const reuseKey = agentReuseKey(configId, trimmedCwd)
+  const projectId = (options.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
   const currentAgentId = get().configToLiveAgent[reuseKey]
   if (
     currentAgentId &&
@@ -689,6 +709,14 @@ export function ensureLiveAgent(
     set((s) => ({ warmingConfigs: { ...s.warmingConfigs, [reuseKey]: true } }))
   }
 
+  if (projectId && otherProjectHoldsAgent(get(), configId, trimmedCwd, projectId)) {
+    void logFrontendError({
+      level: 'info',
+      source: 'acp-store.ensureLiveAgent',
+      message: `Project ${projectId} spawns its own agent for ${configId} at ${trimmedCwd}; another project already holds that cwd`
+    })
+  }
+
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
       const agentId = await get().spawnAgent(
@@ -700,7 +728,7 @@ export function ensureLiveAgent(
           env: config.env,
           allowTerminal: config.allowTerminal
         },
-        options.projectId || projectIdForCwd(trimmedCwd)
+        projectId || undefined
       )
       definiteSpawnRejections.delete(reuseKey)
       if (get().agentConfigs.some((c) => c.id === configId)) {
@@ -735,6 +763,26 @@ export function ensureLiveAgent(
   // Joiners derive their own view; this handle must never be an unhandled rejection.
   strictSpawn.catch(() => undefined)
   return spawnPromise
+}
+
+/** True when a different Project already has a live process for this config and cwd. */
+function otherProjectHoldsAgent(
+  state: AcpState,
+  configId: string,
+  cwd: string,
+  projectId: string
+): boolean {
+  return Object.keys(state.configToLiveAgent).some((key) => {
+    if (isDetachedReuseKey(key)) return false
+    const parsed = parseReuseKey(key)
+    return (
+      parsed.configId === configId &&
+      parsed.cwd === cwd &&
+      typeof parsed.projectId === 'string' &&
+      parsed.projectId.length > 0 &&
+      parsed.projectId !== projectId
+    )
+  })
 }
 
 /**

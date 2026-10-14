@@ -14,7 +14,12 @@ import { useCanvasStore } from '@/stores/canvas-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
-import { editorTabId, useLeafCount, useWorkspaceStore } from '@/stores/workspace-store'
+import {
+  editorTabId,
+  useFullscreenPaneId,
+  useLeafCount,
+  useWorkspaceStore
+} from '@/stores/workspace-store'
 import type { Terminal } from '@/types/project'
 import type { TabReorderPosition } from '@/types/workspace.types'
 import { EditorTab } from './EditorTab'
@@ -70,14 +75,15 @@ export function WorkspaceTabBar({
   defaultShell,
   topRow
 }: WorkspaceTabBarProps): React.JSX.Element {
-  const { setActiveTab, setActivePane, fullscreenPaneId, togglePaneFullscreen } = useWorkspaceStore(
+  const { setActiveTab, setActivePane, togglePaneFullscreen } = useWorkspaceStore(
     useShallow((state) => ({
       setActiveTab: state.setActiveTab,
       setActivePane: state.setActivePane,
-      fullscreenPaneId: state.fullscreenPaneId,
       togglePaneFullscreen: state.togglePaneFullscreen
     }))
   )
+  // This tree's own fullscreen pane (a hidden project's parked tree when hidden).
+  const fullscreenPaneId = useFullscreenPaneId()
   const leafCount = useLeafCount()
   const {
     startTabDrag,

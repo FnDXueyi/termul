@@ -7,7 +7,6 @@ import { useFileWatcher } from '@/hooks/use-file-watcher'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useProjectSwitch } from '@/hooks/use-project-switch'
 import { useShellUnreadTracker } from '@/hooks/use-shell-unread-tracker'
-import { useWorkspaceManifestSync } from '@/hooks/use-workspace-manifest-sync'
 import { useWorktreeShortcuts } from '@/hooks/use-worktree-shortcuts'
 import { useWorkspaceOverlayBackStack } from '@/layouts/use-workspace-overlay-back-stack'
 import { MobileWorkspaceShell } from '@/layouts/workspace-layout/MobileWorkspaceShell'
@@ -99,15 +98,13 @@ export default function WorkspaceLayout(): React.JSX.Element {
     setIsCommandPaletteOpen,
     isCommandHistoryOpen,
     setIsCommandHistoryOpen,
-    isSshPasswordPromptOpen: ssh.sshPasswordPrompt !== null,
-    closeSshPasswordPrompt: ssh.closeSshPasswordPrompt,
     locationKey: location.key
   })
 
   const handleSelectProject = useCallback(
     (id: string) => {
       selectProject(id)
-      ssh.selectSSHProfile(null) // Deselect SSH when switching to project
+      ssh.selectSSHProfile(null) // Leave the SSH workspace when switching to a project
     },
     [selectProject, ssh.selectSSHProfile]
   )
@@ -131,11 +128,6 @@ export default function WorkspaceLayout(): React.JSX.Element {
 
   // Editor state persistence
   useEditorPersistence(activeProjectId)
-
-  // Story 6: cross-client workspace manifest sync (the manifest is read by the
-  // project-switch hydration (fetchManifestWorkspace); this hook wires the
-  // debounced write side + conflict surfacing).
-  useWorkspaceManifestSync(activeProjectId)
 
   useTerminalTabSync({ terminals, activeProjectId })
 

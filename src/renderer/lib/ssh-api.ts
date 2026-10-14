@@ -1,4 +1,5 @@
 import type { IpcResult } from '@shared/types/ipc.types'
+import { PersistenceKeys } from '@shared/types/persistence.types'
 import type {
   ActivePortForward,
   PortForwardConfig,
@@ -24,8 +25,8 @@ import { invokeIpc as invokeTauriIpc } from './ipc/tauri'
 import { persistenceApi } from './persistence-api'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
 
-/** Web mode: SSH profiles live in the server-side store (issue #613). */
-const SSH_PROFILES_KEY = 'ssh/profiles'
+/** How many times a profile list rewrite is tried before a lost compare-and-set race ends it. */
+const PROFILE_WRITE_ATTEMPTS = 5
 
 /**
  * Web mode has no OS keychain — persist profile metadata without secrets,
@@ -51,7 +52,7 @@ async function readProfilesFromStore(): Promise<IpcResult<SSHProfile[]>> {
 async function readProfilesSnapshot(): Promise<
   IpcResult<{ profiles: SSHProfile[]; expected: SSHProfile[] | null }>
 > {
-  const result = await persistenceApi.read<SSHProfile[]>(SSH_PROFILES_KEY)
+  const result = await persistenceApi.read<SSHProfile[]>(PersistenceKeys.sshProfiles)
   if (result.success) {
     return { success: true, data: { profiles: result.data, expected: result.data } }
   }
@@ -146,7 +147,7 @@ export function createSSHApi(): SSHApi {
 
     async saveProfile(profile: SSHProfile): Promise<IpcResult<void>> {
       if (!isTauriContext()) {
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < PROFILE_WRITE_ATTEMPTS; attempt++) {
           const list = await readProfilesSnapshot()
           if (!list.success) return list
           const updated = list.data.profiles.filter((p) => p.id !== profile.id)
@@ -155,8 +156,10 @@ export function createSSHApi(): SSHApi {
           // `ssh/profiles` is a shared/cas key: the write is only accepted while
           // the host still holds `expected` (null = key absent). The facade
           // journals the commandId, so a resend of this exact write reuses it.
-          const res = await persistenceApi.write(SSH_PROFILES_KEY, updated, {
-            expected: list.data.expected
+          const res = await persistenceApi.write(PersistenceKeys.sshProfiles, updated, {
+            expected: list.data.expected,
+            // Only the last lost race is reported to the user.
+            retrying: attempt < PROFILE_WRITE_ATTEMPTS - 1
           })
           if (res.success || res.code !== 'STORE_CAS_FAILED') return res
         }
@@ -167,15 +170,17 @@ export function createSSHApi(): SSHApi {
 
     async deleteProfile(profileId: string): Promise<IpcResult<void>> {
       if (!isTauriContext()) {
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < PROFILE_WRITE_ATTEMPTS; attempt++) {
           const list = await readProfilesSnapshot()
           if (!list.success) return list
           const updated = list.data.profiles.filter((p) => p.id !== profileId)
           if (updated.length === list.data.profiles.length)
             return { success: true, data: undefined }
 
-          const res = await persistenceApi.write(SSH_PROFILES_KEY, updated, {
-            expected: list.data.expected
+          const res = await persistenceApi.write(PersistenceKeys.sshProfiles, updated, {
+            expected: list.data.expected,
+            // Only the last lost race is reported to the user.
+            retrying: attempt < PROFILE_WRITE_ATTEMPTS - 1
           })
           if (res.success || res.code !== 'STORE_CAS_FAILED') return res
         }
