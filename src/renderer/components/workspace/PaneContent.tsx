@@ -47,6 +47,9 @@ const EditorPanel = lazy(() =>
   import('@/components/editor/EditorPanel').then((m) => ({ default: m.EditorPanel }))
 )
 const DiffTab = lazy(() => import('@/components/git/DiffTab').then((m) => ({ default: m.DiffTab })))
+const CommitDiffTab = lazy(() =>
+  import('@/components/git/CommitDiffTab').then((m) => ({ default: m.CommitDiffTab }))
+)
 const GitHistoryPanel = lazy(() =>
   import('@/components/git/GitHistoryPanel').then((m) => ({ default: m.GitHistoryPanel }))
 )
@@ -509,12 +512,22 @@ export function PaneContent({
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
                     <Suspense fallback={<PaneSkeleton />}>
-                      <DiffTab
-                        cwd={tab.cwd}
-                        path={tab.path}
-                        staged={tab.staged}
-                        isVisible={isVisible}
-                      />
+                      {tab.commit ? (
+                        <CommitDiffTab
+                          cwd={tab.cwd}
+                          commit={tab.commit}
+                          path={tab.path}
+                          oldPath={tab.oldPath}
+                          isVisible={isVisible}
+                        />
+                      ) : (
+                        <DiffTab
+                          cwd={tab.cwd}
+                          path={tab.path}
+                          staged={tab.staged}
+                          isVisible={isVisible}
+                        />
+                      )}
                     </Suspense>
                   </div>
                 )

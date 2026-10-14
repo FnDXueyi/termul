@@ -1,6 +1,7 @@
 import type {
   GitCommit,
   GitCommitContext,
+  GitCommitDetail,
   GitDiffStat,
   GitStashInfo,
   GitStatusDetail,
@@ -84,10 +85,38 @@ export const gitApi = {
       ? ledgeredInvoke('git_discard', entityKeyOf(cwd, path), { cwd, path })
       : webServerGit.discard(cwd, path),
 
-  getLog: (cwd: string, limit?: number) =>
+  getLog: (cwd: string, limit?: number, all = false) =>
     isTauriContext()
-      ? invoke<GitCommit[]>('git_get_log', { cwd, limit })
-      : webServerGit.getLog(cwd, limit),
+      ? invoke<GitCommit[]>('git_get_log', { cwd, limit, all })
+      : webServerGit.getLog(cwd, limit, all),
+
+  getCommitDetail: async (cwd: string, hash: string): Promise<GitCommitDetail> => {
+    if (isTauriContext()) {
+      const res = await invokeIpc<GitCommitDetail>('git_get_commit_detail', { cwd, hash })
+      if (!res.success) throw new Error(res.error)
+      return res.data
+    }
+    return webServerGit.getCommitDetail(cwd, hash)
+  },
+
+  getCommitFileDiff: async (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string
+  ): Promise<string> => {
+    if (isTauriContext()) {
+      const res = await invokeIpc<string>('git_get_commit_file_diff', {
+        cwd,
+        hash,
+        path,
+        oldPath: oldPath ?? null
+      })
+      if (!res.success) throw new Error(res.error)
+      return res.data
+    }
+    return webServerGit.getCommitFileDiff(cwd, hash, path, oldPath)
+  },
 
   /**
    * `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch);

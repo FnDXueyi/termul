@@ -53,6 +53,9 @@ interface PersistedDiffTabRef {
   cwd: string
   path: string
   staged: boolean
+  /** Read-only commit diff: the full hash (absent for a working-copy diff). */
+  commit?: string
+  oldPath?: string
 }
 
 export type PersistedTabRef =

@@ -124,6 +124,7 @@ import {
   TypeIcon,
   Unlink01Icon,
   Upload01Icon,
+  UserIcon,
   Video01Icon,
   Wifi01Icon,
   WifiOff01Icon,
@@ -180,6 +181,7 @@ export const Home = hugeIcon('Home', Home01Icon)
 export const Settings = hugeIcon('Settings', Settings01Icon)
 export const Download = hugeIcon('Download', Download01Icon)
 export const Upload = hugeIcon('Upload', Upload01Icon)
+export const User = hugeIcon('User', UserIcon)
 export const X = hugeIcon('X', XIconData)
 export const Plus = hugeIcon('Plus', PlusIcon)
 export const Minus = hugeIcon('Minus', MinusIcon)

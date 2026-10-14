@@ -115,6 +115,9 @@ interface GitDiffPaneProps {
   controlsDisabled?: boolean
   /** Why the controls are disabled; shown under the header when set. */
   disabledReason?: string | null
+  /** Replaces the Staged / Working tree chip (e.g. `at e44b917`) and makes the
+   * diff read-only: no hunk actions. Used for commit diffs. */
+  sideLabel?: string
 }
 
 /** Diff header (file, side label, delta, Inline | Split track) and diff body. */
@@ -130,7 +133,8 @@ export function GitDiffPane({
   onBack,
   failure,
   controlsDisabled = false,
-  disabledReason = null
+  disabledReason = null,
+  sideLabel
 }: GitDiffPaneProps) {
   const isMobile = variant === 'mobile'
   const chrome = CHROME[variant]
@@ -175,7 +179,7 @@ export function GitDiffPane({
             <span className="shrink-0 font-medium text-foreground">{fileName}</span>
           </span>
           <span className="flex h-5 shrink-0 items-center rounded-md border border-border px-1.5 text-2xs text-muted-foreground">
-            {selectedStaged ? 'Staged' : 'Working tree'}
+            {sideLabel ?? (selectedStaged ? 'Staged' : 'Working tree')}
           </span>
           {delta && chrome.showText && (
             <span
@@ -220,7 +224,7 @@ export function GitDiffPane({
               diff={currentDiff}
               mode={diffViewMode}
               filePath={selectedFile}
-              diffSide={selectedStaged ? 'staged' : 'unstaged'}
+              diffSide={sideLabel ? undefined : selectedStaged ? 'staged' : 'unstaged'}
               onStageHunk={onStageHunk}
               onUnstageHunk={onUnstageHunk}
             />

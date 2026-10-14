@@ -4,7 +4,7 @@ import { TabChrome } from './tab-chrome'
 import type { TabInlineProps } from './types'
 
 interface DiffTabInlineProps extends TabInlineProps {
-  tab: { type: 'diff'; id: string; cwd: string; path: string; staged: boolean }
+  tab: { type: 'diff'; id: string; cwd: string; path: string; staged: boolean; commit?: string }
 }
 
 /** Repo-relative POSIX path -> its last segment (the tab label). */
@@ -27,7 +27,10 @@ export function DiffTabInline({
   onDrop,
   bulkMenu
 }: DiffTabInlineProps): React.JSX.Element {
-  const side = tab.staged ? 'Staged' : 'Working tree'
+  const shortHash = tab.commit?.slice(0, 7)
+  const side = shortHash ? `at ${shortHash}` : tab.staged ? 'Staged' : 'Working tree'
+  const name = basename(tab.path)
+  const label = shortHash ? `${name} @ ${shortHash}` : tab.staged ? `${name} (staged)` : name
   return (
     <TabContextMenu kind="diff" onClose={onClose} {...bulkMenu}>
       <TabChrome
@@ -42,7 +45,7 @@ export function DiffTabInline({
         onDragLeave={onDragLeave}
         onDrop={onDrop}
         icon={<FileDiff size={12} />}
-        label={tab.staged ? `${basename(tab.path)} (staged)` : basename(tab.path)}
+        label={label}
         title={`${tab.path} (${side})`}
         pinClose={isActive}
       />

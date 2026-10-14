@@ -13,6 +13,7 @@ use super::cwd_tracker::CwdTracker;
 use super::{TerminalEvent, TerminalEventHub};
 
 mod commands;
+mod commit_detail;
 mod commit_stamp;
 mod diff_stat;
 mod polling;
@@ -41,6 +42,9 @@ pub use commands::{
     git_checkout_branch, git_commit_stamped, git_create_branch, git_discard_file,
     git_get_commit_context, git_get_diff, git_get_log, git_get_status_detail, git_push_current,
     git_stage_file, git_stage_hunk, git_unstage_file, git_unstage_hunk,
+};
+pub use commit_detail::{
+    git_get_commit_detail, git_get_commit_file_diff, CommitDetailError, GitCommitDetail,
 };
 pub use diff_stat::{git_get_diff_stat, DiffStatError, GitDiffStat};
 pub use resolve::{resolve_executable, resolve_git_binary};
@@ -559,6 +563,8 @@ impl GitTracker {
     }
 }
 
+#[cfg(test)]
+mod commit_detail_tests;
 #[cfg(test)]
 mod diff_stat_tests;
 #[cfg(test)]

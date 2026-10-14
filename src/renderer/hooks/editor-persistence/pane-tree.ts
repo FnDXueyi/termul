@@ -3,7 +3,13 @@ import { randomUUID } from '@/lib/uuid'
 import { reportUnknownTabKind } from '@/lib/workspace-tab-kinds'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
-import { browserTabId, diffTabId, editorTabId, terminalTabId } from '@/stores/workspace-store'
+import {
+  browserTabId,
+  commitDiffTabId,
+  diffTabId,
+  editorTabId,
+  terminalTabId
+} from '@/stores/workspace-store'
 import type { Terminal } from '@/types/project'
 import type { PaneNode, SplitNode } from '@/types/workspace.types'
 import type { PersistedTerminalLayout } from '../../../shared/types/persistence.types'
@@ -32,7 +38,17 @@ export function serializePaneTree(node: PaneNode): PersistedPaneNode {
         case 'git-history':
           return [{ type: 'git-history', id: tab.id, cwd: tab.cwd }]
         case 'diff':
-          return [{ type: 'diff', id: tab.id, cwd: tab.cwd, path: tab.path, staged: tab.staged }]
+          return [
+            {
+              type: 'diff',
+              id: tab.id,
+              cwd: tab.cwd,
+              path: tab.path,
+              staged: tab.staged,
+              ...(tab.commit ? { commit: tab.commit } : {}),
+              ...(tab.oldPath ? { oldPath: tab.oldPath } : {})
+            }
+          ]
         case 'canvas':
           // Not persisted (see WORKSPACE_TAB_KIND_TRAITS): the canvas re-opens
           // user-initiated.
@@ -345,13 +361,22 @@ export function deserializePaneTree(persisted: PersistedPaneNodeInput): PaneNode
               })
               return []
             }
+            const commit = typeof tab.commit === 'string' ? tab.commit : undefined
+            const oldPath = typeof tab.oldPath === 'string' ? tab.oldPath : undefined
             return [
               {
                 type: 'diff',
-                id: typeof tab.id === 'string' ? tab.id : diffTabId(tab.cwd, tab.path, tab.staged),
+                id:
+                  typeof tab.id === 'string'
+                    ? tab.id
+                    : commit
+                      ? commitDiffTabId(tab.cwd, commit, tab.path)
+                      : diffTabId(tab.cwd, tab.path, tab.staged),
                 cwd: tab.cwd,
                 path: tab.path,
-                staged: tab.staged
+                staged: tab.staged,
+                ...(commit ? { commit } : {}),
+                ...(oldPath ? { oldPath } : {})
               }
             ]
           }
