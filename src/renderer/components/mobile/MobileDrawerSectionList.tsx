@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
 import { Edit2, FileDiff, GitBranch, Globe, Pencil, TerminalSquare, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
@@ -31,6 +32,13 @@ function rowButtonClass(isActive: boolean): string {
 
 function basename(filePath: string): string {
   return filePath.split(/[\\/]/).pop() || filePath
+}
+
+/** The file's extension without the dot, `null` for none or a dotfile. */
+function extension(filePath: string): string | null {
+  const name = basename(filePath)
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1) : null
 }
 
 /**
@@ -375,7 +383,16 @@ export function MobileDrawerSectionList({
                   data-section-row-select={tab.id}
                   onClick={() => choose(paneId, tab.id)}
                 >
-                  {tab.type === 'editor' && <Pencil size={16} />}
+                  {tab.type === 'editor' && (
+                    <MaterialFileIcon
+                      name={basename(tab.filePath)}
+                      extension={extension(tab.filePath)}
+                      isDirectory={false}
+                      isExpanded={false}
+                      depth={0}
+                      size={16}
+                    />
+                  )}
                   {tab.type === 'git' && <GitBranch size={16} />}
                   {tab.type === 'diff' && <FileDiff size={16} />}
                   {tab.type === 'browser' && <Globe size={16} />}
