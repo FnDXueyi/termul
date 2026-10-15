@@ -281,6 +281,16 @@ impl Default for IdleWindowState {
     }
 }
 
+/// A log label chosen here, never the caller's string.
+fn idle_window_log_source(source: &str) -> &'static str {
+    match source {
+        "env" => "env",
+        "operator" => "operator",
+        "setting" => "setting",
+        _ => "default",
+    }
+}
+
 fn resolve_idle_window(state: &IdleWindowState) -> AgentIdleWindowStatus {
     let baseline = if state.baseline_secs == 0 {
         DEFAULT_AGENT_IDLE_WINDOW_SECS
@@ -323,12 +333,13 @@ pub fn install_agent_idle_baseline(secs: u64, lock: Option<&'static str>) {
         state.lock = lock;
     }
     let live = resolved_agent_idle_window();
+    // Log only a fixed label. The window length is caller-supplied (flag, env,
+    // or Settings) and must not be copied into the log line.
     log::info!(
         target: LOG_TARGET,
-        "agent idle window baseline installed: baseline={baseline}s locked={} live={}s source={}",
+        "agent idle window baseline installed: locked={} source={}",
         lock.is_some(),
-        live.secs,
-        live.source
+        idle_window_log_source(live.source)
     );
 }
 
@@ -340,11 +351,11 @@ pub fn set_agent_idle_window_override(secs: Option<u64>) {
         state.ui_override_secs = secs.filter(|value| *value > 0);
     }
     let live = resolved_agent_idle_window();
+    // `secs` comes from Settings. Log a fixed label, not that value.
     log::info!(
         target: LOG_TARGET,
-        "agent idle window override updated: override={secs:?} live={}s source={}",
-        live.secs,
-        live.source
+        "agent idle window override updated: source={}",
+        idle_window_log_source(live.source)
     );
 }
 
