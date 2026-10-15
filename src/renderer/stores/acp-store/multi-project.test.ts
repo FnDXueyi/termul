@@ -151,7 +151,8 @@ import {
   configIdFromReuseKey,
   selectAgentIdentity,
   selectConfigWarmState,
-  useAcpStore
+  useAcpStore,
+  withSessionResumeError
 } from '@/stores/acp-store'
 import { FRESH, seedSession } from './testkit'
 
@@ -313,6 +314,24 @@ describe('acp-store multi-project isolation', () => {
       message: 'turn idle timeout'
     })
     session = useAcpStore.getState().sessions['s1']
+    expect(session.lastErrorCode).toBeNull()
+    expect(session.lastErrorData).toBeUndefined()
+  })
+
+  it('gh-821: a resume failure clears the earlier agent error code + data', () => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.getState()._onAgentError({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      message: 'auth',
+      code: -32000,
+      data: { reason: 'login' }
+    })
+    useAcpStore.setState((s) => ({
+      sessions: withSessionResumeError(s.sessions, 's1', 'spawn boom')
+    }))
+    const session = useAcpStore.getState().sessions['s1']
+    expect(session.lastError).toBe('Resume failed: spawn boom')
     expect(session.lastErrorCode).toBeNull()
     expect(session.lastErrorData).toBeUndefined()
   })
