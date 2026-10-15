@@ -338,7 +338,7 @@ describe('useProjectRegistry', () => {
       const before = vi.mocked(persistenceApi.writeDebounced).mock.calls.length
       h.heldWrites = []
       for (const name of names) act(() => useProjectStore.getState().addGroup(name))
-      await waitFor(() =>
+      await vi.waitFor(() =>
         expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(before + names.length)
       )
     }
@@ -371,6 +371,18 @@ describe('useProjectRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
       expect(savedGroupNames()).toEqual(['One', 'Two', 'Three', 'Four'])
+    })
+
+    it('writes the newest state when the store changes while a retry is pending', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['First'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      await addGroupsOverHeldWrites(['Second'])
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['First', 'Second'])
     })
 
     it('stops retrying a failed save once the hook is unmounted', async () => {

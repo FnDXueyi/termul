@@ -129,7 +129,7 @@ function createPrefsSaver(isCancelled: () => boolean): {
   }
 
   function scheduleRetry(error: unknown): void {
-    if (isCancelled()) return
+    if (isCancelled() || retryTimer) return
     const delay = PREFS_SAVE_RETRY_MS[failures]
     if (delay === undefined) {
       logFailure(
@@ -146,7 +146,6 @@ function createPrefsSaver(isCancelled: () => boolean): {
       `saving the project prefs failed, retrying in ${delay} ms`,
       error
     )
-    cancel()
     retryTimer = setTimeout(() => {
       retryTimer = undefined
       const state = useProjectStore.getState()
