@@ -699,7 +699,12 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
 
     const session = get().sessions[sessionId]
     if (!session) throw new Error(`unknown session ${sessionId}`)
-    if (session.status === 'closed') throw new Error('session is closed')
+    if (session.status === 'closed') {
+      // A history reopen (e.g. a stopped chat's automatic resume) is in
+      // flight: leave the item queued — the open's finally flushes it.
+      if (get().openingHistoryIds[sessionId]) return
+      throw new Error('session is closed')
+    }
 
     set((s) => ({
       promptQueues: {

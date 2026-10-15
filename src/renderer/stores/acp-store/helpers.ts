@@ -482,6 +482,18 @@ export function withSessionActive(
   return { ...sessions, [sessionId]: { ...session, status: 'active', lastError: null } }
 }
 
+/** Prefix of the `lastError` a failed history load/resume writes. */
+export const RESUME_FAILED_PREFIX = 'Resume failed: '
+
+/**
+ * Whether `lastError` records a failed resume (as opposed to a turn note such
+ * as "Interrupted by server restart."). A failed resume blocks the seamless
+ * resume of a stopped chat; a leftover turn note does not.
+ */
+export function isResumeFailureError(lastError: string | null | undefined): boolean {
+  return typeof lastError === 'string' && lastError.startsWith(RESUME_FAILED_PREFIX)
+}
+
 /** Surface a failed history load/resume on the session without changing status. */
 export function withSessionResumeError(
   sessions: Record<SessionId, AcpSession>,
@@ -492,7 +504,11 @@ export function withSessionResumeError(
   if (!session) return sessions
   return {
     ...sessions,
-    [sessionId]: { ...session, replaying: null, lastError: `Resume failed: ${String(err)}` }
+    [sessionId]: {
+      ...session,
+      replaying: null,
+      lastError: `${RESUME_FAILED_PREFIX}${String(err)}`
+    }
   }
 }
 

@@ -768,6 +768,67 @@ describe('ChatInputBar agent switch chip (Story 4, spec-in-chat-agent-switch)', 
     expect(trigger).toBeDisabled()
   })
 
+  it('disables the agent-backed controls via controlsDisabled while the editor stays enabled', async () => {
+    // A stopped chat that resumes on input: typing works, pickers would hit
+    // the stopped agent.
+    renderInputBar({ disabled: false, controlsDisabled: true })
+    const trigger = await screen.findByRole('button', {
+      name: /Switch agent\. Currently Cursor/
+    })
+    expect(trigger).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^Agent$/ })).toBeDisabled()
+    expect(screen.queryByText('Session closed')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(document.querySelector('[data-composer-editor="true"] p')).toHaveAttribute(
+        'data-placeholder',
+        'Ask anything… (/ for commands, @ for files)'
+      )
+    })
+  })
+
+  it('hides slash-menu mode and config rows via controlsDisabled while commands still list', async () => {
+    const commands = [{ name: 'compact', description: 'Compact the conversation' }]
+    const openSlashMenu = async (): Promise<HTMLElement> => {
+      await waitFor(() => {
+        expect(document.querySelector('[data-composer-editor="true"]')).not.toBeNull()
+      })
+      setComposerValue('/')
+      return screen.findByRole('listbox')
+    }
+
+    // Baseline: with the controls on, the session's modes list.
+    renderInputBar({ commands })
+    expect(within(await openSlashMenu()).getByText('Plan')).toBeInTheDocument()
+    cleanup()
+
+    // Modes only (no config options): no Plan/Ask rows, the command stays.
+    renderInputBar({ commands, disabled: false, controlsDisabled: true })
+    let listbox = await openSlashMenu()
+    expect(within(listbox).getByText('/compact')).toBeInTheDocument()
+    expect(within(listbox).queryByText('Plan')).not.toBeInTheDocument()
+    expect(within(listbox).queryByText('Ask')).not.toBeInTheDocument()
+    cleanup()
+
+    // Config options (which replace the mode rows when present): none list.
+    const effort = option('effort', 'Effort', 'other', 'low', [
+      { value: 'low', name: 'Low effort' },
+      { value: 'high', name: 'High effort' }
+    ])
+    renderInputBar({ commands, configOptions: [effort] })
+    expect(within(await openSlashMenu()).getByText('High effort')).toBeInTheDocument()
+    cleanup()
+    renderInputBar({
+      commands,
+      configOptions: [effort],
+      disabled: false,
+      controlsDisabled: true
+    })
+    listbox = await openSlashMenu()
+    expect(within(listbox).getByText('/compact')).toBeInTheDocument()
+    expect(within(listbox).queryByText('High effort')).not.toBeInTheDocument()
+    expect(within(listbox).queryByText('Low effort')).not.toBeInTheDocument()
+  })
+
   it('cancel affordance clears the armed switch', async () => {
     mockSwitching.current = { toConfigId: 'acp-registry:claude-acp', status: 'pending' }
     renderInputBar()
@@ -1420,6 +1481,99 @@ describe('ChatInputBar command chip', () => {
     await waitFor(() => {
       expect(screen.getByRole('listbox')).toBeInTheDocument()
     })
+  })
+})
+
+/** A paste event carrying plain text (jsdom has no ClipboardEvent/DataTransfer). */
+function textPasteEvent(text: string): Event {
+  const clipboardData = {
+    types: ['text/plain'],
+    getData: (type: string) => (type === 'text/plain' || type === 'text' ? text : ''),
+    setData: () => {},
+    items: [],
+    files: [] as File[]
+  }
+  const ev = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(ev, 'clipboardData', { value: clipboardData, configurable: true })
+  return ev
+}
+
+function pasteIntoComposer(text: string): void {
+  const el = document.querySelector('[data-composer-editor="true"]')
+  if (!el) throw new Error('composer editor not mounted')
+  act(() => {
+    el.dispatchEvent(textPasteEvent(text))
+  })
+}
+
+// spec-idle-stopped-chat-seamless-resume: the draft-start signal pre-warms
+// the resume of a stopped chat.
+describe('ChatInputBar draft start', () => {
+  beforeEach(() => {
+    persistenceStore.clear()
+    fakePersistenceApi.readFails = false
+  })
+
+  it('fires onDraftStart on the first keystroke into an empty draft only', async () => {
+    const onDraftStart = vi.fn()
+    renderInputBar({ onDraftStart })
+    await waitFor(() => {
+      expect(document.querySelector('[data-composer-editor="true"]')).not.toBeNull()
+    })
+    expect(onDraftStart).not.toHaveBeenCalled()
+    setComposerValue('c')
+    setComposerValue('co')
+    expect(onDraftStart).toHaveBeenCalledTimes(1)
+    // Emptying the draft and typing again is a new draft start.
+    setComposerValue('')
+    setComposerValue('n')
+    expect(onDraftStart).toHaveBeenCalledTimes(2)
+  })
+
+  it('fires once for a paste into an empty draft', async () => {
+    const onDraftStart = vi.fn()
+    renderInputBar({ onDraftStart })
+    await waitFor(() => {
+      expect(document.querySelector('[data-composer-editor="true"]')).not.toBeNull()
+    })
+    pasteIntoComposer('pasted text')
+    expect(onDraftStart).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire for a paste into a non-empty draft', async () => {
+    const onDraftStart = vi.fn()
+    renderInputBar()
+    await waitFor(() => {
+      expect(document.querySelector('[data-composer-editor="true"]')).not.toBeNull()
+    })
+    setComposerValue('already typing')
+    cleanup()
+    // Same draft, now with the callback wired: the paste is not a draft start.
+    persistenceStore.set('chat-draft/p1/session-1', 'already typing')
+    renderInputBar({ onDraftStart })
+    await waitFor(() => {
+      expect(getComposerValue()).toBe('already typing')
+    })
+    pasteIntoComposer(' more')
+    expect(onDraftStart).not.toHaveBeenCalled()
+  })
+
+  it('does not fire for a restored draft', async () => {
+    persistenceStore.set('chat-draft/p1/session-1', 'half-typed message')
+    const onDraftStart = vi.fn()
+    renderInputBar({ onDraftStart })
+    await waitFor(() => {
+      expect(getComposerValue()).toBe('half-typed message')
+    })
+    expect(onDraftStart).not.toHaveBeenCalled()
+  })
+
+  it('shows the Session closed pill only while disabled', () => {
+    const { unmount } = renderInputBar({ disabled: true })
+    expect(screen.getByText('Session closed')).toBeInTheDocument()
+    unmount()
+    renderInputBar({ disabled: false })
+    expect(screen.queryByText('Session closed')).not.toBeInTheDocument()
   })
 })
 
