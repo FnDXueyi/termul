@@ -1,6 +1,12 @@
 import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import {
   browserTabCreate,
   browserTabDestroy,
   browserTabHide,
@@ -226,6 +232,34 @@ describe('useBrowserWebview bounds updates', () => {
 
     occluder.unmount()
     visible.unmount()
+    resetNativeWebviewOcclusionForTests()
+  })
+
+  it('hides while a shared menu primitive is open and reveals once it closes', async () => {
+    const Page = ({ menuOpen }: { menuOpen: boolean }): JSX.Element => (
+      <>
+        <BrowserWebviewHarness />
+        <DropdownMenu open={menuOpen}>
+          <DropdownMenuTrigger>Tab</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem>Close</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </>
+    )
+    const view = render(<Page menuOpen={false} />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalledTimes(1))
+    expect(browserTabHide).not.toHaveBeenCalled()
+
+    view.rerender(<Page menuOpen />)
+    await waitFor(() => expect(browserTabHide).toHaveBeenCalledTimes(1))
+    expect(browserTabHide).toHaveBeenLastCalledWith('browser-1')
+
+    view.rerender(<Page menuOpen={false} />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalledTimes(2))
+    expect(browserTabShow).toHaveBeenLastCalledWith('browser-1')
+
+    view.unmount()
     resetNativeWebviewOcclusionForTests()
   })
 
