@@ -1,7 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mockAcpSession, mockSessionIndexEntry } from '@/lib/test-utils/acp'
-import { useAcpStore } from '@/stores/acp-store'
+import {
+  _addEphemeralSessionIdForTesting,
+  _resetEphemeralSessionIdsForTesting,
+  useAcpStore
+} from '@/stores/acp-store'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { resetShellLayoutStoreForTests, useShellLayoutStore } from '@/stores/shell-layout-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -83,6 +87,7 @@ beforeEach(() => {
   resetShellLayoutStoreForTests()
   useShellLayoutStore.setState({ status: 'ready' })
   useAgentChatUnreadStore.setState({ unread: {} })
+  _resetEphemeralSessionIdsForTesting()
   useAcpStore.setState({
     sessionIndex: [],
     sessions: {},
@@ -290,6 +295,25 @@ describe('ChatsList card content', () => {
     const [line1, line2] = Array.from(screen.getByTitle('Chat a').children)
     expect(line1).toHaveTextContent('Chat a')
     expect(line2).toHaveTextContent('Opus')
+  })
+
+  it('shows New activity on an unread closed chat', () => {
+    setIndex([entry('a', { status: 'closed' })])
+    useAcpStore.setState({ sessions: { a: mockAcpSession({ id: 'a', status: 'closed' }) } })
+    useAgentChatUnreadStore.setState({ unread: { a: true } })
+    render(<ChatsList project={project} />)
+    expect(screen.getByRole('button', { name: 'Chat a, New activity' })).toBeInTheDocument()
+    expect(within(screen.getByTitle('Chat a')).getByTitle('New activity')).toBeInTheDocument()
+  })
+
+  it('shows no New activity for an unread ephemeral session', () => {
+    setIndex([entry('eph')])
+    useAcpStore.setState({ sessions: { eph: mockAcpSession({ id: 'eph' }) } })
+    _addEphemeralSessionIdForTesting('eph')
+    useAgentChatUnreadStore.setState({ unread: { eph: true } })
+    render(<ChatsList project={project} />)
+    expect(screen.getByRole('button', { name: 'Chat eph' })).toBeInTheDocument()
+    expect(within(screen.getByTitle('Chat eph')).queryByTitle('New activity')).toBeNull()
   })
 
   it('keeps a closed chat at full opacity and says Closed', () => {

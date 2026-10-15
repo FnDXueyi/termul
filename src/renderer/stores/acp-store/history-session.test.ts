@@ -144,6 +144,7 @@ vi.mock('@/lib/api', async (importActual) => {
 import { invoke } from '@tauri-apps/api/core'
 import { setCachedSessionPayload } from '@/lib/acp-history-persistence'
 import { _resetAcpTransportForTests } from '@/lib/acp-transport'
+import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import {
   _flushCoalescedForTesting,
   _resetAcpAuthForTesting,
@@ -1190,5 +1191,62 @@ describe('acp-store', () => {
       commandId: expect.any(String)
     })
     expect(useAcpStore.getState().sessions['s-cold-start'].status).toBe('active')
+  })
+
+  describe('markResumeFailed', () => {
+    function setSession(patch: {
+      status: 'active' | 'closed' | 'error'
+      lastError: string | null
+    }) {
+      seedSession('s-stop', 'agent-1', false)
+      useAcpStore.setState((s) => ({
+        sessions: { ...s.sessions, 's-stop': { ...s.sessions['s-stop'], ...patch } }
+      }))
+    }
+
+    it('records a Resume failed lastError on a closed session without one', () => {
+      setSession({ status: 'closed', lastError: null })
+      useAcpStore.getState().markResumeFailed('s-stop', 'could not reconnect to the agent')
+      const session = useAcpStore.getState().sessions['s-stop']
+      expect(session.lastError).toBe('Resume failed: could not reconnect to the agent')
+      expect(isResumeFailureError(session.lastError)).toBe(true)
+      expect(session.status).toBe('closed')
+    })
+
+    it('replaces a leftover turn note on a closed session', () => {
+      setSession({ status: 'closed', lastError: 'Interrupted by server restart.' })
+      useAcpStore.getState().markResumeFailed('s-stop', 'could not reconnect to the agent')
+      expect(useAcpStore.getState().sessions['s-stop'].lastError).toBe(
+        'Resume failed: could not reconnect to the agent'
+      )
+    })
+
+    it('never overwrites an existing resume failure (no double write)', () => {
+      setSession({ status: 'closed', lastError: 'Resume failed: spawn boom' })
+      const before = useAcpStore.getState().sessions
+      useAcpStore.getState().markResumeFailed('s-stop', 'could not reconnect to the agent')
+      expect(useAcpStore.getState().sessions['s-stop'].lastError).toBe('Resume failed: spawn boom')
+      expect(useAcpStore.getState().sessions).toBe(before)
+    })
+
+    it('never overwrites the Codex signed-out message', () => {
+      setSession({ status: 'closed', lastError: CODEX_CLI_SIGNED_OUT_MESSAGE })
+      const before = useAcpStore.getState().sessions
+      useAcpStore.getState().markResumeFailed('s-stop', 'could not reconnect to the agent')
+      expect(useAcpStore.getState().sessions['s-stop'].lastError).toBe(CODEX_CLI_SIGNED_OUT_MESSAGE)
+      expect(useAcpStore.getState().sessions).toBe(before)
+    })
+
+    it('leaves live and crashed sessions alone, and ignores unknown ids', () => {
+      setSession({ status: 'active', lastError: null })
+      useAcpStore.getState().markResumeFailed('s-stop', 'x')
+      expect(useAcpStore.getState().sessions['s-stop'].lastError).toBeNull()
+      setSession({ status: 'error', lastError: 'agent crashed' })
+      useAcpStore.getState().markResumeFailed('s-stop', 'x')
+      expect(useAcpStore.getState().sessions['s-stop'].lastError).toBe('agent crashed')
+      const before = useAcpStore.getState().sessions
+      useAcpStore.getState().markResumeFailed('missing', 'x')
+      expect(useAcpStore.getState().sessions).toBe(before)
+    })
   })
 })

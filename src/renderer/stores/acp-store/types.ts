@@ -699,6 +699,10 @@ export interface AcpState {
    * is still surfaced; respawn only happens on explicit user action). */
   /** Reopen on a fresh agent and (unless `resend: false`) send the last user prompt again. */
   retryCrashedSession: (sessionId: SessionId, options?: { resend?: boolean }) => Promise<void>
+  /** Record a failed resume of a stopped (`closed`) chat as a `Resume failed: <reason>`
+   * `lastError` so Attention, the panel and remounts agree. No-op when the
+   * session is missing, not `closed`, or already carries a resume failure. */
+  markResumeFailed: (sessionId: SessionId, reason: string) => void
   /** Re-run prepare for a failed chat launch (status 'error' +
    * `launchConfigId`) against the recorded agent config. On success the real
    * session replaces the placeholder and the tab remaps; on failure the

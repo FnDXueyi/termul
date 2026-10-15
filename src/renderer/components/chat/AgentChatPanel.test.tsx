@@ -14,6 +14,7 @@ const {
   mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
+  mockMarkResumeFailed,
   mockSendPrompt,
   mockSendPromptBlocks,
   promptQueueRef,
@@ -65,6 +66,9 @@ const {
   // never retryCrashedSession, and never toast a circular "Could not retry").
   mockRetryCrashed: vi.fn(),
   mockRetryFailed: vi.fn(),
+  // spec-stopped-chat-status-signals: the idle-stop auto-resume records a
+  // failure through this store action when the store wrote none itself.
+  mockMarkResumeFailed: vi.fn(),
   // Live-turn retry (handleRetry): asserts the sanitized wire blocks the
   // panel dispatches through the store's sendPromptBlocks.
   mockSendPromptBlocks: vi.fn(),
@@ -251,6 +255,7 @@ vi.mock('@/stores/acp-store', () => {
     sendQueuedPromptNow: vi.fn(),
     retryCrashedSession: mockRetryCrashed,
     retryFailedLaunch: mockRetryFailed,
+    markResumeFailed: mockMarkResumeFailed,
     setConfigOption: mockSetConfigOption,
     setMode: mockSetMode,
     setModel: mockSetModel,
@@ -447,7 +452,10 @@ vi.mock('./chat-timeline', () => {
 })
 
 import { AgentChatPanel } from './AgentChatPanel'
-import { AUTO_RESUME_FAILED_QUEUED_TOAST } from './use-idle-stop-auto-resume'
+import {
+  AUTO_RESUME_FAILED_QUEUED_TOAST,
+  AUTO_RESUME_FAILED_REASON
+} from './use-idle-stop-auto-resume'
 
 function seedLiveSession(id: string, lastError: string | null = null): void {
   sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'closed', lastError })
@@ -663,6 +671,7 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
     mockSendPrompt.mockReset().mockResolvedValue(undefined)
     mockSendPromptBlocks.mockReset().mockResolvedValue(undefined)
     mockRetryCrashed.mockReset().mockResolvedValue(undefined)
+    mockMarkResumeFailed.mockReset()
     toastErrorSpy.mockReset()
     sessionRef.current = null
     indexRef.current = [{ id: 's1' }]
@@ -906,6 +915,161 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
     expect(errorNoticePropsRef.current?.message).toBe('agent crashed')
     expect(lastComposerProps()?.onDraftStart).toBeUndefined()
     expect(mockOpen).not.toHaveBeenCalled()
+  })
+
+  // spec-stopped-chat-status-signals: a failed automatic resume is recorded
+  // as a `Resume failed: …` lastError so Attention, the panel and a remount agree.
+  describe('failed automatic resume is recorded', () => {
+    const RECORDED = `Resume failed: ${AUTO_RESUME_FAILED_REASON}`
+
+    it('records a resume failure when the open resolves still closed with no lastError', async () => {
+      let resolveOpen!: () => void
+      mockOpen.mockReturnValue(
+        new Promise<void>((resolve) => {
+          resolveOpen = resolve
+        })
+      )
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => {
+        lastComposerProps()?.onDraftStart?.()
+      })
+      publishOpening(rerender)
+      openingRef.current = {}
+      restoringRef.current = {}
+      await act(async () => {
+        resolveOpen()
+      })
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(mockMarkResumeFailed).toHaveBeenCalledTimes(1)
+      expect(mockMarkResumeFailed).toHaveBeenCalledWith('s1', AUTO_RESUME_FAILED_REASON)
+      // The store applies the record; the panel derives everything from it.
+      seedLiveSession('s1', RECORDED)
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(errorNoticePropsRef.current?.message).toBe(RECORDED)
+      expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Resume chat' })).toBeInTheDocument()
+      expect(lastComposerProps()?.disabled).toBe(true)
+      expect(mockMarkResumeFailed).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not record again when the store already wrote the resume failure (rejection)', async () => {
+      mockOpen.mockImplementationOnce(async () => {
+        // The store writes `Resume failed: …` before the open rejects.
+        seedLiveSession('s1', 'Resume failed: spawn boom')
+        throw new Error('spawn boom')
+      })
+      const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+      await act(async () => {
+        lastComposerProps()?.onSend?.('continue')
+      })
+      rerender(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+      expect(errorNoticePropsRef.current?.message).toBe('Resume failed: spawn boom')
+      expect(mockMarkResumeFailed).not.toHaveBeenCalled()
+    })
+
+    it('a remount after the recorded failure does not auto-resume again', () => {
+      seedLiveSession('s1', RECORDED)
+      const first = render(<AgentChatPanel sessionId="s1" isVisible />)
+      first.unmount()
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+      expect(lastComposerProps()?.disabled).toBe(true)
+      expect(lastComposerProps()?.onDraftStart).toBeUndefined()
+      act(() => {
+        lastComposerProps()?.onSend?.('continue')
+      })
+      expect(mockOpen).not.toHaveBeenCalled()
+      expect(mockMarkResumeFailed).not.toHaveBeenCalled()
+    })
+
+    it("the notice's Resume chat reopens like the bar, even with no user turn", () => {
+      seedLiveSession('s1', RECORDED)
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      const props = errorNoticePropsRef.current as { retryLabel?: string; onRetry?: () => void }
+      expect(props.retryLabel).toBe('Resume chat')
+      expect(props.onRetry).toBeDefined()
+      act(() => {
+        props.onRetry?.()
+      })
+      expect(mockOpen).toHaveBeenCalledTimes(1)
+      expect(mockOpen).toHaveBeenCalledWith('s1')
+      expect(mockRetryCrashed).not.toHaveBeenCalled()
+      expect(mockSendPromptBlocks).not.toHaveBeenCalled()
+    })
+
+    it("the notice's Resume chat does not resend a finished last user turn", () => {
+      seedLiveSession('s1', 'Resume failed: spawn boom')
+      messagesRef.current = [{ id: 'm1', role: 'user', blocks: [{ type: 'text', text: 'hello' }] }]
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(mockOpen).toHaveBeenCalledWith('s1')
+      expect(mockRetryCrashed).not.toHaveBeenCalled()
+      expect(mockSendPromptBlocks).not.toHaveBeenCalled()
+    })
+
+    it("toasts when the notice's Resume chat open rejects with a normal error", async () => {
+      seedLiveSession('s1', RECORDED)
+      mockOpen.mockRejectedValueOnce(new Error('spawn boom'))
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      await act(async () => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(toastErrorSpy).toHaveBeenCalledWith('Could not resume this chat. Try again.')
+    })
+
+    it("does not toast when the notice's Resume chat open rejects with an agent-dead error", async () => {
+      seedLiveSession('s1', RECORDED)
+      mockOpen.mockRejectedValueOnce(new Error('agent thread is no longer running'))
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      await act(async () => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(mockOpen).toHaveBeenCalledWith('s1')
+      expect(toastErrorSpy).not.toHaveBeenCalled()
+    })
+
+    it('re-shows the notice after a dismissed, identical repeat failure', async () => {
+      seedLiveSession('s1', RECORDED)
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => {
+        errorNoticePropsRef.current?.onDismiss()
+      })
+      expect(errorNoticePropsRef.current?.message).toBeNull()
+      // The reopen settles still failed with the same recorded error.
+      await act(async () => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(errorNoticePropsRef.current?.message).toBe(RECORDED)
+    })
+
+    it('leaves a discovered-reopen session on its own Retry restore path', () => {
+      seedLiveSession('s1', RECORDED)
+      discoveredContextRef.current = { s1: { agentId: 'a1', cwd: '/w', projectId: 'p1' } }
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      expect(screen.getByRole('button', { name: 'Retry restore' })).toBeInTheDocument()
+      // No user turn: the notice offers no Resume chat of its own.
+      expect(errorNoticePropsRef.current?.onRetry).toBeUndefined()
+    })
+
+    it('a crashed (error) chat Retry still resends as before', () => {
+      indexRef.current = []
+      sessionRef.current = mockAcpSession({
+        id: 's1',
+        cwd: '/w',
+        status: 'error',
+        lastError: 'Resume failed: spawn boom'
+      })
+      messagesRef.current = [{ id: 'm1', role: 'user', blocks: [{ type: 'text', text: 'hello' }] }]
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      act(() => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(mockRetryCrashed.mock.calls).toEqual([['s1']])
+      expect(mockMarkResumeFailed).not.toHaveBeenCalled()
+    })
   })
 
   it('keeps the Codex sign-in bar and a disabled composer', () => {

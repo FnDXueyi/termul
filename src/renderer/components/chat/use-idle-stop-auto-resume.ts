@@ -10,6 +10,12 @@ import { isResumeFailureError } from '@/stores/acp-store/helpers'
 export const AUTO_RESUME_FAILED_QUEUED_TOAST =
   'Could not resume this chat. Your message is still queued — use Resume chat.'
 
+/**
+ * Reason recorded (as `Resume failed: <reason>`) when the automatic resume
+ * settles without reconnecting and the store wrote no resume error itself.
+ */
+export const AUTO_RESUME_FAILED_REASON = 'could not reconnect to the agent'
+
 const LOG_SOURCE = 'AgentChatPanel.idleStopAutoResume'
 
 interface AutoResumeAttempt {
@@ -34,6 +40,8 @@ interface UseIdleStopAutoResumeArgs {
   /** Prompts queued for this session (drives the failure toast). */
   queuedCount: number
   openHistorySession: (id: SessionId) => Promise<void>
+  /** Store action recording a resume failure on a `closed` session. */
+  markResumeFailed: (id: SessionId, reason: string) => void
 }
 
 interface IdleStopAutoResume {
@@ -65,7 +73,9 @@ interface IdleStopAutoResume {
  *
  * Failure is derived from store state: the attempt is running, its open was
  * seen in flight, the open is no longer in flight and the session is still not
- * `active`. The manual "Resume chat" UI then returns (no automatic retry). The
+ * `active`. The manual "Resume chat" UI then returns (no automatic retry) and,
+ * when the store wrote no resume error itself, a `Resume failed: …` lastError
+ * is recorded so Attention ("Needs you") and a remount agree. The
  * attempt resets only once the session is `active` AND the restore mark has
  * cleared, so the preload bypass holds through the whole auto-started restore.
  */
@@ -78,7 +88,8 @@ export function useIdleStopAutoResume({
   isRestoringChat,
   isLaunchingSession,
   queuedCount,
-  openHistorySession
+  openHistorySession,
+  markResumeFailed
 }: UseIdleStopAutoResumeArgs): IdleStopAutoResume {
   const [attempt, setAttempt] = useState<AutoResumeAttempt | null>(null)
   // Mirror of `attempt` for callbacks only (never read during render), so two
@@ -128,11 +139,15 @@ export function useIdleStopAutoResume({
       }
       if (isOpeningHistory || status === 'active') return
       commit({ ...live, phase: 'failed', restoreTail: isRestoringChat })
+      const storeRecorded = isResumeFailureError(lastError)
+      // Record the failure on the session (store-side guard: closed only,
+      // never over an existing resume failure) so Attention and remounts see it.
+      if (!storeRecorded) markResumeFailed(sessionId, AUTO_RESUME_FAILED_REASON)
       void logFrontendError({
         level: 'warn',
         source: LOG_SOURCE,
         message: `Automatic resume of stopped chat ${sessionId} did not reconnect (${
-          isResumeFailureError(lastError) ? 'resume error' : 'no live agent'
+          storeRecorded ? 'resume error' : 'no live agent'
         }; ${queuedCount} queued); manual Resume chat offered`
       })
       if (queuedCount > 0) toast.error(AUTO_RESUME_FAILED_QUEUED_TOAST)
@@ -147,6 +162,7 @@ export function useIdleStopAutoResume({
     isRestoringChat,
     lastError,
     queuedCount,
+    markResumeFailed,
     commit
   ])
 
