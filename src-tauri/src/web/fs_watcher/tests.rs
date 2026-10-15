@@ -346,7 +346,11 @@ async fn fs_deltas_reach_only_connections_subscribed_to_that_project() {
 async fn reading_a_file_or_listing_a_dir_publishes_no_delta() {
     // An open editor tab reloads through `/fs/read`; if that read came back as
     // a change, the tab would reload again and spin forever.
-    let dir = temp_project_dir("read");
+    let temp = tempfile::Builder::new()
+        .prefix("termul-fswatch-read-")
+        .tempdir()
+        .expect("create project dir");
+    let dir = temp.path().canonicalize().expect("canonicalize project dir");
     let file = dir.join("open-in-editor.md");
     std::fs::write(&file, "# spec").expect("write file");
     let registry = registry_with(&[("p-1", &dir)]);
@@ -374,7 +378,6 @@ async fn reading_a_file_or_listing_a_dir_publishes_no_delta() {
     assert!(payload["paths"].as_array().expect("paths").iter().any(|p| p
         .as_str()
         .is_some_and(|p| p.ends_with("/open-in-editor.md"))));
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
