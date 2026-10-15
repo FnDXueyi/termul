@@ -363,6 +363,16 @@ describe('useProjectRegistry', () => {
       expect(savedGroupNames()).toEqual(['Survives the retry'])
     })
 
+    it('retries within the first ladder step when the debounce fails a burst of saves at once', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['One', 'Two', 'Three', 'Four'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['One', 'Two', 'Three', 'Four'])
+    })
+
     it('stops retrying a failed save once the hook is unmounted', async () => {
       const { unmount } = await mountWithOneProjectSaved()
       await addGroupsOverHeldWrites(['Lost with the hook'])
