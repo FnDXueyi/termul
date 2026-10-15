@@ -75,20 +75,22 @@ describe('AgentProse streaming word animation', () => {
     expect(next?.delay).toBeGreaterThan(0)
   })
 
-  it('keeps words from earlier commits steady instead of replaying them', async () => {
+  it('lets a word finish its fade instead of snapping it at the next commit', async () => {
     const view = renderProse(FIRST, true)
     await settle()
+    const before = wordTimings(view.container)
+    const nodes = [...view.container.querySelectorAll('[data-sd-animate]')]
+    expect(before.length).toBe(FIRST.split(' ').length)
+    for (const word of before) expect(word.duration).toBeGreaterThan(0)
+
     view.update(SECOND, true)
     await settle()
 
-    const firstWords = FIRST.split(' ')
-    const earlier = wordTimings(view.container).filter((w) => firstWords.includes(w.text))
-
-    expect(earlier.length).toBe(firstWords.length)
-    for (const word of earlier) {
-      expect(word.duration).toBe(0)
-      expect(word.delay).toBe(0)
-    }
+    // Same DOM nodes, same schedule: the re-render must not rewrite an animated
+    // word to a 0 ms duration, which cuts a running or waiting fade short.
+    const after = [...view.container.querySelectorAll('[data-sd-animate]')]
+    expect(after.slice(0, nodes.length)).toEqual(nodes)
+    expect(wordTimings(view.container).slice(0, before.length)).toEqual(before)
   })
 
   it('drops the animation wrappers once the turn settles', async () => {
