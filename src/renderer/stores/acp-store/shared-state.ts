@@ -7,6 +7,7 @@
 
 import { type PersistedComposerOptions, PersistenceKeys } from '@shared/types/persistence.types'
 import type { WsAgentSummary } from '@shared/types/web-protocol.types'
+import { sessionModelSnapshot } from '@/components/chat/chat-input-bar-config'
 import type { AgentId, SessionId, ToolCall } from '@/lib/acp-api'
 import {
   deriveTitle,
@@ -171,6 +172,12 @@ export function persistSession(
   // (including a prior `Untitled Chat N`) instead of regenerating one on every
   // persist. `rebaseUntitledCounter` keeps fresh numbers from colliding.
   const fallbackTitle = existingEntry?.title ?? nextUntitledTitle()
+  // Prefer the model the composer shows. Omit the keys when neither the live
+  // session nor the previous row has one, so a spread merge cannot wipe a
+  // host snapshot with `undefined`.
+  const recordedModel = sessionModelSnapshot(session)
+  const modelId = recordedModel?.modelId ?? existingEntry?.modelId
+  const modelName = recordedModel?.modelName ?? existingEntry?.modelName
   const entry: SessionIndexEntry = {
     id: sessionId,
     agentId: session.agentId,
@@ -197,6 +204,8 @@ export function persistSession(
     discovered: session.discovered ?? existingEntry?.discovered ?? false,
     worktreePath: session.worktreePath,
     worktreeBranch: session.worktreeBranch,
+    ...(modelId !== undefined ? { modelId } : {}),
+    ...(modelName !== undefined ? { modelName } : {}),
     // Story 3 (spec-in-chat-agent-switch): ordered-agent cache. The switch
     // orchestration writes the list at switch completion (see
     // `appendOrderedAgents`); every other persist carries the existing

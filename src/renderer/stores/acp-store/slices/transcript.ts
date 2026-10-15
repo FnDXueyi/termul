@@ -3,6 +3,10 @@
  */
 
 import type { StateCreator } from 'zustand'
+import {
+  alignSessionModelProjection,
+  withSessionModelOnIndex
+} from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import { applyTerminalStream, type TerminalStreamFields } from '@/components/chat/terminal-output'
 import type {
@@ -60,7 +64,13 @@ import {
   rejectTerminalAssistCollector,
   terminalAssistCollectors
 } from '../shared-state'
-import type { AcpState, ChatMessage, MessageRole, OpenCodeSessionNotice } from '../types'
+import type {
+  AcpSession,
+  AcpState,
+  ChatMessage,
+  MessageRole,
+  OpenCodeSessionNotice
+} from '../types'
 import { clearPromptReconcile, clearPromptReconcileForTurn } from './prompt-reconcile'
 import { createFlushClock, type FlushTier } from './transcript-flush-clock'
 
@@ -1517,11 +1527,18 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         creationEchoLogged = { ...creationEchoLogged }
         for (const optionId of preservedOptionIds) creationEchoLogged[optionId] = true
       }
+      const draft: AcpSession = {
+        ...session,
+        configOptions: merged,
+        creationEchoLogged
+      }
+      const next = alignSessionModelProjection(draft)
       return {
         sessions: {
           ...s.sessions,
-          [e.sessionId]: { ...session, configOptions: merged, creationEchoLogged }
-        }
+          [e.sessionId]: next
+        },
+        sessionIndex: withSessionModelOnIndex(s.sessionIndex, e.sessionId, next)
       }
     })
     for (const optionId of preservedOptionIds) {

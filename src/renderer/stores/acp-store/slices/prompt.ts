@@ -6,6 +6,10 @@ import { WS_ERROR_CODES } from '@shared/types/web-protocol.types'
 import { toast } from 'sonner'
 import type { StateCreator } from 'zustand'
 import {
+  alignSessionModelProjection,
+  withSessionModelOnIndex
+} from '@/components/chat/chat-input-bar-config'
+import {
   acpApi,
   type ContentBlock,
   type ElicitationField,
@@ -783,11 +787,18 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
         creationEchoLogged = { ...creationEchoLogged }
         for (const optionId of preservedEchoOptionIds) creationEchoLogged[optionId] = true
       }
+      const draft: AcpSession = {
+        ...current,
+        configOptions: updated,
+        creationEchoLogged
+      }
+      const session = alignSessionModelProjection(draft)
       return {
         sessions: {
           ...s.sessions,
-          [sessionId]: { ...current, configOptions: updated, creationEchoLogged }
-        }
+          [sessionId]: session
+        },
+        sessionIndex: withSessionModelOnIndex(s.sessionIndex, sessionId, session)
       }
     })
     for (const optionId of preservedEchoOptionIds) {
@@ -839,23 +850,24 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     set((s) => {
       const current = s.sessions[sessionId]
       if (!current) return {}
+      // The chat picker prefers the model-category config option over
+      // the legacy `models` projection. Keep both in sync so applying a
+      // launcher selection cannot leave the composer showing the
+      // session/new default.
+      const draft: AcpSession = {
+        ...current,
+        models: current.models ? { ...current.models, currentModelId: modelId } : current.models,
+        configOptions: current.configOptions.map((option) =>
+          option.category === 'model' ? { ...option, currentValue: modelId } : option
+        )
+      }
+      const session = alignSessionModelProjection(draft)
       return {
         sessions: {
           ...s.sessions,
-          [sessionId]: {
-            ...current,
-            // The chat picker prefers the model-category config option over
-            // the legacy `models` projection. Keep both in sync so applying a
-            // launcher selection cannot leave the composer showing the
-            // session/new default.
-            models: current.models
-              ? { ...current.models, currentModelId: modelId }
-              : current.models,
-            configOptions: current.configOptions.map((option) =>
-              option.category === 'model' ? { ...option, currentValue: modelId } : option
-            )
-          }
-        }
+          [sessionId]: session
+        },
+        sessionIndex: withSessionModelOnIndex(s.sessionIndex, sessionId, session)
       }
     })
     cacheOptionsFromSession(set, get, sessionId)

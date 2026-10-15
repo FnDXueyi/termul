@@ -588,6 +588,7 @@ describe('acp-store', () => {
       useAcpStore.getState().sessions.s1.configOptions.find((option) => option.id === 'model')
         ?.currentValue
     ).toBe('gpt-6-luna')
+    expect(useAcpStore.getState().sessions.s1.models?.currentModelId).toBe('gpt-6-luna')
   })
 
   // Story 5.3 (AC3): transportReconnecting flag is additive state — verify
