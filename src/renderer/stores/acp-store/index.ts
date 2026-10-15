@@ -82,6 +82,7 @@ import {
   dropRecordKey,
   normalizeUserMessages,
   partitionTranscriptTurns,
+  plainLastError,
   selectAgentIdentity,
   selectConfigWarmState,
   trimLiveToolCalls
@@ -232,8 +233,9 @@ async function installTransportRecovery(
               ...state.sessions,
               [recovery.sessionId]: {
                 ...session,
-                lastError:
+                ...plainLastError(
                   'This session could not be fully re-synced; events emitted while disconnected may be missing.'
+                )
               }
             }
           : state.sessions
@@ -430,7 +432,7 @@ async function installTransportRecovery(
       sessions: session
         ? {
             ...current.sessions,
-            [recovery.sessionId]: { ...session, lastError: null }
+            [recovery.sessionId]: { ...session, ...plainLastError(null) }
           }
         : current.sessions
     }

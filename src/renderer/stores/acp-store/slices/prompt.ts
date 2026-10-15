@@ -45,6 +45,7 @@ import {
   mergeAgentConfigOptions,
   newId,
   nextQueueId,
+  plainLastError,
   recoverPromptToQueue,
   SWITCH_SPLICE_ID_PREFIX,
   writeAgentOptionsCache
@@ -327,7 +328,7 @@ export async function runPromptTurn(
           return {
             sessions: {
               ...s.sessions,
-              [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+              [sessionId]: { ...current, activeTurn: true, openTurnId, ...plainLastError(null) }
             }
           }
         }
@@ -350,7 +351,7 @@ export async function runPromptTurn(
           },
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+            [sessionId]: { ...current, activeTurn: true, openTurnId, ...plainLastError(null) }
           }
         }
       }
@@ -363,7 +364,7 @@ export async function runPromptTurn(
         },
         sessions: {
           ...s.sessions,
-          [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+          [sessionId]: { ...current, activeTurn: true, openTurnId, ...plainLastError(null) }
         }
       }
     }
@@ -383,7 +384,7 @@ export async function runPromptTurn(
       },
       sessions: {
         ...s.sessions,
-        [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+        [sessionId]: { ...current, activeTurn: true, openTurnId, ...plainLastError(null) }
       }
     }
   })

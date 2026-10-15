@@ -19,6 +19,7 @@ import {
   cacheOptionsFromSession,
   dropRecordKey,
   newId,
+  plainLastError,
   prepareChatKey,
   reapOrphanPreparedSession
 } from '../helpers'
@@ -472,7 +473,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
               ...current,
               activeTurn: true,
               openTurnId: current.openTurnId ?? newId('turn'),
-              lastError: null
+              ...plainLastError(null)
             }
           }
         }
@@ -496,7 +497,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
             ...current,
             activeTurn: true,
             openTurnId: newId('turn'),
-            lastError: null
+            ...plainLastError(null)
           }
         },
         launchingSessionIds: { ...s.launchingSessionIds, [sessionId]: true }
@@ -791,11 +792,13 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
               status: 'error',
               activeTurn: false,
               openTurnId: null,
-              lastError: placeholderAlive
-                ? `${classified.label}: ${classified.detail}`
-                : err instanceof Error
-                  ? err.message
-                  : String(err),
+              ...plainLastError(
+                placeholderAlive
+                  ? `${classified.label}: ${classified.detail}`
+                  : err instanceof Error
+                    ? err.message
+                    : String(err)
+              ),
               ...(placeholderAlive
                 ? { launchConfigId: configId, pendingLauncherOptions: pending ?? null }
                 : {})

@@ -479,7 +479,13 @@ export function withSessionActive(
 ): Record<SessionId, AcpSession> {
   const session = sessions[sessionId]
   if (!session) return sessions
-  return { ...sessions, [sessionId]: { ...session, status: 'active', lastError: null } }
+  return { ...sessions, [sessionId]: { ...session, status: 'active', ...plainLastError(null) } }
+}
+
+export function plainLastError(
+  message: string | null
+): Pick<AcpSession, 'lastError' | 'lastErrorCode' | 'lastErrorData'> {
+  return { lastError: message, lastErrorCode: null, lastErrorData: undefined }
 }
 
 /** Prefix of the `lastError` a failed history load/resume writes. */
@@ -507,7 +513,7 @@ export function withSessionResumeError(
     [sessionId]: {
       ...session,
       replaying: null,
-      lastError: `${RESUME_FAILED_PREFIX}${String(err)}`
+      ...plainLastError(`${RESUME_FAILED_PREFIX}${String(err)}`)
     }
   }
 }
@@ -1423,7 +1429,7 @@ export function setSwitchRejection(
         [sessionId]: {
           ...session,
           switching: null,
-          lastError: `Could not switch agent: ${message}`
+          ...plainLastError(`Could not switch agent: ${message}`)
         }
       }
     }

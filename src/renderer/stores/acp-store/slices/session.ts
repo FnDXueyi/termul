@@ -67,6 +67,7 @@ import {
   mergeSessionIndexEntries,
   normalizeUserMessages,
   partitionTranscriptTurns,
+  plainLastError,
   refreshHostOwnedIndex,
   resolveSwitchRedirect,
   SWITCH_SPLICE_ID_PREFIX,
@@ -235,7 +236,7 @@ async function attachLiveTurn(
           ...session,
           agentId,
           status: 'active',
-          lastError: null,
+          ...plainLastError(null),
           replaying: 'streaming',
           activeTurn: true,
           openTurnId: session.openTurnId ?? 'turn:live'
@@ -1535,6 +1536,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
                   configOptions: outcome.configOptions ?? existing?.configOptions
                 }),
               lastError: existing?.lastError ?? null,
+              lastErrorCode: existing?.lastErrorCode,
+              lastErrorData: existing?.lastErrorData,
               createdAt: existing?.createdAt ?? Date.now(),
               replaying: null,
               worktreePath: opts?.worktreePath ?? existing?.worktreePath,
@@ -1893,7 +1896,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         messages: finalizeStreaming(s.messages, id),
         sessions: {
           ...s.sessions,
-          [id]: { ...s.sessions[id], status: 'active', replaying: null, lastError: null }
+          [id]: { ...s.sessions[id], status: 'active', replaying: null, ...plainLastError(null) }
         }
       }))
     } catch (err) {
@@ -1971,7 +1974,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...cur, status: 'closed', lastError: null }
+            [sessionId]: { ...cur, status: 'closed', ...plainLastError(null) }
           }
         }
       })
@@ -2066,7 +2069,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...cur, status: 'initializing', lastError: null }
+            [sessionId]: { ...cur, status: 'initializing', ...plainLastError(null) }
           },
           launchingSessionIds: { ...s.launchingSessionIds, [sessionId]: true }
         }
