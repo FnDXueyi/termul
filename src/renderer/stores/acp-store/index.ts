@@ -73,6 +73,7 @@ import { AcpConnectionCoordinator, type AcpRecovery } from '@/lib/acp-connection
 import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transport'
 import { logFrontendError } from '@/lib/log-api'
 import { wireBlocksToDisplay } from '@/lib/skills-wire-reverse'
+import { getAgentChatSessionIdsInAllTrees, useWorkspaceStore } from '@/stores/workspace-store'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
 import { attachAgentRosterWatch } from './agent-roster-watch'
 import {
@@ -99,7 +100,11 @@ import { createMcpSlice } from './slices/mcp'
 import { createMiscSlice } from './slices/misc'
 import { createPromptSlice } from './slices/prompt'
 import { reconcilePromptAfterRecovery, resendPendingPrompts } from './slices/prompt-reconcile'
-import { createSessionSlice, recoverNotedLaunchChats } from './slices/session'
+import {
+  createSessionSlice,
+  evictClosedSessionTranscript,
+  recoverNotedLaunchChats
+} from './slices/session'
 import { createSwitchSlice } from './slices/switch'
 import { appendBlocks, createTranscriptSlice } from './slices/transcript'
 import type {
@@ -167,6 +172,28 @@ setLiveLaunchSessionLookup((sessionId) => {
 setLaunchPlaceholderNotedListener(() => {
   void recoverNotedLaunchChats()
 })
+
+// --- Closed-chat transcript eviction on tab close ---------------------------
+
+/**
+ * A stopped chat keeps its transcript while a tab shows it (`_onSessionClosed`).
+ * When its last agent-chat tab leaves every tree (active and parked), evict the
+ * transcript so closed chats stay out of the WebView heap (#436). Live chats
+ * are untouched. Returns the unsubscribe.
+ */
+export function startClosedTranscriptEviction(): () => void {
+  let inTabs = getAgentChatSessionIdsInAllTrees(useWorkspaceStore.getState())
+  return useWorkspaceStore.subscribe((state, prev) => {
+    if (state.root === prev.root && state.parkedTrees === prev.parkedTrees) return
+    const next = getAgentChatSessionIdsInAllTrees(state)
+    for (const sessionId of inTabs) {
+      if (!next.has(sessionId)) {
+        evictClosedSessionTranscript(useAcpStore.getState, useAcpStore.setState, sessionId)
+      }
+    }
+    inTabs = next
+  })
+}
 
 // --- Event listener wiring (called once at app mount) ----------------------
 
@@ -492,6 +519,7 @@ export function initAcpEventListeners(): () => void {
   })
   connection.attach()
   teardown = [
+    startClosedTranscriptEviction(),
     // Web only: the agent roster arrives through the `agents` watch (the
     // desktop listens to the Tauri `acp:agent_*` events below).
     ...(transport.watches

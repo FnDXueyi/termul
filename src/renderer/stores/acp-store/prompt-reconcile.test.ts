@@ -55,12 +55,17 @@ vi.mock('@/lib/acp-mcp-persistence', async (orig) => {
   }
 })
 
+// Session ids with an open agent-chat tab (a close keeps their transcript).
+const { openChatTabSessionIds } = vi.hoisted(() => ({ openChatTabSessionIds: new Set<string>() }))
+
 vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   getAllLeafPanes: () => [],
   getAllTreeRoots: () => [],
   findPaneContainingTab: () => null,
+  getAgentChatSessionIdsInAllTrees: () => new Set(openChatTabSessionIds),
   useWorkspaceStore: {
+    subscribe: () => () => {},
     getState: () => ({ addAgentChatTab: vi.fn(), root: null })
   }
 }))
@@ -920,6 +925,29 @@ describe('prompt pending-reconcile (AD-6)', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(send).toHaveBeenCalledTimes(1) // the cancelled timer never resends
     vi.useRealTimers()
+  })
+
+  it('a close that keeps the transcript for an open tab still frees reconcile state', async () => {
+    vi.useFakeTimers()
+    seedSession('s1', 'agent-1', false)
+    openChatTabSessionIds.add('s1')
+    try {
+      const send = installTransport(async () => {
+        throw drop()
+      })
+      await useAcpStore.getState().sendPrompt('s1', 'deploy')
+      expect(__detachedCommandCountForTesting()).toBe(1)
+      useAcpStore.getState()._onSessionClosed({ agentId: 'agent-1', sessionId: 's1' } as never)
+      expect(useAcpStore.getState().messages.s1).toBeDefined()
+      expect(__detachedCommandCountForTesting()).toBe(0)
+      expect(activeWirePromptTurns.size).toBe(0)
+      expect(useAcpStore.getState().promptCommandStates.s1).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(send).toHaveBeenCalledTimes(1)
+    } finally {
+      openChatTabSessionIds.clear()
+      vi.useRealTimers()
+    }
   })
 
   it('snapshot recovery resolves it: the recovered terminator ends the turn', async () => {

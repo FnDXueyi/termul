@@ -1,10 +1,12 @@
 import { act, render, renderHook, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import {
   _addEphemeralSessionIdForTesting,
   _resetEphemeralSessionIdsForTesting,
   useAcpStore
 } from '@/stores/acp-store'
+import { RESUME_FAILED_PREFIX } from '@/stores/acp-store/helpers'
 import { FRESH, seedOptionsSession } from '@/stores/acp-store/testkit'
 import {
   AgentChatStatusGlyphs,
@@ -168,7 +170,7 @@ describe('useAgentChatStatusSignals', () => {
     expect(result.current.needsAttention).toBe(false)
   })
 
-  it('treats a closed session as Needs you and not live, with stale turn flags ignored', () => {
+  it('treats a cleanly closed session as not Needs you and not live, with stale turn flags ignored', () => {
     seedOptionsSession('s1', 'agent-1', {
       status: 'closed',
       activeTurn: true,
@@ -176,9 +178,20 @@ describe('useAgentChatStatusSignals', () => {
     })
     const { result } = renderHook(() => useAgentChatStatusSignals('s1'))
 
-    expect(result.current.needsAttention).toBe(true)
+    expect(result.current.needsAttention).toBe(false)
     expect(result.current.liveSession).toBe(false)
     expect(result.current.turnBusy).toBe(false)
+  })
+
+  it.each([
+    ['a failed resume', `${RESUME_FAILED_PREFIX}agent exited`],
+    ['a Codex sign-out', CODEX_CLI_SIGNED_OUT_MESSAGE]
+  ])('treats a closed session after %s as Needs you', (_label, lastError) => {
+    seedOptionsSession('s1', 'agent-1', { status: 'closed', lastError })
+    const { result } = renderHook(() => useAgentChatStatusSignals('s1'))
+
+    expect(result.current.needsAttention).toBe(true)
+    expect(result.current.liveSession).toBe(false)
   })
 
   it('treats a disconnected agent as Needs you', () => {

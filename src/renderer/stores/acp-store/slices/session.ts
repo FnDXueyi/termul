@@ -40,6 +40,7 @@ import { useProjectStore } from '@/stores/project-store'
 import {
   agentChatTabId,
   findPaneContainingTab,
+  getAgentChatSessionIdsInAllTrees,
   getAllLeafPanes,
   useWorkspaceStore
 } from '@/stores/workspace-store'
@@ -111,7 +112,12 @@ import {
 } from '../types'
 import { authenticatedAgents, evictAgentForTransport, withAuthRetry } from './agent'
 import { flushNextQueuedPrompt, runPromptTurn } from './prompt'
-import { dropSessionTranscriptState, flushCoalescedSync, trimLiveWindow } from './transcript'
+import {
+  dropSessionBookkeeping,
+  dropSessionTranscriptState,
+  flushCoalescedSync,
+  trimLiveWindow
+} from './transcript'
 
 /**
  * Project a fetched payload into the installable transcript: hidden /
@@ -349,7 +355,27 @@ function invalidateRestorePreload(set: TurnEndSetter, sessionId: SessionId): voi
   set((s) => ({ restoringChatIds: dropRecordKey(s.restoringChatIds, sessionId) }))
 }
 
-/** Test-only: clear module-level reopen tracking between tests. */
+/** True when an agent-chat tab for `sessionId` sits in any tree (active or parked). */
+export function isAgentChatTabOpen(sessionId: SessionId): boolean {
+  return getAgentChatSessionIdsInAllTrees(useWorkspaceStore.getState()).has(sessionId)
+}
+
+/**
+ * Evict the in-memory transcript of a closed session that no tab shows any
+ * more (#436 memory bound). A live session — or one resumed since its close —
+ * keeps its transcript, and so does an `'error'` session (as
+ * `_onAgentDisconnected` does). The session was persisted when it closed.
+ */
+export function evictClosedSessionTranscript(
+  get: () => AcpState,
+  set: (fn: (s: AcpState) => Partial<AcpState>) => void,
+  sessionId: SessionId
+): void {
+  if (get().sessions[sessionId]?.status !== 'closed') return
+  if (isAgentChatTabOpen(sessionId)) return
+  set((s) => dropSessionTranscriptState(s, sessionId))
+}
+
 export function _resetInFlightHistoryOpensForTesting(): void {
   for (const sessionId of new Set([
     ...inFlightHistoryOpens.keys(),
@@ -2616,7 +2642,15 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     if (get().sessions[e.sessionId]) {
       persistSession(get(), e.sessionId, (entries) => set({ sessionIndex: entries }))
     }
-    set((s) => dropSessionTranscriptState(s, e.sessionId))
+    // An open chat tab keeps showing its transcript (the idle reaper stops a
+    // chat the user still has open; #1166 resumes it on typing). The in-memory
+    // live window is already bounded; it is evicted when the last tab closes.
+    // Bookkeeping (prompt reconcile, wire turns, watermarks…) always goes.
+    if (get().sessions[e.sessionId] && isAgentChatTabOpen(e.sessionId)) {
+      dropSessionBookkeeping(e.sessionId)
+    } else {
+      set((s) => dropSessionTranscriptState(s, e.sessionId))
+    }
     refreshHostOwnedIndex(get)
   }
 })

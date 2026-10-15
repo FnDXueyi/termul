@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { RESUME_FAILED_PREFIX } from '@/stores/acp-store/helpers'
 import {
   type AcpAnnouncementState,
   type AnnouncementContext,
@@ -25,6 +26,7 @@ function session(overrides: Partial<AnnouncementSession> = {}): AnnouncementSess
     projectId: 'p1',
     status: 'active',
     activeTurn: false,
+    lastError: null,
     ...overrides
   }
 }
@@ -220,13 +222,24 @@ describe('deriveAcpAnnouncements: other chat needs you', () => {
     ])
   })
 
-  it('announces for a closed session and for a disconnected agent', () => {
+  it('announces for a closed session that cannot resume and for a disconnected agent', () => {
     expect(
-      transition(idle, { ...idle, sessions: twoChats({ other: { status: 'closed' } }) })
+      transition(idle, {
+        ...idle,
+        sessions: twoChats({
+          other: { status: 'closed', lastError: `${RESUME_FAILED_PREFIX}agent exited` }
+        })
+      })
     ).toEqual(['Chat other needs you'])
     expect(transition(idle, { ...idle, agentStatus: { 'agent-1': 'disconnected' } })).toEqual([
       'Chat other needs you'
     ])
+  })
+
+  it('is silent for a cleanly stopped session: it resumes when the user types', () => {
+    expect(
+      transition(idle, { ...idle, sessions: twoChats({ other: { status: 'closed' } }) })
+    ).toEqual([])
   })
 
   it('is silent for a count change only: a second permission on a chat that already needs you', () => {

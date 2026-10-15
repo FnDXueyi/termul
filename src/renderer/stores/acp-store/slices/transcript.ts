@@ -640,25 +640,14 @@ const inFlightDurabilityProbes = new Set<SessionId>()
 const untrimmableSessions = new Set<SessionId>()
 
 /**
- * Free per-session transcript maps held in the WebView heap.
- * Disk history is untouched — reopen lazy-loads via `openHistorySession`.
- * Call only after any needed `persistSession` so the last mirror is flushed.
+ * Drop per-session module-level bookkeeping so a closed/deleted session never
+ * leaks a backfill allowance, an in-flight load guard, a stale history
+ * watermark, a durability-probe/untrimmable mark, a pending prompt command, or
+ * a live-switch link (a recreated session must re-establish its own; a
+ * resolving probe must not resurrect a pin). Runs on every close, including a
+ * close that keeps the transcript maps for an open chat tab.
  */
-export function dropSessionTranscriptState(
-  state: Pick<
-    AcpState,
-    'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-  >,
-  sessionId: SessionId
-): Pick<
-  AcpState,
-  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-> {
-  // Drop per-session module-level bookkeeping too so a closed/deleted session
-  // never leaks a backfill allowance, an in-flight load guard, a stale history
-  // watermark, a durability-probe/untrimmable mark, or clamp-log dedup entries
-  // (a recreated session must re-establish its own; a resolving probe must not
-  // resurrect a pin).
+export function dropSessionBookkeeping(sessionId: SessionId): void {
   backfillCounts.delete(sessionId)
   // A pending (unconfirmed) prompt command — its reconcile timer, store flag and
   // wire-turn tracking — dies with the session: nothing may resend into it.
@@ -675,6 +664,26 @@ export function dropSessionTranscriptState(
   for (const [target, source] of liveSwitchSources) {
     if (source === sessionId) liveSwitchSources.delete(target)
   }
+}
+
+/**
+ * Free per-session transcript maps held in the WebView heap, plus the
+ * session's bookkeeping (`dropSessionBookkeeping`), clamp-log dedup entries
+ * and payload pin. Disk history is untouched — reopen lazy-loads via
+ * `openHistorySession`. Call only after any needed `persistSession` so the
+ * last mirror is flushed. Idempotent.
+ */
+export function dropSessionTranscriptState(
+  state: Pick<
+    AcpState,
+    'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
+  >,
+  sessionId: SessionId
+): Pick<
+  AcpState,
+  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
+> {
+  dropSessionBookkeeping(sessionId)
   for (const call of state.toolCalls[sessionId] ?? []) {
     clampedToolCallIds.delete(clampLogKey(call.toolCallId))
   }

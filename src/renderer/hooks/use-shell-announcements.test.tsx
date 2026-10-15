@@ -270,9 +270,9 @@ describe('useShellAnnouncements', () => {
         })
       })
       settle()
-      // The permission key just disappears, so nothing is announced for it. What is
-      // announced is the other chat of the closed agent that now needs you.
-      expect(region()).toBe('Title other needs you')
+      // The permission key just disappears, so nothing is announced for it. The
+      // cleanly closed chats resume when the user types, so neither needs you.
+      expect(region()).toBe('')
     })
   })
 
