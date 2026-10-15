@@ -34,6 +34,7 @@ import {
   useAcpStore,
   usePromptQueue
 } from '@/stores/acp-store'
+import { isResumeFailureError } from '@/stores/acp-store/helpers'
 import { isLaunchPlaceholderSessionId } from '@/stores/acp-store/live-turn'
 import { useConsentCardHost } from '@/stores/browser-consent-card-store'
 import { useIsConsentStripHosting } from '@/stores/browser-consent-strip-store'
@@ -59,7 +60,7 @@ import { PermissionPrompt } from './PermissionPrompt'
 import { PlanPanel } from './PlanPanel'
 import { PromptReconcileNotice } from './PromptReconcileNotice'
 import { useApprovalDock } from './use-approval-dock'
-import { useIdleStopAutoResume } from './use-idle-stop-auto-resume'
+import { AUTO_RESUME_FAILED_REASON, useIdleStopAutoResume } from './use-idle-stop-auto-resume'
 
 /** Concatenate the text blocks of a message into a single string. */
 function messageText(blocks: ContentBlock[]): string {
@@ -202,6 +203,7 @@ export function AgentChatPanel({
   const removeQueuedPrompt = useAcpStore((s) => s.removeQueuedPrompt)
   const sendQueuedPromptNow = useAcpStore((s) => s.sendQueuedPromptNow)
   const retryCrashedSession = useAcpStore((s) => s.retryCrashedSession)
+  const markResumeFailed = useAcpStore((s) => s.markResumeFailed)
   const retryFailedLaunch = useAcpStore((s) => s.retryFailedLaunch)
   const promptQueue = usePromptQueue(sessionId)
   const setConfigOption = useAcpStore((s) => s.setConfigOption)
@@ -308,8 +310,27 @@ export function AgentChatPanel({
     isRestoringChat,
     isLaunchingSession,
     queuedCount: promptQueue.length,
-    openHistorySession
+    openHistorySession,
+    markResumeFailed
   })
+
+  // Manual "Resume chat" on a stopped chat (stopped bar or error notice). A
+  // reopen can resolve still `closed` (read-only strategy) after clearing
+  // `lastError`; record that as a failed resume so the bar, Needs you and a
+  // remount keep agreeing (the store skips a Codex sign-out / existing failure).
+  const resumeStoppedChat = useCallback(() => {
+    void openHistorySession(sessionId).then(
+      () => {
+        if (useAcpStore.getState().sessions[sessionId]?.status === 'closed') {
+          markResumeFailed(sessionId, AUTO_RESUME_FAILED_REASON)
+        }
+      },
+      (err) => {
+        if (isAgentDeadError(err)) return
+        toast.error('Could not resume this chat. Try again.')
+      }
+    )
+  }, [openHistorySession, markResumeFailed, sessionId])
 
   // A persisted launch-* tab is a failed-launch corpse. deserialize drops it
   // and reattach must not put it back; if one still mounts with no session
@@ -512,6 +533,20 @@ export function AgentChatPanel({
       })
       return
     }
+    // A stopped (closed) chat whose resume failed: reopen like the stopped
+    // bar's Resume chat (never re-sends the finished last turn; keeps the
+    // recorded failure until the open succeeds; flushes a queued prompt).
+    // Offered even without a user turn. Clear the dismissal first so an
+    // identical repeat failure re-surfaces the notice.
+    if (
+      session?.status === 'closed' &&
+      !discoveredReopenContext &&
+      isResumeFailureError(session.lastError)
+    ) {
+      setDismissedError(null)
+      resumeStoppedChat()
+      return
+    }
     if (!lastUserBlocks || !canRetryLastUserTurn) return
     setDismissedError(session?.lastError ?? null)
     // A crashed/disconnected chat can't re-send into the dead agent — restart
@@ -575,6 +610,8 @@ export function AgentChatPanel({
     sendPromptBlocks,
     retryCrashedSession,
     retryFailedLaunch,
+    resumeStoppedChat,
+    discoveredReopenContext,
     sessionId,
     session?.status,
     session?.launchConfigId,
@@ -715,6 +752,11 @@ export function AgentChatPanel({
   // the transcript (the retry relaunches without re-sending).
   const isFailedLaunch = session.status === 'error' && Boolean(session.launchConfigId)
   const canOfferRetry = (canRetryLastUserTurn || isFailedLaunch) && !session.activeTurn
+  // The error notice's "Resume chat" for a stopped chat whose resume failed
+  // reopens without re-sending, so it needs no user turn in the transcript.
+  const isClosedResumeFailure =
+    isClosed && !discoveredReopenContext && isResumeFailureError(session.lastError)
+  const canOfferNoticeRetry = (canOfferRetry || isClosedResumeFailure) && !session.activeTurn
   const retryDiscoveredReopen = discoveredReopenContext
     ? () => {
         void openDiscoveredSession(
@@ -797,9 +839,7 @@ export function AgentChatPanel({
                   openCodexSignIn()
                   return
                 }
-                void openHistorySession(sessionId).catch(() => {
-                  toast.error('Could not resume this chat. Try again.')
-                })
+                resumeStoppedChat()
               }}
               className="inline-flex min-h-11 items-center rounded-md border border-warning/40 px-3 text-xs font-medium transition-colors hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 @[400px]:min-h-10"
             >
@@ -832,7 +872,7 @@ export function AgentChatPanel({
       )}
       <ChatErrorNotice
         message={activeError}
-        onRetry={canOfferRetry ? handleRetry : undefined}
+        onRetry={canOfferNoticeRetry ? handleRetry : undefined}
         retryLabel={
           !session.launchConfigId && (session.status === 'error' || session.status === 'closed')
             ? 'Resume chat'

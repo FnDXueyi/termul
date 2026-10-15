@@ -17,7 +17,7 @@ import {
 const IDLE = {
   needsAttention: false,
   turnBusy: false,
-  liveSession: true,
+  realChat: true,
   unread: false
 }
 
@@ -38,14 +38,12 @@ describe('agentChatStatusSlots', () => {
     expect(slots.statusText).toBe('Working')
   })
 
-  it('shows New activity only for an idle live chat that is unread', () => {
+  it('shows New activity for an idle real chat that is unread', () => {
     expect(agentChatStatusSlots({ ...IDLE, unread: true }).statuses).toEqual(['New activity'])
     // A turn in flight hides the dot until it finishes.
     expect(agentChatStatusSlots({ ...IDLE, unread: true, turnBusy: true }).showUnread).toBe(false)
-    // A dead or ephemeral session never shows it.
-    expect(agentChatStatusSlots({ ...IDLE, unread: true, liveSession: false }).showUnread).toBe(
-      false
-    )
+    // A missing or ephemeral session never shows it.
+    expect(agentChatStatusSlots({ ...IDLE, unread: true, realChat: false }).showUnread).toBe(false)
   })
 
   it('shows Needs you alongside Working', () => {
@@ -99,6 +97,7 @@ describe('useAgentChatStatusSignals', () => {
     expect(result.current).toMatchObject({
       needsAttention: false,
       liveSession: true,
+      realChat: true,
       turnBusy: false
     })
   })
@@ -181,6 +180,29 @@ describe('useAgentChatStatusSignals', () => {
     expect(result.current.needsAttention).toBe(false)
     expect(result.current.liveSession).toBe(false)
     expect(result.current.turnBusy).toBe(false)
+    // Still a real chat: its unread dot stays (spec: stopped-chat-status-signals).
+    expect(result.current.realChat).toBe(true)
+  })
+
+  it('keeps New activity for an unread closed chat', () => {
+    seedOptionsSession('s1', 'agent-1', { status: 'closed', activeTurn: true, openTurnId: 't1' })
+    const { result } = renderHook(() => useAgentChatStatusSignals('s1'))
+
+    const slots = agentChatStatusSlots({ ...result.current, unread: true })
+    expect(slots.showUnread).toBe(true)
+    expect(slots.showWorking).toBe(false)
+    expect(slots.statuses).toEqual(['New activity'])
+  })
+
+  it.each([
+    ['a failed resume', `${RESUME_FAILED_PREFIX}agent exited`],
+    ['a Codex sign-out', CODEX_CLI_SIGNED_OUT_MESSAGE]
+  ])('treats a closed session after %s as Needs you', (_label, lastError) => {
+    seedOptionsSession('s1', 'agent-1', { status: 'closed', lastError })
+    const { result } = renderHook(() => useAgentChatStatusSignals('s1'))
+
+    expect(result.current.needsAttention).toBe(true)
+    expect(result.current.liveSession).toBe(false)
   })
 
   it.each([
@@ -208,8 +230,10 @@ describe('useAgentChatStatusSignals', () => {
     const { result } = renderHook(() => useAgentChatStatusSignals('s1'))
 
     expect(result.current.liveSession).toBe(false)
+    expect(result.current.realChat).toBe(false)
     expect(result.current.turnBusy).toBe(false)
     expect(result.current.needsAttention).toBe(false)
+    expect(agentChatStatusSlots({ ...result.current, unread: true }).showUnread).toBe(false)
   })
 
   it('returns an all-false record for a missing session', () => {
@@ -219,6 +243,7 @@ describe('useAgentChatStatusSignals', () => {
       session: undefined,
       needsAttention: false,
       liveSession: false,
+      realChat: false,
       turnBusy: false
     })
   })

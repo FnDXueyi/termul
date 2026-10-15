@@ -285,15 +285,37 @@ describe('AgentChatTabInline activity indicator', () => {
     expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
   })
 
-  it('keeps the Done flag but hides the dot while the session is closed', () => {
+  it('keeps the unread dot after the session is stopped (closed)', () => {
     seedChat('s1', 'My Chat', true)
-    renderChip(false)
+    const { container } = renderChip(false)
     setTurn('s1', false)
     expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
 
     setSessionStatus('s1', 'closed')
-    expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+    expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
+    expect(chipRoot(container)).toHaveAttribute('aria-label', 'My Chat, New activity')
     expect(useAgentChatUnreadStore.getState().unread).toEqual({ s1: true })
+  })
+
+  it('shows the unread dot on a closed chat with stale turn flags (not Working)', () => {
+    seedOptionsSession('s1', 'agent-1', {
+      title: 'My Chat',
+      status: 'closed',
+      activeTurn: true,
+      openTurnId: 't1'
+    })
+    useAgentChatUnreadStore.setState({ unread: { s1: true } })
+    renderChip(false)
+    expect(screen.queryByTitle(WORKING)).not.toBeInTheDocument()
+    expect(screen.getByTitle(UNREAD)).toBeInTheDocument()
+  })
+
+  it('mutes a stopped chat title without striking it through', () => {
+    seedOptionsSession('s1', 'agent-1', { title: 'My Chat', status: 'closed' })
+    renderChip(false)
+    const label = screen.getByText('My Chat')
+    expect(label).toHaveClass('opacity-60')
+    expect(label).not.toHaveClass('line-through')
   })
 
   it('shows no activity indicators for an ephemeral session', () => {
@@ -307,6 +329,12 @@ describe('AgentChatTabInline activity indicator', () => {
 
     // Even a finished ephemeral turn leaves no dot.
     setTurn('s-eph', false)
+    expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+
+    // Nor does an unread flag set by any other path, live or closed.
+    act(() => useAgentChatUnreadStore.getState().markUnread('s-eph'))
+    expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
+    setSessionStatus('s-eph', 'closed')
     expect(screen.queryByTitle(UNREAD)).not.toBeInTheDocument()
   })
 

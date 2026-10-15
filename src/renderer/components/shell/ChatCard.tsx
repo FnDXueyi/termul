@@ -66,7 +66,7 @@ export function ChatCard({
     ? 'needs-you'
     : signals.turnBusy
       ? 'running'
-      : signals.liveSession && unread
+      : signals.realChat && unread
         ? 'done'
         : 'idle'
   const statusWord = STATUS_WORD[liveState]

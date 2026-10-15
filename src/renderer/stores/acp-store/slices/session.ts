@@ -31,6 +31,7 @@ import { selectMcpServersForAgent } from '@/lib/acp-mcp-persistence'
 import { decideResume, resumeMissesSession } from '@/lib/acp-resume-policy'
 import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transport'
 import { classifySetupError } from '@/lib/agents/acp-spawn-errors'
+import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { deleteSessionTempFiles } from '@/lib/attachment-temp-cleanup'
 import { logFrontendError } from '@/lib/log-api'
 import { sanitizeDisplayText } from '@/lib/skill-tokens'
@@ -62,6 +63,7 @@ import {
   dropRecordKey,
   extractTermulPlanFenceJson,
   finalizeStreaming,
+  isResumeFailureError,
   mergeSessionIndexEntries,
   normalizeUserMessages,
   partitionTranscriptTurns,
@@ -1365,6 +1367,7 @@ type SessionSliceState = Pick<
   | 'resumeLiveSession'
   | 'flushLiveSessionSaves'
   | 'retryCrashedSession'
+  | 'markResumeFailed'
   | 'retryFailedLaunch'
   | 'deleteHistorySession'
   | 'discoverSessions'
@@ -2019,6 +2022,22 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     } finally {
       inFlightCrashedRetries.delete(sessionId)
     }
+  },
+  markResumeFailed: (sessionId, reason) => {
+    set((s) => {
+      const cur = s.sessions[sessionId]
+      // Never overwrite an earlier resume failure (the store's own rejection
+      // path already wrote one) or the Codex signed-out message (its "Sign in"
+      // bar), and never touch a live or crashed session.
+      if (
+        cur?.status !== 'closed' ||
+        isResumeFailureError(cur.lastError) ||
+        cur.lastError === CODEX_CLI_SIGNED_OUT_MESSAGE
+      ) {
+        return {}
+      }
+      return { sessions: withSessionResumeError(s.sessions, sessionId, reason) }
+    })
   },
   retryFailedLaunch: async (sessionId) => {
     // Dedupe concurrent Retry clicks (shared set with retryCrashedSession so a
