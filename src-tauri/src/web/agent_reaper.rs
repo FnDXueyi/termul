@@ -318,6 +318,11 @@ fn resolve_idle_window(state: &IdleWindowState) -> AgentIdleWindowStatus {
 static IDLE_WINDOW: std::sync::LazyLock<parking_lot::Mutex<IdleWindowState>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(IdleWindowState::default()));
 
+/// Serializes tests that mutate [`IDLE_WINDOW`]. Cargo runs test threads in
+/// parallel, and the router test and the precedence test share this static.
+#[cfg(test)]
+pub(crate) static IDLE_WINDOW_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Install the process baseline. `lock` is `"env"` or `"operator"` when a
 /// later settings override must not change the live window. `None` leaves the
 /// window open for App Preferences.

@@ -3,6 +3,7 @@ import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
 import { useSharedKeySync } from '@/lib/shared-key-sync'
+import { isTauriContext } from '@/lib/tauri-runtime'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
@@ -134,7 +135,24 @@ export function useAppSettingsLoader(): void {
         console.error('Failed to apply ACP session reopen timeout:', error)
       }
       try {
-        await acpApi.setAgentIdleWindow(settings.agentIdleWindowSecs)
+        if (isTauriContext()) {
+          // One desktop process owns this window. Apply the saved choice at
+          // startup. The browser must not POST on load: that would replace
+          // the server's shared value with whatever this page last saved.
+          await acpApi.setAgentIdleWindow(settings.agentIdleWindowSecs)
+        } else {
+          const live = await acpApi.getAgentIdleWindow()
+          if (live.source === 'setting' || live.source === 'default') {
+            const next = live.source === 'default' || live.secs === 1800 ? null : live.secs
+            if (next !== settings.agentIdleWindowSecs) {
+              useAppSettingsStore.getState().updateSetting('agentIdleWindowSecs', next)
+              await persistenceApi.writeDebounced(
+                PersistenceKeys.appSettings,
+                useAppSettingsStore.getState().settings
+              )
+            }
+          }
+        }
       } catch (error) {
         void logFrontendError({
           level: 'error',

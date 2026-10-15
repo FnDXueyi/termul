@@ -296,6 +296,7 @@ async fn agent_idle_window_returns_the_ipc_envelope() {
 
 #[tokio::test]
 async fn post_agent_idle_window_applies_a_settings_choice() {
+    let _guard = crate::web::agent_reaper::IDLE_WINDOW_TEST_LOCK.lock();
     crate::web::agent_reaper::reset_agent_idle_window_for_tests();
     crate::web::agent_reaper::install_agent_idle_baseline(1800, None);
     let dir = TempDir::new("idle-window-set");

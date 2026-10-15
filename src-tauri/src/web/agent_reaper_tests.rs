@@ -13,6 +13,7 @@ use crate::acp::{AcpManager, AgentId};
 use crate::web::agent_reaper::{
     install_agent_idle_baseline, reap_idle_agents, reset_agent_idle_window_for_tests,
     resolved_agent_idle_window, run_agent_idle_reaper, set_agent_idle_window_override,
+    IDLE_WINDOW_TEST_LOCK,
     DEFAULT_SWEEP_INTERVAL,
 };
 use crate::web::sink::WsRelaySink;
@@ -276,6 +277,7 @@ async fn reaper_loop_reads_the_window_on_each_sweep() {
 /// One test owns the process-wide window so the cases cannot race each other.
 #[test]
 fn agent_idle_window_precedence_setting_then_env_lock_then_operator() {
+    let _guard = IDLE_WINDOW_TEST_LOCK.lock();
     reset_agent_idle_window_for_tests();
     let open = resolved_agent_idle_window();
     assert_eq!(open.secs, 1800);

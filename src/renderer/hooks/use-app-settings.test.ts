@@ -20,7 +20,8 @@ const {
   mockSetTurnIdleTimeout,
   mockSetSessionNewTimeout,
   mockSetSessionReopenTimeout,
-  mockSetAgentIdleWindow
+  mockSetAgentIdleWindow,
+  mockGetAgentIdleWindow
 } = vi.hoisted(() => ({
   mockPersistenceRead: vi.fn(),
   mockPersistenceWrite: vi.fn(),
@@ -29,7 +30,8 @@ const {
   mockSetTurnIdleTimeout: vi.fn(),
   mockSetSessionNewTimeout: vi.fn(),
   mockSetSessionReopenTimeout: vi.fn(),
-  mockSetAgentIdleWindow: vi.fn()
+  mockSetAgentIdleWindow: vi.fn(),
+  mockGetAgentIdleWindow: vi.fn()
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -38,7 +40,8 @@ vi.mock('@/lib/api', () => ({
     setTurnIdleTimeout: mockSetTurnIdleTimeout,
     setSessionNewTimeout: mockSetSessionNewTimeout,
     setSessionReopenTimeout: mockSetSessionReopenTimeout,
-    setAgentIdleWindow: mockSetAgentIdleWindow
+    setAgentIdleWindow: mockSetAgentIdleWindow,
+    getAgentIdleWindow: mockGetAgentIdleWindow
   },
   persistenceApi: {
     read: mockPersistenceRead,
@@ -66,6 +69,7 @@ describe('use-app-settings', () => {
     mockSetSessionNewTimeout.mockResolvedValue(undefined)
     mockSetSessionReopenTimeout.mockResolvedValue(undefined)
     mockSetAgentIdleWindow.mockResolvedValue(undefined)
+    mockGetAgentIdleWindow.mockResolvedValue({ secs: 1800, source: 'default' })
   })
 
   it('does not push legacy AppSettings panel visibility into the shell layout on load', async () => {
@@ -113,6 +117,8 @@ describe('use-app-settings', () => {
       }
     })
 
+    mockGetAgentIdleWindow.mockResolvedValueOnce({ secs: 3600, source: 'setting' })
+
     renderHook(() => useAppSettingsLoader())
 
     await waitFor(() => {
@@ -121,7 +127,9 @@ describe('use-app-settings', () => {
       expect(mockSetTurnIdleTimeout).toHaveBeenCalledWith(1800)
       expect(mockSetSessionNewTimeout).toHaveBeenCalledWith(120)
       expect(mockSetSessionReopenTimeout).toHaveBeenCalledWith(300)
-      expect(mockSetAgentIdleWindow).toHaveBeenCalledWith(7200)
+      // The browser reads the server window. It does not POST the saved value.
+      expect(mockSetAgentIdleWindow).not.toHaveBeenCalled()
+      expect(useAppSettingsStore.getState().settings.agentIdleWindowSecs).toBe(3600)
     })
   })
 
