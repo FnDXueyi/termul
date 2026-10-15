@@ -1543,9 +1543,16 @@ pub fn run() {
             // The one host-owned idle-agent reaper for the desktop process
             // (probe-based; see `web::agent_reaper`). Never started from
             // `serve_router`, whose shared-live toggle reuses these agents.
+            // `$TERMUL_AGENT_IDLE_REAP_SECS` wins; otherwise App Preferences
+            // can change the window on the next sweep.
+            let idle_window = web::config::desktop_agent_idle_window_secs();
+            web::agent_reaper::install_agent_idle_baseline(
+                idle_window.secs,
+                idle_window.from_env.then_some("env"),
+            );
             app.manage(Arc::new(web::agent_reaper::AgentReaperHandle::start(
                 Arc::clone(&acp_manager),
-                std::time::Duration::from_secs(web::config::DEFAULT_AGENT_IDLE_WINDOW_SECS),
+                web::agent_reaper::live_agent_idle_window,
                 tauri::async_runtime::handle().inner(),
             )));
 
@@ -1898,6 +1905,8 @@ pub fn run() {
             acp::commands::acp_set_turn_idle_timeout,
             acp::commands::acp_set_session_new_timeout,
             acp::commands::acp_set_session_reopen_timeout,
+            acp::commands::acp_set_agent_idle_window,
+            acp::commands::acp_get_agent_idle_window,
             acp::commands::acp_probe_mcp_server,
             acp::commands::acp_mcp_oauth_start,
             acp::commands::acp_mcp_oauth_has_token,

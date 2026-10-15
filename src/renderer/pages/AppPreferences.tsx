@@ -3,7 +3,11 @@ import { useEffect, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { SettingsLayout } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
-import { useResetAppSettings, useUpdateAppSetting } from '@/hooks/use-app-settings'
+import {
+  queueAgentIdleWindowPush,
+  useResetAppSettings,
+  useUpdateAppSetting
+} from '@/hooks/use-app-settings'
 import {
   useResetAllShortcuts,
   useResetShortcut,
@@ -18,6 +22,7 @@ import {
   useAcpSessionReopenTimeout,
   useAcpTurnIdleTimeout,
   useAcpTurnTimeout,
+  useAgentIdleWindow,
   useConfirmTerminalClose,
   useDefaultProjectColor,
   useDefaultShell,
@@ -79,6 +84,7 @@ export function AppPreferencesModal(): React.JSX.Element {
   const acpTurnIdleTimeoutSecs = useAcpTurnIdleTimeout()
   const acpSessionNewTimeoutSecs = useAcpSessionNewTimeout()
   const acpSessionReopenTimeoutSecs = useAcpSessionReopenTimeout()
+  const agentIdleWindowSecs = useAgentIdleWindow()
   const updateSetting = useUpdateAppSetting()
   const resetSettings = useResetAppSettings()
 
@@ -246,6 +252,12 @@ export function AppPreferencesModal(): React.JSX.Element {
     }
   }
 
+  const handleAgentIdleWindowChange = async (value: number | null) => {
+    const push = queueAgentIdleWindowPush(value)
+    await updateSetting('agentIdleWindowSecs', value)
+    await push
+  }
+
   const handleResetConfirm = async () => {
     await resetSettings()
     await resetAllShortcuts()
@@ -323,10 +335,12 @@ export function AppPreferencesModal(): React.JSX.Element {
             acpTurnIdleTimeoutSecs={acpTurnIdleTimeoutSecs}
             acpSessionNewTimeoutSecs={acpSessionNewTimeoutSecs}
             acpSessionReopenTimeoutSecs={acpSessionReopenTimeoutSecs}
+            agentIdleWindowSecs={agentIdleWindowSecs}
             handleAcpTurnTimeoutChange={handleAcpTurnTimeoutChange}
             handleAcpTurnIdleTimeoutChange={handleAcpTurnIdleTimeoutChange}
             handleAcpSessionNewTimeoutChange={handleAcpSessionNewTimeoutChange}
             handleAcpSessionReopenTimeoutChange={handleAcpSessionReopenTimeoutChange}
+            handleAgentIdleWindowChange={handleAgentIdleWindowChange}
           />
           <ProviderSection />
           <McpServersSection />

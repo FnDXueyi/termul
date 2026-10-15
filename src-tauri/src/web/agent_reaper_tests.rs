@@ -3,13 +3,19 @@
 //! stamp) — never connections, subscriptions or presence.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::acp::{AcpManager, AgentId};
-use crate::web::agent_reaper::{reap_idle_agents, run_agent_idle_reaper, DEFAULT_SWEEP_INTERVAL};
+use crate::web::agent_reaper::{
+    install_agent_idle_baseline, reap_idle_agents, reset_agent_idle_window_for_tests,
+    resolved_agent_idle_window, run_agent_idle_reaper, set_agent_idle_window_override,
+    IDLE_WINDOW_TEST_LOCK,
+    DEFAULT_SWEEP_INTERVAL,
+};
 use crate::web::sink::WsRelaySink;
 
 const WINDOW: Duration = Duration::from_secs(30);
@@ -195,7 +201,7 @@ async fn reaper_loop_reaps_quiet_agent_and_exits_on_shutdown() {
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(run_agent_idle_reaper(
         manager.clone(),
-        Duration::from_millis(150),
+        || Duration::from_millis(150),
         Duration::from_millis(20),
         Box::pin(async move {
             let _ = stop_rx.await;
@@ -220,4 +226,79 @@ async fn reaper_loop_reaps_quiet_agent_and_exits_on_shutdown() {
         .await
         .expect("loop exits on shutdown")
         .expect("loop task joins");
+}
+
+/// A sweep that captured its window once would keep the long window and leave
+/// the agent up after the closure starts returning a tiny window.
+#[tokio::test]
+async fn reaper_loop_reads_the_window_on_each_sweep() {
+    let manager = Arc::new(AcpManager::new(vec![]));
+    let agent_id = AgentId("agent-reread".to_string());
+    let _record =
+        manager.install_test_agent_with_reap_state(agent_id, HashSet::new(), false, false);
+    let secs = Arc::new(AtomicU64::new(60_000));
+    let secs_for_loop = Arc::clone(&secs);
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(run_agent_idle_reaper(
+        manager.clone(),
+        move || Duration::from_millis(secs_for_loop.load(Ordering::Relaxed).max(1)),
+        Duration::from_millis(15),
+        Box::pin(async move {
+            let _ = stop_rx.await;
+        }),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        manager.list_agents().len(),
+        1,
+        "long window keeps the agent"
+    );
+
+    secs.store(1, Ordering::Relaxed);
+    for _ in 0..100 {
+        if manager.list_agents().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert!(
+        manager.list_agents().is_empty(),
+        "the next sweep uses the new window"
+    );
+
+    let _ = stop_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("loop exits on shutdown")
+        .expect("loop task joins");
+}
+
+/// One test owns the process-wide window so the cases cannot race each other.
+#[tokio::test]
+async fn agent_idle_window_precedence_setting_then_env_lock_then_operator() {
+    let _guard = IDLE_WINDOW_TEST_LOCK.lock().await;
+    reset_agent_idle_window_for_tests();
+    let open = resolved_agent_idle_window();
+    assert_eq!(open.secs, 1800);
+    assert_eq!(open.source, "default");
+
+    set_agent_idle_window_override(Some(3600));
+    let setting = resolved_agent_idle_window();
+    assert_eq!(setting.secs, 3600);
+    assert_eq!(setting.source, "setting");
+
+    install_agent_idle_baseline(45, Some("env"));
+    let locked = resolved_agent_idle_window();
+    assert_eq!(locked.secs, 45);
+    assert_eq!(locked.source, "env");
+
+    set_agent_idle_window_override(None);
+    install_agent_idle_baseline(120, Some("operator"));
+    let operator = resolved_agent_idle_window();
+    assert_eq!(operator.secs, 120);
+    assert_eq!(operator.source, "operator");
+
+    reset_agent_idle_window_for_tests();
+    assert_eq!(resolved_agent_idle_window().source, "default");
 }

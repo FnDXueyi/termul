@@ -149,6 +149,12 @@ export interface SessionCursor {
   logEpoch: string | null
 }
 
+/** Live idle-chat window reported by the host. */
+export interface AgentIdleWindowStatus {
+  secs: number
+  source: 'default' | 'setting' | 'env' | 'operator'
+}
+
 export interface AcpTransport {
   installRegistryBinary(
     request: InstallAcpRegistryBinaryRequest
@@ -179,6 +185,17 @@ export interface AcpTransport {
   setTurnIdleTimeout(secs: number | null): Promise<void>
   setSessionNewTimeout(secs: number | null): Promise<void>
   setSessionReopenTimeout(secs: number | null): Promise<void>
+  /**
+   * How long an idle agent chat stays open. `null` clears the App Preferences
+   * override. The desktop command updates the live reaper. The web transport
+   * ignores the call: the server window comes from its flag or env var.
+   */
+  setAgentIdleWindow(secs: number | null): Promise<void>
+  /**
+   * The window the host is using now. `source` is `env`, `operator`,
+   * `setting`, or `default`.
+   */
+  getAgentIdleWindow(): Promise<AgentIdleWindowStatus>
   fetchRegistrySnapshot(forceRefresh?: boolean): Promise<AcpRegistrySnapshot>
   /**
    * On-demand MCP client probe (Termul's own rmcp client connection — NOT the

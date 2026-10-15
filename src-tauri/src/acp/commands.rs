@@ -379,5 +379,25 @@ pub fn acp_set_session_reopen_timeout(secs: Option<u64>) -> Result<(), String> {
     Ok(())
 }
 
+/// Set how long an idle agent chat stays open, in seconds, or `None` to clear
+/// the App Preferences override. `$TERMUL_AGENT_IDLE_REAP_SECS` and a locked
+/// server window keep the live value. The reaper reads the result on its next
+/// sweep.
+#[tauri::command]
+pub fn acp_set_agent_idle_window(secs: Option<u64>) -> Result<(), String> {
+    if matches!(secs, Some(0)) {
+        return Err("agent idle window must be > 0 seconds".to_string());
+    }
+    crate::web::agent_reaper::set_agent_idle_window_override(secs);
+    Ok(())
+}
+
+/// The idle window the host is using now (`secs` plus `source`: `env`,
+/// `operator`, `setting`, or `default`).
+#[tauri::command]
+pub fn acp_get_agent_idle_window() -> crate::web::agent_reaper::AgentIdleWindowStatus {
+    crate::web::agent_reaper::resolved_agent_idle_window()
+}
+
 #[cfg(test)]
 mod tests;

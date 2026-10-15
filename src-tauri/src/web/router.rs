@@ -18,7 +18,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::web::acp_api;
 use crate::web::auth::WebAuth;
@@ -173,6 +173,10 @@ pub fn router(
 ) -> Router {
     let r = Router::new()
         .route("/health", get(health_check))
+        .route(
+            "/host/agent-idle-window",
+            get(agent_idle_window).post(set_agent_idle_window),
+        )
         .route("/ws", get(ws_upgrade))
         .route("/terminal/ws", get(terminal_ws_upgrade))
         // The host's project registry: the web client reads the non-archived +
@@ -425,6 +429,7 @@ const PUBLIC_PATHS: &[&str] = &["/health", "/ws", "/terminal/ws", "/oauth/callba
 /// (CAP-1 intent: "every endpoint"). Everything else — the static bundle and
 /// SPA client routes — stays public so the login page can load.
 const GATED_PREFIXES: &[&str] = &[
+    "/host/",
     "/projects",
     "/project/",
     "/mcp-servers",
@@ -536,6 +541,10 @@ pub fn router_with_static(
 ) -> Router {
     let r = Router::new()
         .route("/health", get(health_check))
+        .route(
+            "/host/agent-idle-window",
+            get(agent_idle_window).post(set_agent_idle_window),
+        )
         .route("/ws", get(ws_upgrade))
         .route("/terminal/ws", get(terminal_ws_upgrade))
         .route("/projects", get(projects_api::list))
@@ -717,6 +726,92 @@ async fn health_check(
 struct HealthBody {
     status: &'static str,
     allow_remote_writes: bool,
+}
+
+/// `GET /host/agent-idle-window` — the live idle-chat window. Same `IpcResult`
+/// envelope as the other host reads so the web client can parse it with
+/// `getJson`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentIdleWindowBody {
+    success: bool,
+    data: crate::web::agent_reaper::AgentIdleWindowStatus,
+}
+
+async fn agent_idle_window() -> impl IntoResponse {
+    let data = crate::web::agent_reaper::resolved_agent_idle_window();
+    tracing::debug!(
+        target: "termul::web::agent_reaper",
+        secs = data.secs,
+        source = data.source,
+        "agent idle window probe"
+    );
+    (StatusCode::OK, Json(idle_window_ok(data)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetAgentIdleWindowRequest {
+    secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentIdleWindowError {
+    success: bool,
+    error: String,
+    code: String,
+}
+
+fn idle_window_ok(data: crate::web::agent_reaper::AgentIdleWindowStatus) -> AgentIdleWindowBody {
+    AgentIdleWindowBody {
+        success: true,
+        data,
+    }
+}
+
+/// `POST /host/agent-idle-window` — save the Settings choice. A flag or
+/// `$TERMUL_AGENT_IDLE_REAP_SECS` keeps the live window. View-only peers
+/// (shared-live, or a remote peer without `--allow-remote-writes`) are refused.
+async fn set_agent_idle_window(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<SetAgentIdleWindowRequest>,
+) -> Response {
+    let allowed = crate::web::capabilities::write_decision(
+        peer,
+        crate::web::capabilities::WriteFlags::from_state(&state),
+    )
+    .is_allowed();
+    if !allowed {
+        tracing::info!(
+            target: "termul::web::agent_reaper",
+            "agent idle window change refused for a view-only peer"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(AgentIdleWindowError {
+                success: false,
+                error: "this connection cannot change host settings".to_string(),
+                code: "FORBIDDEN".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if matches!(body.secs, Some(0)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AgentIdleWindowError {
+                success: false,
+                error: "agent idle window must be greater than 0 seconds".to_string(),
+                code: "INVALID_IDLE_WINDOW".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    crate::web::agent_reaper::set_agent_idle_window_override(body.secs);
+    let data = crate::web::agent_reaper::resolved_agent_idle_window();
+    (StatusCode::OK, Json(idle_window_ok(data))).into_response()
 }
 
 #[cfg(test)]

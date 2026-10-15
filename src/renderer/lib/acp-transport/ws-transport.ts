@@ -57,6 +57,7 @@ import type {
 } from '@/lib/acp-api'
 import type { SessionPayload } from '@/lib/acp-history-persistence'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
+import { getJson, postJson } from '@/lib/ipc/http'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import { flagWebAuthUnauthorized, getWebAuthGateState } from '@/lib/web-auth-gate'
@@ -75,6 +76,7 @@ import {
   type AcpConnectionState,
   type AcpTransport,
   AcpTransportError,
+  type AgentIdleWindowStatus,
   COMMAND_IN_PROGRESS_CODE,
   type CommandCallOptions,
   parseVisibleAt,
@@ -851,6 +853,24 @@ export class WsAcpTransport implements AcpTransport {
   async setSessionReopenTimeout(_secs: number | null): Promise<void> {
     // Desktop-only: the standalone server has no settings surface and configures
     // the session reopen timeout via TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS.
+  }
+
+  async setAgentIdleWindow(secs: number | null): Promise<void> {
+    const res = await postJson<AgentIdleWindowStatus>('/host/agent-idle-window', { secs })
+    if (!res.success) {
+      throw new AcpTransportError(res.code, res.error)
+    }
+  }
+
+  async getAgentIdleWindow(): Promise<AgentIdleWindowStatus> {
+    const res = await getJson<AgentIdleWindowStatus>('/host/agent-idle-window')
+    if (!res.success || res.data == null) {
+      throw new AcpTransportError(
+        res.success ? 'NETWORK_ERROR' : res.code,
+        res.success ? 'agent idle window response had no data' : res.error
+      )
+    }
+    return res.data
   }
 
   /**
