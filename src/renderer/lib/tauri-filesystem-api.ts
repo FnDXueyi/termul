@@ -150,6 +150,17 @@ function dispatchTypedEvent(
   })
 }
 
+/**
+ * A notify access event (open, read, close): not a change. A real write also
+ * fires a `modify` event, so dropping close-after-write loses nothing. The
+ * negation of the host watcher's `is_change_event`
+ * (`src-tauri/src/web/fs_watcher/mod.rs`).
+ */
+function isAccessEvent(event: WatchEvent): boolean {
+  const kind = event.type
+  return typeof kind === 'object' && kind !== null && 'access' in kind
+}
+
 const activeWatchers = new Map<string, () => void>()
 
 /**
@@ -956,6 +967,10 @@ export function createTauriFilesystemApi(): FilesystemApi {
           (event: WatchEvent) => {
             const callbacks = activeCallbacks.get(normalizedDirPath)
             if (!callbacks) return
+            // Reading a file (our own readTextFile included) fires access
+            // events; reporting them as changes makes an open editor tab
+            // reload, read, and reload again forever.
+            if (isAccessEvent(event)) return
 
             // WatchEventKind is a complex type - check the type property
             // The kind object has a 'type' property: 'create' | 'modify' | 'remove' | 'access' | 'other' | 'any'

@@ -85,6 +85,38 @@ fn normalize_converts_backslashes_and_skips_empty() {
     assert_eq!(normalize_path(std::path::Path::new("")), None);
 }
 
+#[test]
+fn access_events_are_not_changes() {
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind,
+        RemoveKind,
+    };
+    for kind in [
+        EventKind::Access(AccessKind::Open(AccessMode::Any)),
+        EventKind::Access(AccessKind::Open(AccessMode::Write)),
+        EventKind::Access(AccessKind::Read),
+        EventKind::Access(AccessKind::Close(AccessMode::Read)),
+        EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        EventKind::Access(AccessKind::Any),
+        EventKind::Access(AccessKind::Other),
+    ] {
+        assert!(
+            !is_change_event(&kind),
+            "{kind:?} is an access, not a change"
+        );
+    }
+    for kind in [
+        EventKind::Create(CreateKind::File),
+        EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        EventKind::Remove(RemoveKind::File),
+        EventKind::Any,
+        EventKind::Other,
+    ] {
+        assert!(is_change_event(&kind), "{kind:?} is a change");
+    }
+}
+
 /// `fs` delta shape: camelCase `{root, paths}` — pinned against the shared
 /// `FsDelta` so the renderer contract cannot drift.
 #[test]
@@ -308,6 +340,44 @@ async fn fs_deltas_reach_only_connections_subscribed_to_that_project() {
     for d in [d1, d2] {
         let _ = std::fs::remove_dir_all(d);
     }
+}
+
+#[tokio::test]
+async fn reading_a_file_or_listing_a_dir_publishes_no_delta() {
+    // An open editor tab reloads through `/fs/read`; if that read came back as
+    // a change, the tab would reload again and spin forever.
+    let temp = tempfile::Builder::new()
+        .prefix("termul-fswatch-read-")
+        .tempdir()
+        .expect("create project dir");
+    let dir = temp.path().canonicalize().expect("canonicalize project dir");
+    let file = dir.join("open-in-editor.md");
+    std::fs::write(&file, "# spec").expect("write file");
+    let registry = registry_with(&[("p-1", &dir)]);
+    let hub = FsWatchHub::default();
+    let watches = Arc::new(WatchHub::new());
+    let (watching, mut rx) = conn();
+    subscribe_fs(&hub, &watches, &registry, "p-1", &watching).unwrap();
+    assert!(hub.wait_armed("p-1", ARM_WAIT).await, "watcher armed");
+
+    for _ in 0..3 {
+        std::fs::read_to_string(&file).expect("read file");
+        let _ = std::fs::read_dir(&dir).expect("list dir").count();
+    }
+    assert!(
+        next_fs_changed(&mut rx, Duration::from_millis(800))
+            .await
+            .is_none(),
+        "reading a file or listing its directory is not a change"
+    );
+
+    std::fs::write(&file, "# spec v2").expect("rewrite file");
+    let payload = next_fs_changed(&mut rx, Duration::from_secs(10))
+        .await
+        .expect("a real write still reaches the subscriber");
+    assert!(payload["paths"].as_array().expect("paths").iter().any(|p| p
+        .as_str()
+        .is_some_and(|p| p.ends_with("/open-in-editor.md"))));
 }
 
 #[tokio::test]
