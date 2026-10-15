@@ -257,6 +257,32 @@ describe('persistProjectPrefs', () => {
 
     expect(persistence.written).toHaveLength(1)
   })
+
+  it('writes the records in call order when an earlier save is still storing a secret', async () => {
+    let releaseFirst: () => void = () => {}
+    mockApi.secureStorageApi.setSecret.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseFirst = () => resolve({ success: true, data: undefined })
+        })
+    )
+    const withSecret = project('a', {
+      envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+    })
+
+    const first = persistProjectPrefs([withSecret], [], [])
+    const second = persistProjectPrefs(
+      [withSecret],
+      [{ id: 'g', name: 'Group', projectIds: ['a'] }],
+      [withSecret]
+    )
+    // Give the second save every chance to reach the store before the first one.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    releaseFirst()
+    await Promise.all([first, second])
+
+    expect(persistence.written.map((record) => record.groups.map((g) => g.id))).toEqual([[], ['g']])
+  })
 })
 
 describe('loadProjectPrefs', () => {
