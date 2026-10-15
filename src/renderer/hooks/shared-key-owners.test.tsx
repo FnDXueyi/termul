@@ -25,7 +25,8 @@ vi.mock('@/lib/api', async () => ({
     setTurnTimeout: vi.fn(),
     setTurnIdleTimeout: vi.fn(),
     setSessionNewTimeout: vi.fn(),
-    setSessionReopenTimeout: vi.fn()
+    setSessionReopenTimeout: vi.fn(),
+    setAgentIdleWindow: vi.fn()
   }
 }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))

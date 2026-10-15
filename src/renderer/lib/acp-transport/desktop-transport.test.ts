@@ -50,6 +50,12 @@ describe('DesktopAcpTransport host-local domain commands', () => {
     await transport.setTurnIdleTimeout(null)
     await transport.setSessionNewTimeout(45)
     await transport.setSessionReopenTimeout(60)
+    await transport.setAgentIdleWindow(7200)
+    tauri.invoke.mockResolvedValueOnce({ secs: 1800, source: 'default' })
+    await expect(transport.getAgentIdleWindow()).resolves.toEqual({
+      secs: 1800,
+      source: 'default'
+    })
 
     expect(tauri.invoke.mock.calls).toEqual([
       ['acp_install_registry_binary', { request: { agentId: 'a1' } }],
@@ -59,7 +65,9 @@ describe('DesktopAcpTransport host-local domain commands', () => {
       ['acp_set_turn_timeout', { secs: 30 }],
       ['acp_set_turn_idle_timeout', { secs: null }],
       ['acp_set_session_new_timeout', { secs: 45 }],
-      ['acp_set_session_reopen_timeout', { secs: 60 }]
+      ['acp_set_session_reopen_timeout', { secs: 60 }],
+      ['acp_set_agent_idle_window', { secs: 7200 }],
+      ['acp_get_agent_idle_window']
     ])
     transport.dispose()
   })

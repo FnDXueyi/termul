@@ -130,9 +130,33 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
   },
   {
     categoryId: 'ai-agents',
-    label: 'Turn Timeout',
-    description: 'Maximum wall-clock duration for a single agent turn (hard cap).',
-    keywords: ['acp', 'timeout', 'turn', 'hard cap', 'unlimited', 'wedge']
+    label: 'Keep idle chats',
+    description: 'How long an idle agent chat stays open before Termul stops it.',
+    keywords: ['timeout', 'session closed', 'idle', 'reap', 'leave chat']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Stop a silent answer after',
+    description: 'Cancel an agent answer that sends no update for this long.',
+    keywords: ['timeout', 'idle', 'wedge', 'silent', 'turn']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Stop a long answer after',
+    description: 'Stop an agent answer that is still sending output.',
+    keywords: ['timeout', 'hard cap', 'turn', 'long answer']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Wait for a new agent',
+    description: 'How long Termul waits for a new agent to become ready.',
+    keywords: ['timeout', 'session new', 'spawn', 'cold start']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Wait to reopen a chat',
+    description: 'How long Termul waits to reopen a saved chat.',
+    keywords: ['timeout', 'resume', 'reopen', 'history']
   },
   {
     categoryId: 'provider',

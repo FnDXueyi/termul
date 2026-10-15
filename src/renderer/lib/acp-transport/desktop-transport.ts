@@ -28,7 +28,7 @@ import type {
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
 import { ChannelSocket } from './channel-socket'
 import { isDesktopLocalEvent, onDesktopLocalEvent } from './desktop-local-events'
-import { AcpTransportError, type SessionCursor } from './types'
+import { AcpTransportError, type AgentIdleWindowStatus, type SessionCursor } from './types'
 import { WsAcpTransport } from './ws-transport'
 
 /** Placeholder URL: the Channel carrier has no endpoint, but logs/diagnostics name one. */
@@ -111,5 +111,13 @@ export class DesktopAcpTransport extends WsAcpTransport {
 
   override setSessionReopenTimeout(secs: number | null): Promise<void> {
     return invoke<void>('acp_set_session_reopen_timeout', { secs })
+  }
+
+  override setAgentIdleWindow(secs: number | null): Promise<void> {
+    return invoke<void>('acp_set_agent_idle_window', { secs })
+  }
+
+  override getAgentIdleWindow(): Promise<AgentIdleWindowStatus> {
+    return invoke<AgentIdleWindowStatus>('acp_get_agent_idle_window')
   }
 }

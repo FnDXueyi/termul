@@ -18,6 +18,7 @@ import {
   useAcpSessionReopenTimeout,
   useAcpTurnIdleTimeout,
   useAcpTurnTimeout,
+  useAgentIdleWindow,
   useConfirmTerminalClose,
   useDefaultProjectColor,
   useDefaultShell,
@@ -79,6 +80,7 @@ export function AppPreferencesModal(): React.JSX.Element {
   const acpTurnIdleTimeoutSecs = useAcpTurnIdleTimeout()
   const acpSessionNewTimeoutSecs = useAcpSessionNewTimeout()
   const acpSessionReopenTimeoutSecs = useAcpSessionReopenTimeout()
+  const agentIdleWindowSecs = useAgentIdleWindow()
   const updateSetting = useUpdateAppSetting()
   const resetSettings = useResetAppSettings()
 
@@ -246,6 +248,19 @@ export function AppPreferencesModal(): React.JSX.Element {
     }
   }
 
+  const handleAgentIdleWindowChange = async (value: number | null) => {
+    await updateSetting('agentIdleWindowSecs', value)
+    try {
+      await acpApi.setAgentIdleWindow(value)
+    } catch (error) {
+      void logFrontendError({
+        level: 'error',
+        source: 'AppPreferences.agentIdleWindow',
+        message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+      })
+    }
+  }
+
   const handleResetConfirm = async () => {
     await resetSettings()
     await resetAllShortcuts()
@@ -323,10 +338,12 @@ export function AppPreferencesModal(): React.JSX.Element {
             acpTurnIdleTimeoutSecs={acpTurnIdleTimeoutSecs}
             acpSessionNewTimeoutSecs={acpSessionNewTimeoutSecs}
             acpSessionReopenTimeoutSecs={acpSessionReopenTimeoutSecs}
+            agentIdleWindowSecs={agentIdleWindowSecs}
             handleAcpTurnTimeoutChange={handleAcpTurnTimeoutChange}
             handleAcpTurnIdleTimeoutChange={handleAcpTurnIdleTimeoutChange}
             handleAcpSessionNewTimeoutChange={handleAcpSessionNewTimeoutChange}
             handleAcpSessionReopenTimeoutChange={handleAcpSessionReopenTimeoutChange}
+            handleAgentIdleWindowChange={handleAgentIdleWindowChange}
           />
           <ProviderSection />
           <McpServersSection />

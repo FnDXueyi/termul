@@ -1058,6 +1058,7 @@ describe('WsAcpTransport', () => {
     await transport.setTurnIdleTimeout(1800)
     await transport.setSessionNewTimeout(120)
     await transport.setSessionReopenTimeout(300)
+    await transport.setAgentIdleWindow(7200)
 
     expect(sock.sent.length).toBe(sentBefore)
     transport.dispose()

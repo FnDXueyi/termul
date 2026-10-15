@@ -623,6 +623,27 @@ fn clear_remote_writes_env() {
 }
 
 #[test]
+fn desktop_agent_idle_window_reads_env_then_default() {
+    let _g = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
+    let saved = save_env(&[AGENT_IDLE_WINDOW_ENV]);
+    std::env::remove_var(AGENT_IDLE_WINDOW_ENV);
+    let open = desktop_agent_idle_window_secs();
+    assert_eq!(open.secs, DEFAULT_AGENT_IDLE_WINDOW_SECS);
+    assert!(!open.from_env);
+
+    std::env::set_var(AGENT_IDLE_WINDOW_ENV, "90");
+    let locked = desktop_agent_idle_window_secs();
+    assert_eq!(locked.secs, 90);
+    assert!(locked.from_env);
+
+    std::env::set_var(AGENT_IDLE_WINDOW_ENV, "0");
+    let invalid = desktop_agent_idle_window_secs();
+    assert_eq!(invalid.secs, DEFAULT_AGENT_IDLE_WINDOW_SECS);
+    assert!(!invalid.from_env);
+    restore_env(saved);
+}
+
+#[test]
 fn from_args_defaults_to_guarded() {
     let _g = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
     clear_remote_writes_env();

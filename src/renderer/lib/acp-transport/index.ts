@@ -31,6 +31,7 @@ export {
   type AcpConnectionState,
   type AcpTransport,
   AcpTransportError,
+  type AgentIdleWindowStatus,
   COMMAND_ACCEPTED_CODE,
   COMMAND_IN_PROGRESS_CODE,
   type CommandCallOptions,

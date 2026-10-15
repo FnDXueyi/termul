@@ -2,6 +2,7 @@ import { PersistenceKeys } from '@shared/types/persistence.types'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { acpApi } from '@/lib/api'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { DEFAULT_APP_SETTINGS } from '@/types/settings'
@@ -22,7 +23,9 @@ vi.mock('@/lib/api', () => ({
     setTurnTimeout: vi.fn().mockResolvedValue({ success: true }),
     setTurnIdleTimeout: vi.fn().mockResolvedValue({ success: true }),
     setSessionNewTimeout: vi.fn().mockResolvedValue({ success: true }),
-    setSessionReopenTimeout: vi.fn().mockResolvedValue({ success: true })
+    setSessionReopenTimeout: vi.fn().mockResolvedValue({ success: true }),
+    setAgentIdleWindow: vi.fn().mockResolvedValue(undefined),
+    getAgentIdleWindow: vi.fn().mockResolvedValue({ secs: 1800, source: 'default' })
   },
   logApi: {
     revealLogDir: vi.fn(),
@@ -181,6 +184,25 @@ describe('AppPreferences editor auto-save controls (GH-539)', () => {
   })
 })
 
+describe('AppPreferences idle chat window', () => {
+  beforeEach(() => {
+    tauriRef.current = true
+    vi.clearAllMocks()
+    useAppSettingsStore.setState({ settings: { ...DEFAULT_APP_SETTINGS }, isLoaded: true })
+  })
+
+  it('saves Keep idle chats and pushes the window to the host', async () => {
+    renderPage()
+
+    fireEvent.change(await screen.findByLabelText('Keep idle chats'), { target: { value: '7200' } })
+
+    await waitFor(() => {
+      expect(useAppSettingsStore.getState().settings.agentIdleWindowSecs).toBe(7200)
+      expect(acpApi.setAgentIdleWindow).toHaveBeenCalledWith(7200)
+    })
+  })
+})
+
 describe('AppPreferences notification switches (issue #865)', () => {
   beforeEach(() => {
     tauriRef.current = true
@@ -260,10 +282,12 @@ describe('AppPreferences web honesty gates (Story 8)', () => {
     expect(
       await screen.findByText(/Managed by the server — timeouts for agents spawned/i)
     ).toBeInTheDocument()
-    expect(screen.queryByLabelText(/Turn Timeout \(hard cap\)/)).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Turn Idle Timeout')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Session/New Timeout')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Session Reopen Timeout')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Keep idle chats')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Stop a silent answer after')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Stop a long answer after')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Wait for a new agent')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Wait to reopen a chat')).not.toBeInTheDocument()
+    expect(await screen.findByText(/Idle chats stay open for 30 minutes/)).toBeInTheDocument()
   })
 
   it('hides the New Browser Tab shortcut row on web but keeps other shortcuts', async () => {

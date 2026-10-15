@@ -152,10 +152,12 @@ pub async fn serve(
     // (bind failure, panic, early exit) so `serve` never hangs waiting on a
     // reaper whose signal can no longer arrive in-process.
     let (reaper_stop_tx, reaper_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let reaper_window = std::time::Duration::from_secs(cfg.agent_idle_window_secs);
+    // Flag → env → default is already resolved on `cfg`. Lock it so a desktop
+    // settings override in this process cannot move the server window.
+    agent_reaper::install_agent_idle_baseline(cfg.agent_idle_window_secs, Some("operator"));
     let reaper_handle = agent_reaper::spawn_agent_idle_reaper(
         acp.clone(),
-        reaper_window,
+        agent_reaper::live_agent_idle_window,
         Box::pin(async move {
             tokio::select! {
                 _ = shutdown_signal_future() => {}

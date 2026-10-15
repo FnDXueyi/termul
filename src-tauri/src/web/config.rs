@@ -85,6 +85,36 @@ where
     }
 }
 
+/// The idle-agent window for the desktop host, which has no CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopAgentIdleWindow {
+    pub secs: u64,
+    /// `true` when `$TERMUL_AGENT_IDLE_REAP_SECS` supplied `secs`. That value
+    /// stays locked: App Preferences cannot move the live window.
+    pub from_env: bool,
+}
+
+/// `$TERMUL_AGENT_IDLE_REAP_SECS` → [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (1800).
+/// An invalid env value is ignored with a logged warning.
+#[must_use]
+pub fn desktop_agent_idle_window_secs() -> DesktopAgentIdleWindow {
+    let mut warnings = Vec::new();
+    let from_env = positive_env::<u64>(AGENT_IDLE_WINDOW_ENV, &mut warnings);
+    for warning in warnings {
+        log::warn!(target: "termul::web::agent_reaper", "{warning}");
+    }
+    match from_env {
+        Some(secs) => DesktopAgentIdleWindow {
+            secs,
+            from_env: true,
+        },
+        None => DesktopAgentIdleWindow {
+            secs: DEFAULT_AGENT_IDLE_WINDOW_SECS,
+            from_env: false,
+        },
+    }
+}
+
 /// The per-project terminal cap for the desktop host, which has no CLI:
 /// `$TERMUL_MAX_TERMINALS_PER_PROJECT` → [`DEFAULT_MAX_TERMINALS_PER_PROJECT`].
 /// An invalid env value is ignored with a logged warning.
@@ -345,7 +375,7 @@ pub struct ServerConfig {
     /// Idle window (seconds) after which the host reaps an idle agent.
     /// `--agent-idle-window-secs` → `$TERMUL_AGENT_IDLE_REAP_SECS` →
     /// [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (1800). The desktop host reads the
-    /// same default const.
+    /// same env var and default through [`desktop_agent_idle_window_secs`].
     pub agent_idle_window_secs: u64,
     /// Outbound-queue overflow tolerance per client: consecutive failed
     /// enqueues before a peer that stopped draining is closed.

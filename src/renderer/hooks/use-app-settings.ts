@@ -1,6 +1,7 @@
 import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { useSharedKeySync } from '@/lib/shared-key-sync'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
@@ -132,6 +133,15 @@ export function useAppSettingsLoader(): void {
       } catch (error) {
         console.error('Failed to apply ACP session reopen timeout:', error)
       }
+      try {
+        await acpApi.setAgentIdleWindow(settings.agentIdleWindowSecs)
+      } catch (error) {
+        void logFrontendError({
+          level: 'error',
+          source: 'useAppSettingsLoader.agentIdleWindow',
+          message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+        })
+      }
     }
     load()
   }, [setSettings])
@@ -214,6 +224,15 @@ export function useResetAppSettings(): () => Promise<void> {
       await acpApi.setSessionReopenTimeout(DEFAULT_APP_SETTINGS.acpSessionReopenTimeoutSecs)
     } catch (error) {
       console.error('Failed to clear ACP session reopen timeout on reset:', error)
+    }
+    try {
+      await acpApi.setAgentIdleWindow(DEFAULT_APP_SETTINGS.agentIdleWindowSecs)
+    } catch (error) {
+      void logFrontendError({
+        level: 'error',
+        source: 'useResetAppSettings.agentIdleWindow',
+        message: `Failed to clear the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+      })
     }
   }, [resetToDefaults])
 }

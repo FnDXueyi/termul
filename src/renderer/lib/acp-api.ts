@@ -22,7 +22,11 @@ import {
   type ProviderErrorCode
 } from '@shared/types/web-protocol.types'
 import { invoke } from '@tauri-apps/api/core'
-import { type CommandCallOptions, getAcpTransport } from '@/lib/acp-transport'
+import {
+  type AgentIdleWindowStatus,
+  type CommandCallOptions,
+  getAcpTransport
+} from '@/lib/acp-transport'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
 import { type CommandRun, runCommand } from '@/lib/command-engine'
 import { keyDigest } from '@/lib/command-journal'
@@ -30,6 +34,8 @@ import { waitUntilVisible } from '@/lib/command-visibility'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { webServerMcpOAuth } from '@/lib/web-server-api'
+
+export type { AgentIdleWindowStatus }
 
 // --- Identifiers -----------------------------------------------------------
 
@@ -1322,6 +1328,18 @@ export async function acpSetSessionReopenTimeout(secs: number | null): Promise<v
   await getAcpTransport().setSessionReopenTimeout(secs)
 }
 
+// Push how long an idle agent chat stays open, in seconds, or `null` to clear.
+// Desktop updates the reaper. The web transport no-ops; the server locks the
+// window at startup.
+export async function acpSetAgentIdleWindow(secs: number | null): Promise<void> {
+  await getAcpTransport().setAgentIdleWindow(secs)
+}
+
+// The window the host is using now.
+export async function acpGetAgentIdleWindow(): Promise<AgentIdleWindowStatus> {
+  return getAcpTransport().getAgentIdleWindow()
+}
+
 // --- Event subscription ----------------------------------------------------
 
 /**
@@ -1366,6 +1384,8 @@ export const acpApi = {
   setTurnIdleTimeout: acpSetTurnIdleTimeout,
   setSessionNewTimeout: acpSetSessionNewTimeout,
   setSessionReopenTimeout: acpSetSessionReopenTimeout,
+  setAgentIdleWindow: acpSetAgentIdleWindow,
+  getAgentIdleWindow: acpGetAgentIdleWindow,
   installRegistryBinary: acpInstallRegistryBinary,
   installAcpAgent: acpInstallAcpAgent,
   probeRuntime: acpProbeRuntime,

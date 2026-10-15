@@ -173,6 +173,7 @@ pub fn router(
 ) -> Router {
     let r = Router::new()
         .route("/health", get(health_check))
+        .route("/host/agent-idle-window", get(agent_idle_window))
         .route("/ws", get(ws_upgrade))
         .route("/terminal/ws", get(terminal_ws_upgrade))
         // The host's project registry: the web client reads the non-archived +
@@ -425,6 +426,7 @@ const PUBLIC_PATHS: &[&str] = &["/health", "/ws", "/terminal/ws", "/oauth/callba
 /// (CAP-1 intent: "every endpoint"). Everything else — the static bundle and
 /// SPA client routes — stays public so the login page can load.
 const GATED_PREFIXES: &[&str] = &[
+    "/host/",
     "/projects",
     "/project/",
     "/mcp-servers",
@@ -536,6 +538,7 @@ pub fn router_with_static(
 ) -> Router {
     let r = Router::new()
         .route("/health", get(health_check))
+        .route("/host/agent-idle-window", get(agent_idle_window))
         .route("/ws", get(ws_upgrade))
         .route("/terminal/ws", get(terminal_ws_upgrade))
         .route("/projects", get(projects_api::list))
@@ -717,6 +720,33 @@ async fn health_check(
 struct HealthBody {
     status: &'static str,
     allow_remote_writes: bool,
+}
+
+/// `GET /host/agent-idle-window` — the live idle-chat window. Same `IpcResult`
+/// envelope as the other host reads so the web client can parse it with
+/// `getJson`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentIdleWindowBody {
+    success: bool,
+    data: crate::web::agent_reaper::AgentIdleWindowStatus,
+}
+
+async fn agent_idle_window() -> impl IntoResponse {
+    let data = crate::web::agent_reaper::resolved_agent_idle_window();
+    tracing::debug!(
+        target: "termul::web::agent_reaper",
+        secs = data.secs,
+        source = data.source,
+        "agent idle window probe"
+    );
+    (
+        StatusCode::OK,
+        Json(AgentIdleWindowBody {
+            success: true,
+            data,
+        }),
+    )
 }
 
 #[cfg(test)]
