@@ -96,7 +96,11 @@ pub async fn git_stage_hunk(
     // The fingerprint names the file, never the patch.
     let print = fingerprint_of("git_stage_hunk", &[("cwd", &cwd), ("path", &path)]);
     run_domain(relay.ledger(), "git_stage_hunk", command_id, print, no_entity(), async move {
-        crate::trackers::git_tracker::git_stage_hunk(&cwd, &path, &hunk_patch)
+        tokio::task::spawn_blocking(move || {
+            crate::trackers::git_tracker::git_stage_hunk(&cwd, &path, &hunk_patch)
+        })
+        .await
+        .map_err(|e| format!("git stage hunk task failed: {e}"))?
     })
     .await
 }
@@ -118,7 +122,13 @@ pub async fn git_unstage_hunk(
         command_id,
         print,
         no_entity(),
-        async move { crate::trackers::git_tracker::git_unstage_hunk(&cwd, &path, &hunk_patch) },
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::trackers::git_tracker::git_unstage_hunk(&cwd, &path, &hunk_patch)
+            })
+            .await
+            .map_err(|e| format!("git unstage hunk task failed: {e}"))?
+        },
     )
     .await
 }
@@ -134,7 +144,11 @@ pub async fn git_discard(
 ) -> Result<(), String> {
     let print = fingerprint_of("git_discard", &[("cwd", &cwd), ("path", &path)]);
     run_domain(relay.ledger(), "git_discard", command_id, print, no_entity(), async move {
-        crate::trackers::git_tracker::git_discard_file(&cwd, &path).map_err(|e: String| e)
+        tokio::task::spawn_blocking(move || {
+            crate::trackers::git_tracker::git_discard_file(&cwd, &path)
+        })
+        .await
+        .map_err(|e| format!("git discard task failed: {e}"))?
     })
     .await
 }
