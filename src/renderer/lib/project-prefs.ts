@@ -317,7 +317,6 @@ async function writeRecord(signature: string, record: ProjectPrefsRecord): Promi
   }
 }
 
-/** The save whose record is being prepared; the next one waits for it. */
 let preparing: Promise<unknown> = Promise.resolve()
 
 /**

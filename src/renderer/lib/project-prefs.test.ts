@@ -63,7 +63,6 @@ function lastRecord(): ProjectPrefsRecord {
   return persistence.written[persistence.written.length - 1]
 }
 
-/** Lets every save already started run as far as it can before the test goes on. */
 function letPendingSavesRun(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }

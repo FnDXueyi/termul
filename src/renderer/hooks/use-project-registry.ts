@@ -106,15 +106,16 @@ function mergeRecoveredPrefs(): void {
   useProjectStore.setState({ groups: [...state.groups, ...missingGroups], projects })
 }
 
-/** Waits before a failed save is tried again with the newest store state. */
+/**
+ * A longer outage needs no further step: the projects watch resends full
+ * state on reconnect, and that triggers a fresh save.
+ */
 export const PREFS_SAVE_RETRY_MS = [1000, 5000, 30000]
 
 /**
- * Save the store state and, when the save fails, try the newest store state
- * again a few times. A transport failure shows the user no toast, so without
- * the retry a group made as the last change of a session stays in memory
- * until the restart and is then gone (#1155). A store change restarts the
- * ladder; the retry pending at unmount is cancelled.
+ * A transport failure shows the user no toast, so without the retry a group
+ * made as the last change of a session stays in memory until the restart and
+ * is then gone (#1155).
  */
 function createPrefsSaver(isCancelled: () => boolean): {
   save: (projects: Project[], groups: ProjectGroup[], previousProjects: Project[]) => void
