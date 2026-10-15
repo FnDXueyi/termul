@@ -16,9 +16,10 @@ interface RailToggleButtonProps {
 
 /**
  * Expands or collapses the Rail. Expanded: the last control of the Rail's top
- * row, just left of the Side panel header. Collapsed: it takes the Termul
- * mark's place at the top while the pointer is over the Rail (see
- * `RailCollapsed`). The glyph names the next action (collapse when expanded,
+ * row, just left of the Side panel header. Collapsed: it shares the Termul
+ * mark's slot at the top — it slides in while the pointer is over the Rail
+ * and stays pinned where no input can hover (see `RailCollapsed`). The glyph
+ * names the next action (collapse when expanded,
  * expand when collapsed); the accessible name and `aria-pressed` stay
  * stable. No keycap: pressed here means "expanded", not "you are here".
  */

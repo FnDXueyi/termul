@@ -36,9 +36,14 @@ const SWAP_MOTION =
  * the mark shows and the toggle waits off to the left, transparent. While
  * the pointer is over the Rail (`group/rail` on the nav) the toggle slides
  * in left to right and the mark slides out to the right; leaving reverses
- * it. Keyboard focus on the toggle shows it too, and on a touch screen
- * (`any-pointer-coarse`, which also covers touch laptops) the toggle always
- * shows. The slide takes 220ms.
+ * it. Keyboard focus on the toggle shows it too. The slide takes 220ms.
+ *
+ * When no connected input can hover (`any-hover: none` — phones, tablets, a
+ * laptop in tablet mode) the toggle stays pinned because nothing can trigger
+ * the swap. A touchscreen laptop driven by mouse or trackpad keeps the
+ * mark-first swap (a finger tap still pops the toggle through sticky
+ * tap-hover), and the pinned state drops the mark's pointer events so its
+ * invisible drag region never swallows a tap meant for the toggle.
  */
 function BrandToggleSwap({ dragRegion }: { dragRegion: boolean }): React.JSX.Element {
   return (
@@ -52,7 +57,7 @@ function BrandToggleSwap({ dragRegion }: { dragRegion: boolean }): React.JSX.Ele
           SWAP_MOTION,
           'group-hover/rail:translate-x-full group-hover/rail:opacity-0',
           'group-focus-within/swap:translate-x-full group-focus-within/swap:opacity-0',
-          'any-pointer-coarse:opacity-0'
+          '[@media(any-hover:none)]:pointer-events-none [@media(any-hover:none)]:opacity-0'
         )}
         data-testid="rail-brand-swap-mark"
         data-tauri-drag-region={dragRegion ? true : undefined}
@@ -65,7 +70,7 @@ function BrandToggleSwap({ dragRegion }: { dragRegion: boolean }): React.JSX.Ele
           '-translate-x-full opacity-0',
           'group-hover/rail:translate-x-0 group-hover/rail:opacity-100',
           'group-focus-within/swap:translate-x-0 group-focus-within/swap:opacity-100',
-          'any-pointer-coarse:translate-x-0 any-pointer-coarse:opacity-100'
+          '[@media(any-hover:none)]:translate-x-0 [@media(any-hover:none)]:opacity-100'
         )}
         data-testid="rail-brand-swap-toggle"
       >
