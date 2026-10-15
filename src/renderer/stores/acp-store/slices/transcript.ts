@@ -647,7 +647,10 @@ const untrimmableSessions = new Set<SessionId>()
  * resolving probe must not resurrect a pin). Runs on every close, including a
  * close that keeps the transcript maps for an open chat tab.
  */
-export function dropSessionBookkeeping(sessionId: SessionId): void {
+export function dropSessionBookkeeping(
+  sessionId: SessionId,
+  opts: { keepLiveSwitchLinks?: boolean } = {}
+): void {
   backfillCounts.delete(sessionId)
   // A pending (unconfirmed) prompt command — its reconcile timer, store flag and
   // wire-turn tracking — dies with the session: nothing may resend into it.
@@ -658,6 +661,9 @@ export function dropSessionBookkeeping(sessionId: SessionId): void {
   historySeqWatermarks.delete(sessionId)
   inFlightDurabilityProbes.delete(sessionId)
   untrimmableSessions.delete(sessionId)
+  // A close that keeps the transcript for an open tab keeps the links too: a
+  // later history reopen re-splices the pre-switch conversation through them.
+  if (opts.keepLiveSwitchLinks) return
   // Live-switch source links die with either endpoint: the target's entry
   // outright, and any entry pointing at the dropped session as source.
   liveSwitchSources.delete(sessionId)

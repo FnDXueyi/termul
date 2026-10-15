@@ -2645,9 +2645,13 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // An open chat tab keeps showing its transcript (the idle reaper stops a
     // chat the user still has open; #1166 resumes it on typing). The in-memory
     // live window is already bounded; it is evicted when the last tab closes.
-    // Bookkeeping (prompt reconcile, wire turns, watermarks…) always goes.
-    if (get().sessions[e.sessionId] && isAgentChatTabOpen(e.sessionId)) {
-      dropSessionBookkeeping(e.sessionId)
+    // Bookkeeping (prompt reconcile, wire turns, watermarks…) always goes;
+    // live-switch links stay with the kept transcript.
+    // An errored session (status kept by the close) evicts as before: the
+    // tab-close eviction only handles 'closed' sessions.
+    const closedSession = get().sessions[e.sessionId]
+    if (closedSession && closedSession.status !== 'error' && isAgentChatTabOpen(e.sessionId)) {
+      dropSessionBookkeeping(e.sessionId, { keepLiveSwitchLinks: true })
     } else {
       set((s) => dropSessionTranscriptState(s, e.sessionId))
     }

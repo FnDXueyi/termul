@@ -125,6 +125,7 @@ import {
   startClosedTranscriptEviction,
   useAcpStore
 } from '@/stores/acp-store'
+import { liveSwitchSources } from './shared-state'
 import { FRESH, seedSession } from './testkit'
 
 const chatTab = (sessionId: string): TabLike => ({
@@ -182,6 +183,7 @@ describe('closed chat transcript kept while a tab shows it', () => {
   afterEach(() => stop())
 
   beforeEach(() => {
+    liveSwitchSources.clear()
     vi.clearAllMocks()
     _resetCoalesceForTesting()
     useAcpStore.setState(FRESH)
@@ -264,14 +266,28 @@ describe('closed chat transcript kept while a tab shows it', () => {
     expect(useAcpStore.getState().messages.s1).toHaveLength(1)
   })
 
-  it('an error session keeps its transcript when its tab closes', () => {
+  it('an error session closed with its tab open evicts on close (not kept)', () => {
     seedTranscript('s1')
     setStatus('s1', 'error')
     setTabs([chatTab('s1')])
     close('s1')
-    expect(useAcpStore.getState().sessions.s1?.status).toBe('error')
-    setTabs([])
+    const st = useAcpStore.getState()
+    expect(st.sessions.s1?.status).toBe('error')
+    expect(st.messages.s1).toBeUndefined()
+    expect(st.toolCalls.s1).toBeUndefined()
+  })
+
+  it('a kept live-switch target keeps its source link until tab-close eviction', () => {
+    seedTranscript('src')
+    seedTranscript('s1')
+    liveSwitchSources.set('s1', 'src')
+    setTabs([chatTab('s1')])
+    close('s1')
     expect(useAcpStore.getState().messages.s1).toHaveLength(1)
+    expect(liveSwitchSources.get('s1')).toBe('src')
+    setTabs([])
+    expect(useAcpStore.getState().messages.s1).toBeUndefined()
+    expect(liveSwitchSources.has('s1')).toBe(false)
   })
 
   it('closing one tab leaves other sessions alone', () => {
