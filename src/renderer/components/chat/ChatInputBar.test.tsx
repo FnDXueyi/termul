@@ -1240,11 +1240,14 @@ describe('ChatInputBar command chip', () => {
     // Select the command
     await selectSlashOption('/compact')
 
-    // Command pill should render inline (the CommandPill NodeView renders the
-    // SkillChip with name prefixed by `/` so the visible text is `/compact`).
+    // Command pill: terminal icon and muted `/compact`, not the skill sparkles.
     await waitFor(() => {
       expect(screen.getByText('/compact')).toBeInTheDocument()
     })
+    const commandPill = document.querySelector('[data-command-pill="true"]')
+    expect(commandPill?.querySelector('svg[data-termul-icon="TerminalSquare"]')).not.toBeNull()
+    expect(commandPill?.querySelector('svg[data-termul-icon="Sparkles"]')).toBeNull()
+    expect(commandPill?.querySelector('.text-muted-foreground')).not.toBeNull()
   })
 
   it('sends the command-prefixed wire with token display blocks on send', async () => {
