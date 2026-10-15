@@ -951,6 +951,38 @@ describe('bounded full-payload cache', () => {
     expect(getCachedSessionPayload('s-live')).toBeDefined()
   })
 
+  it('keeps a plan fence from the dropped copy and merges it into the host tail by message id', async () => {
+    const fence = '```termul-plan\n[{"content":"ship","status":"completed"}]\n```'
+    const reply = { ...msg('agent', 'final reply'), seq: 1478 }
+    setCachedSessionPayload(
+      's-fence',
+      atSeq(
+        payload('s-fence', [
+          ...early,
+          { ...reply, blocks: [...reply.blocks, { type: 'text', text: fence }] }
+        ]),
+        1500
+      )
+    )
+    const later = { ...msg('agent', 'more work'), seq: 1600 }
+    mockHistoryApi.getTail.mockResolvedValueOnce(
+      atSeq(payload('s-fence', [...early, reply, later]), 1655)
+    )
+
+    const tail = await loadSessionPayloadTail('s-fence')
+
+    // Host transcript, not the stale copy: the later message is there.
+    expect(tail?.messages.map((m) => m.id)).toEqual(['m-prompt', 'm-final reply', 'm-more work'])
+    expect(tail?.messages[1].blocks.map((b) => b.text)).toEqual(['final reply', '\n', fence])
+    expect(tail?.messages[2].blocks.map((b) => b.text)).toEqual(['more work'])
+    expect(getCachedSessionPayload('s-fence')).toBeUndefined()
+
+    // A later full read from the host gets the fence too.
+    mockHistoryApi.get.mockResolvedValueOnce(payload('s-fence', [...early, reply]))
+    const full = await loadSessionPayload('s-fence')
+    expect(full?.messages[1].blocks.map((b) => b.text)).toEqual(['final reply', '\n', fence])
+  })
+
   it('evicts least-recent inactive entries and reloads them from Rust', async () => {
     for (let index = 0; index <= INACTIVE_PAYLOAD_CACHE_BUDGET; index += 1) {
       setCachedSessionPayload(`s-${index}`, payload(`s-${index}`, [msg('user', `${index}`)]))

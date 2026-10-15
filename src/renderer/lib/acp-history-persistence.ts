@@ -598,6 +598,7 @@ export function queueSessionPayloadDelete(id: string): Promise<void> {
   deletedSessionIds.add(id)
   payloadCache.delete(id)
   pinnedPayloads.delete(id)
+  planFences.delete(id)
   return new Promise<void>((resolve, reject) => {
     const existing = pendingHistoryOperations.get(id)
     const waiter = { resolve, reject }
@@ -711,7 +712,7 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
   const transport = getAcpTransport()
   const mode = transport.historyMode?.()
   if (mode === 'server' && transport.getSessionPayload) {
-    const payload = await transport.getSessionPayload(id)
+    const payload = withPlanFences(id, await transport.getSessionPayload(id))
     if (payload) touchPayload(id, payload)
     return payload
   }
@@ -721,7 +722,7 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
     return cached
   }
   if (mode === 'live_only') return null
-  const payload = await acpHistoryApi.get(id)
+  const payload = withPlanFences(id, await acpHistoryApi.get(id))
   if (payload) touchPayload(id, payload)
   return payload
 }
@@ -737,7 +738,8 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
  * live events no longer refresh it, so a copy cached by an earlier scroll-up
  * misses everything streamed after it and would replace the live transcript.
  * The tail itself is never cached; the session's cached full payload is
- * dropped before the read (see {@link takeCachedPayload}).
+ * dropped before the read (see {@link takeCachedPayload}). Plan fences that
+ * only that copy carried are kept and merged into the host read.
  */
 export async function loadSessionPayloadTail(
   id: string,
@@ -749,10 +751,12 @@ export async function loadSessionPayloadTail(
   // No host history to re-read: the cache stays as it is.
   if (mode === 'live_only') return null
   const cached = takeCachedPayload(id)
-  const tail =
+  const tail = withPlanFences(
+    id,
     mode === 'server' && transport.getSessionPayloadTail
       ? await transport.getSessionPayloadTail(id, limit)
       : await acpHistoryApi.getTail(id, limit)
+  )
   const cachedMeta = cached?.metadata
   if (
     cachedMeta &&
@@ -779,7 +783,57 @@ function takeCachedPayload(id: string): SessionPayload | undefined {
   const cached = payloadCache.get(id)
   payloadCache.delete(id)
   pinnedPayloads.delete(id)
+  if (cached) rememberPlanFences(id, cached)
   return cached
+}
+
+type ContentBlock = ChatMessage['blocks'][number]
+
+/** A text block that IS a `termul-plan` fence (mirrors `isTermulPlanFenceBlock`). */
+const PLAN_FENCE_BLOCK = /^```termul-plan\r?\n[\s\S]*?\r?\n```$/
+
+const isPlanFenceBlock = (block: ContentBlock): boolean =>
+  block.type === 'text' && typeof block.text === 'string' && PLAN_FENCE_BLOCK.test(block.text)
+
+/**
+ * Plan-snapshot fences by session, then message id. `_onPromptComplete` stamps
+ * the fence on the cached payload only (the host never stores it), so when a
+ * host re-read drops that copy the fences are kept here and merged back.
+ */
+const planFences = new Map<string, Map<string, ContentBlock>>()
+
+function rememberPlanFences(id: string, payload: SessionPayload): void {
+  for (const message of payload.messages) {
+    if (message.role !== 'agent') continue
+    const fence = message.blocks.find(isPlanFenceBlock)
+    if (!fence) continue
+    let byMessage = planFences.get(id)
+    if (!byMessage) {
+      byMessage = new Map()
+      planFences.set(id, byMessage)
+    }
+    byMessage.set(message.id, fence)
+  }
+}
+
+/** Add remembered fences to host messages (by id) that do not carry one. */
+function withPlanFences(id: string, payload: SessionPayload | null): SessionPayload | null {
+  const byMessage = planFences.get(id)
+  if (!payload || !byMessage || byMessage.size === 0) return payload
+  let changed = false
+  const messages = payload.messages.map((message) => {
+    const fence = byMessage.get(message.id)
+    if (!fence || message.blocks.some(isPlanFenceBlock)) return message
+    changed = true
+    const lastText = [...message.blocks]
+      .reverse()
+      .find((block) => block.type === 'text' && (block.text ?? '').length > 0)
+    // The fence opener must start a line once text blocks are joined.
+    const separator: ContentBlock[] =
+      lastText && !(lastText.text ?? '').endsWith('\n') ? [{ type: 'text', text: '\n' }] : []
+    return { ...message, blocks: [...message.blocks, ...separator, fence] }
+  })
+  return changed ? { ...payload, messages } : payload
 }
 
 export async function saveSessionPayload(id: string, payload: SessionPayload): Promise<void> {
@@ -794,6 +848,7 @@ export async function saveSessionPayload(id: string, payload: SessionPayload): P
 export async function deleteSessionPayload(id: string): Promise<void> {
   payloadCache.delete(id)
   pinnedPayloads.delete(id)
+  planFences.delete(id)
   const mode = historyMode()
   // CAP-11: server mode deletes through the WS transport (`delete_session`) —
   // previously a silent no-op that left the host record on disk.
@@ -867,6 +922,7 @@ export async function flushSessionHistory(): Promise<void> {
 export function _clearPayloadCacheForTesting(): void {
   payloadCache.clear()
   pinnedPayloads.clear()
+  planFences.clear()
 }
 
 export async function runHistoryWipeMigration(): Promise<void> {

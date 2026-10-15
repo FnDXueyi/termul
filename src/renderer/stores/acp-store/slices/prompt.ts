@@ -1117,8 +1117,8 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
     })
     // Update the in-memory payload cache so a later full read in this app
     // session (`loadSessionPayload`, e.g. desktop scroll-up) finds the fence. A
-    // reopen does not: it installs the host tail, which never carries the fence,
-    // and drops this cached copy. Since CAP-2 host-owned history,
+    // reopen drops this cached copy but keeps its fences and merges them into
+    // the host tail by message id. Since CAP-2 host-owned history,
     // `persistSession` only updates the session-index projection — the durable
     // message wire shape is owned by the Rust host, and the renderer's
     // `messages` is a projection. Without this cache update, the snapshot fence
