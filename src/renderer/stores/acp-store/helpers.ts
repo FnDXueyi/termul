@@ -1747,6 +1747,23 @@ export function selectConfigWarmState(state: AcpState, configId: string): Config
 }
 
 /**
+ * Server seq of the prompt that opened the trailing turn: the last user bubble
+ * when it is a real prompt (visible content, not a handoff boundary row) with
+ * a positive seq. `null` when the window cuts the turn off from its prompt or
+ * the trailing turn is a hidden one, whose cards never render.
+ */
+export function openTurnPromptSeq(messages: ChatMessage[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user') continue
+    const seq = message.seq
+    const prompt = message.handoffBoundary !== true && hasVisibleContent(message)
+    return prompt && typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? seq : null
+  }
+  return null
+}
+
+/**
  * Issue #838: derive the open turn (a `user_prompt` with no matching
  * `prompt_complete`) from an installed transcript. The server's session
  * metadata may carry `turnActive` (authoritative, set when the host knows a
