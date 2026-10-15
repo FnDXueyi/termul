@@ -30,6 +30,7 @@ fn metadata() -> SessionMetadata {
         command_id: None,
         log_epoch: None,
         head_ahead_of_durable: false,
+        sweep_checkpoint: None,
     }
 }
 
