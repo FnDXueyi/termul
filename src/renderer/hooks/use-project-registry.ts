@@ -107,7 +107,7 @@ function mergeRecoveredPrefs(): void {
 }
 
 /** Waits before a failed save is tried again with the newest store state. */
-const PREFS_SAVE_RETRY_MS = [1000, 5000, 30000]
+export const PREFS_SAVE_RETRY_MS = [1000, 5000, 30000]
 
 /**
  * Save the store state and, when the save fails, try the newest store state

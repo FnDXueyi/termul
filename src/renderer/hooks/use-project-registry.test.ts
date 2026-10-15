@@ -1,7 +1,8 @@
+import type { IpcResult } from '@shared/types/ipc.types'
 import type { ProjectPrefsRecord } from '@shared/types/persistence.types'
 import type { ProjectListPayload, ProjectSummary } from '@shared/types/web-projects.types'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const h = vi.hoisted(() => {
   const store = new Map<string, unknown>()
@@ -9,6 +10,7 @@ const h = vi.hoisted(() => {
   return {
     store,
     calls,
+    heldWrites: null as Array<(result: IpcResult<void>) => void> | null,
     tauri: { value: false },
     subscribe: vi.fn(),
     unwatch: vi.fn(),
@@ -35,6 +37,7 @@ vi.mock('@/lib/api', () => ({
       return { success: true, data: undefined }
     }),
     writeDebounced: vi.fn(async (key: string, data: unknown) => {
+      if (h.heldWrites) return new Promise((resolve) => h.heldWrites?.push(resolve))
       h.store.set(key, data)
       return { success: true, data: undefined }
     })
@@ -66,7 +69,7 @@ import { persistenceApi } from '@/lib/api'
 import { _resetProjectPrefsForTests } from '@/lib/project-prefs'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
-import { useProjectRegistry } from './use-project-registry'
+import { PREFS_SAVE_RETRY_MS, useProjectRegistry } from './use-project-registry'
 
 function summary(id: string, extra: Partial<ProjectSummary> = {}): ProjectSummary {
   return {
@@ -111,6 +114,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   h.store.clear()
   h.calls.length = 0
+  h.heldWrites = null
   h.tauri.value = false
   h.subscribe.mockReturnValue(h.unwatch)
   h.importLegacyProjects.mockResolvedValue('skipped')
@@ -316,41 +320,59 @@ describe('useProjectRegistry', () => {
   })
 
   describe('prefs save failure', () => {
-    /** A group added once the first save is through, saved over a lost transport. */
-    async function addGroupOverLostTransport(name: string): Promise<ReturnType<typeof renderHook>> {
+    afterEach(() => vi.useRealTimers())
+
+    function savedGroupNames(): string[] | undefined {
+      return (h.store.get('project-prefs') as ProjectPrefsRecord | undefined)?.groups.map(
+        (g) => g.name
+      )
+    }
+
+    async function mountWithOneProjectSaved(): Promise<ReturnType<typeof renderHook>> {
       const rendered = await mountAndDeliver(list([summary('a')]))
       await waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(1))
-      vi.mocked(persistenceApi.writeDebounced).mockImplementationOnce(async () => ({
-        success: false,
-        code: 'WS_ERROR',
-        error: 'WebSocket closed'
-      }))
-
-      act(() => useProjectStore.getState().addGroup(name))
-      await waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2))
       return rendered
     }
 
-    it('saves the group again on its own after the save failed', async () => {
-      await addGroupOverLostTransport('Survives the retry')
-
-      await waitFor(
-        () => {
-          const saved = h.store.get('project-prefs') as ProjectPrefsRecord | undefined
-          expect(saved?.groups.map((g) => g.name)).toEqual(['Survives the retry'])
-        },
-        { timeout: 3000 }
+    async function addGroupsOverHeldWrites(names: string[]): Promise<void> {
+      const before = vi.mocked(persistenceApi.writeDebounced).mock.calls.length
+      h.heldWrites = []
+      for (const name of names) act(() => useProjectStore.getState().addGroup(name))
+      await waitFor(() =>
+        expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(before + names.length)
       )
+    }
+
+    /** The real debounce answers every write it merged with the one result. */
+    async function failHeldWritesTogether(): Promise<void> {
+      const held = h.heldWrites ?? []
+      h.heldWrites = null
+      for (const resolve of held) {
+        resolve({ success: false, code: 'WS_ERROR', error: 'WebSocket closed' })
+      }
+      await vi.advanceTimersByTimeAsync(0)
+    }
+
+    it('saves the group again on its own after the save failed', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Survives the retry'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Survives the retry'])
     })
 
     it('stops retrying a failed save once the hook is unmounted', async () => {
-      const { unmount } = await addGroupOverLostTransport('Lost with the hook')
+      const { unmount } = await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Lost with the hook'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
       unmount()
 
-      // Longer than the first retry delay: a live hook would save again by now.
-      await new Promise((resolve) => setTimeout(resolve, 1300))
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[PREFS_SAVE_RETRY_MS.length - 1])
       expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2)
-      expect((h.store.get('project-prefs') as ProjectPrefsRecord).groups).toEqual([])
+      expect(savedGroupNames()).toEqual([])
     })
   })
 

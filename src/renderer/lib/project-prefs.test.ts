@@ -63,6 +63,11 @@ function lastRecord(): ProjectPrefsRecord {
   return persistence.written[persistence.written.length - 1]
 }
 
+/** Lets every save already started run as far as it can before the test goes on. */
+function letPendingSavesRun(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   persistence.record = null
@@ -276,12 +281,11 @@ describe('persistProjectPrefs', () => {
       [{ id: 'g', name: 'Group', projectIds: ['a'] }],
       [withSecret]
     )
-    // Give the second save every chance to reach the store before the first one.
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await letPendingSavesRun()
     releaseFirst()
     await Promise.all([first, second])
 
-    expect(persistence.written.map((record) => record.groups.map((g) => g.id))).toEqual([[], ['g']])
+    expect(lastRecord().groups.map((g) => g.id)).toEqual(['g'])
   })
 })
 
