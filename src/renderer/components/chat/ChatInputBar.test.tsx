@@ -1360,6 +1360,31 @@ describe('ChatInputBar command chip', () => {
     expect(
       editor!.querySelector('[data-command-pill="true"][data-command-name="compact"]')
     ).not.toBeNull()
+    expect(mockToastError).toHaveBeenCalledWith('This message already has a command.')
+  })
+
+  it('places a command picked in the middle of a sentence at the front', async () => {
+    const commands = [{ name: 'compact', description: 'Compact the conversation' }]
+    renderInputBar({ commands })
+
+    setComposerValue('buatkan design baru /compact')
+
+    await selectSlashOption('/compact')
+
+    await waitFor(() => {
+      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design baru `)
+    })
+  })
+
+  it('moves a stored mid-sentence command to the front when the composer loads it', async () => {
+    const commands = [{ name: 'compact', description: 'Compact' }]
+    renderInputBar({ commands })
+
+    setComposerValue(`buatkan ${commandToken('compact')} design`)
+
+    await waitFor(() => {
+      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design`)
+    })
   })
 
   it('sends just the command (token display) when no message is typed', async () => {

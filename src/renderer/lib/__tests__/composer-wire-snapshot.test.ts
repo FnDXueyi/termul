@@ -141,6 +141,21 @@ describe('composer wire snapshots', () => {
       `
     )
   })
+
+  it('keeps a skill marker in the sentence and the path in the header', () => {
+    const display = `buatkan design baru menggunakan skill ini ${T('design')}`
+    expect(buildPromptWithLoadedSkills([{ name: 'design', path: '/path/SKILL.md' }], display)).toBe(
+      [
+        '# Agent Skills',
+        '',
+        'design: /path/SKILL.md',
+        '',
+        '---',
+        '',
+        'buatkan design baru menggunakan skill ini (design)'
+      ].join('\n')
+    )
+  })
 })
 
 /**
