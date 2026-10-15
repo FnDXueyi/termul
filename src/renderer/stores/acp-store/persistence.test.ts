@@ -107,7 +107,9 @@ vi.mock('@/stores/workspace-store', () => {
     getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
+    getAgentChatSessionIdsInAllTrees: () => new Set<string>(),
     useWorkspaceStore: {
+      subscribe: () => () => {},
       getState: () => ({
         addAgentChatTab: addAgentChatTabSpy,
         removeTab: workspaceStateRef.current.removeTab,

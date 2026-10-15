@@ -81,7 +81,7 @@ The act of starting a new Agent process for the same Session after an Agent proc
 _Avoid_: reconnect
 
 **Attention**:
-A Project or Agent chat that has a pending permission, a pending question, or an Agent process stop.
+A Project or Agent chat that has a pending permission, a pending question, or a stopped Agent chat that cannot resume by itself.
 _Avoid_: badge, unread, notification
 
 **Session**:

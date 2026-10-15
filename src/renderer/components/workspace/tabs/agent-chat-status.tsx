@@ -15,8 +15,8 @@ import { sessionTurnBusy } from '@/stores/prompt-queue-orchestration'
 export interface AgentChatStatusSignals {
   session: AcpSession | undefined
   /**
-   * Permission, question, elicitation, or a closed/disconnected chat
-   * (`agentChatNeedsAttention`).
+   * Permission, question, elicitation, a disconnected chat, or a closed chat
+   * that cannot resume by itself (`agentChatNeedsAttention`).
    */
   needsAttention: boolean
   /**
@@ -55,6 +55,7 @@ export function useAgentChatStatusSignals(sessionId: string): AgentChatStatusSig
         pendingPermission,
         pendingQuestion,
         pendingElicitation,
+        lastError: session.lastError ?? null,
         ephemeral
       })
     : false
