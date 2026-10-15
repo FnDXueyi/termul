@@ -19,5 +19,5 @@ tracks their restoration.
   scoping and the file-mention picker, and are different records from
   ADR-0002 and ADR-0003.
 
-`.gitignore` excluded this directory until #357, which is the likely reason
+`.gitignore` excluded this directory until #1180, which is the likely reason
 these records are missing.
