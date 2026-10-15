@@ -110,6 +110,8 @@ pub(crate) struct RecoveryState {
     last_reload: Option<Instant>,
     /// One graceful restart decision per process: a second would only loop.
     restart_requested: bool,
+    /// Last over-budget reload taken because a decided restart was refused.
+    last_fallback_reload: Option<Instant>,
 }
 
 impl RecoveryState {
@@ -118,6 +120,7 @@ impl RecoveryState {
             budget: ReloadBudget::new(RELOAD_BUDGET, RELOAD_WINDOW),
             last_reload: None,
             restart_requested: false,
+            last_fallback_reload: None,
         }
     }
 
@@ -167,6 +170,35 @@ pub(crate) fn on_reload_failed(state: &mut RecoveryState) -> Effect {
         return Effect::None;
     }
     escalate(state)
+}
+
+/// Whether a render failure whose decided restart was refused (guard, marker,
+/// no log dir) still gets one reload past the budget. A render crash fires only
+/// once, so without it the window stays blank; at most one such reload per
+/// [`RELOAD_WINDOW`] keeps a launch-time crash loop from reloading endlessly.
+pub(crate) fn fallback_reload(
+    kind: i32,
+    state: &mut RecoveryState,
+    now: Instant,
+    exiting: bool,
+) -> bool {
+    if exiting
+        || !matches!(
+            kind,
+            KIND_RENDER_PROCESS_EXITED | KIND_RENDER_PROCESS_UNRESPONSIVE
+        )
+    {
+        return false;
+    }
+    if state
+        .last_fallback_reload
+        .is_some_and(|last| now.saturating_duration_since(last) < RELOAD_WINDOW)
+    {
+        return false;
+    }
+    state.last_fallback_reload = Some(now);
+    state.last_reload = Some(now);
+    true
 }
 
 fn escalate(state: &mut RecoveryState) -> Effect {
@@ -349,7 +381,19 @@ fn attach(
             }
             Effect::Restart => {
                 log::error!("{line}");
-                restart_or_keep_reloading(&app, &mut state);
+                if !restart_or_keep_reloading(&app, &mut state)
+                    && fallback_reload(
+                        kind,
+                        &mut state,
+                        Instant::now(),
+                        crate::exit_cleanup_in_progress(),
+                    )
+                {
+                    log::warn!(
+                        "[webview-recovery] main webview {name}: restart refused; one reload past the budget"
+                    );
+                    reload_main(&app, sender.as_ref(), name);
+                }
             }
             Effect::None => log::warn!("{line}"),
         }
@@ -392,15 +436,18 @@ fn reload_main(
 }
 
 /// Runs a decided restart; when none is dispatched, recovery falls back to
-/// reloads only instead of going quiet for the rest of the process.
+/// reloads only instead of going quiet for the rest of the process. Returns
+/// whether a restart was dispatched.
 #[cfg(windows)]
-fn restart_or_keep_reloading(app: &tauri::AppHandle, state: &mut RecoveryState) {
-    if !restart_guarded(app) {
+fn restart_or_keep_reloading(app: &tauri::AppHandle, state: &mut RecoveryState) -> bool {
+    let dispatched = restart_guarded(app);
+    if !dispatched {
         state.restart_not_dispatched();
         log::warn!(
             "[webview-recovery] no restart dispatched; recovery continues with reloads only"
         );
     }
+    dispatched
 }
 
 /// Requests the graceful restart unless [`claim_restart`] refuses it. Returns

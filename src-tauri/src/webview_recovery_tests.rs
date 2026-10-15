@@ -452,3 +452,78 @@ fn claim_restart_fails_when_the_marker_cannot_be_written() {
     std::fs::create_dir(&marker).unwrap();
     assert!(claim_restart(&marker, 1_800_000_000).is_err());
 }
+
+#[test]
+fn a_refused_restart_gets_one_fallback_reload_per_window() {
+    let start = Instant::now();
+    let mut state = RecoveryState::new();
+    // Budget spent, restart decided, then refused by the guard.
+    for offset in [0, 20, 40] {
+        decide(
+            KIND_RENDER_PROCESS_EXITED,
+            &mut state,
+            secs(start, offset),
+            false,
+        );
+    }
+    assert_eq!(
+        decide(
+            KIND_RENDER_PROCESS_EXITED,
+            &mut state,
+            secs(start, 60),
+            false
+        ),
+        Effect::Restart
+    );
+    state.restart_not_dispatched();
+    assert!(fallback_reload(
+        KIND_RENDER_PROCESS_EXITED,
+        &mut state,
+        secs(start, 60),
+        false
+    ));
+    // A crash loop does not get a second over-budget reload inside the window...
+    assert!(!fallback_reload(
+        KIND_RENDER_PROCESS_EXITED,
+        &mut state,
+        secs(start, 120),
+        false
+    ));
+    // ...but does once the window has passed.
+    assert!(fallback_reload(
+        KIND_RENDER_PROCESS_UNRESPONSIVE,
+        &mut state,
+        secs(start, 360),
+        false
+    ));
+}
+
+#[test]
+fn no_fallback_reload_while_exiting_or_for_non_render_kinds() {
+    let now = Instant::now();
+    let mut state = RecoveryState::new();
+    assert!(!fallback_reload(
+        KIND_RENDER_PROCESS_EXITED,
+        &mut state,
+        now,
+        true
+    ));
+    for kind in [
+        KIND_BROWSER_PROCESS_EXITED,
+        KIND_FRAME_RENDER_PROCESS_EXITED,
+        KIND_GPU_PROCESS_EXITED,
+    ] {
+        assert!(
+            !fallback_reload(kind, &mut state, now, false),
+            "{}",
+            kind_name(kind)
+        );
+    }
+    // Nothing above consumed the fallback.
+    assert!(fallback_reload(
+        KIND_RENDER_PROCESS_EXITED,
+        &mut state,
+        now,
+        false
+    ));
+}
