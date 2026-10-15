@@ -391,6 +391,67 @@ describe('MobileFileExplorer', () => {
     })
   })
 
+  describe('when /health answers after the drawer opened (#641)', () => {
+    const keepsCase = { status: 'ok', allowRemoteWrites: true, caseInsensitivePaths: false }
+    let resolveHealth!: (body: Record<string, unknown>) => void
+    let resolveRead!: (res: { success: boolean; data?: string }) => void
+
+    beforeEach(() => {
+      __resetServerCapabilityCache()
+      const health = new Promise<Record<string, unknown>>((resolve) => {
+        resolveHealth = resolve
+      })
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockReturnValue(
+            health.then((body) => ({ ok: true, status: 200, json: async () => body }))
+          )
+      )
+      mockPersistenceRead.mockReturnValue(
+        new Promise<{ success: boolean; data?: string }>((resolve) => {
+          resolveRead = resolve
+        })
+      )
+      mockProjectId = 'proj-1'
+      mockExplorerState.rootPath = '/Work/Repo'
+      mockExplorerState.directoryContents = new Map([
+        ['/Work/Repo', [entry('a.txt', 'file', '/Work/Repo/a.txt')]]
+      ])
+      primeServerCapability()
+    })
+
+    afterEach(() => {
+      __resetServerCapabilityCache()
+      vi.unstubAllGlobals()
+    })
+
+    it('drops a differently cased saved folder once /health says the host keeps case', async () => {
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+      await act(async () => resolveRead({ success: true, data: '/work/repo/child' }))
+      expect(await screen.findByRole('heading', { name: 'child' })).toBeInTheDocument()
+
+      await act(async () => resolveHealth(keepsCase))
+
+      expect(await screen.findByRole('heading', { name: 'Repo' })).toBeInTheDocument()
+      expect(await screen.findByText('a.txt')).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
+    })
+
+    it('finishes the restore when /health answers while the saved-folder read is pending', async () => {
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+      expect(screen.getByText('Loading…')).toBeInTheDocument()
+
+      await act(async () => resolveHealth(keepsCase))
+      await act(async () => resolveRead({ success: true, data: '/work/repo/child' }))
+
+      expect(await screen.findByRole('heading', { name: 'Repo' })).toBeInTheDocument()
+      expect(await screen.findByText('a.txt')).toBeInTheDocument()
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    })
+  })
+
   it('restores the new project folder after a project switch', async () => {
     mockProjectId = 'proj-1'
     mockPersistenceRead.mockResolvedValue({ success: true, data: '/proj/sub' })
