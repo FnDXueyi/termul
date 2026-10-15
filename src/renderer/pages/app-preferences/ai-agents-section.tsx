@@ -35,6 +35,11 @@ interface TimeoutChoice {
   label: string
 }
 
+function formatLimit(secs: number | null, fallback: string): string {
+  if (secs === null) return fallback
+  return formatAgentIdleWindow(secs)
+}
+
 function TimeoutSelect({
   id,
   label,
@@ -129,120 +134,72 @@ export function AiAgentsSection({
             <Bot size={18} className="text-primary" />
             <h2 className="text-lg font-medium text-foreground">AI Agents</h2>
           </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            View ACP agent availability and warm/auth status. Agent Chat supports these agents
-            automatically.
-          </p>
+          <p className="text-sm text-muted-foreground mt-1">See which agents are ready.</p>
         </div>
         <div className="w-full space-y-4 md:w-2/3">
-          <h3 className="text-sm font-medium text-foreground">When you leave a chat</h3>
           <TimeoutSelect
             id="agent-idle-window"
-            label="Keep idle chats"
-            value={agentIdleWindowSecs}
+            label="Close idle chats after"
+            value={agentIdleWindowSecs === 1800 ? null : agentIdleWindowSecs}
             options={AGENT_IDLE_WINDOW_OPTIONS}
             onChange={handleAgentIdleWindowChange}
-            help="Choose how long an idle agent chat stays open. An open tab does not keep the chat alive. A running answer, a pending approval, or a running agent terminal does. The change applies within one minute. A server flag or TERMUL_AGENT_IDLE_REAP_SECS overrides this menu."
+            help="A chat closes after you leave it this long. A running answer or a waiting question keeps it open."
           />
-          {envLocksWindow && liveWindow ? (
+          {(envLocksWindow || operatorLocksWindow) && liveWindow ? (
             <p className="text-xs text-muted-foreground">
-              TERMUL_AGENT_IDLE_REAP_SECS is set to {formatAgentIdleWindow(liveWindow.secs)}. This
-              menu is saved. It applies after you remove that variable and restart Termul.
+              Using {formatAgentIdleWindow(liveWindow.secs)} from server setup. This menu applies
+              after a restart without that setup.
             </p>
           ) : null}
-          {operatorLocksWindow && liveWindow ? (
+          {liveWindowFailed ? (
             <p className="text-xs text-muted-foreground">
-              The server was started with --agent-idle-window-secs (
-              {formatAgentIdleWindow(liveWindow.secs)}). This menu is saved. It applies after that
-              flag is removed and the server restarts.
+              Could not read the current time. Your choice is still saved.
             </p>
           ) : null}
           {isDesktop ? (
             <>
-              <h3 className="text-sm font-medium text-foreground">While an agent answers</h3>
               <TimeoutSelect
                 id="acp-turn-idle-timeout"
-                label="Stop a silent answer after"
+                label="If an answer goes quiet"
                 value={acpTurnIdleTimeoutSecs}
                 options={ACP_TURN_IDLE_TIMEOUT_OPTIONS}
                 onChange={handleAcpTurnIdleTimeoutChange}
-                help="Termul cancels an answer that sends no update for this long. The default has no limit. TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS overrides this menu."
+                help="Cancel the answer after this long with no update."
               />
               <TimeoutSelect
                 id="acp-turn-timeout"
-                label="Stop a long answer after"
+                label="Longest one answer"
                 value={acpTurnTimeoutSecs}
                 options={ACP_TURN_TIMEOUT_OPTIONS}
                 onChange={handleAcpTurnTimeoutChange}
-                help="Termul stops an answer that is still sending output when it reaches this time. The default has no limit. TERMUL_ACP_TURN_TIMEOUT_SECS overrides this menu."
+                help="Stop an answer that is still writing."
               />
-              <h3 className="text-sm font-medium text-foreground">When a chat starts</h3>
               <TimeoutSelect
                 id="acp-session-new-timeout"
-                label="Wait for a new agent"
-                value={acpSessionNewTimeoutSecs}
+                label="Start a new chat"
+                value={acpSessionNewTimeoutSecs === 60 ? null : acpSessionNewTimeoutSecs}
                 options={ACP_SESSION_NEW_TIMEOUT_OPTIONS}
                 onChange={handleAcpSessionNewTimeoutChange}
-                help="How long Termul waits for a new agent to become ready. The default is 60 seconds. TERMUL_ACP_SESSION_NEW_TIMEOUT_SECS overrides this menu."
+                help="How long to wait for the agent to start."
               />
               <TimeoutSelect
                 id="acp-session-reopen-timeout"
-                label="Wait to reopen a chat"
-                value={acpSessionReopenTimeoutSecs}
+                label="Open a saved chat"
+                value={acpSessionReopenTimeoutSecs === 60 ? null : acpSessionReopenTimeoutSecs}
                 options={ACP_SESSION_REOPEN_TIMEOUT_OPTIONS}
                 onChange={handleAcpSessionReopenTimeoutChange}
-                help="How long Termul waits to reopen a saved chat. A long history can need more time. The default is 60 seconds. TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS overrides this menu."
+                help="How long to wait. A long chat can need more time."
               />
             </>
           ) : (
-            <div className="bg-secondary/30 border border-border rounded-md px-4 py-3">
-              {liveWindowFailed ? (
-                <p className="mb-3 text-xs text-muted-foreground">
-                  Termul could not read the active idle window. Your menu choice is still saved.
-                </p>
-              ) : null}
-              <div className="text-sm font-medium text-foreground">While an agent answers</div>
-              <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
-                <li>
-                  Silent answer:{' '}
-                  <span className="font-mono text-foreground">
-                    {acpTurnIdleTimeoutSecs === null
-                      ? 'server default (no limit)'
-                      : `${acpTurnIdleTimeoutSecs}s`}
-                  </span>
-                </li>
-                <li>
-                  Long answer:{' '}
-                  <span className="font-mono text-foreground">
-                    {acpTurnTimeoutSecs === null
-                      ? 'server default (no limit)'
-                      : `${acpTurnTimeoutSecs}s`}
-                  </span>
-                </li>
-              </ul>
-              <div className="mt-3 text-sm font-medium text-foreground">When a chat starts</div>
-              <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
-                <li>
-                  New agent:{' '}
-                  <span className="font-mono text-foreground">
-                    {acpSessionNewTimeoutSecs === null
-                      ? 'server default (60 seconds)'
-                      : `${acpSessionNewTimeoutSecs}s`}
-                  </span>
-                </li>
-                <li>
-                  Reopen a chat:{' '}
-                  <span className="font-mono text-foreground">
-                    {acpSessionReopenTimeoutSecs === null
-                      ? 'server default (60 seconds)'
-                      : `${acpSessionReopenTimeoutSecs}s`}
-                  </span>
-                </li>
-              </ul>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Managed by the server — timeouts for agents spawned by the standalone server come
-                from its env vars (TERMUL_ACP_*_TIMEOUT_SECS), not from the browser client.
-              </p>
+            <div className="bg-secondary/30 border border-border rounded-md px-4 py-3 text-xs text-muted-foreground">
+              <p className="text-sm font-medium text-foreground">While an answer is running</p>
+              <p className="mt-1">Goes quiet: {formatLimit(acpTurnIdleTimeoutSecs, 'No limit')}</p>
+              <p>Still writing: {formatLimit(acpTurnTimeoutSecs, 'No limit')}</p>
+              <p className="mt-3 text-sm font-medium text-foreground">Starting a chat</p>
+              <p className="mt-1">New chat: {formatLimit(acpSessionNewTimeoutSecs, '1 minute')}</p>
+              <p>Saved chat: {formatLimit(acpSessionReopenTimeoutSecs, '1 minute')}</p>
+              <p className="mt-2">Set on the server.</p>
             </div>
           )}
           <AcpAgentsSettings />

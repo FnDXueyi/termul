@@ -130,32 +130,32 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
   },
   {
     categoryId: 'ai-agents',
-    label: 'Keep idle chats',
-    description: 'How long an idle agent chat stays open before Termul stops it.',
-    keywords: ['timeout', 'session closed', 'idle', 'reap', 'leave chat']
+    label: 'Close idle chats after',
+    description: 'How long a chat stays open after you leave it.',
+    keywords: ['timeout', 'session closed', 'idle', 'keep idle chats', 'leave chat']
   },
   {
     categoryId: 'ai-agents',
-    label: 'Stop a silent answer after',
-    description: 'Cancel an agent answer that sends no update for this long.',
-    keywords: ['timeout', 'idle', 'wedge', 'silent', 'turn']
+    label: 'If an answer goes quiet',
+    description: 'Cancel an answer that stops sending updates.',
+    keywords: ['timeout', 'idle', 'silent', 'turn']
   },
   {
     categoryId: 'ai-agents',
-    label: 'Stop a long answer after',
-    description: 'Stop an agent answer that is still sending output.',
-    keywords: ['timeout', 'hard cap', 'turn', 'long answer']
+    label: 'Longest one answer',
+    description: 'Stop an answer that is still writing.',
+    keywords: ['timeout', 'turn', 'long answer']
   },
   {
     categoryId: 'ai-agents',
-    label: 'Wait for a new agent',
-    description: 'How long Termul waits for a new agent to become ready.',
-    keywords: ['timeout', 'session new', 'spawn', 'cold start']
+    label: 'Start a new chat',
+    description: 'How long to wait for an agent to start.',
+    keywords: ['timeout', 'new chat', 'start']
   },
   {
     categoryId: 'ai-agents',
-    label: 'Wait to reopen a chat',
-    description: 'How long Termul waits to reopen a saved chat.',
+    label: 'Open a saved chat',
+    description: 'How long to wait to open a saved chat.',
     keywords: ['timeout', 'resume', 'reopen', 'history']
   },
   {

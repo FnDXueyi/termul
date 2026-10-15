@@ -194,7 +194,9 @@ describe('AppPreferences idle chat window', () => {
   it('saves Keep idle chats and pushes the window to the host', async () => {
     renderPage()
 
-    fireEvent.change(await screen.findByLabelText('Keep idle chats'), { target: { value: '7200' } })
+    fireEvent.change(await screen.findByLabelText('Close idle chats after'), {
+      target: { value: '7200' }
+    })
 
     await waitFor(() => {
       expect(useAppSettingsStore.getState().settings.agentIdleWindowSecs).toBe(7200)
@@ -276,18 +278,16 @@ describe('AppPreferences web honesty gates (Story 8)', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('keeps Keep idle chats editable on web and leaves the other timeouts read-only', async () => {
+  it('keeps Close idle chats after editable on web and leaves the other timeouts read-only', async () => {
     renderWeb()
 
-    expect(
-      await screen.findByText(/Managed by the server — timeouts for agents spawned/i)
-    ).toBeInTheDocument()
-    const keep = screen.getByLabelText('Keep idle chats')
+    expect(await screen.findByText('Set on the server.')).toBeInTheDocument()
+    const keep = screen.getByLabelText('Close idle chats after')
     expect(keep).toBeEnabled()
-    expect(screen.queryByLabelText('Stop a silent answer after')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Stop a long answer after')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Wait for a new agent')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Wait to reopen a chat')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('If an answer goes quiet')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Longest one answer')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Start a new chat')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Open a saved chat')).not.toBeInTheDocument()
 
     fireEvent.change(keep, { target: { value: '7200' } })
     await waitFor(() => {

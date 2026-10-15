@@ -169,7 +169,7 @@ export const ACP_TURN_TIMEOUT_OPTIONS: Array<{
   value: number | null
   label: string
 }> = [
-  { value: null, label: 'Default (no limit)' },
+  { value: null, label: 'No limit' },
   { value: 3600, label: '1 hour' },
   { value: 7200, label: '2 hours' },
   { value: 21600, label: '6 hours' },
@@ -183,7 +183,7 @@ export const ACP_TURN_IDLE_TIMEOUT_OPTIONS: Array<{
   value: number | null
   label: string
 }> = [
-  { value: null, label: 'Default (no limit)' },
+  { value: null, label: 'No limit' },
   { value: 300, label: '5 minutes' },
   { value: 600, label: '10 minutes' },
   { value: 900, label: '15 minutes' },
@@ -197,9 +197,8 @@ export const ACP_SESSION_NEW_TIMEOUT_OPTIONS: Array<{
   value: number | null
   label: string
 }> = [
-  { value: null, label: 'Default (60 seconds)' },
+  { value: null, label: '1 minute' },
   { value: 30, label: '30 seconds' },
-  { value: 60, label: '1 minute' },
   { value: 120, label: '2 minutes' },
   { value: 300, label: '5 minutes' }
 ]
@@ -210,9 +209,8 @@ export const ACP_SESSION_REOPEN_TIMEOUT_OPTIONS: Array<{
   value: number | null
   label: string
 }> = [
-  { value: null, label: 'Default (60 seconds)' },
+  { value: null, label: '1 minute' },
   { value: 30, label: '30 seconds' },
-  { value: 60, label: '1 minute' },
   { value: 120, label: '2 minutes' },
   { value: 300, label: '5 minutes' }
 ]
@@ -222,9 +220,8 @@ export const AGENT_IDLE_WINDOW_OPTIONS: Array<{
   value: number | null
   label: string
 }> = [
-  { value: null, label: 'Default (30 minutes)' },
   { value: 900, label: '15 minutes' },
-  { value: 1800, label: '30 minutes' },
+  { value: null, label: '30 minutes' },
   { value: 3600, label: '1 hour' },
   { value: 7200, label: '2 hours' },
   { value: 21600, label: '6 hours' },
