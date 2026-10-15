@@ -14,7 +14,9 @@ const {
   mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
+  mockSendPrompt,
   mockSendPromptBlocks,
+  promptQueueRef,
   mockSetSwitchPendingOption,
   mockSetConfigOption,
   mockSetMode,
@@ -66,6 +68,11 @@ const {
   // Live-turn retry (handleRetry): asserts the sanitized wire blocks the
   // panel dispatches through the store's sendPromptBlocks.
   mockSendPromptBlocks: vi.fn(),
+  // Composer text sends (handleSend): the idle-stop resume orders the open
+  // before this call.
+  mockSendPrompt: vi.fn(),
+  // usePromptQueue answer (the idle-stop resume failure toast reads it).
+  promptQueueRef: { current: [] as Array<{ id: string }> },
   // spec-acp-composer-option-fidelity: while a switch is armed, composer picks
   // route to this store action (queued on session.switching) — never the old
   // session's setConfigOption/setMode/setModel.
@@ -237,7 +244,7 @@ vi.mock('@/stores/acp-store', () => {
     recheckPromptCommand: mockRecheckPromptCommand,
     openHistorySession: mockOpen,
     openDiscoveredSession: mockOpenDiscovered,
-    sendPrompt: vi.fn(),
+    sendPrompt: mockSendPrompt,
     sendPromptBlocks: mockSendPromptBlocks,
     cancelPrompt: vi.fn(),
     removeQueuedPrompt: vi.fn(),
@@ -268,7 +275,7 @@ vi.mock('@/stores/acp-store', () => {
     },
     useAgentIcon: () => null,
     useAcpMessages: () => messagesRef.current,
-    usePromptQueue: () => [],
+    usePromptQueue: () => promptQueueRef.current,
     configIdFromReuseKey: (key: string) => key,
     // Mirrors acp-store's prepareChatKey — the panel looks up the switch
     // target's prepared session by (toConfigId, session.cwd, mcpServers).
@@ -349,6 +356,11 @@ const { chatInputBarPropsRef } = vi.hoisted(() => ({
   chatInputBarPropsRef: {
     current: [] as Array<{
       isVisible?: boolean
+      disabled?: boolean
+      controlsDisabled?: boolean
+      onSend?: (text: string) => void
+      onSendBlocks?: (blocks: unknown[], displayBlocks?: unknown[]) => void
+      onDraftStart?: () => void
       session?: { models?: unknown; modes?: unknown; configOptions?: unknown[] }
       configOptions?: unknown[]
       modes?: unknown
@@ -435,9 +447,15 @@ vi.mock('./chat-timeline', () => {
 })
 
 import { AgentChatPanel } from './AgentChatPanel'
+import { AUTO_RESUME_FAILED_QUEUED_TOAST } from './use-idle-stop-auto-resume'
 
 function seedLiveSession(id: string, lastError: string | null = null): void {
   sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'closed', lastError })
+}
+
+/** The props of the most recent ChatInputBar render. */
+function lastComposerProps(): (typeof chatInputBarPropsRef.current)[number] | undefined {
+  return chatInputBarPropsRef.current.at(-1)
 }
 
 /** Advance fake timers past a render-driven delay (e.g. the reconnect grace period). */
@@ -602,9 +620,9 @@ describe('AgentChatPanel restored-tab rehydration', () => {
   })
 
   it('offers a Reconnect action for a closed session with history (no dead end)', () => {
-    // A failed background reconnect leaves the session registered but closed;
-    // the pane must offer a working way to re-attempt the reopen.
-    seedLiveSession('s1')
+    // A failed reconnect leaves the session registered but closed with the
+    // resume error; the pane must offer a working way to re-attempt the reopen.
+    seedLiveSession('s1', 'Resume failed: boom')
     indexRef.current = [{ id: 's1' }]
     render(<AgentChatPanel sessionId="s1" isVisible />)
     fireEvent.click(screen.getByRole('button', { name: 'Resume chat' }))
@@ -620,14 +638,282 @@ describe('AgentChatPanel restored-tab rehydration', () => {
     expect(mockShowAgentLauncher).toHaveBeenCalledWith('pane-1')
   })
 
-  it('surfaces a read-only banner when a closed session has history and no reopen context (CAP-4)', () => {
-    // Remap failed or strategy was 'local' → session lands closed with a
-    // history entry and no discovered reopen context → explicit read-only hint.
+  it('surfaces a read-only banner when a closed session has history and no reopen context (CAP-4)', async () => {
+    // Remap failed or strategy was 'local' → the automatic resume settles
+    // with the session still closed (no live agent) → explicit read-only hint.
     seedLiveSession('s1')
     indexRef.current = [{ id: 's1' }]
     render(<AgentChatPanel sessionId="s1" isVisible />)
+    await act(async () => {
+      lastComposerProps()?.onDraftStart?.()
+    })
     expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Resume chat' })).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+  })
+})
+
+// spec-idle-stopped-chat-seamless-resume: a chat the host idle reaper stopped
+// (closed, has history, lastError is not a resume failure) resumes on the
+// first keystroke or send.
+describe('AgentChatPanel idle-stopped chat seamless resume', () => {
+  beforeEach(() => {
+    sessionsMapRef.current = {}
+    mockOpen.mockReset().mockResolvedValue(undefined)
+    mockSendPrompt.mockReset().mockResolvedValue(undefined)
+    mockSendPromptBlocks.mockReset().mockResolvedValue(undefined)
+    mockRetryCrashed.mockReset().mockResolvedValue(undefined)
+    toastErrorSpy.mockReset()
+    sessionRef.current = null
+    indexRef.current = [{ id: 's1' }]
+    openingRef.current = {}
+    restoringRef.current = {}
+    launchingRef.current = {}
+    discoveredContextRef.current = {}
+    messagesRef.current = []
+    promptQueueRef.current = []
+    errorNoticePropsRef.current = null
+    chatInputBarPropsRef.current = []
+    seedLiveSession('s1')
+  })
+
+  /** Publish the store marks a real `openHistorySession` sets while it runs. */
+  function publishOpening(rerender: (ui: React.ReactElement) => void): void {
+    openingRef.current = { s1: true }
+    restoringRef.current = { s1: true }
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+  }
+
+  it('hides the stopped bar, keeps the composer enabled and the pickers disabled', () => {
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.queryByText('This chat stopped.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Resume chat' })).not.toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(false)
+    expect(lastComposerProps()?.controlsDisabled).toBe(true)
+    expect(lastComposerProps()?.onDraftStart).toBeTypeOf('function')
+  })
+
+  it('stays resumable with a leftover turn note in lastError', () => {
+    seedLiveSession('s1', 'Interrupted by server restart.')
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.queryByText('This chat stopped.')).not.toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(false)
+    // The note itself stays visible.
+    expect(errorNoticePropsRef.current?.message).toBe('Interrupted by server restart.')
+  })
+
+  it('is not resumable after a resume failure', () => {
+    seedLiveSession('s1', 'Resume failed: spawn boom')
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+    expect(lastComposerProps()?.onDraftStart).toBeUndefined()
+  })
+
+  it('does not resume from viewing alone', () => {
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible={false} />)
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(mockOpen).not.toHaveBeenCalled()
+  })
+
+  it('starts the open before a text send so the prompt queues behind it', () => {
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onSend?.('continue')
+    })
+    expect(mockOpen).toHaveBeenCalledWith('s1')
+    expect(mockSendPrompt).toHaveBeenCalledWith('s1', 'continue')
+    expect(mockOpen.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendPrompt.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('starts the open before a blocks send (attachments / pills)', () => {
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    const blocks = [{ type: 'text', text: 'see file' }]
+    act(() => {
+      lastComposerProps()?.onSendBlocks?.(blocks)
+    })
+    expect(mockOpen).toHaveBeenCalledWith('s1')
+    expect(mockSendPromptBlocks).toHaveBeenCalledWith('s1', blocks, { displayBlocks: undefined })
+    expect(mockOpen.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendPromptBlocks.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('resumes once on the first keystroke (one automatic attempt per stop)', () => {
+    mockOpen.mockReturnValue(new Promise(() => {}))
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onDraftStart?.()
+      lastComposerProps()?.onDraftStart?.()
+    })
+    act(() => {
+      lastComposerProps()?.onSend?.('continue')
+    })
+    expect(mockOpen).toHaveBeenCalledTimes(1)
+    expect(mockSendPrompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('tracks an open already in flight instead of starting another', () => {
+    openingRef.current = { s1: true }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onSend?.('continue')
+    })
+    expect(mockOpen).not.toHaveBeenCalled()
+    expect(mockSendPrompt).toHaveBeenCalledWith('s1', 'continue')
+  })
+
+  it('keeps the composer mounted through a fast reconnect, then auto-resumes a second stop', () => {
+    mockOpen.mockReturnValue(new Promise(() => {}))
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onDraftStart?.()
+    })
+    publishOpening(rerender)
+    expect(screen.queryByRole('status', { name: 'Restoring chat' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('composer-stub')).toBeInTheDocument()
+    expect(screen.getByText('Resuming chat…')).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(false)
+
+    // The agent is back before the store's ≥400 ms restore mark clears.
+    sessionRef.current = mockAcpSession({ id: 's1', cwd: '/w', status: 'active' })
+    openingRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.queryByRole('status', { name: 'Restoring chat' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('composer-stub')).toBeInTheDocument()
+
+    // The restore mark clears: the attempt resets, so a later restore of this
+    // live chat shows the normal preload again.
+    restoringRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    restoringRef.current = { s1: true }
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByRole('status', { name: 'Restoring chat' })).toBeInTheDocument()
+    restoringRef.current = {}
+
+    // Reaped again: the next keystroke starts a new automatic resume.
+    seedLiveSession('s1')
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.queryByText('This chat stopped.')).not.toBeInTheDocument()
+    act(() => {
+      lastComposerProps()?.onDraftStart?.()
+    })
+    expect(mockOpen).toHaveBeenCalledTimes(2)
+  })
+
+  it('brings the bar back with a toast when the open resolves still closed with a queued prompt', async () => {
+    let resolveOpen!: () => void
+    mockOpen.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveOpen = resolve
+      })
+    )
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onSend?.('continue')
+    })
+    publishOpening(rerender)
+    // The send queued behind the open; the open lands read-only (no agent).
+    promptQueueRef.current = [{ id: 'q1' }]
+    openingRef.current = {}
+    restoringRef.current = {}
+    await act(async () => {
+      resolveOpen()
+    })
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Resume chat' })).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+    expect(toastErrorSpy).toHaveBeenCalledTimes(1)
+    expect(toastErrorSpy).toHaveBeenCalledWith(AUTO_RESUME_FAILED_QUEUED_TOAST)
+  })
+
+  it('keeps the composer through the restore tail of a failed attempt, then a manual resume shows the preload', async () => {
+    let resolveOpen!: () => void
+    mockOpen.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveOpen = resolve
+      })
+    )
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    act(() => {
+      lastComposerProps()?.onDraftStart?.()
+    })
+    publishOpening(rerender)
+    // The open settles still closed while the store holds the ≥400 ms restore mark.
+    openingRef.current = {}
+    await act(async () => {
+      resolveOpen()
+    })
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByTestId('composer-stub')).toBeInTheDocument()
+    expect(screen.queryByRole('status', { name: 'Restoring chat' })).not.toBeInTheDocument()
+
+    // The restore mark clears; a manual Resume chat restores with the preload.
+    restoringRef.current = {}
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    fireEvent.click(screen.getByRole('button', { name: 'Resume chat' }))
+    expect(mockOpen).toHaveBeenCalledTimes(2)
+    restoringRef.current = { s1: true }
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByRole('status', { name: 'Restoring chat' })).toBeInTheDocument()
+  })
+
+  it('falls back to the error and Resume chat when the automatic resume fails', async () => {
+    mockOpen.mockRejectedValueOnce(new Error('spawn boom'))
+    const { rerender } = render(<AgentChatPanel sessionId="s1" isVisible />)
+    await act(async () => {
+      lastComposerProps()?.onSend?.('continue')
+    })
+    // The store records the failure on the record.
+    seedLiveSession('s1', 'Resume failed: spawn boom')
+    rerender(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(errorNoticePropsRef.current?.message).toBe('Resume failed: spawn boom')
+    expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+    expect(lastComposerProps()?.onDraftStart).toBeUndefined()
+    // No queued prompt in this case → no toast.
+    expect(toastErrorSpy).not.toHaveBeenCalled()
+    // No automatic retry loop; the manual Resume chat re-attempts the open.
+    expect(mockOpen).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Resume chat' }))
+    expect(mockOpen).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not auto-resume again after a failed attempt even without a lastError', async () => {
+    mockOpen.mockRejectedValueOnce(new Error('no persisted history'))
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    await act(async () => {
+      lastComposerProps()?.onDraftStart?.()
+    })
+    expect(screen.getByText('This chat stopped.')).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+    expect(lastComposerProps()?.onDraftStart).toBeUndefined()
+    expect(mockOpen).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves a crashed (error) chat on the unchanged error notice', () => {
+    indexRef.current = []
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      status: 'error',
+      lastError: 'agent crashed'
+    })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(errorNoticePropsRef.current?.message).toBe('agent crashed')
+    expect(lastComposerProps()?.onDraftStart).toBeUndefined()
+    expect(mockOpen).not.toHaveBeenCalled()
+  })
+
+  it('keeps the Codex sign-in bar and a disabled composer', () => {
+    seedLiveSession('s1', CODEX_CLI_SIGNED_OUT_MESSAGE)
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(true)
+    expect(lastComposerProps()?.onDraftStart).toBeUndefined()
   })
 })
 

@@ -59,6 +59,7 @@ import { PermissionPrompt } from './PermissionPrompt'
 import { PlanPanel } from './PlanPanel'
 import { PromptReconcileNotice } from './PromptReconcileNotice'
 import { useApprovalDock } from './use-approval-dock'
+import { useIdleStopAutoResume } from './use-idle-stop-auto-resume'
 
 /** Concatenate the text blocks of a message into a single string. */
 function messageText(blocks: ContentBlock[]): string {
@@ -296,6 +297,20 @@ export function AgentChatPanel({
     }
   }, [isVisible, session, hasHistoryEntry, rehydrateError, openHistorySession, sessionId])
 
+  // A chat the idle reaper stopped resumes on the first keystroke or send
+  // (never on view alone; the effect above deliberately skips 'closed').
+  const { isResumableStop, autoResumeActive, startAutoResume } = useIdleStopAutoResume({
+    sessionId,
+    session,
+    hasHistoryEntry,
+    hasDiscoveredReopenContext: discoveredReopenContext != null,
+    isOpeningHistory,
+    isRestoringChat,
+    isLaunchingSession,
+    queuedCount: promptQueue.length,
+    openHistorySession
+  })
+
   // A persisted launch-* tab is a failed-launch corpse. deserialize drops it
   // and reattach must not put it back; if one still mounts with no session
   // and no history, close it instead of "The session no longer exists."
@@ -334,24 +349,29 @@ export function AgentChatPanel({
     [sendQueuedPromptNow, sessionId]
   )
 
+  // A send into a cleanly stopped chat starts the resume FIRST: the open marks
+  // `openingHistoryIds` synchronously, so `runPromptTurn` queues the prompt
+  // and the open dispatches it once the agent is back.
   const handleSend = useCallback(
     (text: string) => {
+      startAutoResume()
       void sendPrompt(sessionId, text).catch((err) => {
         if (isAgentDeadError(err)) return
         toast.error('Could not send your message. Try again.')
       })
     },
-    [sendPrompt, sessionId]
+    [sendPrompt, sessionId, startAutoResume]
   )
 
   const handleSendBlocks = useCallback(
     (blocks: ContentBlock[], displayBlocks?: ContentBlock[]) => {
+      startAutoResume()
       void sendPromptBlocks(sessionId, blocks, { displayBlocks }).catch((err) => {
         if (isAgentDeadError(err)) return
         toast.error('Could not send your message. Try again.')
       })
     },
-    [sendPromptBlocks, sessionId]
+    [sendPromptBlocks, sessionId, startAutoResume]
   )
 
   const handleCancel = useCallback(() => {
@@ -632,7 +652,9 @@ export function AgentChatPanel({
   const dockRef = useDockClearance(isMobileShell && isVisible)
   const dockClassName = isMobileShell ? 'flex shrink-0 flex-col' : 'contents'
 
-  if (isRestoringChat) return <ChatRestorePreload />
+  // An automatic resume keeps the composer (and the draft being typed)
+  // mounted; the "Resuming chat…" strip covers the reconnect instead.
+  if (isRestoringChat && !(session && autoResumeActive)) return <ChatRestorePreload />
 
   if (!session) {
     if (rehydrateError) {
@@ -761,6 +783,7 @@ export function AgentChatPanel({
           </div>
         )}
       {isClosed &&
+        !isResumableStop &&
         !isOpeningHistory &&
         !isLaunchingSession &&
         !discoveredReopenContext &&
@@ -909,7 +932,9 @@ export function AgentChatPanel({
             session={composerSession ?? session}
             projectRoot={skillsProjectRoot}
             busy={session.activeTurn}
-            disabled={isClosed}
+            disabled={isClosed && !isResumableStop}
+            controlsDisabled={isClosed}
+            onDraftStart={isResumableStop ? startAutoResume : undefined}
             imageCapable={imageCapable}
             embedCapable={embedCapable}
             onSend={handleSend}

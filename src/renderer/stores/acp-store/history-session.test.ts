@@ -155,6 +155,7 @@ import {
   _resetLiveSwitchSourcesForTesting,
   _resetSessionIndexLoadGenerationForTesting,
   agentReuseKey,
+  isResumeFailureError,
   useAcpStore
 } from '@/stores/acp-store'
 import { deferred, FRESH, seedSession } from './testkit'
@@ -270,6 +271,57 @@ describe('acp-store', () => {
     expect(commands.filter((cmd) => cmd === 'acp_spawn_agent')).toHaveLength(1)
     expect(commands).not.toContain('acp_resume_session')
     expect(commands).not.toContain('acp_load_session')
+  })
+
+  it('a prompt queued behind an automatic resume survives a rejected open (idle-stopped chat)', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Ghost', command: 'ghost', args: [], env: {} })
+    // The idle reaper left the chat cleanly closed (no lastError).
+    seedSession('s-reaped', 'agent-reaped', false)
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        's-reaped': { ...s.sessions['s-reaped'], status: 'closed' }
+      }
+    }))
+    const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+    ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      metadata: {
+        id: 's-reaped',
+        agentId: 'agent-reaped',
+        agentConfigId: 'cfg-1',
+        title: 'Reaped chat',
+        cwd: '/w',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 0,
+        status: 'closed'
+      },
+      messages: []
+    })
+    ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValue(
+      'ACP_AGENT_UNAVAILABLE: agent failed to start: program not found'
+    )
+
+    // The panel starts the open first, then sends: the send queues.
+    const open = useAcpStore.getState().openHistorySession('s-reaped')
+    expect(useAcpStore.getState().openingHistoryIds['s-reaped']).toBe(true)
+    await useAcpStore.getState().sendPrompt('s-reaped', 'continue')
+    expect(useAcpStore.getState().promptQueues['s-reaped']).toHaveLength(1)
+
+    await expect(open).rejects.toThrow()
+    const state = useAcpStore.getState()
+    expect(state.openingHistoryIds['s-reaped']).toBeUndefined()
+    expect(state.sessions['s-reaped'].status).toBe('closed')
+    expect(isResumeFailureError(state.sessions['s-reaped'].lastError)).toBe(true)
+    expect(state.sessions['s-reaped'].lastError).toContain('program not found')
+    // Never dropped: the queued prompt waits for the manual Resume chat.
+    expect(state.promptQueues['s-reaped']).toEqual([
+      expect.objectContaining({ blocks: [{ type: 'text', text: 'continue' }] })
+    ])
+    const commands = (invoke as ReturnType<typeof vi.fn>).mock.calls.map(([cmd]) => cmd)
+    expect(commands).not.toContain('acp_send_prompt')
   })
 
   it('openHistorySession restores persisted tool calls alongside the transcript', async () => {

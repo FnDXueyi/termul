@@ -55,6 +55,7 @@ import { useChatComposer } from './use-chat-composer'
 import { useComposerAttachments } from './use-composer-attachments'
 import { useComposerCaretRestore, useComposerMentionSelect } from './use-composer-caret-restore'
 import { useComposerDraft } from './use-composer-draft'
+import { useComposerDraftStart } from './use-composer-draft-start'
 import { useComposerMentions } from './use-composer-mentions'
 
 interface ChatInputBarProps {
@@ -66,6 +67,13 @@ interface ChatInputBarProps {
   busy: boolean
   /** Whether the session is closed/disconnected (fully disables input). */
   disabled: boolean
+  /**
+   * Whether the agent-backed controls (model / mode / config pickers, agent
+   * switch, slash-menu config and mode rows) are disabled. Defaults to
+   * `disabled`. A stopped chat that resumes on input keeps the editor enabled
+   * but these controls off: they would hit the stopped agent.
+   */
+  controlsDisabled?: boolean
   /** Whether the agent accepts inline image content blocks (drag/paste images). */
   imageCapable?: boolean
   /** Whether the agent accepts embedded `resource` blocks (drag/paste text files). */
@@ -111,13 +119,22 @@ interface ChatInputBarProps {
    * work. Defaults to true (visible) for other hosts.
    */
   isVisible?: boolean
+  /**
+   * Fired when the user starts a draft: the first edit or paste into an empty
+   * composer (no text, no attachments). A restored draft or a seed never
+   * fires it. The chat panel uses it to resume a stopped chat early.
+   */
+  onDraftStart?: () => void
 }
+
+const NO_CONFIG_OPTIONS: SessionConfigOption[] = []
 
 export function ChatInputBar({
   session,
   projectRoot,
   busy,
   disabled,
+  controlsDisabled = disabled,
   imageCapable = false,
   embedCapable = false,
   onSend,
@@ -136,7 +153,8 @@ export function ChatInputBar({
   onRemoveQueued,
   onSendQueuedNow,
   compactTop = false,
-  isVisible = true
+  isVisible = true,
+  onDraftStart
 }: ChatInputBarProps): React.JSX.Element {
   const usableConfigOptions = configOptions.filter(
     (option) => option.type === 'boolean' || (option.options?.length ?? 0) > 0
@@ -276,8 +294,10 @@ export function ChatInputBar({
     editorRef,
     slashMenuRef,
     commands,
-    configOptions,
-    modes,
+    // Slash-menu config / mode rows set options on the live agent — hidden
+    // while the agent-backed controls are off.
+    configOptions: controlsDisabled ? NO_CONFIG_OPTIONS : configOptions,
+    modes: controlsDisabled ? null : modes,
     skills: availableSkills,
     disabled,
     onSetConfig,
@@ -288,6 +308,13 @@ export function ChatInputBar({
   })
   const slashOpen = composerSlashOpen
   const mentionMenuOpen = mentions.menuOpen && !disabled && !slashOpen
+
+  const { handleValueChange, handleComposerPaste } = useComposerDraftStart({
+    draftEmpty: value.length === 0 && attachments.length === 0,
+    onDraftStart,
+    setValue,
+    handlePaste
+  })
 
   const canSend = !disabled && !sending && (value.trim().length > 0 || attachments.length > 0)
   const showStop = busy && !canSend
@@ -499,7 +526,7 @@ export function ChatInputBar({
     <AgentModelSelector
       sessionId={session.id}
       busy={busy}
-      disabled={disabled}
+      disabled={controlsDisabled}
       modelOption={modelOption}
       modelSource={modelSource}
       thoughtLevel={thoughtLevel}
@@ -518,7 +545,7 @@ export function ChatInputBar({
   const agentModeChip = (
     <ModeChip
       session={session}
-      disabled={disabled}
+      disabled={controlsDisabled}
       onSelect={onSetMode}
       label="Agent"
       agentName={modeAgentName}
@@ -645,10 +672,10 @@ export function ChatInputBar({
               <ChatComposerEditor
                 className="min-w-0 flex-1"
                 value={value}
-                onValueChange={setValue}
+                onValueChange={handleValueChange}
                 onCaretChange={mentions.update}
                 onBeforeEditorKeyDown={handleKeyDown}
-                onPasteAttachments={handlePaste}
+                onPasteAttachments={handleComposerPaste}
                 getSkillPaths={() => skillPathsRef.current}
                 editorRef={editorRef}
                 inputRef={composerInputRef}

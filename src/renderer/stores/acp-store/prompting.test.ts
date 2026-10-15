@@ -764,6 +764,45 @@ describe('acp-store', () => {
     ])
   })
 
+  it('sendQueuedPromptNow leaves the item queued while a history reopen is in flight', async () => {
+    // A stopped chat's automatic resume keeps the record 'closed' until the
+    // open lands; Send now must not throw — the open's finally flushes it.
+    seedSession('s1', 'agent-1', false)
+    const item = {
+      id: 'q-resume',
+      blocks: [{ type: 'text' as const, text: 'continue' }],
+      createdAt: Date.now()
+    }
+    useAcpStore.setState((s) => ({
+      sessions: { s1: { ...s.sessions.s1, status: 'closed' } },
+      openingHistoryIds: { s1: true },
+      promptQueues: { s1: [item] }
+    }))
+
+    await expect(
+      useAcpStore.getState().sendQueuedPromptNow('s1', 'q-resume')
+    ).resolves.toBeUndefined()
+
+    expect(useAcpStore.getState().promptQueues['s1']).toEqual([item])
+    expect(useAcpStore.getState().suppressQueueFlush['s1']).toBeUndefined()
+    expect(invoke).not.toHaveBeenCalledWith('acp_send_prompt', expect.anything())
+    useAcpStore.setState({ openingHistoryIds: {} })
+  })
+
+  it('sendQueuedPromptNow still rejects on a closed session with no reopen in flight', async () => {
+    seedSession('s1', 'agent-1', false)
+    useAcpStore.setState((s) => ({
+      sessions: { s1: { ...s.sessions.s1, status: 'closed' } },
+      openingHistoryIds: {},
+      promptQueues: {
+        s1: [{ id: 'q-closed', blocks: [{ type: 'text', text: 'x' }], createdAt: Date.now() }]
+      }
+    }))
+    await expect(useAcpStore.getState().sendQueuedPromptNow('s1', 'q-closed')).rejects.toThrow(
+      'session is closed'
+    )
+  })
+
   it('prompt_complete clears activeTurn-only sessions and flushes the queue', async () => {
     seedSession('s1', 'agent-1', false)
     useAcpStore.setState((s) => ({
