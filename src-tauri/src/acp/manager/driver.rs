@@ -268,9 +268,10 @@ pub(super) fn run_agent(
     }
 }
 
-/// Handle an inbound `session/update` notification from the agent: nudge the
-/// active turn's idle deadline, apply the story-3 replay-window suppression,
-/// bind tool calls, apply the AD-8 title gate, then fan out to the sinks.
+/// Handle an inbound `session/update` notification from the agent: drop a
+/// repeated command list, nudge the active turn's idle deadline, apply the
+/// story-3 replay-window suppression, bind tool calls, apply the AD-8 title
+/// gate, then fan out to the sinks.
 ///
 /// Extracted from the connection-builder closure so the routing logic can be
 /// unit-tested without a live connection (cf. `gate_load_session`).
@@ -282,6 +283,20 @@ pub(super) async fn handle_session_notification(
     notification: agent_client_protocol::schema::v1::SessionNotification,
 ) -> Result<(), agent_client_protocol::Error> {
     let session_id = notification.session_id.0.to_string();
+    // A command list that repeats the last one fanned out for the session
+    // (same set, any order) is dropped here, before the idle nudge and before
+    // the relay allocates a seq: no live event, no durable record, no seq
+    // hole. Devin re-sends its unchanged list every ~15 s.
+    if let agent_client_protocol::schema::v1::SessionUpdate::AvailableCommandsUpdate(update) =
+        &notification.update
+    {
+        if state
+            .lock()
+            .is_repeated_commands_update(&session_id, &update.available_commands)
+        {
+            return Ok(());
+        }
+    }
     // Any inbound session/update is agent activity — nudge the active turn's
     // idle deadline so a streaming turn never hits the idle timeout.
     // Best-effort: a no-op when no turn is active for this session. Admission

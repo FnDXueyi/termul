@@ -421,6 +421,7 @@ impl SessionPersistence {
             command_id: registration.command_id.filter(|id| !id.is_empty()),
             log_epoch: Some(mint_log_epoch()),
             head_ahead_of_durable: false,
+            sweep_checkpoint: None,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -528,6 +529,7 @@ impl SessionPersistence {
             command_id: None,
             log_epoch: Some(mint_log_epoch()),
             head_ahead_of_durable: false,
+            sweep_checkpoint: None,
         };
         if let Err(error) = self.persist_metadata(&metadata) {
             let _ = fs::remove_dir_all(self.session_dir(&metadata.storage_key)?);
@@ -600,6 +602,7 @@ impl SessionPersistence {
             command_id: None,
             log_epoch: Some(mint_log_epoch()),
             head_ahead_of_durable: false,
+            sweep_checkpoint: None,
         };
         self.persist_metadata(&metadata)?;
         if let Err(error) = self.install_runtime(metadata.clone()) {
@@ -1556,6 +1559,9 @@ impl SessionPersistence {
         current.message_count = counts.message_count;
         current.tool_count = counts.tool_count;
         current.last_seq = current.last_seq.max(counts.last_seq);
+        // The rewrite removed lines from the prefix a sweep checkpoint vouches
+        // for; the next host start rescans and restamps.
+        current.sweep_checkpoint = None;
         self.persist_metadata(&current)?;
         log::warn!(
             "[acp-history] salvaged seq-intruder records session_id={} \
@@ -1708,10 +1714,12 @@ impl SessionPersistence {
     }
 
     async fn recover(&self) -> Result<()> {
+        let started = std::time::Instant::now();
         let index_path = self.inner.root.join(INDEX_FILE);
+        // Kept as bytes: the rebuilt index is written only when it differs.
         let existing_index = match fs::read(&index_path) {
             Ok(bytes) => match decode_index(&bytes) {
-                Ok(index) => Some(index),
+                Ok(_) => Some(bytes),
                 Err(SessionPersistenceError::UnsupportedVersion { found }) => {
                     return Err(SessionPersistenceError::UnsupportedVersion { found })
                 }
@@ -1730,6 +1738,7 @@ impl SessionPersistence {
         // Sessions the loop could not visit (unreadable, quarantined,
         // conflicting): they miss the stamping, so they keep the migration open.
         let mut skipped = 0usize;
+        let mut sweeps = sweep::SweepTotals::default();
         let mut recovered = HashMap::new();
         let mut logical_ids = HashSet::new();
         for entry in fs::read_dir(&self.inner.root)? {
@@ -1792,8 +1801,9 @@ impl SessionPersistence {
             // stale-low `last_seq` before any append can reuse a seq.
             //
             // Repair torn tails (incomplete final writes) so later appends
-            // land after a valid line. This reads only the last 4 KiB of
-            // each file — O(1) per session, not O(total_records).
+            // land after a valid line. A log that ends in `\n` costs a
+            // one-byte read; only a bare tail is read back to its line start —
+            // O(1) per session, not O(total_records).
             repair_jsonl_torn_tail(&dir.join(MESSAGES_FILE));
             repair_jsonl_torn_tail(&dir.join(TOOL_CALLS_FILE));
 
@@ -1890,6 +1900,9 @@ impl SessionPersistence {
                     .filter(|record| is_tool_event(&record.type_))
                     .count() as u64;
                 metadata.last_seq = records.last().map_or(0, |record| record.seq);
+                // The full load may have rewritten the log; the sweep below
+                // rescans it from the head and restamps.
+                metadata.sweep_checkpoint = None;
                 dirty = true;
             }
 
@@ -1916,7 +1929,9 @@ impl SessionPersistence {
             }
             // AD-5 host-start sweep: terminate a turn the crash left open
             // (never replayed) before any manager or carrier exists.
-            if sweep::sweep_interrupted_turn(&self.inner.root, &mut metadata) {
+            let sweep = sweep::sweep_interrupted_turn(&self.inner.root, &mut metadata);
+            sweeps.add(&sweep);
+            if sweep.swept {
                 dirty = true;
             }
             if migrate_unassigned
@@ -1936,6 +1951,16 @@ impl SessionPersistence {
                         crate::logging::redact_session_id(&metadata.session_id)
                     );
                     return Err(e);
+                }
+            } else if sweep.checkpoint_changed {
+                // Only the sweep memo changed: an optimization, so a failed
+                // write is logged and the next launch simply rescans.
+                if let Err(error) = self.persist_metadata(&metadata) {
+                    log::warn!(
+                        "[acp-history] recover() could not persist the sweep checkpoint \
+                         session_id={} error={error}",
+                        crate::logging::redact_session_id(&metadata.session_id)
+                    );
                 }
             }
             // A legacy record has no log epoch; one whose seq frontier ran ahead
@@ -1970,9 +1995,12 @@ impl SessionPersistence {
             self.install_catalog_entry(metadata.clone());
         }
         // The index is a cache. Always rebuild it from canonical per-session
-        // metadata + logs so stale titles/status/counts/namespaces cannot survive.
-        let _ = existing_index;
-        self.persist_index().await?;
+        // metadata + logs so stale titles/status/counts/namespaces cannot
+        // survive; the write (and its fsync) is skipped when the rebuilt
+        // bytes equal the file already on disk.
+        let index_written = self
+            .persist_index_unless_unchanged(existing_index.as_deref())
+            .await?;
         if migrate_unassigned && skipped == 0 {
             // Marker last: a crash before this point re-runs the (idempotent)
             // stamping on the next open. A skipped session keeps the
@@ -1986,6 +2014,18 @@ impl SessionPersistence {
                 "[acp-history] unassigned-project migration left open stamped={unassigned_stamped} skipped={skipped}"
             );
         }
+        log::info!(
+            "[acp-history] recover() summary sessions={} skipped={skipped} checkpoint_hits={} \
+             rescans={} bytes_scanned={} swept={} stamped={} index_written={index_written} \
+             elapsed_ms={}",
+            recovered.len(),
+            sweeps.checkpoint_hits,
+            sweeps.rescans,
+            sweeps.bytes_scanned,
+            sweeps.swept,
+            sweeps.stamped,
+            started.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -2134,6 +2174,14 @@ impl SessionPersistence {
     }
 
     async fn persist_index(&self) -> Result<()> {
+        self.persist_index_unless_unchanged(None).await.map(|_| ())
+    }
+
+    /// Rebuild `sessions.json` from the catalog and write it, unless the
+    /// rebuilt bytes equal `on_disk` (the file as last read). Returns whether
+    /// it wrote. Ties on `last_activity_at` order by session id so the bytes
+    /// are reproducible across launches.
+    async fn persist_index_unless_unchanged(&self, on_disk: Option<&[u8]>) -> Result<bool> {
         let _guard = self.inner.index_lock.lock().await;
         let mut sessions: Vec<_> = self
             .inner
@@ -2142,16 +2190,21 @@ impl SessionPersistence {
             .values()
             .map(|metadata| SessionIndexEntry::from(&*metadata.lock()))
             .collect();
-        sessions.sort_by_key(|entry| std::cmp::Reverse(entry.last_activity_at));
+        sessions.sort_by(|a, b| {
+            b.last_activity_at
+                .cmp(&a.last_activity_at)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
         let index = SessionIndexFile {
             schema_version: SESSION_SCHEMA_VERSION,
             sessions,
         };
-        atomic_file::replace(
-            &self.inner.root.join(INDEX_FILE),
-            &serde_json::to_vec_pretty(&index)?,
-        )?;
-        Ok(())
+        let bytes = serde_json::to_vec_pretty(&index)?;
+        if on_disk == Some(bytes.as_slice()) {
+            return Ok(false);
+        }
+        atomic_file::replace(&self.inner.root.join(INDEX_FILE), &bytes)?;
+        Ok(true)
     }
 
     fn session_dir(&self, storage_key: &str) -> Result<PathBuf> {
@@ -2180,49 +2233,48 @@ fn mint_log_epoch() -> String {
 pub(crate) fn last_unmatched_user_prompt(
     records: &[PersistedEventRecord],
 ) -> Option<Option<&Value>> {
-    let mut pending: Option<Option<&Value>> = None;
-    for record in records {
-        match record.type_.as_str() {
-            "user_prompt" => {
-                // `turnId` arrives as `Option<String>` inside `json!`, so
-                // durable records carry `"turnId": null` (or "") when the
-                // client omitted it. Normalize non-string/empty to `None` —
-                // an unnameable open turn — otherwise `Some(&Value::Null)`
-                // looks like a named turn that no `prompt_complete` can ever
-                // close, and every shutdown appends another `interrupted`
-                // marker that still cannot satisfy it.
-                pending = Some(
-                    record
-                        .payload
-                        .get("turnId")
-                        .filter(|value| value.as_str().is_some_and(|id| !id.is_empty())),
-                );
-            }
-            "prompt_complete" => {
-                let completion_turn = record.payload.get("turnId");
-                if let Some(prompt_turn) = pending {
-                    // Turn-id match when both carry one (the completion
-                    // echoes it); a prompt with no turn-id (pre-1.8 payload)
-                    // is closed by any later completion.
-                    let closed = match prompt_turn {
-                        Some(turn) => completion_turn == Some(turn),
-                        None => true,
-                    };
-                    if closed {
-                        pending = None;
-                    }
-                }
-            }
-            // A durable `agent_switch` ends this session's ownership — a
-            // pending turn is abandoned and can never emit `prompt_complete`,
-            // so close it here. Without this the orphan holds `turn_active`
-            // open forever and the marker writer re-marks it on every
-            // shutdown (same failure class as a superseded prompt).
-            "agent_switch" => pending = None,
-            _ => {}
+    records.iter().fold(None, |pending, record| {
+        open_turn_step(pending, &record.type_, record.payload.get("turnId"))
+    })
+}
+
+/// One step of the open-turn fold: the pending prompt's turn after a record
+/// of `type_` whose `payload.turnId` is `turn_id`. The single rule set shared
+/// by [`last_unmatched_user_prompt`] and the host-start sweep gate, so the
+/// two can never disagree. Only `user_prompt`, `prompt_complete` and
+/// `agent_switch` change the state, and the state is only the pending turn,
+/// so folding a suffix that starts at a `user_prompt` or `agent_switch` from
+/// `None` gives the same answer as folding the whole log.
+fn open_turn_step<'a>(
+    pending: Option<Option<&'a Value>>,
+    type_: &str,
+    turn_id: Option<&'a Value>,
+) -> Option<Option<&'a Value>> {
+    match type_ {
+        // `turnId` arrives as `Option<String>` inside `json!`, so durable
+        // records carry `"turnId": null` (or "") when the client omitted it.
+        // Normalize non-string/empty to `None` — an unnameable open turn —
+        // otherwise `Some(&Value::Null)` looks like a named turn that no
+        // `prompt_complete` can ever close, and every shutdown appends
+        // another `interrupted` marker that still cannot satisfy it.
+        "user_prompt" => {
+            Some(turn_id.filter(|value| value.as_str().is_some_and(|id| !id.is_empty())))
         }
+        // Turn-id match when both carry one (the completion echoes it); a
+        // prompt with no turn-id (pre-1.8 payload) is closed by any later
+        // completion.
+        "prompt_complete" => match pending {
+            Some(Some(turn)) if turn_id != Some(turn) => pending,
+            _ => None,
+        },
+        // A durable `agent_switch` ends this session's ownership — a pending
+        // turn is abandoned and can never emit `prompt_complete`, so close
+        // it here. Without this the orphan holds `turn_active` open forever
+        // and the marker writer re-marks it on every shutdown (same failure
+        // class as a superseded prompt).
+        "agent_switch" => None,
+        _ => pending,
     }
-    pending
 }
 
 #[cfg(test)]
@@ -2237,3 +2289,5 @@ mod unassigned_tests;
 mod worktree_branch_tests;
 #[cfg(test)]
 mod sweep_tests;
+#[cfg(test)]
+mod jsonl_tests;

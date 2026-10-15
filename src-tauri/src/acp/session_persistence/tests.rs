@@ -3843,3 +3843,56 @@ async fn legacy_tool_records_without_summary_fields_yield_no_summaries() {
     assert_eq!(serde_json::to_value(&tail).unwrap()["toolCalls"], json!([]));
     let _ = fs::remove_dir_all(root);
 }
+
+/// `recover()` rebuilds `sessions.json` every launch but writes (and fsyncs)
+/// it only when the rebuilt bytes differ: an unchanged launch leaves the file
+/// untouched, while a launch that changes an indexed field rewrites it.
+#[tokio::test]
+async fn recover_rewrites_the_index_only_when_it_changed() {
+    let root = temp_dir("index-unchanged");
+    let (persistence, metadata) = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    drop(persistence);
+    let store = root.join("store");
+    let index = store.join(INDEX_FILE);
+    let settled = open_with_authority(&store).await;
+    drop(settled);
+    let pinned = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(86_400);
+    let pin = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&index)
+            .unwrap()
+            .set_modified(pinned)
+            .unwrap();
+    };
+    pin();
+    let bytes = fs::read(&index).unwrap();
+
+    let unchanged = open_with_authority(&store).await;
+    drop(unchanged);
+    assert_eq!(fs::read(&index).unwrap(), bytes);
+    assert_eq!(
+        fs::metadata(&index).unwrap().modified().unwrap(),
+        pinned,
+        "an unchanged index is not rewritten"
+    );
+
+    let metadata_path = store.join(&metadata.storage_key).join(METADATA_FILE);
+    let mut on_disk: SessionMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    on_disk.title = Some("Renamed elsewhere".to_string());
+    fs::write(&metadata_path, serde_json::to_vec_pretty(&on_disk).unwrap()).unwrap();
+    let changed = open_with_authority(&store).await;
+    assert_eq!(
+        changed.list_sessions()[0].title.as_deref(),
+        Some("Renamed elsewhere")
+    );
+    drop(changed);
+    assert_ne!(
+        fs::metadata(&index).unwrap().modified().unwrap(),
+        pinned,
+        "a changed index is rewritten"
+    );
+    let _ = fs::remove_dir_all(root);
+}

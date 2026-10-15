@@ -135,6 +135,26 @@ pub struct SessionMetadata {
     /// never on `SessionIndexEntry` or any wire type.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub head_ahead_of_durable: bool,
+    /// Memoized "no open turn" verdict of the host-start sweep (see
+    /// `sweep.rs`), so `recover()` does not rescan a long log on every launch.
+    /// Always validated against the log before it is trusted. Host-internal:
+    /// never on `SessionIndexEntry` or any wire type. Additive: old metadata
+    /// loads with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep_checkpoint: Option<SweepCheckpoint>,
+}
+
+/// Asserts that `messages.jsonl[0..len)` folds to no open turn (the
+/// `last_unmatched_user_prompt` rules) and that the last line ending
+/// at `len` carries `seq`. A log that only grew past `len` keeps the
+/// assertion; the line check catches a rewrite that shrank the log and then
+/// regrew it to the same length. Rewriters of the prefix (the seq-intruder
+/// salvage, the recover fallback) clear it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepCheckpoint {
+    pub len: u64,
+    pub seq: u64,
 }
 
 /// Provenance of a worktree branch name (story 16): `Auto` is the launcher's

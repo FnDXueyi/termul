@@ -1356,14 +1356,16 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| format!("failed to resolve app data directory: {error}"))?
                 .join("acp-sessions");
+            let persistence_started = std::time::Instant::now();
             let session_persistence =
                 match tauri::async_runtime::block_on(SessionPersistence::open(
                     sessions_root.clone(),
                 )) {
                     Ok(persistence) => {
                         log::info!(
-                            "[acp-history] host persistence ready path={}",
-                            persistence.root().display()
+                            "[acp-history] host persistence ready path={} elapsed_ms={}",
+                            persistence.root().display(),
+                            persistence_started.elapsed().as_millis()
                         );
                         Some(persistence)
                     }
