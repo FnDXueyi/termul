@@ -285,6 +285,12 @@ describe('MobileFileExplorer', () => {
     expect(await screen.findByRole('heading', { name: 'proj' })).toBeInTheDocument()
     expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
     expect(mockPersistenceRead).toHaveBeenCalledWith('mobile-file-explorer/proj-1')
+    expect(mockLogFrontendError).toHaveBeenCalledWith({
+      level: 'warn',
+      source: 'MobileFileExplorer.restore',
+      message:
+        'saved folder is outside the project root under a case-insensitive compare; showing the root'
+    })
   })
 
   it('falls back to the project root when a persisted `..` path escapes the root', async () => {
@@ -373,6 +379,12 @@ describe('MobileFileExplorer', () => {
       expect(await screen.findByText('a.txt')).toBeInTheDocument()
       expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
       expect(mockToggleDirectory).not.toHaveBeenCalledWith('/work/repo/child')
+      expect(mockLogFrontendError).toHaveBeenCalledWith({
+        level: 'warn',
+        source: 'MobileFileExplorer.restore',
+        message:
+          'saved folder is outside the project root under a case-sensitive compare; showing the root'
+      })
     })
 
     it('still restores an exactly cased persisted folder', async () => {
@@ -388,6 +400,9 @@ describe('MobileFileExplorer', () => {
 
       expect(await screen.findByRole('heading', { name: 'child' })).toBeInTheDocument()
       expect(screen.getByLabelText('Back to parent folder')).toBeEnabled()
+      expect(mockLogFrontendError).not.toHaveBeenCalledWith(
+        expect.objectContaining({ source: 'MobileFileExplorer.restore' })
+      )
     })
   })
 

@@ -38,6 +38,7 @@ import { useClippedSegments } from '@/hooks/use-clipped-segments'
 import { useServerPathsCaseInsensitive } from '@/hooks/use-server-paths-case-insensitive'
 import { filesystemApi, persistenceApi } from '@/lib/api'
 import { sortDirectoryEntries } from '@/lib/filesystem-sort'
+import { logFrontendError } from '@/lib/log-api'
 import {
   buildFolderCrumbs,
   comparePath,
@@ -161,11 +162,16 @@ export function MobileFileExplorer({
         // Normalize before the containment check so a persisted `..` path
         // that lexically escapes the root is dropped, never restored.
         const persisted = res.success && res.data ? normalizePath(res.data) : null
-        setCurrentPath(
-          persisted && isWithinRoot(persisted, rootPath, caseInsensitive)
-            ? persisted
-            : normalizedRoot
-        )
+        if (persisted && !isWithinRoot(persisted, rootPath, caseInsensitive)) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'MobileFileExplorer.restore',
+            message: `saved folder is outside the project root under a case-${caseInsensitive ? 'insensitive' : 'sensitive'} compare; showing the root`
+          })
+          setCurrentPath(normalizedRoot)
+          return
+        }
+        setCurrentPath(persisted ?? normalizedRoot)
       })
       .catch(() => {
         if (!cancelled) setCurrentPath(normalizedRoot)
