@@ -3,7 +3,11 @@ import { useEffect, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { SettingsLayout } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
-import { useResetAppSettings, useUpdateAppSetting } from '@/hooks/use-app-settings'
+import {
+  queueAgentIdleWindowPush,
+  useResetAppSettings,
+  useUpdateAppSetting
+} from '@/hooks/use-app-settings'
 import {
   useResetAllShortcuts,
   useResetShortcut,
@@ -249,16 +253,9 @@ export function AppPreferencesModal(): React.JSX.Element {
   }
 
   const handleAgentIdleWindowChange = async (value: number | null) => {
+    const push = queueAgentIdleWindowPush(value)
     await updateSetting('agentIdleWindowSecs', value)
-    try {
-      await acpApi.setAgentIdleWindow(value)
-    } catch (error) {
-      void logFrontendError({
-        level: 'error',
-        source: 'AppPreferences.agentIdleWindow',
-        message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
-      })
-    }
+    await push
   }
 
   const handleResetConfirm = async () => {

@@ -14,6 +14,37 @@ import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 
 type PanelSettingKey = 'sidebarVisible' | 'fileExplorerVisible' | 'sshPanelVisible'
 
+let idleWindowEpoch = 0
+let idleWindowQueue: Promise<void> = Promise.resolve()
+
+/** Push one idle-window choice. A newer choice skips an older push still in line. */
+export function queueAgentIdleWindowPush(secs: number | null): Promise<void> {
+  idleWindowEpoch += 1
+  const epoch = idleWindowEpoch
+  const run = idleWindowQueue.then(async () => {
+    if (epoch !== idleWindowEpoch) return
+    try {
+      await acpApi.setAgentIdleWindow(secs)
+    } catch (error) {
+      void logFrontendError({
+        level: 'error',
+        source: 'queueAgentIdleWindowPush',
+        message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+      })
+    }
+  })
+  idleWindowQueue = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
+function queueSavedAgentIdleWindow(): void {
+  if (idleWindowEpoch !== 0) return
+  queueAgentIdleWindowPush(useAppSettingsStore.getState().settings.agentIdleWindowSecs)
+}
+
 function applyPanelVisibility(panel: PanelSettingKey, visible: boolean): void {
   if (panel === 'sidebarVisible') {
     setSidebarVisible(visible)
@@ -137,11 +168,14 @@ export function useAppSettingsLoader(): void {
       try {
         if (isTauriContext()) {
           // One desktop process owns this window. Apply the saved choice at
-          // startup. The browser must not POST on load: that would replace
-          // the server's shared value with whatever this page last saved.
-          await acpApi.setAgentIdleWindow(settings.agentIdleWindowSecs)
+          // startup. A choice made while this load is in flight stays ahead
+          // of this push. The browser must not POST on load: that would
+          // replace the server's shared value with whatever this page saved.
+          queueSavedAgentIdleWindow()
         } else {
+          const epoch = idleWindowEpoch
           const live = await acpApi.getAgentIdleWindow()
+          if (epoch !== idleWindowEpoch) return
           if (live.source === 'setting' || live.source === 'default') {
             const next = live.source === 'default' || live.secs === 1800 ? null : live.secs
             if (next !== settings.agentIdleWindowSecs) {
@@ -243,14 +277,6 @@ export function useResetAppSettings(): () => Promise<void> {
     } catch (error) {
       console.error('Failed to clear ACP session reopen timeout on reset:', error)
     }
-    try {
-      await acpApi.setAgentIdleWindow(DEFAULT_APP_SETTINGS.agentIdleWindowSecs)
-    } catch (error) {
-      void logFrontendError({
-        level: 'error',
-        source: 'useResetAppSettings.agentIdleWindow',
-        message: `Failed to clear the agent idle window: ${error instanceof Error ? error.message : String(error)}`
-      })
-    }
+    await queueAgentIdleWindowPush(DEFAULT_APP_SETTINGS.agentIdleWindowSecs)
   }, [resetToDefaults])
 }
