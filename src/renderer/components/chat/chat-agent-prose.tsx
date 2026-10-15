@@ -96,7 +96,7 @@ const STREAMDOWN_ANIMATED = {
   duration: 350,
   easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
   sep: 'word',
-  stagger: 60
+  stagger: 24
 } as const
 
 /**
