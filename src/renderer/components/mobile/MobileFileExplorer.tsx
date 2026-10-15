@@ -114,11 +114,11 @@ export function MobileFileExplorer({
   const [creating, setCreating] = useState<CreateState | null>(null)
   const [createSubmitting, setCreateSubmitting] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<DirectoryEntry | null>(null)
-  // Tracks the project root we've already restored the persisted folder for.
-  // Prevents re-reading persistence (and clobbering the in-session folder) on
-  // every drawer reopen — the component stays mounted across close, so
-  // currentPath already holds the user's last folder.
-  const restoredForRootRef = useRef<string | null>(null)
+  // Tracks the project, root and case rule we've already restored the persisted
+  // folder for. Prevents re-reading persistence (and clobbering the in-session
+  // folder) on every drawer reopen — the component stays mounted across close,
+  // so currentPath already holds the user's last folder.
+  const restoredKeyRef = useRef<string | null>(null)
 
   function persistFolder(path: string): void {
     if (!projectId) return
@@ -139,9 +139,9 @@ export function MobileFileExplorer({
       setCurrentPath(null)
       return
     }
-    const restoreKey = `${projectId ?? ''}:${rootPath}`
-    if (restoredForRootRef.current === restoreKey) return
-    restoredForRootRef.current = restoreKey
+    const restoreKey = `${projectId ?? ''}:${rootPath}:${caseInsensitive}`
+    if (restoredKeyRef.current === restoreKey) return
+    restoredKeyRef.current = restoreKey
     const normalizedRoot = normalizePath(rootPath)
     if (!projectId) {
       setCurrentPath(normalizedRoot)
