@@ -72,9 +72,11 @@ export interface SessionIndexEntry {
   worktreePath?: string
   worktreeBranch?: string
   /**
-   * Host-recorded current model id + display-name snapshot (CAP-3). Additive:
-   * absent on old entries and on discovered/imported sessions. Read-only on the
-   * renderer — the host (`SessionPersistence`) is the sole writer.
+   * Current model id + display-name snapshot (CAP-3). Additive: absent on old
+   * entries and on discovered/imported sessions. The host
+   * (`SessionPersistence`) is the durable writer. The renderer projection
+   * copies these fields forward and refreshes them from the live session so
+   * the sidebar does not keep the creation-time model.
    */
   modelId?: string
   modelName?: string

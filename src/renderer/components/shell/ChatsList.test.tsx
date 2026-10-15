@@ -236,6 +236,42 @@ describe('ChatsList card content', () => {
     expect(within(card('Chat bare')).getByText('main')).toBeInTheDocument()
   })
 
+  it('shows the selected model config option instead of the creation-time model', () => {
+    setIndex([entry('live', { modelName: 'Index model' })])
+    useAcpStore.setState({
+      sessions: {
+        live: mockAcpSession({
+          id: 'live',
+          models: {
+            currentModelId: 'haiku',
+            availableModels: [
+              { modelId: 'haiku', name: 'Haiku 5.5' },
+              { modelId: 'sonnet', name: 'Sonnet 5.5' }
+            ]
+          },
+          configOptions: [
+            {
+              id: 'model',
+              name: 'Model',
+              category: 'model',
+              type: 'select',
+              currentValue: 'sonnet',
+              options: [
+                { value: 'haiku', name: 'Haiku 5.5' },
+                { value: 'sonnet', name: 'Sonnet 5.5' }
+              ]
+            }
+          ]
+        })
+      }
+    })
+    render(<ChatsList project={project} />)
+    const card = screen.getByTitle('Chat live')
+    expect(within(card).getByText('Sonnet 5.5')).toBeInTheDocument()
+    expect(within(card).queryByText('Haiku 5.5')).toBeNull()
+    expect(within(card).queryByText('Index model')).toBeNull()
+  })
+
   it('leaves the branch line empty on a project without git', () => {
     setIndex([entry('a')])
     render(<ChatsList project={{ ...project, isGitRepo: false }} />)
