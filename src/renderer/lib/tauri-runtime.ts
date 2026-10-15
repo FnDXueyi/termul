@@ -1,6 +1,5 @@
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { logFrontendError } from '@/lib/log-api'
-import { isMac, isWindows } from '@/lib/platform'
 
 type MaybeUnlisten = Promise<UnlistenFn> | UnlistenFn | null | undefined
 
@@ -83,10 +82,9 @@ export function serverAdmitsRemoteWrites(): boolean {
   return serverCapability.admitted
 }
 
-/** True iff the host filesystem folds path case. On the web, `true` until the
- * `/health` probe resolves. */
+/** True iff the host filesystem folds path case, per `/health`; `true` until
+ * the probe resolves. */
 export function serverPathsCaseInsensitive(): boolean {
-  if (isTauriContext()) return isWindows || isMac
   return serverCapability.caseInsensitivePaths
 }
 

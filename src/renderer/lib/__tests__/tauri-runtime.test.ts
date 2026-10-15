@@ -13,18 +13,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockFetch, mockPlatform } = vi.hoisted(() => ({
-  mockFetch: vi.fn(),
-  mockPlatform: { isWindows: false, isMac: false }
-}))
-
-vi.mock('@/lib/platform', () => ({
-  get isWindows() {
-    return mockPlatform.isWindows
-  },
-  get isMac() {
-    return mockPlatform.isMac
-  }
+const { mockFetch } = vi.hoisted(() => ({
+  mockFetch: vi.fn()
 }))
 
 // jsdom provides `window.location` (defaults to http://localhost/) so
@@ -308,30 +298,5 @@ describe('host path case sensitivity from /health (web branch)', () => {
     await flushMicrotasks()
     expect(listener).toHaveBeenCalled()
     expect(serverPathsCaseInsensitive()).toBe(false)
-  })
-})
-
-describe('host path case sensitivity on desktop', () => {
-  beforeEach(() => {
-    __resetServerCapabilityCache()
-    mockFetch.mockReset()
-    setTauriContext(true)
-  })
-
-  afterEach(() => {
-    __resetServerCapabilityCache()
-    setTauriContext(false)
-    mockPlatform.isWindows = false
-    mockPlatform.isMac = false
-  })
-
-  it.each([
-    ['Windows', { isWindows: true, isMac: false }, true],
-    ['macOS', { isWindows: false, isMac: true }, true],
-    ['Linux', { isWindows: false, isMac: false }, false]
-  ])('derives the flag from the local platform (%s) without fetching', (_, platform, expected) => {
-    Object.assign(mockPlatform, platform)
-    expect(serverPathsCaseInsensitive()).toBe(expected)
-    expect(mockFetch).not.toHaveBeenCalled()
   })
 })
