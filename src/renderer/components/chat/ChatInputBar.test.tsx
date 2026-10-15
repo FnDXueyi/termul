@@ -1240,11 +1240,14 @@ describe('ChatInputBar command chip', () => {
     // Select the command
     await selectSlashOption('/compact')
 
-    // Command pill should render inline (the CommandPill NodeView renders the
-    // SkillChip with name prefixed by `/` so the visible text is `/compact`).
+    // Command pill: terminal icon and muted `/compact`, not the skill sparkles.
     await waitFor(() => {
       expect(screen.getByText('/compact')).toBeInTheDocument()
     })
+    const commandPill = document.querySelector('[data-command-pill="true"]')
+    expect(commandPill?.querySelector('svg[data-termul-icon="TerminalSquare"]')).not.toBeNull()
+    expect(commandPill?.querySelector('svg[data-termul-icon="Sparkles"]')).toBeNull()
+    expect(commandPill?.querySelector('.text-muted-foreground')).not.toBeNull()
   })
 
   it('sends the command-prefixed wire with token display blocks on send', async () => {
@@ -1360,6 +1363,31 @@ describe('ChatInputBar command chip', () => {
     expect(
       editor!.querySelector('[data-command-pill="true"][data-command-name="compact"]')
     ).not.toBeNull()
+    expect(mockToastError).toHaveBeenCalledWith('This message already has a command.')
+  })
+
+  it('places a command picked in the middle of a sentence at the front', async () => {
+    const commands = [{ name: 'compact', description: 'Compact the conversation' }]
+    renderInputBar({ commands })
+
+    setComposerValue('buatkan design baru /compact')
+
+    await selectSlashOption('/compact')
+
+    await waitFor(() => {
+      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design baru `)
+    })
+  })
+
+  it('moves a stored mid-sentence command to the front when the composer loads it', async () => {
+    const commands = [{ name: 'compact', description: 'Compact' }]
+    renderInputBar({ commands })
+
+    setComposerValue(`buatkan ${commandToken('compact')} design`)
+
+    await waitFor(() => {
+      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design`)
+    })
   })
 
   it('sends just the command (token display) when no message is typed', async () => {

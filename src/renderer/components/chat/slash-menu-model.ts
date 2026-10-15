@@ -10,6 +10,7 @@ import type {
   SessionMode,
   SessionModeState
 } from '@/lib/acp-api'
+import { isComposerTriggerBoundary } from '@/lib/skill-tokens'
 import type { AgentSkillSummary } from '@/lib/skills-api'
 import {
   dropDuplicateSingletonConfigOptions,
@@ -224,7 +225,7 @@ export function findSlashTrigger(
   const previous = value[caret - 1]
   if (previous === undefined || /\s/.test(previous)) return null
   let start = caret - 1
-  while (start > 0 && !/\s/.test(value[start - 1] ?? '')) start -= 1
+  while (start > 0 && !isComposerTriggerBoundary(value, start)) start -= 1
   if (value[start] !== '/') return null
   if (caret <= start) return null
   return { start, end: caret, filter: value.slice(start + 1, caret) }
