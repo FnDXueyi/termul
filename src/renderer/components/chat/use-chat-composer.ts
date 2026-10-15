@@ -1,6 +1,7 @@
 import type { Editor } from '@tiptap/core'
 import type { MutableRefObject, RefObject } from 'react'
 import { useCallback, useMemo, useRef } from 'react'
+import { toast } from 'sonner'
 import { buildPromptWithLoadedSkills } from '@/hooks/use-agent-skills'
 import type {
   AvailableCommand,
@@ -8,12 +9,13 @@ import type {
   SessionConfigOption,
   SessionModeState
 } from '@/lib/acp-api'
+import { placeCommandTokenAtStart } from '@/lib/command-prefix'
 import { docOffsetToDisplayOffset, SKILL_PAD_DEFAULT } from '@/lib/composer/doc-to-prompt'
+import { logFrontendError } from '@/lib/log-api'
 import {
   commandToken,
   extractCommandNames,
   extractSkillNames,
-  insertCommandToken,
   insertSkillToken,
   isFolderTokenPath,
   parseFileSegments,
@@ -46,8 +48,9 @@ import type { ComposerMentions } from './use-composer-mentions'
  * command-pill splice, submit text builder — through this hook so they cannot
  * drift again.
  *
- * The hook is renderer-neutral: no Tauri/runtime calls, no JSX. Both surfaces
- * keep their own `submit()`/`launch()` because the dispatch shapes differ
+ * The hook has no JSX and does not call Tauri `invoke` directly. A rejected
+ * second command toasts and writes a warning through the renderer log facade.
+ * Both surfaces keep their own `submit()`/`launch()` because the dispatch shapes differ
  * (`onSend`/`onSendBlocks` vs `finalizeChatLaunch`/`sendPromptBlocks`), but both
  * read `hasCommandToken` + `skillPathsRef` + `buildPromptParts()` from the hook
  * to build the wire/display text identically.
@@ -286,25 +289,24 @@ export function useChatComposer(args: UseChatComposerArgs): UseChatComposerResul
         return
       }
       if (item.kind === 'command') {
-        // Splice an inline command token into the display string at the caret,
-        // removing the `/`-filter text the slash menu was filtering on. The
-        // token carries the command name + no padding block (the command pill
-        // is a real DOM node, so there is no caret-alignment deficit to
-        // compensate). A trailing space is appended so the caret lands in plain
-        // text and the next `/` trigger matches. Single-command invariant:
-        // `insertCommandToken` rejects a second command token if one already
-        // exists (matching today's single-`activeCommand` semantics) — the
-        // rejection is a no-op (value untouched, editor focused).
+        // A command is a prefix. Remove the `/`-filter at the caret and place
+        // the token at the start of the draft, so the composer matches the
+        // `/name` wire text before Enter. One command per draft: a second pick
+        // leaves the value unchanged and tells the user why.
         const editor = editorRef.current
         const caret = composerStringCaret(editor, value.length)
         const trigger = findSlashTrigger(value, caret)
         const insertAt = trigger ? trigger.end : caret
         const deleteBefore = trigger ? trigger.end - trigger.start : 0
-        const result = insertCommandToken(value, insertAt, item.name, deleteBefore)
+        const result = placeCommandTokenAtStart(value, insertAt, item.name, deleteBefore)
         if (!result.inserted) {
-          // Single-command invariant: a command token already exists. Focus
-          // the editor so the user can backspace the existing pill + retry.
           editorRef.current?.commands.focus(undefined, { scrollIntoView: false })
+          toast.error('This message already has a command.')
+          void logFrontendError({
+            level: 'warn',
+            source: 'useChatComposer',
+            message: 'Rejected a second slash command in one composer draft'
+          })
           return
         }
         const { value: next, caret: nextCaret } = result
