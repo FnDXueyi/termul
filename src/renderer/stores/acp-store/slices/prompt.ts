@@ -1115,15 +1115,16 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
         }
       }
     })
-    // Update the in-memory payload cache so a same-session rehydrate (switching
-    // away and back, or any path that re-runs `loadSessionPayload`) finds the
-    // fence. Since CAP-2 host-owned history, `persistSession` only updates the
-    // session-index projection — the durable message wire shape is owned by the
-    // Rust host, and the renderer's `messages` is a projection. Without this
-    // cache update, the snapshot fence would be lost the moment the live
-    // projection is re-fetched. Cross-restart durability requires a host-side
-    // synthetic record (renegotiate the spec's "Never: no Rust-side persistence"
-    // rule if needed).
+    // Update the in-memory payload cache so a later full read in this app
+    // session (`loadSessionPayload`, e.g. desktop scroll-up) finds the fence. A
+    // reopen does not: it installs the host tail, which never carries the fence,
+    // and drops this cached copy. Since CAP-2 host-owned history,
+    // `persistSession` only updates the session-index projection — the durable
+    // message wire shape is owned by the Rust host, and the renderer's
+    // `messages` is a projection. Without this cache update, the snapshot fence
+    // would be lost the moment the live projection is re-fetched. Cross-restart
+    // durability requires a host-side synthetic record (renegotiate the spec's
+    // "Never: no Rust-side persistence" rule if needed).
     //
     // Only update the specific assistant message in the cache — the live window
     // (`get().messages[sessionId]`) may be trimmed (MAX_LIVE_WINDOW_MESSAGES),

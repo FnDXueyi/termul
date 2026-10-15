@@ -731,50 +731,55 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
  * `limit` messages + matching tool calls so the renderer can install the
  * recent transcript immediately and lazy-load the full payload on scroll-up.
  *
- * Cache-first: if the full payload is already cached (instant second open),
- * slices the tail from it — no IPC. Otherwise fetches via the transport/API
- * tail method. NEVER writes to `payloadCache` — the cache is for full
- * payloads only, and `loadOlderMessages` expects to find (or fetch) the full
- * payload on a cache miss.
+ * Always asks the host: every caller (reopen, crash retry, account-switch
+ * restart, web resume, launch recovery) needs the session as the host holds it
+ * now. A cached full payload is not that: since host-owned history (CAP-2),
+ * live events no longer refresh it, so a copy cached by an earlier scroll-up
+ * misses everything streamed after it and would replace the live transcript.
+ * The tail itself is never cached; the session's cached full payload is
+ * dropped before the read (see {@link takeCachedPayload}).
  */
 export async function loadSessionPayloadTail(
   id: string,
   limit: number = HISTORY_TAIL_MESSAGE_LIMIT
 ): Promise<SessionPayload | null> {
-  // Cache-first: slice the tail from a cached full payload (instant re-open).
-  const cached = payloadCache.get(id)
-  if (cached) {
-    touchPayload(id, cached)
-    if (cached.messages.length <= limit) return cached
-    const tailStart = cached.messages.length - limit
-    return {
-      ...cached,
-      messages: cached.messages.slice(tailStart),
-      // Restored file-change summaries are whole-session (the host keeps
-      // them all in tail payloads too) — never window them out.
-      toolCalls: cached.toolCalls?.filter(
-        (tc) =>
-          tc.restoredSummary === true ||
-          typeof tc.seq !== 'number' ||
-          tc.seq >= (cached.messages[tailStart]?.seq ?? Infinity)
-      ),
-      // CAP-2: retain switches inside the tail window (mirrors the
-      // toolCalls rule) — a switch older than the window belongs to
-      // scrolled-away history.
-      switches: cached.switches?.filter(
-        (sw) =>
-          typeof sw.seq !== 'number' || sw.seq >= (cached.messages[tailStart]?.seq ?? Infinity)
-      )
-    }
-  }
   // Transport tail (web/remote) → API tail (desktop) → null.
   const transport = getAcpTransport()
   const mode = transport.historyMode?.()
-  if (mode === 'server' && transport.getSessionPayloadTail) {
-    return transport.getSessionPayloadTail(id, limit)
-  }
+  // No host history to re-read: the cache stays as it is.
   if (mode === 'live_only') return null
-  return acpHistoryApi.getTail(id, limit)
+  const cached = takeCachedPayload(id)
+  const tail =
+    mode === 'server' && transport.getSessionPayloadTail
+      ? await transport.getSessionPayloadTail(id, limit)
+      : await acpHistoryApi.getTail(id, limit)
+  const cachedMeta = cached?.metadata
+  if (
+    cachedMeta &&
+    tail &&
+    (cachedMeta.lastSeq !== tail.metadata.lastSeq || cachedMeta.logEpoch !== tail.metadata.logEpoch)
+  ) {
+    void logFrontendError({
+      level: 'info',
+      source: 'acp.historyPersistence',
+      message: `Re-read session ${id.slice(0, 8)}… from the host: the dropped cached copy ended at seq ${cachedMeta.lastSeq ?? 'unknown'}, the host is at seq ${tail.metadata.lastSeq ?? 'unknown'}`
+    })
+  }
+  return tail
+}
+
+/**
+ * Remove (and unpin) a session's cached full payload before a host re-read,
+ * returning it. Whether it is stale is not knowable from the cache: a reply
+ * still streaming when it was cached keeps its first chunk's seq. Without it,
+ * the fallback full read after a failed tail read and the next desktop
+ * scroll-up both refetch from the host instead of the old snapshot.
+ */
+function takeCachedPayload(id: string): SessionPayload | undefined {
+  const cached = payloadCache.get(id)
+  payloadCache.delete(id)
+  pinnedPayloads.delete(id)
+  return cached
 }
 
 export async function saveSessionPayload(id: string, payload: SessionPayload): Promise<void> {
