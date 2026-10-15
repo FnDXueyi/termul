@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UI_ZOOM_MAX, UI_ZOOM_MIN } from '@/types/settings'
-import { applyUiZoom, clampUiZoom } from './use-ui-zoom'
+import { applyUiZoom, clampUiZoom, getAppliedUiZoom } from './use-ui-zoom'
 
 // jsdom is not the Tauri webview, so applyUiZoom normally takes the CSS-`zoom`
 // fallback. We selectively force the Tauri path for the failure-propagation
@@ -64,6 +64,30 @@ describe('applyUiZoom', () => {
     try {
       await expect(applyUiZoom(1)).rejects.toThrow('boom')
     } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    }
+  })
+
+  it('reports the native zoom it applied and keeps the last one that took effect after a failure', async () => {
+    const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+    const setZoom = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('boom'))
+    vi.mocked(getCurrentWebview).mockReturnValue({ setZoom } as unknown as never)
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: {},
+      configurable: true,
+      writable: true
+    })
+    try {
+      await applyUiZoom(1.25)
+      expect(getAppliedUiZoom()).toBe(1.25)
+      await expect(applyUiZoom(1.5)).rejects.toThrow('boom')
+      expect(getAppliedUiZoom()).toBe(1.25)
+    } finally {
+      setZoom.mockResolvedValue(undefined)
+      await applyUiZoom(1)
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     }
   })
