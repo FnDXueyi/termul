@@ -275,9 +275,9 @@ async fn reaper_loop_reads_the_window_on_each_sweep() {
 }
 
 /// One test owns the process-wide window so the cases cannot race each other.
-#[test]
-fn agent_idle_window_precedence_setting_then_env_lock_then_operator() {
-    let _guard = IDLE_WINDOW_TEST_LOCK.lock();
+#[tokio::test]
+async fn agent_idle_window_precedence_setting_then_env_lock_then_operator() {
+    let _guard = IDLE_WINDOW_TEST_LOCK.lock().await;
     reset_agent_idle_window_for_tests();
     let open = resolved_agent_idle_window();
     assert_eq!(open.secs, 1800);
