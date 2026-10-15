@@ -134,7 +134,6 @@ export function AiAgentsSection({
           </p>
         </div>
         <div className="w-full space-y-4 md:w-2/3">
-          <AcpAgentsSettings />
           {isDesktop ? (
             <>
               <h3 className="text-sm font-medium text-foreground">When you leave a chat</h3>
@@ -241,6 +240,7 @@ export function AiAgentsSection({
               </p>
             </div>
           )}
+          <AcpAgentsSettings />
         </div>
       </div>
     </SettingsSection>
