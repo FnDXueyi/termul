@@ -27,9 +27,10 @@ interface RailExpandedProps {
 const NEED_PROJECT = 'Open a project first'
 
 /**
- * Expanded Rail body, top to bottom: the header (top row part), Search, Canvas, the Projects section
- * (with the SSH section on desktop), and the footer. Fills the width its
- * container gives it.
+ * Expanded Rail body, top to bottom: the header (top row part, ending in the
+ * Rail toggle), Search, Canvas, the Projects section (with the SSH section on
+ * desktop), and the icon-only footer. Fills the width its container gives it
+ * and inherits the Rail's sidebar surface.
  */
 export function RailExpanded({
   projects,
@@ -52,7 +53,7 @@ export function RailExpanded({
   const searchShortcut = useShortcutLabel('commandPalette')
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col bg-background">
+    <div className="flex h-full min-h-0 w-full flex-col">
       <RailHeader />
 
       <div className="flex shrink-0 flex-col gap-0.5 px-2 pt-2">

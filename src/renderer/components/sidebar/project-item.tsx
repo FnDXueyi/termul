@@ -135,10 +135,13 @@ export const ProjectItem = memo(function ProjectItem({
                 <span
                   className={cn(
                     'absolute inset-y-0 right-0 hidden items-center gap-1 bg-gradient-to-l to-transparent pl-6 group-hover:flex group-focus-within:flex',
-                    // The fade ends in the row's own surface: keycap when
-                    // active, the hover wash otherwise. It shows under the
-                    // same conditions as the wash (hover and focus-within).
-                    isActive ? 'from-muted from-60%' : 'from-row-hover-solid from-60%'
+                    // The fade ends in the row's own surface: the Rail keycap
+                    // fill when active, the hover wash otherwise. It shows
+                    // under the same conditions as the wash (hover and
+                    // focus-within).
+                    isActive
+                      ? 'from-[var(--rail-keycap)] from-60%'
+                      : 'from-row-hover-solid from-60%'
                   )}
                   data-testid="project-row-actions"
                 >

@@ -328,7 +328,7 @@ export function ProjectSidebar({
   const railSections = visibleGroups.length > 0 && projects.length > 0
 
   return (
-    <div className="flex min-h-0 w-full flex-1 flex-col bg-background">
+    <div className="flex min-h-0 w-full flex-1 flex-col">
       {/* Header with inline + button */}
       {!railSections && (
         <div className={PANEL_HEADER_CLASS}>

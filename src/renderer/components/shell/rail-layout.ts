@@ -14,5 +14,5 @@ export const RAIL_ICON_BOX_CLASS = 'inline-flex size-4 shrink-0 items-center jus
 /** Width of the collapsed Rail (`w-12`). */
 export const COLLAPSED_WIDTH = 48
 
-/** Gap between the Rail and the Side panel (`gap-2` in `ShellFrame`). */
+/** Gap between the Rail and the Side panel (`pl-2` on the shell row in `ShellFrame`). */
 export const SHELL_GAP = 8

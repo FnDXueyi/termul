@@ -33,7 +33,7 @@ function NeedsYouBadge({ count }: { count: number }): React.JSX.Element {
   return (
     <span
       aria-hidden="true"
-      className="pointer-events-none absolute -top-1 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-3xs font-semibold tabular-nums text-warning-foreground ring-2 ring-background"
+      className="pointer-events-none absolute -top-1 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-3xs font-semibold tabular-nums text-warning-foreground ring-2 ring-sidebar"
     >
       {count > 9 ? '9+' : count}
     </span>
@@ -51,7 +51,7 @@ function StatusBadge({ status }: { status: ProjectRowStatus }): React.JSX.Elemen
     return (
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-background text-warning"
+        className="pointer-events-none absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-sidebar text-warning"
       >
         <AlertTriangle size={10} />
       </span>
@@ -61,7 +61,7 @@ function StatusBadge({ status }: { status: ProjectRowStatus }): React.JSX.Elemen
     return (
       <span
         aria-hidden="true"
-        className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background"
+        className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-sidebar"
       />
     )
   }

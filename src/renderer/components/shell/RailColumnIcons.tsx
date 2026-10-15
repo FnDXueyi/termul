@@ -68,7 +68,7 @@ export function RailColumnIcons({
           isRunning ? (
             <span
               data-testid="rail-chats-live-dot"
-              className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background"
+              className="pointer-events-none absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-sidebar"
             />
           ) : null
         }
@@ -100,7 +100,7 @@ export function RailColumnIcons({
               count={changedCount}
               max={99}
               data-testid="rail-changes-badge"
-              className="pointer-events-none absolute -top-0.5 -right-1 h-3.5 min-w-3.5 text-4xs ring-2 ring-background"
+              className="pointer-events-none absolute -top-0.5 -right-1 h-3.5 min-w-3.5 text-4xs ring-2 ring-sidebar"
             />
           ) : null
         }
