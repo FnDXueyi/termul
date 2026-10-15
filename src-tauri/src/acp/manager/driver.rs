@@ -610,6 +610,8 @@ pub(super) async fn drive_connection(
                     session_id: SessionId::new(session_string),
                     question_id,
                     question: request.question,
+                    allow_free_text: None,
+                    multi_select: None,
                     options: request
                         .options
                         .into_iter()

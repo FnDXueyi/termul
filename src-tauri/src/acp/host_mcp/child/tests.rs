@@ -303,3 +303,59 @@ async fn set_session_title_schema_lists_optional_branch() {
     .await;
     result.expect("tools/list timed out");
 }
+
+#[tokio::test]
+async fn ask_user_schema_lists_question_options_and_free_text() {
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client_io);
+    let serve = tokio::spawn(async move {
+        serve_mcp_transport(handshake_config(), server_read, server_write).await
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        client_write
+            .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}"#)
+            .await
+            .unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        let mut reader = BufReader::new(client_read);
+        let _ = read_json_id(&mut reader, 1).await;
+        client_write
+            .write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#)
+            .await
+            .unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        let tools = read_json_id(&mut reader, 2).await;
+        let ask_tool = tools["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some("ask_user"))
+            .cloned()
+            .expect("ask_user tool");
+        let schema = &ask_tool["inputSchema"];
+        for field in [
+            "question",
+            "options",
+            "multi_select",
+            "allow_free_text",
+            "header",
+        ] {
+            assert!(schema["properties"].get(field).is_some(), "{field} missing: {schema}");
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+            .unwrap_or_default();
+        assert!(required.contains(&"question"), "{required:?}");
+        assert!(!required.contains(&"allow_free_text"), "{required:?}");
+        let description = ask_tool["description"].as_str().unwrap_or_default();
+        assert!(description.contains("INSTEAD of asking"), "{description}");
+        drop(client_write);
+        drop(reader);
+        serve.await.expect("serve task").expect("serve ok");
+    })
+    .await;
+    result.expect("tools/list timed out");
+}

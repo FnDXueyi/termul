@@ -274,6 +274,10 @@ export interface PendingQuestion {
   sessionId: SessionId
   question: string
   options: QuestionOption[]
+  /** `ask_user` (issue #784): show the free-text "Other" row. */
+  allowFreeText?: boolean
+  /** `ask_user` (issue #784): more than one option may be picked. */
+  multiSelect?: boolean
 }
 
 export interface PendingElicitation {

@@ -83,6 +83,39 @@ describe('AskUserQuestion (issue #411)', () => {
     expect(mockAnswer).toHaveBeenCalledWith('q-1', ['plan-a'])
   })
 
+  it('shows no free-text row unless the question allows it', () => {
+    render(<AskUserQuestion question={question} />)
+    expect(screen.queryByLabelText('Your own answer')).not.toBeInTheDocument()
+  })
+
+  it('free text: a typed answer alone enables Submit and is sent as the value', () => {
+    render(<AskUserQuestion question={{ ...question, allowFreeText: true }} />)
+    const submit = screen.getByRole('button', { name: 'Submit' })
+    expect(submit).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Your own answer'), {
+      target: { value: 'Neither, use option C' }
+    })
+    expect(submit).toBeEnabled()
+    fireEvent.click(submit)
+    expect(mockAnswer).toHaveBeenCalledWith('q-1', ['Neither, use option C'])
+  })
+
+  it('free text on single-select: typing replaces the picked option', () => {
+    render(<AskUserQuestion question={{ ...question, allowFreeText: true }} />)
+    fireEvent.click(screen.getByText('Plan A'))
+    fireEvent.change(screen.getByLabelText('Your own answer'), { target: { value: 'custom' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    expect(mockAnswer).toHaveBeenCalledWith('q-1', ['custom'])
+  })
+
+  it('multiSelect flag alone allows several picks without per-option cardinality', () => {
+    render(<AskUserQuestion question={{ ...question, multiSelect: true }} />)
+    fireEvent.click(screen.getByText('Plan A'))
+    fireEvent.click(screen.getByText('Plan B'))
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+    expect(mockAnswer).toHaveBeenCalledWith('q-1', ['plan-a', 'plan-b'])
+  })
+
   it('multi-select: multiple selections are submitted together', () => {
     const multi = {
       ...question,

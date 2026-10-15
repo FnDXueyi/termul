@@ -372,6 +372,13 @@ pub struct AskUserQuestionEvent {
     pub question_id: String,
     pub question: String,
     pub options: Vec<QuestionOption>,
+    /// Show a free-text field (issue #784, `ask_user`). Absent on the
+    /// `_session/question` path, which has no free text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_free_text: Option<bool>,
+    /// Pick more than one option (issue #784). Absent means single choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_select: Option<bool>,
 }
 
 /// `acp:elicitation_request`

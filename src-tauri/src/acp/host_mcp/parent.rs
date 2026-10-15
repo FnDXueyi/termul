@@ -23,11 +23,28 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::acp::config::{AgentId, SessionId};
+use crate::acp::events::{self, AskUserQuestionEvent, QuestionOption};
 use crate::acp::host_mcp::{
     emit_plan_update, map_todos_to_plan_entries, FrameKind, FrameReply, FrameRequest, PlanStore,
+    TermulAskUserInput,
 };
 use crate::acp::session_persistence::SessionPersistence;
 use crate::web::EventSink;
+
+/// How a parked `ask_user` call ended (issue #784).
+#[derive(Debug)]
+pub(crate) enum AskOutcome {
+    /// The user picked option labels and/or typed free text.
+    Answered(Vec<String>),
+    /// The user dismissed the panel, or the turn or session ended first.
+    Cancelled,
+}
+
+/// An `ask_user` call waiting for the user's answer.
+struct PendingAsk {
+    session_id: String,
+    responder: tokio::sync::oneshot::Sender<AskOutcome>,
+}
 
 /// Per-session auth + routing context, keyed by the random token.
 #[derive(Clone)]
@@ -78,6 +95,9 @@ pub struct HostPlanServer {
     plan_store: PlanStore,
     /// Durable store used by the title tool. Absent in live-only tests/modes.
     persistence: Option<Arc<SessionPersistence>>,
+    /// `ask_user` calls waiting for the user, keyed by their `q-` question id
+    /// (the id the renderer answers with). Removed on answer, cancel or drop.
+    pending_asks: Mutex<HashMap<String, PendingAsk>>,
 }
 
 impl HostPlanServer {
@@ -98,6 +118,7 @@ impl HostPlanServer {
             sinks,
             sessions: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
+            pending_asks: Mutex::new(HashMap::new()),
             title_set_for_session: Mutex::new(HashSet::new()),
             branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
@@ -270,9 +291,131 @@ impl HostPlanServer {
             .lock()
             .remove(real_session_id);
         self.plan_store.drop_session(real_session_id);
+        self.cancel_asks_for_session(real_session_id);
         // Close agent-controlled browser tabs + drop the consent grant. The
         // host no-ops when no browser feature was used by this session.
         crate::browser_automation::session_ended(real_session_id);
+    }
+
+    /// Park an `ask_user` call: show the question panel and wait for the
+    /// answer or a cancel. The agent's tool call stays open for as long as the
+    /// user takes, so there is no timeout here.
+    async fn ask_user(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        input: TermulAskUserInput,
+    ) -> FrameReply {
+        if input.question.trim().is_empty() {
+            return FrameReply::err("question must not be empty");
+        }
+        if input.options.is_empty() && !input.allow_free_text {
+            return FrameReply::err("ask_user needs options or free text");
+        }
+        let question_id = format!("q-{}", Uuid::new_v4());
+        let (responder, waiting) = tokio::sync::oneshot::channel();
+        self.pending_asks.lock().insert(
+            question_id.clone(),
+            PendingAsk {
+                session_id: session_id.to_string(),
+                responder,
+            },
+        );
+
+        let cardinality = if input.multi_select {
+            "multi"
+        } else {
+            "single"
+        };
+        let option_labels: Vec<String> = input.options.iter().map(|o| o.label.clone()).collect();
+        let question = match input.header.as_deref().map(str::trim) {
+            Some(header) if !header.is_empty() => format!("{header}\n\n{}", input.question),
+            _ => input.question,
+        };
+        let event = AskUserQuestionEvent {
+            agent_id: AgentId(agent_id.to_string()),
+            session_id: SessionId(session_id.to_string()),
+            question_id: question_id.clone(),
+            question,
+            options: input
+                .options
+                .into_iter()
+                .map(|option| QuestionOption {
+                    value: option.label.clone(),
+                    label: option.label,
+                    description: option.description,
+                    cardinality: Some(cardinality.to_string()),
+                })
+                .collect(),
+            allow_free_text: Some(input.allow_free_text),
+            multi_select: Some(input.multi_select),
+        };
+        events::fan_out(
+            &self.sinks,
+            Some(session_id),
+            events::EVENT_QUESTION_REQUEST,
+            &event,
+        );
+        log::info!(
+            "[host-mcp] ask_user waiting for the user in session {}",
+            crate::logging::redact_session_id(session_id)
+        );
+
+        let outcome = match waiting.await {
+            Ok(outcome) => outcome,
+            // The sender is gone only when the server itself is dropped.
+            Err(_) => AskOutcome::Cancelled,
+        };
+        self.pending_asks.lock().remove(&question_id);
+        match outcome {
+            AskOutcome::Answered(values) => {
+                FrameReply::ok_with(ask_answer_result(&option_labels, values))
+            }
+            AskOutcome::Cancelled => FrameReply::ok_with(serde_json::json!({
+                "answers": [],
+                "free_text": null,
+                "cancelled": true,
+            })),
+        }
+    }
+
+    /// Route the user's answer to a parked `ask_user` call. Returns `false`
+    /// when no such call is waiting (it was already answered or cancelled, or
+    /// the id belongs to a `_session/question` request).
+    pub fn answer_ask(&self, question_id: &str, values: Option<Vec<String>>) -> bool {
+        let Some(pending) = self.pending_asks.lock().remove(question_id) else {
+            return false;
+        };
+        let outcome = match values {
+            Some(values) => AskOutcome::Answered(values),
+            None => AskOutcome::Cancelled,
+        };
+        let _ = pending.responder.send(outcome);
+        true
+    }
+
+    /// Cancel every `ask_user` call still waiting in a session. Called when the
+    /// turn ends, the session closes or the agent goes away, so no tool call is
+    /// left hanging.
+    pub fn cancel_asks_for_session(&self, real_session_id: &str) {
+        let cancelled: Vec<PendingAsk> = {
+            let mut pending = self.pending_asks.lock();
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, ask)| ask.session_id == real_session_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| pending.remove(id)).collect()
+        };
+        for ask in cancelled {
+            let _ = ask.responder.send(AskOutcome::Cancelled);
+        }
+    }
+
+    /// Question ids of the `ask_user` calls currently waiting (tests only).
+    #[cfg(test)]
+    pub(crate) fn open_ask_ids(&self) -> Vec<String> {
+        self.pending_asks.lock().keys().cloned().collect()
     }
 
     /// Drop a registration by token (used when `session/new` fails AFTER
@@ -470,6 +613,12 @@ impl HostPlanServer {
                     }
                 }
             }
+            FrameKind::AskUser => {
+                let Some(input) = req.ask else {
+                    return FrameReply::err("ask_user frame needs a question");
+                };
+                self.ask_user(&auth.agent_id, &real_session_id, input).await
+            }
             FrameKind::Plan => {
                 if req.title.is_some() {
                     return FrameReply::err("plan frame must not include title");
@@ -555,3 +704,21 @@ impl HostPlanServer {
 
 #[cfg(test)]
 mod tests;
+
+/// Split the user's answer into picked option labels and free text. A value
+/// that matches an option label counts as a pick; anything else is free text.
+fn ask_answer_result(option_labels: &[String], values: Vec<String>) -> serde_json::Value {
+    let (answers, free): (Vec<String>, Vec<String>) = values
+        .into_iter()
+        .partition(|value| option_labels.contains(value));
+    let free_text = if free.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(free.join("\n"))
+    };
+    serde_json::json!({
+        "answers": answers,
+        "free_text": free_text,
+        "cancelled": false,
+    })
+}

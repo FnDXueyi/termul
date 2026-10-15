@@ -1029,7 +1029,9 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
             agentId: e.agentId,
             sessionId: e.sessionId,
             question: e.question,
-            options: e.options
+            options: e.options,
+            allowFreeText: e.allowFreeText,
+            multiSelect: e.multiSelect
           }
         }
       }

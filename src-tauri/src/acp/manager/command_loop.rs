@@ -477,6 +477,7 @@ pub(super) async fn run_command_loop(
                 // and wait for its terminator before `session/close`, so the
                 // turn ends with exactly one `prompt_complete` and the close
                 // never races the turn task's own cleanup.
+                host_plan_server.cancel_asks_for_session(&session_id.0);
                 let (waiter, pending, pending_questions, pending_elicitations) = {
                     let mut state = driver_state.lock();
                     state.signal_cancel(&session_id.0);
@@ -719,6 +720,9 @@ pub(super) async fn run_command_loop(
                     // driver active-turn marker, then resolve permissions that
                     // were never answered (H3 — normal completion, not just cancel).
                     turn_plan_server.end_turn(&turn_agent_id.0, &session_id.0);
+                    // Issue #784: an `ask_user` call still open when the turn ends
+                    // resolves as cancelled, like the `_session/question` path below.
+                    turn_plan_server.cancel_asks_for_session(&session_id.0);
                     let pending = turn_state.lock().finish_turn(&session_id.0);
                     for permission in pending {
                         let _ = permission.responder.respond(RequestPermissionResponse::new(
@@ -1048,6 +1052,7 @@ pub(super) async fn run_command_loop(
                     state.signal_cancel(&session_id.0);
                     state.drain_session(&session_id.0)
                 };
+                host_plan_server.cancel_asks_for_session(&session_id.0);
                 for permission in pending {
                     let _ = permission.responder.respond(RequestPermissionResponse::new(
                         RequestPermissionOutcome::Cancelled,
@@ -1281,7 +1286,13 @@ pub(super) async fn run_command_loop(
                         let _ = reply.send(result.map_err(|e| e.to_string()));
                     }
                     None => {
-                        let _ = reply.send(Err(format!("unknown question request: {question_id}")));
+                        // Issue #784: an `ask_user` call parked by the host MCP server.
+                        if host_plan_server.answer_ask(&question_id, values) {
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            let _ =
+                                reply.send(Err(format!("unknown question request: {question_id}")));
+                        }
                     }
                 }
             }
