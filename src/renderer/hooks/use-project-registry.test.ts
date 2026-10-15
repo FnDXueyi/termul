@@ -315,6 +315,45 @@ describe('useProjectRegistry', () => {
     })
   })
 
+  describe('prefs save failure', () => {
+    /** A group added once the first save is through, saved over a lost transport. */
+    async function addGroupOverLostTransport(name: string): Promise<ReturnType<typeof renderHook>> {
+      const rendered = await mountAndDeliver(list([summary('a')]))
+      await waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(1))
+      vi.mocked(persistenceApi.writeDebounced).mockImplementationOnce(async () => ({
+        success: false,
+        code: 'WS_ERROR',
+        error: 'WebSocket closed'
+      }))
+
+      act(() => useProjectStore.getState().addGroup(name))
+      await waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2))
+      return rendered
+    }
+
+    it('saves the group again on its own after the save failed', async () => {
+      await addGroupOverLostTransport('Survives the retry')
+
+      await waitFor(
+        () => {
+          const saved = h.store.get('project-prefs') as ProjectPrefsRecord | undefined
+          expect(saved?.groups.map((g) => g.name)).toEqual(['Survives the retry'])
+        },
+        { timeout: 3000 }
+      )
+    })
+
+    it('stops retrying a failed save once the hook is unmounted', async () => {
+      const { unmount } = await addGroupOverLostTransport('Lost with the hook')
+      unmount()
+
+      // Longer than the first retry delay: a live hook would save again by now.
+      await new Promise((resolve) => setTimeout(resolve, 1300))
+      expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2)
+      expect((h.store.get('project-prefs') as ProjectPrefsRecord).groups).toEqual([])
+    })
+  })
+
   describe('active project', () => {
     it('restores this device saved selection', async () => {
       h.store.set('active-project', 'b')
