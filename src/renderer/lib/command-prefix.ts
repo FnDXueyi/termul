@@ -76,10 +76,20 @@ export function normalizeCommandToPrefix(value: string): string {
   return next === value ? value : next
 }
 
+function isSpaceBeforeToken(value: string, index: number): boolean {
+  if (index <= 0) return true
+  const prev = value[index - 1]
+  return prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r'
+}
+
 /**
  * Map a caret in `value` onto `normalized` after {@link normalizeCommandToPrefix}.
- * A caret that sat in the text before the token follows that text, which now
- * sits after the prefix. A caret inside the token lands just after the prefix.
+ *
+ * Text before the token follows that text, which now sits after the prefix.
+ * A caret on the pill itself (the token start, with whitespace before it)
+ * follows the pill to offset 0. A caret glued to a character that was just
+ * typed against the pill stays after that character. A caret inside the token
+ * lands just after the prefix.
  */
 export function mapCaretAfterCommandPrefix(
   value: string,
@@ -94,8 +104,17 @@ export function mapCaretAfterCommandPrefix(
   if (value[removeEnd] === ' ') removeEnd += 1
   const prefixLen = commandToken(found.name).length + 1
   const safe = Math.max(0, Math.min(caret, value.length))
-  if (safe <= found.start) {
-    const lead = /^[ \t]*/.exec(value.slice(0, found.start))?.[0].length ?? 0
+  const lead = /^[ \t]*/.exec(value.slice(0, found.start))?.[0].length ?? 0
+  if (safe < found.start) {
+    return clamp(prefixLen + Math.max(0, safe - lead))
+  }
+  // The display caret on a pill is the token start. When a space separates
+  // that pill from the sentence, follow the pill to the front. A character
+  // typed against the pill has no space, so the caret stays after that text.
+  if (safe === found.start && isSpaceBeforeToken(value, found.start)) {
+    return 0
+  }
+  if (safe === found.start) {
     return clamp(prefixLen + Math.max(0, safe - lead))
   }
   if (safe >= removeEnd) {

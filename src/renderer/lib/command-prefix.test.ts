@@ -45,6 +45,26 @@ describe('mapCaretAfterCommandPrefix', () => {
     expect(mapCaretAfterCommandPrefix(value, normalized, 1)).toBe(token.length + 2)
   })
 
+  it('follows a caret on a mid-sentence pill to the front', () => {
+    const value = `hello ${token} world`
+    const normalized = normalizeCommandToPrefix(value)
+    const pill = value.indexOf(token)
+    expect(pill).toBeGreaterThan(1)
+    expect(mapCaretAfterCommandPrefix(value, normalized, pill)).toBe(0)
+  })
+
+  it('does not drop a caret on the pill into the sentence when spaces collapse', () => {
+    const value = `hello  ${token}  world`
+    const normalized = normalizeCommandToPrefix(value)
+    expect(mapCaretAfterCommandPrefix(value, normalized, value.indexOf(token))).toBe(0)
+  })
+
+  it('keeps a caret inside the text before the pill with that text', () => {
+    const value = `hello ${token} world`
+    const normalized = normalizeCommandToPrefix(value)
+    expect(mapCaretAfterCommandPrefix(value, normalized, 1)).toBe(token.length + 2)
+  })
+
   it('keeps a caret at the end of the sentence at the end', () => {
     const value = `hello ${token} world`
     const normalized = normalizeCommandToPrefix(value)
