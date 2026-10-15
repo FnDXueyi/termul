@@ -262,7 +262,14 @@ vi.mock('@/stores/acp-store', () => {
     setSwitchPendingOption: mockSetSwitchPendingOption
   })
   return {
-    useAcpStore: (sel: (s: unknown) => unknown) => sel(state()),
+    useAcpStore: Object.assign((sel: (s: unknown) => unknown) => sel(state()), {
+      // Imperative reads (e.g. the manual resume's still-closed check) see the
+      // seeded session through the same ref the session hook serves.
+      getState: () => ({
+        ...state(),
+        sessions: sessionRef.current ? { [sessionRef.current.id]: sessionRef.current } : {}
+      })
+    }),
     // Armed-switch tests seed a second session by id (the target's prepared
     // warm session); a null id resolves to null (matching the real hook) and
     // every other caller keeps the legacy sessionRef answer.
@@ -1008,6 +1015,41 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
       expect(mockOpen).toHaveBeenCalledWith('s1')
       expect(mockRetryCrashed).not.toHaveBeenCalled()
       expect(mockSendPromptBlocks).not.toHaveBeenCalled()
+    })
+
+    it("records a failed resume when the notice's Resume chat reopen resolves still closed", async () => {
+      seedLiveSession('s1', RECORDED)
+      mockOpen.mockImplementationOnce(async () => {
+        // The reopen installs history (clearing lastError) but lands read-only.
+        sessionRef.current = mockAcpSession({
+          id: 's1',
+          cwd: '/w',
+          status: 'closed',
+          lastError: null
+        })
+      })
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      await act(async () => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(mockMarkResumeFailed).toHaveBeenCalledWith('s1', AUTO_RESUME_FAILED_REASON)
+    })
+
+    it("does not record a failure when the notice's Resume chat reconnects", async () => {
+      seedLiveSession('s1', RECORDED)
+      mockOpen.mockImplementationOnce(async () => {
+        sessionRef.current = mockAcpSession({
+          id: 's1',
+          cwd: '/w',
+          status: 'active',
+          lastError: null
+        })
+      })
+      render(<AgentChatPanel sessionId="s1" isVisible />)
+      await act(async () => {
+        errorNoticePropsRef.current?.onRetry?.()
+      })
+      expect(mockMarkResumeFailed).not.toHaveBeenCalled()
     })
 
     it("toasts when the notice's Resume chat open rejects with a normal error", async () => {

@@ -60,7 +60,7 @@ import { PermissionPrompt } from './PermissionPrompt'
 import { PlanPanel } from './PlanPanel'
 import { PromptReconcileNotice } from './PromptReconcileNotice'
 import { useApprovalDock } from './use-approval-dock'
-import { useIdleStopAutoResume } from './use-idle-stop-auto-resume'
+import { AUTO_RESUME_FAILED_REASON, useIdleStopAutoResume } from './use-idle-stop-auto-resume'
 
 /** Concatenate the text blocks of a message into a single string. */
 function messageText(blocks: ContentBlock[]): string {
@@ -314,6 +314,24 @@ export function AgentChatPanel({
     markResumeFailed
   })
 
+  // Manual "Resume chat" on a stopped chat (stopped bar or error notice). A
+  // reopen can resolve still `closed` (read-only strategy) after clearing
+  // `lastError`; record that as a failed resume so the bar, Needs you and a
+  // remount keep agreeing (the store skips a Codex sign-out / existing failure).
+  const resumeStoppedChat = useCallback(() => {
+    void openHistorySession(sessionId).then(
+      () => {
+        if (useAcpStore.getState().sessions[sessionId]?.status === 'closed') {
+          markResumeFailed(sessionId, AUTO_RESUME_FAILED_REASON)
+        }
+      },
+      (err) => {
+        if (isAgentDeadError(err)) return
+        toast.error('Could not resume this chat. Try again.')
+      }
+    )
+  }, [openHistorySession, markResumeFailed, sessionId])
+
   // A persisted launch-* tab is a failed-launch corpse. deserialize drops it
   // and reattach must not put it back; if one still mounts with no session
   // and no history, close it instead of "The session no longer exists."
@@ -526,10 +544,7 @@ export function AgentChatPanel({
       isResumeFailureError(session.lastError)
     ) {
       setDismissedError(null)
-      void openHistorySession(sessionId).catch((err) => {
-        if (isAgentDeadError(err)) return
-        toast.error('Could not resume this chat. Try again.')
-      })
+      resumeStoppedChat()
       return
     }
     if (!lastUserBlocks || !canRetryLastUserTurn) return
@@ -595,7 +610,7 @@ export function AgentChatPanel({
     sendPromptBlocks,
     retryCrashedSession,
     retryFailedLaunch,
-    openHistorySession,
+    resumeStoppedChat,
     discoveredReopenContext,
     sessionId,
     session?.status,
@@ -824,9 +839,7 @@ export function AgentChatPanel({
                   openCodexSignIn()
                   return
                 }
-                void openHistorySession(sessionId).catch(() => {
-                  toast.error('Could not resume this chat. Try again.')
-                })
+                resumeStoppedChat()
               }}
               className="inline-flex min-h-11 items-center rounded-md border border-warning/40 px-3 text-xs font-medium transition-colors hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 @[400px]:min-h-10"
             >
