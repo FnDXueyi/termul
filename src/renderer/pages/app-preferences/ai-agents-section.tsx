@@ -119,6 +119,7 @@ export function AiAgentsSection({
   }, [agentIdleWindowSecs])
 
   const envLocksWindow = liveWindow?.source === 'env'
+  const operatorLocksWindow = liveWindow?.source === 'operator'
 
   return (
     <SettingsSection id="ai-agents">
@@ -134,23 +135,30 @@ export function AiAgentsSection({
           </p>
         </div>
         <div className="w-full space-y-4 md:w-2/3">
+          <h3 className="text-sm font-medium text-foreground">When you leave a chat</h3>
+          <TimeoutSelect
+            id="agent-idle-window"
+            label="Keep idle chats"
+            value={agentIdleWindowSecs}
+            options={AGENT_IDLE_WINDOW_OPTIONS}
+            onChange={handleAgentIdleWindowChange}
+            help="Choose how long an idle agent chat stays open. An open tab does not keep the chat alive. A running answer, a pending approval, or a running agent terminal does. The change applies within one minute. A server flag or TERMUL_AGENT_IDLE_REAP_SECS overrides this menu."
+          />
+          {envLocksWindow && liveWindow ? (
+            <p className="text-xs text-muted-foreground">
+              TERMUL_AGENT_IDLE_REAP_SECS is set to {formatAgentIdleWindow(liveWindow.secs)}. This
+              menu is saved. It applies after you remove that variable and restart Termul.
+            </p>
+          ) : null}
+          {operatorLocksWindow && liveWindow ? (
+            <p className="text-xs text-muted-foreground">
+              The server was started with --agent-idle-window-secs (
+              {formatAgentIdleWindow(liveWindow.secs)}). This menu is saved. It applies after that
+              flag is removed and the server restarts.
+            </p>
+          ) : null}
           {isDesktop ? (
             <>
-              <h3 className="text-sm font-medium text-foreground">When you leave a chat</h3>
-              <TimeoutSelect
-                id="agent-idle-window"
-                label="Keep idle chats"
-                value={agentIdleWindowSecs}
-                options={AGENT_IDLE_WINDOW_OPTIONS}
-                onChange={handleAgentIdleWindowChange}
-                help="Termul stops an idle agent chat after this time. An open tab does not keep the chat alive. A running answer, a pending approval, or a running agent terminal does. The change applies within one minute. TERMUL_AGENT_IDLE_REAP_SECS overrides this menu."
-              />
-              {envLocksWindow && liveWindow ? (
-                <p className="text-xs text-muted-foreground">
-                  TERMUL_AGENT_IDLE_REAP_SECS is set to {formatAgentIdleWindow(liveWindow.secs)}.
-                  This menu is saved. It applies after you remove that variable and restart Termul.
-                </p>
-              ) : null}
               <h3 className="text-sm font-medium text-foreground">While an agent answers</h3>
               <TimeoutSelect
                 id="acp-turn-idle-timeout"
@@ -188,15 +196,12 @@ export function AiAgentsSection({
             </>
           ) : (
             <div className="bg-secondary/30 border border-border rounded-md px-4 py-3">
-              <div className="text-sm font-medium text-foreground">When you leave a chat</div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {liveWindowFailed
-                  ? 'Termul could not read how long idle chats stay open.'
-                  : liveWindow
-                    ? `Idle chats stay open for ${formatAgentIdleWindow(liveWindow.secs)}. The server sets this with --agent-idle-window-secs or TERMUL_AGENT_IDLE_REAP_SECS. Restart the server after a change. An open tab does not keep a chat alive.`
-                    : 'Reading how long idle chats stay open…'}
-              </p>
-              <div className="mt-3 text-sm font-medium text-foreground">While an agent answers</div>
+              {liveWindowFailed ? (
+                <p className="mb-3 text-xs text-muted-foreground">
+                  Termul could not read the active idle window. Your menu choice is still saved.
+                </p>
+              ) : null}
+              <div className="text-sm font-medium text-foreground">While an agent answers</div>
               <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
                 <li>
                   Silent answer:{' '}

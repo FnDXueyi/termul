@@ -1058,9 +1058,21 @@ describe('WsAcpTransport', () => {
     await transport.setTurnIdleTimeout(1800)
     await transport.setSessionNewTimeout(120)
     await transport.setSessionReopenTimeout(300)
-    await transport.setAgentIdleWindow(7200)
 
     expect(sock.sent.length).toBe(sentBefore)
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: { secs: 7200, source: 'setting' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+    await transport.setAgentIdleWindow(7200)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/host/agent-idle-window'),
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ secs: 7200 }) })
+    )
+    fetchMock.mockRestore()
     transport.dispose()
   })
 

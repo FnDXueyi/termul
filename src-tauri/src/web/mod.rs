@@ -152,9 +152,12 @@ pub async fn serve(
     // (bind failure, panic, early exit) so `serve` never hangs waiting on a
     // reaper whose signal can no longer arrive in-process.
     let (reaper_stop_tx, reaper_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    // Flag → env → default is already resolved on `cfg`. Lock it so a desktop
-    // settings override in this process cannot move the server window.
-    agent_reaper::install_agent_idle_baseline(cfg.agent_idle_window_secs, Some("operator"));
+    // A flag or env var locks the window. The 30-minute default stays open so
+    // Settings can change it.
+    agent_reaper::install_agent_idle_baseline(
+        cfg.agent_idle_window_secs,
+        crate::web::config::server_agent_idle_window_lock(&cfg),
+    );
     let reaper_handle = agent_reaper::spawn_agent_idle_reaper(
         acp.clone(),
         agent_reaper::live_agent_idle_window,

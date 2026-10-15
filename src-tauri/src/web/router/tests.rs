@@ -294,6 +294,33 @@ async fn agent_idle_window_returns_the_ipc_envelope() {
     );
 }
 
+#[tokio::test]
+async fn post_agent_idle_window_applies_a_settings_choice() {
+    crate::web::agent_reaper::reset_agent_idle_window_for_tests();
+    crate::web::agent_reaper::install_agent_idle_baseline(1800, None);
+    let dir = TempDir::new("idle-window-set");
+    let resp = test_router_with_fixture(dir.path())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/host/agent-idle-window")
+                .header("content-type", "application/json")
+                .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 54321))))
+                .body(Body::from(r#"{"secs":7200}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(parsed["data"]["secs"], 7200);
+    assert_eq!(parsed["data"]["source"], "setting");
+    crate::web::agent_reaper::reset_agent_idle_window_for_tests();
+}
+
 /// Non-loopback peer WITHOUT the opt-in → `allowRemoteWrites:false`. This
 /// is the tunnel/LAN client whose server denies writes; the client must
 /// hide the picker so it never reaches a launch that `FORBIDDEN`s.

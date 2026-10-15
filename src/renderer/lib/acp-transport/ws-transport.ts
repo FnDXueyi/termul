@@ -57,7 +57,7 @@ import type {
 } from '@/lib/acp-api'
 import type { SessionPayload } from '@/lib/acp-history-persistence'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
-import { getJson } from '@/lib/ipc/http'
+import { getJson, postJson } from '@/lib/ipc/http'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import { flagWebAuthUnauthorized, getWebAuthGateState } from '@/lib/web-auth-gate'
@@ -855,9 +855,11 @@ export class WsAcpTransport implements AcpTransport {
     // the session reopen timeout via TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS.
   }
 
-  async setAgentIdleWindow(_secs: number | null): Promise<void> {
-    // The standalone server locks this window at startup
-    // (`--agent-idle-window-secs` / TERMUL_AGENT_IDLE_REAP_SECS).
+  async setAgentIdleWindow(secs: number | null): Promise<void> {
+    const res = await postJson<AgentIdleWindowStatus>('/host/agent-idle-window', { secs })
+    if (!res.success) {
+      throw new AcpTransportError(res.code, res.error)
+    }
   }
 
   async getAgentIdleWindow(): Promise<AgentIdleWindowStatus> {

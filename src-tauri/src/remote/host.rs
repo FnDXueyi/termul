@@ -355,6 +355,8 @@ impl RemoteServerState {
             // `resolved_agent_idle_window`, which also applies App Preferences
             // when the env var is unset.
             agent_idle_window_secs: crate::web::config::desktop_agent_idle_window_secs().secs,
+            agent_idle_window_locked: crate::web::config::desktop_agent_idle_window_secs()
+                .from_env,
             overflow_tolerance: crate::web::config::DEFAULT_OVERFLOW_TOLERANCE,
             max_terminals_per_project: crate::web::config::DEFAULT_MAX_TERMINALS_PER_PROJECT,
             receipt_retention_secs: ws_relay.ledger().retention().as_secs(),

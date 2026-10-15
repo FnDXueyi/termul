@@ -276,18 +276,24 @@ describe('AppPreferences web honesty gates (Story 8)', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('replaces the ACP timeout selects with a read-only managed note on web', async () => {
+  it('keeps Keep idle chats editable on web and leaves the other timeouts read-only', async () => {
     renderWeb()
 
     expect(
       await screen.findByText(/Managed by the server — timeouts for agents spawned/i)
     ).toBeInTheDocument()
-    expect(screen.queryByLabelText('Keep idle chats')).not.toBeInTheDocument()
+    const keep = screen.getByLabelText('Keep idle chats')
+    expect(keep).toBeEnabled()
     expect(screen.queryByLabelText('Stop a silent answer after')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Stop a long answer after')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Wait for a new agent')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Wait to reopen a chat')).not.toBeInTheDocument()
-    expect(await screen.findByText(/Idle chats stay open for 30 minutes/)).toBeInTheDocument()
+
+    fireEvent.change(keep, { target: { value: '7200' } })
+    await waitFor(() => {
+      expect(useAppSettingsStore.getState().settings.agentIdleWindowSecs).toBe(7200)
+      expect(acpApi.setAgentIdleWindow).toHaveBeenCalledWith(7200)
+    })
   })
 
   it('hides the New Browser Tab shortcut row on web but keeps other shortcuts', async () => {
