@@ -716,9 +716,14 @@ async fn health_check(
         Json(HealthBody {
             status: "ok",
             allow_remote_writes: allow,
+            case_insensitive_paths: PATHS_CASE_INSENSITIVE_BY_TARGET,
         }),
     )
 }
+
+/// The source of truth for the web client's path case rule (#641). A per-volume
+/// probe would need a path, and `/health` is host-wide.
+const PATHS_CASE_INSENSITIVE_BY_TARGET: bool = cfg!(any(windows, target_os = "macos"));
 
 /// `GET /health` response body.
 #[derive(Serialize)]
@@ -726,6 +731,7 @@ async fn health_check(
 struct HealthBody {
     status: &'static str,
     allow_remote_writes: bool,
+    case_insensitive_paths: bool,
 }
 
 /// `GET /host/agent-idle-window` — the live idle-chat window. Same `IpcResult`

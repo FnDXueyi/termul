@@ -35,6 +35,7 @@ import {
   SheetTitle
 } from '@/components/ui/sheet'
 import { useClippedSegments } from '@/hooks/use-clipped-segments'
+import { useServerPathsCaseInsensitive } from '@/hooks/use-server-paths-case-insensitive'
 import { filesystemApi, persistenceApi } from '@/lib/api'
 import { sortDirectoryEntries } from '@/lib/filesystem-sort'
 import {
@@ -95,6 +96,7 @@ export function MobileFileExplorer({
   const { toggleDirectory, refreshDirectory, selectPath } = useFileExplorerActions()
   const reducedMotion = useReducedMotion() ?? false
   const projectId = useActiveProjectId()
+  const caseInsensitive = useServerPathsCaseInsensitive()
 
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [navigationDirection, setNavigationDirection] = useState<NavigationDirection>(0)
@@ -159,7 +161,11 @@ export function MobileFileExplorer({
         // Normalize before the containment check so a persisted `..` path
         // that lexically escapes the root is dropped, never restored.
         const persisted = res.success && res.data ? normalizePath(res.data) : null
-        setCurrentPath(persisted && isWithinRoot(persisted, rootPath) ? persisted : normalizedRoot)
+        setCurrentPath(
+          persisted && isWithinRoot(persisted, rootPath, caseInsensitive)
+            ? persisted
+            : normalizedRoot
+        )
       })
       .catch(() => {
         if (!cancelled) setCurrentPath(normalizedRoot)
@@ -167,7 +173,7 @@ export function MobileFileExplorer({
     return () => {
       cancelled = true
     }
-  }, [open, rootPath, projectId])
+  }, [open, rootPath, projectId, caseInsensitive])
 
   // Web has no directory watcher, so load whichever folder is currently shown.
   useEffect(() => {
@@ -180,14 +186,14 @@ export function MobileFileExplorer({
   function parentOf(path: string): string {
     const normalized = normalizePath(path)
     const canonicalRoot = rootPath ? normalizePath(rootPath) : normalized
-    const rootCompare = comparePath(canonicalRoot)
-    const currentCompare = comparePath(normalized)
+    const rootCompare = comparePath(canonicalRoot, caseInsensitive)
+    const currentCompare = comparePath(normalized, caseInsensitive)
     const rootPrefix = rootCompare === '/' ? '/' : `${rootCompare}/`
     if (currentCompare === rootCompare || !currentCompare.startsWith(rootPrefix)) {
       return canonicalRoot
     }
     const parent = normalized.slice(0, normalized.lastIndexOf('/'))
-    return comparePath(parent) === rootCompare ? canonicalRoot : parent
+    return comparePath(parent, caseInsensitive) === rootCompare ? canonicalRoot : parent
   }
 
   function closeAffectedTabs(target: DirectoryEntry): void {
@@ -227,7 +233,13 @@ export function MobileFileExplorer({
   }
 
   function navigateBack(): void {
-    if (!currentPath || !rootPath || comparePath(currentPath) === comparePath(rootPath)) return
+    if (
+      !currentPath ||
+      !rootPath ||
+      comparePath(currentPath, caseInsensitive) === comparePath(rootPath, caseInsensitive)
+    ) {
+      return
+    }
     setCreating(null)
     setRenaming(null)
     setNavigationDirection(-1)
@@ -239,7 +251,7 @@ export function MobileFileExplorer({
   /** Breadcrumb tap: jump to an ancestor folder. Mirrors `navigateBack` (clears
    * the inline create/rename state, slides back, persists the folder). */
   function navigateTo(path: string): void {
-    const target = resolveBreadcrumbTarget(path, rootPath, currentPath)
+    const target = resolveBreadcrumbTarget(path, rootPath, currentPath, caseInsensitive)
     if (!target) return
     setCreating(null)
     setRenaming(null)
@@ -415,7 +427,9 @@ export function MobileFileExplorer({
       : normalizedRoot.length + 1
     : 0
   const isAtRoot =
-    !normalizedRoot || comparePath(normalizedCurrent ?? '/') === comparePath(normalizedRoot)
+    !normalizedRoot ||
+    comparePath(normalizedCurrent ?? '/', caseInsensitive) ===
+      comparePath(normalizedRoot, caseInsensitive)
   const currentName =
     normalizedCurrent && normalizedRoot
       ? isAtRoot
@@ -424,7 +438,7 @@ export function MobileFileExplorer({
       : 'Files'
   const folderCrumbs =
     normalizedRoot && normalizedCurrent
-      ? buildFolderCrumbs(normalizedRoot, normalizedCurrent)
+      ? buildFolderCrumbs(normalizedRoot, normalizedCurrent, caseInsensitive)
       : null
   // An ancestor clipped away on the left cannot be scrolled into view, so it
   // must not take keyboard focus unseen (see `useClippedSegments`).

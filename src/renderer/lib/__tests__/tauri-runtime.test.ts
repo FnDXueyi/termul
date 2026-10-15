@@ -13,8 +13,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockFetch } = vi.hoisted(() => ({
-  mockFetch: vi.fn()
+const { mockFetch, mockPlatform } = vi.hoisted(() => ({
+  mockFetch: vi.fn(),
+  mockPlatform: { isWindows: false, isMac: false }
+}))
+
+vi.mock('@/lib/platform', () => ({
+  get isWindows() {
+    return mockPlatform.isWindows
+  },
+  get isMac() {
+    return mockPlatform.isMac
+  }
 }))
 
 // jsdom provides `window.location` (defaults to http://localhost/) so
@@ -199,6 +209,7 @@ describe('server write-admission capability cache (web branch)', () => {
     const snapshot = getServerCapabilitySnapshot()()
     expect(snapshot).toEqual({
       admitted: true,
+      caseInsensitivePaths: true,
       inFlight: false,
       resolved: true,
       retryTimer: null,
@@ -301,8 +312,6 @@ describe('host path case sensitivity from /health (web branch)', () => {
 })
 
 describe('host path case sensitivity on desktop', () => {
-  const originalPlatform = navigator.platform
-
   beforeEach(() => {
     __resetServerCapabilityCache()
     mockFetch.mockReset()
@@ -312,15 +321,16 @@ describe('host path case sensitivity on desktop', () => {
   afterEach(() => {
     __resetServerCapabilityCache()
     setTauriContext(false)
-    Object.defineProperty(navigator, 'platform', { value: originalPlatform, configurable: true })
+    mockPlatform.isWindows = false
+    mockPlatform.isMac = false
   })
 
   it.each([
-    ['Win32', true],
-    ['MacIntel', true],
-    ['Linux x86_64', false]
-  ])('derives the flag from navigator.platform %j without fetching', (platform, expected) => {
-    Object.defineProperty(navigator, 'platform', { value: platform, configurable: true })
+    ['Windows', { isWindows: true, isMac: false }, true],
+    ['macOS', { isWindows: false, isMac: true }, true],
+    ['Linux', { isWindows: false, isMac: false }, false]
+  ])('derives the flag from the local platform (%s) without fetching', (_, platform, expected) => {
+    Object.assign(mockPlatform, platform)
     expect(serverPathsCaseInsensitive()).toBe(expected)
     expect(mockFetch).not.toHaveBeenCalled()
   })
