@@ -44,6 +44,10 @@ mod updater_api;
 pub mod web;
 // Main-window show safety net + Wayland detection (gh-719).
 mod window_visibility;
+// Main-window WebView2 crash recovery; the pure decision logic is also
+// compiled for tests so it runs on every CI platform.
+#[cfg(any(target_os = "windows", test))]
+mod webview_recovery;
 mod worktree;
 
 #[cfg(target_os = "windows")]
@@ -1022,6 +1026,46 @@ static CLEANUP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 // returns immediately via the check above.
 static CLEANUP_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// Set by `request_restart_after_cleanup`; read by `finish_exit` only once the
+// exit cleanup has finished, so a recovery restart relaunches after the same
+// PTY/ACP/canvas/WS drain and history flush as a normal quit.
+static RESTART_AFTER_CLEANUP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True once an exit (quit or recovery restart) has claimed the cleanup path.
+#[cfg(target_os = "windows")]
+pub(crate) fn exit_cleanup_in_progress() -> bool {
+    CLEANUP_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Requests a graceful restart: the normal exit cleanup runs first, then
+/// `finish_exit` relaunches. `AppHandle::request_restart()` cannot be used
+/// directly because tauri ignores `prevent_exit` for `RESTART_EXIT_CODE`, so
+/// the async cleanup would be skipped.
+#[cfg(target_os = "windows")]
+pub(crate) fn request_restart_after_cleanup(app: &tauri::AppHandle) -> bool {
+    // A quit that already claimed the exit wins: flagging a restart now would
+    // turn the user's quit into a relaunch.
+    if exit_cleanup_in_progress() {
+        log::warn!("[webview-recovery] restart dropped: exit already in progress");
+        return false;
+    }
+    RESTART_AFTER_CLEANUP.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+    true
+}
+
+/// Ends the process after the exit cleanup: relaunches when a restart was
+/// requested, otherwise exits with code 0. `CLEANUP_DONE` is already set, so
+/// the `ExitRequested` either call raises returns early.
+fn finish_exit(app: &tauri::AppHandle) {
+    if RESTART_AFTER_CLEANUP.load(std::sync::atomic::Ordering::SeqCst) {
+        log::warn!("[exit] cleanup finished; relaunching (restart requested)");
+        app.request_restart();
+    } else {
+        app.exit(0);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1240,6 +1284,17 @@ pub fn run() {
                         log::warn!("Failed to disable native window decorations: {}", e);
                     }
                 }
+            }
+            // Reload the main webview after a render-process crash/hang and
+            // restart once (after the exit cleanup) if WebView2 cannot recover.
+            #[cfg(target_os = "windows")]
+            match app.get_webview_window("main") {
+                Some(window) => {
+                    if let Err(e) = webview_recovery::install(&handle, &window) {
+                        log::warn!("[webview-recovery] failed to attach to the main window: {e}");
+                    }
+                }
+                None => log::warn!("[webview-recovery] no main window; crash recovery not attached"),
             }
 
             app.manage(ViewMenuState::default());
@@ -2047,8 +2102,8 @@ pub fn run() {
                     }
                     // Mark cleanup as done so the subsequent exit event isn't prevented
                     CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // After cleanup completes, allow the app to exit with code 0
-                    app_handle_clone.exit(0);
+                    // After cleanup completes, exit (or relaunch if requested)
+                    finish_exit(&app_handle_clone);
                 });
             } else if let Some(acp_manager) = acp_manager {
                 let app_handle_clone = app_handle.clone();
@@ -2070,7 +2125,7 @@ pub fn run() {
                         browser_tab_manager.destroy_all();
                     }
                     CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
-                    app_handle_clone.exit(0);
+                    finish_exit(&app_handle_clone);
                 });
             } else {
                 let app_handle_clone = app_handle.clone();
@@ -2088,8 +2143,8 @@ pub fn run() {
                         browser_tab_manager.destroy_all();
                     }
                     CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // No PTY or ACP manager, just exit
-                    app_handle_clone.exit(0);
+                    // No PTY or ACP manager, just exit (or relaunch)
+                    finish_exit(&app_handle_clone);
                 });
             }
         }

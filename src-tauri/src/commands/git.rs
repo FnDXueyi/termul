@@ -18,7 +18,11 @@ use tauri::State;
 /// Get git status for a repository
 #[tauri::command]
 pub async fn git_get_status(cwd: String) -> Result<Vec<GitStatusDetail>, String> {
-    crate::trackers::git_tracker::git_get_status_detail(&cwd).map_err(|e: String| e)
+    // Git runs off the async workers (as `web/git_api.rs` does): an all-repo
+    // refresh must not starve IPC, ACP and the WS relay.
+    tokio::task::spawn_blocking(move || crate::trackers::git_tracker::git_get_status_detail(&cwd))
+        .await
+        .map_err(|e| format!("git status task failed: {e}"))?
 }
 
 /// Get git diff for a file. `staged` selects the index-vs-HEAD diff
@@ -29,8 +33,12 @@ pub async fn git_get_diff(
     path: String,
     staged: Option<bool>,
 ) -> Result<String, String> {
-    crate::trackers::git_tracker::git_get_diff(&cwd, &path, staged.unwrap_or(false))
-        .map_err(|e: String| e)
+    let staged = staged.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        crate::trackers::git_tracker::git_get_diff(&cwd, &path, staged)
+    })
+    .await
+    .map_err(|e| format!("git diff task failed: {e}"))?
 }
 
 /// Working-tree `+added -removed` line stat for the repository at `cwd`
@@ -59,13 +67,19 @@ pub async fn git_get_diff_stat(cwd: String) -> Result<IpcResult<GitDiffStat>, St
 /// Stage a single file (`git add`).
 #[tauri::command]
 pub async fn git_stage(cwd: String, path: String) -> Result<(), String> {
-    crate::trackers::git_tracker::git_stage_file(&cwd, &path).map_err(|e: String| e)
+    tokio::task::spawn_blocking(move || crate::trackers::git_tracker::git_stage_file(&cwd, &path))
+        .await
+        .map_err(|e| format!("git stage task failed: {e}"))?
 }
 
 /// Unstage a single file (`git restore --staged`).
 #[tauri::command]
 pub async fn git_unstage(cwd: String, path: String) -> Result<(), String> {
-    crate::trackers::git_tracker::git_unstage_file(&cwd, &path).map_err(|e: String| e)
+    tokio::task::spawn_blocking(move || {
+        crate::trackers::git_tracker::git_unstage_file(&cwd, &path)
+    })
+    .await
+    .map_err(|e| format!("git unstage task failed: {e}"))?
 }
 
 /// Stage a single hunk. `hunk_patch` is a unified-diff fragment
@@ -300,7 +314,11 @@ pub async fn git_push(cwd: String) -> Result<(), String> {
 pub async fn git_get_commit_context(
     cwd: String,
 ) -> Result<crate::trackers::git_tracker::GitCommitContext, String> {
-    crate::trackers::git_tracker::git_get_commit_context(&cwd).map_err(|e: String| e)
+    tokio::task::spawn_blocking(move || {
+        crate::trackers::git_tracker::git_get_commit_context(&cwd)
+    })
+    .await
+    .map_err(|e| format!("git commit context task failed: {e}"))?
 }
 
 #[tauri::command]
