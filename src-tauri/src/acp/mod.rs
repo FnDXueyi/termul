@@ -5,7 +5,8 @@
 //! and bridges agent events to the renderer over Tauri IPC.
 //!
 //! This is the backend-only P0 deliverable; the React chat UI is deferred to
-//! P1+.
+//! P1+. See `docs/adr/adr-003-acp-agent-chat-ui-architecture.md` and
+//! `_bmad-output/implementation-artifacts/spec-adr-003-p0-rust-acp-core.md`.
 
 pub mod agent_process;
 pub mod archive;
