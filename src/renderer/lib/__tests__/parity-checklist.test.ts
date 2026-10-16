@@ -1931,6 +1931,40 @@ describe('Bounded delivery parity (host heartbeat, gap frame)', () => {
   })
 })
 
+describe('Shared chat read marker parity (cross-surface unread)', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const protocol = readFileSync(
+    join(LIB_DIR, '..', '..', 'shared', 'types', 'web-protocol.types.ts'),
+    'utf-8'
+  )
+
+  it('one host service owns the marker and the relay serves it to every carrier', () => {
+    const service = readFileSync(join(SRC_TAURI, 'web', 'chat_reads.rs'), 'utf-8')
+    expect(service).toMatch(/pub fn mark\(&self, session_id: &str, head: &LogHead, seq: u64\)/)
+    const dispatch = readFileSync(join(SRC_TAURI, 'web', 'ws', 'dispatch.rs'), 'utf-8')
+    expect(dispatch).toMatch(/"mark_chat_read" => handle_mark_chat_read/)
+    const sources = readFileSync(join(SRC_TAURI, 'web', 'watch', 'sources.rs'), 'utf-8')
+    expect(sources).toMatch(/WatchKind::ChatReads/)
+  })
+
+  it('the protocol declares the request, its class and the watch payloads', () => {
+    expect(protocol).toMatch(/'mark_chat_read',/)
+    expect(protocol).toMatch(/mark_chat_read: \['idempotent', null\]/)
+    expect(protocol).toMatch(/interface ChatReadsWatchState/)
+  })
+
+  it('the transport facade and the shell tracker carry it on both renderer roots', () => {
+    const transport = readTsModule(join(LIB_DIR, 'acp-transport'))
+    expect(transport).toMatch(/markChatRead\(sessionId: SessionId, seq: number\)/)
+    expect(transport).toMatch(/'mark_chat_read'/)
+    const shell = readFileSync(join(LIB_DIR, '..', 'hooks', 'use-shell-unread-tracker.ts'), 'utf-8')
+    expect(shell).toMatch(/startChatReadSync\(\)/)
+    expect(shell).toMatch(/useChatReadMarker\(activeSessionIds\)/)
+    const layout = readFileSync(join(LIB_DIR, '..', 'layouts', 'WorkspaceLayout.tsx'), 'utf-8')
+    expect(layout).toMatch(/useShellUnreadTracker\(\)/)
+  })
+})
+
 describe('Watch hub parity (projects, chat history, agent roster)', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const hubSource = readFileSync(join(SRC_TAURI, 'web', 'watch', 'hub.rs'), 'utf-8')

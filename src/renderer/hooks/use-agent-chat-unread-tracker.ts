@@ -14,7 +14,8 @@ import { sessionTurnBusy } from '@/stores/prompt-queue-orchestration'
  * (`useShellUnreadTracker`, from `WorkspaceLayout`), because chat tabs and
  * Recents rows unmount (closed drawer, inactive tab, project switch) while a
  * turn finishes. A flag never clears because its session left the live set or
- * the project switched; it clears only on view here or on deletion
+ * the project switched; it clears on view here, on a read on another surface
+ * (the store's shared last-read marker, `useChatReadMarker`) or on deletion
  * (`deleteHistorySession`). Only live, non-ephemeral sessions are tracked:
  * closed/error sessions can carry stale turn flags and warm-pool sessions are
  * not chats, so a turn that ends because the session closed never banks a dot.
