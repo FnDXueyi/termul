@@ -13,7 +13,6 @@ import { MENU_CONTENT_CLASS, MENU_ITEM_CLASS } from '@/components/ui/menu-styles
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { PopoverSearchBand } from '@/components/ui/popover-search-band'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { cn } from '@/lib/utils'
 import type { Project } from '@/types/project'
 
@@ -59,7 +58,6 @@ export function ProjectSwitcher({
 }: ProjectSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  useNativeWebviewOcclusion(open)
 
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase()
