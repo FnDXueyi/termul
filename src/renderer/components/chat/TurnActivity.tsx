@@ -58,6 +58,7 @@ function TurnActivityComponent({
   }, [active, attentionRequired, hasFinalResponse])
 
   const duration = formatTurnDuration(durationMs)
+  const lastItem = items[items.length - 1]
   // Each contiguous run of tool calls gets its own nested disclosure, so a
   // reply between two batches keeps its seat: tools, text, tools. `summary`
   // still covers every call in the turn for the trigger's aggregate diffstat.
@@ -143,6 +144,10 @@ function TurnActivityComponent({
                     items={run.items}
                     summary={run.summary}
                     active={active}
+                    // The run is the turn's live edge while its last call is
+                    // the timeline's last item; anything arriving after it
+                    // (thought, reply, another run) folds the group.
+                    isLiveTail={active && run.items[run.items.length - 1] === lastItem}
                     attentionRequired={run.attentionRequired}
                     enter={enter}
                     filePathContext={filePathContext}
