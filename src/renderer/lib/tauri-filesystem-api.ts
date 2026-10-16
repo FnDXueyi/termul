@@ -151,14 +151,29 @@ function dispatchTypedEvent(
 }
 
 /**
- * A notify access event (open, read, close): not a change. A real write also
- * fires a `modify` event, so dropping close-after-write loses nothing. The
- * negation of the host watcher's `is_change_event`
- * (`src-tauri/src/web/fs_watcher/mod.rs`).
+ * The facade event type for a notify event kind, or null for an event that
+ * reports no change. tauri-plugin-fs builds notify with
+ * `serialization-compat-6`, so a kind arrives as `'any'`, `'other'` or an
+ * object keyed by its category (`{ remove: { kind: 'file' } }`); the wire
+ * shape is pinned by `src-tauri/src/fs_watch_wire_tests.rs`.
+ *
+ * Access events (open, read, close) are not changes: a real write also fires
+ * `modify`, so dropping close-after-write loses nothing. This is the negation
+ * of the host watcher's `is_change_event` (`src-tauri/src/web/fs_watcher/mod.rs`).
+ * inotify reports a rename as `from`, `to` and then `both`; the first two
+ * already carry each path, so `both` is dropped.
  */
-function isAccessEvent(event: WatchEvent): boolean {
-  const kind = event.type
-  return typeof kind === 'object' && kind !== null && 'access' in kind
+function toFileWatchEventType(kind: WatchEvent['type']): FileWatchEventType | null {
+  if (typeof kind !== 'object') return 'change'
+  if ('access' in kind) return null
+  if ('create' in kind) return 'add'
+  if ('remove' in kind) return 'unlink'
+  if ('modify' in kind && kind.modify.kind === 'rename') {
+    if (kind.modify.mode === 'from') return 'unlink'
+    if (kind.modify.mode === 'to') return 'add'
+    if (kind.modify.mode === 'both') return null
+  }
+  return 'change'
 }
 
 const activeWatchers = new Map<string, () => void>()
@@ -970,15 +985,8 @@ export function createTauriFilesystemApi(): FilesystemApi {
             // Reading a file (our own readTextFile included) fires access
             // events; reporting them as changes makes an open editor tab
             // reload, read, and reload again forever.
-            if (isAccessEvent(event)) return
-
-            // WatchEventKind is a complex type - check the type property
-            // The kind object has a 'type' property: 'create' | 'modify' | 'remove' | 'access' | 'other' | 'any'
-            const kindType = (event.type as { type?: string })?.type ?? 'other'
-
-            let changeType: FileWatchEventType = 'change'
-            if (kindType === 'create') changeType = 'add'
-            else if (kindType === 'remove') changeType = 'unlink'
+            const changeType = toFileWatchEventType(event.type)
+            if (!changeType) return
 
             // paths is an array - use first element
             const changedPath = (event.paths?.[0] ?? normalizedDirPath).replace(/\\/g, '/')

@@ -78,12 +78,6 @@ export function useFileWatcher(): void {
       }
     }
 
-    const handleFileCreated = (event: FileChangeEvent): void => {
-      scheduleGitStatusRefreshForPath(event.path)
-      const parentDir = getDirname(event.path)
-      scheduleRefresh(parentDir)
-    }
-
     const handleFileDeleted = (event: FileChangeEvent): void => {
       scheduleGitStatusRefreshForPath(event.path)
       const parentDir = getDirname(event.path)
@@ -95,18 +89,26 @@ export function useFileWatcher(): void {
       // saving→saved transition and drop the user back to the terminal.
       if (event.type !== 'unlink') return
 
-      // Close editor tab immediately if the deleted file is open
-      const editorState = useEditorStore.getState()
-      if (editorState.openFiles.has(event.path)) {
-        const didClose = editorState.closeFileIfIdle(event.path)
-        if (didClose) {
-          useWorkspaceStore.getState().removeTab(editorTabId(event.path))
-        }
+      if (useEditorStore.getState().openFiles.has(event.path)) {
+        void closeTabIfFileIsGone(event.path)
+      }
+    }
+
+    // git checkout and stash, and editors that move a file aside before
+    // writing it, remove a file and recreate it at once. Its create and
+    // modify events reload the tab, so close it only if the file stayed gone.
+    async function closeTabIfFileIsGone(path: string): Promise<void> {
+      const info = await filesystemApi.getFileInfo(path)
+      if (info.success) return
+      if (useEditorStore.getState().closeFileIfIdle(path)) {
+        useWorkspaceStore.getState().removeTab(editorTabId(path))
       }
     }
 
     const unsubChanged = filesystemApi.onFileChanged(handleFileChanged)
-    const unsubCreated = filesystemApi.onFileCreated(handleFileCreated)
+    // A file created at an open tab's path replaced its content (sed -i,
+    // an atomic save, git checkout), so it reloads the tab like a change.
+    const unsubCreated = filesystemApi.onFileCreated(handleFileChanged)
     const unsubDeleted = filesystemApi.onFileDeleted(handleFileDeleted)
 
     return () => {
