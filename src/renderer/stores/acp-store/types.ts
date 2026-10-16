@@ -151,6 +151,12 @@ export interface AcpSession {
    * are not dropped.
    */
   openTurnId: string | null
+  /**
+   * Wire turn id of the newest prompt turn this renderer opened. Unlike
+   * `openTurnId` it survives the turn's end, so a late result of an older turn
+   * can tell a newer one superseded it.
+   */
+  latestPromptTurnId?: string
   modes: SessionModeState | null
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
