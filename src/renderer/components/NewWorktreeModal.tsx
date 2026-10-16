@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Spinner } from '@/components/ui/spinner'
 import { worktreeApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { openTerminalAtCwd } from '@/lib/terminal-spawn'
 import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
@@ -304,6 +305,11 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
 
         onClose()
       } else {
+        void logFrontendError({
+          level: 'warn',
+          source: 'newWorktreeModal.worktreeCreate',
+          message: `worktree create failed code=${result.success ? 'UNKNOWN' : result.code}`
+        })
         setValidationError(!result.success ? result.error : 'Failed to create worktree')
         toast.error('Failed to create worktree', {
           description: !result.success ? result.error : 'Unknown error'
@@ -311,6 +317,11 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
       }
     } catch (err) {
       const msg = String(err)
+      void logFrontendError({
+        level: 'warn',
+        source: 'newWorktreeModal.worktreeCreate',
+        message: 'worktree create threw code=UNKNOWN'
+      })
       setValidationError(msg)
       toast.error('Error creating worktree', {
         description: msg

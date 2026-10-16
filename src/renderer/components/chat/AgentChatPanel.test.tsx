@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RECONNECT_GRACE_MS } from '@/hooks/use-delayed-flag'
+import {
+  NativeWebviewOccluder,
+  resetNativeWebviewOcclusionForTests
+} from '@/hooks/use-native-webview-occlusion'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { commandToken } from '@/lib/skill-tokens'
 import { mockAcpSession } from '@/lib/test-utils/acp'
@@ -23,6 +27,8 @@ const {
   mockSetMode,
   mockSetModel,
   sessionsMapRef,
+  agentsRef,
+  commandsRef,
   preparedSessionsRef,
   optionsCacheRef,
   mockRemoveTab,
@@ -89,6 +95,8 @@ const {
   // Extra sessions addressable by id (e.g. the switch target's prepared warm
   // session) so useAcpSession('s-warm') resolves in armed-switch tests.
   sessionsMapRef: { current: {} as Record<string, object> },
+  agentsRef: { current: {} as Record<string, object> },
+  commandsRef: { current: {} as Record<string, unknown[]> },
   // Armed-switch option scoping seams: the target's prepared session id (per
   // prepareChatKey) and its cached advertised options.
   preparedSessionsRef: { current: {} as Record<string, string> },
@@ -220,8 +228,8 @@ vi.mock('@/stores/workspace-store', () => ({
 
 vi.mock('@/stores/acp-store', () => {
   const state = () => ({
-    agents: {},
-    commands: {},
+    agents: agentsRef.current,
+    commands: commandsRef.current,
     agentSwitches: agentSwitchesRef.current,
     agentConfigs: agentConfigsRef.current,
     toolCalls: toolCallsRef.current,
@@ -234,7 +242,7 @@ vi.mock('@/stores/acp-store', () => {
     // useAcpMessages mock serves one flat list for ANY session, so the map
     // is a Proxy answering every key with messagesRef.
     messages: new Proxy({}, { get: () => messagesRef.current }),
-    sessions: {},
+    sessions: sessionsMapRef.current,
     configToLiveAgent: {},
     preparedSessions: preparedSessionsRef.current,
     agentOptionsCache: optionsCacheRef.current,
@@ -373,7 +381,15 @@ const { chatInputBarPropsRef } = vi.hoisted(() => ({
       onSend?: (text: string) => void
       onSendBlocks?: (blocks: unknown[], displayBlocks?: unknown[]) => void
       onDraftStart?: () => void
-      session?: { models?: unknown; modes?: unknown; configOptions?: unknown[] }
+      session?: {
+        models?: unknown
+        modes?: unknown
+        configOptions?: unknown[]
+        mcpServerCount?: number
+      }
+      commands?: unknown[]
+      imageCapable?: boolean
+      embedCapable?: boolean
       configOptions?: unknown[]
       modes?: unknown
       onSetConfig?: (configId: string, valueId: string) => Promise<void>
@@ -1848,6 +1864,8 @@ describe('AgentChatPanel armed-switch composer scoping', () => {
     mockSetModel.mockReset()
     sessionRef.current = null
     sessionsMapRef.current = {}
+    agentsRef.current = {}
+    commandsRef.current = {}
     preparedSessionsRef.current = {}
     optionsCacheRef.current = {}
     indexRef.current = []
@@ -1899,6 +1917,35 @@ describe('AgentChatPanel armed-switch composer scoping', () => {
     expect(props?.modes).toEqual({ ...targetModes, currentModeId: 'code' })
     expect(props?.configOptions).toEqual([{ ...targetConfigOptions[0], currentValue: 'max' }])
     expect(props?.session?.configOptions?.[0]).not.toMatchObject({ id: 'old_opt' })
+  })
+
+  it('offers the target session commands, prompt capabilities and MCP count while armed', () => {
+    seedArmedSession()
+    sessionsMapRef.current['s-warm'] = { ...sessionsMapRef.current['s-warm'], mcpServerCount: 3 }
+    agentsRef.current = {
+      'agent-old': { capabilities: { promptCapabilities: {} } },
+      'agent-new': { capabilities: { promptCapabilities: { image: true, embeddedContext: true } } }
+    }
+    commandsRef.current = {
+      s1: [{ name: 'old-only', description: 'Old agent command' }],
+      's-warm': [{ name: 'target-only', description: 'Target agent command' }]
+    }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    const props = chatInputBarPropsRef.current.at(-1)
+    expect(props?.commands).toEqual([{ name: 'target-only', description: 'Target agent command' }])
+    expect(props?.imageCapable).toBe(true)
+    expect(props?.embedCapable).toBe(true)
+    expect(props?.session?.mcpServerCount).toBe(3)
+  })
+
+  it('offers no old-agent commands while the armed target has no prepared session', () => {
+    seedArmedSession()
+    preparedSessionsRef.current = {}
+    commandsRef.current = { s1: [{ name: 'old-only', description: 'Old agent command' }] }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    expect(chatInputBarPropsRef.current.at(-1)?.commands).toEqual([])
   })
 
   it('routes armed composer picks into setSwitchPendingOption (old session untouched)', async () => {
@@ -2018,11 +2065,22 @@ describe('AgentChatPanel browser consent card mounting (CAP-5)', () => {
 
   afterEach(() => {
     runtimeState.tauri = false
+    resetNativeWebviewOcclusionForTests()
   })
 
   function seedActiveSession(id: string): void {
     sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'active' })
   }
+
+  it('mounts no card while an overlay covers the chat, leaving it to the root host', () => {
+    seedActiveSession('s1')
+    pendingBrowserConsentsRef.current = {
+      'req-1': { requestId: 'req-1', sessionId: 's1' }
+    }
+    render(<NativeWebviewOccluder />)
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(browserConsentCardPropsRef.current).toBeNull()
+  })
 
   it('renders the pending consent belonging to this session', () => {
     seedActiveSession('s1')

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use super::*;
 
@@ -99,12 +99,13 @@ impl WorktreeManager {
         on_progress: Option<&mut dyn FnMut(&str)>,
     ) -> Result<GitWorktreeEntry, WorktreeError> {
         let target = match target_path {
-            Some(p) => p.to_string(),
-            None => format!(
+            Some(p) => Some(p.to_string()),
+            None if is_only_plain_folder_names(name) => Some(format!(
                 "{}/.termul/worktrees/{}/",
                 project_path.trim_end_matches('/'),
                 name
-            ),
+            )),
+            None => None,
         };
 
         // Boundary log: record the create inputs before ANY early return so
@@ -132,6 +133,15 @@ impl WorktreeManager {
                 error
             );
         };
+
+        let Some(target) = target else {
+            log_failure(&WorktreeError::InvalidWorktreeName);
+            return Err(WorktreeError::InvalidWorktreeName);
+        };
+        if let Err(error) = ensure_valid_branch_name(branch, project_path) {
+            log_failure(&error);
+            return Err(error);
+        }
 
         // Validate path length (Windows MAX_PATH guard)
         let target_path_obj = Path::new(&target);
@@ -580,4 +590,12 @@ impl WorktreeManager {
     ) -> Vec<SymlinkResult> {
         Self::create_symlinks(project_path, worktree_path, symlink_dirs)
     }
+}
+
+fn is_only_plain_folder_names(name: &str) -> bool {
+    let mut components = Path::new(name).components().peekable();
+    // `components()` silently drops interior `.`, so `feat/./login` would alias `feat/login`.
+    components.peek().is_some()
+        && components.all(|c| matches!(c, Component::Normal(_)))
+        && !name.split(['/', '\\']).any(|segment| segment == ".")
 }

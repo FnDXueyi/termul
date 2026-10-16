@@ -2582,6 +2582,101 @@ describe('switchAgent CAP-7 reopen (story 3)', () => {
     expect(state.sessions['s-new']?.status).toBe('active')
   })
 
+  it('QUEUE_REDIRECT: a send queued during the automatic resume of an idle-stopped switch source runs on the final session', async () => {
+    const marker = {
+      id: 'switch:seq-3',
+      fromConfigId: 'cfg-old',
+      toConfigId: 'cfg-new',
+      newSessionId: 's-new',
+      summaryText: 'Handoff summary',
+      timestamp: 3,
+      seq: 3
+    }
+    setCachedSessionPayload('s-old', {
+      metadata: {
+        id: 's-old',
+        agentId: 'agent-old',
+        agentConfigId: 'cfg-old',
+        title: 'Switched chat',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 10,
+        messageCount: 1,
+        lastSeq: 3,
+        status: 'closed'
+      },
+      messages: [
+        {
+          id: 'user:seq-1',
+          role: 'user',
+          blocks: [{ type: 'text', text: 'hello old agent' }],
+          streaming: false,
+          timestamp: 1,
+          seq: 1
+        }
+      ] as never,
+      switches: [marker]
+    })
+    setCachedSessionPayload('s-new', {
+      metadata: {
+        id: 's-new',
+        agentId: 'agent-new',
+        agentConfigId: 'cfg-new',
+        title: 'Continuation',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 4,
+        lastActivityAt: 8,
+        messageCount: 0,
+        lastSeq: 0,
+        status: 'closed'
+      },
+      messages: [] as never
+    })
+    const loadSession = vi.fn(async () => ({}))
+    const sendPromptBlocks = vi.fn(async () => ({}))
+    _setAcpTransportForTests({
+      historyMode: () => 'server',
+      loadSession,
+      sendPrompt: vi.fn(async () => ({})),
+      sendPromptBlocks,
+      recordAgentSwitch: vi.fn(async () => {}),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    seedSession('s-old', 'agent-old', false)
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, 's-old': { ...s.sessions['s-old'], status: 'closed' } },
+      agentSwitches: { 's-old': [marker] },
+      agentConfigs: [{ id: 'cfg-new', name: 'Claude', command: 'claude', args: [], env: {} }],
+      agents: { 'agent-new': { id: 'agent-new', capabilities: { loadSession: true } } },
+      agentStatus: { 'agent-new': 'connected' }
+    }))
+
+    const open = useAcpStore.getState().openHistorySession('s-old')
+    await useAcpStore.getState().sendPrompt('s-old', 'queued during resume')
+    expect(useAcpStore.getState().promptQueues['s-old']).toHaveLength(1)
+
+    await open
+    await flushTurnEnd()
+
+    const state = useAcpStore.getState()
+    expect(workspaceStateRef.current.remapAgentChatSession).toHaveBeenCalledWith('s-old', 's-new')
+    expect(state.promptQueues['s-old'] ?? []).toEqual([])
+    expect(sendPromptBlocks).toHaveBeenCalledWith(
+      'agent-new',
+      's-new',
+      [{ type: 'text', text: 'queued during resume' }],
+      expect.any(String),
+      undefined
+    )
+    expect(logFrontendError).toHaveBeenCalledWith({
+      level: 'info',
+      source: 'acp.openHistorySession.switchRedirect',
+      message: 'Moved 1 queued prompt(s) from switched session s-old to s-new'
+    })
+  })
+
   it('UNSWITCHED: reopening a chat with no switch markers takes the original path', async () => {
     setCachedSessionPayload('s-plain', {
       metadata: {
@@ -3502,6 +3597,76 @@ describe('composer option fidelity', () => {
       expect(session.models?.currentModelId).toBe('m2')
       expect(session.configOptions[0]?.currentValue).toBe('max')
       expect(session.creationOptionDefaults?.modeId).toBe('agent')
+    })
+
+    it('_onSessionCreated adds options a late payload advertises without moving current values', () => {
+      seedOptionsSession('s1', 'agent-1', {
+        modes: { currentModeId: 'bypass', availableModes: [makeMode('bypass')] },
+        models: { currentModelId: 'm2', availableModels: [makeModel('m2')] },
+        configOptions: [makeConfigOption('thought_level', 'max', ['low', 'max'])]
+      })
+
+      useAcpStore.getState()._onSessionCreated({
+        agentId: 'agent-1',
+        sessionId: 's1',
+        modes: { currentModeId: 'agent', availableModes: [makeMode('agent'), makeMode('bypass')] },
+        models: { currentModelId: 'm1', availableModels: [makeModel('m1'), makeModel('m2')] },
+        configOptions: [
+          makeConfigOption('thought_level', 'low', ['low', 'max']),
+          makeConfigOption('other', 'x', ['x', 'y'])
+        ]
+      })
+
+      const session = useAcpStore.getState().sessions['s1']
+      expect(session.modes).toEqual({
+        currentModeId: 'bypass',
+        availableModes: [makeMode('bypass'), makeMode('agent')]
+      })
+      expect(session.models).toEqual({
+        currentModelId: 'm2',
+        availableModels: [makeModel('m2'), makeModel('m1')]
+      })
+      expect(session.configOptions).toEqual([
+        makeConfigOption('thought_level', 'max', ['low', 'max']),
+        makeConfigOption('other', 'x', ['x', 'y'])
+      ])
+    })
+
+    it('_onSessionCreated adds values a late payload advertises under an existing option', () => {
+      const grouped = (currentValue: string, values: string[]) => ({
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue,
+        options: [
+          { name: 'Fast', group: 'fast', options: values.map((v) => ({ value: v, name: v })) }
+        ]
+      })
+      seedOptionsSession('s1', 'agent-1', {
+        configOptions: [
+          makeConfigOption('thought_level', 'max', ['low', 'max']),
+          grouped('a', ['a'])
+        ]
+      })
+      const latePayload = {
+        agentId: 'agent-1',
+        sessionId: 's1',
+        configOptions: [
+          makeConfigOption('thought_level', 'low', ['low', 'medium', 'max']),
+          grouped('b', ['a', 'b'])
+        ]
+      }
+
+      useAcpStore.getState()._onSessionCreated(latePayload)
+      const enriched = useAcpStore.getState().sessions['s1'].configOptions
+      useAcpStore.getState()._onSessionCreated(latePayload)
+
+      expect(enriched).toEqual([
+        makeConfigOption('thought_level', 'max', ['low', 'max', 'medium']),
+        grouped('a', ['a', 'b'])
+      ])
+      expect(useAcpStore.getState().sessions['s1'].configOptions).toBe(enriched)
     })
 
     it('_onSessionCreated populates an event stub with the payload as creation defaults', () => {
