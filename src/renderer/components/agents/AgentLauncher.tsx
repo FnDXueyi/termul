@@ -1519,8 +1519,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
 
     // Build the wire text (skills framed by path under `# Agent Skills`, then
     // the user text with tokens replaced by `(name)`) and the display text (the
-    // raw token value, so the chat timeline re-renders inline chips), with the
-    // active command prefixed to both. Shared with `ChatInputBar.submit` via
+    // raw token value, so the chat timeline re-renders inline chips). A command
+    // token becomes `/name` where the user typed it. Shared with `ChatInputBar.submit` via
     // `useChatComposer.buildPromptParts` so the two surfaces cannot drift. A
     // skill surfaced without a path (web parity gap) blocks the launch —
     // `buildPromptParts` throws and the catch toasts + releases the in-flight
