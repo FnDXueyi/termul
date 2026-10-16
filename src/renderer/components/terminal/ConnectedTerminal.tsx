@@ -30,7 +30,7 @@ import { openTerminalUrl } from '@/lib/browser/terminal-url-navigation'
 import { buildTerminalPathLinks, openFilePathFromTerminal } from '@/lib/file-path-links'
 import { MONO_STACK } from '@/lib/font-stacks'
 import { logFrontendError } from '@/lib/log-api'
-import { ensureMonoFontLoaded, isMonoFontReady } from '@/lib/mono-font'
+import { ensureMonoFontLoaded, isMonoFontReady, MONO_FONT_LOAD_TIMEOUT_MS } from '@/lib/mono-font'
 import { isMac } from '@/lib/platform'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import {
@@ -1406,20 +1406,38 @@ function ConnectedTerminalComponent({
       return
     }
 
-    void ensureMonoFontLoaded(fontSize)
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error)
+    // A hung Font Loading API must not keep monoFontReady false forever.
+    let timedOut = false
+    let timer = 0
+    const timeout = new Promise<void>((resolve) => {
+      timer = window.setTimeout(() => {
+        timedOut = true
+        resolve()
+      }, MONO_FONT_LOAD_TIMEOUT_MS)
+    })
+    const load = ensureMonoFontLoaded(fontSize).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      void logFrontendError({
+        level: 'warn',
+        source: 'ConnectedTerminal.font',
+        message: `Paper Mono failed to load — terminal uses the monospace fallback (${message})`
+      })
+    })
+
+    void Promise.race([load, timeout]).then(() => {
+      window.clearTimeout(timer)
+      if (timedOut) {
         void logFrontendError({
           level: 'warn',
           source: 'ConnectedTerminal.font',
-          message: `Paper Mono failed to load — terminal uses the monospace fallback (${message})`
+          message: 'Paper Mono load timed out — terminal uses the monospace fallback'
         })
-      })
-      .then(() => {
-        apply()
-      })
+      }
+      apply()
+    })
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
   }, [fontSize])
 
