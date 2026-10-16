@@ -14,6 +14,7 @@ import { buildPromptWithLoadedSkills, useAgentSkills } from '@/hooks/use-agent-s
 import { RECONNECT_GRACE_MS, useDelayedFlag } from '@/hooks/use-delayed-flag'
 import { useDockClearance } from '@/hooks/use-dock-clearance'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
+import { useInterfaceOverlayOpen } from '@/hooks/use-native-webview-occlusion'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
 import type { AvailableCommand, ContentBlock, PlanEntry, SessionId, ToolCall } from '@/lib/acp-api'
 import type { AgentSwitchRecord } from '@/lib/acp-history-persistence'
@@ -182,6 +183,7 @@ export function AgentChatPanel({
   // CAP-5: the panel owns the fallback card while the strip is not hosting —
   // mirrored by the render gate below (`showBrowserConsentCard`).
   const stripHosting = useIsConsentStripHosting()
+  const overlayOpen = useInterfaceOverlayOpen()
   const registerConsentCard = useConsentCardHost((s) => s.register)
   const unregisterConsentCard = useConsentCardHost((s) => s.unregister)
   // A registered session means "a visible consent card is on screen in this
@@ -755,11 +757,8 @@ export function AgentChatPanel({
   }
 
   const isClosed = session.status === 'closed'
-  // CAP-5: gate the card (and its gutter wrapper) on every suppression term —
-  // closed sessions never show it, and remote (non-Tauri) or strip-hosted
-  // states render nothing instead of an empty padded gutter block.
   const showBrowserConsentCard =
-    pendingBrowserConsent != null && !isClosed && !stripHosting && isTauriContext()
+    pendingBrowserConsent != null && !isClosed && !stripHosting && !overlayOpen && isTauriContext()
   // Failed launches keep the Retry affordance even without a user prompt in
   // the transcript (the retry relaunches without re-sending).
   const isFailedLaunch = session.status === 'error' && Boolean(session.launchConfigId)

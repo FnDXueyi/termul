@@ -15,7 +15,6 @@ import { useBulkTabClose } from '@/layouts/workspace-layout/use-bulk-tab-close'
 import { useCloseActiveTab } from '@/layouts/workspace-layout/use-close-active-tab'
 import { useCommandPaletteData } from '@/layouts/workspace-layout/use-command-palette-data'
 import { useEditorTabClose } from '@/layouts/workspace-layout/use-editor-tab-close'
-import { useModalBrowserHide } from '@/layouts/workspace-layout/use-modal-browser-hide'
 import { useOverlayActions } from '@/layouts/workspace-layout/use-overlay-actions'
 import { useProjectRootWatch } from '@/layouts/workspace-layout/use-project-root-watch'
 import { useShortcutLabels } from '@/layouts/workspace-layout/use-shortcut-labels'
@@ -176,8 +175,6 @@ export default function WorkspaceLayout(): React.JSX.Element {
     setIsCommandHistoryOpen,
     setIsNewProjectModalOpen
   })
-
-  useModalBrowserHide({ isNewProjectModalOpen, isAgentLauncherOpen, activeTab })
 
   const terminalClose = useTerminalClose({ activeProjectId, handleCloseTerminalRef })
   const bulkTabClose = useBulkTabClose({
