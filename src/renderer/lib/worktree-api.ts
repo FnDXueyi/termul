@@ -65,13 +65,6 @@ export interface IncludeCopyResult {
   skipped: IncludeSkipReason[]
 }
 
-/**
- * Invoke a desktop-only worktree Tauri command. `removeAllManaged`, `archive`,
- * `restore`, `mergePreview` and `mergeExecute` have no renderer caller and no
- * web route, so on web (`!isTauriContext()`) they answer `WEB_UNSUPPORTED`.
- * Every other method branches to `webServerWorktree` (HTTP routes in
- * `web/worktree_api.rs`) in its own facade method below.
- */
 async function worktreeInvoke<T>(
   command: string,
   args?: Record<string, unknown>

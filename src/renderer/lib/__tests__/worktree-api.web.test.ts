@@ -1,16 +1,5 @@
 /**
  * Web-branch tests for worktree-api.ts.
- *
- * CAP — Web worktree parity: the launch-flow methods (list, create, remove,
- * branches, checkDirty, resolveBaseBranch, copyIncludeFiles) and the symlink
- * methods (parseGitignore, createSymlinks, ensureSymlinks) branch to
- * `webServerWorktree` (HTTP routes in `web/worktree_api.rs`) when
- * `!isTauriContext()`. The desktop-only ops (merge, archive/restore,
- * removeAllManaged) return `WEB_UNSUPPORTED` on web.
- *
- * Pins `isTauriContext()` to FALSE and asserts:
- * - The web methods call `fetch` (HTTP), NOT `invoke`.
- * - The desktop-only methods return `WEB_UNSUPPORTED`.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'

@@ -3,9 +3,7 @@
  *
  * Thin trigger over the single-flight reconciler (`lib/worktree-reconciler.ts`,
  * the only writer of `project.worktrees`): runs on mount and on a 60-second
- * interval, on desktop and web alike. When the host admits this client's
- * writes it also ensures the configured symlink dirs exist in each stored
- * worktree; a read-only server would refuse every ensure.
+ * interval, on desktop and web alike.
  */
 
 import { useCallback, useEffect, useRef } from 'react'

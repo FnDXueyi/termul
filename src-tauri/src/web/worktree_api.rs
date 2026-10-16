@@ -21,10 +21,6 @@
 //!   (template: `git_api.rs`).
 //! - logs at route boundaries via `tracing` (the standalone server's logger;
 //!   a no-op when no subscriber is installed on the desktop shared-live path).
-//!
-//! The symlink routes (`parse-gitignore`, `create-symlinks`, `ensure-symlinks`)
-//! live in `symlinks`. `mergePreview`/`mergeExecute`, `archive`/`restore` and
-//! `removeAllManaged` have no renderer caller and no web route.
 
 use std::net::SocketAddr;
 use std::path::Path;

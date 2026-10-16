@@ -307,11 +307,7 @@ pub fn router(
         // Worktree web routes (CAP — Web worktree parity). Each mirrors a
         // desktop `#[tauri::command] worktree_*` handler; see
         // `web/worktree_api.rs`. Registered AHEAD of the static fallback so the
-        // SPA mount cannot shadow them. Write routes (`create`/`remove`/
-        // `copy-include-files`/`rename-branch`/`create-symlinks`/`ensure-symlinks`)
-        // are loopback-guarded inside the handler; read routes (`list`/
-        // `branches`/`check-dirty`/`resolve-base-branch`/`parse-gitignore`)
-        // enforce containment only.
+        // SPA mount cannot shadow them.
         .route("/worktree/list", post(worktree_api::list))
         .route("/worktree/create", post(worktree_api::create))
         .route("/worktree/remove", post(worktree_api::remove))

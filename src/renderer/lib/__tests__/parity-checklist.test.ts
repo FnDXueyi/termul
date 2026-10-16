@@ -1001,13 +1001,6 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
-  // CAP — Web worktree parity. The launch-flow and symlink worktree ops ship
-  // on THREE transports (Tauri command `worktree_*`, HTTP `/worktree/*` route,
-  // facade branch `isTauriContext()` between `invoke(...)` and
-  // `webServerWorktree`). This block pins the TS-side parity (the Rust-side
-  // parity — router routes + Tauri command registration + `web/worktree_api.rs`
-  // — is covered by the Rust test suite). The desktop-only ops have no renderer
-  // caller and stay `WEB_UNSUPPORTED` on web.
   describe('Worktree parity (CAP — Web worktree parity)', () => {
     const Facade = join(LIB_DIR, 'worktree-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
@@ -1019,39 +1012,24 @@ describe('Parity Checklist Automation', () => {
 
     const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-    // facade method, HTTP route, Axum handler, desktop Tauri command
     const WEB_OPS = [
-      ['list', '/worktree/list', 'list', 'worktree_list'],
-      ['create', '/worktree/create', 'create', 'worktree_create'],
-      ['remove', '/worktree/remove', 'remove', 'worktree_remove'],
-      ['branches', '/worktree/branches', 'branches', 'worktree_branches'],
-      ['checkDirty', '/worktree/check-dirty', 'check_dirty', 'worktree_check_dirty'],
-      [
-        'resolveBaseBranch',
-        '/worktree/resolve-base-branch',
-        'resolve_base_branch',
-        'worktree_resolve_base_branch'
-      ],
-      [
-        'copyIncludeFiles',
-        '/worktree/copy-include-files',
-        'copy_include_files',
-        'worktree_copy_include_files'
-      ],
-      [
-        'parseGitignore',
-        '/worktree/parse-gitignore',
-        'parse_gitignore',
-        'worktree_parse_gitignore'
-      ],
-      [
-        'createSymlinks',
-        '/worktree/create-symlinks',
-        'create_symlinks',
-        'worktree_create_symlinks'
-      ],
-      ['ensureSymlinks', '/worktree/ensure-symlinks', 'ensure_symlinks', 'worktree_ensure_symlinks']
-    ] as const
+      'list',
+      'create',
+      'remove',
+      'branches',
+      'check-dirty',
+      'resolve-base-branch',
+      'copy-include-files',
+      'parse-gitignore',
+      'create-symlinks',
+      'ensure-symlinks'
+    ].map((name) => ({
+      route: `/worktree/${name}`,
+      method: name.replace(/-(\w)/g, (_, c: string) => c.toUpperCase()),
+      handler: name.replaceAll('-', '_'),
+      command: `worktree_${name.replaceAll('-', '_')}`
+    }))
+    const OTHER_WEB_METHODS = ['renameBranch']
 
     const DESKTOP_ONLY_METHODS = [
       'removeAllManaged',
@@ -1072,7 +1050,7 @@ describe('Parity Checklist Automation', () => {
       expect(existsSync(WebAdapter), 'web-server-api.ts should exist').toBe(true)
       const content = readFileSync(WebAdapter, 'utf-8')
       expect(content).toMatch(/export\s+const\s+\bwebServerWorktree\b/)
-      for (const [, route] of WEB_OPS) {
+      for (const { route } of WEB_OPS) {
         expect(content, `web-server-api.ts should hit ${route}`).toMatch(
           new RegExp(escapeRe(route))
         )
@@ -1083,16 +1061,13 @@ describe('Parity Checklist Automation', () => {
 
     it('facade branches every web method (invoke on Tauri, webServerWorktree on web)', () => {
       const content = readFileSync(Facade, 'utf-8')
-      for (const [method] of WEB_OPS) {
+      for (const { method } of WEB_OPS) {
         expect(content, `worktree-api.ts should branch ${method}`).toMatch(
           new RegExp(`webServerWorktree\\.${method}\\(`)
         )
       }
-      // The web methods + `renameBranch` (story 16) reference `webServerWorktree`.
       const webRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(webRefs, 'web methods + renameBranch should reference webServerWorktree').toBe(
-        WEB_OPS.length + 1
-      )
+      expect(webRefs).toBe(WEB_OPS.length + OTHER_WEB_METHODS.length)
     })
 
     it('facade keeps the desktop-only methods as WEB_UNSUPPORTED (no webServerWorktree ref)', () => {
@@ -1108,7 +1083,7 @@ describe('Parity Checklist Automation', () => {
     it('router.rs registers every /worktree/* web route ahead of the static fallback', () => {
       expect(existsSync(RouterRust), 'router.rs should exist').toBe(true)
       const content = readFileSync(RouterRust, 'utf-8')
-      for (const [, route] of WEB_OPS) {
+      for (const { route } of WEB_OPS) {
         expect(content, `router.rs should register ${route}`).toMatch(new RegExp(escapeRe(route)))
       }
     })
@@ -1118,7 +1093,7 @@ describe('Parity Checklist Automation', () => {
       const content = [WorktreeApiRust, WorktreeSymlinksRust]
         .map((file) => readFileSync(file, 'utf-8'))
         .join('\n')
-      for (const [, , handler] of WEB_OPS) {
+      for (const { handler } of WEB_OPS) {
         expect(content, `the web worktree routes should define ${handler}`).toMatch(
           new RegExp(`pub async fn ${handler}\\b`)
         )
@@ -1135,7 +1110,7 @@ describe('Parity Checklist Automation', () => {
     it('commands module defines the desktop Tauri command for every web route', () => {
       expect(existsSync(CommandsRust), 'commands module should exist').toBe(true)
       const content = readRustModule(CommandsRust)
-      for (const [, , , cmd] of WEB_OPS) {
+      for (const { command: cmd } of WEB_OPS) {
         expect(content, `commands module should define ${cmd}`).toMatch(
           new RegExp(`\\b${escapeRe(cmd)}\\b`)
         )

@@ -48,7 +48,6 @@ fn lan_peer() -> SocketAddr {
     SocketAddr::from(([192, 168, 1, 50], 54321))
 }
 
-/// A project dir with a `shared/` directory and an empty worktree dir.
 struct Project {
     dir: TempDir,
     root: std::path::PathBuf,
@@ -72,8 +71,7 @@ fn s(path: &std::path::Path) -> String {
     crate::path_validation::strip_verbatim_prefix(&path.to_string_lossy()).into_owned()
 }
 
-/// `(link name, status)` per result of a successful symlink reply.
-fn outcome(body: &IpcBody<serde_json::Value>) -> Vec<(String, String)> {
+fn link_statuses(body: &IpcBody<serde_json::Value>) -> Vec<(String, String)> {
     assert!(body.success, "expected success, got {body:?}");
     let results = body
         .data
@@ -142,7 +140,7 @@ async fn create_symlinks_links_existing_dirs_and_skips_the_rest() {
     .await;
 
     assert_eq!(
-        outcome(&body),
+        link_statuses(&body),
         pairs(&[
             ("shared", "created"),
             ("missing", "skipped"),
@@ -175,8 +173,8 @@ async fn ensure_symlinks_leaves_an_existing_link_in_place() {
     .await;
     let second = post_from(app, "/worktree/ensure-symlinks", req, loopback()).await;
 
-    assert_eq!(outcome(&first), pairs(&[("shared", "created")]));
-    assert_eq!(outcome(&second), pairs(&[("shared", "skipped")]));
+    assert_eq!(link_statuses(&first), pairs(&[("shared", "created")]));
+    assert_eq!(link_statuses(&second), pairs(&[("shared", "skipped")]));
 }
 
 #[tokio::test]
@@ -259,7 +257,7 @@ async fn create_symlinks_refuses_rooted_and_drive_relative_names() {
         loopback(),
     )
     .await;
-    let statuses: Vec<String> = outcome(&body)
+    let statuses: Vec<String> = link_statuses(&body)
         .into_iter()
         .map(|(_, status)| status)
         .collect();

@@ -1,12 +1,3 @@
-//! Worktree symlink routes: `POST /worktree/parse-gitignore` (read),
-//! `POST /worktree/create-symlinks` and `POST /worktree/ensure-symlinks`
-//! (writes, loopback-guarded). They mirror the desktop `worktree_parse_gitignore`
-//! / `worktree_create_symlinks` / `worktree_ensure_symlinks` commands over the
-//! same `WorktreeManager` calls.
-//!
-//! The symlink writes are not ledgered: like `copy-include-files`, a repeat
-//! converges (an existing link is reported `skipped`, never replaced).
-
 use std::net::SocketAddr;
 
 use axum::{
