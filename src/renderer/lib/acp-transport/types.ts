@@ -90,6 +90,19 @@ export interface CommandCallOptions {
   onVisibleAt?: (visibleAt: number) => void
 }
 
+/**
+ * Options for `session/load` and `session/resume`.
+ * `mcpServers` is set only by Reload this chat. It stays on this bag so a
+ * normal reopen still passes command options as the fifth argument.
+ */
+export type ReopenCallOptions = CommandCallOptions & {
+  /**
+   * Present only for a reload. An empty array still asks the host to attach
+   * the plan server. Omitted keeps a normal history reopen.
+   */
+  mcpServers?: McpServer[]
+}
+
 /** `visible_at` is a session seq; anything else on the wire is ignored. */
 export function parseVisibleAt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
@@ -266,14 +279,14 @@ export interface AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome>
   resumeSession(
     agentId: AgentId,
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome>
   deleteAgentSession(
     agentId: AgentId,
