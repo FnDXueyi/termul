@@ -87,6 +87,26 @@ function sameProbeConfig(a: StoredMcpServer, b: StoredMcpServer): boolean {
 
 type McpSliceCreator = StateCreator<AcpState, [], [], McpSliceState>
 
+type McpProbeState = Pick<
+  AcpState,
+  'mcpProbeStatus' | 'mcpTools' | 'mcpToolsLoaded' | 'mcpProbing' | 'mcpProbeError'
+>
+
+function omitKey<V>(record: Record<string, V>, id: string): Record<string, V> {
+  const { [id]: _dropped, ...rest } = record
+  return rest
+}
+
+function withoutProbeState(s: McpProbeState, id: string): McpProbeState {
+  return {
+    mcpProbeStatus: omitKey(s.mcpProbeStatus, id),
+    mcpTools: omitKey(s.mcpTools, id),
+    mcpToolsLoaded: omitKey(s.mcpToolsLoaded, id),
+    mcpProbing: omitKey(s.mcpProbing, id),
+    mcpProbeError: omitKey(s.mcpProbeError, id)
+  }
+}
+
 function reprobeEditedServer(
   set: Parameters<McpSliceCreator>[0],
   get: Parameters<McpSliceCreator>[1],
@@ -209,6 +229,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         })
         throw err
       }
+      set((s) => withoutProbeState(s, id))
     }),
 
   // OpenPencil canvas mode (CAP-2 / AD-5): one persisted http entry per
@@ -317,8 +338,11 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     try {
       const result: ProbeResult = await acpApi.probeMcpServer(probeConfigOf(server))
       const current = get().mcpServers.find((s) => s.id === id)
-      const configEditedDuringProbe = current !== undefined && !sameProbeConfig(current, server)
-      if (configEditedDuringProbe) {
+      if (!current) {
+        set((s) => withoutProbeState(s, id))
+        return
+      }
+      if (!sameProbeConfig(current, server)) {
         set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
         if (current.enabled === false) return
         return get().probeMcpServer(id)
@@ -336,6 +360,14 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         }
       }))
     } catch (err) {
+      void logFrontendError({
+        source: 'acp-store.probeMcpServer',
+        message: `MCP probe failed for server '${server.name}' (${String(err)})`
+      })
+      if (!get().mcpServers.some((s) => s.id === id)) {
+        set((s) => withoutProbeState(s, id))
+        return
+      }
       // Transport/parse failure (NOT a disconnected probe — that's a
       // `status:'disconnected'` ProbeResult, not a throw). Surface the
       // failure in the dot + log WITHOUT env/header values, tokens, or
@@ -352,10 +384,6 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         mcpProbing: { ...s.mcpProbing, [id]: false },
         mcpProbeError: { ...s.mcpProbeError, [id]: undefined }
       }))
-      void logFrontendError({
-        source: 'acp-store.probeMcpServer',
-        message: `MCP probe failed for server '${server.name}' (${String(err)})`
-      })
     }
   },
 
