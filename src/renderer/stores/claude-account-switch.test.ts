@@ -181,6 +181,16 @@ describe('claude account switch', () => {
     expect(restarted).toHaveLength(2)
   })
 
+  it('does not reopen a busy chat whose tab closed while it waited', async () => {
+    await applyProjectClaudeAccount('office')
+    openChatTabs(['c1'])
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, c2: { ...s.sessions.c2, activeTurn: false, openTurnId: null } }
+    }))
+    await vi.waitFor(() => expect(killAgent).toHaveBeenCalledWith('agent-c2'))
+    expect(retryCrashedSession.mock.calls.map(([id]) => id)).toEqual(['c1'])
+  })
+
   it('saves the project account on the host before restarting', async () => {
     await switchProjectClaudeAccount('office', 'ab12')
     expect(api.setProjectAccount).toHaveBeenCalledWith('office', 'ab12')

@@ -10,6 +10,8 @@
 import { claudeAccountsApi } from '@/lib/claude-accounts-api'
 import { logFrontendError } from '@/lib/log-api'
 import { type AcpState, switchBlockedReason, useAcpStore } from '@/stores/acp-store'
+import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
+import { getAgentChatSessionIdsInAllTrees, useWorkspaceStore } from '@/stores/workspace-store'
 
 /** Config id of the host-managed Claude ACP agent. */
 export const CLAUDE_AGENT_CONFIG_ID = 'acp-registry:claude-acp'
@@ -32,6 +34,33 @@ export function isClaudeSession(state: AcpState, sessionId: string): boolean {
 const isOpen = (state: AcpState, sessionId: string): boolean => {
   const status = state.sessions[sessionId]?.status
   return status === 'active' || status === 'error'
+}
+
+/** Chats with a tab in any tree, or kept for a Project that is off screen. */
+function chatsWithTab(): Set<string> {
+  const ids = getAgentChatSessionIdsInAllTrees(useWorkspaceStore.getState())
+  for (const kept of Object.values(useAgentChatLifetimeStore.getState().retainedByProject)) {
+    for (const id of kept) ids.add(id)
+  }
+  return ids
+}
+
+async function stopOldAgent(agentId: string, reason: string): Promise<void> {
+  void logFrontendError({
+    level: 'info',
+    source: 'claudeAccountSwitch.stop',
+    message: `Stopping agent ${agentId} (${reason}) without reopening its chats`
+  })
+  await useAcpStore
+    .getState()
+    .killAgent(agentId)
+    .catch((error) => {
+      void logFrontendError({
+        level: 'warn',
+        source: 'claudeAccountSwitch.stop',
+        message: `Stopping agent ${agentId} failed: ${error instanceof Error ? error.message : String(error)}`
+      })
+    })
 }
 
 /** Resolves once the chat has no turn, replay, queue or pending request; `false` if it closed. */
@@ -74,6 +103,10 @@ export async function restartClaudeSession(
     }
     if (!(await waitUntilIdle(sessionId))) return false
     const oldAgentId = useAcpStore.getState().sessions[sessionId]?.agentId
+    if (!chatsWithTab().has(sessionId)) {
+      if (oldAgentId) await stopOldAgent(oldAgentId, `tab of chat ${sessionId} closed`)
+      return false
+    }
     void logFrontendError({
       level: 'info',
       source: 'claudeAccountSwitch.restart',
@@ -107,26 +140,35 @@ export async function restartClaudeSession(
 }
 
 /**
- * Restart every open Claude chat of a Project after its Account changed.
- * `continueSessionId` is the chat that hit a limit: its held turn is cancelled
- * and its last prompt is sent again. Other busy chats restart in the
- * background when their turn ends. Resolves when the idle chats restarted.
+ * Restart every Claude chat of a Project that has a tab after its Account
+ * changed. `continueSessionId` is the chat that hit a limit: its held turn is
+ * cancelled and its last prompt is sent again. Other busy chats restart in the
+ * background when their turn ends. A chat with no tab is not reopened; its
+ * agent stops unless a chat with a tab shares it. Resolves when the idle chats
+ * restarted.
  */
 export async function applyProjectClaudeAccount(
   projectId: string,
   options: { continueSessionId?: string } = {}
 ): Promise<void> {
   const state = useAcpStore.getState()
-  const sessionIds = Object.values(state.sessions)
-    .filter((s) => s.projectId === projectId && isOpen(state, s.id) && isClaudeSession(state, s.id))
-    .map((s) => s.id)
+  const withTab = chatsWithTab()
+  const chats = Object.values(state.sessions).filter(
+    (s) => s.projectId === projectId && isOpen(state, s.id) && isClaudeSession(state, s.id)
+  )
+  const shown = chats.filter((s) => withTab.has(s.id) || s.id === options.continueSessionId)
+  const shownAgents = new Set(shown.map((s) => s.agentId))
+  const hidden = chats.filter((s) => !shown.includes(s))
+  const hiddenAgents = new Set(hidden.map((s) => s.agentId).filter((a) => !shownAgents.has(a)))
+  const warm = new Set(Object.values(state.preparedSessions))
   void logFrontendError({
     level: 'info',
     source: 'claudeAccountSwitch.apply',
-    message: `Project ${projectId} account changed; restarting ${sessionIds.length} Claude chats`
+    message: `Project ${projectId} account changed; restarting ${shown.length} Claude chats, stopping ${hiddenAgents.size} agents of ${hidden.length} chats without a tab (${hidden.filter((s) => warm.has(s.id)).length} warm-pool)`
   })
-  const now: Promise<boolean>[] = []
-  for (const id of sessionIds) {
+  const now: Promise<unknown>[] = []
+  for (const agentId of hiddenAgents) now.push(stopOldAgent(agentId, 'chat without a tab'))
+  for (const { id } of shown) {
     if (id === options.continueSessionId) {
       now.push(restartClaudeSession(id, { resend: true, cancelTurn: true }))
     } else if (switchBlockedReason(state, id) === null) {
