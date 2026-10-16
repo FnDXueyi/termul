@@ -203,6 +203,12 @@ export function AgentChatPanel({
   const removeQueuedPrompt = useAcpStore((s) => s.removeQueuedPrompt)
   const sendQueuedPromptNow = useAcpStore((s) => s.sendQueuedPromptNow)
   const retryCrashedSession = useAcpStore((s) => s.retryCrashedSession)
+  const killAgent = useAcpStore((s) => s.killAgent)
+  // A turn error (auth required, timeout) can retire the chat's agent while
+  // the chat itself stays live with its error banner.
+  const agentRetired = useAcpStore((s) =>
+    session ? s.agentStatus[session.agentId] === 'error' : false
+  )
   const markResumeFailed = useAcpStore((s) => s.markResumeFailed)
   const retryFailedLaunch = useAcpStore((s) => s.retryFailedLaunch)
   const promptQueue = usePromptQueue(sessionId)
@@ -552,11 +558,22 @@ export function AgentChatPanel({
     // A crashed/disconnected chat can't re-send into the dead agent — restart
     // the agent + replay history first (user-initiated Retry; honors ADR-003's
     // no-silent-respawn: the crash is still surfaced, respawn is on click).
+    const onRestartError = (err: unknown): void => {
+      if (isAgentDeadError(err)) return
+      toast.error('Could not retry. Try again.')
+    }
     if (session?.status === 'error' || session?.status === 'closed') {
-      void retryCrashedSession(sessionId).catch((err) => {
-        if (isAgentDeadError(err)) return
-        toast.error('Could not retry. Try again.')
-      })
+      void retryCrashedSession(sessionId).catch(onRestartError)
+      return
+    }
+    // A retired agent still runs and still owns the session, so a web reopen
+    // would adopt it again: stop it first so the restart spawns a fresh one.
+    const retiredAgentId = agentRetired ? session?.agentId : undefined
+    if (retiredAgentId) {
+      void killAgent(retiredAgentId)
+        .catch(() => undefined)
+        .then(() => retryCrashedSession(sessionId))
+        .catch(onRestartError)
       return
     }
     // Re-frame the wire from the token text in the last user message's text
@@ -609,13 +626,16 @@ export function AgentChatPanel({
     availableSkills,
     sendPromptBlocks,
     retryCrashedSession,
+    killAgent,
+    agentRetired,
     retryFailedLaunch,
     resumeStoppedChat,
     discoveredReopenContext,
     sessionId,
     session?.status,
     session?.launchConfigId,
-    session?.lastError
+    session?.lastError,
+    session?.agentId
   ])
 
   // Desktop + web parity: the open-in-editor chain is transport-agnostic —

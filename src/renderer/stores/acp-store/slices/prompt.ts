@@ -1122,6 +1122,12 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
         pendingPermissions,
         pendingQuestions,
         pendingElicitations,
+        // A timed-out turn may have been cancelled cleanly or may sit on a
+        // wedged agent; the host cannot tell. Retire the process from reuse so
+        // a new chat spawns its own and Retry restarts this one.
+        ...(e.stopReason === 'timeout'
+          ? { agentStatus: { ...s.agentStatus, [e.agentId]: 'error' as const } }
+          : {}),
         sessions: {
           ...s.sessions,
           [e.sessionId]: {

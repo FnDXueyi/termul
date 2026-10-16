@@ -78,6 +78,12 @@ export const authenticatedAgents = new Set<AgentId>()
  */
 const inFlightAuth = new Map<string, Promise<boolean>>()
 
+/**
+ * ACP `AuthRequired`. A turn rejected with it needs a sign-in, so its process
+ * is retired: Retry restarts it and no new chat inherits it.
+ */
+const ACP_AUTH_REQUIRED_RPC_CODE = -32000
+
 /** True while an ACP `authenticate` call is still waiting. */
 export function isAnyAgentAuthInFlight(): boolean {
   return inFlightAuth.size > 0
@@ -862,6 +868,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         const session = s.sessions[e.sessionId]
         if (!session || session.status === 'closed') return {}
         return {
+          // The chat stays live either way; only a retired process leaves the
+          // reuse pool, and Retry restarts it (AgentChatPanel).
+          ...(detail.code === ACP_AUTH_REQUIRED_RPC_CODE
+            ? { agentStatus: { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus } }
+            : {}),
           // Finalize streaming markers: the turn is over (errored), and the
           // persist below must not capture a message mid-shimmer.
           messages: finalizeStreaming(s.messages, e.sessionId),
@@ -908,11 +919,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     }
   },
 
-  // Story 1.9 FR26: the agent subprocess crashed mid-turn. Mirrors
-  // `_onAgentError` (sets `agentStatus[agentId]='error'`, finalizes streaming,
-  // sets `lastError`, persists) but is the typed crash event emitted BEFORE
-  // `agent_error` + `agent_disconnected`. The UI shows a manual-restart action
-  // (no silent respawn, honoring ADR-003).
+  // Story 1.9 FR26: the agent subprocess crashed mid-turn. Sets
+  // `agentStatus[agentId]='error'` and the session `status: 'error'`,
+  // finalizes streaming, sets `lastError` and persists. Unlike a turn-scoped
+  // `_onAgentError`, this marks the chat dead, so it reopens onto a fresh
+  // agent. The UI shows a manual-restart action (no silent respawn, honoring
+  // ADR-003).
   _onAgentCrashed: (e) => {
     const sessionId = e.sessionId
     const hadCommit = sessionId ? commitMessageCollectors.has(sessionId) : false

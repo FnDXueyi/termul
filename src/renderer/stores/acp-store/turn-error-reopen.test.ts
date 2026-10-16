@@ -122,6 +122,7 @@ function fakeWebTransport(
     sendPrompt: vi.fn(async () => 'end_turn'),
     sendPromptBlocks: vi.fn(async () => 'end_turn'),
     closeSession: vi.fn(async () => {}),
+    killAgent: vi.fn(async () => {}),
     getSessionPayload: async (id: string) => payloads[id] ?? null,
     getSessionPayloadTail: async () => null,
     subscribeSession: vi.fn(async () => {}),
@@ -414,6 +415,37 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
 
     await closeChatThenStartAnother(transport)
     expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('the Retry restart (stop the retired agent, then reopen) resends on a fresh agent', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'Authentication required',
+      code: -32000
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'error'
+    })
+    await useAcpStore.getState().killAgent(OWNER)
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+    expect(session.status).toBe('active')
+    expect(session.agentId).toBe(FRESH_AGENT)
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      SESSION,
+      'do the thing',
+      expect.any(String),
+      expect.anything()
+    )
   })
 
   it('a transient turn error keeps the agent reusable for the next chat', async () => {
