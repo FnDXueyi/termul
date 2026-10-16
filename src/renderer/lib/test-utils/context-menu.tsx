@@ -51,11 +51,12 @@ export function ContextMenu({
 
 export function ContextMenuTrigger({
   children,
-  asChild
-}: ChildrenProps & { asChild?: boolean }): React.JSX.Element {
+  asChild,
+  disabled
+}: ChildrenProps & { asChild?: boolean; disabled?: boolean }): React.JSX.Element {
   const { setOpen } = React.useContext(MenuContext)
   const openUnlessPrevented = (e: React.MouseEvent): void => {
-    if (e.defaultPrevented) return
+    if (disabled || e.defaultPrevented) return
     e.preventDefault()
     setOpen(true)
   }
@@ -190,15 +191,23 @@ export function ContextMenuSub({ children }: ChildrenProps): React.JSX.Element {
   return <SubContext.Provider value={{ open, setOpen }}>{children}</SubContext.Provider>
 }
 
-export function ContextMenuSubTrigger(props: PassthroughProps): React.JSX.Element {
+export function ContextMenuSubTrigger({
+  disabled,
+  ...props
+}: PassthroughProps & { disabled?: boolean }): React.JSX.Element {
   const { setOpen } = React.useContext(SubContext)
+  const openUnlessDisabled = (): void => {
+    if (!disabled) setOpen(true)
+  }
   return (
     <div
       role="menuitem"
       tabIndex={-1}
       aria-haspopup="menu"
-      onMouseEnter={() => setOpen(true)}
-      onClick={() => setOpen(true)}
+      aria-disabled={disabled || undefined}
+      data-disabled={disabled ? '' : undefined}
+      onMouseEnter={openUnlessDisabled}
+      onClick={openUnlessDisabled}
       {...passthrough(props)}
     >
       {props.children}
