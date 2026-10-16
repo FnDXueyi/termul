@@ -220,8 +220,21 @@ pub(super) struct FoldTailScan {
     /// A candidate line did not probe: the fold is unknown.
     pub(super) unreadable: bool,
     pub(super) bytes_read: u64,
-    /// Seq of the last line when it is newline-terminated and probes.
-    pub(super) last_seq: Option<u64>,
+    pub(super) last_line: Option<LastLine>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LastLine {
+    pub(super) seq: u64,
+    pub(super) terminated: bool,
+}
+
+impl FoldTailScan {
+    pub(super) fn open_turn(&self) -> Option<Option<&Value>> {
+        self.records.iter().rev().fold(None, |pending, record| {
+            open_turn_step(pending, &record.type_, record.payload.turn_id.as_ref())
+        })
+    }
 }
 
 /// One backward pass over `file[floor..end)` collecting the records the
@@ -240,7 +253,7 @@ pub(super) fn scan_fold_tail(
         records: Vec::new(),
         unreadable: false,
         bytes_read: 0,
-        last_seq: None,
+        last_line: None,
     };
     let mut last_line = true;
     scan.bytes_read = scan_lines_backward(file, end, floor, |line, terminated| {
@@ -252,8 +265,11 @@ pub(super) fn scan_fold_tail(
             return ControlFlow::Continue(());
         }
         let probe = probe_record(line, session_id);
-        if is_last && terminated {
-            scan.last_seq = probe.as_ref().map(|probe| probe.seq);
+        if is_last {
+            scan.last_line = probe.as_ref().map(|probe| LastLine {
+                seq: probe.seq,
+                terminated,
+            });
         }
         if !candidate {
             return ControlFlow::Continue(());
@@ -704,8 +720,7 @@ pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
 /// totals the catalog metadata must agree with after intruders are
 /// removed.
 pub(super) struct SalvageCounts {
-    pub(super) message_count: u64,
-    pub(super) tool_count: u64,
+    pub(super) fold: FoldCounts,
     pub(super) last_seq: u64,
     /// Quarantined lines — for the heal log; the bytes live in the
     /// `.corrupt-*.bak` sidecar.
@@ -868,14 +883,7 @@ pub(super) fn probe_seq_intruders(dir: &Path, session_id: &str) -> Result<Salvag
 /// both cases no file was rewritten.
 pub(super) fn salvage_session_dir(dir: &Path, session_id: &str) -> Result<Option<SalvageCounts>> {
     let mut staged: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut counts = SalvageCounts {
-        message_count: 0,
-        tool_count: 0,
-        last_seq: 0,
-        intruder_lines: 0,
-    };
-    // Issue #844c: fold state for the seq-ordered recount below.
-    let mut fold_state = FoldState::default();
+    let mut intruder_lines = 0;
     // Kept records across BOTH files, collected then sorted by seq (the
     // fold's chunk-run rules depend on global seq order, not per-file order).
     let mut all_records: Vec<PersistedEventRecord> = Vec::new();
@@ -910,33 +918,20 @@ pub(super) fn salvage_session_dir(dir: &Path, session_id: &str) -> Result<Option
         if !salvageable {
             break;
         }
-        counts.intruder_lines += scan.intruder_lines;
+        intruder_lines += scan.intruder_lines;
         if !scan.intruders.is_empty() {
             staged.push((path, scan.kept, scan.intruders));
         }
     }
-    // Issue #844c: recount under the materializer's fold rules in GLOBAL seq
-    // order (chunk-run coalescing crosses the two JSONL files' boundary).
-    all_records.sort_by_key(|record| record.seq);
-    for record in &all_records {
-        if is_tool_event(&record.type_) {
-            counts.tool_count += 1;
-            // A tool call closes the open chunk run (fold boundary).
-            if record.type_ == "tool_call" {
-                fold_state.open_role = None;
-            }
-        } else {
-            let (next, opens_message) = fold_step(fold_state, &record.type_, &record.payload);
-            fold_state = next;
-            if opens_message {
-                counts.message_count += 1;
-            }
-        }
-        counts.last_seq = counts.last_seq.max(record.seq);
-    }
     if !salvageable || staged.is_empty() {
         return Ok(None);
     }
+    let fold = fold_counts(&mut all_records);
+    let counts = SalvageCounts {
+        fold,
+        last_seq: all_records.last().map_or(0, |record| record.seq),
+        intruder_lines,
+    };
     // Quarantine every intruder BEFORE any rewrite: a backup failure must
     // never leave a partially-rewritten log without its `.corrupt-*.bak`.
     for (path, _, intruders) in &staged {
