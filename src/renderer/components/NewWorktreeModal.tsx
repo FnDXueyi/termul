@@ -1,4 +1,4 @@
-import type { BranchInfo } from '@shared/types/ipc.types'
+import type { BranchInfo } from '@shared/types/worktree.types'
 import { AnimatePresence, motion } from 'framer-motion'
 import { type KeyboardEvent, useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
