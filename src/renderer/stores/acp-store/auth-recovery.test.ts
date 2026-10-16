@@ -2234,6 +2234,31 @@ describe('acp provider authentication & recovery', () => {
       })
     })
 
+    it('offers Retry when the agent_error event arrives after the prompt error reply', async () => {
+      seedLiveAgent('agent-1', [{ id: 'cursor_login', name: 'Sign in with Cursor' }])
+      seedSession('s1', 'agent-1', false)
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+        if (cmd === 'acp_authenticate') {
+          emitPromptAuthError()
+          return undefined
+        }
+        if (cmd === 'acp_send_prompt') throw authRequiredError()
+        throw new Error(`unexpected invoke command: ${cmd}`)
+      })
+
+      await expect(useAcpStore.getState().sendPrompt('s1', 'hello')).rejects.toThrow(
+        'not authenticated'
+      )
+
+      const state = useAcpStore.getState()
+      expect(state.agentStatus['agent-1']).toBe('connected')
+      expect(state.sessions.s1).toMatchObject({
+        status: 'active',
+        activeTurn: false,
+        lastError: 'Signed in to the agent again. Select Retry to send your message.'
+      })
+    })
+
     it('drops the sign-in result of a failed prompt once a newer prompt has finished', async () => {
       seedLiveAgent('agent-1', [{ id: 'cursor_login', name: 'Sign in with Cursor' }])
       seedSession('s1', 'agent-1', false)

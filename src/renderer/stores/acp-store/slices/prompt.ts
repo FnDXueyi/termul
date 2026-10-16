@@ -332,7 +332,13 @@ export async function runPromptTurn(
           return {
             sessions: {
               ...s.sessions,
-              [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+              [sessionId]: {
+                ...current,
+                activeTurn: true,
+                openTurnId,
+                latestPromptTurnId: turnId,
+                lastError: null
+              }
             }
           }
         }
@@ -355,7 +361,13 @@ export async function runPromptTurn(
           },
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+            [sessionId]: {
+              ...current,
+              activeTurn: true,
+              openTurnId,
+              latestPromptTurnId: turnId,
+              lastError: null
+            }
           }
         }
       }
@@ -368,7 +380,13 @@ export async function runPromptTurn(
         },
         sessions: {
           ...s.sessions,
-          [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+          [sessionId]: {
+            ...current,
+            activeTurn: true,
+            openTurnId,
+            latestPromptTurnId: turnId,
+            lastError: null
+          }
         }
       }
     }
@@ -388,7 +406,13 @@ export async function runPromptTurn(
       },
       sessions: {
         ...s.sessions,
-        [sessionId]: { ...current, activeTurn: true, openTurnId, lastError: null }
+        [sessionId]: {
+          ...current,
+          activeTurn: true,
+          openTurnId,
+          latestPromptTurnId: turnId,
+          lastError: null
+        }
       }
     }
   })
@@ -574,13 +598,7 @@ export async function runPromptTurn(
     // The agent may have run part of the turn before its token expired, so a
     // resend could repeat its tool calls.
     if (dispatchedAgentId && isAuthRetriableSessionError(err)) {
-      await reauthenticateWithoutResendingPrompt(
-        set,
-        get,
-        sessionId,
-        dispatchedAgentId,
-        String(err)
-      )
+      await reauthenticateWithoutResendingPrompt(set, get, sessionId, dispatchedAgentId, turnId)
     }
     throw err
   }
@@ -594,7 +612,7 @@ async function reauthenticateWithoutResendingPrompt(
   get: () => AcpState,
   sessionId: SessionId,
   agentId: AgentId,
-  failedTurnError: string
+  failedTurnId: string
 ): Promise<void> {
   let signedIn = false
   let lastError: string
@@ -607,8 +625,13 @@ async function reauthenticateWithoutResendingPrompt(
   }
   set((s) => {
     const current = s.sessions[sessionId]
-    // A newer turn replaced the failed turn's error: this result is stale.
-    if (current?.agentId !== agentId || current.lastError !== failedTurnError) return {}
+    // A newer turn opened since the failed one: this result is stale.
+    if (
+      current?.agentId !== agentId ||
+      current.activeTurn ||
+      current.latestPromptTurnId !== failedTurnId
+    )
+      return {}
     const revive = signedIn && current.status === 'error'
     return {
       agentStatus:
