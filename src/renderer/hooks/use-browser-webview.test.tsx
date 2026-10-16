@@ -1,6 +1,12 @@
 import { act, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import {
   browserTabCreate,
   browserTabDestroy,
   browserTabHide,
@@ -13,11 +19,16 @@ import {
   resetNativeWebviewOcclusionForTests,
   useNativeWebviewOcclusion
 } from './use-native-webview-occlusion'
+import { applyUiZoom } from './use-ui-zoom'
 
 vi.mock('@/lib/tauri-runtime', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri-runtime')>('@/lib/tauri-runtime')
   return { ...actual, isTauriContext: () => true }
 })
+
+vi.mock('@/lib/tauri-webview', () => ({
+  getCurrentWebview: () => ({ setZoom: () => Promise.resolve() })
+}))
 
 vi.mock('@/lib/browser-api', () => ({
   browserTabCreate: vi.fn(),
@@ -124,6 +135,45 @@ describe('useBrowserWebview bounds updates', () => {
     view.unmount()
   })
 
+  it('sends window-logical bounds under UI zoom: the CSS rect times the applied zoom', async () => {
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({
+      ...LOGICAL_RECT,
+      x: 263,
+      y: 85,
+      width: 1264,
+      height: 704
+    })
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: {},
+      configurable: true,
+      writable: true
+    })
+    try {
+      await applyUiZoom(1.25)
+      const view = render(<BrowserWebviewHarness />)
+
+      await waitFor(() => expect(browserTabCreate).toHaveBeenCalledTimes(1))
+      expect(browserTabCreate).toHaveBeenCalledWith('browser-1', 'https://example.com', {
+        x: 328.75,
+        y: 106.25,
+        width: 1580,
+        height: 880
+      })
+      await waitFor(() => expect(browserTabResize).toHaveBeenCalledTimes(1))
+      expect(browserTabResize).toHaveBeenLastCalledWith('browser-1', {
+        x: 328.75,
+        y: 106.25,
+        width: 1580,
+        height: 880
+      })
+
+      view.unmount()
+    } finally {
+      await applyUiZoom(1)
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    }
+  })
+
   it('resyncs to settled bounds after creation, not stale creation bounds (#644)', async () => {
     // Simulate the pane layout still mid-transition at creation time: the
     // container reports a wide (unsettled) rect while browserTabCreate is in
@@ -226,6 +276,34 @@ describe('useBrowserWebview bounds updates', () => {
 
     occluder.unmount()
     visible.unmount()
+    resetNativeWebviewOcclusionForTests()
+  })
+
+  it('hides while a shared menu primitive is open and reveals once it closes', async () => {
+    const Page = ({ menuOpen }: { menuOpen: boolean }): JSX.Element => (
+      <>
+        <BrowserWebviewHarness />
+        <DropdownMenu open={menuOpen}>
+          <DropdownMenuTrigger>Tab</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem>Close</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </>
+    )
+    const view = render(<Page menuOpen={false} />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalledTimes(1))
+    expect(browserTabHide).not.toHaveBeenCalled()
+
+    view.rerender(<Page menuOpen />)
+    await waitFor(() => expect(browserTabHide).toHaveBeenCalledTimes(1))
+    expect(browserTabHide).toHaveBeenLastCalledWith('browser-1')
+
+    view.rerender(<Page menuOpen={false} />)
+    await waitFor(() => expect(browserTabShow).toHaveBeenCalledTimes(2))
+    expect(browserTabShow).toHaveBeenLastCalledWith('browser-1')
+
+    view.unmount()
     resetNativeWebviewOcclusionForTests()
   })
 

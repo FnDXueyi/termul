@@ -13,7 +13,6 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { PopoverSearchBand } from '@/components/ui/popover-search-band'
 import { Spinner } from '@/components/ui/spinner'
 import { WriteGate } from '@/components/ui/write-gate'
-import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { activeWorktreeOf, OUTSIDE_PROJECT_ROOT_REASON } from '@/lib/active-worktree'
 import { openTerminalAtCwd } from '@/lib/terminal-spawn'
@@ -55,7 +54,6 @@ export function WorkspaceSwitcher({ project }: WorkspaceSwitcherProps): React.JS
   const pick = useWorktreePick(project.id)
   const picked = activeWorktreeOf(project, pick)
   const label = picked ? worktreeLabel(picked) : WORKSPACE_ROW_FALLBACK_LABEL
-  useNativeWebviewOcclusion(open)
 
   return (
     <Popover open={open} onOpenChange={setOpen}>

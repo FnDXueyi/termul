@@ -2,10 +2,11 @@ import { useEffect, useSyncExternalStore } from 'react'
 import { isTauriContext } from '@/lib/tauri-runtime'
 
 /**
- * Native browser webviews paint above the DOM, so a shell popover would be
- * drawn underneath them. Popovers register here while open; `useBrowserWebview`
- * reads the count and treats an occluded webview as not visible, so overlapping
- * popovers hide the webviews once and the last one to close reveals only the
+ * Native browser webviews paint above the DOM, so an overlay would be drawn
+ * underneath them. The shared overlay primitives in `components/ui` register
+ * here themselves; a custom fixed overlay calls `useNativeWebviewOcclusion`.
+ * `useBrowserWebview` treats an occluded webview as not visible, so overlapping
+ * overlays hide the webviews once and the last one to close reveals only the
  * webviews whose pane shows them.
  */
 
@@ -38,6 +39,16 @@ export function useNativeWebviewOcclusion(open: boolean): void {
       emit()
     }
   }, [open])
+}
+
+/**
+ * Rendered inside overlay content: Radix `Presence` keeps content mounted
+ * through its exit animation, so mounted is the exact span the overlay is
+ * visible.
+ */
+export function NativeWebviewOccluder(): null {
+  useNativeWebviewOcclusion(true)
+  return null
 }
 
 /** True while at least one occluder is open. */
