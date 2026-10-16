@@ -96,7 +96,7 @@ export function PromptQueuePanel({
   return (
     <Queue className="-mb-6">
       <QueueSection open={open} onOpenChange={setOpen}>
-        {/* Match the Changed files toggle: no press-scale, background-only press, same focus ring. */}
+        {/* Match the Changed files toggle: no press-scale, background-only press. */}
         <QueueSectionTrigger
           data-press-feedback="off"
           className={cn(
