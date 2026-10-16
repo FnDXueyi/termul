@@ -139,17 +139,6 @@ describe('SubagentDetailsDialog agent prose', () => {
     isTauriContextMock.mockReturnValue(false)
   })
 
-  function renderResult(toolCall: ToolCall): void {
-    render(
-      <SubagentDetailsDialog
-        toolCall={toolCall}
-        open
-        onOpenChange={() => {}}
-        filePathContext={{ cwd: '/proj', projectRoot: '/proj' }}
-      />
-    )
-  }
-
   it.each([
     [
       'text content blocks',
@@ -168,7 +157,14 @@ describe('SubagentDetailsDialog agent prose', () => {
       } satisfies ToolCall
     ]
   ])('links file paths and resolves relative images from %s', async (_label, toolCall) => {
-    renderResult(toolCall)
+    render(
+      <SubagentDetailsDialog
+        toolCall={toolCall}
+        open
+        onOpenChange={() => {}}
+        filePathContext={{ cwd: '/proj', projectRoot: '/proj' }}
+      />
+    )
 
     const dialog = screen.getByRole('dialog', { name: 'Audit branch code for slop' })
     const fileButton = within(dialog).getByTestId('termul-file-path')
