@@ -2163,3 +2163,6 @@ pub fn run() {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod fs_watch_wire_tests;
