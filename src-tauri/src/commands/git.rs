@@ -422,6 +422,13 @@ pub(crate) async fn create_branch_ledgered(
         print,
         no_entity(),
         async move {
+            let cwd = match validate_project_path(&cwd) {
+                Ok(validated) => match validated.to_str() {
+                    Some(validated) => validated.to_string(),
+                    None => return DomainRan::Released("Path contains invalid UTF-8".to_string()),
+                },
+                Err(invalid) => return DomainRan::Released(invalid),
+            };
             // The guard runs INSIDE the ledgered effect: a settled outcome
             // replays before it, and a refusal is released (not recorded) so a
             // retry after the turn ends runs.

@@ -130,6 +130,29 @@ async fn create_branch_guards_only_a_start_ref_other_than_head() {
     }
 }
 
+#[tokio::test]
+async fn create_branch_rejects_an_invalid_cwd_before_running_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+    let ledger = Arc::new(crate::web::command_ledger::CommandLedger::new(
+        std::time::Duration::from_secs(600),
+    ));
+
+    let error = create_branch_ledgered(
+        &ledger,
+        Arc::new(AcpManager::new(vec![])),
+        missing.to_string_lossy().to_string(),
+        "topic".into(),
+        None,
+        Some("cmd-invalid-cwd".into()),
+    )
+    .await
+    .expect_err("a cwd that does not resolve is refused");
+
+    assert!(error.starts_with("Invalid or inaccessible path"), "{error}");
+    assert_eq!(ledger.counts(), (0, 0, 0), "a refusal must not be recorded");
+}
+
 /// A refusal is released, not recorded: the same `commandId` runs once the turn
 /// ends, and a settled success replays before the guard is consulted.
 #[tokio::test]
