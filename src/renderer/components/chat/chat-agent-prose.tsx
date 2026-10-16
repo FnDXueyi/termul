@@ -160,15 +160,10 @@ function decodeFragment(href: string): string {
   }
 }
 
-/**
- * Same-document `#id` links (footnote refs and backrefs, raw-HTML anchors)
- * scroll within their own message. Every message reuses ids such as
- * `user-content-fn-1`, so the lookup stays inside `root`.
- */
-function scrollToFragment(root: HTMLElement | null, href: string): void {
+function scrollToFragment(messageRoot: HTMLElement | null, href: string): void {
   const id = decodeFragment(href)
   const target = id
-    ? Array.from(root?.querySelectorAll('[id]') ?? []).find((element) => element.id === id)
+    ? Array.from(messageRoot?.querySelectorAll('[id]') ?? []).find((element) => element.id === id)
     : undefined
   if (!target) {
     void logFrontendError({
