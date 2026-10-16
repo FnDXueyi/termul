@@ -21,7 +21,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::web::acp_api;
-use crate::web::auth::WebAuth;
+use crate::web::auth::{BearerVerified, WebAuth};
 
 use crate::acp::{
     AcpCatalogService, AcpInstallService, AcpManager,
@@ -283,8 +283,7 @@ pub fn router(
         .route("/skills", get(skills_api::list))
         .route("/skills/{name}", get(skills_api::read))
         // Frontend error forwarding (CAP-2): `POST /log/frontend-error`.
-        // Loopback-only (enforced inside the handler).
-        .route("/log/frontend-error", post(log_api::frontend_error))
+        .route("/log/frontend-error", log_api::route())
         .route("/shells", get(fs_api::shells))
         // ACP catalog web routes (CAP-6: Web & Mobile 1:1 Parity). Each
         // mirrors a desktop `#[tauri::command] acp_*_catalog` handler; see
@@ -510,13 +509,20 @@ fn presented_token(request: &Request) -> Option<String> {
 /// Axum middleware enforcing the web auth gate on gated API routes. The 401
 /// body mirrors the `IpcBody` failure shape (`{success, error, code}`) the
 /// renderer's REST helpers parse; the token is never logged or echoed.
-async fn web_auth_gate(State(auth): State<Arc<WebAuth>>, request: Request, next: Next) -> Response {
+async fn web_auth_gate(
+    State(auth): State<Arc<WebAuth>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     if !requires_token(request.uri().path()) {
         return next.run(request).await;
     }
     let presented = presented_token(&request);
     match presented {
-        Some(token) if auth.accepts(&token) => next.run(request).await,
+        Some(token) if auth.accepts(&token) => {
+            request.extensions_mut().insert(BearerVerified);
+            next.run(request).await
+        }
         _ => {
             tracing::warn!(
                 target: "termul::web::router",
@@ -611,7 +617,7 @@ pub fn router_with_static(
         .route("/search/cancel", post(search_api::cancel))
         .route("/skills", get(skills_api::list))
         .route("/skills/{name}", get(skills_api::read))
-        .route("/log/frontend-error", post(log_api::frontend_error))
+        .route("/log/frontend-error", log_api::route())
         .route("/shells", get(fs_api::shells))
         .route("/acp/catalog", get(catalog_api::list))
         .route("/acp/catalog/opt-in", post(catalog_api::set_opt_in))

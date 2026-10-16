@@ -468,6 +468,16 @@ export const webServerSkills = {
   }
 }
 
+const SERVER_LOG_FIELD_CHARS = 4096
+
+function truncateCodePoints(value: string, max: number): string {
+  return value.length <= max ? value : Array.from(value).slice(0, max).join('')
+}
+
+function capLogField(value: string): string {
+  return truncateCodePoints(value, SERVER_LOG_FIELD_CHARS + 1)
+}
+
 /**
  * Frontend error forwarding routed to `termul-server` (`POST /log/frontend-error`).
  * CAP-2 parity: mirrors the desktop `log_frontend_error` Tauri command. Returns
@@ -483,10 +493,11 @@ export const webServerLog = {
   }): Promise<void> {
     const res = await postJson<void>('/log/frontend-error', {
       level: payload.level ?? 'error',
-      message: payload.message,
-      source: payload.source ?? 'renderer',
-      stack: payload.stack ?? null,
-      componentStack: payload.componentStack ?? null
+      message: capLogField(payload.message),
+      source: capLogField(payload.source ?? 'renderer'),
+      stack: payload.stack === undefined ? null : capLogField(payload.stack),
+      componentStack:
+        payload.componentStack === undefined ? null : capLogField(payload.componentStack)
     })
     if (!res.success) throw new Error(res.error)
   }
