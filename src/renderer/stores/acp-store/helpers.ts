@@ -7,17 +7,18 @@
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
-import type {
-  AgentId,
-  ContentBlock,
-  McpServer,
-  PlanEntry,
-  SessionConfigOption,
-  SessionId,
-  SessionModelState,
-  SessionModeState,
-  StopReason,
-  ToolCall
+import {
+  type AgentId,
+  acpApi,
+  type ContentBlock,
+  type McpServer,
+  type PlanEntry,
+  type SessionConfigOption,
+  type SessionId,
+  type SessionModelState,
+  type SessionModeState,
+  type StopReason,
+  type ToolCall
 } from '@/lib/acp-api'
 import {
   type AgentSwitchRecord,
@@ -272,9 +273,8 @@ export const SKILL_PAD_BLOCK_RE = new RegExp(
  * live-only padding blocks and edge whitespace on both sides while KEEPING
  * the skill/command sentinels: chip text must stay distinguishable from
  * literal `(name)` / `/cmd` text or backfill could discard a distinct
- * prompt. File tokens reduce to their `(display)` marker — the wire form —
- * because the chip never round-trips (the file rides a `resource_link`
- * block); the resulting `(display)` vs literal ambiguity is resolved by
+ * prompt. File tokens reduce to their `(display)` marker — the wire form;
+ * the resulting `(display)` vs literal ambiguity is resolved by
  * `twinFileEvidence`. `wireTextToDisplay` also runs on the persisted side
  * so a record that skipped display normalization still canonicalizes (it
  * is a passthrough for any text lacking the exact framing).
@@ -793,6 +793,14 @@ export function dropPreparedSlots(
   return next ?? prepared
 }
 
+export function isLivePreparedSession(
+  state: Pick<AcpState, 'sessions' | 'agentStatus'>,
+  sessionId: SessionId
+): boolean {
+  const session = state.sessions[sessionId]
+  return session?.status === 'active' && state.agentStatus[session.agentId] === 'connected'
+}
+
 /**
  * Maximum number of messages retained per session in the live React window.
  * Generous so normal single-session use never trims — only the multi-hour /
@@ -1265,13 +1273,21 @@ export function reapOrphanPreparedSession(get: AcpGet, set: AcpSet, sessionId: S
   // createSession may have set activeSessionId as a side effect; that must not
   // block reaping a session that never became a published preparedSessions entry.
   set((s) => (s.activeSessionId === sessionId ? { activeSessionId: null } : s))
-  void get()
-    .closeSession(sessionId)
-    .catch(() => {
-      /* best-effort: backend may already be gone */
-    })
+  const agentId = get().sessions[sessionId]?.agentId
+  const disposed = agentId
+    ? acpApi.disposeEphemeralSession(agentId, sessionId).catch((error) => {
+        void logFrontendError({
+          level: 'warn',
+          source: 'acp.reapOrphanPreparedSession',
+          message: `Failed to dispose warm session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+        })
+      })
+    : Promise.resolve()
+  void disposed
+    .then(() => get().deleteHistorySession(sessionId))
     .finally(() => {
-      void get().deleteHistorySession(sessionId)
+      ephemeralSessionIds.delete(sessionId)
+      set((s) => (s.sessions[sessionId] ? dropEphemeralSessionState(s, sessionId) : s))
     })
 }
 
@@ -1478,7 +1494,10 @@ export async function killSpawnedAgentIfUnused(
   get: () => AcpState,
   agentId: AgentId
 ): Promise<void> {
-  const hasOtherSession = Object.values(get().sessions).some((s) => s.agentId === agentId)
+  const { sessions, openingHistoryIds } = get()
+  const hasOtherSession = Object.values(sessions).some(
+    (s) => s.agentId === agentId && (s.status !== 'closed' || openingHistoryIds[s.id])
+  )
   if (hasOtherSession) return
   try {
     await get().killAgent(agentId)

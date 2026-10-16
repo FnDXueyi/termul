@@ -743,6 +743,7 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().sessions['s-real']?.status).toBe('active')
     expect(useAcpStore.getState().sessionIndex.some((entry) => entry.id === 's-real')).toBe(true)
     expect(invoke).not.toHaveBeenCalledWith('acp_close_session', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('acp_dispose_ephemeral_session', expect.anything())
   })
 
   it('reapOrphanPreparedSession does not close an indexed session, including a launch- id (#882)', () => {
@@ -774,6 +775,7 @@ describe('acp-store', () => {
     ).toBe(true)
     expect(isEphemeralAcpSession('launch-persisted')).toBe(false)
     expect(invoke).not.toHaveBeenCalledWith('acp_close_session', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('acp_dispose_ephemeral_session', expect.anything())
   })
 
   it('prepareChat caches models/modes/configOptions for the agent config id', async () => {
@@ -844,7 +846,8 @@ describe('acp-store', () => {
         const next = sessionResults.shift()
         return next instanceof Promise ? next : Promise.resolve(next)
       }
-      if (cmd === 'acp_close_session' || cmd === 'acp_kill_agent') return Promise.resolve(undefined)
+      if (cmd === 'acp_dispose_ephemeral_session' || cmd === 'acp_kill_agent')
+        return Promise.resolve(undefined)
       return undefined
     })
 
@@ -873,13 +876,14 @@ describe('acp-store', () => {
     await flushTurnEnd()
     expect(useAcpStore.getState().preparedSessions[key]).toBe('sess-second')
     await vi.waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('acp_close_session', {
+      expect(invoke).toHaveBeenCalledWith('acp_dispose_ephemeral_session', {
         agentId: 'agent-9',
         sessionId: 'sess-stale',
         commandId: expect.any(String)
       })
     })
-    expect(useAcpStore.getState().sessions['sess-stale']?.status).toBe('closed')
+    await vi.waitFor(() => expect(useAcpStore.getState().sessions['sess-stale']).toBeUndefined())
+    expect(isEphemeralAcpSession('sess-stale')).toBe(false)
   })
 
   it('stale prepare resolving while newer is still in flight keeps preparingChatKeys', async () => {
@@ -908,7 +912,7 @@ describe('acp-store', () => {
         const next = sessionResults.shift()
         return next instanceof Promise ? next : Promise.resolve(next)
       }
-      if (cmd === 'acp_close_session') return Promise.resolve(undefined)
+      if (cmd === 'acp_dispose_ephemeral_session') return Promise.resolve(undefined)
       return undefined
     })
 
@@ -933,7 +937,7 @@ describe('acp-store', () => {
     })
     expect(useAcpStore.getState().preparingChatKeys[key]).toBeUndefined()
     await vi.waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('acp_close_session', {
+      expect(invoke).toHaveBeenCalledWith('acp_dispose_ephemeral_session', {
         agentId: 'agent-9',
         sessionId: 'sess-stale',
         commandId: expect.any(String)
@@ -961,12 +965,6 @@ describe('acp-store', () => {
     const firstGate = new Promise((resolve) => {
       resolveFirst = resolve
     })
-    // Track every created/closed session id so we can assert "no orphans":
-    // every session created by `acp_new_session` must be either the one
-    // `startChat` returns (`sess-reopen`) or explicitly closed via
-    // `acp_close_session`. This pins the duplicate-prevention guarantee
-    // without depending on the exact `session/new` call count (which varies
-    // with microtask timing under the synchronous authenticate path).
     const createdSessions: string[] = []
     const closedSessions: string[] = []
     let nextSessionId = 0
@@ -986,7 +984,7 @@ describe('acp-store', () => {
         nextSessionId++
         return Promise.resolve({ sessionId: sid })
       }
-      if (cmd === 'acp_close_session') {
+      if (cmd === 'acp_dispose_ephemeral_session') {
         const closeArgs = args as { sessionId?: string }
         if (closeArgs?.sessionId) closedSessions.push(closeArgs.sessionId)
         return Promise.resolve(undefined)
@@ -1007,16 +1005,13 @@ describe('acp-store', () => {
     resolveFirst({ sessionId: 'sess-stale' })
     const returnedId = await started
     expect(returnedId).toBe('sess-reopen')
-    // Let async cleanup (orphan reaping → acp_close_session) settle.
     await flushTurnEnd()
     await vi.waitFor(() => {
-      // No orphaned sessions: every created session is either the returned
-      // one ('sess-reopen') or explicitly closed via `acp_close_session`.
       for (const sid of createdSessions) {
         const isReturned = sid === 'sess-reopen'
         const isClosed = closedSessions.includes(sid)
         if (!isReturned && !isClosed) {
-          throw new Error(`orphaned session ${sid} was neither returned nor closed`)
+          throw new Error(`orphaned session ${sid} was neither returned nor disposed`)
         }
       }
     })
