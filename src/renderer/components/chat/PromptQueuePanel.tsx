@@ -96,11 +96,12 @@ export function PromptQueuePanel({
   return (
     <Queue className="-mb-6">
       <QueueSection open={open} onOpenChange={setOpen}>
-        {/* Match the Changed files toggle: no press-scale, background-only press. */}
+        {/* Match the Changed files toggle: no press-scale, background-only press, same focus ring. */}
         <QueueSectionTrigger
           data-press-feedback="off"
           className={cn(
             'select-none text-xs hover:bg-secondary/60 hover:text-foreground active:bg-secondary/80',
+            'focus-visible:bg-secondary/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
             isMobileShell && 'min-h-11'
           )}
         >
