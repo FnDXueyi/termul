@@ -83,7 +83,7 @@ beforeEach(() => {
   workspaceState.activeTab = undefined
   runtimeState.tauri = true
   useConsentCardHost.setState({ hostedSessionIds: new Set() })
-  useConsentStripHost.setState({ mountedBrowserTabIds: new Set(), announcedRequestId: null })
+  useConsentStripHost.setState({ mountedBrowserTabIds: new Set(), announcedRequestIds: new Set() })
 })
 
 afterEach(() => {

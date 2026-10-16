@@ -98,7 +98,7 @@ beforeEach(() => {
   workspaceState.activeTab = undefined
   runtimeState.tauri = true
   useBrowserSessionStore.setState({ tabs: new Map() })
-  useConsentStripHost.setState({ mountedBrowserTabIds: new Set(), announcedRequestId: null })
+  useConsentStripHost.setState({ mountedBrowserTabIds: new Set(), announcedRequestIds: new Set() })
 })
 
 afterEach(() => cleanup())
@@ -194,6 +194,21 @@ describe('BrowserConsentStrip announcement', () => {
     first.unmount()
 
     render(<BrowserConsentStrip browserTabId={TAB_ID} />)
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Allow browser automation?' })).toBeInTheDocument()
+  })
+
+  it('stays quiet for a request restored after a later one was announced', () => {
+    workspaceState.activeTab = browserTab()
+    acpState.pendingBrowserConsents = { 'req-1': consentEvent() }
+    const { rerender } = render(<BrowserConsentStrip browserTabId={TAB_ID} />)
+    acpState.pendingBrowserConsents = { 'req-2': consentEvent({ requestId: 'req-2' }) }
+    rerender(<BrowserConsentStrip browserTabId={TAB_ID} />)
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+
+    acpState.pendingBrowserConsents = { 'req-1': consentEvent() }
+    rerender(<BrowserConsentStrip browserTabId={TAB_ID} />)
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Allow browser automation?' })).toBeInTheDocument()

@@ -131,7 +131,7 @@ function AlertOnceStripFrame({
   children: ReactNode
 }): React.JSX.Element {
   const [isFirstMountForRequest] = useState(
-    () => useConsentStripHost.getState().announcedRequestId !== requestId
+    () => !useConsentStripHost.getState().announcedRequestIds.has(requestId)
   )
   const markAnnounced = useConsentStripHost((s) => s.markAnnounced)
   useEffect(() => markAnnounced(requestId), [requestId, markAnnounced])

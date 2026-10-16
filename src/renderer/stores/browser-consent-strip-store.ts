@@ -20,7 +20,7 @@ import { useActiveTab } from './workspace-store'
 
 interface ConsentStripHostState {
   mountedBrowserTabIds: ReadonlySet<string>
-  announcedRequestId: string | null
+  announcedRequestIds: ReadonlySet<string>
   register: (browserTabId: string) => void
   unregister: (browserTabId: string) => void
   markAnnounced: (requestId: string) => void
@@ -28,7 +28,7 @@ interface ConsentStripHostState {
 
 export const useConsentStripHost = create<ConsentStripHostState>((set) => ({
   mountedBrowserTabIds: new Set<string>(),
-  announcedRequestId: null,
+  announcedRequestIds: new Set<string>(),
   register: (browserTabId) =>
     set((s) => {
       const next = new Set(s.mountedBrowserTabIds)
@@ -41,7 +41,13 @@ export const useConsentStripHost = create<ConsentStripHostState>((set) => ({
       next.delete(browserTabId)
       return { mountedBrowserTabIds: next }
     }),
-  markAnnounced: (requestId) => set({ announcedRequestId: requestId })
+  markAnnounced: (requestId) =>
+    set((s) => {
+      if (s.announcedRequestIds.has(requestId)) return s
+      const next = new Set(s.announcedRequestIds)
+      next.add(requestId)
+      return { announcedRequestIds: next }
+    })
 }))
 
 /**
