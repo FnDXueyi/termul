@@ -730,12 +730,8 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
 }
 
 /**
- * Re-read a session's full payload from the host and replace the cached copy
- * in place, keeping its pin and plan fences. Desktop full reads are
- * cache-first and live events never refresh that copy, so a caller that finds
- * it behind the live transcript asks for this. `null` when no fresher read
- * exists: server mode already reads the host on every full read, and
- * `live_only` has no host history.
+ * Re-read a session's full payload from the host, replacing the cached copy
+ * in place (pin and plan fences kept). `null` in server and `live_only` modes.
  */
 export async function reloadSessionPayloadFromHost(id: string): Promise<SessionPayload | null> {
   const transport = getAcpTransport()

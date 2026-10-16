@@ -908,8 +908,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   /**
    * Lazy-load older messages from the cached full payload on scroll-up.
    * Reads the full payload via `loadSessionPayload` (cached module-side so
-   * re-hydrations don't re-read disk; re-read from the host when the copy
-   * lacks the window's oldest id), finds messages older than the
+   * re-hydrations don't re-read disk), finds messages older than the
    * window's oldest retained id, and prepends the next `count` into the
    * in-memory window. Idempotent at the history head (no infinite loop).
    * Reversible trim — disk format unchanged.
@@ -928,14 +927,11 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       })
       if (!payload) return
       const headId = get().messages[sessionId]?.[0]?.id
-      if (
+      const copyBehindLiveWindow =
         headId !== undefined &&
         !headId.startsWith(SWITCH_SPLICE_ID_PREFIX) &&
         !payload.messages.some((m) => m.id === headId)
-      ) {
-        // The desktop copy is cache-first and live events never refresh it.
-        // Once the live window has streamed past it, the seq anchor below
-        // would land at the copy's end and skip every message in between.
+      if (copyBehindLiveWindow) {
         try {
           payload = (await reloadSessionPayloadFromHost(sessionId)) ?? payload
         } catch {

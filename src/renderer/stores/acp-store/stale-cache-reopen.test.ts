@@ -305,11 +305,10 @@ describe('acp-store: a reopen never installs a stale cached transcript', () => {
 })
 
 describe('acp-store: scroll-up in a long live chat never skips past a stale cached copy', () => {
-  /** 710 host messages; the first 310 existed when the trim probe cached the payload. */
   const hostMessages = Array.from({ length: 710 }, (_, i) =>
     hostMessage(i % 2 === 0 ? 'user' : 'agent', `message ${i + 1}`, (i + 1) * 10)
   )
-  /** The live window `trimLiveWindow` keeps: the newest 300 bubbles, with live ids. */
+  const cachedByTrimProbe = hostPayload(hostMessages.slice(0, 310), 3100)
   const liveWindow = hostMessages.slice(410).map((m, i) => ({ ...m, id: `live-${411 + i}` }))
 
   beforeEach(() => {
@@ -318,10 +317,8 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
     _clearPayloadCacheForTesting()
     useAcpStore.setState(FRESH)
     seedLiveChat(liveWindow)
-    // What the trim probe left behind: the payload as the host held it 400
-    // bubbles ago, pinned so the window keeps trimming.
     markSessionPayloadPinned(SESSION)
-    setCachedSessionPayload(SESSION, hostPayload(hostMessages.slice(0, 310), 3100))
+    setCachedSessionPayload(SESSION, cachedByTrimProbe)
   })
 
   it('desktop history: the next page is the messages right before the oldest loaded one', async () => {
@@ -344,8 +341,6 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
     expect(getCachedSessionPayload(SESSION)?.messages).toHaveLength(710)
     expect(getPinnedSessionPayloadIds()).toEqual([SESSION])
 
-    // The head is now a host message: the next page anchors by id in the
-    // refreshed copy, with no second host read.
     await useAcpStore.getState().loadOlderMessages(SESSION, 4)
 
     expect(

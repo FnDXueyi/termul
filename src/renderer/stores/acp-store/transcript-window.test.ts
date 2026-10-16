@@ -42,7 +42,6 @@ vi.mock('@/lib/acp-history-persistence', async (orig) => {
     // Read-through the module-level cache so tests can seed payloads via
     // setCachedSessionPayload (preferred over per-test mockResolvedValue).
     loadSessionPayload: vi.fn(async (id: string) => actual.getCachedSessionPayload(id) ?? null),
-    // The seeded cache IS the host here: an id-anchor miss re-reads it.
     reloadSessionPayloadFromHost: vi.fn(
       async (id: string) => actual.getCachedSessionPayload(id) ?? null
     ),
