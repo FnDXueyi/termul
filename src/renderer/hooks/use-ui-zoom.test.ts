@@ -91,4 +91,36 @@ describe('applyUiZoom', () => {
       delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     }
   })
+
+  it('keeps a later zoom when an earlier overlapping one fails', async () => {
+    const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+    let rejectFirst: (error: Error) => void = () => {}
+    const setZoom = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectFirst = reject
+          })
+      )
+      .mockResolvedValue(undefined)
+    vi.mocked(getCurrentWebview).mockReturnValue({ setZoom } as unknown as never)
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: {},
+      configurable: true,
+      writable: true
+    })
+    try {
+      const first = applyUiZoom(1.1)
+      const second = applyUiZoom(1.2)
+      await Promise.resolve()
+      rejectFirst(new Error('boom'))
+      await expect(first).rejects.toThrow('boom')
+      await expect(second).resolves.toBe(1.2)
+      expect(getAppliedUiZoom()).toBe(1.2)
+    } finally {
+      await applyUiZoom(1)
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    }
+  })
 })
