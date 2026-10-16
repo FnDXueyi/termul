@@ -270,7 +270,9 @@ export async function runPromptTurn(
     // repoints `agentId` at the resolved live agent, dispatching would hit the
     // old (possibly dead) agent with `unknown agent`. Queue here; the open's
     // finally flushes once agentId is repointed and the transcript installed.
-    if ((sessionTurnBusy(current) || s.openingHistoryIds[sessionId]) && !skipUserAppend) {
+    const isUnboundLaunchPlaceholder = !current.agentId
+    const awaitingAgent = s.openingHistoryIds[sessionId] || isUnboundLaunchPlaceholder
+    if ((sessionTurnBusy(current) || awaitingAgent) && !skipUserAppend) {
       enqueued = true
       if (queuedOrigin) {
         return {

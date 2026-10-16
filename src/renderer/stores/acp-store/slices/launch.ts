@@ -15,6 +15,7 @@ import {
 } from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestration'
+import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
 import {
   cacheOptionsFromSession,
   dropRecordKey,
@@ -38,7 +39,7 @@ import {
   ChatLaunchCancelledError,
   type ChatMessage
 } from '../types'
-import { runPromptTurn } from './prompt'
+import { flushNextQueuedPrompt, runPromptTurn } from './prompt'
 
 function cancelPreparedChatEntry(
   key: string,
@@ -453,6 +454,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
         sessions,
         messages,
         launchingSessionIds,
+        promptQueues: dropPromptQueueForSession(s.promptQueues, sessionId),
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId
       }
     })
@@ -663,6 +665,12 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           if (!real) return s
           const placeholderMessages = s.messages[placeholderId] ?? []
           const realMessages = s.messages[sessionId] ?? []
+          const promptQueues = { ...s.promptQueues }
+          const placeholderQueue = promptQueues[placeholderId] ?? []
+          if (placeholderQueue.length > 0) {
+            promptQueues[sessionId] = [...(promptQueues[sessionId] ?? []), ...placeholderQueue]
+          }
+          delete promptQueues[placeholderId]
           const messages = { ...s.messages }
           const sessions = { ...s.sessions }
           const launchingSessionIds = { ...s.launchingSessionIds }
@@ -690,6 +698,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           return {
             sessions,
             messages,
+            promptQueues,
             launchingSessionIds,
             activeSessionId: s.activeSessionId === placeholderId ? sessionId : s.activeSessionId,
             // Drop the placeholder's failed-launch index projection (if any) so
@@ -734,6 +743,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           { skipUserAppend: hadOptimisticUser }
         )
       }
+      flushNextQueuedPrompt(set, sessionId)
       return sessionId
     } catch (err) {
       // Cancellation bypasses failure stamping entirely: the user deleted the
