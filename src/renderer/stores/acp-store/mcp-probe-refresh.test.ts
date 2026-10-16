@@ -111,6 +111,22 @@ describe('MCP probe refresh', () => {
     expect(useAcpStore.getState().mcpTools.fs).toEqual([])
   })
 
+  it('drops an in-flight probe of the old config without probing a server the edit disabled', async () => {
+    const oldProbe = deferred<ProbeResult>()
+    vi.mocked(invoke).mockReturnValueOnce(oldProbe.promise)
+
+    const inFlight = useAcpStore.getState().probeMcpServer('fs')
+    await useAcpStore
+      .getState()
+      .saveMcpServer({ id: 'fs', type: 'stdio', name: 'Files', command: 'new-cmd', enabled: false })
+    oldProbe.resolve(CONNECTED)
+    await inFlight
+
+    expect(probedConfigs()).toEqual([{ type: 'stdio', name: 'Files', command: 'old-cmd' }])
+    expect(useAcpStore.getState().mcpProbeStatus.fs).toBeUndefined()
+    expect(useAcpStore.getState().mcpProbing.fs).toBe(false)
+  })
+
   it('re-probes the canvas entry when a canvas open moves it to a new URL', async () => {
     useAcpStore.setState({
       mcpServers: [
