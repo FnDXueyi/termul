@@ -34,6 +34,7 @@ const READ_ROUTES: &[&str] = &[
     "/worktree/branches",
     "/worktree/check-dirty",
     "/worktree/resolve-base-branch",
+    "/worktree/parse-gitignore",
 ];
 
 fn class_of(request: &Request) -> Option<RouteClass> {
