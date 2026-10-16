@@ -594,5 +594,8 @@ impl WorktreeManager {
 
 fn is_only_plain_folder_names(name: &str) -> bool {
     let mut components = Path::new(name).components().peekable();
-    components.peek().is_some() && components.all(|c| matches!(c, Component::Normal(_)))
+    // `components()` silently drops interior `.`, so `feat/./login` would alias `feat/login`.
+    components.peek().is_some()
+        && components.all(|c| matches!(c, Component::Normal(_)))
+        && !name.split(['/', '\\']).any(|segment| segment == ".")
 }

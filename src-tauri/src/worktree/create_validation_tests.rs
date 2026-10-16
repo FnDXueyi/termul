@@ -27,7 +27,18 @@ fn repo_with_one_commit() -> tempfile::TempDir {
 
 #[test]
 fn create_rejects_a_name_that_leaves_the_worktrees_folder() {
-    for name in ["../../escape", "..", ".", "", "feat/../x", "./x", "/abs"] {
+    for name in [
+        "../../escape",
+        "..",
+        ".",
+        "",
+        "feat/../x",
+        "./x",
+        "/abs",
+        "feat/./login",
+        "feat/.",
+        r"feat\.\login",
+    ] {
         let err =
             WorktreeManager::create("/no/such/project", name, "chat/x", true, None, None, None)
                 .expect_err(name);
