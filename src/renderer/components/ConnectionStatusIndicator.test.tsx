@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { RECONNECT_GRACE_MS } from '@/hooks/use-delayed-flag'
 
 /**
  * Story 10 (F1): StatusBar connection-health indicator — worst-of rollup over
@@ -135,6 +136,75 @@ describe('ConnectionStatusIndicator', () => {
     expect(screen.getByRole('status', { name: 'Connected' })).toBeInTheDocument()
     expect(lampClass()).toContain('fill-current')
     expect(lampClass()).not.toContain('animate-pulse')
+  })
+})
+
+describe('ConnectionStatusIndicator reconnect grace', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function setChannel(patch: { controlChannel?: 'connected' | 'reconnecting' }): void {
+    act(() => {
+      useConnectionStatusStore.setState(patch)
+    })
+  }
+
+  function advance(ms: number): void {
+    act(() => {
+      vi.advanceTimersByTime(ms)
+    })
+  }
+
+  it('keeps the Connected lamp through a 500 ms reconnect', () => {
+    renderIndicator()
+    const connectedLamp = lampClass()
+
+    setChannel({ controlChannel: 'reconnecting' })
+    advance(500)
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeInTheDocument()
+    expect(lampClass()).toBe(connectedLamp)
+
+    setChannel({ controlChannel: 'connected' })
+    advance(RECONNECT_GRACE_MS * 2)
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeInTheDocument()
+    expect(lampClass()).toBe(connectedLamp)
+  })
+
+  it('shows the reconnecting lamp once a 2 s outage passes the grace period', () => {
+    renderIndicator()
+
+    setChannel({ controlChannel: 'reconnecting' })
+    advance(RECONNECT_GRACE_MS - 1)
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeInTheDocument()
+
+    advance(1)
+    expect(
+      screen.getByRole('status', { name: 'Control channel: reconnecting' })
+    ).toBeInTheDocument()
+    expect(lampClass()).toContain('animate-pulse')
+
+    advance(RECONNECT_GRACE_MS)
+    setChannel({ controlChannel: 'connected' })
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeInTheDocument()
+    expect(lampClass()).not.toContain('animate-pulse')
+  })
+
+  it('labels the drawer footer Connected through a 500 ms reconnect', () => {
+    render(
+      <TooltipProvider>
+        <ConnectionStatusIndicator showLabel />
+      </TooltipProvider>
+    )
+
+    setChannel({ controlChannel: 'reconnecting' })
+    advance(500)
+    expect(screen.getByRole('status')).toHaveTextContent(
+      formatConnectedSummary(window.location.host)
+    )
   })
 })
 
