@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use super::*;
 
@@ -99,12 +99,13 @@ impl WorktreeManager {
         on_progress: Option<&mut dyn FnMut(&str)>,
     ) -> Result<GitWorktreeEntry, WorktreeError> {
         let target = match target_path {
-            Some(p) => p.to_string(),
-            None => format!(
+            Some(p) => Some(p.to_string()),
+            None if is_single_folder_name(name) => Some(format!(
                 "{}/.termul/worktrees/{}/",
                 project_path.trim_end_matches('/'),
                 name
-            ),
+            )),
+            None => None,
         };
 
         // Boundary log: record the create inputs before ANY early return so
@@ -131,6 +132,11 @@ impl WorktreeManager {
                 error.error_code(),
                 error
             );
+        };
+
+        let Some(target) = target else {
+            log_failure(&WorktreeError::InvalidWorktreeName);
+            return Err(WorktreeError::InvalidWorktreeName);
         };
 
         // Validate path length (Windows MAX_PATH guard)
@@ -580,4 +586,12 @@ impl WorktreeManager {
     ) -> Vec<SymlinkResult> {
         Self::create_symlinks(project_path, worktree_path, symlink_dirs)
     }
+}
+
+fn is_single_folder_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }

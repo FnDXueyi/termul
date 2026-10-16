@@ -7,8 +7,6 @@ use super::*;
 
 /// Build the `git worktree add` argument vector (subcommand args only — the
 /// `git -c color.ui=false` prefix is added by `run_git`/`run_git_streaming`).
-/// `-b <branch> <target> [start_ref]` selects new-branch mode; existing-branch
-/// mode is `<target> <branch>`. `start_ref` is ignored unless `is_new_branch`.
 pub(super) fn worktree_add_args<'a>(
     branch: &'a str,
     is_new_branch: bool,
@@ -19,11 +17,13 @@ pub(super) fn worktree_add_args<'a>(
     if is_new_branch {
         args.push("-b");
         args.push(branch);
+        args.push("--");
         args.push(target);
         if let Some(ref_val) = start_ref {
             args.push(ref_val);
         }
     } else {
+        args.push("--");
         args.push(target);
         args.push(branch);
     }

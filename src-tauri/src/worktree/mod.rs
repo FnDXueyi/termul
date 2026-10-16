@@ -44,6 +44,9 @@ mod tests;
 mod conflict_analysis_tests;
 
 #[cfg(test)]
+mod create_validation_tests;
+
+#[cfg(test)]
 mod launch_registry_tests;
 
 #[cfg(test)]
