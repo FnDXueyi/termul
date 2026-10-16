@@ -529,6 +529,10 @@ impl AcpManager {
         persistence: Arc<SessionPersistence>,
         claude_agent: Arc<crate::acp::claude_agent::ClaudeAgentService>,
     ) -> Self {
+        // Host start: claim this process's browser-shim dir and sweep the dirs
+        // that killed hosts left behind.
+        #[cfg(unix)]
+        let _ = crate::acp::browser_shim::host_shim_dir();
         let host_plan_server = crate::acp::host_mcp::parent::HostPlanServer::start(
             sinks.clone(),
             Some(Arc::clone(&persistence)),
