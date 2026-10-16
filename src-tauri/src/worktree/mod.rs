@@ -26,7 +26,7 @@ use conflict::{
 use git::{ensure_valid_branch_name, run_git, run_git_streaming, worktree_add_args};
 use launch_registry::note_launch_created;
 use types::parse_git_stderr;
-use util::{is_excluded_dir, quiet_command};
+use util::{is_excluded_dir, is_single_safe_folder_name, quiet_command};
 
 #[cfg(test)]
 use git::{extract_lines, which_git};

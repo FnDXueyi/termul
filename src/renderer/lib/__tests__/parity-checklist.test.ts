@@ -1002,43 +1002,38 @@ describe('Parity Checklist Automation', () => {
     })
   })
 
-  // CAP — Web worktree parity. The 7 launch-flow worktree ops ship on THREE
-  // transports (Tauri command `worktree_*`, HTTP `/worktree/*` route, facade
-  // branch `isTauriContext()` between `invoke(...)` and `webServerWorktree`).
-  // This block pins the TS-side parity (the Rust-side parity — router routes +
-  // Tauri command registration + `web/worktree_api.rs` — is covered by the Rust
-  // test suite). The 8 advanced ops stay `WEB_UNSUPPORTED` on web (deferred).
   describe('Worktree parity (CAP — Web worktree parity)', () => {
     const Facade = join(LIB_DIR, 'worktree-api.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
-    const RouterRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'router.rs')
-    const WorktreeApiRust = join(
-      LIB_DIR,
-      '..',
-      '..',
-      '..',
-      'src-tauri',
-      'src',
-      'web',
-      'worktree_api.rs'
-    )
+    const WebRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web')
+    const RouterRust = join(WebRust, 'router.rs')
+    const WorktreeApiRust = join(WebRust, 'worktree_api.rs')
+    const WorktreeSymlinksRust = join(WebRust, 'worktree_api', 'symlinks.rs')
     const CommandsRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'commands')
 
-    const LAUNCH_FLOW_METHODS = [
+    const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+    const WEB_OPS = [
       'list',
       'create',
       'remove',
       'branches',
-      'checkDirty',
-      'resolveBaseBranch',
-      'copyIncludeFiles'
-    ] as const
+      'check-dirty',
+      'resolve-base-branch',
+      'copy-include-files',
+      'parse-gitignore',
+      'create-symlinks',
+      'ensure-symlinks'
+    ].map((name) => ({
+      route: `/worktree/${name}`,
+      method: name.replace(/-(\w)/g, (_, c: string) => c.toUpperCase()),
+      handler: name.replaceAll('-', '_'),
+      command: `worktree_${name.replaceAll('-', '_')}`
+    }))
+    const OTHER_WEB_METHODS = ['renameBranch']
 
-    const ADVANCED_METHODS = [
+    const DESKTOP_ONLY_METHODS = [
       'removeAllManaged',
-      'parseGitignore',
-      'createSymlinks',
-      'ensureSymlinks',
       'archive',
       'restore',
       'mergePreview',
@@ -1052,88 +1047,56 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/webServerWorktree/)
     })
 
-    it('web-server-api.ts exports webServerWorktree hitting the 7 routes', () => {
+    it('web-server-api.ts exports webServerWorktree hitting every web route', () => {
       expect(existsSync(WebAdapter), 'web-server-api.ts should exist').toBe(true)
       const content = readFileSync(WebAdapter, 'utf-8')
       expect(content).toMatch(/export\s+const\s+\bwebServerWorktree\b/)
-      for (const route of [
-        '/worktree/list',
-        '/worktree/create',
-        '/worktree/remove',
-        '/worktree/branches',
-        '/worktree/check-dirty',
-        '/worktree/resolve-base-branch',
-        '/worktree/copy-include-files'
-      ]) {
+      for (const { route } of WEB_OPS) {
         expect(content, `web-server-api.ts should hit ${route}`).toMatch(
-          new RegExp(route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          new RegExp(escapeRe(route))
         )
       }
       // Network/parse failures must map to `NETWORK_ERROR`.
       expect(content).toMatch(/NETWORK_ERROR/)
     })
 
-    it('facade branches the 7 launch-flow methods (invoke on Tauri, webServerWorktree on web)', () => {
+    it('facade branches every web method (invoke on Tauri, webServerWorktree on web)', () => {
       const content = readFileSync(Facade, 'utf-8')
-      for (const method of LAUNCH_FLOW_METHODS) {
+      for (const { method } of WEB_OPS) {
         expect(content, `worktree-api.ts should branch ${method}`).toMatch(
-          new RegExp(`\\b${method}\\s*\\(`)
+          new RegExp(`webServerWorktree\\.${method}\\(`)
         )
       }
-      // The 7 launch-flow methods + `renameBranch` (story 16) reference
-      // `webServerWorktree` (the web branch).
-      const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(
-        launchFlowRefs,
-        '7 launch-flow methods + renameBranch should reference webServerWorktree'
-      ).toBe(8)
+      const webRefs = (content.match(/webServerWorktree\./g) ?? []).length
+      expect(webRefs).toBe(WEB_OPS.length + OTHER_WEB_METHODS.length)
     })
 
-    it('facade keeps the 8 advanced methods as WEB_UNSUPPORTED (no webServerWorktree ref)', () => {
+    it('facade keeps the desktop-only methods as WEB_UNSUPPORTED (no webServerWorktree ref)', () => {
       const content = readFileSync(Facade, 'utf-8')
-      for (const method of ADVANCED_METHODS) {
+      for (const method of DESKTOP_ONLY_METHODS) {
         expect(content, `worktree-api.ts should still define ${method}`).toMatch(
           new RegExp(`\\b${method}\\s*:`)
         )
+        expect(content).not.toMatch(new RegExp(`webServerWorktree\\.${method}\\b`))
       }
-      // Exactly 8 webServerWorktree refs (7 launch-flow + story 16 `renameBranch`) —
-      // the advanced methods do NOT branch.
-      const launchFlowRefs = (content.match(/webServerWorktree\./g) ?? []).length
-      expect(launchFlowRefs).toBe(8)
     })
 
-    it('router.rs registers the 7 /worktree/* routes ahead of the static fallback', () => {
+    it('router.rs registers every /worktree/* web route ahead of the static fallback', () => {
       expect(existsSync(RouterRust), 'router.rs should exist').toBe(true)
       const content = readFileSync(RouterRust, 'utf-8')
-      for (const route of [
-        '/worktree/list',
-        '/worktree/create',
-        '/worktree/remove',
-        '/worktree/branches',
-        '/worktree/check-dirty',
-        '/worktree/resolve-base-branch',
-        '/worktree/copy-include-files'
-      ]) {
-        expect(content, `router.rs should register ${route}`).toMatch(
-          new RegExp(route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        )
+      for (const { route } of WEB_OPS) {
+        expect(content, `router.rs should register ${route}`).toMatch(new RegExp(escapeRe(route)))
       }
     })
 
-    it('worktree_api.rs exists and defines the 7 Axum handlers', () => {
+    it('worktree_api.rs and worktree_api/symlinks.rs define the Axum handlers', () => {
       expect(existsSync(WorktreeApiRust), 'worktree_api.rs should exist').toBe(true)
-      const content = readFileSync(WorktreeApiRust, 'utf-8')
-      for (const handler of [
-        'pub async fn list',
-        'pub async fn create',
-        'pub async fn remove',
-        'pub async fn branches',
-        'pub async fn check_dirty',
-        'pub async fn resolve_base_branch',
-        'pub async fn copy_include_files'
-      ]) {
-        expect(content, `worktree_api.rs should define ${handler}`).toMatch(
-          new RegExp(handler.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      const content = [WorktreeApiRust, WorktreeSymlinksRust]
+        .map((file) => readFileSync(file, 'utf-8'))
+        .join('\n')
+      for (const { handler } of WEB_OPS) {
+        expect(content, `the web worktree routes should define ${handler}`).toMatch(
+          new RegExp(`pub async fn ${handler}\\b`)
         )
       }
       // IpcBody contract + spawn_blocking + tracing logs.
@@ -1145,20 +1108,12 @@ describe('Parity Checklist Automation', () => {
       expect(content).toMatch(/ensure_within_project_boundary/)
     })
 
-    it('commands module defines the 7 desktop Tauri commands (worktree_*)', () => {
+    it('commands module defines the desktop Tauri command for every web route', () => {
       expect(existsSync(CommandsRust), 'commands module should exist').toBe(true)
       const content = readRustModule(CommandsRust)
-      for (const cmd of [
-        'worktree_list',
-        'worktree_create',
-        'worktree_remove',
-        'worktree_branches',
-        'worktree_check_dirty',
-        'worktree_resolve_base_branch',
-        'worktree_copy_include_files'
-      ]) {
+      for (const { command: cmd } of WEB_OPS) {
         expect(content, `commands module should define ${cmd}`).toMatch(
-          new RegExp(`\\b${cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
+          new RegExp(`\\b${escapeRe(cmd)}\\b`)
         )
       }
     })

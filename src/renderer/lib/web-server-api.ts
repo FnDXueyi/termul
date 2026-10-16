@@ -39,7 +39,9 @@ import type {
   BaseBranchInfo,
   BranchInfo,
   DirtyStatus,
+  GitignoreDir,
   IncludeCopyResult,
+  SymlinkResult,
   WorktreeInfo,
   WorktreeProgressEvent
 } from '@shared/types/worktree.types'
@@ -596,8 +598,7 @@ export const webServerMcpProbe = {
  * parity: each method mirrors a desktop `#[tauri::command] worktree_*` handler
  * and returns the SAME `IpcResult<T>` contract (the renderer facade
  * `worktree-api.ts` branches `isTauriContext()` between `invoke(...)` and these
- * HTTP impls). Only the 7 launch-flow routes ship here; the 8 advanced ops
- * stay `WEB_UNSUPPORTED` on web (deferred — see deferred-work.md).
+ * HTTP impls).
  */
 export const webServerWorktree = {
   async list(projectPath: string): Promise<IpcResult<WorktreeInfo[]>> {
@@ -685,6 +686,34 @@ export const webServerWorktree = {
     return postJson<IncludeCopyResult>('/worktree/copy-include-files', {
       projectPath,
       worktreePath
+    })
+  },
+
+  async parseGitignore(projectPath: string): Promise<IpcResult<GitignoreDir[]>> {
+    return postJson<GitignoreDir[]>('/worktree/parse-gitignore', { projectPath })
+  },
+
+  async createSymlinks(
+    projectPath: string,
+    worktreePath: string,
+    symlinkDirs: string[]
+  ): Promise<IpcResult<SymlinkResult[]>> {
+    return postJson<SymlinkResult[]>('/worktree/create-symlinks', {
+      projectPath,
+      worktreePath,
+      symlinkDirs
+    })
+  },
+
+  async ensureSymlinks(
+    projectPath: string,
+    worktreePath: string,
+    symlinkDirs: string[]
+  ): Promise<IpcResult<SymlinkResult[]>> {
+    return postJson<SymlinkResult[]>('/worktree/ensure-symlinks', {
+      projectPath,
+      worktreePath,
+      symlinkDirs
     })
   }
 }

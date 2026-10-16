@@ -464,8 +464,7 @@ impl WorktreeManager {
                 continue;
             }
 
-            // Skip if it contains path separators (subdirectory patterns like src/dist/)
-            if dir_name.contains('/') || dir_name.contains('\\') {
+            if !is_single_safe_folder_name(dir_name) {
                 continue;
             }
 
@@ -509,19 +508,13 @@ impl WorktreeManager {
         let mut results = Vec::new();
 
         for dir_name in symlink_dirs {
-            // Validate: reject absolute paths and path-traversal components
-            let dir_path = Path::new(dir_name);
-            if dir_path.is_absolute()
-                || dir_path
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir)
-            {
+            if !is_single_safe_folder_name(dir_name) {
                 results.push(SymlinkResult {
                     path: worktree_root.join(dir_name).to_string_lossy().to_string(),
                     target: project_root.join(dir_name).to_string_lossy().to_string(),
                     status: "skipped".to_string(),
                     reason: Some(format!(
-                        "Invalid symlink directory name (absolute or path traversal): {}",
+                        "Invalid symlink directory name (must be one folder name with no path separator or shell metacharacter): {}",
                         dir_name
                     )),
                 });
