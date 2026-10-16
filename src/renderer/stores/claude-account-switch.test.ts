@@ -222,7 +222,7 @@ describe('claude account switch with chats that have no open tab', () => {
       sessions: {
         c1: s.sessions.c1,
         warm: session('warm'),
-        bg: session('bg', { busy: true })
+        bg: session('bg')
       },
       sessionIndex: [
         indexEntry('c1', CLAUDE_AGENT_CONFIG_ID),
@@ -242,9 +242,24 @@ describe('claude account switch with chats that have no open tab', () => {
     expect(vi.mocked(logFrontendError).mock.calls.filter(([e]) => e.level === 'warn')).toEqual([])
   })
 
-  it('stops the agent of a chat whose tab was closed and does not reopen it', async () => {
+  it('stops the agent of an idle chat whose tab was closed and does not reopen it', async () => {
     await applyProjectClaudeAccount('office')
     expect(acpApi.killAgent).toHaveBeenCalledWith('agent-bg')
+    expect(useAcpStore.getState().sessions.bg?.status).toBe('closed')
+    expect(retryCrashedSession).not.toHaveBeenCalledWith('bg', expect.anything())
+  })
+
+  it('lets a closed-tab chat finish its turn before stopping its agent', async () => {
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, bg: { ...s.sessions.bg, activeTurn: true, openTurnId: 'turn-1' } }
+    }))
+    await applyProjectClaudeAccount('office')
+    expect(acpApi.killAgent).not.toHaveBeenCalledWith('agent-bg')
+    expect(useAcpStore.getState().sessions.bg?.status).toBe('active')
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, bg: { ...s.sessions.bg, activeTurn: false, openTurnId: null } }
+    }))
+    await vi.waitFor(() => expect(acpApi.killAgent).toHaveBeenCalledWith('agent-bg'))
     expect(useAcpStore.getState().sessions.bg?.status).toBe('closed')
     expect(retryCrashedSession).not.toHaveBeenCalledWith('bg', expect.anything())
   })
@@ -257,9 +272,6 @@ describe('claude account switch with chats that have no open tab', () => {
 
   it('treats a chat kept for an off-screen project as open', async () => {
     useAgentChatLifetimeStore.getState().retainProjectChats('office', ['bg'])
-    useAcpStore.setState((s) => ({
-      sessions: { ...s.sessions, bg: { ...s.sessions.bg, activeTurn: false, openTurnId: null } }
-    }))
     await applyProjectClaudeAccount('office')
     expect(retryCrashedSession).toHaveBeenCalledWith('bg', { resend: false })
   })

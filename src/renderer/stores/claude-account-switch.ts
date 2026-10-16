@@ -103,7 +103,7 @@ export async function restartClaudeSession(
     if (!(await waitUntilIdle(sessionId))) return false
     const oldAgentId = useAcpStore.getState().sessions[sessionId]?.agentId
     if (!openChatIds().has(sessionId)) {
-      if (oldAgentId) await stopOldAgent(oldAgentId, `chat ${sessionId} closed`)
+      if (oldAgentId) await stopOldAgent(oldAgentId, `turn of unopened chat ${sessionId} ended`)
       return false
     }
     void logFrontendError({
@@ -144,8 +144,9 @@ export async function restartClaudeSession(
  * screen. `continueSessionId` is the chat that hit a limit: its held turn is
  * cancelled and its last prompt is sent again. Other busy chats restart in the
  * background when their turn ends. An unopened chat (a warm-pool seed, or a
- * chat whose tab was closed) is not reopened; its agent stops unless an open
- * chat shares it. Resolves when the idle chats restarted.
+ * chat whose tab was closed) is not reopened; its agent stops, after the
+ * running turn if there is one, unless an open chat shares it. Resolves when
+ * the idle chats restarted.
  */
 export async function applyProjectClaudeAccount(
   projectId: string,
@@ -158,16 +159,26 @@ export async function applyProjectClaudeAccount(
   )
   const open = chats.filter((s) => openIds.has(s.id))
   const openAgents = new Set(open.map((s) => s.agentId))
-  const unopened = chats.filter((s) => !openIds.has(s.id))
-  const unopenedAgents = new Set(unopened.map((s) => s.agentId).filter((a) => !openAgents.has(a)))
+  const unopened = chats.filter((s) => !openIds.has(s.id) && !openAgents.has(s.agentId))
+  const busy = unopened.filter((s) => switchBlockedReason(state, s.id) !== null)
+  const busyAgents = new Set(busy.map((s) => s.agentId))
+  const idleAgents = new Set(unopened.map((s) => s.agentId).filter((a) => !busyAgents.has(a)))
   const warm = new Set(Object.values(state.preparedSessions))
   void logFrontendError({
     level: 'info',
     source: 'claudeAccountSwitch.apply',
-    message: `Project ${projectId} account changed; restarting ${open.length} open Claude chats, stopping ${unopenedAgents.size} agents of ${unopened.length} unopened chats (${unopened.filter((s) => warm.has(s.id)).length} warm-pool)`
+    message: `Project ${projectId} account changed; restarting ${open.length} open Claude chats, stopping ${idleAgents.size} agents of unopened chats now (${unopened.filter((s) => warm.has(s.id)).length} warm-pool) and ${busy.length} after their turn`
   })
   const now: Promise<unknown>[] = []
-  for (const agentId of unopenedAgents) now.push(stopOldAgent(agentId, 'chat not open'))
+  for (const agentId of idleAgents) now.push(stopOldAgent(agentId, 'chat not open'))
+  for (const { id, agentId } of busy) {
+    void logFrontendError({
+      level: 'info',
+      source: 'claudeAccountSwitch.stop',
+      message: `Agent ${agentId} of unopened chat ${id} stops after its running turn`
+    })
+    void restartClaudeSession(id)
+  }
   for (const { id } of open) {
     if (id === options.continueSessionId) {
       now.push(restartClaudeSession(id, { resend: true, cancelTurn: true }))
