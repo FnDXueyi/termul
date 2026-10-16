@@ -176,7 +176,32 @@ fn claim_host_dir(root: &Path) -> std::io::Result<HostShimDir> {
 /// without a lock file (the older `<agent_id>`-only layout) are left alone.
 #[cfg(unix)]
 fn sweep_stale_host_dirs(root: &Path) {
-    let _ = root;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(lock) = std::fs::File::open(path.join(HOST_LOCK_FILE_NAME)) else {
+            continue;
+        };
+        if lock.try_lock().is_err() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => log::info!(
+                "[acp] browser shim: removed {} left by a host that is gone",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!(
+                "[acp] browser shim: failed to remove stale {}: {e}",
+                path.display()
+            ),
+        }
+    }
 }
 
 /// Per-agent shim directory: `<host shim dir>/<agent_id>/`.

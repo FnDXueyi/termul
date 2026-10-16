@@ -109,7 +109,11 @@ fn sweep_removes_only_dirs_whose_host_died() {
     let dead = claim_host_dir(&root).expect("claim dead host dir");
     let dead_path = dead.path.clone();
     std::fs::create_dir(dead_path.join("agent-1")).unwrap();
-    std::fs::write(dead_path.join("agent-1").join(SINK_FILE_NAME), "https://a.example/\n").unwrap();
+    std::fs::write(
+        dead_path.join("agent-1").join(SINK_FILE_NAME),
+        "https://a.example/\n",
+    )
+    .unwrap();
     drop(dead);
     let legacy = root.join("6f1c2a52-legacy-agent");
     std::fs::create_dir(&legacy).unwrap();
