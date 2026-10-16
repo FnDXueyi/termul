@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tower_http::services::{ServeDir, ServeFile};
@@ -193,22 +193,28 @@ pub struct Assets;
 /// - Anything else (a client-side route, no `.` in the last segment) →
 ///   `index.html` (the SPA boots + routes client-side).
 ///
-/// Every embedded response carries a content-hash `ETag`; a request whose
-/// `If-None-Match` names it gets `304 Not Modified` with no body.
-pub async fn serve_embedded(uri: Uri, request: HeaderMap) -> Response {
+/// Every embedded response carries a content-hash `ETag`; a GET or HEAD whose
+/// `If-None-Match` names it gets `304 Not Modified` with no body. Other
+/// methods ignore the validator.
+pub async fn serve_embedded(method: Method, uri: Uri, headers: HeaderMap) -> Response {
+    let validators = if matches!(method, Method::GET | Method::HEAD) {
+        headers
+    } else {
+        HeaderMap::new()
+    };
     let path = uri.path().trim_start_matches('/');
 
     if path.is_empty() || path == INDEX_HTML {
-        return embedded_index(&request);
+        return embedded_index(&validators);
     }
 
     match Assets::get(path) {
-        Some(file) => embedded_file(file, path, &request),
+        Some(file) => embedded_file(file, path, &validators),
         None => {
             if last_segment_has_extension(path) {
                 (StatusCode::NOT_FOUND, "404 Not Found").into_response()
             } else {
-                embedded_index(&request)
+                embedded_index(&validators)
             }
         }
     }

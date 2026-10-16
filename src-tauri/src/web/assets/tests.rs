@@ -1,6 +1,6 @@
 use super::*;
 use axum::body::to_bytes;
-use axum::http::Request;
+use axum::http::{Method, Request};
 use axum::routing::Router;
 use tower::ServiceExt; // for `oneshot`
 use flate2::read::GzDecoder;
@@ -773,5 +773,46 @@ async fn serve_embedded_if_none_match_respects_quoted_commas() {
             b""
         };
         assert_eq!(body.as_ref(), expected_body, "{header_value}");
+    }
+}
+
+#[tokio::test]
+async fn serve_embedded_evaluates_if_none_match_only_for_get_and_head() {
+    if !embed_present() {
+        return;
+    }
+    let fresh = get_embedded("/", None).await;
+    let etag = fresh.headers()[header::ETAG]
+        .to_str()
+        .expect("ascii etag")
+        .to_string();
+    let index = to_bytes(fresh.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+
+    for (method, expected, expected_body) in [
+        (Method::HEAD, StatusCode::NOT_MODIFIED, &b""[..]),
+        (Method::POST, StatusCode::OK, &index[..]),
+        (Method::PUT, StatusCode::OK, &index[..]),
+        (Method::DELETE, StatusCode::OK, &index[..]),
+    ] {
+        let resp = Router::new()
+            .fallback(serve_embedded)
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri("/")
+                    .header(header::IF_NONE_MATCH, etag.as_str())
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(resp.status(), expected, "{method}");
+        assert_eq!(resp.headers()[header::ETAG], etag.as_str(), "{method}");
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(body.as_ref(), expected_body, "{method}");
     }
 }

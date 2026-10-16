@@ -184,6 +184,10 @@ async fn frontend_error_from_an_authenticated_remote_peer_reaches_the_log() {
         .with_ansi(false)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
+    // With a single registered dispatcher, tracing-core computes a callsite's
+    // interest from the registering thread's default alone, so a parallel test
+    // reaching the same `warn!` with no subscriber disables it for every thread.
+    let _second_dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let req = serde_json::json!({
         "level": "warn",
         "message": "sw skipped",
