@@ -396,6 +396,61 @@ describe('acp-store: dead-turn reopen detach (reopen-liveness)', () => {
     expect(session?.openTurnId).toBe('turn:live')
   })
 
+  it('ACP_REOPEN_TURN_ACTIVE on the resume path still attaches', async () => {
+    const transport = fakeWebTransport([], {
+      's-rband': trailingUserPayload('s-rband', { status: 'active' })
+    })
+    transport.spawnAgent.mockResolvedValue({
+      agentId: FRESH_AGENT,
+      capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+    })
+    transport.resumeSession.mockRejectedValue(
+      new AcpTransportError('not_implemented', 'ACP_REOPEN_TURN_ACTIVE: session s-rband')
+    )
+    _setAcpTransportForTests(transport)
+
+    await useAcpStore.getState().openHistorySession('s-rband')
+
+    const session = useAcpStore.getState().sessions['s-rband']
+    expect(transport.loadSession).not.toHaveBeenCalled()
+    expect(transport.resumeSession).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      's-rband',
+      '/w',
+      [],
+      expect.objectContaining({ commandId: expect.any(String) })
+    )
+    expect(transport.subscribeSession).toHaveBeenCalledWith('s-rband', 10, true)
+    expect(session?.status).toBe('active')
+    expect(session?.activeTurn).toBe(true)
+    expect(session?.openTurnId).toBe('turn:live')
+    expect(session?.lastError).toBeNull()
+  })
+
+  it('resume failure on the resume path surfaces the banner with cleared flags', async () => {
+    const transport = fakeWebTransport([], {
+      's-rfail': trailingUserPayload('s-rfail', { status: 'active' })
+    })
+    transport.spawnAgent.mockResolvedValue({
+      agentId: FRESH_AGENT,
+      capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+    })
+    transport.resumeSession.mockRejectedValue(new Error('agent gone'))
+    _setAcpTransportForTests(transport)
+
+    await expect(useAcpStore.getState().openHistorySession('s-rfail')).rejects.toThrow('agent gone')
+
+    const session = useAcpStore.getState().sessions['s-rfail']
+    expect(transport.loadSession).not.toHaveBeenCalled()
+    expect(transport.resumeSession).toHaveBeenCalledTimes(1)
+    expect(transport.subscribeSession).not.toHaveBeenCalled()
+    expect(session?.activeTurn).toBe(false)
+    expect(session?.openTurnId).toBeNull()
+    expect(session?.lastError).toContain('Resume failed')
+    expect(session?.lastError).toContain('agent gone')
+    expect(useAcpStore.getState().messages['s-rfail']).toHaveLength(1)
+  })
+
   it('status:active + trailing user + host-registered owner attaches unchanged (#882 regression)', async () => {
     const transport = fakeWebTransport([ownerSummary('s-live')], {
       's-live': trailingUserPayload('s-live', { status: 'active' })
