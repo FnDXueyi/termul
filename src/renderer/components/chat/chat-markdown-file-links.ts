@@ -1,4 +1,4 @@
-import { findFilePathMatches } from '@/lib/file-path-links'
+import { findFilePathMatches, stripLineColumnSuffix } from '@/lib/file-path-links'
 
 /**
  * Escape `& < > "` so interpolated path/alt/url values cannot break out of
@@ -25,7 +25,50 @@ type MarkdownNode = {
  * their link text.
  */
 export function termulFilePathTag(path: string, label: string = path): string {
-  return `<termul-file-path data-path="${escapeHtmlAttribute(path)}">${escapeHtmlAttribute(label)}</termul-file-path>`
+  return filePathElement(path, escapeHtmlAttribute(label))
+}
+
+function filePathElement(path: string, innerHtml: string): string {
+  return `<termul-file-path data-path="${escapeHtmlAttribute(path)}">${innerHtml}</termul-file-path>`
+}
+
+/**
+ * Extensions that make a lone `name.ext` inline-code span a file. A known set
+ * instead of any extension so member access such as `console.log`,
+ * `process.env` or `user.id` stays plain code.
+ */
+const INLINE_CODE_FILE_EXTENSIONS = new Set([
+  ...['c', 'cc', 'cjs', 'cpp', 'cs', 'css', 'cts', 'dart', 'ex', 'exs', 'go', 'h', 'hpp'],
+  ...['java', 'js', 'jsx', 'kt', 'lua', 'mjs', 'mts', 'php', 'ps1', 'py', 'rb', 'rs'],
+  ...['sass', 'scss', 'sh', 'sql', 'svelte', 'swift', 'ts', 'tsx', 'vue', 'zig', 'zsh'],
+  ...['cfg', 'conf', 'csv', 'html', 'ini', 'json', 'jsonc', 'lock', 'md', 'mdx', 'toml'],
+  ...['tsv', 'txt', 'xml', 'yaml', 'yml'],
+  ...['avif', 'gif', 'ico', 'jpeg', 'jpg', 'pdf', 'png', 'svg', 'webp']
+])
+
+const SINGLE_SEGMENT_FILE_RE = /^[^\s\\/:*?"<>|`#]+\.([A-Za-z0-9]+)$/
+
+/**
+ * The path an inline-code span names when its whole content is a file path:
+ * a prose-grade multi-segment path, or a single `name.ext` with a known file
+ * extension. Either may carry a `:line` suffix or `#L` fragment.
+ */
+function inlineCodeFilePath(value: string): string | null {
+  const code = value.trim()
+  const [match, ...rest] = findFilePathMatches(code)
+  if (match && rest.length === 0 && match.start === 0 && match.text === code) return code
+
+  const extension = SINGLE_SEGMENT_FILE_RE.exec(stripLineColumnSuffix(code))?.[1]
+  return extension && INLINE_CODE_FILE_EXTENSIONS.has(extension.toLowerCase()) ? code : null
+}
+
+function inlineCodeToFileButton(node: MarkdownNode): MarkdownNode | null {
+  const path = inlineCodeFilePath(node.value ?? '')
+  if (path === null) return null
+  return {
+    type: 'html',
+    value: filePathElement(path, `<code>${escapeHtmlAttribute(node.value ?? '')}</code>`)
+  }
 }
 
 const URI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/
@@ -149,6 +192,7 @@ function splitTextNode(node: MarkdownNode): MarkdownNode[] {
 
 function transformNode(node: MarkdownNode): MarkdownNode[] {
   if (node.type === 'text') return splitTextNode(node)
+  if (node.type === 'inlineCode') return [inlineCodeToFileButton(node) ?? node]
   if (node.type === 'link') {
     const button = linkToFileButton(node)
     return [button ?? node]

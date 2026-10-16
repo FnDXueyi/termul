@@ -48,7 +48,11 @@ const PATH_PREFIX_REGEX = /^(?:\.{1,2}\/|~\/|[A-Za-z]:\/|\/)/
 
 const DOT_DIRECTORY_REGEX = /^\.[A-Za-z]/
 
-const LINE_COLUMN_SUFFIX_REGEX = /:(\d+)(?::\d+)?$/
+/**
+ * A `:line[:col]` suffix or a GitHub-style `#L<line>[C<col>][-L<end>]`
+ * fragment. Groups: 1/2 are the colon line/column, 3/4 the fragment ones.
+ */
+const LINE_POSITION_SUFFIX_REGEX = /(?::(\d+)(?::(\d+))?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)$/i
 
 const FILE_EXTENSION_REGEX = /\.[^.]+$/
 
@@ -90,7 +94,7 @@ export function hasPathEvidence(text: string): boolean {
     return true
   }
 
-  if (LINE_COLUMN_SUFFIX_REGEX.test(normalized)) {
+  if (LINE_POSITION_SUFFIX_REGEX.test(normalized)) {
     return true
   }
 
@@ -345,19 +349,20 @@ export function trimWrappedPath(value: string): string {
   return result
 }
 
-/** Removes trailing :line or :line:column suffixes from a path token. */
+/** Removes a trailing `:line[:col]` suffix or `#L<line>` fragment from a path token. */
 export function stripLineColumnSuffix(value: string): string {
-  return value.replace(LINE_COLUMN_SUFFIX_REGEX, '')
+  return value.replace(LINE_POSITION_SUFFIX_REGEX, '')
 }
 
 function parseLineColumnSuffix(value: string): { line?: number; column?: number } {
-  const match = value.match(/:(\d+)(?::(\d+))?$/)
+  const match = value.match(LINE_POSITION_SUFFIX_REGEX)
   if (!match) {
     return {}
   }
 
-  const line = Number.parseInt(match[1], 10)
-  const parsedColumn = match[2] ? Number.parseInt(match[2], 10) : null
+  const line = Number.parseInt(match[1] ?? match[3], 10)
+  const rawColumn = match[2] ?? match[4]
+  const parsedColumn = rawColumn ? Number.parseInt(rawColumn, 10) : null
 
   return {
     line: Number.isFinite(line) && line > 0 ? line : undefined,

@@ -744,7 +744,11 @@ describe('file-path-links resolution', () => {
   })
 
   it('names the fragment-free path when a #L target is missing', async () => {
-    mocks.getFileInfo.mockResolvedValue({ success: false, error: 'No such file', code: 'NOT_FOUND' })
+    mocks.getFileInfo.mockResolvedValue({
+      success: false,
+      error: 'No such file',
+      code: 'NOT_FOUND'
+    })
 
     const opened = await openFilePathFromTerminal('src/x.ts#L10', { cwd: '/repo' })
 
