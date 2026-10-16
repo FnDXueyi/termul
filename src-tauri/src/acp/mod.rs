@@ -26,6 +26,7 @@ pub mod events;
 pub mod factory_key;
 pub mod history_import;
 pub mod host_mcp;
+pub mod https_only;
 pub mod install;
 pub mod legacy_models;
 pub mod manager;

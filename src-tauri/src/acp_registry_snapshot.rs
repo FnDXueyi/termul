@@ -113,9 +113,9 @@ pub fn sanitize_distribution(value: &serde_json::Value) -> Option<serde_json::Va
     value.as_object().cloned().map(serde_json::Value::Object)
 }
 
-fn parse_snapshot(body: &str) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
+fn parse_snapshot(body: &[u8]) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
     let raw: RawRegistry =
-        serde_json::from_str(body).map_err(|e| format!("Failed to parse ACP registry: {}", e))?;
+        serde_json::from_slice(body).map_err(|e| format!("Failed to parse ACP registry: {}", e))?;
 
     let mut agents = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -196,23 +196,43 @@ fn cache_is_fresh(fetched_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool 
 /// Network fetch of the live CDN registry (no cache interaction). Production
 /// passes the fixed https [`REGISTRY_URL`]; tests pass a local server URL.
 async fn fetch_registry_agents(url: &str) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
+    use futures_util::StreamExt;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .redirect(crate::acp::https_only::redirect_policy())
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("ACP registry request failed: {}", e))?;
+    let response =
+        client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| match std::error::Error::source(&e) {
+                Some(cause) if e.is_redirect() => {
+                    let message = format!("ACP registry redirect refused: {cause}");
+                    log::warn!("[acp-registry] {message}");
+                    message
+                }
+                _ => format!("ACP registry request failed: {}", e),
+            })?;
     if !response.status().is_success() {
         return Err(format!("ACP registry returned HTTP {}", response.status()));
     }
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read ACP registry body: {}", e))?;
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read ACP registry body: {}", e))?;
+        if body.len() + chunk.len() > MAX_REGISTRY_BODY_BYTES {
+            let message = format!(
+                "ACP registry body exceeded the {MAX_REGISTRY_BODY_BYTES}-byte cap; refused"
+            );
+            log::warn!("[acp-registry] {message}");
+            return Err(message);
+        }
+        body.extend_from_slice(&chunk);
+    }
     parse_snapshot(&body)
 }
 

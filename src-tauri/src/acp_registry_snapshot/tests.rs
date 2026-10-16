@@ -13,7 +13,7 @@ fn parses_agents_with_distribution() {
                 }
             ]
         }"#;
-    let agents = parse_snapshot(body).unwrap();
+    let agents = parse_snapshot(body.as_bytes()).unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].id, "claude-acp");
     assert!(agents[0].distribution.get("npx").is_some());
@@ -22,7 +22,7 @@ fn parses_agents_with_distribution() {
 #[test]
 fn skips_agents_without_distribution() {
     let body = r#"{ "agents": [ { "id": "broken" } ] }"#;
-    assert!(parse_snapshot(body).unwrap().is_empty());
+    assert!(parse_snapshot(body.as_bytes()).unwrap().is_empty());
 }
 
 #[test]
@@ -254,7 +254,8 @@ async fn malformed_fetched_at_treated_as_expired() {
 
 // ---- Live fetch against a local HTTP server ----
 
-const ONE_AGENT_REGISTRY: &str = r#"{"agents":[{"id":"local-agent","distribution":{"npx":{"package":"local@1.0.0"}}}]}"#;
+const ONE_AGENT_REGISTRY: &str =
+    r#"{"agents":[{"id":"local-agent","distribution":{"npx":{"package":"local@1.0.0"}}}]}"#;
 
 /// A registry document of exactly `len` bytes: valid JSON with no agents and
 /// a padding string, streamed in 64 KiB chunks with no Content-Length.
@@ -265,8 +266,10 @@ fn padded_registry_body(len: usize) -> axum::body::Body {
     body.extend_from_slice(prefix.as_bytes());
     body.resize(len - suffix.len(), b'x');
     body.extend_from_slice(suffix.as_bytes());
-    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
-        body.chunks(64 * 1024).map(|chunk| Ok(chunk.to_vec())).collect();
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> = body
+        .chunks(64 * 1024)
+        .map(|chunk| Ok(chunk.to_vec()))
+        .collect();
     axum::body::Body::from_stream(futures_util::stream::iter(chunks))
 }
 
