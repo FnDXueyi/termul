@@ -14,9 +14,7 @@
  *    user-edit override semantics,
  *  - only Root Directory + Project Name render (no template, color, shell,
  *    or git-init controls), and
- *  - the web session-only note is preserved, and
- *  - after create, the web `.git` probe marks the project a git repo for a
- *    `.git` directory or `gitdir:` pointer file, and for nothing else.
+ *  - the web session-only note is preserved.
  *
  * The `@tauri-apps/plugin-fs` + `@tauri-apps/plugin-dialog` +
  * `@tauri-apps/api/core` modules are stubbed so the module loads without a
@@ -126,8 +124,6 @@ vi.mock('@/stores/project-store', () => ({
   useProjects: () => existingProjectsRef.current
 }))
 
-// The desktop worktree reconciler runs after the web `.git` probe; it has its
-// own tests, so here it only records which project it was handed.
 vi.mock('@/lib/worktree-reconciler', () => ({
   reconcileProjectWorktrees: mockReconcileProjectWorktrees
 }))
