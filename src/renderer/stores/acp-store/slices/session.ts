@@ -49,6 +49,7 @@ import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestrati
 import { dropPromptQueueForSession, moveQueuedPrompts } from '../../prompt-queue-orchestration'
 import { pruneRestoredChatTabs } from '../chat-tab-prune'
 import {
+  addAdvertisedOptionsKeepingCurrent,
   cacheOptionsFromSession,
   captureReopenControlBaseline,
   configIdForAgentId,
@@ -76,8 +77,7 @@ import {
   trimLiveToolCalls,
   withSessionActive,
   withSessionResumeError,
-  withSwitchMarker,
-  writeAgentOptionsCache
+  withSwitchMarker
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
@@ -1565,16 +1565,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
               activeTurn: existing?.activeTurn ?? false,
               mcpServerCount: sessionMcpServers.length,
               openTurnId: existing?.openTurnId ?? null,
-              // An event-created stub (session_created/mode_update beating
-              // the reply) carries the SAME creation payload plus any genuine
-              // updates that landed during the await — prefer it so a real
-              // agent-side change isn't reverted by the `session/new` echo.
-              modes: existing?.modes ?? outcome.modes ?? null,
-              models: existing?.models ?? outcome.models ?? null,
-              configOptions:
-                existing && existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (outcome.configOptions ?? []),
+              ...addAdvertisedOptionsKeepingCurrent(
+                existing ?? { modes: null, models: null, configOptions: [] },
+                outcome
+              ),
               // Baseline for the creation-default echo guard: the values the
               // session was created WITH (from whichever payload populated
               // them — the `session/new` result or an earlier event stub).
@@ -1610,14 +1604,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       }
       // Cache models/modes even for ephemeral prepares so the launcher can paint
       // instantly from the warm pool.
-      const configId = configIdForAgentId(get(), agentId)
-      if (configId) {
-        writeAgentOptionsCache(set, configId, {
-          models: outcome.models ?? null,
-          modes: outcome.modes ?? null,
-          configOptions: outcome.configOptions ?? []
-        })
-      }
+      cacheOptionsFromSession(set, get, sessionId)
       return sessionId
     } catch (err) {
       const { category } = classifySetupError(err)
@@ -2594,23 +2581,12 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     set((s) => {
       const existing = s.sessions[e.sessionId]
       if (existing) {
-        // Enrich-only — the event re-delivers the SAME `session/new` payload
-        // the local create path already installed (manager.rs fans it out
-        // before send_reply, so it can land after pending launcher picks were
-        // applied). Populated option fields are authoritative: fill only
-        // EMPTY ones so a late echo of creation defaults cannot revert values
-        // the user already selected.
         return {
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
               ...existing,
-              modes: existing.modes ?? e.modes ?? null,
-              models: existing.models ?? e.models ?? null,
-              configOptions:
-                existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (e.configOptions ?? existing.configOptions),
+              ...addAdvertisedOptionsKeepingCurrent(existing, e),
               creationOptionDefaults:
                 existing.creationOptionDefaults ?? creationOptionDefaultsFrom(e)
             }
