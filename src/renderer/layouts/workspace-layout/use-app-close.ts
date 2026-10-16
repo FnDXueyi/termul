@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { persistWindowStateBeforeClose } from '@/hooks/use-window-state'
 import { flushSessionHistory, waitForPendingSessionIndexWrite } from '@/lib/acp-history-persistence'
 import { persistenceApi, windowApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { listen, type UnlistenFn } from '@/lib/tauri-event'
 import { useEditorStore } from '@/stores/editor-store'
 
@@ -12,12 +14,25 @@ export function useAppClose() {
 
   const closeAppWithPersistenceFlush = useCallback(async () => {
     try {
-      const [pendingPersistenceResult, pendingSessionIndexResult, historyFlushResult] =
-        await Promise.allSettled([
-          persistenceApi.flushPendingWrites(),
-          waitForPendingSessionIndexWrite(),
-          flushSessionHistory()
-        ])
+      const [
+        pendingPersistenceResult,
+        pendingSessionIndexResult,
+        historyFlushResult,
+        windowStateResult
+      ] = await Promise.allSettled([
+        persistenceApi.flushPendingWrites(),
+        waitForPendingSessionIndexWrite(),
+        flushSessionHistory(),
+        persistWindowStateBeforeClose()
+      ])
+
+      if (windowStateResult.status === 'rejected') {
+        const reason = windowStateResult.reason
+        void logFrontendError({
+          source: 'use-app-close',
+          message: `Failed to persist window state before close: ${reason instanceof Error ? reason.message : String(reason)}`
+        })
+      }
 
       // Note: waitForPendingSessionIndexWrite swallows rejections internally
       // (trackPendingIndexWrite catches and logs them), so this branch is

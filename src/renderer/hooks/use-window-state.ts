@@ -25,6 +25,38 @@ const MIN_VISIBLE_PIXELS = 100
  */
 export const WINDOW_RESTORE_TIMEOUT_MS = 1500
 
+/** Upper bound on the close-time geometry write so a hung IPC cannot block quit. */
+export const WINDOW_STATE_CLOSE_TIMEOUT_MS = 1000
+
+// Null outside Tauri and until the restore settles, so close never persists
+// half-restored geometry.
+let persistWindowStateNow: (() => Promise<void>) | null = null
+
+/**
+ * Persist the current window geometry before the app destroys its window,
+ * waiting at most `WINDOW_STATE_CLOSE_TIMEOUT_MS`. Resolves at once when no
+ * desktop window state is mounted.
+ */
+export async function persistWindowStateBeforeClose(): Promise<void> {
+  if (!persistWindowStateNow) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), WINDOW_STATE_CLOSE_TIMEOUT_MS)
+  })
+  const outcome = await Promise.race([
+    persistWindowStateNow().then(() => 'done' as const),
+    timeout
+  ]).finally(() => clearTimeout(timer))
+  if (outcome === 'timeout') {
+    console.warn(`Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms`)
+    void logFrontendError({
+      level: 'warn',
+      source: 'use-window-state',
+      message: `Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms; closing anyway`
+    })
+  }
+}
+
 interface LogicalRect {
   x: number
   y: number
@@ -218,6 +250,16 @@ export function useWindowState(): boolean {
       await operation
     }
 
+    // Both close-requested listeners and the app-close flush ask for this
+    // write in an order Tauri does not fix; they share one in-flight write.
+    let closeWrite: Promise<void> | null = null
+    const persistNow = (): Promise<void> => {
+      closeWrite ??= persistWindowState(true).finally(() => {
+        closeWrite = null
+      })
+      return closeWrite
+    }
+
     const registerListeners = (): Array<() => void> => {
       const movedUnlisten = window.onMoved(() => void persistWindowState())
       const resizedUnlisten = window.onResized(() => void persistWindowState())
@@ -229,7 +271,12 @@ export function useWindowState(): boolean {
       // route) the default destroy stays, so the window can still close.
       const closeRequestedUnlisten = window.onCloseRequested((event) => {
         if (hasAppCloseOwner()) event.preventDefault()
-        void persistWindowState(true)
+        persistNow().catch((error) => {
+          void logFrontendError({
+            source: 'use-window-state',
+            message: `Failed to persist window state on close: ${error instanceof Error ? error.message : String(error)}`
+          })
+        })
       })
 
       return [
@@ -295,6 +342,7 @@ export function useWindowState(): boolean {
 
       if (disposed) return
       cleanups = registerListeners()
+      persistWindowStateNow = persistNow
     }
 
     void initialize()
@@ -310,6 +358,7 @@ export function useWindowState(): boolean {
     return () => {
       disposed = true
       clearTimeout(restoreTimer)
+      if (persistWindowStateNow === persistNow) persistWindowStateNow = null
       void persistWindowState(true)
       cleanups.forEach((cleanup) => {
         cleanup()
