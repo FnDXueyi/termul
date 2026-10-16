@@ -4,8 +4,8 @@ interface AgentChatUnreadState {
   /** Sessions whose turn finished while they were not the active chat ("New activity"). */
   unread: Record<string, true>
   /**
-   * Per dot, the `seenTurnEndSeq` when its turn started. A read elsewhere can
-   * clear the dot only once a turn end newer than this was seen here.
+   * Per dot, the `seenTurnEndSeq` when its newest turn started. A read elsewhere
+   * can clear the dot only once a turn end newer than this was seen here.
    */
   unreadSince: Record<string, number>
   /** Host-stamped session-log seq of the newest turn end this renderer has seen. */
@@ -70,8 +70,11 @@ export const useAgentChatUnreadStore = create<AgentChatUnreadState>((set) => ({
   markUnread: (sessionId, sinceSeq) => {
     if (!sessionId) return
     set((state) => {
-      if (state.unread[sessionId]) return state
       const since = sinceSeq ?? state.seenTurnEndSeq[sessionId] ?? 0
+      if (state.unread[sessionId]) {
+        if ((state.unreadSince[sessionId] ?? 0) >= since) return state
+        return { unreadSince: { ...state.unreadSince, [sessionId]: since } }
+      }
       if (readElsewhere(state, sessionId, since)) return state
       return {
         unread: { ...state.unread, [sessionId]: true },

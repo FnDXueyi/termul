@@ -99,6 +99,17 @@ describe('useAgentChatUnreadStore', () => {
     expect(unread()).toEqual({})
   })
 
+  it('keeps a merged dot when a later turn ended with no turn end seen and the read covers only the first', () => {
+    const store = useAgentChatUnreadStore.getState()
+    store.noteTurnEnd('a', 10)
+    store.markUnread('a', 0)
+    store.markUnread('a', 10)
+
+    store.setReadMark('a', 10)
+
+    expect(unread()).toEqual({ a: true })
+  })
+
   it('banks no dot for a turn end another surface already read', () => {
     const store = useAgentChatUnreadStore.getState()
     store.noteTurnEnd('a', 12)
