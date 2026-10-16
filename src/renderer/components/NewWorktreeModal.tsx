@@ -8,6 +8,7 @@ import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Spinner } from '@/components/ui/spinner'
 import { toast } from '@/hooks/use-toast'
 import { worktreeApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { openTerminalAtCwd } from '@/lib/terminal-spawn'
 import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
@@ -311,6 +312,13 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
 
         onClose()
       } else {
+        const failCode = result.success ? 'UNKNOWN' : result.code
+        const failError = result.success ? 'no worktree returned' : result.error
+        void logFrontendError({
+          level: 'warn',
+          source: 'newWorktreeModal.worktreeCreate',
+          message: `worktree create failed name=${worktreeName} code=${failCode} branch=${branch}: ${failError}`
+        })
         setValidationError(!result.success ? result.error : 'Failed to create worktree')
         toast({
           title: 'Failed to create worktree',
@@ -320,6 +328,12 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
       }
     } catch (err) {
       const msg = String(err)
+      void logFrontendError({
+        level: 'warn',
+        source: 'newWorktreeModal.worktreeCreate',
+        message: `worktree create flow threw name=${worktreeName}: ${msg}`,
+        stack: err instanceof Error ? err.stack : undefined
+      })
       setValidationError(msg)
       toast({
         title: 'Error creating worktree',
