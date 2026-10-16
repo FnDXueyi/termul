@@ -509,12 +509,14 @@ impl WorktreeManager {
         let mut results = Vec::new();
 
         for dir_name in symlink_dirs {
-            // Validate: reject absolute paths and path-traversal components
+            // Only plain names may join onto the roots: on Windows a rooted
+            // (`\x`) or drive-relative (`C:x`) name is not `is_absolute()`
+            // yet `join` replaces the root with it.
             let dir_path = Path::new(dir_name);
-            if dir_path.is_absolute()
-                || dir_path
+            if dir_name.is_empty()
+                || !dir_path
                     .components()
-                    .any(|c| c == std::path::Component::ParentDir)
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
             {
                 results.push(SymlinkResult {
                     path: worktree_root.join(dir_name).to_string_lossy().to_string(),

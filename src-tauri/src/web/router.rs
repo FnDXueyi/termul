@@ -308,10 +308,10 @@ pub fn router(
         // desktop `#[tauri::command] worktree_*` handler; see
         // `web/worktree_api.rs`. Registered AHEAD of the static fallback so the
         // SPA mount cannot shadow them. Write routes (`create`/`remove`/
-        // `copy-include-files`/`rename-branch`) are loopback-guarded inside the handler; read
-        // routes (`list`/`branches`/`check-dirty`/`resolve-base-branch`)
-        // enforce containment only. Only the 7 launch-flow routes ship here;
-        // the 8 advanced ops are deferred (see deferred-work.md).
+        // `copy-include-files`/`rename-branch`/`create-symlinks`/`ensure-symlinks`)
+        // are loopback-guarded inside the handler; read routes (`list`/
+        // `branches`/`check-dirty`/`resolve-base-branch`/`parse-gitignore`)
+        // enforce containment only.
         .route("/worktree/list", post(worktree_api::list))
         .route("/worktree/create", post(worktree_api::create))
         .route("/worktree/remove", post(worktree_api::remove))
@@ -328,6 +328,18 @@ pub fn router(
         .route(
             "/worktree/rename-branch",
             post(worktree_rename_api::rename_branch),
+        )
+        .route(
+            "/worktree/parse-gitignore",
+            post(worktree_api::parse_gitignore),
+        )
+        .route(
+            "/worktree/create-symlinks",
+            post(worktree_api::create_symlinks),
+        )
+        .route(
+            "/worktree/ensure-symlinks",
+            post(worktree_api::ensure_symlinks),
         );
     let mut r = r
         // Canvas web routes (OpenPencil canvas mode, CAP-5): open/close/

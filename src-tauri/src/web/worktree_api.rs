@@ -22,9 +22,9 @@
 //! - logs at route boundaries via `tracing` (the standalone server's logger;
 //!   a no-op when no subscriber is installed on the desktop shared-live path).
 //!
-//! The 7 launch-flow routes ship here. The 8 advanced ops (symlinks,
-//! `parseGitignore`, `mergePreview/Execute`, `archive`/`restore`,
-//! `removeAllManaged`) are deferred — see `deferred-work.md`.
+//! The symlink routes (`parse-gitignore`, `create-symlinks`, `ensure-symlinks`)
+//! live in `symlinks`. `mergePreview`/`mergeExecute`, `archive`/`restore` and
+//! `removeAllManaged` have no renderer caller and no web route.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -50,6 +50,8 @@ use crate::worktree::{
 mod ledgered;
 pub(crate) use ledgered::create_fingerprint;
 mod scope;
+mod symlinks;
+pub use symlinks::{create_symlinks, ensure_symlinks, parse_gitignore};
 
 /// `POST /worktree/list { projectPath }` body.
 #[derive(Debug, Deserialize)]
