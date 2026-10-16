@@ -7,11 +7,15 @@ import type { Project } from '@/types/project'
 import { ProjectSidebar } from './ProjectSidebar'
 
 const {
+  mockSelectDirectory,
+  toastMock,
   mockGetAvailableShells,
   mockUseProjectsWithActivity,
   mockUseProjectsWithErrors,
   mockUseProjectsWithActiveAgentChat
 } = vi.hoisted(() => ({
+  mockSelectDirectory: vi.fn(),
+  toastMock: Object.assign(vi.fn(), { error: vi.fn() }),
   mockGetAvailableShells: vi.fn(),
   mockUseProjectsWithActivity: vi.fn(),
   mockUseProjectsWithErrors: vi.fn(),
@@ -19,6 +23,9 @@ const {
 }))
 
 vi.mock('@/lib/api', () => ({
+  dialogApi: {
+    selectDirectory: mockSelectDirectory
+  },
   shellApi: {
     getAvailableShells: mockGetAvailableShells
   },
@@ -35,6 +42,8 @@ vi.mock('@/lib/api', () => ({
     writeText: vi.fn().mockResolvedValue({ success: true })
   }
 }))
+
+vi.mock('sonner', () => ({ toast: toastMock }))
 
 vi.mock('@/stores/terminal-store', async () => {
   const actual = await vi.importActual('@/stores/terminal-store')
@@ -1238,6 +1247,42 @@ describe('ProjectSidebar: Mono-style alignment and groups', () => {
     fireEvent.contextMenu(screen.getByText('My Folder'))
 
     expect(screen.getByText('Rename Group')).toBeInTheDocument()
+  })
+
+  function importProjectIntoGroup(): void {
+    fireEvent.contextMenu(screen.getByText('My Folder'))
+    fireEvent.mouseEnter(screen.getByText('Add Project'))
+    fireEvent.click(screen.getByText('Import Project...'))
+  }
+
+  it('confirms an imported project with a sonner toast', async () => {
+    mockSelectDirectory.mockResolvedValue({ success: true, data: '/repo/imported' })
+    const addProject = vi.fn().mockResolvedValue({ id: 'imported' })
+    useProjectStore.setState({ groups: [group(true)], addProject })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    importProjectIntoGroup()
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith('Project created', {
+        description: 'Created project "imported" and added to group.'
+      })
+    )
+    expect(addProject).toHaveBeenCalledWith('imported', 'blue', '/repo/imported')
+  })
+
+  it('reports a failed project import with a sonner error toast', async () => {
+    mockSelectDirectory.mockRejectedValue(new Error('dialog failed'))
+    useProjectStore.setState({ groups: [group(true)] })
+    renderWithRouter({ projects: railProjects.slice(0, 3) })
+
+    importProjectIntoGroup()
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith('Error', {
+        description: 'Failed to create project from folder: dialog failed'
+      })
+    )
   })
 
   it('renames a group inline from the menu', () => {
