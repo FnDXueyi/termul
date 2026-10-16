@@ -277,23 +277,25 @@ pub(super) fn scan_fold_tail(
     Ok(scan)
 }
 
-/// Lightweight corruption check: read the first line of a JSONL file and
-/// verify it probes as a record with the expected schema version and session
-/// id. Returns `true` for empty files or valid first records, `false` only
-/// when the first line is non-empty and unparseable or mismatches. This
-/// catches fully-corrupt files without loading all records.
 pub(super) fn jsonl_first_record_is_valid(path: &Path, expected_session_id: &str) -> bool {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return true, // missing file is handled by `ensure_log_exists`
-    };
     use std::io::BufRead;
-    let reader = std::io::BufReader::new(file);
-    match reader.lines().next() {
-        Some(Ok(line)) if !line.trim().is_empty() => {
-            probe_record(line.as_bytes(), expected_session_id).is_some()
+    let Ok(file) = fs::File::open(path) else {
+        return true;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => return true,
+            Ok(_) => {}
         }
-        _ => true, // empty file or no lines — not corrupt
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if !line.is_empty() {
+            return probe_record(&line, expected_session_id).is_some();
+        }
     }
 }
 
@@ -791,13 +793,43 @@ fn scan_seq_intruders(bytes: &[u8], session_id: &str) -> Option<SeqIntruderScan>
     Some(scan)
 }
 
-/// Unlocked pre-check for the read-path salvage: `true` only when every
-/// scanned log is salvageable AND at least one holds an intruder — i.e. a
-/// locked [`salvage_session_dir`] pass could actually rewrite something.
-/// Unsalvageable content (`None` from [`scan_seq_intruders`]) and clean
-/// logs both return `false`, so permanently-corrupt sessions never reach
-/// for the catalog lock on every failed read.
-pub(super) fn has_seq_intruders(dir: &Path, session_id: &str) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LogStamps {
+    messages: Option<FileStamp>,
+    tool_calls: Option<FileStamp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+pub(super) fn log_stamps(dir: &Path) -> io::Result<LogStamps> {
+    let stamp = |name: &str| match fs::metadata(dir.join(name)) {
+        Ok(metadata) => Ok(Some(FileStamp {
+            len: metadata.len(),
+            modified: metadata.modified()?,
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    Ok(LogStamps {
+        messages: stamp(MESSAGES_FILE)?,
+        tool_calls: stamp(TOOL_CALLS_FILE)?,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SalvageProbe {
+    Clean,
+    Intruders,
+    Unsalvageable,
+}
+
+pub(super) fn probe_seq_intruders(dir: &Path, session_id: &str) -> Result<SalvageProbe> {
+    let mut kept_seqs = std::collections::HashSet::new();
+    let mut intruders = false;
     for name in [MESSAGES_FILE, TOOL_CALLS_FILE] {
         let path = dir.join(name);
         let bytes = match fs::read(&path) {
@@ -808,13 +840,23 @@ pub(super) fn has_seq_intruders(dir: &Path, session_id: &str) -> Result<bool> {
         if bytes.is_empty() {
             continue;
         }
-        match scan_seq_intruders(&bytes, session_id) {
-            None => return Ok(false),
-            Some(scan) if !scan.intruders.is_empty() => return Ok(true),
-            _ => {}
+        let Some(scan) = scan_seq_intruders(&bytes, session_id) else {
+            return Ok(SalvageProbe::Unsalvageable);
+        };
+        if !scan
+            .kept_records
+            .iter()
+            .all(|record| kept_seqs.insert(record.seq))
+        {
+            return Ok(SalvageProbe::Unsalvageable);
         }
+        intruders |= !scan.intruders.is_empty();
     }
-    Ok(false)
+    Ok(if intruders {
+        SalvageProbe::Intruders
+    } else {
+        SalvageProbe::Clean
+    })
 }
 
 /// Single file-order salvage pass over a session directory's JSONL logs.
