@@ -254,7 +254,7 @@ async fn create_symlinks_refuses_rooted_and_drive_relative_names() {
         json!({
             "projectPath": s(&p.root),
             "worktreePath": s(&p.worktree),
-            "symlinkDirs": ["\termul-rooted-escape", "C:termul-drive-escape"]
+            "symlinkDirs": ["\\termul-rooted-escape", "C:termul-drive-escape"]
         }),
         loopback(),
     )
