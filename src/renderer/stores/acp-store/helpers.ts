@@ -433,16 +433,24 @@ export function isFailedTurnStopReason(reason: StopReason): boolean {
   return reason === 'error' || reason === 'timeout' || reason === 'crashed'
 }
 
+type LastErrorFields = Pick<AcpSession, 'lastError' | 'lastErrorCode' | 'lastErrorData'>
+
 /**
  * `lastError` after a turn terminator: a failed-turn terminator keeps the
  * specific error already recorded by the preceding `agent_error` and only
  * falls back to the generic note; every other reason keeps the existing
- * `note ?? current` rule.
+ * `note ?? current` rule. The code and data stay only with the error they
+ * came with.
  */
-export function lastErrorAfterStop(current: string | null, reason: StopReason): string | null {
+export function lastErrorAfterStop(current: LastErrorFields, reason: StopReason): LastErrorFields {
   const note = noteForStopReason(reason)
-  if (isFailedTurnStopReason(reason)) return current ?? note
-  return note ?? current
+  const keep = isFailedTurnStopReason(reason) ? current.lastError !== null : note === null
+  if (!keep) return plainLastError(note)
+  return {
+    lastError: current.lastError,
+    lastErrorCode: current.lastErrorCode,
+    lastErrorData: current.lastErrorData
+  }
 }
 
 /**
@@ -482,9 +490,7 @@ export function withSessionActive(
   return { ...sessions, [sessionId]: { ...session, status: 'active', ...plainLastError(null) } }
 }
 
-export function plainLastError(
-  message: string | null
-): Pick<AcpSession, 'lastError' | 'lastErrorCode' | 'lastErrorData'> {
+export function plainLastError(message: string | null): LastErrorFields {
   return { lastError: message, lastErrorCode: null, lastErrorData: undefined }
 }
 

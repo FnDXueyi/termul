@@ -148,10 +148,7 @@ function scheduleTurnEnd(
               ...current,
               openTurnId: null,
               activeTurn: false,
-              lastError:
-                stopReason !== undefined
-                  ? lastErrorAfterStop(current.lastError, stopReason)
-                  : current.lastError
+              ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
             }
           }
         }
@@ -185,10 +182,7 @@ function scheduleTurnEnd(
             ...current,
             openTurnId: null,
             activeTurn: false,
-            lastError:
-              stopReason !== undefined
-                ? lastErrorAfterStop(current.lastError, stopReason)
-                : current.lastError
+            ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
           }
         }
       }
@@ -1127,7 +1121,7 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
           ...s.sessions,
           [e.sessionId]: {
             ...session,
-            lastError: lastErrorAfterStop(session.lastError, e.stopReason),
+            ...lastErrorAfterStop(session, e.stopReason),
             opencodeNotice: undefined
           }
         }
