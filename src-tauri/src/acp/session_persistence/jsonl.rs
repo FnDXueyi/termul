@@ -293,6 +293,40 @@ pub(super) fn scan_fold_tail(
     Ok(scan)
 }
 
+static COMMANDS_UPDATE_NEEDLE: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(b"\"type\":\"commands_update\""));
+
+/// The `availableCommands` of the newest `commands_update` in `path`, the
+/// value `materialize_session_payload` folds from a full replay. One backward
+/// pass that parses only lines naming that type and stops at the first that
+/// is one.
+pub(super) fn newest_command_list(path: &Path, session_id: &str) -> io::Result<Option<Value>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let end = file.metadata()?.len();
+    let mut commands = None;
+    scan_lines_backward(&mut file, end, 0, |line, terminated| {
+        if !terminated || COMMANDS_UPDATE_NEEDLE.find(line).is_none() {
+            return ControlFlow::Continue(());
+        }
+        match serde_json::from_slice::<PersistedEventRecord>(line) {
+            Ok(record)
+                if record.schema_version == SESSION_SCHEMA_VERSION
+                    && record.session_id == session_id
+                    && record.type_ == "commands_update" =>
+            {
+                commands = record.payload.get("availableCommands").cloned();
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    })?;
+    Ok(commands)
+}
+
 pub(super) fn jsonl_first_record_is_valid(path: &Path, expected_session_id: &str) -> bool {
     use std::io::BufRead;
     let Ok(file) = fs::File::open(path) else {
