@@ -1,3 +1,4 @@
+use super::GitTracker;
 use super::git_exec::{
     drain_capped, empty_tree_for, run_git_capture, GitRunError, StdoutCap, EMPTY_TREE,
 };
@@ -84,7 +85,7 @@ fn git_run_error_display_is_stable() {
 }
 
 #[test]
-fn it_run_git_capture_reads_output_larger_than_the_pipe_buffer() {
+fn it_git_runners_read_output_larger_than_the_pipe_buffer() {
     let tmp = std::env::temp_dir().join(format!("termul-gitexec-big-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("create temp dir");
     struct Cleanup(std::path::PathBuf);
@@ -115,6 +116,10 @@ fn it_run_git_capture_reads_output_larger_than_the_pipe_buffer() {
         .expect("cat-file");
     assert!(out.status.success());
     assert_eq!(out.stdout.len(), 300_000);
+    let polled = GitTracker::run_git_command_with_timeout(cwd, &["cat-file", "-p", &id], 10_000)
+        .expect("run_git_command must not stall on a full pipe");
+    assert!(polled.status.success());
+    assert_eq!(polled.stdout.len(), 300_000);
 
     let capped = run_git_capture(
         cwd,
