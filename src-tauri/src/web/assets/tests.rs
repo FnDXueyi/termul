@@ -684,3 +684,55 @@ async fn missing_hashed_asset_falls_back_not_immutable() {
         "the HTML fallback must be revalidated (upgrade safety), got {cache}"
     );
 }
+
+async fn get_embedded(path: &str, if_none_match: Option<&str>) -> axum::response::Response {
+    let mut request = Request::builder().uri(path);
+    if let Some(tag) = if_none_match {
+        request = request.header(header::IF_NONE_MATCH, tag);
+    }
+    Router::new()
+        .fallback(serve_embedded)
+        .oneshot(request.body(Body::empty()).expect("build request"))
+        .await
+        .expect("router response")
+}
+
+#[tokio::test]
+async fn serve_embedded_answers_a_matching_if_none_match_with_304() {
+    use sha2::{Digest, Sha256};
+
+    if !embed_present() {
+        return;
+    }
+    for path in ["/", "/sw.js", "/manifest.webmanifest"] {
+        let fresh = get_embedded(path, None).await;
+        assert_eq!(fresh.status(), StatusCode::OK, "{path}");
+        let etag = fresh.headers()[header::ETAG]
+            .to_str()
+            .expect("ascii etag")
+            .to_string();
+        let body = to_bytes(fresh.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let hex: String = Sha256::digest(&body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(etag, format!("W/\"{hex}\""), "{path}");
+
+        let revalidated = get_embedded(path, Some(&etag)).await;
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(revalidated.headers()[header::ETAG], etag.as_str());
+        assert_eq!(
+            revalidated.headers()[header::CACHE_CONTROL],
+            "no-cache, must-revalidate"
+        );
+        let empty = to_bytes(revalidated.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(empty.len(), 0, "{path}");
+
+        let stale = get_embedded(path, Some("W/\"0000\", \"1111\"")).await;
+        assert_eq!(stale.status(), StatusCode::OK, "{path}");
+    }
+}
