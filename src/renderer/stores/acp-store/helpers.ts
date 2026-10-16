@@ -14,6 +14,7 @@ import {
   type McpServer,
   type PlanEntry,
   type SessionConfigOption,
+  type SessionConfigOptionEntry,
   type SessionId,
   type SessionModelState,
   type SessionModeState,
@@ -1182,10 +1183,49 @@ export function creationOptionDefaultsFrom(input: {
   }
 }
 
-function appendUnseen<T>(current: T[], incoming: T[], key: (item: T) => string): T[] {
+function appendUnseen<T>(
+  current: T[],
+  incoming: T[],
+  key: (item: T) => string,
+  enrich?: (item: T, other: T) => T
+): T[] {
+  const incomingByKey = new Map(incoming.map((item) => [key(item), item]))
+  const enriched = enrich
+    ? current.map((item) => {
+        const other = incomingByKey.get(key(item))
+        return other ? enrich(item, other) : item
+      })
+    : current
   const seen = new Set(current.map(key))
   const added = incoming.filter((item) => !seen.has(key(item)))
-  return added.length > 0 ? [...current, ...added] : current
+  const changed = enriched.some((item, index) => item !== current[index])
+  return changed || added.length > 0 ? [...enriched, ...added] : current
+}
+
+const configEntryKey = (entry: SessionConfigOptionEntry): string =>
+  Array.isArray(entry.options) ? `group:${entry.group ?? entry.name}` : `value:${entry.value}`
+
+function appendUnseenGroupValues(
+  entry: SessionConfigOptionEntry,
+  other: SessionConfigOptionEntry
+): SessionConfigOptionEntry {
+  if (!entry.options || !other.options) return entry
+  const options = appendUnseen(entry.options, other.options, (value) => value.value)
+  return options === entry.options ? entry : { ...entry, options }
+}
+
+function appendUnseenConfigValues(
+  option: SessionConfigOption,
+  other: SessionConfigOption
+): SessionConfigOption {
+  if (!option.options || !other.options) return option
+  const options = appendUnseen(
+    option.options,
+    other.options,
+    configEntryKey,
+    appendUnseenGroupValues
+  )
+  return options === option.options ? option : { ...option, options }
 }
 
 export function addAdvertisedOptionsKeepingCurrent(
@@ -1221,7 +1261,12 @@ export function addAdvertisedOptionsKeepingCurrent(
   return {
     modes,
     models,
-    configOptions: appendUnseen(current.configOptions, payload.configOptions ?? [], (o) => o.id)
+    configOptions: appendUnseen(
+      current.configOptions,
+      payload.configOptions ?? [],
+      (option) => option.id,
+      appendUnseenConfigValues
+    )
   }
 }
 
@@ -1762,8 +1807,7 @@ export function captureReopenControlBaseline(
   return {
     modes: session.modes,
     models: session.models,
-    configOptions: session.configOptions,
-    creationOptionDefaults: session.creationOptionDefaults
+    configOptions: session.configOptions
   }
 }
 

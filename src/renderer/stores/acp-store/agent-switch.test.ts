@@ -3537,6 +3537,43 @@ describe('composer option fidelity', () => {
       ])
     })
 
+    it('_onSessionCreated adds values a late payload advertises under an existing option', () => {
+      const grouped = (currentValue: string, values: string[]) => ({
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue,
+        options: [
+          { name: 'Fast', group: 'fast', options: values.map((v) => ({ value: v, name: v })) }
+        ]
+      })
+      seedOptionsSession('s1', 'agent-1', {
+        configOptions: [
+          makeConfigOption('thought_level', 'max', ['low', 'max']),
+          grouped('a', ['a'])
+        ]
+      })
+      const latePayload = {
+        agentId: 'agent-1',
+        sessionId: 's1',
+        configOptions: [
+          makeConfigOption('thought_level', 'low', ['low', 'medium', 'max']),
+          grouped('b', ['a', 'b'])
+        ]
+      }
+
+      useAcpStore.getState()._onSessionCreated(latePayload)
+      const enriched = useAcpStore.getState().sessions['s1'].configOptions
+      useAcpStore.getState()._onSessionCreated(latePayload)
+
+      expect(enriched).toEqual([
+        makeConfigOption('thought_level', 'max', ['low', 'max', 'medium']),
+        grouped('a', ['a', 'b'])
+      ])
+      expect(useAcpStore.getState().sessions['s1'].configOptions).toBe(enriched)
+    })
+
     it('_onSessionCreated populates an event stub with the payload as creation defaults', () => {
       useAcpStore.getState()._onSessionCreated({
         agentId: 'agent-1',

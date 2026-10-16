@@ -109,7 +109,6 @@ import {
   terminalAssistCollectors
 } from '../shared-state'
 import {
-  type AcpSession,
   type AcpState,
   ChatLaunchCancelledError,
   type ChatMessage,
@@ -614,19 +613,6 @@ async function redirectSwitchedReopen(
   return true
 }
 
-function echoBaselineAfterReopen(
-  prior: AcpSession['creationOptionDefaults'],
-  outcome: SessionReopenOutcome
-): AcpSession['creationOptionDefaults'] {
-  if (!outcome.modes && !outcome.models && !outcome.configOptions) return prior
-  const reported = creationOptionDefaultsFrom(outcome)
-  return {
-    modeId: outcome.modes ? reported.modeId : prior?.modeId,
-    modelId: outcome.models ? reported.modelId : prior?.modelId,
-    configValues: outcome.configOptions ? reported.configValues : (prior?.configValues ?? {})
-  }
-}
-
 // AD-6 exception (reply-driven session state kept): `session/load` and
 // `session/resume` report the session's modes / models / config options ONLY in
 // the reply (the replayed updates carry changes, not the initial state), so the
@@ -648,7 +634,6 @@ function mergeReopenOutcomeIfUnchanged(
         ...s.sessions,
         [sessionId]: {
           ...session,
-          creationOptionDefaults: echoBaselineAfterReopen(session.creationOptionDefaults, outcome),
           modes:
             outcome.modes !== undefined && Object.is(session.modes, baseline.modes)
               ? outcome.modes
@@ -783,7 +768,6 @@ async function openHistorySessionInner(
         modes: existingControls?.modes ?? null,
         models: existingControls?.models ?? null,
         configOptions: existingControls?.configOptions ?? [],
-        creationOptionDefaults: existingControls?.creationOptionDefaults,
         lastError: null,
         createdAt: meta.createdAt,
         replaying: null,
@@ -2378,7 +2362,6 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
             modes: existingControls?.modes ?? null,
             models: existingControls?.models ?? null,
             configOptions: existingControls?.configOptions ?? [],
-            creationOptionDefaults: existingControls?.creationOptionDefaults,
             lastError: null,
             createdAt: Date.now(),
             replaying: strategy === 'load' ? 'pending' : strategy === 'resume' ? 'streaming' : null,
