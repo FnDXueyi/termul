@@ -144,6 +144,11 @@ struct Inner {
     /// shutdown `interrupted` marker) take theirs from here.
     seq_authority: Mutex<Option<Arc<dyn SeqAuthority>>>,
     unsalvageable_log_stamps: Mutex<HashMap<String, LogStamps>>,
+    /// Newest `availableCommands` appended per session by this process. Agents
+    /// send their list after `session/new`, `session/load` and
+    /// `session/resume`, so every session live in this process has an entry
+    /// even when the record sits before a tail payload's window.
+    last_commands: Mutex<HashMap<String, Value>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -331,6 +336,7 @@ impl SessionPersistence {
                 process_shutdown: AtomicBool::new(false),
                 seq_authority: Mutex::new(None),
                 unsalvageable_log_stamps: Mutex::new(HashMap::new()),
+                last_commands: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 writer_gate_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -679,7 +685,14 @@ impl SessionPersistence {
         record.payload = normalize_durable_payload(&record.type_, &record.payload);
         let session_id = record.session_id.clone();
         let runtime = self.runtime(&session_id)?;
-        self.send_command(&runtime, &session_id, WriterCommand::Append(record))
+        let commands = (record.type_ == "commands_update")
+            .then(|| record.payload.get("availableCommands").cloned())
+            .flatten();
+        self.send_command(&runtime, &session_id, WriterCommand::Append(record))?;
+        if let Some(commands) = commands {
+            self.inner.last_commands.lock().insert(session_id, commands);
+        }
+        Ok(())
     }
 
     /// Hold this session's send lock across a critical section that both
@@ -939,6 +952,7 @@ impl SessionPersistence {
         // retain a stopped writer. Catalog metadata remains available for
         // read-only listing/replay and `unhealthy` preserves observability.
         self.inner.sessions.lock().remove(session_id);
+        self.inner.last_commands.lock().remove(session_id);
         result?;
         self.persist_index().await
     }
@@ -1195,6 +1209,7 @@ impl SessionPersistence {
             }
         }
         self.inner.sessions.lock().remove(session_id);
+        self.inner.last_commands.lock().remove(session_id);
         let dir = self.session_dir(&metadata.storage_key)?;
         // Drop the catalog entry BEFORE touching the dir: a read-path
         // salvage serializes its rewrite on the catalog lock, so once the
@@ -1638,7 +1653,9 @@ impl SessionPersistence {
         self.flush_session(session_id).await?;
         let metadata = self.metadata(session_id)?;
         let records = self.replay_after_async(session_id.to_string(), 0).await?;
-        let payload = crate::acp::session_payload::materialize_session_payload(&metadata, &records);
+        let mut payload =
+            crate::acp::session_payload::materialize_session_payload(&metadata, &records);
+        self.overlay_last_commands(session_id, &mut payload);
         log::info!(
             "[acp-history] session_payload session_id={} messages={} tool_summaries={}",
             crate::logging::redact_session_id(session_id),
@@ -1681,6 +1698,7 @@ impl SessionPersistence {
         // The tail window drops tool records older than its oldest message;
         // summaries must still cover the whole session.
         payload.tool_calls = crate::acp::session_payload::fold_tool_call_summaries(&tool_records);
+        self.overlay_last_commands(session_id, &mut payload);
         // If the tail fold produced fewer than `limit` messages AND the
         // session has more on disk (metadata.message_count > tail len), the
         // heuristic under-read (the 4× line ratio wasn't enough). Fall back
@@ -1735,6 +1753,16 @@ impl SessionPersistence {
             payload.tool_calls.len()
         );
         Ok(payload)
+    }
+
+    fn overlay_last_commands(
+        &self,
+        session_id: &str,
+        payload: &mut crate::acp::session_payload::MaterializedSessionPayload,
+    ) {
+        if let Some(commands) = self.inner.last_commands.lock().get(session_id) {
+            payload.commands = Some(commands.clone());
+        }
     }
 
     /// Completed client turn ids reconstructed from durable prompt-complete
