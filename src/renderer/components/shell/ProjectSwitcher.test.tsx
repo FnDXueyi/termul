@@ -4,8 +4,6 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import type { Project } from '@/types/project'
 import { ProjectSwitcher } from './ProjectSwitcher'
 
-vi.mock('@/hooks/use-native-webview-occlusion', () => ({ useNativeWebviewOcclusion: vi.fn() }))
-
 const project = (id: string, extra: Partial<Project> = {}): Project =>
   ({ id, name: id.toUpperCase(), color: 'blue', path: `/repo/${id}`, ...extra }) as Project
 

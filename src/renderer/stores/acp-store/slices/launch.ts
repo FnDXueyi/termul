@@ -15,15 +15,17 @@ import {
 } from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestration'
+import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
 import {
   cacheOptionsFromSession,
+  dropPreparedSlots,
   dropRecordKey,
+  isLivePreparedSession,
   newId,
   plainLastError,
   prepareChatKey,
   reapOrphanPreparedSession
 } from '../helpers'
-import { isIndexedRealSession } from '../live-turn'
 import {
   cancelledChatLaunches,
   ensureLiveAgent,
@@ -39,7 +41,7 @@ import {
   ChatLaunchCancelledError,
   type ChatMessage
 } from '../types'
-import { runPromptTurn } from './prompt'
+import { flushNextQueuedPrompt, runPromptTurn } from './prompt'
 
 function cancelPreparedChatEntry(
   key: string,
@@ -63,6 +65,17 @@ function cancelPreparedChatEntry(
     delete preparingChatKeys[key]
     delete prepareChatErrors[key]
     return { preparedSessions, preparingChatKeys, prepareChatErrors }
+  })
+}
+
+function remarkEphemeralAndNotify(
+  sessionId: SessionId,
+  set: (fn: (s: AcpState) => Partial<AcpState> | AcpState) => void
+): void {
+  ephemeralSessionIds.add(sessionId)
+  set((s) => {
+    const session = s.sessions[sessionId]
+    return session ? { sessions: { ...s.sessions, [sessionId]: { ...session } } } : {}
   })
 }
 
@@ -106,7 +119,7 @@ function promotePreparedSession(
         // Keep renderer behavior consistent with the backend reality: the
         // session is STILL backend-ephemeral, so close/disconnect must drop
         // (never persist) it — same as an un-promoted pooled session.
-        ephemeralSessionIds.add(sessionId)
+        remarkEphemeralAndNotify(sessionId, set)
       })
       .finally(() => {
         inFlightPromotions.delete(sessionId)
@@ -156,6 +169,28 @@ function preparedSessionFitsProject(
   return get().sessions[sessionId]?.projectId === projectId
 }
 
+function reconcilePreparedSlot(
+  key: string,
+  get: () => AcpState,
+  set: (fn: (s: AcpState) => Partial<AcpState> | AcpState) => void
+): SessionId | null {
+  const sessionId = get().preparedSessions[key]
+  if (!sessionId) return null
+  if (isLivePreparedSession(get(), sessionId)) return sessionId
+  void logFrontendError({
+    level: 'info',
+    source: 'acp.preparedSlot.stale',
+    message: `Dropped stale prepared slot ${sessionId} (session ${get().sessions[sessionId]?.status ?? 'missing'})`
+  })
+  set((s) => ({
+    preparedSessions: dropPreparedSlots(s.preparedSessions, (sid) => sid === sessionId)
+  }))
+  if (get().sessions[sessionId] && get().activeSessionId !== sessionId) {
+    reapOrphanPreparedSession(get, set, sessionId)
+  }
+  return null
+}
+
 type LaunchSliceState = Pick<
   AcpState,
   | 'preparedSessions'
@@ -189,32 +224,14 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
     if (!sessionId) return
     // If the user already navigated to this session, don't reap it.
     if (get().activeSessionId === sessionId) return
-    // A prepare cancel must not close or delete a chat that already has a
-    // persisted history row (issue #882). Warm-pool ids are not indexed.
-    if (isIndexedRealSession(get().sessionIndex, sessionId)) {
-      ephemeralSessionIds.delete(sessionId)
-      void logFrontendError({
-        level: 'warn',
-        source: 'acp.cancelPreparedChat',
-        message: `Skipped teardown of indexed session ${sessionId}; prepare cancel must not close or delete a persisted chat`
-      })
-      return
-    }
-    void get()
-      .closeSession(sessionId)
-      .catch(() => {
-        /* best-effort: backend may already be gone */
-      })
-      .finally(() => {
-        void get().deleteHistorySession(sessionId)
-      })
+    reapOrphanPreparedSession(get, set, sessionId)
   },
 
   prepareChat: (configId, cwd, mcpServers, projectId, opts) => {
     const trimmedCwd = cwd.trim()
     if (!configId || trimmedCwd.length === 0) return
     const key = prepareChatKey(configId, trimmedCwd, mcpServers)
-    if (get().preparedSessions[key] || inFlightPrepared.has(key)) return
+    if (reconcilePreparedSlot(key, get, set) || inFlightPrepared.has(key)) return
     // AD-5: a definite host rejection (missing binary / invalid config) is not
     // retried by background (`silent`) seeds — pool reseed, retarget, model
     // catalog. A user-initiated (non-silent) prepare, e.g. a Retry click, is a
@@ -349,7 +366,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
     // Loop so a cancelled in-flight prepare that returns null can pick up a
     // newer prepare that started during the await (cancel+reopen race).
     for (;;) {
-      const prepared = get().preparedSessions[key]
+      const prepared = reconcilePreparedSlot(key, get, set)
       if (prepared) {
         if (!preparedSessionFitsProject(get, prepared, projectId)) {
           void logFrontendError({
@@ -364,13 +381,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
       }
       const inFlight = inFlightPrepared.get(key)
       if (!inFlight) break
-      const sessionId = await inFlight
-      if (sessionId && preparedSessionFitsProject(get, sessionId, projectId)) {
-        promotePreparedSession(key, sessionId, projectId, get, set)
-        return sessionId
-      }
-      if (sessionId) break
-      // null: cancelled or failed — re-check for a newer prepare before spawning.
+      await inFlight
     }
     const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
     if (!agentId) throw new Error(`failed to spawn agent for config ${configId}`)
@@ -378,7 +389,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
   },
 
   claimPreparedChat: (key, projectId) => {
-    const sessionId = get().preparedSessions[key]
+    const sessionId = reconcilePreparedSlot(key, get, set)
     if (!sessionId || !preparedSessionFitsProject(get, sessionId, projectId)) return null
     promotePreparedSession(key, sessionId, projectId, get, set)
     return sessionId
@@ -454,6 +465,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
         sessions,
         messages,
         launchingSessionIds,
+        promptQueues: dropPromptQueueForSession(s.promptQueues, sessionId),
         activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId
       }
     })
@@ -664,6 +676,12 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           if (!real) return s
           const placeholderMessages = s.messages[placeholderId] ?? []
           const realMessages = s.messages[sessionId] ?? []
+          const promptQueues = { ...s.promptQueues }
+          const placeholderQueue = promptQueues[placeholderId] ?? []
+          if (placeholderQueue.length > 0) {
+            promptQueues[sessionId] = [...(promptQueues[sessionId] ?? []), ...placeholderQueue]
+          }
+          delete promptQueues[placeholderId]
           const messages = { ...s.messages }
           const sessions = { ...s.sessions }
           const launchingSessionIds = { ...s.launchingSessionIds }
@@ -691,6 +709,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           return {
             sessions,
             messages,
+            promptQueues,
             launchingSessionIds,
             activeSessionId: s.activeSessionId === placeholderId ? sessionId : s.activeSessionId,
             // Drop the placeholder's failed-launch index projection (if any) so
@@ -735,6 +754,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
           { skipUserAppend: hadOptimisticUser }
         )
       }
+      flushNextQueuedPrompt(set, sessionId)
       return sessionId
     } catch (err) {
       // Cancellation bypasses failure stamping entirely: the user deleted the

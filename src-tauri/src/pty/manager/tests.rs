@@ -862,7 +862,7 @@ async fn replayed_spawn_finds_the_stamped_pty_and_issues_a_fresh_claim() {
     assert!(manager.find_by_command_id("cmd-other").is_none());
 
     // A viewer is attached: the replay's claim is shared, the viewer's stays valid.
-    found.add_web_attachment();
+    found.add_live_attachment();
     let replay = manager
         .replay_spawn("cmd-spawn-1", Some("p"))
         .expect("replayed spawn");
@@ -874,7 +874,7 @@ async fn replayed_spawn_finds_the_stamped_pty_and_issues_a_fresh_claim() {
 
     // Nobody attached (e.g. a concurrent resend before the first client
     // attaches): the first reply's claim must keep working too.
-    found.remove_web_attachment();
+    found.remove_live_attachment();
     let again = manager
         .replay_spawn("cmd-spawn-1", Some("p"))
         .expect("replayed spawn");
@@ -966,11 +966,11 @@ async fn terminal_set_observer_hears_each_change_of_the_project_once() {
     assert!(manager.terminal_set("other").is_empty());
 
     let instance = manager.get(&spawned.info.id).expect("instance");
-    instance.add_web_attachment();
-    instance.add_web_attachment(); // a second viewer does not change the set
+    instance.add_live_attachment();
+    instance.add_live_attachment(); // a second viewer does not change the set
     assert!(manager.terminal_set("proj-x")[0].attached);
-    instance.remove_web_attachment();
-    instance.remove_web_attachment();
+    instance.remove_live_attachment();
+    instance.remove_live_attachment();
     assert!(!manager.terminal_set("proj-x")[0].attached);
     manager.force_kill(&spawned.info.id).await.unwrap();
     manager.force_kill(&loose.info.id).await.unwrap();
