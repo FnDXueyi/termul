@@ -1191,6 +1191,10 @@ impl AcpManager {
         self.host_plan_server.bind_session(&token, session_id);
         let mut combined = build_internal_plan_stdio(&agent_id.0, port, &token, &provisional_sid);
         combined.extend(mcp_servers);
+        // Count before OAuth injection. `inject_oauth_tokens` returns servers
+        // that can carry bearer tokens. Logging that value, including its
+        // length, is clear-text logging of the tokens.
+        let server_count = combined.len();
         let combined = inject_oauth_tokens(combined);
         if let Err(error) = gate_mcp_servers(caps, &combined) {
             self.host_plan_server.unregister_by_token(&token);
@@ -1199,7 +1203,7 @@ impl AcpManager {
         log::info!(
             "[acp] session {} reopen attaches {} mcp servers",
             crate::logging::redact_session_id(session_id),
-            combined.len()
+            server_count
         );
         Ok((Some(combined), Some(token)))
     }
