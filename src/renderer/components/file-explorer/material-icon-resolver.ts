@@ -50,6 +50,12 @@ function resolveFolderIconKey(
     : (manifest.folder ?? 'folder')
 }
 
+function* dotSuffixesLongestFirst(fileName: string): Generator<string> {
+  for (let dot = fileName.indexOf('.'); dot !== -1; dot = fileName.indexOf('.', dot + 1)) {
+    yield fileName.slice(dot + 1)
+  }
+}
+
 function resolveFileIconKey(manifest: Manifest, name: string): string {
   const fileName = normalizeName(name)
 
@@ -58,9 +64,8 @@ function resolveFileIconKey(manifest: Manifest, name: string): string {
     return byName
   }
 
-  // Longest dot-suffix first, so `foo.test.ts` matches `test.ts` before `ts` (VS Code's rule).
-  for (let dot = fileName.indexOf('.'); dot !== -1; dot = fileName.indexOf('.', dot + 1)) {
-    const byExtension = manifest.fileExtensions?.[fileName.slice(dot + 1)]
+  for (const suffix of dotSuffixesLongestFirst(fileName)) {
+    const byExtension = manifest.fileExtensions?.[suffix]
     if (byExtension) {
       return byExtension
     }
