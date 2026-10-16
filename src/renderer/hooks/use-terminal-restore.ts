@@ -129,14 +129,10 @@ function resetSpawnCallCount(sessionId: string): void {
 }
 
 async function cleanupSpawnedPtys(
-  terminals: Array<{ ptyId?: string }>,
+  ptyIds: readonly string[],
   restoreId: string,
   phase: string
 ): Promise<void> {
-  const ptyIds = Array.from(
-    new Set(terminals.map((terminal) => terminal.ptyId).filter((ptyId): ptyId is string => !!ptyId))
-  )
-
   if (ptyIds.length === 0) {
     return
   }
@@ -921,6 +917,7 @@ async function restoreFromLayout(
     }> = []
     // Map old IDs to new IDs for active terminal selection and pane remapping
     const idMap = new Map<string, string>()
+    const spawnedPtyIds: string[] = []
 
     let preserved: PreservedTerminalEntry[] = []
     const preservedResult = await terminalApi.listPreserved(projectId)
@@ -956,7 +953,7 @@ async function restoreFromLayout(
     const limitRefusals = { count: 0, message: '' }
     for (const persistedTerminal of layout.terminals) {
       if (isCancelled()) {
-        await cleanupSpawnedPtys(newTerminals, restoreId, 'during restore loop')
+        await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'during restore loop')
         debugLog('restoreFromLayout', `CANCELLED [${restoreId}] during restore loop`)
         return { status: 'cancelled', path: 'persisted-replay' }
       }
@@ -977,7 +974,7 @@ async function restoreFromLayout(
       try {
         const resolvedShell = await resolveShellToPath(persistedTerminal.shell)
         if (isCancelled()) {
-          await cleanupSpawnedPtys(newTerminals, restoreId, 'after shell resolution')
+          await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'after shell resolution')
           debugLog('restoreFromLayout', `CANCELLED [${terminalCallId}] after shell resolution`)
           return { status: 'cancelled', path: 'persisted-replay' }
         }
@@ -1167,6 +1164,7 @@ async function restoreFromLayout(
 
         // FIX #6: Increment SPAWN_CALL_COUNT for each successful spawn in the loop
         SPAWN_CALL_COUNT++
+        spawnedPtyIds.push(spawnData.id)
 
         idMap.set(persistedTerminal.id, newId)
         newTerminals.push({
@@ -1260,7 +1258,7 @@ async function restoreFromLayout(
     }
 
     if (isCancelled()) {
-      await cleanupSpawnedPtys(newTerminals, restoreId, 'before store mutation')
+      await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'before store mutation')
       debugLog('restoreFromLayout', `CANCELLED [${restoreId}] before store mutation`)
       return { status: 'cancelled', path: 'persisted-replay' }
     }
