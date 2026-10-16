@@ -156,8 +156,14 @@ function unambiguousFilePaths(blocks: WireBlock[]): Map<string, string> {
     ) {
       continue
     }
+    let path: string
+    try {
+      path = fileUrlToPath(block.uri)
+    } catch {
+      continue
+    }
     const paths = pathsByName.get(block.name) ?? new Set<string>()
-    pathsByName.set(block.name, paths.add(fileUrlToPath(block.uri)))
+    pathsByName.set(block.name, paths.add(path))
   }
   const unambiguous = new Map<string, string>()
   for (const [name, paths] of pathsByName) {

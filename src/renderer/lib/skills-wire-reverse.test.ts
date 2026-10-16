@@ -222,6 +222,19 @@ describe('wireBlocksToDisplay', () => {
     expect(wireBlocksToDisplay(blocks)).toBe(blocks)
   })
 
+  it('keeps the marker of a link with a malformed file URI as text', () => {
+    const blocks = [
+      { type: 'text', text: '(bad.ts) and (auth.ts)' },
+      { type: 'resource_link', uri: 'file:///%', name: 'bad.ts' },
+      { type: 'resource_link', uri: 'file:///w/auth.ts', name: 'auth.ts' }
+    ]
+    expect(wireBlocksToDisplay(blocks)).toEqual([
+      { type: 'text', text: `(bad.ts) and ${fileToken('auth.ts', '/w/auth.ts')}` },
+      { type: 'resource_link', uri: 'file:///%', name: 'bad.ts' },
+      { type: 'resource_link', uri: 'file:///w/auth.ts', name: 'auth.ts' }
+    ])
+  })
+
   it('keeps a resource_link with no matching marker as an attachment', () => {
     const blocks = [
       { type: 'text', text: 'see attached' },
