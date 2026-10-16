@@ -677,8 +677,8 @@ export function dropSessionBookkeeping(
   // Live-switch source links die with either endpoint: the target's entry
   // outright, and any entry pointing at the dropped session as source.
   liveSwitchSources.delete(sessionId)
-  for (const [target, source] of liveSwitchSources) {
-    if (source === sessionId) liveSwitchSources.delete(target)
+  for (const [target, link] of liveSwitchSources) {
+    if (link.sourceId === sessionId) liveSwitchSources.delete(target)
   }
 }
 
