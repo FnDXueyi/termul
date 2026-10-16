@@ -10,7 +10,7 @@ import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { DiffStatCounts } from '@/components/ui/diff-stat-counts'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ToolCall } from '@/lib/acp-api'
-import type { GitDisplayStatus } from '@/lib/git-status-display'
+import { GIT_STATUS_LABEL, type GitDisplayStatus } from '@/lib/git-status-display'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
 import { useEditorStore } from '@/stores/editor-store'
@@ -29,11 +29,22 @@ function isChangedFileKind(kind: string | undefined): kind is ChangedFileKind {
   return kind === 'edit' || kind === 'delete' || kind === 'move'
 }
 
+/**
+ * The kind a call settles the file into, or null when it settles nothing: a
+ * failed call changed nothing, and a delete still awaiting approval or running
+ * has not removed the file yet.
+ */
+function settledKind(kind: ChangedFileKind, status: ToolCall['status']): ChangedFileKind | null {
+  if (status === 'failed') return null
+  if (kind === 'delete' && status !== 'completed') return null
+  return kind
+}
+
 /** A file touched by one or more ACP tool calls in this session. */
 interface ChangedFile {
   /** Resolved full path — forward slashes, cwd-joined. Also the dedupe key. */
   path: string
-  lastKind: ChangedFileKind
+  settledKind: ChangedFileKind | null
   added: number
   removed: number
 }
@@ -113,7 +124,8 @@ function dirName(fullPath: string, cwd: string): string {
  * `resolveFilePath`, so `src/foo.ts` and `/work/src/foo.ts` merge under cwd
  * `/work`. Add/remove counts — `describeToolCall().diffStat`, the same
  * battle-tested path used by ToolCallCard — are summed across all contributing
- * calls and `kind` is taken from the last one. First-appearance order kept. */
+ * calls; `settledKind` comes from the last call that took effect (see
+ * `settledKind()`). First-appearance order kept. */
 function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] {
   const files: ChangedFile[] = []
   const byPath = new Map<string, ChangedFile>()
@@ -128,16 +140,17 @@ function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] 
     // A dot-only path ('.', 'a/..') can canonicalize to empty.
     if (!path) continue
     const stat = describeToolCall(tc).diffStat ?? { added: 0, removed: 0 }
+    const settled = settledKind(kind, tc.status)
     const existing = byPath.get(path)
     if (existing) {
       existing.added += stat.added
       existing.removed += stat.removed
-      existing.lastKind = kind
+      existing.settledKind = settled ?? existing.settledKind
       continue
     }
     const file: ChangedFile = {
       path,
-      lastKind: kind,
+      settledKind: settled,
       added: stat.added,
       removed: stat.removed
     }
@@ -162,7 +175,8 @@ function FileRow({
   // A separators-only path ('/') has no basename — show the path itself.
   const label = baseName(file.path) || file.path
   const hasCounts = file.added > 0 || file.removed > 0
-  const isDeleted = file.lastKind === 'delete'
+  const isDeleted = file.settledKind === 'delete'
+  const status = file.settledKind && KIND_STATUS[file.settledKind]
 
   const content = (
     <>
@@ -176,7 +190,7 @@ function FileRow({
           <DiffStatCounts added={file.added} removed={file.removed} />
         </span>
       )}
-      <GitStatusLetter status={KIND_STATUS[file.lastKind]} />
+      {status && <GitStatusLetter status={status} />}
     </>
   )
   const rowClass = cn(
@@ -204,9 +218,9 @@ function FileRow({
       type="button"
       data-press-feedback="off"
       title={file.path}
-      // `title` is hover-only; the aria-label carries the resolved path to
-      // touch and screen-reader users.
-      aria-label={file.path}
+      // `title` is hover-only; the aria-label carries the resolved path and the
+      // change kind to touch and screen-reader users.
+      aria-label={status ? `${file.path}, ${GIT_STATUS_LABEL[status]}` : file.path}
       onClick={() => onOpen(file.path)}
       className={cn(
         rowClass,
