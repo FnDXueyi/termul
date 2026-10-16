@@ -89,6 +89,7 @@ import {
   _resetInFlightPreparedForTesting,
   _resetLiveSwitchSourcesForTesting,
   _resetSessionIndexLoadGenerationForTesting,
+  agentReuseKey,
   useAcpStore
 } from '@/stores/acp-store'
 import { FRESH } from './testkit'
@@ -101,6 +102,7 @@ const SESSION = 's1'
 type FakeTransport = AcpTransport & {
   loadSession: ReturnType<typeof vi.fn>
   sendPrompt: ReturnType<typeof vi.fn>
+  closeSession: ReturnType<typeof vi.fn>
   subscribeSession: ReturnType<typeof vi.fn>
   spawnAgent: ReturnType<typeof vi.fn>
 }
@@ -119,6 +121,7 @@ function fakeWebTransport(
     resumeSession: vi.fn(async () => ({})),
     sendPrompt: vi.fn(async () => 'end_turn'),
     sendPromptBlocks: vi.fn(async () => 'end_turn'),
+    closeSession: vi.fn(async () => {}),
     getSessionPayload: async (id: string) => payloads[id] ?? null,
     getSessionPayloadTail: async () => null,
     subscribeSession: vi.fn(async () => {}),
@@ -336,5 +339,90 @@ describe('acp-store: a turn-scoped agent_error keeps the chat on its live agent 
     expect(session.agentId).toBe(FRESH_AGENT)
     expect(session.activeTurn).toBe(false)
     expect(session.lastError).toBeNull()
+  })
+})
+
+describe('acp-store: a turn error that leaves the agent unusable retires it from reuse', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(isTauriContext).mockReturnValue(true)
+    _resetAcpTransportForTests(null)
+    _resetInFlightHistoryOpensForTesting()
+    _resetAcpAuthForTesting()
+    _resetInFlightPreparedForTesting()
+    _resetEphemeralSessionIdsForTesting()
+    _resetSessionIndexLoadGenerationForTesting()
+    _resetHistorySeqWatermarksForTesting()
+    _resetLiveSwitchSourcesForTesting()
+    useAcpStore.setState(FRESH)
+    seedLiveTurn()
+    useAcpStore.setState({ configToLiveAgent: { [agentReuseKey(CONFIG_ID, '/w')]: OWNER } })
+  })
+
+  async function closeChatThenStartAnother(transport: FakeTransport): Promise<void> {
+    await useAcpStore.getState().openHistorySession(SESSION)
+    expect(transport.spawnAgent).not.toHaveBeenCalled()
+    await useAcpStore.getState().closeSession(SESSION)
+    await useAcpStore.getState().prewarmAgent(CONFIG_ID, '/w')
+  }
+
+  it('auth required (-32000): the banner stays, the chat stays live, and a new chat spawns a fresh agent', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'Authentication required',
+      code: -32000
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'error'
+    })
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.status).toBe('active')
+    expect(session.lastError).toBe('Authentication required')
+    expect(session.lastErrorCode).toBe(-32000)
+    expect(session.activeTurn).toBe(false)
+
+    await closeChatThenStartAnother(transport)
+    expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('turn timeout: the banner stays, the chat stays live, and a new chat spawns a fresh agent', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'turn idle timeout: no agent activity for 5s'
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'timeout'
+    })
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.status).toBe('active')
+    expect(session.lastError).toBe('turn idle timeout: no agent activity for 5s')
+    expect(session.activeTurn).toBe(false)
+
+    await closeChatThenStartAnother(transport)
+    expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('a transient turn error keeps the agent reusable for the next chat', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+
+    failTurn()
+
+    await closeChatThenStartAnother(transport)
+    expect(transport.spawnAgent).not.toHaveBeenCalled()
   })
 })
