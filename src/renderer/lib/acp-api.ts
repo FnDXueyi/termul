@@ -22,7 +22,11 @@ import {
   type ProviderErrorCode
 } from '@shared/types/web-protocol.types'
 import { invoke } from '@tauri-apps/api/core'
-import { type CommandCallOptions, getAcpTransport } from '@/lib/acp-transport'
+import {
+  type AgentIdleWindowStatus,
+  type CommandCallOptions,
+  getAcpTransport
+} from '@/lib/acp-transport'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
 import { type CommandRun, runCommand } from '@/lib/command-engine'
 import { keyDigest } from '@/lib/command-journal'
@@ -30,6 +34,8 @@ import { waitUntilVisible } from '@/lib/command-visibility'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { webServerMcpOAuth } from '@/lib/web-server-api'
+
+export type { AgentIdleWindowStatus }
 
 // --- Identifiers -----------------------------------------------------------
 
@@ -1022,12 +1028,24 @@ export async function acpLoadSession(
   agentId: AgentId,
   sessionId: SessionId,
   cwd: string,
-  additionalDirectories?: string[]
+  additionalDirectories?: string[],
+  mcpServers?: McpServer[]
 ): Promise<SessionReopenOutcome> {
+  // A reload carries a different server list than a plain reopen. Digest it
+  // so an in-flight history open is not reused as the reload command.
+  const mcpKey = mcpServers ? keyDigest(JSON.stringify(mcpServers)) : ''
   const run = await ledgered(
     'load_session',
-    `${agentId}|${sessionId}|${cwd}`,
-    (call) => getAcpTransport().loadSession(agentId, sessionId, cwd, additionalDirectories, call),
+    `${agentId}|${sessionId}|${cwd}|${mcpKey}`,
+    (call) =>
+      getAcpTransport().loadSession(
+        agentId,
+        sessionId,
+        cwd,
+        additionalDirectories,
+        // Keep command options in the fifth slot. An empty list is still sent.
+        mcpServers === undefined ? call : { ...call, mcpServers }
+      ),
     { acceptedWithoutResult: () => ({}) }
   )
   await untilSessionVisible(sessionId, run.visibleAt)
@@ -1038,12 +1056,21 @@ export async function acpResumeSession(
   agentId: AgentId,
   sessionId: SessionId,
   cwd: string,
-  additionalDirectories?: string[]
+  additionalDirectories?: string[],
+  mcpServers?: McpServer[]
 ): Promise<SessionReopenOutcome> {
+  const mcpKey = mcpServers ? keyDigest(JSON.stringify(mcpServers)) : ''
   const run = await ledgered(
     'resume_session',
-    `${agentId}|${sessionId}|${cwd}`,
-    (call) => getAcpTransport().resumeSession(agentId, sessionId, cwd, additionalDirectories, call),
+    `${agentId}|${sessionId}|${cwd}|${mcpKey}`,
+    (call) =>
+      getAcpTransport().resumeSession(
+        agentId,
+        sessionId,
+        cwd,
+        additionalDirectories,
+        mcpServers === undefined ? call : { ...call, mcpServers }
+      ),
     { acceptedWithoutResult: () => ({}) }
   )
   await untilSessionVisible(sessionId, run.visibleAt)
@@ -1326,6 +1353,18 @@ export async function acpSetSessionReopenTimeout(secs: number | null): Promise<v
   await getAcpTransport().setSessionReopenTimeout(secs)
 }
 
+// Push how long an idle agent chat stays open, in seconds, or `null` to clear.
+// Desktop updates the reaper. The web transport no-ops; the server locks the
+// window at startup.
+export async function acpSetAgentIdleWindow(secs: number | null): Promise<void> {
+  await getAcpTransport().setAgentIdleWindow(secs)
+}
+
+// The window the host is using now.
+export async function acpGetAgentIdleWindow(): Promise<AgentIdleWindowStatus> {
+  return getAcpTransport().getAgentIdleWindow()
+}
+
 // --- Event subscription ----------------------------------------------------
 
 /**
@@ -1370,6 +1409,8 @@ export const acpApi = {
   setTurnIdleTimeout: acpSetTurnIdleTimeout,
   setSessionNewTimeout: acpSetSessionNewTimeout,
   setSessionReopenTimeout: acpSetSessionReopenTimeout,
+  setAgentIdleWindow: acpSetAgentIdleWindow,
+  getAgentIdleWindow: acpGetAgentIdleWindow,
   installRegistryBinary: acpInstallRegistryBinary,
   installAcpAgent: acpInstallAcpAgent,
   probeRuntime: acpProbeRuntime,

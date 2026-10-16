@@ -94,6 +94,7 @@ fn server_config_bind_addr() {
         port: 8080,
         event_log_capacity: 4096,
         agent_idle_window_secs: DEFAULT_AGENT_IDLE_WINDOW_SECS,
+        agent_idle_window_locked: false,
         overflow_tolerance: DEFAULT_OVERFLOW_TOLERANCE,
         max_terminals_per_project: DEFAULT_MAX_TERMINALS_PER_PROJECT,
         receipt_retention_secs: DEFAULT_RECEIPT_RETENTION_SECS,
@@ -120,6 +121,7 @@ fn server_config_bind_addr() {
         port: 8080,
         event_log_capacity: 4096,
         agent_idle_window_secs: DEFAULT_AGENT_IDLE_WINDOW_SECS,
+        agent_idle_window_locked: false,
         overflow_tolerance: DEFAULT_OVERFLOW_TOLERANCE,
         max_terminals_per_project: DEFAULT_MAX_TERMINALS_PER_PROJECT,
         receipt_retention_secs: DEFAULT_RECEIPT_RETENTION_SECS,
@@ -347,6 +349,7 @@ fn from_args_tunable_defaults() {
     let cfg = ServerConfig::from_args(Vec::<&str>::new()).expect("defaults");
     restore_env(saved);
     assert_eq!(cfg.agent_idle_window_secs, 1800);
+    assert!(!cfg.agent_idle_window_locked);
     assert_eq!(cfg.overflow_tolerance, 15);
     assert_eq!(cfg.receipt_retention_secs, 600);
     assert_eq!(cfg.partition_gc_age_secs, 90 * 24 * 60 * 60);
@@ -423,12 +426,15 @@ fn from_args_tunable_env_fallback_flag_wins_and_invalid_env_warns() {
     restore_env(saved);
 
     assert_eq!(from_env.agent_idle_window_secs, 45);
+    assert!(from_env.agent_idle_window_locked);
     assert_eq!(from_env.partition_gc_age_secs, 3600);
     assert_eq!(from_env.partition_byte_budget, 2048);
     assert!(from_env.deprecation_warnings.is_empty());
     assert_eq!(flag_wins.agent_idle_window_secs, 60);
+    assert!(flag_wins.agent_idle_window_locked);
 
     assert_eq!(invalid.agent_idle_window_secs, DEFAULT_AGENT_IDLE_WINDOW_SECS);
+    assert!(!invalid.agent_idle_window_locked);
     assert_eq!(invalid.partition_gc_age_secs, DEFAULT_PARTITION_GC_AGE_SECS);
     assert_eq!(invalid.partition_byte_budget, DEFAULT_PARTITION_BYTE_BUDGET);
     assert_eq!(invalid.deprecation_warnings.len(), 2, "blank env is silent");
@@ -579,6 +585,7 @@ fn service_account_state_dir_falls_through_empty_env_var() {
         port: 8080,
         event_log_capacity: 4096,
         agent_idle_window_secs: DEFAULT_AGENT_IDLE_WINDOW_SECS,
+        agent_idle_window_locked: false,
         overflow_tolerance: DEFAULT_OVERFLOW_TOLERANCE,
         max_terminals_per_project: DEFAULT_MAX_TERMINALS_PER_PROJECT,
         receipt_retention_secs: DEFAULT_RECEIPT_RETENTION_SECS,
@@ -620,6 +627,27 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn clear_remote_writes_env() {
     std::env::remove_var("TERMUL_SERVER_ALLOW_REMOTE_WRITES");
+}
+
+#[test]
+fn desktop_agent_idle_window_reads_env_then_default() {
+    let _g = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
+    let saved = save_env(&[AGENT_IDLE_WINDOW_ENV]);
+    std::env::remove_var(AGENT_IDLE_WINDOW_ENV);
+    let open = desktop_agent_idle_window_secs();
+    assert_eq!(open.secs, DEFAULT_AGENT_IDLE_WINDOW_SECS);
+    assert!(!open.from_env);
+
+    std::env::set_var(AGENT_IDLE_WINDOW_ENV, "90");
+    let locked = desktop_agent_idle_window_secs();
+    assert_eq!(locked.secs, 90);
+    assert!(locked.from_env);
+
+    std::env::set_var(AGENT_IDLE_WINDOW_ENV, "0");
+    let invalid = desktop_agent_idle_window_secs();
+    assert_eq!(invalid.secs, DEFAULT_AGENT_IDLE_WINDOW_SECS);
+    assert!(!invalid.from_env);
+    restore_env(saved);
 }
 
 #[test]

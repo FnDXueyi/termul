@@ -2,7 +2,7 @@
 
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
 import type { PersistedSessionSummary } from '@shared/types/web-protocol.types'
-import type { ToolCall } from '@/lib/acp-api'
+import type { AvailableCommand, ToolCall } from '@/lib/acp-api'
 import { acpHistoryApi } from '@/lib/acp-history-api'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { persistenceApi } from '@/lib/api'
@@ -72,9 +72,11 @@ export interface SessionIndexEntry {
   worktreePath?: string
   worktreeBranch?: string
   /**
-   * Host-recorded current model id + display-name snapshot (CAP-3). Additive:
-   * absent on old entries and on discovered/imported sessions. Read-only on the
-   * renderer — the host (`SessionPersistence`) is the sole writer.
+   * Current model id + display-name snapshot (CAP-3). Additive: absent on old
+   * entries and on discovered/imported sessions. The host
+   * (`SessionPersistence`) is the durable writer. The renderer projection
+   * copies these fields forward and refreshes them from the live session so
+   * the sidebar does not keep the creation-time model.
    */
   modelId?: string
   modelName?: string
@@ -108,6 +110,11 @@ export interface SessionPayload {
    * field existed (pre-feature chats → no separators, rendering unchanged).
    */
   switches?: AgentSwitchRecord[]
+  /**
+   * The session's last known slash-command list. Absent when the host knows
+   * of none, and on older hosts.
+   */
+  commands?: AvailableCommand[]
 }
 
 /**

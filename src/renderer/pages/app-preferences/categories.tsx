@@ -130,9 +130,33 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
   },
   {
     categoryId: 'ai-agents',
-    label: 'Turn Timeout',
-    description: 'Maximum wall-clock duration for a single agent turn (hard cap).',
-    keywords: ['acp', 'timeout', 'turn', 'hard cap', 'unlimited', 'wedge']
+    label: 'Close idle chats after',
+    description: 'How long a chat stays open after you leave it.',
+    keywords: ['timeout', 'session closed', 'idle', 'keep idle chats', 'leave chat']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'If an answer goes quiet',
+    description: 'Cancel an answer that stops sending updates.',
+    keywords: ['timeout', 'idle', 'silent', 'turn']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Longest one answer',
+    description: 'Stop an answer that is still writing.',
+    keywords: ['timeout', 'turn', 'long answer']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Start a new chat',
+    description: 'How long to wait for an agent to start.',
+    keywords: ['timeout', 'new chat', 'start']
+  },
+  {
+    categoryId: 'ai-agents',
+    label: 'Open a saved chat',
+    description: 'How long to wait to open a saved chat.',
+    keywords: ['timeout', 'resume', 'reopen', 'history']
   },
   {
     categoryId: 'provider',

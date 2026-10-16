@@ -1,7 +1,9 @@
 import { PersistenceKeys } from '@shared/types/persistence.types'
 import { useCallback, useEffect } from 'react'
 import { acpApi, persistenceApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { useSharedKeySync } from '@/lib/shared-key-sync'
+import { isTauriContext } from '@/lib/tauri-runtime'
 import { getSystemAppearance, normalizeThemeFamilyId } from '@/lib/themes/theme-appearance'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
@@ -11,6 +13,37 @@ import type { AppSettings, AppSettingsUpdate } from '@/types/settings'
 import { DEFAULT_APP_SETTINGS } from '@/types/settings'
 
 type PanelSettingKey = 'sidebarVisible' | 'fileExplorerVisible' | 'sshPanelVisible'
+
+let idleWindowEpoch = 0
+let idleWindowQueue: Promise<void> = Promise.resolve()
+
+/** Push one idle-window choice. A newer choice skips an older push still in line. */
+export function queueAgentIdleWindowPush(secs: number | null): Promise<void> {
+  idleWindowEpoch += 1
+  const epoch = idleWindowEpoch
+  const run = idleWindowQueue.then(async () => {
+    if (epoch !== idleWindowEpoch) return
+    try {
+      await acpApi.setAgentIdleWindow(secs)
+    } catch (error) {
+      void logFrontendError({
+        level: 'error',
+        source: 'queueAgentIdleWindowPush',
+        message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+      })
+    }
+  })
+  idleWindowQueue = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
+function queueSavedAgentIdleWindow(): void {
+  if (idleWindowEpoch !== 0) return
+  queueAgentIdleWindowPush(useAppSettingsStore.getState().settings.agentIdleWindowSecs)
+}
 
 function applyPanelVisibility(panel: PanelSettingKey, visible: boolean): void {
   if (panel === 'sidebarVisible') {
@@ -132,6 +165,35 @@ export function useAppSettingsLoader(): void {
       } catch (error) {
         console.error('Failed to apply ACP session reopen timeout:', error)
       }
+      try {
+        if (isTauriContext()) {
+          // One desktop process owns this window. Apply the saved choice at
+          // startup. A choice made while this load is in flight stays ahead
+          // of this push. The browser must not POST on load: that would
+          // replace the server's shared value with whatever this page saved.
+          queueSavedAgentIdleWindow()
+        } else {
+          const epoch = idleWindowEpoch
+          const live = await acpApi.getAgentIdleWindow()
+          if (epoch !== idleWindowEpoch) return
+          if (live.source === 'setting' || live.source === 'default') {
+            const next = live.source === 'default' || live.secs === 1800 ? null : live.secs
+            if (next !== settings.agentIdleWindowSecs) {
+              useAppSettingsStore.getState().updateSetting('agentIdleWindowSecs', next)
+              await persistenceApi.writeDebounced(
+                PersistenceKeys.appSettings,
+                useAppSettingsStore.getState().settings
+              )
+            }
+          }
+        }
+      } catch (error) {
+        void logFrontendError({
+          level: 'error',
+          source: 'useAppSettingsLoader.agentIdleWindow',
+          message: `Failed to apply the agent idle window: ${error instanceof Error ? error.message : String(error)}`
+        })
+      }
     }
     load()
   }, [setSettings])
@@ -215,5 +277,6 @@ export function useResetAppSettings(): () => Promise<void> {
     } catch (error) {
       console.error('Failed to clear ACP session reopen timeout on reset:', error)
     }
+    await queueAgentIdleWindowPush(DEFAULT_APP_SETTINGS.agentIdleWindowSecs)
   }, [resetToDefaults])
 }

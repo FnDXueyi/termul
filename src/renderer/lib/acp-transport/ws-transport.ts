@@ -18,6 +18,7 @@ import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
   type AddProjectPayload,
+  type ChatReadMark,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
@@ -57,6 +58,7 @@ import type {
 } from '@/lib/acp-api'
 import type { SessionPayload } from '@/lib/acp-history-persistence'
 import type { AcpRuntimeAvailability } from '@/lib/agents/supported-acp-agents'
+import { getJson, postJson } from '@/lib/ipc/http'
 import { logFrontendError } from '@/lib/log-api'
 import { randomUUID } from '@/lib/uuid'
 import { flagWebAuthUnauthorized, getWebAuthGateState } from '@/lib/web-auth-gate'
@@ -75,9 +77,11 @@ import {
   type AcpConnectionState,
   type AcpTransport,
   AcpTransportError,
+  type AgentIdleWindowStatus,
   COMMAND_IN_PROGRESS_CODE,
   type CommandCallOptions,
   parseVisibleAt,
+  type ReopenCallOptions,
   type SessionCursor
 } from './types'
 import { WatchClient } from './watch-client'
@@ -853,6 +857,24 @@ export class WsAcpTransport implements AcpTransport {
     // the session reopen timeout via TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS.
   }
 
+  async setAgentIdleWindow(secs: number | null): Promise<void> {
+    const res = await postJson<AgentIdleWindowStatus>('/host/agent-idle-window', { secs })
+    if (!res.success) {
+      throw new AcpTransportError(res.code, res.error)
+    }
+  }
+
+  async getAgentIdleWindow(): Promise<AgentIdleWindowStatus> {
+    const res = await getJson<AgentIdleWindowStatus>('/host/agent-idle-window')
+    if (!res.success || res.data == null) {
+      throw new AcpTransportError(
+        res.success ? 'NETWORK_ERROR' : res.code,
+        res.success ? 'agent idle window response had no data' : res.error
+      )
+    }
+    return res.data
+  }
+
   /**
    * CAP-6 / Story 8: fetchRegistrySnapshot is replaced by the host-resolved
    * catalog. The web client calls `acpCatalogApi.listCatalog()` (the facade)
@@ -1113,18 +1135,22 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome> {
+    const { mcpServers, ...call } = options ?? {}
     const outcome = await this.request<SessionReopenOutcome>(
       'load_session',
       {
         agentId,
         sessionId,
         cwd,
-        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+        ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+        // Present only for a reload. An empty array still asks the host to
+        // attach the plan server. Omitted keeps a normal history reopen.
+        ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
-      options
+      call
     )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
@@ -1135,18 +1161,20 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome> {
+    const { mcpServers, ...call } = options ?? {}
     const outcome = await this.request<SessionReopenOutcome>(
       'resume_session',
       {
         agentId,
         sessionId,
         cwd,
-        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+        ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+        ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
-      options
+      call
     )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
@@ -1202,6 +1230,10 @@ export class WsAcpTransport implements AcpTransport {
     options?: CommandCallOptions
   ): Promise<void> {
     await this.request('record_agent_switch', { sessionId, ...record }, undefined, options)
+  }
+
+  async markChatRead(sessionId: SessionId, seq: number): Promise<ChatReadMark> {
+    return this.request<ChatReadMark>('mark_chat_read', { sessionId, seq })
   }
 
   async sendPrompt(

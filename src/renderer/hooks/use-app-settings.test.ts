@@ -19,7 +19,9 @@ const {
   mockSetTurnTimeout,
   mockSetTurnIdleTimeout,
   mockSetSessionNewTimeout,
-  mockSetSessionReopenTimeout
+  mockSetSessionReopenTimeout,
+  mockSetAgentIdleWindow,
+  mockGetAgentIdleWindow
 } = vi.hoisted(() => ({
   mockPersistenceRead: vi.fn(),
   mockPersistenceWrite: vi.fn(),
@@ -27,7 +29,9 @@ const {
   mockSetTurnTimeout: vi.fn(),
   mockSetTurnIdleTimeout: vi.fn(),
   mockSetSessionNewTimeout: vi.fn(),
-  mockSetSessionReopenTimeout: vi.fn()
+  mockSetSessionReopenTimeout: vi.fn(),
+  mockSetAgentIdleWindow: vi.fn(),
+  mockGetAgentIdleWindow: vi.fn()
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -35,7 +39,9 @@ vi.mock('@/lib/api', () => ({
     setTurnTimeout: mockSetTurnTimeout,
     setTurnIdleTimeout: mockSetTurnIdleTimeout,
     setSessionNewTimeout: mockSetSessionNewTimeout,
-    setSessionReopenTimeout: mockSetSessionReopenTimeout
+    setSessionReopenTimeout: mockSetSessionReopenTimeout,
+    setAgentIdleWindow: mockSetAgentIdleWindow,
+    getAgentIdleWindow: mockGetAgentIdleWindow
   },
   persistenceApi: {
     read: mockPersistenceRead,
@@ -62,6 +68,8 @@ describe('use-app-settings', () => {
     mockSetTurnIdleTimeout.mockResolvedValue(undefined)
     mockSetSessionNewTimeout.mockResolvedValue(undefined)
     mockSetSessionReopenTimeout.mockResolvedValue(undefined)
+    mockSetAgentIdleWindow.mockResolvedValue(undefined)
+    mockGetAgentIdleWindow.mockResolvedValue({ secs: 1800, source: 'default' })
   })
 
   it('does not push legacy AppSettings panel visibility into the shell layout on load', async () => {
@@ -102,11 +110,14 @@ describe('use-app-settings', () => {
         acpTurnIdleTimeoutSecs: 1800,
         acpSessionNewTimeoutSecs: 120,
         acpSessionReopenTimeoutSecs: 300,
+        agentIdleWindowSecs: 7200,
         // Stale key from an old settings blob (story 8 removed the warmup
         // machinery): the merge keeps it inert — nothing reads or pushes it.
         acpFirstPromptWarmupSecs: 0
       }
     })
+
+    mockGetAgentIdleWindow.mockResolvedValueOnce({ secs: 3600, source: 'setting' })
 
     renderHook(() => useAppSettingsLoader())
 
@@ -116,6 +127,9 @@ describe('use-app-settings', () => {
       expect(mockSetTurnIdleTimeout).toHaveBeenCalledWith(1800)
       expect(mockSetSessionNewTimeout).toHaveBeenCalledWith(120)
       expect(mockSetSessionReopenTimeout).toHaveBeenCalledWith(300)
+      // The browser reads the server window. It does not POST the saved value.
+      expect(mockSetAgentIdleWindow).not.toHaveBeenCalled()
+      expect(useAppSettingsStore.getState().settings.agentIdleWindowSecs).toBe(3600)
     })
   })
 
@@ -449,7 +463,8 @@ describe('use-app-settings', () => {
         acpTurnTimeoutSecs: 7200,
         acpTurnIdleTimeoutSecs: 1800,
         acpSessionNewTimeoutSecs: 120,
-        acpSessionReopenTimeoutSecs: 300
+        acpSessionReopenTimeoutSecs: 300,
+        agentIdleWindowSecs: 7200
       },
       isLoaded: true
     })
@@ -462,5 +477,6 @@ describe('use-app-settings', () => {
     expect(mockSetTurnIdleTimeout).toHaveBeenCalledWith(null)
     expect(mockSetSessionNewTimeout).toHaveBeenCalledWith(null)
     expect(mockSetSessionReopenTimeout).toHaveBeenCalledWith(null)
+    expect(mockSetAgentIdleWindow).toHaveBeenCalledWith(null)
   })
 })

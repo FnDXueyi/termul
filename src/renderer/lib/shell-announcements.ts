@@ -56,6 +56,7 @@ export interface AnnouncementSession {
   projectId: string
   status: SessionStatus
   activeTurn: boolean
+  lastError: string | null
 }
 
 /** The slice of the ACP store the derivation reads. `AcpState` satisfies it. */
@@ -142,6 +143,7 @@ function observeNeedsYou(state: AcpAnnouncementState): Record<string, boolean> {
       pendingPermission: permissionSessions.has(sessionId),
       pendingQuestion: questionSessions.has(sessionId),
       pendingElicitation: elicitationSessions.has(sessionId),
+      lastError: session.lastError ?? null,
       ephemeral: false
     })
   }

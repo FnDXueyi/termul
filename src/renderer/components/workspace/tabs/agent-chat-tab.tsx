@@ -1,6 +1,7 @@
 import { AgentBadge } from '@/components/chat/AgentBadge'
 import { CircleDot } from '@/components/icons'
 import { Spinner } from '@/components/ui/spinner'
+import { useReloadChat } from '@/hooks/use-reload-chat'
 import { cn } from '@/lib/utils'
 import { useAgentIdentity, useSessionIndexTitle } from '@/stores/acp-store'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
@@ -27,9 +28,7 @@ export function AgentChatTabInline({
   onDragLeave,
   onDrop
 }: AgentChatTabInlineProps) {
-  const { session, needsAttention, liveSession, turnBusy } = useAgentChatStatusSignals(
-    tab.sessionId
-  )
+  const { session, needsAttention, realChat, turnBusy } = useAgentChatStatusSignals(tab.sessionId)
   const { name: agentName } = useAgentIdentity(session?.agentId ?? null)
   // The persisted index entry carries the effective title (agent-pushed title,
   // first-message derivation, or "Untitled Chat N"). `session.title` stays null
@@ -40,9 +39,11 @@ export function AgentChatTabInline({
   // active tab leaves an unread dot until the chat becomes an active tab. The
   // flag is owned by `useAgentChatUnreadStore` (driven by the shell-level
   // tracker), so this tab and the mobile Recents row always agree. The
-  // live-session gate (closed/error sessions carry stale turn flags, warm-pool
-  // sessions are not chats) lives in `useAgentChatStatusSignals`.
+  // gates (closed/error sessions carry stale turn flags, so only a live one
+  // spins; warm-pool sessions are not chats, so they never show the dot, while
+  // a stopped chat keeps it) live in `useAgentChatStatusSignals`.
   const unread = useAgentChatUnreadStore((state) => Boolean(state.unread[tab.sessionId]))
+  const chatReload = useReloadChat(tab.sessionId)
 
   const isClosed = session?.status === 'closed'
   const tabLabel = session?.title ?? indexTitle ?? agentName ?? 'Agent Chat'
@@ -50,7 +51,7 @@ export function AgentChatTabInline({
   // dot — the single slot shows one cue, so the announced status matches
   // exactly what is visible.
   const showWorking = turnBusy
-  const showUnread = liveSession && !turnBusy && unread
+  const showUnread = realChat && !turnBusy && unread
   const activeStatus = needsAttention
     ? 'Needs you'
     : showWorking
@@ -83,7 +84,14 @@ export function AgentChatTabInline({
   ) : null
 
   return (
-    <TabContextMenu kind="agent-chat" onClose={onClose} {...bulkMenu}>
+    <TabContextMenu
+      kind="agent-chat"
+      onClose={onClose}
+      onReloadChat={chatReload.reload}
+      reloadChatDisabled={chatReload.disabled}
+      reloadChatReason={chatReload.reason}
+      {...bulkMenu}
+    >
       <TabChrome
         isActive={isActive}
         isDragging={isDragging}
@@ -105,7 +113,7 @@ export function AgentChatTabInline({
             <span
               title={tabLabel}
               className={cn(
-                'min-w-0 truncate text-xs font-medium leading-none line-through opacity-60',
+                'min-w-0 truncate text-xs font-medium leading-none opacity-60',
                 isActive ? 'text-foreground' : 'text-inherit'
               )}
             >

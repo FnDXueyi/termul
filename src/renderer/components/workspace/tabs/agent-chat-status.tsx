@@ -15,8 +15,8 @@ import { sessionTurnBusy } from '@/stores/prompt-queue-orchestration'
 export interface AgentChatStatusSignals {
   session: AcpSession | undefined
   /**
-   * Permission, question, elicitation, or a closed/disconnected chat
-   * (`agentChatNeedsAttention`).
+   * Permission, question, elicitation, a disconnected chat, or a closed chat
+   * that cannot resume by itself (`agentChatNeedsAttention`).
    */
   needsAttention: boolean
   /**
@@ -25,6 +25,12 @@ export interface AgentChatStatusSignals {
    * warm-pool sessions are not chats.
    */
   liveSession: boolean
+  /**
+   * A real chat: the session exists and is not a warm-pool (ephemeral)
+   * session, whatever its status. Gates the unread dot, which stays on a
+   * stopped (`closed`) or crashed chat until the chat is viewed.
+   */
+  realChat: boolean
   turnBusy: boolean
 }
 
@@ -55,23 +61,24 @@ export function useAgentChatStatusSignals(sessionId: string): AgentChatStatusSig
         pendingPermission,
         pendingQuestion,
         pendingElicitation,
+        lastError: session.lastError ?? null,
         ephemeral
       })
     : false
   // The old lamp slot is now a turn-lifecycle cue: a live turn spins, and a
   // turn that finishes while this chat is not any pane's active tab leaves an
   // unread dot (owned by `useAgentChatUnreadStore`) until the chat becomes an
-  // active tab.
-  const liveSession =
-    session != null && !ephemeral && session.status !== 'closed' && session.status !== 'error'
+  // active tab, live or stopped.
+  const realChat = session != null && !ephemeral
+  const liveSession = realChat && session.status !== 'closed' && session.status !== 'error'
   const turnBusy = liveSession && sessionTurnBusy(session)
-  return { session, needsAttention, liveSession, turnBusy }
+  return { session, needsAttention, liveSession, realChat, turnBusy }
 }
 
 export interface AgentChatStatusSlotsInput {
   needsAttention: boolean
   turnBusy: boolean
-  liveSession: boolean
+  realChat: boolean
   unread: boolean
 }
 
@@ -92,11 +99,12 @@ export interface AgentChatStatusSlots {
 export function agentChatStatusSlots({
   needsAttention,
   turnBusy,
-  liveSession,
+  realChat,
   unread
 }: AgentChatStatusSlotsInput): AgentChatStatusSlots {
   const showWorking = turnBusy
-  const showUnread = liveSession && !turnBusy && unread
+  // Any real chat keeps its unread dot, closed (idle-stopped) included.
+  const showUnread = realChat && !turnBusy && unread
   const statuses: string[] = []
   if (needsAttention) statuses.push('Needs you')
   if (showWorking) statuses.push('Working')

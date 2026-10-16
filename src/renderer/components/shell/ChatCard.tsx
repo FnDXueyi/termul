@@ -1,4 +1,5 @@
 import { ChatEntryIcon } from '@/components/chat/ChatHistoryEntryRow'
+import { sessionModelSnapshot } from '@/components/chat/chat-input-bar-config'
 import { Columns2, Copy, FolderOpen, GitBranch, Terminal, Trash2 } from '@/components/icons'
 import {
   ChatRowTrail,
@@ -66,16 +67,14 @@ export function ChatCard({
     ? 'needs-you'
     : signals.turnBusy
       ? 'running'
-      : signals.liveSession && unread
+      : signals.realChat && unread
         ? 'done'
         : 'idle'
   const statusWord = STATUS_WORD[liveState]
 
-  const liveModels = signals.session?.models
-  const liveModel = liveModels
-    ? (liveModels.availableModels.find((m) => m.modelId === liveModels.currentModelId)?.name ??
-      liveModels.currentModelId)
-    : null
+  // Same precedence as the composer: the model config option, then the native
+  // model list. `session.models` alone stays on the session/new value.
+  const liveModel = sessionModelSnapshot(signals.session)?.modelName ?? null
   const modelLine = liveModel || modelLineOf(card)
 
   const hasCwd = Boolean(entry.cwd)

@@ -474,8 +474,12 @@ describe('ShellRail', () => {
       expect(mark).toHaveClass(
         'group-hover/rail:translate-x-full',
         'group-hover/rail:opacity-0',
+        'group-focus-within/swap:translate-x-full',
         'group-focus-within/swap:opacity-0',
-        'any-pointer-coarse:opacity-0',
+        // jsdom cannot evaluate media queries: the pinned-on-no-hover state is
+        // covered by asserting these tokens, not by simulating the condition.
+        '[@media(any-hover:none)]:pointer-events-none',
+        '[@media(any-hover:none)]:opacity-0',
         'duration-[220ms]',
         'motion-reduce:transition-none'
       )
@@ -495,8 +499,8 @@ describe('ShellRail', () => {
         'group-hover/rail:opacity-100',
         'group-focus-within/swap:translate-x-0',
         'group-focus-within/swap:opacity-100',
-        'any-pointer-coarse:translate-x-0',
-        'any-pointer-coarse:opacity-100',
+        '[@media(any-hover:none)]:translate-x-0',
+        '[@media(any-hover:none)]:opacity-100',
         'motion-reduce:transition-none'
       )
     })

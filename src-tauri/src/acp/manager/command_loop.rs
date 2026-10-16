@@ -291,6 +291,7 @@ pub(super) async fn run_command_loop(
                 session_id,
                 cwd,
                 additional_directories,
+                mcp_servers,
                 reply,
             } => {
                 let slot = reply_slot(reply);
@@ -376,6 +377,9 @@ pub(super) async fn run_command_loop(
                     // held indefinitely).
                     let mut request = LoadSessionRequest::new(&session_id, cwd.clone())
                         .additional_directories(additional_directories);
+                    if let Some(mcp_servers) = mcp_servers {
+                        request = request.mcp_servers(mcp_servers);
+                    }
                     if profile.summarize_thinking {
                         request = request.meta(summarized_thinking_meta());
                     }
@@ -400,6 +404,7 @@ pub(super) async fn run_command_loop(
                 session_id,
                 cwd,
                 additional_directories,
+                mcp_servers,
                 reply,
             } => {
                 let slot = reply_slot(reply);
@@ -463,6 +468,9 @@ pub(super) async fn run_command_loop(
                     };
                     let mut request = ResumeSessionRequest::new(&session_id, cwd.clone())
                         .additional_directories(additional_directories);
+                    if let Some(mcp_servers) = mcp_servers {
+                        request = request.mcp_servers(mcp_servers);
+                    }
                     if profile.summarize_thinking {
                         request = request.meta(summarized_thinking_meta());
                     }

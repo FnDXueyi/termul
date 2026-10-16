@@ -159,6 +159,11 @@ export function createInvokeAcpTransport(): AcpTransport {
     setTurnIdleTimeout: (secs) => invoke<void>('acp_set_turn_idle_timeout', { secs }),
     setSessionNewTimeout: (secs) => invoke<void>('acp_set_session_new_timeout', { secs }),
     setSessionReopenTimeout: (secs) => invoke<void>('acp_set_session_reopen_timeout', { secs }),
+    setAgentIdleWindow: (secs) => invoke<void>('acp_set_agent_idle_window', { secs }),
+    getAgentIdleWindow: () =>
+      invoke<{ secs: number; source: 'default' | 'setting' | 'env' | 'operator' }>(
+        'acp_get_agent_idle_window'
+      ),
     fetchRegistrySnapshot: (forceRefresh = false) =>
       invoke<AcpRegistrySnapshot>('acp_fetch_registry_snapshot', { forceRefresh }),
     probeMcpServer: (server) => invoke<ProbeResult>('acp_probe_mcp_server', { server }),
@@ -209,7 +214,8 @@ export function createInvokeAcpTransport(): AcpTransport {
           agentId,
           sessionId,
           cwd,
-          ...(additionalDirectories?.length ? { additionalDirectories } : {})
+          ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+          ...(options?.mcpServers ? { mcpServers: options.mcpServers } : {})
         },
         options
       ),
@@ -220,7 +226,8 @@ export function createInvokeAcpTransport(): AcpTransport {
           agentId,
           sessionId,
           cwd,
-          ...(additionalDirectories?.length ? { additionalDirectories } : {})
+          ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+          ...(options?.mcpServers ? { mcpServers: options.mcpServers } : {})
         },
         options
       ),

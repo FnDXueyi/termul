@@ -85,6 +85,50 @@ where
     }
 }
 
+/// The idle-agent window for the desktop host, which has no CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopAgentIdleWindow {
+    pub secs: u64,
+    /// `true` when `$TERMUL_AGENT_IDLE_REAP_SECS` supplied `secs`. That value
+    /// stays locked: App Preferences cannot move the live window.
+    pub from_env: bool,
+}
+
+/// Lock label for a server baseline. `None` when Settings may change it.
+#[must_use]
+pub fn server_agent_idle_window_lock(cfg: &ServerConfig) -> Option<&'static str> {
+    if !cfg.agent_idle_window_locked {
+        return None;
+    }
+    let from_env = desktop_agent_idle_window_secs();
+    if from_env.from_env && from_env.secs == cfg.agent_idle_window_secs {
+        Some("env")
+    } else {
+        Some("operator")
+    }
+}
+
+/// `$TERMUL_AGENT_IDLE_REAP_SECS` → [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (1800).
+/// An invalid env value is ignored with a logged warning.
+#[must_use]
+pub fn desktop_agent_idle_window_secs() -> DesktopAgentIdleWindow {
+    let mut warnings = Vec::new();
+    let from_env = positive_env::<u64>(AGENT_IDLE_WINDOW_ENV, &mut warnings);
+    for warning in warnings {
+        log::warn!(target: "termul::web::agent_reaper", "{warning}");
+    }
+    match from_env {
+        Some(secs) => DesktopAgentIdleWindow {
+            secs,
+            from_env: true,
+        },
+        None => DesktopAgentIdleWindow {
+            secs: DEFAULT_AGENT_IDLE_WINDOW_SECS,
+            from_env: false,
+        },
+    }
+}
+
 /// The per-project terminal cap for the desktop host, which has no CLI:
 /// `$TERMUL_MAX_TERMINALS_PER_PROJECT` → [`DEFAULT_MAX_TERMINALS_PER_PROJECT`].
 /// An invalid env value is ignored with a logged warning.
@@ -345,8 +389,11 @@ pub struct ServerConfig {
     /// Idle window (seconds) after which the host reaps an idle agent.
     /// `--agent-idle-window-secs` → `$TERMUL_AGENT_IDLE_REAP_SECS` →
     /// [`DEFAULT_AGENT_IDLE_WINDOW_SECS`] (1800). The desktop host reads the
-    /// same default const.
+    /// same env var and default through [`desktop_agent_idle_window_secs`].
     pub agent_idle_window_secs: u64,
+    /// `true` when a flag or `$TERMUL_AGENT_IDLE_REAP_SECS` fixed the window.
+    /// Settings can change the live window only when this is `false`.
+    pub agent_idle_window_locked: bool,
     /// Outbound-queue overflow tolerance per client: consecutive failed
     /// enqueues before a peer that stopped draining is closed.
     /// `--overflow-tolerance` → [`DEFAULT_OVERFLOW_TOLERANCE`] (15). Read by
@@ -922,8 +969,15 @@ impl ServerConfig {
         // Tunables: `--flag` wins, then the env var (where one exists), then
         // the shared `DEFAULT_*` const. An invalid env value is ignored with
         // a startup warning; an invalid flag value already failed above.
+        let agent_idle_from_flag = agent_idle_window_secs.is_some();
+        let agent_idle_from_env = if agent_idle_from_flag {
+            None
+        } else {
+            positive_env::<u64>(AGENT_IDLE_WINDOW_ENV, &mut deprecation_warnings)
+        };
+        let agent_idle_window_locked = agent_idle_from_flag || agent_idle_from_env.is_some();
         let agent_idle_window_secs = agent_idle_window_secs
-            .or_else(|| positive_env::<u64>(AGENT_IDLE_WINDOW_ENV, &mut deprecation_warnings))
+            .or(agent_idle_from_env)
             .unwrap_or(DEFAULT_AGENT_IDLE_WINDOW_SECS);
         let max_terminals_per_project = max_terminals_per_project
             .or_else(|| {
@@ -942,6 +996,7 @@ impl ServerConfig {
             port,
             event_log_capacity,
             agent_idle_window_secs,
+            agent_idle_window_locked,
             overflow_tolerance,
             max_terminals_per_project,
             receipt_retention_secs,

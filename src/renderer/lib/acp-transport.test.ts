@@ -1060,6 +1060,19 @@ describe('WsAcpTransport', () => {
     await transport.setSessionReopenTimeout(300)
 
     expect(sock.sent.length).toBe(sentBefore)
+
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ success: true, data: { secs: 7200, source: 'setting' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+    await transport.setAgentIdleWindow(7200)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/host/agent-idle-window'),
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ secs: 7200 }) })
+    )
+    fetchMock.mockRestore()
     transport.dispose()
   })
 
@@ -2152,6 +2165,27 @@ describe('WsAcpTransport', () => {
       .filter((frame) => frame.type === 'subscribe')
     expect(subscriptions).toHaveLength(2)
     expect(subscriptions.every((frame) => frame.payload.lastSeq === 0)).toBe(true)
+    transport.dispose()
+  })
+
+  it('sends mcpServers on reopen only when the caller provides the list', async () => {
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+
+    await transport.loadSession('a1', 's-plain', '/work')
+    await transport.resumeSession('a1', 's-reload', '/work', undefined, { mcpServers: [] })
+
+    const frames = sock.sent.map(
+      (frame) => JSON.parse(frame) as { type: string; payload: Record<string, unknown> }
+    )
+    const load = frames.find((frame) => frame.type === 'load_session')
+    const resume = frames.find((frame) => frame.type === 'resume_session')
+    expect(load?.payload).not.toHaveProperty('mcpServers')
+    expect(resume?.payload.mcpServers).toEqual([])
     transport.dispose()
   })
 
@@ -4781,7 +4815,10 @@ describe('WsAcpTransport commands (AD-5)', () => {
     script.set('load_session', () => ({ ok: true, payload: {}, visible_at: 'soon' }))
     const transport = await connected()
     const onVisibleAt = vi.fn()
-    await transport.loadSession('a1', 's1', '/w', undefined, { commandId: 'c', onVisibleAt })
+    await transport.loadSession('a1', 's1', '/w', undefined, {
+      commandId: 'c',
+      onVisibleAt
+    })
     expect(onVisibleAt).not.toHaveBeenCalled()
     transport.dispose()
   })

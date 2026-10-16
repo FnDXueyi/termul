@@ -205,6 +205,116 @@ describe('useProjectRegistry', () => {
     })
   })
 
+  describe('prefs read failure', () => {
+    it('saves a group created after the first prefs read failed', async () => {
+      vi.mocked(persistenceApi.read).mockImplementationOnce(async () => ({
+        success: false,
+        code: 'TIMEOUT',
+        error: 'store socket did not answer'
+      }))
+
+      await mountAndDeliver(list([summary('a')]))
+      act(() => useProjectStore.getState().addGroup('Survives restart'))
+
+      await waitFor(() => {
+        const saved = h.store.get('project-prefs') as ProjectPrefsRecord | undefined
+        expect(saved?.groups.map((g) => g.name)).toEqual(['Survives restart'])
+      })
+    })
+
+    it('keeps the saved groups and saves again once the prefs read recovers', async () => {
+      h.store.set('project-prefs', {
+        projects: {},
+        groups: [{ id: 'g-old', name: 'Old group', projectIds: [] }],
+        order: [],
+        updatedAt: 't'
+      } satisfies ProjectPrefsRecord)
+      // Every boot attempt fails: the store socket is still not answering.
+      const boot = 1 + 3
+      for (let i = 0; i < boot; i++) {
+        vi.mocked(persistenceApi.read).mockImplementationOnce(async () => ({
+          success: false,
+          code: 'TIMEOUT',
+          error: 'store socket did not answer'
+        }))
+      }
+
+      // The boot retries take a few seconds, so wait for the watch past the default.
+      mount()
+      await waitFor(() => expect(h.subscribe).toHaveBeenCalled(), { timeout: 8000 })
+      act(() => watchHandlers().onState(list([summary('a')])))
+      await waitFor(() => expect(useProjectStore.getState().isLoaded).toBe(true))
+      act(() => useProjectStore.getState().addGroup('Made while unreadable'))
+
+      await waitFor(
+        () => {
+          const saved = h.store.get('project-prefs') as ProjectPrefsRecord | undefined
+          expect(saved?.groups.map((g) => g.name)).toEqual(['Made while unreadable', 'Old group'])
+        },
+        { timeout: 9000 }
+      )
+      expect(useProjectStore.getState().groups.map((g) => g.name)).toEqual([
+        'Made while unreadable',
+        'Old group'
+      ])
+    }, 15000)
+
+    it('keeps a listed project saved prefs after the read recovers', async () => {
+      h.store.set('project-prefs', {
+        projects: { a: { defaultShell: '/bin/zsh', gitBranch: 'feature' } },
+        groups: [],
+        order: [],
+        updatedAt: 't'
+      } satisfies ProjectPrefsRecord)
+      for (let i = 0; i < 1 + 3; i++) {
+        vi.mocked(persistenceApi.read).mockImplementationOnce(async () => ({
+          success: false,
+          code: 'TIMEOUT',
+          error: 'store socket did not answer'
+        }))
+      }
+
+      mount()
+      await waitFor(() => expect(h.subscribe).toHaveBeenCalled(), { timeout: 8000 })
+      act(() => watchHandlers().onState(list([summary('a')])))
+      await waitFor(() => expect(useProjectStore.getState().isLoaded).toBe(true))
+      act(() => useProjectStore.getState().addGroup('Triggers a save'))
+
+      // The group only reaches the record once the read has recovered and saving is on.
+      await waitFor(
+        () => {
+          const saved = h.store.get('project-prefs') as ProjectPrefsRecord | undefined
+          expect(saved?.groups.map((g) => g.name)).toEqual(['Triggers a save'])
+        },
+        { timeout: 9000 }
+      )
+      const saved = h.store.get('project-prefs') as ProjectPrefsRecord
+      expect(saved.projects.a).toMatchObject({ defaultShell: '/bin/zsh', gitBranch: 'feature' })
+      expect(useProjectStore.getState().projects[0]).toMatchObject({
+        defaultShell: '/bin/zsh',
+        gitBranch: 'feature'
+      })
+    }, 15000)
+
+    it('stops retrying the prefs read once the hook is unmounted', async () => {
+      vi.mocked(persistenceApi.read).mockImplementationOnce(async () => ({
+        success: false,
+        code: 'TIMEOUT',
+        error: 'store socket did not answer'
+      }))
+      const prefsReads = () =>
+        vi.mocked(persistenceApi.read).mock.calls.filter(([key]) => key === 'project-prefs').length
+
+      const { unmount } = mount()
+      await waitFor(() => expect(prefsReads()).toBe(1))
+      unmount()
+
+      // Longer than the first retry delay: a live hook would read the prefs again by now.
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      expect(prefsReads()).toBe(1)
+    })
+  })
+
   describe('active project', () => {
     it('restores this device saved selection', async () => {
       h.store.set('active-project', 'b')

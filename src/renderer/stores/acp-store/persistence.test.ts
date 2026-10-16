@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useProjectStore } from '@/stores/project-store'
 
 const { toastError, toastWarning } = vi.hoisted(() => ({
@@ -107,7 +107,9 @@ vi.mock('@/stores/workspace-store', () => {
     getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
+    getAgentChatSessionIdsInAllTrees: () => new Set<string>(),
     useWorkspaceStore: {
+      subscribe: () => () => {},
       getState: () => ({
         addAgentChatTab: addAgentChatTabSpy,
         removeTab: workspaceStateRef.current.removeTab,
@@ -193,6 +195,12 @@ describe('acp-store', () => {
     _resetHistorySeqWatermarksForTesting()
     _resetLiveSwitchSourcesForTesting()
     useAcpStore.setState(FRESH)
+  })
+
+  afterEach(async () => {
+    await vi.waitFor(() => {
+      expect(Object.values(useAcpStore.getState().mcpProbing).some(Boolean)).toBe(false)
+    })
   })
 
   it('spawnAgent populates capabilities + authMethods synchronously from the response', async () => {

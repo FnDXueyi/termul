@@ -13,6 +13,7 @@ import type {
 import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AddProjectPayload,
+  type ChatReadMark,
   type HistoryMode,
   type PersistedSessionSummary,
   type ProjectBusyDetails,
@@ -90,6 +91,19 @@ export interface CommandCallOptions {
   onVisibleAt?: (visibleAt: number) => void
 }
 
+/**
+ * Options for `session/load` and `session/resume`.
+ * `mcpServers` is set only by Reload this chat. It stays on this bag so a
+ * normal reopen still passes command options as the fifth argument.
+ */
+export type ReopenCallOptions = CommandCallOptions & {
+  /**
+   * Present only for a reload. An empty array still asks the host to attach
+   * the plan server. Omitted keeps a normal history reopen.
+   */
+  mcpServers?: McpServer[]
+}
+
 /** `visible_at` is a session seq; anything else on the wire is ignored. */
 export function parseVisibleAt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
@@ -149,6 +163,12 @@ export interface SessionCursor {
   logEpoch: string | null
 }
 
+/** Live idle-chat window reported by the host. */
+export interface AgentIdleWindowStatus {
+  secs: number
+  source: 'default' | 'setting' | 'env' | 'operator'
+}
+
 export interface AcpTransport {
   installRegistryBinary(
     request: InstallAcpRegistryBinaryRequest
@@ -179,6 +199,17 @@ export interface AcpTransport {
   setTurnIdleTimeout(secs: number | null): Promise<void>
   setSessionNewTimeout(secs: number | null): Promise<void>
   setSessionReopenTimeout(secs: number | null): Promise<void>
+  /**
+   * How long an idle agent chat stays open. `null` clears the App Preferences
+   * override. The desktop command updates the live reaper. The web transport
+   * ignores the call: the server window comes from its flag or env var.
+   */
+  setAgentIdleWindow(secs: number | null): Promise<void>
+  /**
+   * The window the host is using now. `source` is `env`, `operator`,
+   * `setting`, or `default`.
+   */
+  getAgentIdleWindow(): Promise<AgentIdleWindowStatus>
   fetchRegistrySnapshot(forceRefresh?: boolean): Promise<AcpRegistrySnapshot>
   /**
    * On-demand MCP client probe (Termul's own rmcp client connection — NOT the
@@ -249,14 +280,14 @@ export interface AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome>
   resumeSession(
     agentId: AgentId,
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome>
   deleteAgentSession(
     agentId: AgentId,
@@ -403,6 +434,12 @@ export interface AcpTransport {
    * `/ws` over its Channel too.
    */
   readonly watches?: WatchClient
+  /**
+   * Tell the host this surface read `sessionId` up to `seq` (the newest turn
+   * end it showed). Resolves to the shared marker as it stands; every
+   * `chat_reads` watcher hears when it moves. WS: `mark_chat_read`.
+   */
+  markChatRead?(sessionId: SessionId, seq: number): Promise<ChatReadMark>
   historyMode?(): HistoryMode | 'tauri_store'
   listPersistedSessions?(): Promise<PersistedSessionSummary[]>
   openPersistedSession?(sessionId: SessionId, lastSeq?: number): Promise<void>

@@ -24,6 +24,7 @@ pub mod auth;
 pub mod canvas_api;
 pub mod capabilities;
 pub mod catalog_api;
+pub mod chat_reads;
 pub mod command_ledger;
 pub mod config;
 pub mod connection_runtime;
@@ -47,6 +48,7 @@ pub mod projects_api;
 pub mod prompt_turn;
 #[cfg(test)]
 mod prompt_turn_tests;
+pub mod route_deadline;
 pub mod router;
 pub mod search_api;
 pub mod sink;
@@ -152,10 +154,15 @@ pub async fn serve(
     // (bind failure, panic, early exit) so `serve` never hangs waiting on a
     // reaper whose signal can no longer arrive in-process.
     let (reaper_stop_tx, reaper_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let reaper_window = std::time::Duration::from_secs(cfg.agent_idle_window_secs);
+    // A flag or env var locks the window. The 30-minute default stays open so
+    // Settings can change it.
+    agent_reaper::install_agent_idle_baseline(
+        cfg.agent_idle_window_secs,
+        crate::web::config::server_agent_idle_window_lock(&cfg),
+    );
     let reaper_handle = agent_reaper::spawn_agent_idle_reaper(
         acp.clone(),
-        reaper_window,
+        agent_reaper::live_agent_idle_window,
         Box::pin(async move {
             tokio::select! {
                 _ = shutdown_signal_future() => {}
