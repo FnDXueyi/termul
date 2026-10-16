@@ -16,17 +16,18 @@
  * returned verbatim, so a plain prompt (or an agent echoing the framing in
  * prose, were this ever misapplied) is never partially rewritten.
  */
-import { commandToken, skillToken } from '@/lib/skill-tokens'
+import { fileUrlToPath } from '@/components/chat/chat-attachments'
+import { commandToken, fileToken, skillToken } from '@/lib/skill-tokens'
 
 /** Literal header emitted by `formatPromptWithSkills`. */
 const SKILLS_HEADER = '# Agent Skills'
 /** Literal separator between the framed skills and the user text. */
 const SEPARATOR = '\n\n---\n\n'
 
-/** Skill names are non-empty word chars (letters, digits, `-`, `_`, `.`). */
-const SKILL_NAME_RE = /^[\w.-]+$/
+const SKILL_NAME_RE = /^[\p{L}\p{N}\p{M}_.-]+$/u
 /** An inline skill marker in the wire user text: `(<name>)`. */
-const SKILL_MARKER_RE = /\(([\w.-]+)\)/g
+const SKILL_MARKER_RE = /\(([\p{L}\p{N}\p{M}_.-]+)\)/gu
+const COMMAND_PREFIX_RE = /^\/([^\s/]+)(?: |$)/
 
 /**
  * Parse one `name: path` header line into `(name, path)`. Returns null when
@@ -61,23 +62,32 @@ function parseHeaderLine(line: string): { name: string; path: string } | null {
  * separator with an empty user text (split-streaming prefix), or a body
  * where no marker resolves to a framed name — returns the input verbatim.
  */
-export function wireTextToDisplay(text: string): string {
-  if (!text.includes(SKILLS_HEADER)) return text
+export function wireTextToDisplay(wire: string): string {
+  const text = wire.includes('\r\n') ? wire.replaceAll('\r\n', '\n') : wire
+  const commandMatch = COMMAND_PREFIX_RE.exec(text)
+  const command = commandMatch?.[1] ?? null
+  const prefixLength = commandMatch?.[0].length ?? 0
+  const body = text.slice(prefixLength)
 
-  let body = text
-  // Optional leading command prefix (wire: `/<cmd> ` + framed body).
-  let command: string | null = null
-  const commandMatch = body.match(/^\/(\S+) /)
-  if (commandMatch && body.slice(commandMatch[0].length).startsWith(SKILLS_HEADER)) {
-    command = commandMatch[1]
-    body = body.slice(commandMatch[0].length)
+  let display: string
+  if (body.startsWith(SKILLS_HEADER)) {
+    const framed = framedSkillsToDisplay(body)
+    if (framed === null) return wire
+    display = framed
+  } else if (command !== null) {
+    display = wire.slice(prefixLength)
+  } else {
+    return wire
   }
+  if (command === null) return display
+  return display.length > 0 ? `${commandToken(command)} ${display}` : commandToken(command)
+}
 
-  if (!body.startsWith(SKILLS_HEADER)) return text
+function framedSkillsToDisplay(body: string): string | null {
   // `formatPromptWithSkills` emits `header\n\n` + lines; no body when the
   // user text was empty (the skills section IS the whole wire).
   const afterHeader = body.slice(SKILLS_HEADER.length)
-  if (!afterHeader.startsWith('\n\n')) return text
+  if (!afterHeader.startsWith('\n\n')) return null
   const headerAndBody = afterHeader.slice(2)
 
   let headerLines: string
@@ -85,7 +95,7 @@ export function wireTextToDisplay(text: string): string {
   const sepIdx = headerAndBody.indexOf(SEPARATOR)
   if (sepIdx === -1) {
     // Token-free send: no separator, no user text.
-    if (headerAndBody.includes('\n\n')) return text
+    if (headerAndBody.includes('\n\n')) return null
     headerLines = headerAndBody
     userText = ''
   } else {
@@ -93,18 +103,18 @@ export function wireTextToDisplay(text: string): string {
     userText = headerAndBody.slice(sepIdx + SEPARATOR.length)
     // A framing header never contains blank lines; a second `\n\n` inside the
     // "header" region means this is not our framing.
-    if (headerLines.includes('\n\n')) return text
-    if (headerLines.length === 0) return text
+    if (headerLines.includes('\n\n')) return null
+    if (headerLines.length === 0) return null
   }
 
   // Parse every header line; any malformed line aborts (passthrough).
   const framed = new Set<string>()
   for (const line of headerLines.split('\n')) {
     const parsed = parseHeaderLine(line)
-    if (!parsed) return text
+    if (!parsed) return null
     framed.add(parsed.name)
   }
-  if (framed.size === 0) return text
+  if (framed.size === 0) return null
 
   // Split-streaming prefix: the wire framing is being re-streamed across
   // several chunks and this fragment ends at the separator with an empty user
@@ -113,19 +123,13 @@ export function wireTextToDisplay(text: string): string {
   // never parse. Keep the raw fragment so the coalesced post-append
   // normalization (recovery fold + `_onMessageChunk`) sees the complete
   // framing once the marker-bearing continuation lands.
-  if (sepIdx !== -1 && userText.length === 0) return text
+  if (sepIdx !== -1 && userText.length === 0) return null
 
   // Token-free send (no separator): the skills section is the whole wire.
   // Reconstruct the chips for the framed skills — never `''`, which would
   // blank the bubble and make `partitionTranscriptTurns` hide the whole turn
   // (its agent reply included) as a hidden no-content turn.
-  if (sepIdx === -1) {
-    let chips = [...framed].map((name) => skillToken(name)).join(' ')
-    if (command) {
-      chips = `${commandToken(command)}${chips.length > 0 ? ` ${chips}` : ''}`
-    }
-    return chips
-  }
+  if (sepIdx === -1) return [...framed].map((name) => skillToken(name)).join(' ')
 
   // Replace only markers whose name is framed (a typed literal `(foo)` that
   // was never a chip stays literal — the forward direction only framed real
@@ -134,38 +138,64 @@ export function wireTextToDisplay(text: string): string {
   // Termul framing — either a split prefix whose markers have not arrived or
   // prose that merely matches the shape — so it passes through verbatim.
   let resolved = false
-  let display = userText.replace(SKILL_MARKER_RE, (marker, name: string) => {
+  const display = userText.replace(SKILL_MARKER_RE, (marker, name: string) => {
     if (!framed.has(name)) return marker
     resolved = true
     return skillToken(name)
   })
-  if (!resolved) return text
-  if (command) {
-    display = `${commandToken(command)}${display.length > 0 ? ` ${display}` : ''}`
-  }
-  return display
+  return resolved ? display : null
 }
 
-/** Apply {@link wireTextToDisplay} to the text of every `text` block. */
-export function wireBlocksToDisplay<T extends { type: string; text?: string }>(
-  blocks: T[] | null | undefined
-): T[] {
+type WireBlock = { type: string; text?: string; name?: unknown; uri?: unknown }
+type FileLink<T> = T & { name: string; uri: string }
+
+function isFileLink<T extends WireBlock>(block: T): block is FileLink<T> {
+  return (
+    block?.type === 'resource_link' &&
+    typeof block.name === 'string' &&
+    block.name.length > 0 &&
+    typeof block.uri === 'string' &&
+    block.uri.startsWith('file://')
+  )
+}
+
+function restoreFileTokens<T extends WireBlock>(
+  text: string,
+  links: FileLink<T>[]
+): { text: string; claimed: FileLink<T>[] } {
+  const byName = new Map<string, FileLink<T>[]>()
+  for (const link of links) byName.set(link.name, [...(byName.get(link.name) ?? []), link])
+  const markers = [...byName.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((name) => `\\(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`)
+  const claimed: FileLink<T>[] = []
+  if (markers.length === 0) return { text, claimed }
+  const seen = new Map<string, number>()
+  const restored = text.replace(new RegExp(markers.join('|'), 'g'), (marker) => {
+    const name = marker.slice(1, -1)
+    const group = byName.get(name) ?? []
+    const index = seen.get(name) ?? 0
+    seen.set(name, index + 1)
+    const link = group[Math.min(index, group.length - 1)]
+    claimed.push(link)
+    return fileToken(name, fileUrlToPath(link.uri))
+  })
+  return { text: restored, claimed }
+}
+
+export function wireBlocksToDisplay<T extends WireBlock>(blocks: T[] | null | undefined): T[] {
   if (!Array.isArray(blocks)) return blocks ?? []
+  const links = blocks.filter(isFileLink)
+  const used = new Set<T>()
   let changed = false
   const next = blocks.map((block) => {
-    if (
-      block != null &&
-      typeof block === 'object' &&
-      (block as T).type === 'text' &&
-      typeof (block as T).text === 'string'
-    ) {
-      const display = wireTextToDisplay((block as T).text as string)
-      if (display !== (block as T).text) {
-        changed = true
-        return { ...block, text: display }
-      }
-    }
-    return block
+    if (block?.type !== 'text' || typeof block.text !== 'string') return block
+    const { text, claimed } = restoreFileTokens(wireTextToDisplay(block.text), links)
+    for (const link of claimed) used.add(link)
+    if (text === block.text) return block
+    changed = true
+    return { ...block, text }
   })
-  return changed ? (next as T[]) : blocks
+  if (used.size > 0) return next.filter((block) => !used.has(block))
+  return changed ? next : blocks
 }

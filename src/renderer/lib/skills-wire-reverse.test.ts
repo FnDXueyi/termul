@@ -1,4 +1,10 @@
-import { commandToken, SKILL_TOKEN_END, SKILL_TOKEN_START, skillToken } from '@/lib/skill-tokens'
+import {
+  commandToken,
+  fileToken,
+  SKILL_TOKEN_END,
+  SKILL_TOKEN_START,
+  skillToken
+} from '@/lib/skill-tokens'
 import { formatPromptWithSkills } from '@/lib/skills-prompt'
 import { wireBlocksToDisplay, wireTextToDisplay } from '@/lib/skills-wire-reverse'
 
@@ -114,10 +120,28 @@ describe('wireTextToDisplay', () => {
     expect(wireTextToDisplay(display)).toBe(display)
   })
 
-  it('passes through a lone command prefix without the skills header', () => {
-    const text = '/compact hello'
-    expect(wireTextToDisplay(text)).toBe(text)
+  it('reconstructs a command-only turn as a command token', () => {
+    expect(wireTextToDisplay('/compact hello')).toBe(`${commandToken('compact')} hello`)
+    expect(wireTextToDisplay('/compact')).toBe(commandToken('compact'))
   })
+
+  it('keeps an absolute path or a lone slash as plain text', () => {
+    expect(wireTextToDisplay('/etc/hosts is broken')).toBe('/etc/hosts is broken')
+    expect(wireTextToDisplay('/ is root')).toBe('/ is root')
+  })
+
+  it('reconstructs a non-ASCII skill name', () => {
+    const wire = '# Agent Skills\n\nCafé-review: /skills/cafe/SKILL.md\n\n---\n\nrun (Café-review)'
+    expect(wireTextToDisplay(wire)).toBe(`run ${skillToken('Café-review')}`)
+  })
+
+  it('reconstructs CRLF-framed wire text', () => {
+    const wire = `/compact # Agent Skills\r\n\r\ngit-worktree: ${GIT_PATH}\r\n\r\n---\r\n\r\n(git-worktree) hello`
+    expect(wireTextToDisplay(wire)).toBe(
+      `${commandToken('compact')} ${skillToken('git-worktree')} hello`
+    )
+  })
+
   it('round-trips the forward direction of formatPromptWithSkills', () => {
     const display = `use this ${skillToken('git-worktree')} and ${skillToken('release-version')}`
     const wire = formatPromptWithSkills(
@@ -150,6 +174,65 @@ describe('wireBlocksToDisplay', () => {
 
   it('keeps a text block with no text field untouched', () => {
     const blocks = [{ type: 'text' }]
+    expect(wireBlocksToDisplay(blocks)).toBe(blocks)
+  })
+
+  it('rebuilds file pills from resource_link blocks and drops the consumed links', () => {
+    const image = { type: 'image', data: 'abc' }
+    const blocks = [
+      { type: 'text', text: 'compare (auth.ts) with (auth.ts) and (notes)' },
+      image,
+      {
+        type: 'resource_link',
+        uri: 'file:///E:/work/my%20app/src/auth.ts',
+        name: 'auth.ts',
+        mimeType: 'text/plain'
+      }
+    ]
+    expect(wireBlocksToDisplay(blocks)).toEqual([
+      {
+        type: 'text',
+        text: `compare ${fileToken('auth.ts', 'E:/work/my app/src/auth.ts')} with ${fileToken('auth.ts', 'E:/work/my app/src/auth.ts')} and (notes)`
+      },
+      image
+    ])
+  })
+
+  it('rebuilds file pills inside a skill-framed, command-prefixed prompt', () => {
+    const blocks = [
+      {
+        type: 'text',
+        text: `/review # Agent Skills\n\ngit-worktree: ${GIT_PATH}\n\n---\n\n(git-worktree) on (auth.ts)`
+      },
+      { type: 'resource_link', uri: 'file:///home/u/app/auth.ts', name: 'auth.ts' }
+    ]
+    expect(wireBlocksToDisplay(blocks)).toEqual([
+      {
+        type: 'text',
+        text: `${commandToken('review')} ${skillToken('git-worktree')} on ${fileToken('auth.ts', '/home/u/app/auth.ts')}`
+      }
+    ])
+  })
+
+  it('pairs same-named mentions with their links in order', () => {
+    const blocks = [
+      { type: 'text', text: '(index.ts) vs (index.ts)' },
+      { type: 'resource_link', uri: 'file:///a/index.ts', name: 'index.ts' },
+      { type: 'resource_link', uri: 'file:///b/index.ts', name: 'index.ts' }
+    ]
+    expect(wireBlocksToDisplay(blocks)).toEqual([
+      {
+        type: 'text',
+        text: `${fileToken('index.ts', '/a/index.ts')} vs ${fileToken('index.ts', '/b/index.ts')}`
+      }
+    ])
+  })
+
+  it('keeps a resource_link with no matching marker as an attachment', () => {
+    const blocks = [
+      { type: 'text', text: 'see attached' },
+      { type: 'resource_link', uri: 'file:///a/report.pdf', name: 'report.pdf' }
+    ]
     expect(wireBlocksToDisplay(blocks)).toBe(blocks)
   })
 

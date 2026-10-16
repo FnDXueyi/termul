@@ -154,7 +154,7 @@ import {
   type AcpTransport,
   AcpTransportError
 } from '@/lib/acp-transport'
-import { commandToken, skillToken } from '@/lib/skill-tokens'
+import { commandToken, fileToken, skillToken } from '@/lib/skill-tokens'
 import {
   _flushCoalescedForTesting,
   _installTransportRecoveryForTesting,
@@ -181,7 +181,9 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
   type TestMessage = {
     id: string
     role: 'user' | 'agent' | 'thought'
-    blocks: Array<{ type: 'text'; text: string }>
+    blocks: Array<
+      { type: 'text'; text: string } | { type: 'resource_link'; uri: string; name: string }
+    >
     streaming: boolean
     timestamp: number
     seq: number
@@ -280,6 +282,20 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
       type: 'text',
       text: `${commandToken('compact')} ${skillToken('git-worktree')} and then`
     })
+  })
+
+  it('normalizes a command-only prompt with a file mention to command and file pills', async () => {
+    const record = msg('turn:t1', 'user', '/review check (auth.ts)', 10)
+    record.blocks.push({ type: 'resource_link', uri: 'file:///w/src/auth.ts', name: 'auth.ts' })
+    seedServerPayload('s-file', [record], 10)
+    seedServerTransport()
+    await useAcpStore.getState().openHistorySession('s-file')
+    expect(useAcpStore.getState().messages['s-file'][0].blocks).toEqual([
+      {
+        type: 'text',
+        text: `${commandToken('review')} check ${fileToken('auth.ts', '/w/src/auth.ts')}`
+      }
+    ])
   })
 
   it('passes plain persisted user text through verbatim (no framing)', async () => {
