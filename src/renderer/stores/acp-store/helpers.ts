@@ -268,9 +268,8 @@ export const SKILL_PAD_BLOCK_RE = new RegExp(
  * live-only padding blocks and edge whitespace on both sides while KEEPING
  * the skill/command sentinels: chip text must stay distinguishable from
  * literal `(name)` / `/cmd` text or backfill could discard a distinct
- * prompt. File tokens reduce to their `(display)` marker — the wire form —
- * because the chip never round-trips (the file rides a `resource_link`
- * block); the resulting `(display)` vs literal ambiguity is resolved by
+ * prompt. File tokens reduce to their `(display)` marker — the wire form;
+ * the resulting `(display)` vs literal ambiguity is resolved by
  * `twinFileEvidence`. `wireTextToDisplay` also runs on the persisted side
  * so a record that skipped display normalization still canonicalizes (it
  * is a passthrough for any text lacking the exact framing).
