@@ -3890,3 +3890,84 @@ async fn recover_rewrites_the_index_only_when_it_changed() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+fn enqueue_commands(persistence: &SessionPersistence, seq: u64, names: &[&str]) {
+    let commands: Vec<Value> = names
+        .iter()
+        .map(|name| json!({"name": name, "description": format!("{name} command")}))
+        .collect();
+    persistence
+        .enqueue_event(payload_record(
+            seq,
+            "commands_update",
+            json!({"agentId": "runtime-1", "sessionId": "session-1", "availableCommands": commands}),
+        ))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn session_payload_tail_carries_the_last_command_list_outside_its_window() {
+    let root = temp_dir("payload-tail-commands");
+    let (persistence, _) = registered(&root).await;
+    enqueue_commands(&persistence, 1, &["init"]);
+    enqueue_commands(&persistence, 2, &["review", "compact"]);
+    for i in 0..10u64 {
+        let seq = i * 3 + 3;
+        enqueue_turn(&persistence, seq, &format!("turn-{i}"), "prompt", "reply");
+    }
+
+    let tail = persistence
+        .session_payload_tail_async("session-1", 5)
+        .await
+        .unwrap();
+    assert_eq!(tail.messages.first().map(|message| message.seq), Some(25));
+    assert_eq!(
+        serde_json::to_value(&tail).unwrap()["commands"],
+        json!([
+            {"name": "review", "description": "review command"},
+            {"name": "compact", "description": "compact command"}
+        ])
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn session_payload_folds_the_command_list_from_the_log_after_restart() {
+    let root = temp_dir("payload-commands-restart");
+    let (persistence, _) = registered(&root).await;
+    enqueue_commands(&persistence, 1, &["init"]);
+    enqueue_turn(&persistence, 2, "turn-1", "prompt", "reply");
+    persistence.shutdown().await.unwrap();
+
+    let reopened = open_with_authority(&root.join("store")).await;
+    let payload = reopened.session_payload_async("session-1").await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&payload).unwrap()["commands"],
+        json!([{"name": "init", "description": "init command"}])
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn session_payload_tail_reads_the_command_list_from_the_log_after_restart() {
+    let root = temp_dir("payload-tail-commands-restart");
+    let (persistence, _) = registered(&root).await;
+    enqueue_commands(&persistence, 1, &["init"]);
+    for i in 0..10u64 {
+        let seq = i * 3 + 2;
+        enqueue_turn(&persistence, seq, &format!("turn-{i}"), "prompt", "reply");
+    }
+    persistence.shutdown().await.unwrap();
+
+    let reopened = open_with_authority(&root.join("store")).await;
+    let tail = reopened
+        .session_payload_tail_async("session-1", 4)
+        .await
+        .unwrap();
+    assert_eq!(tail.messages.first().map(|message| message.seq), Some(26));
+    assert_eq!(
+        serde_json::to_value(&tail).unwrap()["commands"],
+        json!([{"name": "init", "description": "init command"}])
+    );
+    let _ = fs::remove_dir_all(root);
+}
