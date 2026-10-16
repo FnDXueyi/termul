@@ -3,13 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useTerminalStore } from '@/stores/terminal-store'
 import { flushDetachedOutputNow, useTerminalDetachedOutput } from './use-terminal-detached-output'
 
-const { mockOnData, mockAppendTranscript, mockFindTerminalByPtyId, mockLogFrontendError } =
-  vi.hoisted(() => ({
-    mockOnData: vi.fn(),
-    mockAppendTranscript: vi.fn(),
-    mockFindTerminalByPtyId: vi.fn(),
-    mockLogFrontendError: vi.fn()
-  }))
+const {
+  mockOnData,
+  mockOnExit,
+  mockAppendTranscript,
+  mockFindTerminalByPtyId,
+  mockLogFrontendError
+} = vi.hoisted(() => ({
+  mockOnData: vi.fn(),
+  mockOnExit: vi.fn(),
+  mockAppendTranscript: vi.fn(),
+  mockFindTerminalByPtyId: vi.fn(),
+  mockLogFrontendError: vi.fn()
+}))
 
 /** Convert a string to Uint8Array for binary channel test data */
 function toBytes(str: string): Uint8Array {
@@ -18,7 +24,8 @@ function toBytes(str: string): Uint8Array {
 
 vi.mock('@/lib/api', () => ({
   terminalApi: {
-    onData: mockOnData
+    onData: mockOnData,
+    onExit: mockOnExit
   }
 }))
 
@@ -88,19 +95,32 @@ describe('useTerminalDetachedOutput', () => {
   function mountHook(): {
     unmount: () => void
     emit: (ptyId: string, data: string) => void
+    emitBytes: (ptyId: string, bytes: number[]) => void
+    exit: (ptyId: string) => void
     unsubscribe: ReturnType<typeof vi.fn>
+    unsubscribeExit: ReturnType<typeof vi.fn>
   } {
     let capturedCallback: ((ptyId: string, data: Uint8Array) => void) | undefined
+    let capturedExit: ((ptyId: string, exitCode: number) => void) | undefined
     const unsubscribe = vi.fn()
+    const unsubscribeExit = vi.fn()
     mockOnData.mockImplementation((callback: (ptyId: string, data: Uint8Array) => void) => {
       capturedCallback = callback
       return unsubscribe
+    })
+    mockOnExit.mockImplementation((callback: (ptyId: string, exitCode: number) => void) => {
+      capturedExit = callback
+      return unsubscribeExit
     })
     const { unmount } = renderHook(() => useTerminalDetachedOutput())
     return {
       unmount,
       emit: (ptyId: string, data: string) => capturedCallback?.(ptyId, toBytes(data)),
-      unsubscribe
+      emitBytes: (ptyId: string, bytes: number[]) =>
+        capturedCallback?.(ptyId, Uint8Array.from(bytes)),
+      exit: (ptyId: string) => capturedExit?.(ptyId, 0),
+      unsubscribe,
+      unsubscribeExit
     }
   }
 
@@ -244,7 +264,7 @@ describe('useTerminalDetachedOutput', () => {
   })
 
   it('drains buffered chunks synchronously on unmount so no chunk is lost', () => {
-    const { unmount, emit, unsubscribe } = mountHook()
+    const { unmount, emit, unsubscribe, unsubscribeExit } = mountHook()
 
     emit('pty-a', 'tail-1 ')
     emit('pty-a', 'tail-2 ')
@@ -260,6 +280,7 @@ describe('useTerminalDetachedOutput', () => {
     expect(scheduled.size).toBe(0)
     // The subscription was detached — no PTY data flows after unmount.
     expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(unsubscribeExit).toHaveBeenCalledTimes(1)
 
     // Nothing further can fire, even if a stray frame callback were invoked.
     runScheduledFrames()
@@ -536,5 +557,123 @@ describe('useTerminalDetachedOutput', () => {
     expect(single.length).toBe(cap)
     expect(single).toBe('c'.repeat(cap))
     unmount()
+  })
+
+  // '€' is E2 82 AC in UTF-8; a PTY read() can end anywhere inside it.
+  const EURO = [0xe2, 0x82, 0xac]
+
+  it('renders a multi-byte character split across two chunks intact', () => {
+    const { unmount, emitBytes } = mountHook()
+
+    emitBytes('pty-a', EURO.slice(0, 1))
+    emitBytes('pty-a', EURO.slice(1))
+    runScheduledFrames()
+
+    expect(mockAppendTranscript).toHaveBeenCalledTimes(1)
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', '€')
+
+    unmount()
+  })
+
+  it('keeps each terminal on its own decoder when split characters interleave', () => {
+    const { unmount, emitBytes, emit } = mountHook()
+
+    emitBytes('pty-a', EURO.slice(0, 2))
+    emit('pty-b', 'b')
+    emitBytes('pty-a', EURO.slice(2))
+    runScheduledFrames()
+
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', '€')
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-b', 'b')
+
+    unmount()
+  })
+
+  it('flushes a truncated character when the pty exits and starts the next stream clean', () => {
+    const { unmount, emitBytes, emit, exit } = mountHook()
+
+    emitBytes('pty-a', EURO.slice(0, 1))
+    exit('pty-a')
+    runScheduledFrames()
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', '\uFFFD')
+
+    mockAppendTranscript.mockClear()
+    emit('pty-a', 'x')
+    runScheduledFrames()
+    expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', 'x')
+
+    unmount()
+  })
+
+  describe('never-registered pty buffers', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+      // Fake timers replace rAF; restore the deterministic frame stub.
+      globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
+        const handle = nextHandle++
+        scheduled.set(handle, cb)
+        return handle
+      }) as typeof requestAnimationFrame
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('drops the buffer and warns once no record appears within the TTL', () => {
+      mockFindTerminalByPtyId.mockReturnValue(undefined)
+      const { unmount, emit } = mountHook()
+
+      emit('pty-orphan-123456789', 'orphaned output')
+      vi.advanceTimersByTime(29_999)
+      expect(mockLogFrontendError).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(1)
+      expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+      expect(mockLogFrontendError).toHaveBeenCalledWith({
+        level: 'warn',
+        source: 'terminal.detachedOutput',
+        message:
+          'Dropped 15 chars of PTY output buffered for pty=pty-orphan-1: no terminal record after 30000ms'
+      })
+
+      // A record appearing after the reap finds nothing left to deliver.
+      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
+      flushDetachedOutputNow()
+      unmount()
+      expect(mockAppendTranscript).not.toHaveBeenCalled()
+    })
+
+    it('delivers a buffer whose record appears before the TTL and never warns', () => {
+      mockFindTerminalByPtyId.mockReturnValue(undefined)
+      const { unmount, emit } = mountHook()
+
+      emit('pty-x', 'early')
+      vi.advanceTimersByTime(10_000)
+      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
+      flushDetachedOutputNow()
+      expect(mockAppendTranscript).toHaveBeenCalledWith('pty-x', 'early')
+
+      vi.advanceTimersByTime(60_000)
+      expect(mockLogFrontendError).not.toHaveBeenCalled()
+
+      unmount()
+    })
+
+    it('reaps a detached buffer whose record is removed before it flushes', () => {
+      const { unmount, emit } = mountHook()
+
+      emit('pty-a', 'closing')
+      mockFindTerminalByPtyId.mockReturnValue(undefined)
+      runScheduledFrames()
+      vi.advanceTimersByTime(30_000)
+
+      expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
+      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
+      flushDetachedOutputNow()
+      expect(mockAppendTranscript).not.toHaveBeenCalled()
+
+      unmount()
+    })
   })
 })
