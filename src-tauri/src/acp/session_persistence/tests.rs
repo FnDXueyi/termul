@@ -3105,16 +3105,13 @@ async fn legacy_session_message_count_heals_on_reopen() {
     persistence.flush_session("session-1").await.unwrap();
     persistence.shutdown().await.unwrap();
 
-    // Simulate the pre-feature on-disk state: strip `foldOpenRole` and inflate
-    // `messageCount` to the legacy rule's value (every non-tool record).
     let session_dir = persistence.session_dir(&metadata.storage_key).unwrap();
     let metadata_path = session_dir.join(METADATA_FILE);
     let mut legacy: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
-    legacy
-        .as_object_mut()
-        .unwrap()
-        .remove("foldOpenRole");
+    let legacy_fields = legacy.as_object_mut().unwrap();
+    legacy_fields.remove("foldOpenRole");
+    legacy_fields.remove("foldCounted");
     legacy["messageCount"] = serde_json::json!(6);
     fs::write(&metadata_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
 
@@ -3170,16 +3167,13 @@ async fn mid_stream_restart_does_not_double_count_the_open_run() {
     assert_eq!(mid.fold_open_role.as_deref(), Some("agent"));
     persistence.shutdown().await.unwrap();
 
-    // Simulate the restart: strip `foldOpenRole` from the on-disk metadata so
-    // the reopen heal must reconstruct it from the records.
     let session_dir = persistence.session_dir(&metadata.storage_key).unwrap();
     let metadata_path = session_dir.join(METADATA_FILE);
     let mut stripped: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).unwrap()).unwrap();
-    stripped
-        .as_object_mut()
-        .unwrap()
-        .remove("foldOpenRole");
+    let stripped_fields = stripped.as_object_mut().unwrap();
+    stripped_fields.remove("foldOpenRole");
+    stripped_fields.remove("foldCounted");
     fs::write(&metadata_path, serde_json::to_vec_pretty(&stripped).unwrap()).unwrap();
 
     let reopened = open_with_authority(&root.join("store")).await;
