@@ -3947,3 +3947,27 @@ async fn session_payload_folds_the_command_list_from_the_log_after_restart() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn session_payload_tail_reads_the_command_list_from_the_log_after_restart() {
+    let root = temp_dir("payload-tail-commands-restart");
+    let (persistence, _) = registered(&root).await;
+    enqueue_commands(&persistence, 1, &["init"]);
+    for i in 0..10u64 {
+        let seq = i * 3 + 2;
+        enqueue_turn(&persistence, seq, &format!("turn-{i}"), "prompt", "reply");
+    }
+    persistence.shutdown().await.unwrap();
+
+    let reopened = open_with_authority(&root.join("store")).await;
+    let tail = reopened
+        .session_payload_tail_async("session-1", 4)
+        .await
+        .unwrap();
+    assert_eq!(tail.messages.first().map(|message| message.seq), Some(26));
+    assert_eq!(
+        serde_json::to_value(&tail).unwrap()["commands"],
+        json!([{"name": "init", "description": "init command"}])
+    );
+    let _ = fs::remove_dir_all(root);
+}
