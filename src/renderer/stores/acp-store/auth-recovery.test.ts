@@ -2195,7 +2195,6 @@ describe('acp provider authentication & recovery', () => {
   })
 
   describe('auth-gated calls after a mid-session token expiry', () => {
-    /** The host's turn-scoped `agent_error` for an AuthRequired prompt reply. */
     function emitPromptAuthError(): void {
       useAcpStore.getState()._onAgentError({
         agentId: 'agent-1',
