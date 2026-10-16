@@ -1521,6 +1521,9 @@ describe('AgentChatPanel chat pane stays neutral during slow session/new (story 
     oskRef.current = { isOskOpen: false, keyboardHeight: 0, height: 0, offsetTop: 0 }
     transportReconnectingRef.current = false
     discoveredContextRef.current = {}
+    messagesRef.current = []
+    chatMessageListPropsRef.current = null
+    chatInputBarPropsRef.current = []
   })
 
   it('shows no "Starting agent…" banner while a launch is in flight (initializing, no agent yet)', () => {
@@ -1554,6 +1557,28 @@ describe('AgentChatPanel chat pane stays neutral during slow session/new (story 
     launchingRef.current = {}
     rerender(<AgentChatPanel sessionId="s-launch" isVisible />)
     expect(screen.queryByText('Starting agent…')).not.toBeInTheDocument()
+  })
+
+  it('renders the optimistic message and an enabled composer while a launch is in flight', () => {
+    sessionRef.current = mockAcpSession({
+      id: 's-launch',
+      agentId: '',
+      cwd: '/w',
+      status: 'initializing',
+      activeTurn: true
+    })
+    launchingRef.current = { 's-launch': true }
+    messagesRef.current = [
+      { id: 'msg-first', role: 'user', blocks: [{ type: 'text', text: 'first message' }] }
+    ]
+    render(<AgentChatPanel sessionId="s-launch" isVisible />)
+    expect(
+      (chatMessageListPropsRef.current?.items as Array<{ message?: { id: string } }>).map(
+        (item) => item.message?.id
+      )
+    ).toEqual(['msg-first'])
+    expect(screen.getByTestId('composer-stub')).toBeInTheDocument()
+    expect(lastComposerProps()?.disabled).toBe(false)
   })
 
   it('shows no banner for a launch-placeholder handoff still in flight', () => {
