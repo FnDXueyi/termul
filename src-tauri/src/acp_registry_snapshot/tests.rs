@@ -252,13 +252,9 @@ async fn malformed_fetched_at_treated_as_expired() {
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
-// ---- Live fetch against a local HTTP server ----
-
 const ONE_AGENT_REGISTRY: &str =
     r#"{"agents":[{"id":"local-agent","distribution":{"npx":{"package":"local@1.0.0"}}}]}"#;
 
-/// A registry document of exactly `len` bytes: valid JSON with no agents and
-/// a padding string, streamed in 64 KiB chunks with no Content-Length.
 fn padded_registry_body(len: usize) -> axum::body::Body {
     let prefix = r#"{"agents":[],"pad":""#;
     let suffix = r#""}"#;
@@ -312,7 +308,7 @@ async fn fetch_refuses_a_redirect_to_a_non_https_url() {
         .unwrap_err();
     assert_eq!(
         error,
-        "ACP registry redirect refused: refused redirect to non-https URL scheme \"http\""
+        "ACP registry redirect refused: non-https redirect target (scheme \"http\")"
     );
 }
 
