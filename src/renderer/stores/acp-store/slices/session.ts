@@ -76,6 +76,7 @@ import {
   trimLiveToolCalls,
   withSessionActive,
   withSessionResumeError,
+  withSwitchMarker,
   writeAgentOptionsCache
 } from '../helpers'
 import { useAcpStore } from '../index'
@@ -413,43 +414,54 @@ export function _resetSessionIndexLoadGenerationForTesting(): void {
  * Only the source's DURABLE payload may re-splice: its ids share the reopen
  * chain's namespace (`switch-splice:<source>:<durable id>`), so a repeat
  * reinstall dedups via `seen` instead of doubling rows — live-slices ids
- * (`…:<live id>`) could never match a durable reinstall. Skips when the
- * source payload is unreadable: the projection was never persisted and the
- * durable-only view is the pre-feature baseline.
+ * (`…:<live id>`) could never match a durable reinstall.
  */
 async function respliceLiveSwitchTarget(
   set: TurnEndSetter,
   targetId: SessionId,
   stillCurrent?: () => boolean
 ): Promise<void> {
-  const sourceId = liveSwitchSources.get(targetId)
-  if (!sourceId) return
-  const sourcePayload = await loadSessionPayload(sourceId).catch(() => null)
-  if (!sourcePayload) {
-    void logFrontendError({
-      level: 'info',
-      source: 'acp.switchAgent.splice',
-      message: `Re-splice for switch target ${targetId} skipped: source session ${sourceId} payload unavailable`
+  const hopsNewestFirst: Array<{
+    sourceId: SessionId
+    band: ReturnType<typeof installableTranscript>
+  }> = []
+  const visited = new Set<SessionId>([targetId])
+  let successor = targetId
+  for (let link = liveSwitchSources.get(successor); link; link = liveSwitchSources.get(successor)) {
+    if (visited.has(link.sourceId)) break
+    const sourcePayload = await loadSessionPayload(link.sourceId).catch(() => null)
+    if (!sourcePayload) {
+      void logFrontendError({
+        level: 'info',
+        source: 'acp.switchAgent.splice',
+        message: `Re-splice for switch target ${targetId} stopped: source session ${link.sourceId} payload unavailable`
+      })
+      break
+    }
+    const installed = installableTranscript(link.sourceId, sourcePayload, { headAnchored: true })
+    hopsNewestFirst.push({
+      sourceId: link.sourceId,
+      band: withSwitchMarker(installed, link.marker)
     })
-    return
+    visited.add(link.sourceId)
+    successor = link.sourceId
   }
+  if (hopsNewestFirst.length === 0) return
   if (stillCurrent && !stillCurrent()) return
-  // loadSessionPayload returns the FULL payload — never a tail window — so the
-  // transcript provably contains the conversation head. (The tail-window
-  // heuristic used on the open path only applies to loadSessionPayloadTail.)
-  const sourceInstalled = installableTranscript(sourceId, sourcePayload, { headAnchored: true })
   set((s) => {
-    const merged = spliceSwitchTranscript(
-      sourceId,
-      sourceInstalled,
-      s.messages[targetId] ?? [],
-      s.toolCalls[targetId] ?? [],
-      s.agentSwitches[targetId] ?? []
-    )
+    let messages = s.messages[targetId] ?? []
+    let toolCalls = s.toolCalls[targetId] ?? []
+    let switches = s.agentSwitches[targetId] ?? []
+    for (const hop of hopsNewestFirst) {
+      const merged = spliceSwitchTranscript(hop.sourceId, hop.band, messages, toolCalls, switches)
+      messages = merged.messages
+      toolCalls = merged.toolCalls
+      switches = merged.switches
+    }
     return {
-      messages: { ...s.messages, [targetId]: trimLiveWindow(merged.messages, targetId) },
-      toolCalls: { ...s.toolCalls, [targetId]: trimLiveToolCalls(merged.toolCalls) },
-      agentSwitches: { ...s.agentSwitches, [targetId]: merged.switches }
+      messages: { ...s.messages, [targetId]: trimLiveWindow(messages, targetId) },
+      toolCalls: { ...s.toolCalls, [targetId]: trimLiveToolCalls(toolCalls) },
+      agentSwitches: { ...s.agentSwitches, [targetId]: switches }
     }
   })
 }
@@ -518,9 +530,7 @@ async function redirectSwitchedReopen(
       // joins the splice chain.
       chain.push({
         sessionId: finalTarget,
-        ...installableTranscript(finalTarget, hopPayload, {
-          headAnchored: hopPayload.messages.length < HISTORY_TAIL_MESSAGE_LIMIT
-        })
+        ...installableTranscript(finalTarget, hopPayload, { headAnchored: true })
       })
       finalTarget = next.newSessionId
       continue

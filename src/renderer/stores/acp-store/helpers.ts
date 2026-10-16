@@ -20,7 +20,11 @@ import {
   type StopReason,
   type ToolCall
 } from '@/lib/acp-api'
-import type { AgentSwitchRecord, SessionIndexEntry } from '@/lib/acp-history-persistence'
+import {
+  type AgentSwitchRecord,
+  maxPayloadSeq,
+  type SessionIndexEntry
+} from '@/lib/acp-history-persistence'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { agentConfigIdentityKey } from '@/lib/agents/acp-config-identity'
 import { type AgentAuthPolicy, agentPolicyForConfigId } from '@/lib/agents/acp-registry'
@@ -1651,6 +1655,20 @@ export function spliceSwitchTranscript(
     }))
   const switches: AgentSwitchRecord[] = [...splicedSwitches, ...targetSwitches]
   return { messages, toolCalls, switches }
+}
+
+export type SwitchMarkerFacts = Omit<AgentSwitchRecord, 'id' | 'seq'>
+
+export function withSwitchMarker(
+  band: { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] },
+  marker: SwitchMarkerFacts
+): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
+  if (band.switches.some((sw) => sw.newSessionId === marker.newSessionId)) return band
+  const bandTop = maxPayloadSeq(band) + 1
+  return {
+    ...band,
+    switches: [...band.switches, { ...marker, id: `switch:fabricated:${bandTop}`, seq: bandTop }]
+  }
 }
 
 export function liveInlineKeyAuthPolicy(
