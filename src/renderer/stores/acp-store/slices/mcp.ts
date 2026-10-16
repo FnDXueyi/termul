@@ -107,6 +107,11 @@ function withoutProbeState(s: McpProbeState, id: string): McpProbeState {
   }
 }
 
+// Ids deleted while a probe for them was in flight. Absence from `mcpServers`
+// alone does not mean deleted: a web project switch swaps in another
+// project's list, and a probe finishing then must keep its result.
+const deletedWhileProbing = new Set<string>()
+
 // Ids whose in-flight probe started before an OAuth sign-in or sign-out
 // finished, so its result is stale. The host joins identical in-flight probes,
 // so the fresh probe can only start once this one ends.
@@ -120,9 +125,10 @@ function probeAfterInFlight(get: Parameters<McpSliceCreator>[1], id: string): Pr
   return get().probeMcpServer(id)
 }
 
-// Decides what a finished probe of `probed` may do. Returns null when its
-// result is current; otherwise drops it, clearing a deleted server's state or
-// re-probing a server whose config was edited or whose OAuth state changed.
+// Returns null when a finished probe of `probed` should write its result.
+// Otherwise the result is dropped: a server deleted mid-probe stays cleared,
+// and a server whose config was edited or whose OAuth state changed is
+// probed again.
 function settleStaleProbe(
   set: Parameters<McpSliceCreator>[0],
   get: Parameters<McpSliceCreator>[1],
@@ -130,11 +136,9 @@ function settleStaleProbe(
 ): Promise<void> | null {
   const { id } = probed
   const reprobe = reprobeAfterInFlight.delete(id)
+  const deleted = deletedWhileProbing.delete(id)
   const current = get().mcpServers.find((s) => s.id === id)
-  if (!current) {
-    set((s) => withoutProbeState(s, id))
-    return Promise.resolve()
-  }
+  if (!current) return deleted ? Promise.resolve() : null
   if (!reprobe && sameProbeConfig(current, probed)) return null
   set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
   if (current.enabled === false) return Promise.resolve()
@@ -263,6 +267,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         })
         throw err
       }
+      if (get().mcpProbing[id]) deletedWhileProbing.add(id)
       set((s) => withoutProbeState(s, id))
     }),
 

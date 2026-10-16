@@ -28,6 +28,7 @@ vi.mock('@/lib/acp-mcp-persistence', async (orig) => {
 
 import { invoke } from '@tauri-apps/api/core'
 import { acpApi, type ProbeResult } from '@/lib/acp-api'
+import { loadMcpServers } from '@/lib/acp-mcp-persistence'
 import { useAcpStore } from '@/stores/acp-store'
 import { deferred } from './testkit'
 
@@ -191,6 +192,23 @@ describe('MCP probe refresh', () => {
     expect(useAcpStore.getState().mcpProbeStatus.fs).toBe('disconnected')
     expect(useAcpStore.getState().mcpTools.fs).toEqual([])
     expect(useAcpStore.getState().mcpProbeError.fs).toBe('spawn failed')
+  })
+
+  it('keeps the result of a probe that finishes while another project is active', async () => {
+    const probe = deferred<ProbeResult>()
+    vi.mocked(invoke).mockReturnValueOnce(probe.promise)
+    const projectA = useAcpStore.getState().mcpServers
+
+    const inFlight = useAcpStore.getState().probeMcpServer('fs')
+    vi.mocked(loadMcpServers).mockResolvedValueOnce([])
+    await useAcpStore.getState().loadMcpServers()
+    probe.resolve(CONNECTED)
+    await inFlight
+    vi.mocked(loadMcpServers).mockResolvedValueOnce(projectA)
+    await useAcpStore.getState().loadMcpServers()
+
+    expect(useAcpStore.getState().mcpProbeStatus.fs).toBe('connected')
+    expect(useAcpStore.getState().mcpTools.fs).toEqual([{ name: 'read_file' }])
   })
 
   it('retries a server whose last probe ended disconnected when its tool list is expanded', async () => {
