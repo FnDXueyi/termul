@@ -192,7 +192,6 @@ export function FileTreeNode({
               </span>
               <MaterialFileIcon
                 name={entry.name}
-                extension={entry.extension}
                 isDirectory={isDir}
                 isExpanded={isExpanded}
                 depth={depth}

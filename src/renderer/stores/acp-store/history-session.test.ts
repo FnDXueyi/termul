@@ -274,6 +274,47 @@ describe('acp-store', () => {
     expect(commands).not.toContain('acp_load_session')
   })
 
+  it('a forced reopen does not load the old agent when the new process fails to start', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Ghost', command: 'ghost', args: [], env: {} })
+    const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+    ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      metadata: {
+        id: 's-force',
+        agentId: 'agent-old',
+        agentConfigId: 'cfg-1',
+        title: 'Reload chat',
+        cwd: '/w',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 0,
+        status: 'closed'
+      },
+      messages: []
+    })
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-old': { id: 'agent-old', capabilities: { loadSession: true } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-old': 'connected' }
+    }))
+    ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('socket dropped'))
+
+    await expect(
+      useAcpStore.getState().openHistorySession('s-force', { forceNewAgent: true })
+    ).rejects.toThrow('Could not start a new agent for this chat.')
+    expect(useAcpStore.getState().sessions['s-force'].status).toBe('closed')
+    expect(useAcpStore.getState().sessions['s-force'].lastError).toContain(
+      'Could not start a new agent for this chat.'
+    )
+    const commands = (invoke as ReturnType<typeof vi.fn>).mock.calls.map(([cmd]) => cmd)
+    expect(commands).toContain('acp_spawn_agent')
+    expect(commands).not.toContain('acp_resume_session')
+    expect(commands).not.toContain('acp_load_session')
+  })
+
   it('a prompt queued behind an automatic resume survives a rejected open (idle-stopped chat)', async () => {
     await useAcpStore
       .getState()

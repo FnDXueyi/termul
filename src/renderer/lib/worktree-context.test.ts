@@ -27,9 +27,7 @@ import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import {
   getActiveWorktreeForProject,
   getDefaultCwdForProject,
-  getProjectRootPath,
-  getWorktreeContextLabel,
-  getWorktreeTabContext
+  getProjectRootPath
 } from './worktree-context'
 
 function makeProject(overrides: Partial<Project> = {}): Project {
@@ -116,20 +114,14 @@ describe('worktree-context', () => {
 
   describe('active worktree derived from the shell-layout pick', () => {
     it('sees the picked worktree in any path form', () => {
-      const project = makeProject({ worktrees: [WORKTREE] })
-      setState([project])
+      setState([makeProject({ worktrees: [WORKTREE] })])
       setPick(`${WT_PATH}/`)
       expect(getActiveWorktreeForProject('p1')).toEqual(WORKTREE)
-      expect(getWorktreeTabContext('p1')).toBe('chat/abc')
-      expect(getWorktreeContextLabel(project)).toBe('Test / chat/abc')
     })
 
     it('sees the project folder with no pick', () => {
-      const project = makeProject({ worktrees: [WORKTREE] })
-      setState([project])
+      setState([makeProject({ worktrees: [WORKTREE] })])
       expect(getActiveWorktreeForProject('p1')).toBeUndefined()
-      expect(getWorktreeTabContext('p1')).toBeNull()
-      expect(getWorktreeContextLabel(project)).toBe('Test / Root')
     })
 
     it('sees the project folder when the pick equals the project path', () => {
@@ -139,11 +131,9 @@ describe('worktree-context', () => {
     })
 
     it('sees the project folder for a pruned pick', () => {
-      const project = makeProject({ worktrees: [WORKTREE] })
-      setState([project])
+      setState([makeProject({ worktrees: [WORKTREE] })])
       setPick('/projects/main/.termul/worktrees/gone')
       expect(getActiveWorktreeForProject('p1')).toBeUndefined()
-      expect(getWorktreeContextLabel(project)).toBe('Test / Root')
     })
 
     it('sees the project folder for a pick naming an outside-root worktree', () => {

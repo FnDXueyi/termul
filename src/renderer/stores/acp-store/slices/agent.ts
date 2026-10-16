@@ -1218,7 +1218,6 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     if (e.action === 'open') {
       const url = typeof e.url === 'string' && /^https?:\/\//i.test(e.url) ? e.url : undefined
       useBrowserSessionStore.getState().createTab(e.tabId, url)
-      useBrowserSessionStore.getState().setAgentControlled(e.tabId, true)
       useWorkspaceStore.getState().openAgentBrowserTab(e.tabId, url)
       void logFrontendError({
         level: 'info',
