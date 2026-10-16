@@ -143,6 +143,10 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
+  const { commands } = payload
+  if (Array.isArray(commands)) {
+    useAcpStore.setState((s) => ({ commands: { ...s.commands, [sessionId]: commands } }))
+  }
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only

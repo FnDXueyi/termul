@@ -144,6 +144,13 @@ struct Inner {
     /// shutdown `interrupted` marker) take theirs from here.
     seq_authority: Mutex<Option<Arc<dyn SeqAuthority>>>,
     unsalvageable_log_stamps: Mutex<HashMap<String, LogStamps>>,
+    /// Newest `availableCommands` per session (`None`: the log holds no list),
+    /// so a tail payload whose window starts after the session's
+    /// `commands_update` still carries it. Appends replace an entry in append
+    /// order; a tail payload seeds a missing one from the log. Only
+    /// `delete_session` removes one: a seed racing an append can then never
+    /// fill a hole with the older list.
+    last_commands: Mutex<HashMap<String, Option<Value>>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -331,6 +338,7 @@ impl SessionPersistence {
                 process_shutdown: AtomicBool::new(false),
                 seq_authority: Mutex::new(None),
                 unsalvageable_log_stamps: Mutex::new(HashMap::new()),
+                last_commands: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 writer_gate_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -682,7 +690,14 @@ impl SessionPersistence {
         record.payload = normalize_durable_payload(&record.type_, &record.payload);
         let session_id = record.session_id.clone();
         let runtime = self.runtime(&session_id)?;
-        self.send_command(&runtime, &session_id, WriterCommand::Append(record))
+        let commands = (record.type_ == "commands_update")
+            .then(|| record.payload.get("availableCommands").cloned());
+        let _order = runtime.send_lock.lock();
+        Self::deliver(&runtime, &session_id, WriterCommand::Append(record))?;
+        if let Some(commands) = commands {
+            self.inner.last_commands.lock().insert(session_id, commands);
+        }
+        Ok(())
     }
 
     /// Hold this session's send lock across a critical section that both
@@ -1198,6 +1213,7 @@ impl SessionPersistence {
             }
         }
         self.inner.sessions.lock().remove(session_id);
+        self.inner.last_commands.lock().remove(session_id);
         let dir = self.session_dir(&metadata.storage_key)?;
         // Drop the catalog entry BEFORE touching the dir: a read-path
         // salvage serializes its rewrite on the catalog lock, so once the
@@ -1683,6 +1699,7 @@ impl SessionPersistence {
         // The tail window drops tool records older than its oldest message;
         // summaries must still cover the whole session.
         payload.tool_calls = crate::acp::session_payload::fold_tool_call_summaries(&tool_records);
+        payload.commands = self.last_commands_async(session_id).await?;
         // If the tail fold produced fewer than `limit` messages AND the
         // session has more on disk (metadata.message_count > tail len), the
         // heuristic under-read (the 4× line ratio wasn't enough). Fall back
@@ -1737,6 +1754,28 @@ impl SessionPersistence {
             payload.tool_calls.len()
         );
         Ok(payload)
+    }
+
+    /// The session's newest `availableCommands`. A miss (after a host restart,
+    /// or a session no append of this process touched) scans the log once on
+    /// the blocking pool and keeps the result, absent lists included.
+    async fn last_commands_async(self: &Arc<Self>, session_id: &str) -> Result<Option<Value>> {
+        if let Some(known) = self.inner.last_commands.lock().get(session_id) {
+            return Ok(known.clone());
+        }
+        let metadata = self.metadata(session_id)?;
+        let path = self.session_dir(&metadata.storage_key)?.join(MESSAGES_FILE);
+        let id = session_id.to_string();
+        let found = tokio::task::spawn_blocking(move || newest_command_list(&path, &id))
+            .await
+            .map_err(|error| SessionPersistenceError::PersistenceUnhealthy(error.to_string()))??;
+        Ok(self
+            .inner
+            .last_commands
+            .lock()
+            .entry(session_id.to_string())
+            .or_insert(found)
+            .clone())
     }
 
     /// Completed client turn ids reconstructed from durable prompt-complete
