@@ -24,6 +24,11 @@ class ResizeObserverMock {
 
 window.ResizeObserver = ResizeObserverMock
 
+// jsdom has no Element.scrollTo; Streamdown pins streaming code blocks to the bottom with it.
+if (typeof Element.prototype.scrollTo !== 'function') {
+  Element.prototype.scrollTo = (() => {}) as typeof Element.prototype.scrollTo
+}
+
 class IntersectionObserverMock {
   observe() {}
   unobserve() {}
