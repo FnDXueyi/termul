@@ -604,67 +604,121 @@ describe('useTerminalDetachedOutput', () => {
     unmount()
   })
 
-  describe('never-registered pty buffers', () => {
+  describe('buffers waiting for a terminal record', () => {
+    const RECORD = { rendererAttachmentCount: 0, isAppHidden: false }
+    const EXIT_GRACE_MS = 5 * 60_000
+
     beforeEach(() => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      mockFindTerminalByPtyId.mockReturnValue(undefined)
     })
 
     afterEach(() => {
       vi.useRealTimers()
     })
 
-    it('drops the buffer and warns once no record appears within the TTL', () => {
-      mockFindTerminalByPtyId.mockReturnValue(undefined)
+    function registerRecord(): void {
+      mockFindTerminalByPtyId.mockReturnValue(RECORD)
+      const storeListener = vi.mocked(useTerminalStore.subscribe).mock.calls[0]?.[0] as
+        | (() => void)
+        | undefined
+      storeListener?.()
+    }
+
+    it('delivers output to a running pty that restore registers after more than 30s', () => {
       const { unmount, emit } = mountHook()
 
-      emit('pty-orphan-123456789', 'orphaned output')
-      vi.advanceTimersByTime(29_999)
+      emit('pty-restored', 'REPLAYED SCROLLBACK')
+      vi.advanceTimersByTime(31_000)
+      registerRecord()
+
+      expect(mockAppendTranscript).toHaveBeenCalledWith('pty-restored', 'REPLAYED SCROLLBACK')
       expect(mockLogFrontendError).not.toHaveBeenCalled()
-
-      vi.advanceTimersByTime(1)
-      expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
-      expect(mockLogFrontendError).toHaveBeenCalledWith({
-        level: 'warn',
-        source: 'terminal.detachedOutput',
-        message:
-          'Dropped 15 chars of PTY output buffered for pty=pty-orphan-1: no terminal record after 30000ms'
-      })
-
-      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
-      flushDetachedOutputNow()
       unmount()
-      expect(mockAppendTranscript).not.toHaveBeenCalled()
     })
 
-    it('delivers a buffer whose record appears before the TTL and never warns', () => {
-      mockFindTerminalByPtyId.mockReturnValue(undefined)
-      const { unmount, emit } = mountHook()
+    it('delivers a preserved reattach replay whose snapshot exit lands before registration', () => {
+      const { unmount, emit, exit } = mountHook()
 
-      emit('pty-x', 'early')
-      vi.advanceTimersByTime(10_000)
-      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
-      flushDetachedOutputNow()
-      expect(mockAppendTranscript).toHaveBeenCalledWith('pty-x', 'early')
-
+      emit('pty-preserved', 'REPLAYED SCROLLBACK')
+      exit('pty-preserved')
       vi.advanceTimersByTime(60_000)
-      expect(mockLogFrontendError).not.toHaveBeenCalled()
+      registerRecord()
 
+      expect(mockAppendTranscript).toHaveBeenCalledWith('pty-preserved', 'REPLAYED SCROLLBACK')
       unmount()
     })
 
-    it('reaps a detached buffer whose record is removed before it flushes', () => {
+    it('delivers agent-launch output that exits before its record is bound 31s later', () => {
+      const { unmount, emit, exit } = mountHook()
+
+      emit('pty-agent', 'agent: command not found\r\n')
+      exit('pty-agent')
+      emit('pty-agent', 'late final batch')
+      vi.advanceTimersByTime(31_000)
+      registerRecord()
+
+      expect(mockAppendTranscript).toHaveBeenCalledWith(
+        'pty-agent',
+        'agent: command not found\r\nlate final batch'
+      )
+      unmount()
+    })
+
+    it('keeps a streaming pty that never registers without ever warning', () => {
       const { unmount, emit } = mountHook()
 
-      emit('pty-a', 'closing')
-      mockFindTerminalByPtyId.mockReturnValue(undefined)
-      runScheduledFrames()
-      vi.advanceTimersByTime(30_000)
+      for (let minute = 0; minute < 20; minute++) {
+        emit('pty-unregistered', `m${minute} `)
+        vi.advanceTimersByTime(60_000)
+      }
+      expect(mockLogFrontendError).not.toHaveBeenCalled()
 
-      expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
-      mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
-      flushDetachedOutputNow()
+      registerRecord()
+      expect(mockAppendTranscript).toHaveBeenCalledTimes(1)
+      expect(mockAppendTranscript.mock.calls[0][1]).toMatch(/^m0 m1 .* m19 $/)
+      unmount()
+    })
+
+    it('drops an exited pty buffer silently once the grace passes with no record', () => {
+      const { unmount, emit, exit } = mountHook()
+
+      emit('pty-orphan', 'orphaned output')
+      exit('pty-orphan')
+      vi.advanceTimersByTime(EXIT_GRACE_MS)
+      registerRecord()
+
       expect(mockAppendTranscript).not.toHaveBeenCalled()
+      expect(mockLogFrontendError).not.toHaveBeenCalled()
+      unmount()
+    })
 
+    it('drops the final output of a closed terminal without a warning', () => {
+      mockFindTerminalByPtyId.mockReturnValue(RECORD)
+      const { unmount, emit, exit } = mountHook()
+
+      exit('pty-closed')
+      mockFindTerminalByPtyId.mockReturnValue(undefined)
+      emit('pty-closed', 'logout\r\n')
+      vi.advanceTimersByTime(EXIT_GRACE_MS)
+      registerRecord()
+
+      expect(mockAppendTranscript).not.toHaveBeenCalled()
+      expect(mockLogFrontendError).not.toHaveBeenCalled()
+      unmount()
+    })
+
+    it('decodes each chunk that arrives after exit on its own', () => {
+      mockFindTerminalByPtyId.mockReturnValue(RECORD)
+      const { unmount, emitBytes, exit } = mountHook()
+
+      exit('pty-a')
+      emitBytes('pty-a', [...EURO, 0x21])
+      emitBytes('pty-a', EURO.slice(0, 1))
+      emitBytes('pty-a', EURO.slice(1))
+      runScheduledFrames()
+
+      expect(mockAppendTranscript).toHaveBeenCalledWith('pty-a', '€!\uFFFD\uFFFD\uFFFD')
       unmount()
     })
   })

@@ -21,7 +21,17 @@ const IS_DEV = import.meta.env.DEV
  */
 const FLUSH_BACKSTOP_MS = 250
 
-const UNREGISTERED_PTY_TTL_MS = 30_000
+/**
+ * How long an exited pty's buffer waits for its terminal record. A record can
+ * legitimately arrive long after the exit: restore seeds a preserved pty's
+ * exit from its attach snapshot, then registers every terminal only after its
+ * serial attach loop (one step per terminal, each bounded by a 30s spawn
+ * timeout). Five minutes covers ten timed-out steps.
+ */
+const EXITED_PTY_GRACE_MS = 5 * 60_000
+
+/** Exited ptyIds remembered so late chunks never re-create a decoder. */
+const MAX_REMEMBERED_EXITS = 1024
 
 function scheduleFlush(callback: () => void): () => void {
   const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame(callback) : null
@@ -71,7 +81,7 @@ interface PendingBuffer {
    * would lose data the pre-coalescing code captured synchronously.
    */
   capturedDetached: boolean
-  reapTimer: ReturnType<typeof setTimeout> | null
+  dropTimer: ReturnType<typeof setTimeout> | null
 }
 
 /**
@@ -154,30 +164,31 @@ export function useTerminalDetachedOutput(): void {
   useEffect(() => {
     const pendingBuffers = new Map<string, PendingBuffer>()
     const decoders = new Map<string, TextDecoder>()
+    const exited = new Set<string>()
     let cancelFlush: (() => void) | null = null
 
     const dropBuffer = (ptyId: string): void => {
       const buffer = pendingBuffers.get(ptyId)
-      if (buffer?.reapTimer) clearTimeout(buffer.reapTimer)
+      if (buffer?.dropTimer) clearTimeout(buffer.dropTimer)
       pendingBuffers.delete(ptyId)
     }
 
-    const reapIfUnregistered = (ptyId: string, buffer: PendingBuffer): void => {
-      buffer.reapTimer = null
+    const dropIfStillUnregistered = (ptyId: string, buffer: PendingBuffer): void => {
+      buffer.dropTimer = null
       if (useTerminalStore.getState().findTerminalByPtyId(ptyId)) return
       pendingBuffers.delete(ptyId)
-      decoders.delete(ptyId)
-      void logFrontendError({
-        level: 'warn',
-        source: 'terminal.detachedOutput',
-        message: `Dropped ${buffer.totalChars} chars of PTY output buffered for pty=${ptyId.slice(0, 12)}: no terminal record after ${UNREGISTERED_PTY_TTL_MS}ms`
-      })
+      if (IS_DEV) {
+        console.debug(
+          `[DetachedOutput] Dropped ${buffer.totalChars} chars buffered for exited pty=${ptyId} that never got a terminal record`
+        )
+      }
     }
 
-    const armReaper = (ptyId: string, buffer: PendingBuffer): void => {
-      buffer.reapTimer ??= setTimeout(
-        () => reapIfUnregistered(ptyId, buffer),
-        UNREGISTERED_PTY_TTL_MS
+    const armExitedDrop = (ptyId: string, buffer: PendingBuffer): void => {
+      if (!exited.has(ptyId)) return
+      buffer.dropTimer ??= setTimeout(
+        () => dropIfStillUnregistered(ptyId, buffer),
+        EXITED_PTY_GRACE_MS
       )
     }
 
@@ -195,7 +206,7 @@ export function useTerminalDetachedOutput(): void {
       for (const [ptyId, buffer] of pendingBuffers) {
         const terminal = store.findTerminalByPtyId(ptyId)
         if (!terminal) {
-          armReaper(ptyId, buffer)
+          armExitedDrop(ptyId, buffer)
           continue
         }
 
@@ -240,22 +251,15 @@ export function useTerminalDetachedOutput(): void {
             `[DetachedOutput] Buffering data for unknown PTY pty=${ptyId.slice(0, 12)} len=${dataStr.length}`
           )
         }
-        const buffer = pendingBuffers.get(ptyId)
-        if (buffer) {
-          pushChunk(buffer, dataStr)
-        } else {
+        let buffer = pendingBuffers.get(ptyId)
+        if (!buffer) {
           // Create via pushChunk so the very first chunk is cap-checked and
           // clipped (a lone oversized chunk must not bypass the bound).
-          const buffer: PendingBuffer = {
-            chunks: [],
-            totalChars: 0,
-            capturedDetached: false,
-            reapTimer: null
-          }
+          buffer = { chunks: [], totalChars: 0, capturedDetached: false, dropTimer: null }
           pendingBuffers.set(ptyId, buffer)
-          pushChunk(buffer, dataStr)
-          armReaper(ptyId, buffer)
         }
+        pushChunk(buffer, dataStr)
+        armExitedDrop(ptyId, buffer)
         return
       }
 
@@ -287,7 +291,7 @@ export function useTerminalDetachedOutput(): void {
           chunks: [],
           totalChars: 0,
           capturedDetached: true,
-          reapTimer: null
+          dropTimer: null
         }
         pendingBuffers.set(ptyId, buffer)
         pushChunk(buffer, dataStr)
@@ -301,6 +305,11 @@ export function useTerminalDetachedOutput(): void {
       if (!data || data.length === 0) {
         return
       }
+      if (exited.has(ptyId)) {
+        // Desktop sends the exit before the reader's final batch.
+        capture(ptyId, new TextDecoder().decode(data))
+        return
+      }
       let decoder = decoders.get(ptyId)
       if (!decoder) {
         decoder = new TextDecoder()
@@ -311,11 +320,16 @@ export function useTerminalDetachedOutput(): void {
     })
 
     const unsubscribeExit = terminalApi.onExit((ptyId: string) => {
-      const decoder = decoders.get(ptyId)
-      if (!decoder) return
+      exited.delete(ptyId)
+      exited.add(ptyId)
+      if (exited.size > MAX_REMEMBERED_EXITS) {
+        exited.delete(exited.values().next().value as string)
+      }
+      const tail = decoders.get(ptyId)?.decode()
       decoders.delete(ptyId)
-      const tail = decoder.decode()
       if (tail) capture(ptyId, tail)
+      const buffer = pendingBuffers.get(ptyId)
+      if (buffer) armExitedDrop(ptyId, buffer)
     })
 
     return () => {
