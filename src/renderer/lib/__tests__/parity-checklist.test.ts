@@ -1179,7 +1179,7 @@ describe('Parity Checklist Automation', () => {
     })
 
     it('the web facade fans hits through the shared batch emitter without re-shaping them', () => {
-      expect(readLib('tauri-filesystem-api.ts')).toMatch(/files: data\.files/)
+      expect(readLib('web-filename-search.ts')).toMatch(/files: data\.files/)
     })
 
     it('folder tokens reuse the file token with a trailing-slash dir marker', () => {
@@ -1270,6 +1270,7 @@ describe('Parity Checklist Automation', () => {
   // surface the desktop Tauri events use.
   describe('Filename search parity (issue #848)', () => {
     const FsFacade = join(LIB_DIR, 'tauri-filesystem-api.ts')
+    const WebFileNameSearch = join(LIB_DIR, 'web-filename-search.ts')
     const WebAdapter = join(LIB_DIR, 'web-server-api.ts')
     const RouterRust = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src', 'web', 'router.rs')
     const SearchApiRust = join(
@@ -1297,7 +1298,7 @@ describe('Parity Checklist Automation', () => {
       const content = readFileSync(FsFacade, 'utf-8')
       expect(content).toMatch(/isTauriContext\(\)/)
       // The web branch routes through the shared webServerSearch adapter.
-      expect(content).toMatch(/webServerSearch\.fileNames/)
+      expect(readFileSync(WebFileNameSearch, 'utf-8')).toMatch(/webServerSearch\.fileNames/)
       // The web branch still exports the batch/done listener surface.
       expect(content).toMatch(/onSearchFileNamesBatch/)
       expect(content).toMatch(/onSearchFileNamesDone/)
@@ -1736,8 +1737,10 @@ describe('Web FS watcher parity (#856)', () => {
   })
 
   it('the filesystem facade watches the fs scope and feeds the shared callback chain on web', () => {
-    expect(existsSync(FsFacade), 'tauri-filesystem-api.ts should exist').toBe(true)
-    const content = readFileSync(FsFacade, 'utf-8')
+    const WebFsWatch = join(LIB_DIR, 'web-fs-watch.ts')
+    expect(existsSync(WebFsWatch), 'web-fs-watch.ts should exist').toBe(true)
+    expect(readFileSync(FsFacade, 'utf-8')).toMatch(/watchWebDirectory\(dirPath\)/)
+    const content = readFileSync(WebFsWatch, 'utf-8')
     expect(content).toMatch(/startProjectFsWatch/)
     expect(content).toMatch(/watches\.subscribe<FsWatchState, FsWatchDelta>/)
     expect(content).not.toMatch(/acp:fs_changed|wireWebFsChangedBridge/)
