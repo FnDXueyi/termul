@@ -1246,3 +1246,104 @@ fn ask_user_with_no_question_is_rejected_and_answer_for_unknown_id_is_refused() 
     });
     assert!(!server.answer_ask("q-missing", Some(vec!["Yes".to_string()])));
 }
+
+// -- issue #784 review: a pending ask_user keeps the turn's idle clock alive --
+
+#[test]
+fn pending_ask_user_resets_the_idle_deadline_until_it_is_answered() {
+    let server = HostPlanServer::start(vec![], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_session = Arc::new(StdMutex::new(String::new()));
+    {
+        let beats = Arc::clone(&beats);
+        let seen_session = Arc::clone(&seen_session);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |session_id: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *seen_session.lock().unwrap() = session_id.to_string();
+            }),
+        );
+    }
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(20));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Take your time?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+        let question_id = wait_for_open_ask(&server).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let while_pending = beats.load(std::sync::atomic::Ordering::SeqCst);
+        // One beat on arrival, then one per interval: far more than one.
+        assert!(
+            while_pending >= 4,
+            "expected a steady beat, got {while_pending}"
+        );
+        assert!(!call.is_finished(), "the call must stay parked");
+        assert_eq!(*seen_session.lock().unwrap(), "sess-real");
+
+        assert!(server.answer_ask(&question_id, Some(vec!["Yes".to_string()])));
+        call.await.unwrap();
+
+        // Answered: the beat stops with the call.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let settled = beats.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), settled);
+    });
+}
+
+#[test]
+fn cleared_idle_signal_is_not_called_by_a_later_ask_user() {
+    let server = HostPlanServer::start(vec![], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let beats = Arc::clone(&beats);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |_: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+    server.clear_idle_signal("agent-1");
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(10));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Anyone there?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+        let question_id = wait_for_open_ask(&server).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(server.answer_ask(&question_id, None));
+        call.await.unwrap();
+    });
+    assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn ask_idle_heartbeat_is_a_third_of_the_idle_timeout_within_bounds() {
+    use std::time::Duration;
+    assert_eq!(ask_idle_heartbeat(None), Duration::from_secs(30));
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_secs(60))),
+        Duration::from_secs(20)
+    );
+    // A tiny timeout still beats at least every 250 ms.
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_millis(300))),
+        Duration::from_millis(250)
+    );
+    // A huge timeout does not stretch the beat past 30 s.
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_secs(3600))),
+        Duration::from_secs(30)
+    );
+}

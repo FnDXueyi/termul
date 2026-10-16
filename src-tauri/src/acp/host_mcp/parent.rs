@@ -40,6 +40,10 @@ pub(crate) enum AskOutcome {
     Cancelled,
 }
 
+/// Resets the idle deadline of a session's turn: the owning agent's driver
+/// `signal_idle`. Registered per agent by the command loop.
+pub type IdleSignal = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// An `ask_user` call waiting for the user's answer.
 struct PendingAsk {
     session_id: String,
@@ -98,6 +102,12 @@ pub struct HostPlanServer {
     /// `ask_user` calls waiting for the user, keyed by their `q-` question id
     /// (the id the renderer answers with). Removed on answer, cancel or drop.
     pending_asks: Mutex<HashMap<String, PendingAsk>>,
+    /// Per runtime agent: resets the idle deadline of one of its sessions. A
+    /// pending `ask_user` calls it so a configured idle timeout does not cancel
+    /// the turn while the user is still answering.
+    idle_signals: Mutex<HashMap<String, IdleSignal>>,
+    /// Test seam: replaces the computed `ask_user` heartbeat interval.
+    ask_heartbeat_override: Mutex<Option<std::time::Duration>>,
 }
 
 impl HostPlanServer {
@@ -119,6 +129,8 @@ impl HostPlanServer {
             sessions: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
             pending_asks: Mutex::new(HashMap::new()),
+            idle_signals: Mutex::new(HashMap::new()),
+            ask_heartbeat_override: Mutex::new(None),
             title_set_for_session: Mutex::new(HashSet::new()),
             branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
@@ -361,10 +373,34 @@ impl HostPlanServer {
             crate::logging::redact_session_id(session_id)
         );
 
-        let outcome = match waiting.await {
-            Ok(outcome) => outcome,
-            // The sender is gone only when the server itself is dropped.
-            Err(_) => AskOutcome::Cancelled,
+        // The user can take a long time. A configured idle timeout would
+        // otherwise cancel the turn (and with it this call) while they answer,
+        // so keep the session's idle deadline alive for as long as the call is
+        // pending. The hard turn timeout is untouched.
+        let idle_signal = self.idle_signals.lock().get(agent_id).cloned();
+        let heartbeat = self
+            .ask_heartbeat_override
+            .lock()
+            .unwrap_or_else(|| ask_idle_heartbeat(crate::acp::manager::turn_idle_timeout()));
+        if let Some(signal) = &idle_signal {
+            signal(session_id);
+        }
+        let mut waiting = waiting;
+        let outcome = loop {
+            tokio::select! {
+                answered = &mut waiting => {
+                    break match answered {
+                        Ok(outcome) => outcome,
+                        // The sender is gone only when the server itself is dropped.
+                        Err(_) => AskOutcome::Cancelled,
+                    };
+                }
+                () = tokio::time::sleep(heartbeat) => {
+                    if let Some(signal) = &idle_signal {
+                        signal(session_id);
+                    }
+                }
+            }
         };
         self.pending_asks.lock().remove(&question_id);
         match outcome {
@@ -410,6 +446,24 @@ impl HostPlanServer {
         for ask in cancelled {
             let _ = ask.responder.send(AskOutcome::Cancelled);
         }
+    }
+
+    /// Register how to reset the idle deadline of `agent_id`'s sessions.
+    pub fn set_idle_signal(&self, agent_id: &str, signal: IdleSignal) {
+        self.idle_signals
+            .lock()
+            .insert(agent_id.to_string(), signal);
+    }
+
+    /// Forget the idle signal of an agent that went away.
+    pub fn clear_idle_signal(&self, agent_id: &str) {
+        self.idle_signals.lock().remove(agent_id);
+    }
+
+    /// Replace the computed `ask_user` heartbeat interval (tests only).
+    #[cfg(test)]
+    pub(crate) fn set_ask_heartbeat_for_tests(&self, interval: std::time::Duration) {
+        *self.ask_heartbeat_override.lock() = Some(interval);
     }
 
     /// Question ids of the `ask_user` calls currently waiting (tests only).
@@ -721,4 +775,14 @@ fn ask_answer_result(option_labels: &[String], values: Vec<String>) -> serde_jso
         "free_text": free_text,
         "cancelled": false,
     })
+}
+
+/// How often a pending `ask_user` resets the idle deadline: a third of the
+/// configured idle timeout, so one missed beat still lands inside the window,
+/// within 250 ms and 30 s. Unlimited idle timeout (the default) needs no
+/// beat, so it ticks slowly.
+fn ask_idle_heartbeat(idle_timeout: Option<std::time::Duration>) -> std::time::Duration {
+    const MIN: std::time::Duration = std::time::Duration::from_millis(250);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(30);
+    idle_timeout.map_or(MAX, |timeout| (timeout / 3).clamp(MIN, MAX))
 }

@@ -97,6 +97,17 @@ pub(super) async fn run_command_loop(
         }
     };
 
+    // Issue #784: let a pending `ask_user` keep this agent's turns from timing
+    // out on idle while the user answers. Forgotten when the loop ends.
+    host_plan_server.set_idle_signal(&agent_id.0, {
+        let state = driver_state.clone();
+        Arc::new(move |session_id: &str| state.lock().signal_idle(session_id))
+    });
+    let _idle_signal = IdleSignalGuard {
+        server: host_plan_server.clone(),
+        agent_id: agent_id.0.clone(),
+    };
+
     // Step 2: command loop.
     //
     // Every agent→client *request* is dispatched via `cx.spawn` (not awaited
@@ -1402,6 +1413,18 @@ pub(super) async fn run_command_loop(
     }
 
     Ok(())
+}
+
+/// Clears the agent's `ask_user` idle signal however the command loop ends.
+struct IdleSignalGuard {
+    server: Arc<crate::acp::host_mcp::parent::HostPlanServer>,
+    agent_id: String,
+}
+
+impl Drop for IdleSignalGuard {
+    fn drop(&mut self) {
+        self.server.clear_idle_signal(&self.agent_id);
+    }
 }
 
 /// Spawn an agent→client request task on the connection, keeping the command
