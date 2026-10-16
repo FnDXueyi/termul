@@ -97,13 +97,36 @@ const columnTab = (page: Page, name: RegExp): Locator => page.getByRole('tab', {
 const workspaceSwitcherTrigger = (page: Page): Locator =>
   page.locator('button[aria-haspopup="dialog"][title]:has(> span.label-panel)')
 
+/** Opacity the user sees: the element's own times every ancestor's. */
+function effectiveOpacity(element: Element): number {
+  let opacity = 1
+  for (let node: Element | null = element; node; node = node.parentElement) {
+    opacity *= Number(getComputedStyle(node).opacity)
+  }
+  return opacity
+}
+
+/**
+ * The collapsed Rail keeps its toggle slid out of the 36px mark slot at
+ * opacity 0 until the pointer is over the Rail, so hover the Rail the way a
+ * pointer user does and click only once the toggle is fully shown.
+ */
+async function clickRailToggle(page: Page): Promise<void> {
+  const toggle = railNav(page).getByRole('button', { name: RAIL_TOGGLE })
+  await railNav(page).hover()
+  await expect(toggle).toBeVisible()
+  await expect(toggle).toBeInViewport({ ratio: 1 })
+  await expect.poll(() => toggle.evaluate(effectiveOpacity)).toBe(1)
+  await toggle.click()
+}
+
 /** Boot the shell and wait for the Rail + the registered projects. */
 async function openRevampWorkspace(page: Page): Promise<void> {
   await openWorkspace(page)
   await expect(railNav(page)).toBeVisible()
   // The Rail state is persisted: a collapsed Rail would hide the project rows.
   if ((await railNav(page).getAttribute('data-expanded')) === 'false') {
-    await railNav(page).getByRole('button', { name: RAIL_TOGGLE }).click()
+    await clickRailToggle(page)
   }
   await expect(railNav(page)).toHaveAttribute('data-expanded', 'true')
   await page.locator('[aria-label^="Project: proj-"]').first().waitFor({ state: 'visible' })
@@ -286,7 +309,7 @@ test('Journey 1: three chats on one project, side by side, next to the diff', as
 
   await test.step('6. Collapse the Rail, switch projects from the Project switcher, browse Explorer', async () => {
     try {
-      await railNav(page).getByRole('button', { name: RAIL_TOGGLE }).click()
+      await clickRailToggle(page)
       await expect(railNav(page)).toHaveAttribute('data-expanded', 'false')
 
       const switcher = railNav(page).getByRole('button', { name: /^Switch project/ })
@@ -324,7 +347,7 @@ test('Journey 1: three chats on one project, side by side, next to the diff', as
     } finally {
       // The Rail state is a persisted setting shared with later specs.
       if ((await railNav(page).getAttribute('data-expanded')) === 'false') {
-        await railNav(page).getByRole('button', { name: RAIL_TOGGLE }).click()
+        await clickRailToggle(page)
         await expect(railNav(page)).toHaveAttribute('data-expanded', 'true')
         // Let the debounced persistence write flush before the page closes.
         await page.waitForTimeout(1_500)
