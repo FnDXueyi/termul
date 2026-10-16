@@ -1039,8 +1039,8 @@ export async function acpLoadSession(
         sessionId,
         cwd,
         additionalDirectories,
-        mcpServers,
-        call
+        // Keep command options in the fifth slot. An empty list is still sent.
+        mcpServers === undefined ? call : { ...call, mcpServers }
       ),
     { acceptedWithoutResult: () => ({}) }
   )
@@ -1065,8 +1065,7 @@ export async function acpResumeSession(
         sessionId,
         cwd,
         additionalDirectories,
-        mcpServers,
-        call
+        mcpServers === undefined ? call : { ...call, mcpServers }
       ),
     { acceptedWithoutResult: () => ({}) }
   )

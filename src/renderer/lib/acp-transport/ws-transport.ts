@@ -80,6 +80,7 @@ import {
   COMMAND_IN_PROGRESS_CODE,
   type CommandCallOptions,
   parseVisibleAt,
+  type ReopenCallOptions,
   type SessionCursor
 } from './types'
 import { WatchClient } from './watch-client'
@@ -1133,9 +1134,9 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    mcpServers?: McpServer[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome> {
+    const { mcpServers, ...call } = options ?? {}
     const outcome = await this.request<SessionReopenOutcome>(
       'load_session',
       {
@@ -1148,7 +1149,7 @@ export class WsAcpTransport implements AcpTransport {
         ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
-      options
+      call
     )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
@@ -1159,9 +1160,9 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
-    mcpServers?: McpServer[],
-    options?: CommandCallOptions
+    options?: ReopenCallOptions
   ): Promise<SessionReopenOutcome> {
+    const { mcpServers, ...call } = options ?? {}
     const outcome = await this.request<SessionReopenOutcome>(
       'resume_session',
       {
@@ -1172,7 +1173,7 @@ export class WsAcpTransport implements AcpTransport {
         ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
-      options
+      call
     )
     await this.subscribeSession(sessionId, this.lastSeq.get(sessionId) ?? 0, true)
     return outcome
