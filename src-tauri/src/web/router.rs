@@ -267,7 +267,6 @@ pub fn router(
         .route("/git/stash-drop", post(git_api::stash_drop))
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
-        .route("/git/branch-create", post(git_api::branch_create))
         .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         // Project icon resolution (spec-project-icon). Mirrors the desktop
         // `project_icon_resolve` command — same shared resolver, read-route
@@ -608,7 +607,6 @@ pub fn router_with_static(
         .route("/git/stash-drop", post(git_api::stash_drop))
         .route("/git/branch-list", get(git_api::branch_list))
         .route("/git/branch-switch", post(git_api::branch_switch))
-        .route("/git/branch-create", post(git_api::branch_create))
         .route("/git/diff-stat", post(git_diff_stat_api::get_diff_stat))
         .route("/project/icon", post(project_icon_api::resolve_icon))
         .route("/search/rg-info", get(search_api::rg_info))
