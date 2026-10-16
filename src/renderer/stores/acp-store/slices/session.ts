@@ -207,8 +207,6 @@ function scheduleReplayEnd(
  * `session/resume` are rejected by the single-owner guard while that turn is
  * active; the second-client path is subscribe/replay (web) or accepting the
  * already-broadcast events (desktop, which has no `subscribeSession`).
- * A `null` payload means no local transcript (a discovered session): replay
- * the host log from the start.
  */
 async function attachLiveTurn(
   set: TurnEndSetter,
@@ -2359,9 +2357,6 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
 
       const reopenBaseline = captureReopenControlBaseline(get().sessions, sessionId)
 
-      // The host refused the reopen because another client's turn is still
-      // running, which proves the session is live: attach to that turn
-      // instead of painting "Resume failed", as openHistorySession does.
       const attachIfTurnActive = async (err: unknown): Promise<boolean> => {
         if (!isReopenTurnActiveError(err)) return false
         void logFrontendError({

@@ -1,12 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { toastError, toastWarning } = vi.hoisted(() => ({
-  toastError: vi.fn(),
-  toastWarning: vi.fn()
-}))
-
 vi.mock('sonner', () => ({
-  toast: { error: toastError, warning: toastWarning }
+  toast: { error: vi.fn(), warning: vi.fn() }
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -39,9 +34,6 @@ vi.mock('@/lib/acp-history-persistence', async (orig) => {
     saveSessionPayload: vi.fn(async () => {}),
     queueSessionPayloadSave: vi.fn(async () => {}),
     queueSessionPayloadDelete: vi.fn(async () => {}),
-    // Keep the REAL full loader: in server-history mode it reads through the
-    // fake transport's `getSessionPayload` (the "host-owned" durable record).
-    loadSessionPayload: actual.loadSessionPayload,
     loadSessionPayloadTail: vi.fn(async () => null)
   }
 })
@@ -107,7 +99,6 @@ function turnActive(sessionId: string): AcpTransportError {
   return new AcpTransportError('not_implemented', `ACP_REOPEN_TURN_ACTIVE: session ${sessionId}`)
 }
 
-/** Web transport (termul-server, desktop shared-live, browser/phone) subscribes; desktop Tauri does not. */
 function fakeTransport({ subscribe }: { subscribe: boolean }): FakeTransport {
   return {
     loadSession: vi.fn(async () => ({})),
@@ -142,7 +133,7 @@ describe('acp-store: discovered reopen while another client runs a turn', () => 
     useAcpStore.setState({
       agents: { [AGENT]: { id: AGENT, capabilities } },
       agentStatus: { [AGENT]: 'connected' }
-    } as never)
+    })
   }
 
   it.each([
