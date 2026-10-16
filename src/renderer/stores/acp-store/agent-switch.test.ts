@@ -152,6 +152,7 @@ import {
   type AcpTransport
 } from '@/lib/acp-transport'
 import { logFrontendError } from '@/lib/log-api'
+import { mockAcpSession } from '@/lib/test-utils/acp'
 import { detachedReuseKey } from '@/stores/acp-reuse-keys'
 import {
   _addEphemeralSessionIdForTesting,
@@ -492,6 +493,31 @@ describe('switchAgent (story 3)', () => {
     // spawned FOR this switch and owns no other session).
     expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'acp_record_agent_switch')).toBe(false)
     expect(workspaceStateRef.current.remapAgentChatSession).not.toHaveBeenCalled()
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('acp_kill_agent', { agentId: 'agent-new' })
+  })
+
+  it('NEW_SESSION_FAIL: closed sessions do not keep the reused agent alive', async () => {
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-new': { id: 'agent-new', capabilities: {}, authMethods: [] } },
+      agentStatus: { ...s.agentStatus, 'agent-new': 'connected' },
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-new', '/work', 'p1')]: 'agent-new'
+      },
+      sessions: {
+        ...s.sessions,
+        's-done': mockAcpSession({ id: 's-done', agentId: 'agent-new', status: 'closed' })
+      }
+    }))
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'acp_new_session') throw new Error('new session rejected')
+      if (command === 'acp_kill_agent') return undefined
+      throw new Error(`unexpected invoke command: ${command}`)
+    })
+    await useAcpStore.getState().armAgentSwitch('s-old', 'cfg-new')
+    await useAcpStore.getState().switchAgent('s-old', 'cfg-new', { pendingText: 'draft' })
+
+    expect(useAcpStore.getState().sessions['s-old'].agentId).toBe('agent-old')
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('acp_kill_agent', { agentId: 'agent-new' })
   })
 
