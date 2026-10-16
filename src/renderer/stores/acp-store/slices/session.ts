@@ -56,6 +56,7 @@ import {
   deriveOpenTurn,
   discoveryKey,
   dropElicitationsForSession,
+  dropEphemeralSessionState,
   dropHiddenToolCalls,
   dropPermissionsForSession,
   dropPreparedSlots,
@@ -1598,6 +1599,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // Reclaim app-owned temp files (pasted screenshots) staged for this session
     // now that no further turns can read them.
     void deleteSessionTempFiles(sessionId)
+    const emptyPooled =
+      ephemeralSessionIds.has(sessionId) && (get().messages[sessionId]?.length ?? 0) === 0
     set((s) => {
       const sessions = { ...s.sessions }
       if (sessions[sessionId]) {
@@ -1634,6 +1637,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       sessionId in get().messages
     ) {
       persistSession(get(), sessionId, (entries) => set({ sessionIndex: entries }))
+    }
+    if (emptyPooled) {
+      ephemeralSessionIds.delete(sessionId)
+      set((s) => dropEphemeralSessionState(s, sessionId))
     }
     set((s) => dropSessionTranscriptState(s, sessionId))
   },
@@ -2192,6 +2199,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessionIndex: s.sessionIndex.filter((e) => e.id !== id),
           sessions,
+          preparedSessions: dropPreparedSlots(s.preparedSessions, (sid) => sid === id),
           openingHistoryIds: dropRecordKey(s.openingHistoryIds, id),
           discoveredReopenContexts: dropRecordKey(s.discoveredReopenContexts, id),
           ...dropSessionTranscriptState(s, id)
