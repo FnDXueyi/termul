@@ -282,10 +282,8 @@ fn join_or_start_probe(server: McpServerConfig) -> SharedProbe {
     }
     let key = server.clone();
     let task = tokio::spawn(async move {
-        let finished_key = server.clone();
-        let result = probe_once(server).await;
-        IN_FLIGHT_PROBES.lock().remove(&finished_key);
-        result
+        let _entry = InFlightEntry(server.clone());
+        probe_once(server).await
     });
     let shared = task
         .map(|joined| {
@@ -297,6 +295,16 @@ fn join_or_start_probe(server: McpServerConfig) -> SharedProbe {
         .shared();
     in_flight.insert(key, shared.clone());
     shared
+}
+
+/// Removes a probe's in-flight entry when its task ends, panics included, so a
+/// failed probe is never served to later callers.
+struct InFlightEntry(McpServerConfig);
+
+impl Drop for InFlightEntry {
+    fn drop(&mut self) {
+        IN_FLIGHT_PROBES.lock().remove(&self.0);
+    }
 }
 
 /// One-shot probe: open a fresh rmcp client connection, `initialize`, list

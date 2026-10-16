@@ -191,3 +191,30 @@ async fn concurrent_identical_probes_share_one_spawn() {
     probe(config()).await;
     assert_eq!(spawns(), 2, "a finished probe is not cached");
 }
+
+#[tokio::test]
+async fn panicking_probe_task_leaves_no_in_flight_entry() {
+    let config = McpServerConfig {
+        r#type: Some("stdio".to_string()),
+        name: "panicking-probe".to_string(),
+        command: Some("unused".to_string()),
+        args: Vec::new(),
+        env: Vec::new(),
+        url: None,
+        headers: Vec::new(),
+    };
+    let stale = futures::future::ready(ProbeResult::disconnected("stale"))
+        .boxed()
+        .shared();
+    IN_FLIGHT_PROBES.lock().insert(config.clone(), stale);
+
+    let key = config.clone();
+    let joined = tokio::spawn(async move {
+        let _entry = InFlightEntry(key);
+        panic!("probe panicked");
+    })
+    .await;
+
+    assert!(joined.unwrap_err().is_panic());
+    assert!(!IN_FLIGHT_PROBES.lock().contains_key(&config));
+}
