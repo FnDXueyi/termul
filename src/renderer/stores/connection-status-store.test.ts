@@ -174,11 +174,22 @@ describe('connection-status-store', () => {
       expect(shown().controlChannel).toBe(state)
     })
 
-    it('holds host offline, not connected, while a recovery attempt is inside the grace', () => {
-      useConnectionStatusStore.getState().setControlChannel('host-offline')
+    it.each([
+      'host-offline',
+      'disconnected'
+    ] as const)('shows reconnecting at once when recovery starts from %s', (state) => {
+      useConnectionStatusStore.getState().setControlChannel(state)
+      useConnectionStatusStore.getState().setControlChannel('reconnecting')
+      expect(shown().controlChannel).toBe('reconnecting')
+    })
+
+    it('graces a reconnect that starts during the boot connect', () => {
+      _resetConnectionStatusWiringForTests()
       useConnectionStatusStore.getState().setControlChannel('reconnecting')
       vi.advanceTimersByTime(RECONNECT_GRACE_MS - 1)
-      expect(shown().controlChannel).toBe('host-offline')
+      expect(shown().controlChannel).toBe('connecting')
+      vi.advanceTimersByTime(1)
+      expect(shown().controlChannel).toBe('reconnecting')
     })
 
     it('resets to the initial state and drops a pending grace timer', () => {

@@ -7,6 +7,9 @@
  * - `terminalChannel`: the `/terminal/ws` channel (fed by
  *   `WebTerminalClient.setConnectionStateListener`).
  *
+ * UI reads {@link useShownConnectionStore}; safety and recovery logic reads
+ * the raw channels.
+ *
  * Web-only: `wireConnectionStatusTracking()` is a no-op on Tauri desktop
  * (both transports there are direct IPC), so the channels stay at their
  * initial values and every consumer renders its healthy/no-op state.
@@ -67,7 +70,9 @@ function showChannel(channel: keyof ShownChannels, next: ConnectionChannelState)
   const pending = graceTimers[channel]
   if (pending !== null) clearTimeout(pending)
   graceTimers[channel] = null
-  if (next !== 'reconnecting') {
+  const shown = useShownConnectionStore.getState()[channel]
+  const healthy = shown === 'connected' || shown === 'connecting'
+  if (next !== 'reconnecting' || !healthy) {
     useShownConnectionStore.setState({ [channel]: next })
     return
   }
