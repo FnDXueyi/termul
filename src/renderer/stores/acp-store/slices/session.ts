@@ -207,19 +207,21 @@ function scheduleReplayEnd(
  * `session/resume` are rejected by the single-owner guard while that turn is
  * active; the second-client path is subscribe/replay (web) or accepting the
  * already-broadcast events (desktop, which has no `subscribeSession`).
+ * A `null` payload means no local transcript (a discovered session): replay
+ * the host log from the start.
  */
 async function attachLiveTurn(
   set: TurnEndSetter,
   id: SessionId,
   agentId: AgentId,
-  payload: SessionPayload,
+  payload: SessionPayload | null,
   reopenGeneration: number
 ): Promise<void> {
-  const cursor = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  const cursor = payload ? Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload)) : 0
   const transport = getAcpTransport()
   transport.seedSessionCursor?.(id, {
     lastSeq: cursor,
-    logEpoch: payload.metadata.logEpoch ?? null
+    logEpoch: payload?.metadata.logEpoch ?? null
   })
   let missing = false
   set((s) => {
@@ -2357,6 +2359,25 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
 
       const reopenBaseline = captureReopenControlBaseline(get().sessions, sessionId)
 
+      // The host refused the reopen because another client's turn is still
+      // running, which proves the session is live: attach to that turn
+      // instead of painting "Resume failed", as openHistorySession does.
+      const attachIfTurnActive = async (err: unknown): Promise<boolean> => {
+        if (!isReopenTurnActiveError(err)) return false
+        void logFrontendError({
+          level: 'info',
+          source: 'acp.openDiscoveredSession',
+          message: `Discovered session ${sessionId} has a turn in flight; attaching instead of failing the reopen`
+        })
+        await attachLiveTurn(set, sessionId, agentId, null, reopenGeneration)
+        if (isCurrentSessionReopen(sessionId, reopenGeneration)) {
+          set((s) => ({
+            discoveredReopenContexts: dropRecordKey(s.discoveredReopenContexts, sessionId)
+          }))
+        }
+        return true
+      }
+
       if (strategy === 'load') {
         // Agent replays history via session/update into the empty transcript.
         try {
@@ -2402,6 +2423,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           scheduleReplayEnd(set, sessionId, reopenGeneration)
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           // Drop any partially replayed content so the pane doesn't show a
           // half-loaded transcript under the error (there is no local mirror to
           // restore for a discovered session).
@@ -2438,6 +2460,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           return
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           if (capabilities?.loadSession === true && resumeMissesSession(err)) {
             void logFrontendError({
               level: 'warn',
@@ -2501,6 +2524,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           scheduleReplayEnd(set, sessionId, reopenGeneration)
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           set((s) => ({
             messages: { ...s.messages, [sessionId]: [] },
             sessions: withSessionResumeError(s.sessions, sessionId, err)

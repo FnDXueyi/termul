@@ -89,7 +89,7 @@ import {
   _setAcpTransportForTests,
   AcpTransportError
 } from '@/lib/acp-transport'
-import { _resetAcpAuthForTesting, useAcpStore } from '@/stores/acp-store'
+import { _flushCoalescedForTesting, _resetAcpAuthForTesting, useAcpStore } from '@/stores/acp-store'
 import { FRESH, flushTurnEnd } from './testkit'
 
 const AGENT = 'agent-1'
@@ -127,6 +127,7 @@ function streamLiveChunk(sessionId: string, text: string): void {
     role: 'agent',
     content: { type: 'text', text }
   })
+  _flushCoalescedForTesting()
 }
 
 describe('acp-store: discovered reopen while another client runs a turn', () => {
