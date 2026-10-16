@@ -82,6 +82,7 @@ import {
   dropRecordKey,
   normalizeUserMessages,
   partitionTranscriptTurns,
+  SWITCH_SPLICE_ID_PREFIX,
   selectAgentIdentity,
   selectConfigWarmState,
   trimLiveToolCalls
@@ -414,16 +415,26 @@ async function installTransportRecovery(
     if (!recoveryIsCurrent()) return {}
     const session = current.sessions[recovery.sessionId]
     const replacing = normalizedMessages.length > 0
+    const splicedMessages = (current.messages[recovery.sessionId] ?? []).filter((m) =>
+      m.id.startsWith(SWITCH_SPLICE_ID_PREFIX)
+    )
+    const splicedToolCalls = (current.toolCalls[recovery.sessionId] ?? []).filter((t) =>
+      t.toolCallId.startsWith(SWITCH_SPLICE_ID_PREFIX)
+    )
     return {
       messages: replacing
-        ? { ...current.messages, [recovery.sessionId]: installedMessages }
+        ? {
+            ...current.messages,
+            [recovery.sessionId]: [...splicedMessages, ...installedMessages]
+          }
         : current.messages,
       toolCalls: replacing
         ? {
             ...current.toolCalls,
-            [recovery.sessionId]: trimLiveToolCalls(
-              dropHiddenToolCalls(recoveredToolCalls, installedMessages, hidden)
-            )
+            [recovery.sessionId]: trimLiveToolCalls([
+              ...splicedToolCalls,
+              ...dropHiddenToolCalls(recoveredToolCalls, installedMessages, hidden)
+            ])
           }
         : current.toolCalls,
       degradedRecoverySessions: dropRecordKey(current.degradedRecoverySessions, recovery.sessionId),
