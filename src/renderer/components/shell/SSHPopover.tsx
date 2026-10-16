@@ -9,7 +9,6 @@ import {
 } from '@/components/ssh/SSHPanelDialogs'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useSSHStore } from '@/stores/ssh-store'
 
@@ -38,8 +37,6 @@ export function SSHPopover({
   const connectedCount = useSSHStore(
     (state) => state.sessions.filter((s) => s.status === 'connected').length
   )
-
-  useNativeWebviewOcclusion(open)
 
   // Both dialogs are plain overlays that never return focus, so put it back on
   // the icon once the dialog has closed.
