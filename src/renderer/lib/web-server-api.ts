@@ -17,30 +17,34 @@
  * the web auth gate's 401 UNAUTHORIZED) keeps the server-provided code/message.
  */
 import type {
-  BranchInfo,
   DetectedShells,
   DirectoryEntry,
-  DirtyStatus,
   FileInfo,
   GitCommit,
   GitCommitContext,
   GitCommitDetail,
   GitCommitFileDiff,
   GitDiffStat,
-  GitignoreDir,
   GitStashInfo,
   GitStatusDetail,
   IpcResult,
-  ProjectIcon,
-  SymlinkResult,
-  WorktreeInfo,
-  WorktreeProgressEvent
+  ProjectIcon
 } from '@shared/types/ipc.types'
 import {
   COMMAND_ID_HEADER,
   type FsWriteExpected,
   type HashedFileContent
 } from '@shared/types/ipc.types'
+import type {
+  BaseBranchInfo,
+  BranchInfo,
+  DirtyStatus,
+  GitignoreDir,
+  IncludeCopyResult,
+  SymlinkResult,
+  WorktreeInfo,
+  WorktreeProgressEvent
+} from '@shared/types/worktree.types'
 import {
   bodyToResult,
   getJson,
@@ -56,7 +60,6 @@ import {
 import { logFrontendError } from './log-api'
 import type { AgentSkillContent, AgentSkillSummary } from './skills-api'
 import { authHeader } from './web-auth-token'
-import type { BaseBranchInfo, IncludeCopyResult } from './worktree-api'
 
 /**
  * POST JSON and read an `application/x-ndjson` response stream. Each line is

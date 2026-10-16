@@ -1,13 +1,16 @@
+import type { IpcResult } from '@shared/types/ipc.types'
 import type {
+  BaseBranchInfo,
   BranchInfo,
   DirtyStatus,
   GitignoreDir,
-  IpcResult,
+  IncludeCopyResult,
+  MergePreviewInfo,
   RemoveResult,
   SymlinkResult,
   WorktreeInfo,
   WorktreeProgressEvent
-} from '@shared/types/ipc.types'
+} from '@shared/types/worktree.types'
 import { invoke } from '@tauri-apps/api/core'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 import type { Worktree } from '@/types/project'
@@ -15,55 +18,6 @@ import { invokeIpcCommand, mapTauriVerdict } from './acp-transport/tauri-verdict
 import { entityKeyOf, runIpcCommand, worktreeCreateKey } from './ipc/http'
 import { isTauriContext } from './tauri-runtime'
 import { webServerWorktree } from './web-server-api'
-
-export interface MergePreviewInfo {
-  direction: string
-  sourceBranch: string
-  targetBranch: string
-  conflictFiles: {
-    path: string
-    severity: string
-    conflictCount: number
-    isLockFile: boolean
-    suggestions: {
-      strategy: string
-      confidence: string
-      reason: string
-      description: string
-    }[]
-  }[]
-  changedFiles: string[]
-  totalChanges: number
-  detectionMode: string
-  hasAutoResolvable: boolean
-}
-
-/**
- * Origin-aware default base branch + detached-HEAD guard (CAP-2). The launcher
- * uses `defaultBase` as the initial base-branch picker value; `isDetached`
- * forces an explicit pick before a worktree launch.
- */
-export interface BaseBranchInfo {
-  defaultBase: string
-  currentBranch?: string
-  isDetached: boolean
-}
-
-/**
- * Result of `.worktree-include` carry-over (CAP-5). `ran` is the number of
- * patterns that matched at least one file; `copied` is files actually copied;
- * `skipped` carries per-file reasons (symlink / path-escape / already-present).
- */
-export interface IncludeSkipReason {
-  path: string
-  reason: string
-}
-
-export interface IncludeCopyResult {
-  ran: number
-  copied: number
-  skipped: IncludeSkipReason[]
-}
 
 async function worktreeInvoke<T>(
   command: string,
