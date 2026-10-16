@@ -803,7 +803,11 @@ export function AgentChatPanel({
     >
       <PendingRestartBanner sessionId={sessionId} />
       {isClosed && isOpeningHistory && !isLaunchingSession && (
-        <div className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-2 border-b border-border/60 bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground"
+        >
           <Spinner size={12} decorative />
           Resuming chat…
         </div>
@@ -848,13 +852,6 @@ export function AgentChatPanel({
           </div>
         )}
       {showTransportOverlay && (
-        // Story 5.3 (AC3, T5.3): transport-level reconnect overlay. This is
-        // DISTINCT from the session-level "Reconnecting to agent…" banner
-        // above (which fires when `openHistorySession` is in flight). Both can
-        // show simultaneously. The overlay is non-blocking (`pointer-events-none`
-        // on the container) so already-rendered messages remain interactive.
-        // Reuses `AgentConnectionLamp` (amber+pulse via the `reconnecting`
-        // prop) — no new indicator component (NFR9, AC3).
         <div
           className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-1.5 rounded-full border border-border/60 bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur-sm"
           role="status"
