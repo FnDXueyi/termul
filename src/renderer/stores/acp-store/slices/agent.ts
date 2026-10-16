@@ -31,6 +31,7 @@ import {
   browserTabId as workspaceBrowserTabId
 } from '@/stores/workspace-store'
 import { isDetachedReuseKey, parseReuseKey } from '../../acp-reuse-keys'
+import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
 import {
   authPickerUnavailableError,
   configIdForAgentId,
@@ -559,6 +560,20 @@ function endPromptTrackingForAgentFailure(
   }
 }
 
+function dropPromptQueuesForAgent(state: AcpState, agentId: AgentId): AcpState['promptQueues'] {
+  let promptQueues = state.promptQueues
+  for (const [sessionId, queue] of Object.entries(state.promptQueues)) {
+    if (queue.length === 0 || state.sessions[sessionId]?.agentId !== agentId) continue
+    promptQueues = dropPromptQueueForSession(promptQueues, sessionId)
+    void logFrontendError({
+      level: 'info',
+      source: 'acp.promptQueue.agentStopped',
+      message: `Dropped ${queue.length} queued prompt(s) for chat ${sessionId}: agent ${agentId} stopped`
+    })
+  }
+  return promptQueues
+}
+
 export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> = (set, get) => ({
   agents: {},
   agentStatus: {},
@@ -663,7 +678,8 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         ),
         pendingPermissions: dropPermissionsForAgent(s.pendingPermissions, agentId),
         pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, agentId),
-        pendingElicitations: dropElicitationsForAgent(s.pendingElicitations ?? {}, agentId)
+        pendingElicitations: dropElicitationsForAgent(s.pendingElicitations ?? {}, agentId),
+        promptQueues: dropPromptQueuesForAgent(s, agentId)
       }
     })
     // A killed agent can never finish its browser-open flow — drop the
@@ -1138,6 +1154,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         pendingPermissions: dropPermissionsForAgent(s.pendingPermissions, e.agentId),
         pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, e.agentId),
         pendingElicitations: dropElicitationsForAgent(s.pendingElicitations ?? {}, e.agentId),
+        promptQueues: dropPromptQueuesForAgent(s, e.agentId),
         discoveredSessions,
         preparedSessions
       }
