@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::{run_bounded, EXIT_CLEANUP_TIMEOUT};
+use super::{run_bounded, run_exit_cleanup, EXIT_CLEANUP_TIMEOUT};
 
 #[tokio::test(start_paused = true)]
 async fn a_cleanup_that_never_finishes_is_abandoned_at_the_deadline() {
@@ -59,4 +59,27 @@ async fn a_panicking_cleanup_still_returns() {
     run_bounded(async { panic!("teardown bug") }, EXIT_CLEANUP_TIMEOUT).await;
 
     assert_eq!(started.elapsed(), Duration::ZERO);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stuck_terminals_cannot_keep_chat_history_from_flushing() {
+    let flushed = Arc::new(AtomicBool::new(false));
+    let flag = flushed.clone();
+    let started = Instant::now();
+
+    run_exit_cleanup(
+        async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            flag.store(true, Ordering::SeqCst);
+        },
+        tokio::time::sleep(Duration::from_secs(3 * 7)),
+        EXIT_CLEANUP_TIMEOUT,
+    )
+    .await;
+
+    assert!(
+        flushed.load(Ordering::SeqCst),
+        "chat history was not flushed before the deadline"
+    );
+    assert_eq!(started.elapsed(), EXIT_CLEANUP_TIMEOUT);
 }

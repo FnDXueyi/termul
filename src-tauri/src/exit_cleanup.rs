@@ -3,9 +3,24 @@ use std::time::Duration;
 
 pub(crate) const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 
+pub(crate) async fn run_exit_cleanup<P, T>(preserve: P, teardown: T, timeout: Duration)
+where
+    P: Future<Output = ()> + Send + 'static,
+    T: Future<Output = ()> + Send + 'static,
+{
+    run_bounded(
+        async move {
+            preserve.await;
+            teardown.await;
+        },
+        timeout,
+    )
+    .await;
+}
+
 /// Run `cleanup` and give up on it after `timeout`, so the caller always gets
 /// to exit or relaunch.
-pub(crate) async fn run_bounded<F>(cleanup: F, timeout: Duration)
+async fn run_bounded<F>(cleanup: F, timeout: Duration)
 where
     F: Future<Output = ()> + Send + 'static,
 {

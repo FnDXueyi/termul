@@ -2073,7 +2073,7 @@ pub fn run() {
             let pty_manager = app_handle
                 .try_state::<Arc<PtyManager>>()
                 .map(|state| state.inner().clone());
-            let cleanup = async move {
+            let preserve = async move {
                 if let Some(ssh_manager) = ssh_manager {
                     ssh_manager.shutdown().await;
                 }
@@ -2082,12 +2082,6 @@ pub fn run() {
                 }
                 if let Some(ws_channel_host) = &ws_channel_host {
                     ws_channel_host.drain().await;
-                }
-                if let Some(pty_manager) = pty_manager {
-                    pty_manager.kill_all().await;
-                }
-                if let Some(canvas_pool) = canvas_pool {
-                    canvas_pool.shutdown_all().await;
                 }
                 if let Some(acp_manager) = acp_manager {
                     // When persistence is available, kill_all stops agents
@@ -2103,6 +2097,14 @@ pub fn run() {
                         log::error!("[acp-history] persistence shutdown failed at exit: {error}");
                     }
                 }
+            };
+            let teardown = async move {
+                if let Some(pty_manager) = pty_manager {
+                    pty_manager.kill_all().await;
+                }
+                if let Some(canvas_pool) = canvas_pool {
+                    canvas_pool.shutdown_all().await;
+                }
                 if let Some(browser_tab_manager) = browser_tab_manager {
                     browser_tab_manager.destroy_all();
                 }
@@ -2111,7 +2113,12 @@ pub fn run() {
             // tauri::async_runtime, not tokio::spawn: the run callback may fire
             // on a thread without a Tokio reactor (e.g. macOS WKWebView events).
             tauri::async_runtime::spawn(async move {
-                exit_cleanup::run_bounded(cleanup, exit_cleanup::EXIT_CLEANUP_TIMEOUT).await;
+                exit_cleanup::run_exit_cleanup(
+                    preserve,
+                    teardown,
+                    exit_cleanup::EXIT_CLEANUP_TIMEOUT,
+                )
+                .await;
                 CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
                 finish_exit(&app_handle_clone);
             });
