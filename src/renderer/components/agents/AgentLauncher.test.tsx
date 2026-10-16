@@ -3002,10 +3002,6 @@ describe('AgentLauncher worktree isolation', () => {
     expect(mockSetWorktreePick).not.toHaveBeenCalled()
   })
 
-  // Non-collision git failures (WORKTREE_CREATE_FAILED covers GitError/IoError
-  // — e.g. a real usage/argument error) must NOT trigger the `-2` collision
-  // retry: the launcher retries only on WORKTREE_EXISTS /
-  // BRANCH_ALREADY_HAS_WORKTREE, and surfaces anything else to the user.
   it('does not retry when worktree create fails with a non-collision error', async () => {
     mockWorktreeCreate.mockReset()
     mockWorktreeCreate.mockResolvedValue({

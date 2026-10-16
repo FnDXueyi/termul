@@ -2582,6 +2582,101 @@ describe('switchAgent CAP-7 reopen (story 3)', () => {
     expect(state.sessions['s-new']?.status).toBe('active')
   })
 
+  it('QUEUE_REDIRECT: a send queued during the automatic resume of an idle-stopped switch source runs on the final session', async () => {
+    const marker = {
+      id: 'switch:seq-3',
+      fromConfigId: 'cfg-old',
+      toConfigId: 'cfg-new',
+      newSessionId: 's-new',
+      summaryText: 'Handoff summary',
+      timestamp: 3,
+      seq: 3
+    }
+    setCachedSessionPayload('s-old', {
+      metadata: {
+        id: 's-old',
+        agentId: 'agent-old',
+        agentConfigId: 'cfg-old',
+        title: 'Switched chat',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 10,
+        messageCount: 1,
+        lastSeq: 3,
+        status: 'closed'
+      },
+      messages: [
+        {
+          id: 'user:seq-1',
+          role: 'user',
+          blocks: [{ type: 'text', text: 'hello old agent' }],
+          streaming: false,
+          timestamp: 1,
+          seq: 1
+        }
+      ] as never,
+      switches: [marker]
+    })
+    setCachedSessionPayload('s-new', {
+      metadata: {
+        id: 's-new',
+        agentId: 'agent-new',
+        agentConfigId: 'cfg-new',
+        title: 'Continuation',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 4,
+        lastActivityAt: 8,
+        messageCount: 0,
+        lastSeq: 0,
+        status: 'closed'
+      },
+      messages: [] as never
+    })
+    const loadSession = vi.fn(async () => ({}))
+    const sendPromptBlocks = vi.fn(async () => ({}))
+    _setAcpTransportForTests({
+      historyMode: () => 'server',
+      loadSession,
+      sendPrompt: vi.fn(async () => ({})),
+      sendPromptBlocks,
+      recordAgentSwitch: vi.fn(async () => {}),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    seedSession('s-old', 'agent-old', false)
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, 's-old': { ...s.sessions['s-old'], status: 'closed' } },
+      agentSwitches: { 's-old': [marker] },
+      agentConfigs: [{ id: 'cfg-new', name: 'Claude', command: 'claude', args: [], env: {} }],
+      agents: { 'agent-new': { id: 'agent-new', capabilities: { loadSession: true } } },
+      agentStatus: { 'agent-new': 'connected' }
+    }))
+
+    const open = useAcpStore.getState().openHistorySession('s-old')
+    await useAcpStore.getState().sendPrompt('s-old', 'queued during resume')
+    expect(useAcpStore.getState().promptQueues['s-old']).toHaveLength(1)
+
+    await open
+    await flushTurnEnd()
+
+    const state = useAcpStore.getState()
+    expect(workspaceStateRef.current.remapAgentChatSession).toHaveBeenCalledWith('s-old', 's-new')
+    expect(state.promptQueues['s-old'] ?? []).toEqual([])
+    expect(sendPromptBlocks).toHaveBeenCalledWith(
+      'agent-new',
+      's-new',
+      [{ type: 'text', text: 'queued during resume' }],
+      expect.any(String),
+      undefined
+    )
+    expect(logFrontendError).toHaveBeenCalledWith({
+      level: 'info',
+      source: 'acp.openHistorySession.switchRedirect',
+      message: 'Moved 1 queued prompt(s) from switched session s-old to s-new'
+    })
+  })
+
   it('UNSWITCHED: reopening a chat with no switch markers takes the original path', async () => {
     setCachedSessionPayload('s-plain', {
       metadata: {
