@@ -56,6 +56,7 @@ import {
   deriveOpenTurn,
   discoveryKey,
   dropElicitationsForSession,
+  dropEphemeralSessionState,
   dropHiddenToolCalls,
   dropPermissionsForSession,
   dropPreparedSlots,
@@ -75,6 +76,7 @@ import {
   trimLiveToolCalls,
   withSessionActive,
   withSessionResumeError,
+  withSwitchMarker,
   writeAgentOptionsCache
 } from '../helpers'
 import { useAcpStore } from '../index'
@@ -86,6 +88,7 @@ import {
   selectLaunchRecoverySessions,
   takeDroppedLaunchPlaceholders
 } from '../live-turn'
+import { reloadInFlight } from '../reload-guard'
 import {
   adoptHostOwnedAgent,
   beginSessionReopen,
@@ -109,6 +112,7 @@ import {
   type AcpState,
   ChatLaunchCancelledError,
   type ChatMessage,
+  type OpenHistoryOptions,
   type ReopenControlBaseline,
   type TurnEndSetter
 } from '../types'
@@ -412,43 +416,54 @@ export function _resetSessionIndexLoadGenerationForTesting(): void {
  * Only the source's DURABLE payload may re-splice: its ids share the reopen
  * chain's namespace (`switch-splice:<source>:<durable id>`), so a repeat
  * reinstall dedups via `seen` instead of doubling rows — live-slices ids
- * (`…:<live id>`) could never match a durable reinstall. Skips when the
- * source payload is unreadable: the projection was never persisted and the
- * durable-only view is the pre-feature baseline.
+ * (`…:<live id>`) could never match a durable reinstall.
  */
 async function respliceLiveSwitchTarget(
   set: TurnEndSetter,
   targetId: SessionId,
   stillCurrent?: () => boolean
 ): Promise<void> {
-  const sourceId = liveSwitchSources.get(targetId)
-  if (!sourceId) return
-  const sourcePayload = await loadSessionPayload(sourceId).catch(() => null)
-  if (!sourcePayload) {
-    void logFrontendError({
-      level: 'info',
-      source: 'acp.switchAgent.splice',
-      message: `Re-splice for switch target ${targetId} skipped: source session ${sourceId} payload unavailable`
+  const hopsNewestFirst: Array<{
+    sourceId: SessionId
+    band: ReturnType<typeof installableTranscript>
+  }> = []
+  const visited = new Set<SessionId>([targetId])
+  let successor = targetId
+  for (let link = liveSwitchSources.get(successor); link; link = liveSwitchSources.get(successor)) {
+    if (visited.has(link.sourceId)) break
+    const sourcePayload = await loadSessionPayload(link.sourceId).catch(() => null)
+    if (!sourcePayload) {
+      void logFrontendError({
+        level: 'info',
+        source: 'acp.switchAgent.splice',
+        message: `Re-splice for switch target ${targetId} stopped: source session ${link.sourceId} payload unavailable`
+      })
+      break
+    }
+    const installed = installableTranscript(link.sourceId, sourcePayload, { headAnchored: true })
+    hopsNewestFirst.push({
+      sourceId: link.sourceId,
+      band: withSwitchMarker(installed, link.marker)
     })
-    return
+    visited.add(link.sourceId)
+    successor = link.sourceId
   }
+  if (hopsNewestFirst.length === 0) return
   if (stillCurrent && !stillCurrent()) return
-  // loadSessionPayload returns the FULL payload — never a tail window — so the
-  // transcript provably contains the conversation head. (The tail-window
-  // heuristic used on the open path only applies to loadSessionPayloadTail.)
-  const sourceInstalled = installableTranscript(sourceId, sourcePayload, { headAnchored: true })
   set((s) => {
-    const merged = spliceSwitchTranscript(
-      sourceId,
-      sourceInstalled,
-      s.messages[targetId] ?? [],
-      s.toolCalls[targetId] ?? [],
-      s.agentSwitches[targetId] ?? []
-    )
+    let messages = s.messages[targetId] ?? []
+    let toolCalls = s.toolCalls[targetId] ?? []
+    let switches = s.agentSwitches[targetId] ?? []
+    for (const hop of hopsNewestFirst) {
+      const merged = spliceSwitchTranscript(hop.sourceId, hop.band, messages, toolCalls, switches)
+      messages = merged.messages
+      toolCalls = merged.toolCalls
+      switches = merged.switches
+    }
     return {
-      messages: { ...s.messages, [targetId]: trimLiveWindow(merged.messages, targetId) },
-      toolCalls: { ...s.toolCalls, [targetId]: trimLiveToolCalls(merged.toolCalls) },
-      agentSwitches: { ...s.agentSwitches, [targetId]: merged.switches }
+      messages: { ...s.messages, [targetId]: trimLiveWindow(messages, targetId) },
+      toolCalls: { ...s.toolCalls, [targetId]: trimLiveToolCalls(toolCalls) },
+      agentSwitches: { ...s.agentSwitches, [targetId]: switches }
     }
   })
 }
@@ -517,9 +532,7 @@ async function redirectSwitchedReopen(
       // joins the splice chain.
       chain.push({
         sessionId: finalTarget,
-        ...installableTranscript(finalTarget, hopPayload, {
-          headAnchored: hopPayload.messages.length < HISTORY_TAIL_MESSAGE_LIMIT
-        })
+        ...installableTranscript(finalTarget, hopPayload, { headAnchored: true })
       })
       finalTarget = next.newSessionId
       continue
@@ -646,7 +659,8 @@ async function openHistorySessionInner(
   set: TurnEndSetter,
   id: string,
   onTranscriptInstalled: () => void,
-  reopenGeneration: number
+  reopenGeneration: number,
+  options?: OpenHistoryOptions
 ): Promise<void> {
   // Snapshot before any await so a delete during cold-spawn / capability wait
   // is still detected as a mid-open transition (not "never indexed").
@@ -878,7 +892,7 @@ async function openHistorySessionInner(
   // Guard both fields: `ensureLiveAgent` trims `cwd` (throws on undefined),
   // and a missing/empty cwd can't map to a live agent anyway — fall through
   // to read-only 'local' instead of throwing (spec: do not throw).
-  if (meta.agentConfigId && meta.cwd) {
+  if (!options?.forceNewAgent && meta.agentConfigId && meta.cwd) {
     // Issue #837: on web, the host may already have a live agent owning this
     // session (the original tab's process, still streaming). Adopt it before
     // spawning — otherwise every reload spawns a duplicate agent and resumes
@@ -903,6 +917,7 @@ async function openHistorySessionInner(
     }
   }
   if (
+    !options?.forceNewAgent &&
     turnLive &&
     !turnOwnerConnected &&
     (isTauriContext() || !ownerListingTrusted) &&
@@ -932,6 +947,20 @@ async function openHistorySessionInner(
       }
     })
   }
+  if (options?.forceNewAgent) {
+    // A reload must not keep the previous turn's spinner. The button is
+    // disabled while a reply runs, so this turn is already finished.
+    set((s) => {
+      const session = s.sessions[id]
+      if (!session || (!session.activeTurn && !session.openTurnId)) return {}
+      return {
+        sessions: {
+          ...s.sessions,
+          [id]: { ...session, activeTurn: false, openTurnId: null }
+        }
+      }
+    })
+  }
   if (!turnOwnerConnected && meta.agentConfigId && meta.cwd) {
     // No owning agent — ensure one for the reopen anyway so the chat is
     // usable (covers the plain idle path AND the dead-turn degrade above:
@@ -952,7 +981,15 @@ async function openHistorySessionInner(
       throw err
     }
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
-    if (ensured) liveAgentId = ensured
+    if (ensured) {
+      liveAgentId = ensured
+    } else if (options?.forceNewAgent) {
+      // A silent spawn failure returns null and would otherwise reopen on the
+      // old process. Reload must not report success without a new agent.
+      const error = new Error('Could not start a new agent for this chat.')
+      set((s) => ({ sessions: withSessionResumeError(s.sessions, id, error) }))
+      throw error
+    }
   }
   // CAP-4: `spawnAgent` seeds capabilities synchronously from the spawn
   // response, so a freshly spawned agent already has them by this point.
@@ -995,7 +1032,7 @@ async function openHistorySessionInner(
   // would then attach to a corpse (its `_onAgentCrashed` cleanup already ran
   // before `session.agentId` pointed at the owner, so nothing would clear
   // the installed turn flags again).
-  if (turnLive && turnOwnerConnected) {
+  if (!options?.forceNewAgent && turnLive && turnOwnerConnected) {
     if (get().agentStatus[liveAgentId] === 'connected') {
       await attachLiveTurn(set, id, liveAgentId, payload, reopenGeneration)
       return
@@ -1058,7 +1095,7 @@ async function openHistorySessionInner(
       // retry only on an auth-required reply (spec-acp-persistent-auth-reuse).
       const outcome =
         (await withAuthRetry(get, liveAgentId, 'session/load', 'text', () =>
-          acpApi.loadSession(liveAgentId, id, meta.cwd, reopenRoots)
+          acpApi.loadSession(liveAgentId, id, meta.cwd, reopenRoots, options?.mcpServers)
         )) ?? {}
       if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) {
         if (isCurrentSessionReopen(id, reopenGeneration)) clearReplayIfPresent()
@@ -1121,7 +1158,7 @@ async function openHistorySessionInner(
     try {
       const outcome =
         (await withAuthRetry(get, liveAgentId, 'session/resume', 'text', () =>
-          acpApi.resumeSession(liveAgentId, id, meta.cwd, reopenRoots)
+          acpApi.resumeSession(liveAgentId, id, meta.cwd, reopenRoots, options?.mcpServers)
         )) ?? {}
       if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) {
         if (isCurrentSessionReopen(id, reopenGeneration)) clearReplayIfPresent()
@@ -1162,7 +1199,7 @@ async function openHistorySessionInner(
     try {
       const outcome =
         (await withAuthRetry(get, liveAgentId, 'session/load', 'text', () =>
-          acpApi.loadSession(liveAgentId, id, meta.cwd, reopenRoots)
+          acpApi.loadSession(liveAgentId, id, meta.cwd, reopenRoots, options?.mcpServers)
         )) ?? {}
       if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) {
         if (isCurrentSessionReopen(id, reopenGeneration)) clearReplayIfPresent()
@@ -1364,6 +1401,8 @@ type SessionSliceState = Pick<
   | 'loadSessionIndex'
   | 'applySessionIndexSnapshot'
   | 'openHistorySession'
+  | 'reloadingChatIds'
+  | 'agentReloadMarks'
   | 'resumeLiveSession'
   | 'flushLiveSessionSaves'
   | 'retryCrashedSession'
@@ -1424,6 +1463,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
 ) => ({
   sessionIndex: [],
   openingHistoryIds: {},
+  reloadingChatIds: {},
+  agentReloadMarks: {},
   restoringChatIds: {},
   launchingSessionIds: {},
   discoveredSessions: {},
@@ -1598,6 +1639,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // Reclaim app-owned temp files (pasted screenshots) staged for this session
     // now that no further turns can read them.
     void deleteSessionTempFiles(sessionId)
+    const emptyPooled =
+      ephemeralSessionIds.has(sessionId) && (get().messages[sessionId]?.length ?? 0) === 0
     set((s) => {
       const sessions = { ...s.sessions }
       if (sessions[sessionId]) {
@@ -1635,6 +1678,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     ) {
       persistSession(get(), sessionId, (entries) => set({ sessionIndex: entries }))
     }
+    if (emptyPooled) {
+      ephemeralSessionIds.delete(sessionId)
+      set((s) => dropEphemeralSessionState(s, sessionId))
+    }
     set((s) => dropSessionTranscriptState(s, sessionId))
   },
 
@@ -1665,7 +1712,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     await applyIndexEntries(set, get, ++sessionIndexLoadGeneration, entries)
   },
 
-  openHistorySession: async (id) => {
+  openHistorySession: async (id, options) => {
     const cached = get().sessions[id]
     // Only skip reload for a genuinely live session (active/initializing).
     // 'error' is NOT live: the record still points at the failed agent (dead
@@ -1701,7 +1748,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
             transcriptInstalled = true
             scheduleRestorePreloadEnd(set, id, restoreToken)
           },
-          reopenGeneration
+          reopenGeneration,
+          options
         )
       } finally {
         if (!transcriptInstalled) scheduleRestorePreloadEnd(set, id, restoreToken)
@@ -2192,6 +2240,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessionIndex: s.sessionIndex.filter((e) => e.id !== id),
           sessions,
+          preparedSessions: dropPreparedSlots(s.preparedSessions, (sid) => sid === id),
           openingHistoryIds: dropRecordKey(s.openingHistoryIds, id),
           discoveredReopenContexts: dropRecordKey(s.discoveredReopenContexts, id),
           ...dropSessionTranscriptState(s, id)
@@ -2588,6 +2637,28 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
   },
 
   _onSessionClosed: (e) => {
+    if (reloadInFlight.has(e.sessionId)) {
+      // A reload asked the old process to release this session. Keep the
+      // transcript and do not cancel the reopen that follows. Once the chat
+      // points at the new process, a late close from the old process is ignored.
+      set((s) => {
+        const session = s.sessions[e.sessionId]
+        if (!session || session.agentId !== e.agentId) return {}
+        return {
+          sessions: {
+            ...s.sessions,
+            [e.sessionId]: {
+              ...session,
+              status: session.status === 'error' ? session.status : 'closed',
+              activeTurn: false,
+              openTurnId: null,
+              replaying: null
+            }
+          }
+        }
+      })
+      return
+    }
     const hadCommit = commitMessageCollectors.has(e.sessionId)
     const hadAssist = terminalAssistCollectors.has(e.sessionId)
     if (hadCommit)
