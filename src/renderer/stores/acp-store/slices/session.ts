@@ -77,8 +77,7 @@ import {
   trimLiveToolCalls,
   withSessionActive,
   withSessionResumeError,
-  withSwitchMarker,
-  writeAgentOptionsCache
+  withSwitchMarker
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
@@ -1595,14 +1594,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       }
       // Cache models/modes even for ephemeral prepares so the launcher can paint
       // instantly from the warm pool.
-      const configId = configIdForAgentId(get(), agentId)
-      if (configId) {
-        writeAgentOptionsCache(set, configId, {
-          models: outcome.models ?? null,
-          modes: outcome.modes ?? null,
-          configOptions: outcome.configOptions ?? []
-        })
-      }
+      cacheOptionsFromSession(set, get, sessionId)
       return sessionId
     } catch (err) {
       const { category } = classifySetupError(err)
