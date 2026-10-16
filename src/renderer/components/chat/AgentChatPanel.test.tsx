@@ -1407,6 +1407,10 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     messagesRef.current = []
   })
 
+  afterEach(() => {
+    agentStatusRef.current = {}
+  })
+
   function seedFailedLaunchSession(id: string): void {
     sessionRef.current = mockAcpSession({
       id,
@@ -1495,7 +1499,6 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
       mockRetryCrashed.mock.invocationCallOrder[0]
     )
     expect(mockSendPromptBlocks).not.toHaveBeenCalled()
-    agentStatusRef.current = {}
   })
 })
 

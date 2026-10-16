@@ -52,6 +52,7 @@ vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   getAllLeafPanes: () => [],
   findPaneContainingTab: () => null,
+  getAgentChatSessionIdsInAllTrees: () => new Set(),
   useWorkspaceStore: {
     getState: () => ({ addAgentChatTab: vi.fn(), root: null })
   }
@@ -437,6 +438,90 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
 
     const session = useAcpStore.getState().sessions[SESSION]
     expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+    expect(session.status).toBe('active')
+    expect(session.agentId).toBe(FRESH_AGENT)
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      SESSION,
+      'do the thing',
+      expect.any(String),
+      expect.anything()
+    )
+  })
+
+  function retireOnAuthRequired(): void {
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'Authentication required',
+      code: -32000
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'error'
+    })
+  }
+
+  function oldAgentClosesSession(): void {
+    useAcpStore.getState()._onSessionClosed({
+      agentId: OWNER,
+      sessionId: SESSION,
+      reason: 'killed'
+    })
+  }
+
+  it('the stopped agent closing the chat after the restart leaves it live on the fresh agent', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+
+    retireOnAuthRequired()
+    await useAcpStore.getState().killAgent(OWNER)
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+    oldAgentClosesSession()
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.status).toBe('active')
+    expect(session.agentId).toBe(FRESH_AGENT)
+  })
+
+  it('the stopped agent closing the chat while the fresh agent loads it still resends', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    transport.loadSession.mockImplementation(async () => {
+      oldAgentClosesSession()
+      return {}
+    })
+    _setAcpTransportForTests(transport)
+
+    retireOnAuthRequired()
+    await useAcpStore.getState().killAgent(OWNER)
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
+    expect(session.status).toBe('active')
+    expect(session.agentId).toBe(FRESH_AGENT)
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      SESSION,
+      'do the thing',
+      expect.any(String),
+      expect.anything()
+    )
+  })
+
+  it('the stopped agent closing the chat while the fresh agent spawns still resends', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    transport.spawnAgent.mockImplementation(async () => {
+      oldAgentClosesSession()
+      return { agentId: FRESH_AGENT, capabilities: { loadSession: true } }
+    })
+    _setAcpTransportForTests(transport)
+
+    retireOnAuthRequired()
+    await useAcpStore.getState().killAgent(OWNER)
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+
+    const session = useAcpStore.getState().sessions[SESSION]
     expect(session.status).toBe('active')
     expect(session.agentId).toBe(FRESH_AGENT)
     expect(transport.sendPrompt).toHaveBeenCalledWith(
