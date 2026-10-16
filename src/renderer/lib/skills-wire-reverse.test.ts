@@ -120,14 +120,10 @@ describe('wireTextToDisplay', () => {
     expect(wireTextToDisplay(display)).toBe(display)
   })
 
-  it('reconstructs a command-only turn as a command token', () => {
-    expect(wireTextToDisplay('/compact hello')).toBe(`${commandToken('compact')} hello`)
-    expect(wireTextToDisplay('/compact')).toBe(commandToken('compact'))
-  })
-
-  it('keeps an absolute path or a lone slash as plain text', () => {
-    expect(wireTextToDisplay('/etc/hosts is broken')).toBe('/etc/hosts is broken')
-    expect(wireTextToDisplay('/ is root')).toBe('/ is root')
+  it('passes through a lone command prefix without the skills header', () => {
+    for (const text of ['/compact hello', '/tmp is full', '/help', '/compact hi\r\nthere']) {
+      expect(wireTextToDisplay(text)).toBe(text)
+    }
   })
 
   it('reconstructs a non-ASCII skill name', () => {
@@ -140,7 +136,6 @@ describe('wireTextToDisplay', () => {
     expect(wireTextToDisplay(wire)).toBe(
       `${commandToken('compact')} ${skillToken('git-worktree')} hello`
     )
-    expect(wireTextToDisplay('/compact hi\r\nthere')).toBe(`${commandToken('compact')} hi\nthere`)
   })
 
   it('round-trips the forward direction of formatPromptWithSkills', () => {
@@ -178,24 +173,26 @@ describe('wireBlocksToDisplay', () => {
     expect(wireBlocksToDisplay(blocks)).toBe(blocks)
   })
 
-  it('rebuilds file pills from resource_link blocks and drops the consumed links', () => {
+  it('rebuilds file pills from resource_link blocks and keeps each link as an attachment', () => {
     const image = { type: 'image', data: 'abc' }
+    const link = {
+      type: 'resource_link',
+      uri: 'file:///E:/work/my%20app/src/auth.ts',
+      name: 'auth.ts',
+      mimeType: 'text/plain'
+    }
     const blocks = [
       { type: 'text', text: 'compare (auth.ts) with (auth.ts) and (notes)' },
       image,
-      {
-        type: 'resource_link',
-        uri: 'file:///E:/work/my%20app/src/auth.ts',
-        name: 'auth.ts',
-        mimeType: 'text/plain'
-      }
+      link
     ]
     expect(wireBlocksToDisplay(blocks)).toEqual([
       {
         type: 'text',
         text: `compare ${fileToken('auth.ts', 'E:/work/my app/src/auth.ts')} with ${fileToken('auth.ts', 'E:/work/my app/src/auth.ts')} and (notes)`
       },
-      image
+      image,
+      link
     ])
   })
 
@@ -211,22 +208,18 @@ describe('wireBlocksToDisplay', () => {
       {
         type: 'text',
         text: `${commandToken('review')} ${skillToken('git-worktree')} on ${fileToken('auth.ts', '/home/u/app/auth.ts')}`
-      }
+      },
+      { type: 'resource_link', uri: 'file:///home/u/app/auth.ts', name: 'auth.ts' }
     ])
   })
 
-  it('pairs same-named mentions with their links in order', () => {
+  it('keeps a marker as text when same-named links point at different files', () => {
     const blocks = [
-      { type: 'text', text: '(index.ts) vs (index.ts)' },
+      { type: 'text', text: '(index.ts) vs (index.ts) vs (index.ts)' },
       { type: 'resource_link', uri: 'file:///a/index.ts', name: 'index.ts' },
       { type: 'resource_link', uri: 'file:///b/index.ts', name: 'index.ts' }
     ]
-    expect(wireBlocksToDisplay(blocks)).toEqual([
-      {
-        type: 'text',
-        text: `${fileToken('index.ts', '/a/index.ts')} vs ${fileToken('index.ts', '/b/index.ts')}`
-      }
-    ])
+    expect(wireBlocksToDisplay(blocks)).toBe(blocks)
   })
 
   it('keeps a resource_link with no matching marker as an attachment', () => {

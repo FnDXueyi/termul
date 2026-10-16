@@ -27,7 +27,7 @@ const SEPARATOR = '\n\n---\n\n'
 const SKILL_NAME_RE = /^[\p{L}\p{N}\p{M}_.-]+$/u
 /** An inline skill marker in the wire user text: `(<name>)`. */
 const SKILL_MARKER_RE = /\(([\p{L}\p{N}\p{M}_.-]+)\)/gu
-const COMMAND_PREFIX_RE = /^\/([^\s/]+)(?: |$)/
+const COMMAND_PREFIX_RE = /^\/(\S+) /
 
 /**
  * Parse one `name: path` header line into `(name, path)`. Returns null when
@@ -56,34 +56,30 @@ function parseHeaderLine(line: string): { name: string; path: string } | null {
  * The header section is dropped; each `(<name>)` marker in the user text
  * whose name is framed in the header becomes a skill token (inline
  * duplicates preserved, matching the forward direction). A leading
- * `/<cmd> ` prefix becomes a command token. A token-free send (skills
- * section only) reconstructs the chips for its framed skills. Everything
- * else — including markers with no framed entry, a body-less header, a
- * separator with an empty user text (split-streaming prefix), or a body
- * where no marker resolves to a framed name — returns the input verbatim.
+ * `/<cmd> ` prefix becomes a command token only when the framing follows. A
+ * token-free send (skills section only) reconstructs the chips for its framed
+ * skills. Everything else — including markers with no framed entry, a
+ * body-less header, a separator with an empty user text (split-streaming
+ * prefix), or a body where no marker resolves to a framed name — returns the
+ * input verbatim.
  */
 export function wireTextToDisplay(wire: string): string {
-  const text = wire.includes('\r\n') ? wire.replaceAll('\r\n', '\n') : wire
-  const commandMatch = COMMAND_PREFIX_RE.exec(text)
-  const command = commandMatch?.[1] ?? null
-  const prefixLength = commandMatch?.[0].length ?? 0
-  const body = text.slice(prefixLength)
-
-  let display: string
-  if (body.startsWith(SKILLS_HEADER)) {
-    const framed = framedSkillsToDisplay(body)
-    if (framed === null) return wire
-    display = framed
-  } else if (command !== null) {
-    display = body
-  } else {
-    return wire
-  }
+  if (!wire.includes(SKILLS_HEADER)) return wire
+  const text = wire.replaceAll('\r\n', '\n')
+  const command = framedCommandPrefix(text)
+  const display = framedSkillsToDisplay(text.slice(command?.[0].length ?? 0))
+  if (display === null) return wire
   if (command === null) return display
-  return display.length > 0 ? `${commandToken(command)} ${display}` : commandToken(command)
+  return display.length > 0 ? `${commandToken(command[1])} ${display}` : commandToken(command[1])
+}
+
+function framedCommandPrefix(text: string): RegExpExecArray | null {
+  const match = COMMAND_PREFIX_RE.exec(text)
+  return match && text.slice(match[0].length).startsWith(SKILLS_HEADER) ? match : null
 }
 
 function framedSkillsToDisplay(body: string): string | null {
+  if (!body.startsWith(SKILLS_HEADER)) return null
   // `formatPromptWithSkills` emits `header\n\n` + lines; no body when the
   // user text was empty (the skills section IS the whole wire).
   const afterHeader = body.slice(SKILLS_HEADER.length)
@@ -147,55 +143,55 @@ function framedSkillsToDisplay(body: string): string | null {
 }
 
 type WireBlock = { type: string; text?: string; name?: unknown; uri?: unknown }
-type FileLink<T> = T & { name: string; uri: string }
 
-function isFileLink<T extends WireBlock>(block: T): block is FileLink<T> {
-  return (
-    block?.type === 'resource_link' &&
-    typeof block.name === 'string' &&
-    block.name.length > 0 &&
-    typeof block.uri === 'string' &&
-    block.uri.startsWith('file://')
+function unambiguousFilePaths(blocks: WireBlock[]): Map<string, string> {
+  const pathsByName = new Map<string, Set<string>>()
+  for (const block of blocks) {
+    if (
+      block?.type !== 'resource_link' ||
+      typeof block.name !== 'string' ||
+      block.name.length === 0 ||
+      typeof block.uri !== 'string' ||
+      !block.uri.startsWith('file://')
+    ) {
+      continue
+    }
+    const paths = pathsByName.get(block.name) ?? new Set<string>()
+    pathsByName.set(block.name, paths.add(fileUrlToPath(block.uri)))
+  }
+  const unambiguous = new Map<string, string>()
+  for (const [name, paths] of pathsByName) {
+    if (paths.size === 1) unambiguous.set(name, [...paths][0])
+  }
+  return unambiguous
+}
+
+function restoreFileTokens(text: string, paths: Map<string, string>): string {
+  if (paths.size === 0) return text
+  const markers = [...paths.keys()].map(
+    (name) => `\\(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`
   )
-}
-
-function restoreFileTokens<T extends WireBlock>(
-  text: string,
-  links: FileLink<T>[]
-): { text: string; claimed: FileLink<T>[] } {
-  const byName = new Map<string, FileLink<T>[]>()
-  for (const link of links) byName.set(link.name, [...(byName.get(link.name) ?? []), link])
-  const markers = [...byName.keys()]
-    .sort((a, b) => b.length - a.length)
-    .map((name) => `\\(${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`)
-  const claimed: FileLink<T>[] = []
-  if (markers.length === 0) return { text, claimed }
-  const seen = new Map<string, number>()
-  const restored = text.replace(new RegExp(markers.join('|'), 'g'), (marker) => {
+  return text.replace(new RegExp(markers.join('|'), 'g'), (marker) => {
     const name = marker.slice(1, -1)
-    const group = byName.get(name) ?? []
-    const index = seen.get(name) ?? 0
-    seen.set(name, index + 1)
-    const link = group[Math.min(index, group.length - 1)]
-    claimed.push(link)
-    return fileToken(name, fileUrlToPath(link.uri))
+    const path = paths.get(name)
+    return path === undefined ? marker : fileToken(name, path)
   })
-  return { text: restored, claimed }
 }
 
+/**
+ * Apply {@link wireTextToDisplay} to every `text` block and rebuild file
+ * pills from the `resource_link` blocks, which stay in place.
+ */
 export function wireBlocksToDisplay<T extends WireBlock>(blocks: T[] | null | undefined): T[] {
   if (!Array.isArray(blocks)) return blocks ?? []
-  const links = blocks.filter(isFileLink)
-  const used = new Set<T>()
+  const filePaths = unambiguousFilePaths(blocks)
   let changed = false
   const next = blocks.map((block) => {
     if (block?.type !== 'text' || typeof block.text !== 'string') return block
-    const { text, claimed } = restoreFileTokens(wireTextToDisplay(block.text), links)
-    for (const link of claimed) used.add(link)
+    const text = restoreFileTokens(wireTextToDisplay(block.text), filePaths)
     if (text === block.text) return block
     changed = true
     return { ...block, text }
   })
-  if (used.size > 0) return next.filter((block) => !used.has(block))
   return changed ? next : blocks
 }

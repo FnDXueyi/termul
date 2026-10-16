@@ -284,17 +284,16 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     })
   })
 
-  it('normalizes a command-only prompt with a file mention to command and file pills', async () => {
-    const record = msg('turn:t1', 'user', '/review check (auth.ts)', 10)
-    record.blocks.push({ type: 'resource_link', uri: 'file:///w/src/auth.ts', name: 'auth.ts' })
+  it('normalizes a persisted file mention to a file pill', async () => {
+    const link = { type: 'resource_link' as const, uri: 'file:///w/src/auth.ts', name: 'auth.ts' }
+    const record = msg('turn:t1', 'user', 'check (auth.ts)', 10)
+    record.blocks.push(link)
     seedServerPayload('s-file', [record], 10)
     seedServerTransport()
     await useAcpStore.getState().openHistorySession('s-file')
     expect(useAcpStore.getState().messages['s-file'][0].blocks).toEqual([
-      {
-        type: 'text',
-        text: `${commandToken('review')} check ${fileToken('auth.ts', '/w/src/auth.ts')}`
-      }
+      { type: 'text', text: `check ${fileToken('auth.ts', '/w/src/auth.ts')}` },
+      link
     ])
   })
 
