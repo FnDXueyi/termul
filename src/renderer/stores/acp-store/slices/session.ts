@@ -1965,6 +1965,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       // history via `session/load`, restore the local transcript) instead of its
       // "cached non-closed" early-return. The reopen preserves the same tab +
       // history — it never blanks (transcript is installed before agent work).
+      // The reopen flushes queued prompts when it ends; hold them until the
+      // failed prompt is re-sent so it keeps its place ahead of them.
       set((s) => {
         const cur = s.sessions[sessionId]
         if (!cur) return {}
@@ -1972,7 +1974,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           sessions: {
             ...s.sessions,
             [sessionId]: { ...cur, status: 'closed', lastError: null }
-          }
+          },
+          suppressQueueFlush: { ...s.suppressQueueFlush, [sessionId]: true }
         }
       })
       await get().openHistorySession(sessionId)
@@ -2021,6 +2024,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       )
     } finally {
       inFlightCrashedRetries.delete(sessionId)
+      set((s) => ({ suppressQueueFlush: dropRecordKey(s.suppressQueueFlush, sessionId) }))
+      flushNextQueuedPrompt(set, sessionId)
     }
   },
   markResumeFailed: (sessionId, reason) => {
