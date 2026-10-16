@@ -75,7 +75,7 @@ export function wireTextToDisplay(wire: string): string {
     if (framed === null) return wire
     display = framed
   } else if (command !== null) {
-    display = wire.slice(prefixLength)
+    display = body
   } else {
     return wire
   }

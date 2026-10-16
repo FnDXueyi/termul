@@ -140,6 +140,7 @@ describe('wireTextToDisplay', () => {
     expect(wireTextToDisplay(wire)).toBe(
       `${commandToken('compact')} ${skillToken('git-worktree')} hello`
     )
+    expect(wireTextToDisplay('/compact hi\r\nthere')).toBe(`${commandToken('compact')} hi\nthere`)
   })
 
   it('round-trips the forward direction of formatPromptWithSkills', () => {
