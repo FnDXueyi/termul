@@ -17,6 +17,7 @@ function isTauri(): boolean {
 }
 
 let appliedUiZoom = 1
+let nativeZoomQueue: Promise<void> = Promise.resolve()
 
 /**
  * Under native webview zoom, `getBoundingClientRect` reports zoomed CSS px
@@ -44,16 +45,21 @@ export function getAppliedUiZoom(): number {
 export async function applyUiZoom(level: number): Promise<number> {
   const clamped = clampUiZoom(level)
   if (isTauri()) {
-    // Recorded before the await: the zoom reflow fires ResizeObservers that
-    // must already read the new factor.
-    const previous = appliedUiZoom
-    appliedUiZoom = clamped
-    try {
-      await getCurrentWebview().setZoom(clamped)
-    } catch (error) {
-      appliedUiZoom = previous
-      throw error
-    }
+    // Serialized so a failed call cannot roll back a newer one's factor.
+    const update = nativeZoomQueue.then(async () => {
+      // Recorded before the await: the zoom reflow fires ResizeObservers that
+      // must already read the new factor.
+      const previous = appliedUiZoom
+      appliedUiZoom = clamped
+      try {
+        await getCurrentWebview().setZoom(clamped)
+      } catch (error) {
+        appliedUiZoom = previous
+        throw error
+      }
+    })
+    nativeZoomQueue = update.catch(() => {})
+    await update
   } else if (typeof document !== 'undefined') {
     document.documentElement.style.zoom = String(clamped)
   }
