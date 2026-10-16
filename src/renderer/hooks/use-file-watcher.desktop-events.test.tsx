@@ -8,13 +8,6 @@ import type { EditorFileState } from '@/stores/editor-store'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileWatcher } from './use-file-watcher'
 
-/**
- * The desktop chain end to end: real notify event shapes from tauri-plugin-fs
- * go through the real filesystem facade and the real useFileWatcher handlers
- * into the real editor store. Only the plugin and the workspace tab strip are
- * faked, and the fake disk decides whether the file exists.
- */
-
 type WatchEvent = { type: unknown; paths: string[]; attrs: object }
 
 const mocks = vi.hoisted(() => ({

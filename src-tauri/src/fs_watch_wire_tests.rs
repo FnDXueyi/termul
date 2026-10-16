@@ -1,11 +1,3 @@
-//! The desktop file watcher (`watchImmediate` from tauri-plugin-fs) sends each
-//! `notify::Event` to the renderer as serde JSON. tauri-plugin-fs enables
-//! notify's `serialization-compat-6`, so the event kind arrives externally
-//! tagged under `type` (`{"type":{"remove":{"kind":"file"}}}`), not as
-//! `{"type":"remove"}`. The renderer's watch tests replay the fixture file
-//! checked here, so a notify or plugin upgrade that changes the wire shape
-//! fails this test instead of silently breaking create and delete handling.
-
 use notify::event::{
     AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
     RenameMode,

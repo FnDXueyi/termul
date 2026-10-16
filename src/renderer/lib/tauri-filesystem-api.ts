@@ -151,17 +151,10 @@ function dispatchTypedEvent(
 }
 
 /**
- * The facade event type for a notify event kind, or null for an event that
- * reports no change. tauri-plugin-fs builds notify with
- * `serialization-compat-6`, so a kind arrives as `'any'`, `'other'` or an
- * object keyed by its category (`{ remove: { kind: 'file' } }`); the wire
- * shape is pinned by `src-tauri/src/fs_watch_wire_tests.rs`.
- *
  * Access events (open, read, close) are not changes: a real write also fires
- * `modify`, so dropping close-after-write loses nothing. This is the negation
- * of the host watcher's `is_change_event` (`src-tauri/src/web/fs_watcher/mod.rs`).
- * inotify reports a rename as `from`, `to` and then `both`; the first two
- * already carry each path, so `both` is dropped.
+ * `modify`, so dropping close-after-write loses nothing. inotify reports a
+ * rename as `from`, `to` and then `both`; the first two already carry each
+ * path, so `both` is dropped.
  */
 function toFileWatchEventType(kind: WatchEvent['type']): FileWatchEventType | null {
   if (typeof kind !== 'object') return 'change'

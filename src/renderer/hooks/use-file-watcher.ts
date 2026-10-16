@@ -40,7 +40,7 @@ export function useFileWatcher(): void {
       }, 300)
     }
 
-    const handleFileChanged = (event: FileChangeEvent): void => {
+    const handleFileWritten = (event: FileChangeEvent): void => {
       const { path } = event
 
       scheduleGitStatusRefreshForPath(path)
@@ -94,9 +94,7 @@ export function useFileWatcher(): void {
       }
     }
 
-    // git checkout and stash, and editors that move a file aside before
-    // writing it, remove a file and recreate it at once. Its create and
-    // modify events reload the tab, so close it only if the file stayed gone.
+    // git checkout and stash remove a file and recreate it at once.
     async function closeTabIfFileIsGone(path: string): Promise<void> {
       const info = await filesystemApi.getFileInfo(path)
       if (info.success) return
@@ -105,10 +103,8 @@ export function useFileWatcher(): void {
       }
     }
 
-    const unsubChanged = filesystemApi.onFileChanged(handleFileChanged)
-    // A file created at an open tab's path replaced its content (sed -i,
-    // an atomic save, git checkout), so it reloads the tab like a change.
-    const unsubCreated = filesystemApi.onFileCreated(handleFileChanged)
+    const unsubChanged = filesystemApi.onFileChanged(handleFileWritten)
+    const unsubCreated = filesystemApi.onFileCreated(handleFileWritten)
     const unsubDeleted = filesystemApi.onFileDeleted(handleFileDeleted)
 
     return () => {
