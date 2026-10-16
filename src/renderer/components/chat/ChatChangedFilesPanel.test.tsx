@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolCall } from '@/lib/acp-api'
 
@@ -461,6 +461,97 @@ describe('ChatChangedFilesPanel', () => {
       })
     ])
     expect(screen.getByText('Changed files')).toBeInTheDocument()
+  })
+})
+
+describe('ChatChangedFilesPanel change kind', () => {
+  beforeEach(() => {
+    mobileRef.current = false
+    openFileRef.current = vi.fn(async () => {})
+    addEditorTabRef.current = vi.fn()
+  })
+
+  function expandPanel() {
+    fireEvent.click(screen.getByRole('button', { name: 'Expand changed files' }))
+  }
+
+  it('shows the GitPanel status letter for an edited, a deleted and a moved file', async () => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/edited.ts' }),
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/gone.ts', content: [] }),
+      makeToolCall({ toolCallId: 'm1', kind: 'move', path: 'src/moved.ts', content: [] })
+    ])
+    expandPanel()
+    const edited = await screen.findByRole('button', { name: '/work/src/edited.ts' })
+    const deleted = screen.getByRole('group', { name: 'Deleted: /work/src/gone.ts' })
+    const moved = screen.getByRole('button', { name: '/work/src/moved.ts' })
+
+    const letter = (row: HTMLElement, name: string) => within(row).getByRole('img', { name })
+    expect(letter(edited, 'Modified').textContent).toBe('M')
+    expect(letter(edited, 'Modified').className).toContain('text-diff-modified')
+    expect(letter(deleted, 'Deleted').textContent).toBe('D')
+    expect(letter(deleted, 'Deleted').className).toContain('text-destructive')
+    expect(letter(moved, 'Renamed').textContent).toBe('R')
+    expect(letter(moved, 'Renamed').className).toContain('text-diff-modified')
+  })
+
+  it('renders a deleted file as a struck-through row that does not open', async () => {
+    renderPanel([makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/gone.ts' })])
+    expandPanel()
+    const row = await screen.findByRole('group', { name: 'Deleted: /work/src/gone.ts' })
+    expect(row.tagName).toBe('DIV')
+    expect(row).toHaveAttribute('title', 'Deleted: /work/src/gone.ts')
+    expect(screen.queryByRole('button', { name: /gone\.ts/ })).not.toBeInTheDocument()
+    expect(screen.getByText('gone.ts').parentElement?.className).toContain('line-through')
+    expect(row.className).toContain('cursor-default')
+    expect(row.className).not.toMatch(/hover:|active:|cursor-pointer/)
+
+    fireEvent.click(row)
+    fireEvent.click(screen.getByText('gone.ts'))
+    await Promise.resolve()
+    expect(openFileRef.current).not.toHaveBeenCalled()
+    expect(addEditorTabRef.current).not.toHaveBeenCalled()
+  })
+
+  it('marks a file deleted when its last call deletes it after edits', async () => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/a.ts' }),
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/a.ts', content: [] })
+    ])
+    expandPanel()
+    const row = await screen.findByRole('group', { name: 'Deleted: /work/src/a.ts' })
+    expect(within(row).getByText('+1')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '/work/src/a.ts' })).not.toBeInTheDocument()
+  })
+
+  it('opens a file that was deleted and then recreated, marked modified', async () => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/a.ts', content: [] }),
+      makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/a.ts' })
+    ])
+    expandPanel()
+    const row = await screen.findByRole('button', { name: '/work/src/a.ts' })
+    expect(within(row).getByRole('img', { name: 'Modified' }).textContent).toBe('M')
+    fireEvent.click(row)
+    await waitFor(() => expect(openFileRef.current).toHaveBeenCalledWith('/work/src/a.ts'))
+  })
+
+  it('opens the path a move call resolves', async () => {
+    renderPanel([
+      makeToolCall({
+        toolCallId: 'm1',
+        kind: 'move',
+        content: [],
+        rawInput: {},
+        locations: [{ path: 'src/moved.ts' }]
+      })
+    ])
+    expandPanel()
+    fireEvent.click(await screen.findByRole('button', { name: '/work/src/moved.ts' }))
+    await waitFor(() => {
+      expect(openFileRef.current).toHaveBeenCalledWith('/work/src/moved.ts')
+      expect(addEditorTabRef.current).toHaveBeenCalledWith('/work/src/moved.ts')
+    })
   })
 })
 
