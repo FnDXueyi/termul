@@ -56,6 +56,17 @@ describe('PromptQueuePanel', () => {
       expect(row).not.toHaveClass('text-sm')
     })
 
+    it('shows the Changed files keyboard-focus ring on the header', () => {
+      renderPanel()
+      expect(screen.getByRole('button', { name: '2 Queued' })).toHaveClass(
+        'focus-visible:bg-secondary/60',
+        'focus-visible:outline-hidden',
+        'focus-visible:ring-2',
+        'focus-visible:ring-inset',
+        'focus-visible:ring-ring'
+      )
+    })
+
     it('starts collapsed with defaultOpen={false}', () => {
       renderPanel({ defaultOpen: false })
       expect(screen.getByRole('button', { name: '2 Queued' })).toHaveAttribute(
