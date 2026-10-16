@@ -633,6 +633,7 @@ export function AgentChatPanel({
     }),
     [session, projects]
   )
+  const reloadMark = useAcpStore((s) => s.agentReloadMarks?.[sessionId] ?? null)
   const timeline = useMemo(() => {
     const items = consolidateThoughtGroups(buildTimeline(messages, toolCalls, agentSwitches))
     // The worktree-creation progress row is a first-class timeline item
@@ -652,8 +653,19 @@ export function AgentChatPanel({
         progressId
       })
     }
+    if (reloadMark) {
+      const anchor = reloadMark.afterMessageId
+        ? items.findIndex(
+            (item) => item.kind === 'message' && item.message.id === reloadMark.afterMessageId
+          )
+        : -1
+      items.splice(anchor >= 0 ? anchor + 1 : items.length, 0, {
+        kind: 'reload',
+        key: `reload:${sessionId}:${reloadMark.afterMessageId ?? 'start'}`
+      })
+    }
     return items
-  }, [messages, toolCalls, agentSwitches, session?.worktreeProgressId])
+  }, [messages, toolCalls, agentSwitches, session?.worktreeProgressId, reloadMark, sessionId])
   // Keep the bottom cue visible for the complete turn, including while thought,
   // tool, and agent-message surfaces stream their own local progress.
   const showRunningIndicator = Boolean(session?.activeTurn)

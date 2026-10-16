@@ -31,7 +31,7 @@ import {
   parseReuseKey
 } from '../acp-reuse-keys'
 import { ephemeralSessionIds } from './ephemeral-ids'
-import { isReusableStatus } from './helpers'
+import { isReusableStatus, SWITCH_SPLICE_ID_PREFIX, type SwitchMarkerFacts } from './helpers'
 import type { AcpSession, AcpState, ChatMessage, CommitMessageCollector } from './types'
 
 export { ephemeralSessionIds }
@@ -163,6 +163,7 @@ export function persistSession(
   const liveMessages = (state.messages[sessionId] ?? []).map((m) =>
     m.streaming ? { ...m, streaming: false } : m
   )
+  const ownMessages = liveMessages.filter((m) => !m.id.startsWith(SWITCH_SPLICE_ID_PREFIX))
   const reuseKey = Object.keys(state.configToLiveAgent).find(
     (k) => state.configToLiveAgent[k] === session.agentId
   )
@@ -187,8 +188,8 @@ export function persistSession(
     projectId: session.projectId,
     createdAt: session.createdAt,
     lastActivityAt: Date.now(),
-    messageCount: liveMessages.length,
-    lastSeq: liveMessages.reduce(
+    messageCount: ownMessages.length,
+    lastSeq: ownMessages.reduce(
       (max, m) => Math.max(max, typeof m.seq === 'number' ? m.seq : 0),
       0
     ),
@@ -818,6 +819,8 @@ function asCallerView(
   })
 }
 
+export type LiveSwitchLink = { sourceId: SessionId; marker: SwitchMarkerFacts }
+
 /**
  * Live switch target → source session link (spec-agent-switch-live-merged-transcript).
  * `spliceLiveSwitchTranscript` records the pair so an in-session wholesale
@@ -827,7 +830,7 @@ function asCallerView(
  * otherwise collapse the merged view for the rest of the app session.
  * Entries clear in `dropSessionTranscriptState` (either endpoint dropped).
  */
-export const liveSwitchSources = new Map<SessionId, SessionId>()
+export const liveSwitchSources = new Map<SessionId, LiveSwitchLink>()
 
 /** Test-only: clear live-switch source links between tests. */
 export function _resetLiveSwitchSourcesForTesting(): void {
