@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 
-use crate::web::command_ledger::{COMMAND_ID_HEADER, IN_PROGRESS_RECEIPT};
+use crate::web::command_ledger::{AdmissionWatch, IN_PROGRESS_RECEIPT};
 use crate::web::fs_api::IpcBody;
 
 const TIMED_OUT_CODE: &str = "TIMED_OUT";
@@ -43,8 +43,6 @@ fn class_of(request: &Request) -> Option<RouteClass> {
     }
     Some(if READ_ROUTES.contains(&path) {
         RouteClass::Read
-    } else if request.headers().contains_key(COMMAND_ID_HEADER) {
-        RouteClass::Ledgered
     } else {
         RouteClass::Write
     })
@@ -84,9 +82,15 @@ pub async fn bound(request: Request, next: Next) -> Response {
         return next.run(request).await;
     };
     let path = request.uri().path().to_string();
-    match tokio::time::timeout(class.deadline(), next.run(request)).await {
+    let admission = AdmissionWatch::default();
+    match tokio::time::timeout(class.deadline(), admission.watch(next.run(request))).await {
         Ok(response) => response,
         Err(_) => {
+            let class = if admission.admitted() {
+                RouteClass::Ledgered
+            } else {
+                class
+            };
             tracing::warn!(
                 target: "termul::web::route_deadline",
                 path = %path,

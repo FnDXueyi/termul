@@ -14,7 +14,9 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use super::*;
-use crate::web::command_ledger::{fingerprint_of, no_entity, run_http, CommandLedger};
+use crate::web::command_ledger::{
+    fingerprint_of, no_entity, run_http, CommandLedger, COMMAND_ID_HEADER,
+};
 
 fn bounded(router: Router) -> Router {
     router.layer(middleware::from_fn(bound))
@@ -119,4 +121,54 @@ async fn a_ledgered_write_past_its_deadline_replays_its_real_outcome_to_the_rese
     let (_, resend) = post_to(&router, "/worktree/create", Some("cmd-1")).await;
     assert_eq!(resend, json!({"success": true, "data": "created"}));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hung_write_outside_the_ledger_never_claims_in_progress_for_its_command_id() {
+    let router = bounded(Router::new().route("/git/init", post(hangs)));
+
+    let (_, body) = post_to(&router, "/git/init", Some("cmd-1")).await;
+
+    assert_eq!(
+        body,
+        json!({
+            "success": false,
+            "error": "/git/init did not finish within 180s. It may still complete on the host; check its state before retrying",
+            "code": "TIMED_OUT",
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hung_idempotent_kind_run_through_run_http_is_not_ledgered() {
+    let ledger = Arc::new(CommandLedger::new(Duration::from_secs(600)));
+    let handler = move |headers: HeaderMap| {
+        let ledger = Arc::clone(&ledger);
+        async move {
+            let fingerprint = fingerprint_of("git_stage", &[("path", "a.txt")]);
+            Json(
+                run_http(
+                    &ledger,
+                    &headers,
+                    "git_stage",
+                    fingerprint,
+                    no_entity(),
+                    async { std::future::pending::<IpcBody<()>>().await },
+                )
+                .await,
+            )
+        }
+    };
+    let router = bounded(Router::new().route("/git/stage", post(handler)));
+
+    let (_, body) = post_to(&router, "/git/stage", Some("cmd-1")).await;
+
+    assert_eq!(
+        body,
+        json!({
+            "success": false,
+            "error": "/git/stage did not finish within 180s. It may still complete on the host; check its state before retrying",
+            "code": "TIMED_OUT",
+        })
+    );
 }
