@@ -24,6 +24,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  resetNativeWebviewOcclusionForTests,
+  useNativeWebviewOccluded
+} from '@/hooks/use-native-webview-occlusion'
 import { claimEscape } from '@/lib/escape-claim'
 import {
   armMobileOverlayBackStack,
@@ -807,5 +811,37 @@ describe('NewProjectModal overlay back stack', () => {
       expect(backSpy).not.toHaveBeenCalled()
       expect(goSpy).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('NewProjectModal over native browser webviews', () => {
+  function OcclusionProbe(): React.JSX.Element {
+    return <span data-testid="occlusion">{useNativeWebviewOccluded() ? 'occluded' : 'clear'}</span>
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(true)
+  })
+
+  afterEach(() => {
+    resetNativeWebviewOcclusionForTests()
+  })
+
+  it('keeps every browser webview hidden while open and releases them once it closes', async () => {
+    const Page = ({ open }: { open: boolean }): React.JSX.Element => (
+      <>
+        <NewProjectModal isOpen={open} onClose={vi.fn()} onCreateProject={vi.fn()} />
+        <OcclusionProbe />
+      </>
+    )
+    const { rerender } = render(<Page open={false} />)
+    expect(screen.getByTestId('occlusion')).toHaveTextContent('clear')
+
+    rerender(<Page open />)
+    expect(screen.getByTestId('occlusion')).toHaveTextContent('occluded')
+
+    rerender(<Page open={false} />)
+    await waitFor(() => expect(screen.getByTestId('occlusion')).toHaveTextContent('clear'))
   })
 })
