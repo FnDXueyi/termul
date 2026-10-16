@@ -2015,9 +2015,26 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // Dedupe concurrent Retry clicks: only one relaunch+replay+resend per session.
     if (inFlightCrashedRetries.has(sessionId)) return
     inFlightCrashedRetries.add(sessionId)
+    let releasing = false
     try {
       const session = get().sessions[sessionId]
       if (!session) throw new Error(`unknown session ${sessionId}`)
+      // A turn error retired this chat's agent, but the process still runs
+      // and owns the session, so a web reopen would adopt it again. Stop it
+      // first. Its close can land while the reopen still names it, so the
+      // reload guard keeps that close from cancelling the reopen.
+      if (
+        session.status !== 'error' &&
+        session.status !== 'closed' &&
+        get().agentStatus[session.agentId] === 'error' &&
+        !reloadInFlight.has(sessionId)
+      ) {
+        releasing = true
+        reloadInFlight.add(sessionId)
+        await get()
+          .killAgent(session.agentId)
+          .catch(() => undefined)
+      }
       // Force the reopen path: mark closed so `openHistorySession` re-runs its
       // reopen (re-launch a fresh agent via `ensureLiveAgent`, replay persisted
       // history via `session/load`, restore the local transcript) instead of its
@@ -2036,7 +2053,11 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           suppressQueueFlush: { ...s.suppressQueueFlush, [sessionId]: true }
         }
       })
-      await get().openHistorySession(sessionId)
+      try {
+        await get().openHistorySession(sessionId)
+      } finally {
+        if (releasing) reloadInFlight.delete(sessionId)
+      }
       // Reopen failed (still closed / no live agent): leave the recovered
       // transcript + let the resume error show — do not blank.
       const reopened = get().sessions[sessionId]
@@ -2638,6 +2659,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
   },
 
   _onSessionClosed: (e) => {
+    // A stopped process can announce its close after the chat reopened on a
+    // new one. That close is about the old process, so the chat ignores it.
+    const owner = get().sessions[e.sessionId]?.agentId
+    if (e.agentId && owner && owner !== e.agentId) return
     if (reloadInFlight.has(e.sessionId)) {
       // A reload asked the old process to release this session. Keep the
       // transcript and do not cancel the reopen that follows. Once the chat

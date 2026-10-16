@@ -418,7 +418,7 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
   })
 
-  it('the Retry restart (stop the retired agent, then reopen) resends on a fresh agent', async () => {
+  it('Retry stops the retired agent, then resends on a fresh agent', async () => {
     const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
     _setAcpTransportForTests(transport)
 
@@ -433,10 +433,10 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
       sessionId: SESSION,
       stopReason: 'error'
     })
-    await useAcpStore.getState().killAgent(OWNER)
     await useAcpStore.getState().retryCrashedSession(SESSION)
 
     const session = useAcpStore.getState().sessions[SESSION]
+    expect(transport.killAgent).toHaveBeenCalledWith(OWNER)
     expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
     expect(session.status).toBe('active')
     expect(session.agentId).toBe(FRESH_AGENT)
@@ -476,7 +476,6 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     _setAcpTransportForTests(transport)
 
     retireOnAuthRequired()
-    await useAcpStore.getState().killAgent(OWNER)
     await useAcpStore.getState().retryCrashedSession(SESSION)
     oldAgentClosesSession()
 
@@ -494,7 +493,6 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     _setAcpTransportForTests(transport)
 
     retireOnAuthRequired()
-    await useAcpStore.getState().killAgent(OWNER)
     await useAcpStore.getState().retryCrashedSession(SESSION)
 
     const session = useAcpStore.getState().sessions[SESSION]
@@ -518,7 +516,6 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     _setAcpTransportForTests(transport)
 
     retireOnAuthRequired()
-    await useAcpStore.getState().killAgent(OWNER)
     await useAcpStore.getState().retryCrashedSession(SESSION)
 
     const session = useAcpStore.getState().sessions[SESSION]

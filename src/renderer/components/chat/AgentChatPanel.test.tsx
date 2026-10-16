@@ -18,7 +18,6 @@ const {
   mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
-  mockKillAgent,
   agentStatusRef,
   mockMarkResumeFailed,
   mockSendPrompt,
@@ -74,7 +73,6 @@ const {
   // never retryCrashedSession, and never toast a circular "Could not retry").
   mockRetryCrashed: vi.fn(),
   mockRetryFailed: vi.fn(),
-  mockKillAgent: vi.fn(),
   agentStatusRef: { current: {} as Record<string, string> },
   // spec-stopped-chat-status-signals: the idle-stop auto-resume records a
   // failure through this store action when the store wrote none itself.
@@ -268,7 +266,6 @@ vi.mock('@/stores/acp-store', () => {
     sendQueuedPromptNow: vi.fn(),
     retryCrashedSession: mockRetryCrashed,
     retryFailedLaunch: mockRetryFailed,
-    killAgent: mockKillAgent,
     markResumeFailed: mockMarkResumeFailed,
     setConfigOption: mockSetConfigOption,
     setMode: mockSetMode,
@@ -1478,7 +1475,6 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
   })
 
   it('restarts a live chat whose agent a turn error left unusable instead of re-sending to it', async () => {
-    mockKillAgent.mockReset().mockResolvedValue(undefined)
     mockSendPromptBlocks.mockReset().mockResolvedValue(undefined)
     agentStatusRef.current = { 'agent-1': 'error' }
     sessionRef.current = mockAcpSession({
@@ -1494,10 +1490,6 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     expect(props?.retryLabel).toBe('Retry')
     props?.onRetry?.()
     await waitFor(() => expect(mockRetryCrashed).toHaveBeenCalledWith('s1'))
-    expect(mockKillAgent).toHaveBeenCalledWith('agent-1')
-    expect(mockKillAgent.mock.invocationCallOrder[0]).toBeLessThan(
-      mockRetryCrashed.mock.invocationCallOrder[0]
-    )
     expect(mockSendPromptBlocks).not.toHaveBeenCalled()
   })
 })
