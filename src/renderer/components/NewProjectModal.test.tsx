@@ -14,7 +14,9 @@
  *    user-edit override semantics,
  *  - only Root Directory + Project Name render (no template, color, shell,
  *    or git-init controls), and
- *  - the web session-only note is preserved.
+ *  - the web session-only note is preserved, and
+ *  - after create, the web `.git` probe marks the project a git repo for a
+ *    `.git` directory or `gitdir:` pointer file, and for nothing else.
  *
  * The `@tauri-apps/plugin-fs` + `@tauri-apps/plugin-dialog` +
  * `@tauri-apps/api/core` modules are stubbed so the module loads without a
@@ -41,6 +43,8 @@ const {
   mockSelectDirectory,
   mockDefaultProjectColor,
   mockUseProjectStore,
+  mockUpdateProject,
+  mockReconcileProjectWorktrees,
   existingProjectsRef
 } = vi.hoisted(() => ({
   // fetch: used by webServerFilesystem / webServerGit / webServerShell.
@@ -58,6 +62,8 @@ const {
   mockDefaultProjectColor: vi.fn(() => 'blue'),
   // useProjectStore.getState (used by the zustand mock below).
   mockUseProjectStore: vi.fn(() => ({})),
+  mockUpdateProject: vi.fn(),
+  mockReconcileProjectWorktrees: vi.fn(() => Promise.resolve('unchanged')),
   // Existing projects for the Story 7 duplicate-name warning. Mutable per-test.
   existingProjectsRef: { current: [] as Array<{ id: string; name: string }> }
 }))
@@ -115,9 +121,15 @@ vi.mock('@/stores/app-settings-store', () => ({
 // individual tests can seed existing project names.
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: Object.assign(mockUseProjectStore, {
-    getState: () => ({})
+    getState: () => ({ updateProject: mockUpdateProject })
   }),
   useProjects: () => existingProjectsRef.current
+}))
+
+// The desktop worktree reconciler runs after the web `.git` probe; it has its
+// own tests, so here it only records which project it was handed.
+vi.mock('@/lib/worktree-reconciler', () => ({
+  reconcileProjectWorktrees: mockReconcileProjectWorktrees
 }))
 
 // Silence sonner toast during tests (it renders to document.body and can throw
@@ -705,6 +717,124 @@ describe('NewProjectModal (web-mode · auto-name + advanced options)', () => {
 
       expect(onClose).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('NewProjectModal (web-mode · existing .git detection after create)', () => {
+  const REPO = '/web/repo'
+  const DOT_GIT = `${REPO}/.git`
+  const READ_ERROR = { success: false, error: 'not a directory', code: 'READ_ERROR' }
+
+  type DotGit = 'directory' | 'gitdir-file' | 'plain-file' | 'missing'
+
+  function routeFilesystem(dotGit: DotGit) {
+    mockFetch.mockImplementation(async (url: string) => {
+      const u = new URL(String(url), 'http://termul.test')
+      const target = u.searchParams.get('path')
+      if (u.pathname.endsWith('/shells')) {
+        return jsonResponse({
+          success: true,
+          data: {
+            default: { name: 'bash', path: '/bin/bash', displayName: 'Bash' },
+            available: [{ name: 'bash', path: '/bin/bash', displayName: 'Bash' }]
+          }
+        })
+      }
+      if (u.pathname.endsWith('/fs/ls') && target === REPO) {
+        return jsonResponse({ success: true, data: [{ name: '.git', path: DOT_GIT }] })
+      }
+      if (u.pathname.endsWith('/fs/ls') && target === DOT_GIT) {
+        return dotGit === 'directory'
+          ? jsonResponse({ success: true, data: [{ name: 'HEAD', path: `${DOT_GIT}/HEAD` }] })
+          : jsonResponse(READ_ERROR)
+      }
+      if (u.pathname.endsWith('/fs/read') && target === DOT_GIT) {
+        if (dotGit === 'gitdir-file') {
+          return jsonResponse({
+            success: true,
+            data: { content: 'gitdir: /web/main/.git/worktrees/repo\n' }
+          })
+        }
+        if (dotGit === 'plain-file') {
+          return jsonResponse({ success: true, data: { content: 'notes\n' } })
+        }
+        return jsonResponse({ success: false, error: 'no such file', code: 'NOT_FOUND' })
+      }
+      return jsonResponse({ success: true })
+    })
+  }
+
+  async function createProjectAt(path: string) {
+    const onCreateProject = vi.fn(async () => ({ id: 'proj-1' }))
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+    await act(async () => {
+      fireEvent.change(screen.getByPlaceholderText('No directory selected'), {
+        target: { value: path }
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByText('Create'))
+    })
+    await waitFor(() => expect(mockReconcileProjectWorktrees).toHaveBeenCalledWith('proj-1'), {
+      timeout: 10000
+    })
+  }
+
+  const probedPaths = () =>
+    mockFetch.mock.calls
+      .map(([url]) => new URL(String(url), 'http://termul.test'))
+      .filter((u) => u.searchParams.get('path') === DOT_GIT)
+      .map((u) => u.pathname.replace(/^.*\/fs\//, 'fs/'))
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockReset()
+    vi.stubGlobal('fetch', mockFetch)
+    mockDefaultProjectColor.mockReturnValue('blue')
+    existingProjectsRef.current = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('marks the project a git repo when .git is a directory', async () => {
+    routeFilesystem('directory')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([
+      ['proj-1', { isGitRepo: false }],
+      ['proj-1', { isGitRepo: true }]
+    ])
+    expect(probedPaths()).toEqual(['fs/ls'])
+  })
+
+  it('marks the project a git repo when .git is a gitdir: pointer file', async () => {
+    routeFilesystem('gitdir-file')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([
+      ['proj-1', { isGitRepo: false }],
+      ['proj-1', { isGitRepo: true }]
+    ])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
+  })
+
+  it('leaves isGitRepo false when .git is a file without a gitdir: line', async () => {
+    routeFilesystem('plain-file')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([['proj-1', { isGitRepo: false }]])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
+  })
+
+  it('leaves isGitRepo false when there is no .git at all', async () => {
+    routeFilesystem('missing')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([['proj-1', { isGitRepo: false }]])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
   })
 })
 
