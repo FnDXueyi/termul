@@ -305,9 +305,21 @@ fn if_none_match_names(request: &HeaderMap, opaque: &str) -> bool {
         .get_all(header::IF_NONE_MATCH)
         .iter()
         .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .any(|tag| tag == "*" || tag.strip_prefix("W/").unwrap_or(tag) == opaque)
+        .any(|value| value.trim() == "*" || opaque_tags(value).any(|tag| tag == opaque))
+}
+
+/// RFC 9110 §13.1.2 entity-tag list. Commas inside a quoted tag belong to the
+/// tag, so the list is split on quotes, not commas.
+fn opaque_tags(list: &str) -> impl Iterator<Item = &str> {
+    let mut rest = list;
+    std::iter::from_fn(move || {
+        rest = rest.trim_start_matches([' ', '\t', ',']);
+        let tag = rest.strip_prefix("W/").unwrap_or(rest);
+        let end = tag.strip_prefix('"')?.find('"')? + 2;
+        let (opaque, tail) = tag.split_at(end);
+        rest = tail;
+        Some(opaque)
+    })
 }
 
 #[cfg(test)]

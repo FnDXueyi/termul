@@ -736,3 +736,42 @@ async fn serve_embedded_answers_a_matching_if_none_match_with_304() {
         assert_eq!(stale.status(), StatusCode::OK, "{path}");
     }
 }
+
+#[tokio::test]
+async fn serve_embedded_if_none_match_respects_quoted_commas() {
+    if !embed_present() {
+        return;
+    }
+    let fresh = get_embedded("/", None).await;
+    let etag = fresh.headers()[header::ETAG]
+        .to_str()
+        .expect("ascii etag")
+        .to_string();
+    let index = to_bytes(fresh.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let strong = etag.strip_prefix("W/").expect("weak etag").to_string();
+    let listed = format!("\"foreign,*,tag\", {etag}");
+
+    for (header_value, expected) in [
+        ("\"foreign,*,tag\"", StatusCode::OK),
+        ("garbage", StatusCode::OK),
+        ("W/\"0000\", \"1111\"", StatusCode::OK),
+        ("*", StatusCode::NOT_MODIFIED),
+        (etag.as_str(), StatusCode::NOT_MODIFIED),
+        (strong.as_str(), StatusCode::NOT_MODIFIED),
+        (listed.as_str(), StatusCode::NOT_MODIFIED),
+    ] {
+        let resp = get_embedded("/", Some(header_value)).await;
+        assert_eq!(resp.status(), expected, "{header_value}");
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let expected_body: &[u8] = if expected == StatusCode::OK {
+            &index
+        } else {
+            b""
+        };
+        assert_eq!(body.as_ref(), expected_body, "{header_value}");
+    }
+}
