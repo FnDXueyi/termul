@@ -979,6 +979,10 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       for (const id of Object.keys(launchingSessionIds)) {
         if (s.sessions[id]?.agentId === e.agentId) delete launchingSessionIds[id]
       }
+      const preparedSessions = dropPreparedSlots(
+        s.preparedSessions,
+        (sid) => s.sessions[sid]?.agentId === e.agentId
+      )
       // Story 1.9 review: don't resurrect a closed session to 'error' (a late
       // crash event for an already-closed session should not overwrite its
       // terminal status).
@@ -986,6 +990,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         return {
           agentStatus,
           launchingSessionIds,
+          preparedSessions,
           messages: finalizeStreaming(s.messages, e.sessionId),
           sessions: {
             ...s.sessions,
@@ -1017,7 +1022,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
           }
         }
       }
-      return { agentStatus, launchingSessionIds, sessions }
+      return { agentStatus, launchingSessionIds, preparedSessions, sessions }
     })
     if (
       e.sessionId &&
