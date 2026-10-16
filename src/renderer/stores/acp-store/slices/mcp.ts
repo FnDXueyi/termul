@@ -107,6 +107,11 @@ function withoutProbeState(s: McpProbeState, id: string): McpProbeState {
   }
 }
 
+// Ids deleted while a probe for them was in flight. Absence from `mcpServers`
+// alone does not mean deleted: a web project switch swaps in another
+// project's list, and a probe finishing then must keep its result.
+const deletedWhileProbing = new Set<string>()
+
 function reprobeEditedServer(
   set: Parameters<McpSliceCreator>[0],
   get: Parameters<McpSliceCreator>[1],
@@ -229,6 +234,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         })
         throw err
       }
+      if (get().mcpProbing[id]) deletedWhileProbing.add(id)
       set((s) => withoutProbeState(s, id))
     }),
 
@@ -338,11 +344,8 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     try {
       const result: ProbeResult = await acpApi.probeMcpServer(probeConfigOf(server))
       const current = get().mcpServers.find((s) => s.id === id)
-      if (!current) {
-        set((s) => withoutProbeState(s, id))
-        return
-      }
-      if (!sameProbeConfig(current, server)) {
+      if (deletedWhileProbing.delete(id) && !current) return
+      if (current && !sameProbeConfig(current, server)) {
         set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
         if (current.enabled === false) return
         return get().probeMcpServer(id)
@@ -364,10 +367,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         source: 'acp-store.probeMcpServer',
         message: `MCP probe failed for server '${server.name}' (${String(err)})`
       })
-      if (!get().mcpServers.some((s) => s.id === id)) {
-        set((s) => withoutProbeState(s, id))
-        return
-      }
+      if (deletedWhileProbing.delete(id) && !get().mcpServers.some((s) => s.id === id)) return
       // Transport/parse failure (NOT a disconnected probe — that's a
       // `status:'disconnected'` ProbeResult, not a throw). Surface the
       // failure in the dot + log WITHOUT env/header values, tokens, or
