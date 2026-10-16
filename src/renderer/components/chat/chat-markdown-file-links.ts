@@ -1,4 +1,4 @@
-import { findFilePathMatches, stripLineColumnSuffix } from '@/lib/file-path-links'
+import { findFilePathMatches, stripLinePosition } from '@/lib/file-path-links'
 
 /**
  * Escape `& < > "` so interpolated path/alt/url values cannot break out of
@@ -32,11 +32,6 @@ function filePathElement(path: string, innerHtml: string): string {
   return `<termul-file-path data-path="${escapeHtmlAttribute(path)}">${innerHtml}</termul-file-path>`
 }
 
-/**
- * Extensions that make a lone `name.ext` inline-code span a file. A known set
- * instead of any extension so member access such as `console.log`,
- * `process.env` or `user.id` stays plain code.
- */
 const INLINE_CODE_FILE_EXTENSIONS = new Set([
   ...['c', 'cc', 'cjs', 'cpp', 'cs', 'css', 'cts', 'dart', 'ex', 'exs', 'go', 'h', 'hpp'],
   ...['java', 'js', 'jsx', 'kt', 'lua', 'mjs', 'mts', 'php', 'ps1', 'py', 'rb', 'rs'],
@@ -48,27 +43,16 @@ const INLINE_CODE_FILE_EXTENSIONS = new Set([
 
 const SINGLE_SEGMENT_FILE_RE = /^[^\s\\/:*?"<>|`#]+\.([A-Za-z0-9]+)$/
 
-/**
- * The path an inline-code span names when its whole content is a file path:
- * a prose-grade multi-segment path, or a single `name.ext` with a known file
- * extension. Either may carry a `:line` suffix or `#L` fragment.
- */
-function inlineCodeFilePath(value: string): string | null {
-  const code = value.trim()
-  const [match, ...rest] = findFilePathMatches(code)
-  if (match && rest.length === 0 && match.start === 0 && match.text === code) return code
-
-  const extension = SINGLE_SEGMENT_FILE_RE.exec(stripLineColumnSuffix(code))?.[1]
-  return extension && INLINE_CODE_FILE_EXTENSIONS.has(extension.toLowerCase()) ? code : null
+function isInlineCodeFilePath(code: string): boolean {
+  if (findFilePathMatches(code)[0]?.text === code) return true
+  const extension = SINGLE_SEGMENT_FILE_RE.exec(stripLinePosition(code))?.[1]
+  return extension !== undefined && INLINE_CODE_FILE_EXTENSIONS.has(extension.toLowerCase())
 }
 
 function inlineCodeToFileButton(node: MarkdownNode): MarkdownNode | null {
-  const path = inlineCodeFilePath(node.value ?? '')
-  if (path === null) return null
-  return {
-    type: 'html',
-    value: filePathElement(path, `<code>${escapeHtmlAttribute(node.value ?? '')}</code>`)
-  }
+  const code = (node.value ?? '').trim()
+  if (!isInlineCodeFilePath(code)) return null
+  return { type: 'html', value: filePathElement(code, `<code>${escapeHtmlAttribute(code)}</code>`) }
 }
 
 const URI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/

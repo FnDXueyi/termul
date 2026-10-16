@@ -1,5 +1,4 @@
 import { fireEvent, render, waitFor } from '@testing-library/react'
-import { type Components, defaultRemarkPlugins, Streamdown } from 'streamdown'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
@@ -37,37 +36,14 @@ vi.mock('sonner', () => ({ toast: { error: mocks.toastError } }))
 
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn(() => Promise.resolve()) }))
 
-import { TermulFilePathButton } from './chat-agent-prose'
-import { ChatMarkdownCode } from './chat-markdown-code'
-import { remarkFilePathLinks } from './chat-markdown-file-links'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { AgentProse } from './chat-agent-prose'
 
-const CWD = '/repo'
-
-/** Mirrors the AgentProse file-path wiring with real Streamdown and the real opener. */
 function renderChat(text: string): HTMLElement {
-  const components: Components = {
-    code: ChatMarkdownCode,
-    'termul-file-path': (props: Record<string, unknown>) => (
-      <TermulFilePathButton
-        path={typeof props['data-path'] === 'string' ? props['data-path'] : ''}
-        context={{ cwd: CWD }}
-      >
-        {props.children as React.ReactNode}
-      </TermulFilePathButton>
-    )
-  }
   const { container } = render(
-    <Streamdown
-      mode="static"
-      remarkPlugins={[...Object.values(defaultRemarkPlugins), remarkFilePathLinks]}
-      allowedTags={{ 'termul-file-path': ['dataPath'] }}
-      components={components}
-      controls={false}
-      lineNumbers={false}
-      linkSafety={{ enabled: false }}
-    >
-      {text}
-    </Streamdown>
+    <TooltipProvider>
+      <AgentProse text={text} streaming={false} reduced filePathContext={{ cwd: '/repo' }} />
+    </TooltipProvider>
   )
   return container
 }

@@ -48,11 +48,8 @@ const PATH_PREFIX_REGEX = /^(?:\.{1,2}\/|~\/|[A-Za-z]:\/|\/)/
 
 const DOT_DIRECTORY_REGEX = /^\.[A-Za-z]/
 
-/**
- * A `:line[:col]` suffix or a GitHub-style `#L<line>[C<col>][-L<end>]`
- * fragment. Groups: 1/2 are the colon line/column, 3/4 the fragment ones.
- */
-const LINE_POSITION_SUFFIX_REGEX = /(?::(\d+)(?::(\d+))?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)$/i
+const LINE_POSITION_SUFFIX_REGEX =
+  /(?::(?<line>\d+)(?::(?<column>\d+))?|#L(?<fragmentLine>\d+)(?:C(?<fragmentColumn>\d+))?(?:-L?\d+(?:C\d+)?)?)$/i
 
 const FILE_EXTENSION_REGEX = /\.[^.]+$/
 
@@ -98,7 +95,7 @@ export function hasPathEvidence(text: string): boolean {
     return true
   }
 
-  const segments = stripLineColumnSuffix(normalized).split('/').filter(Boolean)
+  const segments = stripLinePosition(normalized).split('/').filter(Boolean)
   const lastSegment = segments[segments.length - 1] ?? ''
   const extension = lastSegment.match(FILE_EXTENSION_REGEX)?.[0]
 
@@ -349,19 +346,19 @@ export function trimWrappedPath(value: string): string {
   return result
 }
 
-/** Removes a trailing `:line[:col]` suffix or `#L<line>` fragment from a path token. */
-export function stripLineColumnSuffix(value: string): string {
+export function stripLinePosition(value: string): string {
   return value.replace(LINE_POSITION_SUFFIX_REGEX, '')
 }
 
-function parseLineColumnSuffix(value: string): { line?: number; column?: number } {
+function parseLinePosition(value: string): { line?: number; column?: number } {
   const match = value.match(LINE_POSITION_SUFFIX_REGEX)
   if (!match) {
     return {}
   }
 
-  const line = Number.parseInt(match[1] ?? match[3], 10)
-  const rawColumn = match[2] ?? match[4]
+  const groups = match.groups ?? {}
+  const line = Number.parseInt(groups.line ?? groups.fragmentLine, 10)
+  const rawColumn = groups.column ?? groups.fragmentColumn
   const parsedColumn = rawColumn ? Number.parseInt(rawColumn, 10) : null
 
   return {
@@ -375,7 +372,7 @@ function parseLineColumnSuffix(value: string): { line?: number; column?: number 
 
 /** Normalizes a terminal token into a file path candidate before filesystem resolution. */
 export function extractPathCandidate(value: string): string {
-  return stripLineColumnSuffix(trimWrappedPath(value))
+  return stripLinePosition(trimWrappedPath(value))
 }
 
 /** Resolves a terminal path token to an existing file using terminal and project context. */
@@ -507,7 +504,7 @@ export async function openFilePathFromTerminal(
   }
 
   const wrappedCandidate = trimWrappedPath(rawCandidate)
-  const position = parseLineColumnSuffix(wrappedCandidate)
+  const position = parseLinePosition(wrappedCandidate)
 
   try {
     await useEditorStore.getState().openFile(resolution.path)

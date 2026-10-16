@@ -6,7 +6,7 @@ import {
   hasPathEvidence,
   openFilePathFromTerminal,
   resolveFilePathCandidate,
-  stripLineColumnSuffix,
+  stripLinePosition,
   trimWrappedPath
 } from './file-path-links'
 
@@ -64,9 +64,9 @@ describe('file-path-links parsing', () => {
   })
 
   it('strips line and column suffixes', () => {
-    expect(stripLineColumnSuffix('src/foo.ts:12')).toBe('src/foo.ts')
-    expect(stripLineColumnSuffix('src/foo.ts:12:3')).toBe('src/foo.ts')
-    expect(stripLineColumnSuffix('C:/repo/src/foo.ts:4:9')).toBe('C:/repo/src/foo.ts')
+    expect(stripLinePosition('src/foo.ts:12')).toBe('src/foo.ts')
+    expect(stripLinePosition('src/foo.ts:12:3')).toBe('src/foo.ts')
+    expect(stripLinePosition('C:/repo/src/foo.ts:4:9')).toBe('C:/repo/src/foo.ts')
   })
 
   it('extracts wrapped paths with line and column suffixes', () => {
