@@ -50,6 +50,7 @@ const WRITER_CAPACITY: usize = 1024;
 /// hunting for a fold boundary. A single coalesced run longer than this is
 /// pathological; the caller falls back to a full replay beyond it.
 const TAIL_DEEPEN_MAX_LINES: usize = 16_384;
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 mod diff_stat;
 mod jsonl;
@@ -142,6 +143,7 @@ struct Inner {
     /// The writer never invents a seq: records it must author itself (the
     /// shutdown `interrupted` marker) take theirs from here.
     seq_authority: Mutex<Option<Arc<dyn SeqAuthority>>>,
+    unsalvageable_log_stamps: Mutex<HashMap<String, LogStamps>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -328,6 +330,7 @@ impl SessionPersistence {
                 index_lock: tokio::sync::Mutex::new(()),
                 process_shutdown: AtomicBool::new(false),
                 seq_authority: Mutex::new(None),
+                unsalvageable_log_stamps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 writer_gate_hook: Mutex::new(None),
                 #[cfg(test)]
@@ -1225,6 +1228,14 @@ impl SessionPersistence {
     ) -> Result<T> {
         match load(self) {
             Err(SessionPersistenceError::CorruptSession) => {
+                if self.logs_known_unsalvageable(session_id) {
+                    log::warn!(
+                        "[acp-history] {op} skipped salvage: logs unchanged since found \
+                         unsalvageable session_id={}",
+                        crate::logging::redact_session_id(session_id)
+                    );
+                    return Err(SessionPersistenceError::CorruptSession);
+                }
                 match self.salvage_seq_intruders(session_id) {
                     Ok(healed) => {
                         if !healed {
@@ -1536,8 +1547,19 @@ impl SessionPersistence {
         // stall every other session's catalog lookups.
         let metadata = self.metadata(session_id)?;
         let dir = self.session_dir(&metadata.storage_key)?;
-        if !has_seq_intruders(&dir, session_id)? {
-            return Ok(false);
+        let stamps = log_stamps(&dir).ok();
+        match probe_seq_intruders(&dir, session_id)? {
+            SalvageProbe::Clean => return Ok(false),
+            SalvageProbe::Unsalvageable => {
+                if let Some(stamps) = stamps {
+                    self.inner
+                        .unsalvageable_log_stamps
+                        .lock()
+                        .insert(session_id.to_string(), stamps);
+                }
+                return Ok(false);
+            }
+            SalvageProbe::Intruders => {}
         }
         // The locked rewrite phase — serialize the heal against every
         // writer-facing mutation. The catalog map lock blocks
@@ -1583,6 +1605,24 @@ impl SessionPersistence {
             counts.last_seq
         );
         Ok(true)
+    }
+
+    fn logs_known_unsalvageable(&self, session_id: &str) -> bool {
+        let Some(known) = self
+            .inner
+            .unsalvageable_log_stamps
+            .lock()
+            .get(session_id)
+            .copied()
+        else {
+            return false;
+        };
+        let current = self
+            .metadata(session_id)
+            .and_then(|metadata| self.session_dir(&metadata.storage_key))
+            .ok()
+            .and_then(|dir| log_stamps(&dir).ok());
+        current == Some(known)
     }
 
     /// Test seam: lets a test enqueue a writer command while the salvage
@@ -1751,9 +1791,20 @@ impl SessionPersistence {
         let mut sweeps = sweep::SweepTotals::default();
         let mut recovered = HashMap::new();
         let mut logical_ids = HashSet::new();
+        let mut stale_temps_removed = 0usize;
         for entry in fs::read_dir(&self.inner.root)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
+                let path = entry.path();
+                if atomic_file::is_stale_temp(&path, INDEX_FILE, STALE_TEMP_AGE) {
+                    match fs::remove_file(&path) {
+                        Ok(()) => stale_temps_removed += 1,
+                        Err(error) => log::warn!(
+                            "[acp-history] recover() could not remove a stale index temp file \
+                             error={error}"
+                        ),
+                    }
+                }
                 continue;
             }
             let storage_key = entry.file_name().to_string_lossy().into_owned();
@@ -2021,7 +2072,7 @@ impl SessionPersistence {
         log::info!(
             "[acp-history] recover() summary sessions={} skipped={skipped} checkpoint_hits={} \
              rescans={} bytes_scanned={} swept={} stamped={} index_written={index_written} \
-             elapsed_ms={}",
+             stale_temps_removed={stale_temps_removed} elapsed_ms={}",
             recovered.len(),
             sweeps.checkpoint_hits,
             sweeps.rescans,
@@ -2112,6 +2163,10 @@ impl SessionPersistence {
 
     /// The single catalog remove: drops the session's `commandId` index entry.
     fn remove_catalog_entry(&self, session_id: &str) {
+        self.inner
+            .unsalvageable_log_stamps
+            .lock()
+            .remove(session_id);
         let removed = self.inner.catalog.lock().remove(session_id);
         if let Some(command_id) = removed.and_then(|metadata| metadata.lock().command_id.clone()) {
             let mut index = self.inner.command_index.lock();
@@ -2268,3 +2323,5 @@ mod sweep_tests;
 mod jsonl_tests;
 #[cfg(test)]
 mod log_scan_tests;
+#[cfg(test)]
+mod store_hygiene_tests;
