@@ -95,6 +95,19 @@ describe('markChatRead', () => {
     expect(useAgentChatUnreadStore.getState().sharedReadSeq).toEqual({ s1: 11 })
   })
 
+  it('never lowers the marker with a reply that lost the race to a newer delta', async () => {
+    const reply = vi.fn(async (sessionId: string) => ({ sessionId, seq: 15 }))
+    const phone = fakeSurface(reply)
+    startChatReadSync(phone.transport)
+    phone.readState({})
+
+    markChatRead('s3', 15, phone.transport)
+    phone.readDelta('s3', 20)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(useAgentChatUnreadStore.getState().sharedReadSeq).toEqual({ s3: 20 })
+  })
+
   it('sends a seq once while it is in flight and again after a failure', async () => {
     const failing = vi.fn(async () => {
       throw new Error('host gone')

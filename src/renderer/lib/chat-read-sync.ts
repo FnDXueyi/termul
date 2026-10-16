@@ -68,7 +68,11 @@ export function markChatRead(
   transport.markChatRead(sessionId, seq).then(
     (mark) => {
       settle()
-      useAgentChatUnreadStore.getState().setReadMark(mark.sessionId, mark.seq)
+      // Replies race the watch deltas, so a reply only ever raises the marker.
+      const store = useAgentChatUnreadStore.getState()
+      if (mark.seq > (store.sharedReadSeq[mark.sessionId] ?? 0)) {
+        store.setReadMark(mark.sessionId, mark.seq)
+      }
     },
     (error: unknown) => {
       settle()
