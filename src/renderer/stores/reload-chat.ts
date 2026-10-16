@@ -137,6 +137,7 @@ export async function reloadAgentChat(sessionId: SessionId): Promise<void> {
           error instanceof Error ? error.message : String(error)
         }`
       })
+      return
     }
 
     const reopened = useAcpStore.getState().sessions[sessionId]

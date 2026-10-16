@@ -112,6 +112,18 @@ describe('reloadAgentChat', () => {
     )
   })
 
+  it('does not mark the chat reloaded when the reopen fails', async () => {
+    useAcpStore.setState({
+      sessions: { s1: session('s1') },
+      openHistorySession: vi.fn(async () => {
+        throw new Error('Could not start a new agent for this chat.')
+      })
+    } as never)
+    await reloadAgentChat('s1')
+    expect(useAcpStore.getState().agentReloadMarks.s1).toBeUndefined()
+    expect(useAcpStore.getState().sessions.s1.status).toBe('active')
+  })
+
   it('refuses an agent that cannot reopen a session', async () => {
     useAcpStore.setState({
       agents: { 'agent-1': { id: 'agent-1', capabilities: { loadSession: false } } }

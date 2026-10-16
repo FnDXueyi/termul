@@ -970,7 +970,15 @@ async function openHistorySessionInner(
       throw err
     }
     if (deletedMidOpen() || !isCurrentSessionReopen(id, reopenGeneration)) return
-    if (ensured) liveAgentId = ensured
+    if (ensured) {
+      liveAgentId = ensured
+    } else if (options?.forceNewAgent) {
+      // A silent spawn failure returns null and would otherwise reopen on the
+      // old process. Reload must not report success without a new agent.
+      const error = new Error('Could not start a new agent for this chat.')
+      set((s) => ({ sessions: withSessionResumeError(s.sessions, id, error) }))
+      throw error
+    }
   }
   // CAP-4: `spawnAgent` seeds capabilities synchronously from the spawn
   // response, so a freshly spawned agent already has them by this point.
