@@ -2302,7 +2302,9 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       let cursor: string | undefined
       // Safety cap: 10 pages max.
       for (let i = 0; i < 10; i++) {
-        const res = await acpApi.listSessions(agentId, cwd || undefined, cursor)
+        const res = await withAuthRetry(get, agentId, 'session/list', 'text', () =>
+          acpApi.listSessions(agentId, cwd || undefined, cursor)
+        )
         if (Array.isArray(res.sessions)) {
           // De-dupe by sessionId across pages (an agent may repeat an entry
           // when paginating) so the sidebar never renders the same chat twice.

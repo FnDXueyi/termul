@@ -47,6 +47,7 @@ pub mod projects_api;
 pub mod prompt_turn;
 #[cfg(test)]
 mod prompt_turn_tests;
+pub mod route_deadline;
 pub mod router;
 pub mod search_api;
 pub mod sink;
