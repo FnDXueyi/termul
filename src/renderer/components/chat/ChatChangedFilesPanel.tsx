@@ -3,24 +3,37 @@ import { toast } from 'sonner'
 import { CHAT_GUTTER_X, CHAT_HIT_MIN_H } from '@/components/chat/chat-layout'
 import { baseName, describeToolCall, toolCallPath } from '@/components/chat/tool-call-summary'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
+import { GitStatusLetter } from '@/components/git/rows'
 import { ChevronDown, ChevronRight, FileDiff } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { DiffStatCounts } from '@/components/ui/diff-stat-counts'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ToolCall } from '@/lib/acp-api'
+import type { GitDisplayStatus } from '@/lib/git-status-display'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
 import { useEditorStore } from '@/stores/editor-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useForcedCollapse } from './use-forced-collapse'
 
+type ChangedFileKind = 'edit' | 'delete' | 'move'
+
+const KIND_STATUS: Record<ChangedFileKind, GitDisplayStatus> = {
+  edit: 'modified',
+  delete: 'deleted',
+  move: 'renamed'
+}
+
+function isChangedFileKind(kind: string | undefined): kind is ChangedFileKind {
+  return kind === 'edit' || kind === 'delete' || kind === 'move'
+}
+
 /** A file touched by one or more ACP tool calls in this session. */
 interface ChangedFile {
   /** Resolved full path — forward slashes, cwd-joined. Also the dedupe key. */
   path: string
-  /** Kind of the most recent contributing call (edit/delete/move). */
-  kind: string
+  lastKind: ChangedFileKind
   added: number
   removed: number
 }
@@ -105,7 +118,8 @@ function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] 
   const files: ChangedFile[] = []
   const byPath = new Map<string, ChangedFile>()
   for (const tc of toolCalls) {
-    if (tc.kind !== 'edit' && tc.kind !== 'delete' && tc.kind !== 'move') continue
+    const kind = tc.kind
+    if (!isChangedFileKind(kind)) continue
     // `locations[].path` arrives untrimmed — a whitespace-only path would
     // otherwise key a garbage row like `<cwd>/   `.
     const rawPath = toolCallPath(tc)?.trim()
@@ -118,12 +132,12 @@ function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] 
     if (existing) {
       existing.added += stat.added
       existing.removed += stat.removed
-      existing.kind = tc.kind ?? 'edit'
+      existing.lastKind = kind
       continue
     }
     const file: ChangedFile = {
       path,
-      kind: tc.kind ?? 'edit',
+      lastKind: kind,
       added: stat.added,
       removed: stat.removed
     }
@@ -148,6 +162,42 @@ function FileRow({
   // A separators-only path ('/') has no basename — show the path itself.
   const label = baseName(file.path) || file.path
   const hasCounts = file.added > 0 || file.removed > 0
+  const isDeleted = file.lastKind === 'delete'
+
+  const content = (
+    <>
+      <MaterialFileIcon name={label} isDirectory={false} isExpanded={false} depth={0} size={14} />
+      <span className={cn('min-w-0 flex-1', isDeleted && 'line-through')}>
+        <span className="block truncate text-2xs font-medium leading-tight">{label}</span>
+        {dir && <span className="block truncate text-4xs leading-tight opacity-50">{dir}</span>}
+      </span>
+      {hasCounts && (
+        <span className="shrink-0 font-mono text-2xs leading-tight">
+          <DiffStatCounts added={file.added} removed={file.removed} />
+        </span>
+      )}
+      <GitStatusLetter status={KIND_STATUS[file.lastKind]} />
+    </>
+  )
+  const rowClass = cn(
+    'flex w-full items-center gap-2 rounded-md px-3 text-left text-muted-foreground select-none',
+    CHAT_HIT_MIN_H
+  )
+
+  if (isDeleted) {
+    const deletedLabel = `Deleted: ${file.path}`
+    return (
+      // biome-ignore lint/a11y/useSemanticElements: a fieldset would give a static row form semantics
+      <div
+        role="group"
+        title={deletedLabel}
+        aria-label={deletedLabel}
+        className={cn(rowClass, 'cursor-default')}
+      >
+        {content}
+      </div>
+    )
+  }
 
   return (
     <button
@@ -159,24 +209,14 @@ function FileRow({
       aria-label={file.path}
       onClick={() => onOpen(file.path)}
       className={cn(
-        'group/row flex w-full items-center gap-2 rounded-md px-3 text-left',
-        CHAT_HIT_MIN_H,
-        'cursor-pointer select-none transition-[background-color,color] duration-150 ease-out motion-reduce:transition-none',
-        'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+        rowClass,
+        'group/row cursor-pointer transition-[background-color,color] duration-150 ease-out motion-reduce:transition-none',
+        'hover:bg-secondary/60 hover:text-foreground',
         'active:bg-secondary/80',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring'
       )}
     >
-      <MaterialFileIcon name={label} isDirectory={false} isExpanded={false} depth={0} size={14} />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-2xs font-medium leading-tight">{label}</span>
-        {dir && <span className="block truncate text-4xs leading-tight opacity-50">{dir}</span>}
-      </span>
-      {hasCounts && (
-        <span className="shrink-0 font-mono text-2xs leading-tight">
-          <DiffStatCounts added={file.added} removed={file.removed} />
-        </span>
-      )}
+      {content}
     </button>
   )
 }
@@ -204,7 +244,8 @@ interface ChatChangedFilesPanelProps {
  * ChatInputBar. One row per unique file touched by ACP tool calls
  * (edit/delete/move) in the current session — a file edited by several calls
  * appears once with summed +N −N counts — persists across agent replies.
- * Clicking a file row opens it in the editor workspace. View-and-open-only.
+ * Clicking a row opens the file in the editor workspace; a deleted file's
+ * row opens nothing. View-and-open-only.
  *
  * The panel sits behind the chatbox (z-0 vs z-10). A negative bottom margin
  * extends the panel's translucent bg-card/60 behind the chatbox's rounded top
