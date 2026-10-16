@@ -22,6 +22,7 @@ import {
   getCachedSessionPayload,
   loadSessionPayload,
   markSessionPayloadPinned,
+  reloadSessionPayloadFromHost,
   setCachedSessionPayload,
   unpinSessionPayload
 } from '@/lib/acp-history-persistence'
@@ -907,7 +908,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   /**
    * Lazy-load older messages from the cached full payload on scroll-up.
    * Reads the full payload via `loadSessionPayload` (cached module-side so
-   * re-hydrations don't re-read disk), finds messages older than the
+   * re-hydrations don't re-read disk; re-read from the host when the copy
+   * lacks the window's oldest id), finds messages older than the
    * window's oldest retained id, and prepends the next `count` into the
    * in-memory window. Idempotent at the history head (no infinite loop).
    * Reversible trim — disk format unchanged.
@@ -920,11 +922,31 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       // Best-effort read: a disk/server failure must not surface as an
       // unhandled promise rejection in the UI — the reader keeps the current
       // view and can retry by scrolling up again.
-      const payload = await loadSessionPayload(sessionId).catch((e: unknown) => {
+      let payload = await loadSessionPayload(sessionId).catch((e: unknown) => {
         console.warn('[acp] loadOlderMessages: payload read failed', e)
         return null
       })
       if (!payload) return
+      const headId = get().messages[sessionId]?.[0]?.id
+      if (
+        headId !== undefined &&
+        !headId.startsWith(SWITCH_SPLICE_ID_PREFIX) &&
+        !payload.messages.some((m) => m.id === headId)
+      ) {
+        // The desktop copy is cache-first and live events never refresh it.
+        // Once the live window has streamed past it, the seq anchor below
+        // would land at the copy's end and skip every message in between.
+        try {
+          payload = (await reloadSessionPayloadFromHost(sessionId)) ?? payload
+        } catch {
+          void logFrontendError({
+            level: 'warn',
+            source: 'acp.loadOlderMessages',
+            message: `Host re-read for session ${sessionId.slice(0, 8)}… failed; scroll-back waits for the next scroll-up instead of paging from a stale copy`
+          })
+          return
+        }
+      }
       // Re-read current state after the async gap — new chunks may have arrived.
       const current = get().messages[sessionId] ?? []
       if (current.length === 0) return

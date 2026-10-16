@@ -730,6 +730,30 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
 }
 
 /**
+ * Re-read a session's full payload from the host and replace the cached copy
+ * in place, keeping its pin and plan fences. Desktop full reads are
+ * cache-first and live events never refresh that copy, so a caller that finds
+ * it behind the live transcript asks for this. `null` when no fresher read
+ * exists: server mode already reads the host on every full read, and
+ * `live_only` has no host history.
+ */
+export async function reloadSessionPayloadFromHost(id: string): Promise<SessionPayload | null> {
+  const transport = getAcpTransport()
+  const mode = transport.historyMode?.()
+  if ((mode === 'server' && transport.getSessionPayload) || mode === 'live_only') return null
+  const stale = payloadCache.get(id)
+  if (stale) rememberPlanFences(id, stale)
+  const payload = withPlanFences(id, await acpHistoryApi.get(id))
+  if (payload) touchPayload(id, payload)
+  void logFrontendError({
+    level: 'info',
+    source: 'acp.historyPersistence',
+    message: `Re-read session ${id.slice(0, 8)}… from the host: the cached copy ended at seq ${stale?.metadata.lastSeq ?? 'unknown'}, the host is at seq ${payload?.metadata.lastSeq ?? 'unknown'}`
+  })
+  return payload
+}
+
+/**
  * Tail-first variant of {@link loadSessionPayload}: fetches only the last
  * `limit` messages + matching tool calls so the renderer can install the
  * recent transcript immediately and lazy-load the full payload on scroll-up.
