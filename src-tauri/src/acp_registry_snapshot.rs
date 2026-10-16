@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const FETCH_TIMEOUT_SECS: u64 = 15;
+/// Body cap for the registry fetch. The live registry measured 57,317 bytes
+/// (42 agents) on 2026-10-16, so 4 MiB leaves about 70x headroom while
+/// bounding what a hostile or broken CDN response can make the host buffer.
+const MAX_REGISTRY_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Snapshot cache TTL — 24h. Within the TTL the cache is served with zero
 /// network; past it the CDN is refetched and a failure falls back to the
 /// stale cache. Registry metadata only (npx pins), never binaries, so 24h of
@@ -189,16 +193,16 @@ fn cache_is_fresh(fetched_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool 
         && skewed <= chrono::Duration::from_std(MAX_CLOCK_SKEW).unwrap_or(chrono::Duration::MAX)
 }
 
-/// Network fetch of the live CDN registry (no cache interaction). The URL is
-/// a fixed https-only constant — no caller-supplied or persisted input.
-async fn fetch_registry_agents() -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
+/// Network fetch of the live CDN registry (no cache interaction). Production
+/// passes the fixed https [`REGISTRY_URL`]; tests pass a local server URL.
+async fn fetch_registry_agents(url: &str) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
     let response = client
-        .get(REGISTRY_URL)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("ACP registry request failed: {}", e))?;
@@ -305,7 +309,10 @@ pub async fn fetch_acp_registry_snapshot_with_cache_path(
     cache_path: &std::path::Path,
     force_refresh: bool,
 ) -> Result<ResolvedSnapshot, String> {
-    resolve_snapshot(cache_path, force_refresh, fetch_registry_agents).await
+    resolve_snapshot(cache_path, force_refresh, || {
+        fetch_registry_agents(REGISTRY_URL)
+    })
+    .await
 }
 
 /// Desktop "Check for updates" / "Apply remote registry" entry point. Uses

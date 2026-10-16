@@ -251,3 +251,82 @@ async fn malformed_fetched_at_treated_as_expired() {
     assert_eq!(resolved.snapshot.agents[0].id, "refetched-agent");
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+// ---- Live fetch against a local HTTP server ----
+
+const ONE_AGENT_REGISTRY: &str = r#"{"agents":[{"id":"local-agent","distribution":{"npx":{"package":"local@1.0.0"}}}]}"#;
+
+/// A registry document of exactly `len` bytes: valid JSON with no agents and
+/// a padding string, streamed in 64 KiB chunks with no Content-Length.
+fn padded_registry_body(len: usize) -> axum::body::Body {
+    let prefix = r#"{"agents":[],"pad":""#;
+    let suffix = r#""}"#;
+    let mut body = Vec::with_capacity(len);
+    body.extend_from_slice(prefix.as_bytes());
+    body.resize(len - suffix.len(), b'x');
+    body.extend_from_slice(suffix.as_bytes());
+    let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+        body.chunks(64 * 1024).map(|chunk| Ok(chunk.to_vec())).collect();
+    axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+}
+
+async fn serve_registry_routes() -> String {
+    use axum::routing::get;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let plain_url = format!("{base}/plain.json");
+    let app = axum::Router::new()
+        .route("/plain.json", get(|| async { ONE_AGENT_REGISTRY }))
+        .route(
+            "/redirect.json",
+            get(move || async move { axum::response::Redirect::temporary(&plain_url) }),
+        )
+        .route(
+            "/at-cap.json",
+            get(|| async { padded_registry_body(MAX_REGISTRY_BODY_BYTES) }),
+        )
+        .route(
+            "/over-cap.json",
+            get(|| async { padded_registry_body(MAX_REGISTRY_BODY_BYTES + 1) }),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    base
+}
+
+#[tokio::test]
+async fn fetch_refuses_a_redirect_to_a_non_https_url() {
+    let base = serve_registry_routes().await;
+
+    let direct = fetch_registry_agents(&format!("{base}/plain.json"))
+        .await
+        .unwrap();
+    assert_eq!(direct[0].id, "local-agent");
+
+    let error = fetch_registry_agents(&format!("{base}/redirect.json"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "ACP registry redirect refused: refused redirect to non-https URL scheme \"http\""
+    );
+}
+
+#[tokio::test]
+async fn fetch_accepts_a_body_at_the_cap_and_refuses_one_byte_over() {
+    let base = serve_registry_routes().await;
+
+    let at_cap = fetch_registry_agents(&format!("{base}/at-cap.json"))
+        .await
+        .unwrap();
+    assert!(at_cap.is_empty());
+
+    let error = fetch_registry_agents(&format!("{base}/over-cap.json"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "ACP registry body exceeded the 4194304-byte cap; refused"
+    );
+}
