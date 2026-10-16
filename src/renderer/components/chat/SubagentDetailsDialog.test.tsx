@@ -22,6 +22,15 @@ vi.mock('@/lib/attachment-api', () => ({
   readAttachmentBytes: (...args: unknown[]) => readAttachmentBytesMock(...args)
 }))
 
+const { openFilePathMock } = vi.hoisted(() => ({
+  openFilePathMock: vi.fn(async () => ({ ok: true as const }))
+}))
+
+vi.mock('@/lib/file-path-links', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/file-path-links')>()
+  return { ...actual, openFilePathFromTerminal: openFilePathMock }
+})
+
 vi.mock('@/lib/tauri-runtime', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/tauri-runtime')>()
   return { ...actual, isTauriContext: () => isTauriContextMock() }
@@ -54,6 +63,7 @@ function Harness({ onOpenChange }: { onOpenChange?: (open: boolean) => void }): 
       toolCall={delegatedCall}
       parentTurnActive
       open={open}
+      filePathContext={undefined}
       onOpenChange={(next) => {
         onOpenChange?.(next)
         setOpen(next)
@@ -177,5 +187,81 @@ describe('SubagentDetailsDialog agent prose', () => {
       )
     })
     expect(readAttachmentBytesMock).toHaveBeenCalledWith('/proj/out/chart.png')
+  })
+})
+
+describe('SubagentDetailsDialog file-path open', () => {
+  const completedCall: ToolCall = {
+    ...delegatedCall,
+    status: 'completed',
+    rawOutput: { text: 'Edited src/foo.ts as asked.' }
+  }
+
+  function ClosableDialog({
+    onOpenChange
+  }: {
+    onOpenChange: (open: boolean) => void
+  }): React.JSX.Element {
+    const [open, setOpen] = useState(true)
+    return (
+      <SubagentDetailsDialog
+        toolCall={completedCall}
+        open={open}
+        onOpenChange={(next) => {
+          onOpenChange(next)
+          setOpen(next)
+        }}
+        filePathContext={{ cwd: '/proj', projectRoot: '/proj' }}
+      />
+    )
+  }
+
+  let cleanup: () => void
+
+  beforeEach(() => {
+    window.history.replaceState(null, '', '#/base')
+    cleanup = armMobileOverlayBackStack()
+    useOverlayStackStore.getState().setMobileShell(false)
+    openFilePathMock.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('closes the dialog when a file path opens in the editor', async () => {
+    const onOpenChange = vi.fn()
+    render(<ClosableDialog onOpenChange={onOpenChange} />)
+
+    fireEvent.click(screen.getByTestId('termul-file-path'))
+
+    expect(openFilePathMock).toHaveBeenCalledWith('src/foo.ts', {
+      cwd: '/proj',
+      projectRoot: '/proj'
+    })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('consumes the mobile back-stack sentinel when a file opens', async () => {
+    useOverlayStackStore.getState().setMobileShell(true)
+    render(<ClosableDialog onOpenChange={() => {}} />)
+    await waitForSentinelDepth(1)
+
+    fireEvent.click(screen.getByTestId('termul-file-path'))
+
+    await waitForSentinelDepth(0)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('stays open on a shift-click the file button ignores', () => {
+    const onOpenChange = vi.fn()
+    render(<ClosableDialog onOpenChange={onOpenChange} />)
+
+    fireEvent.click(screen.getByTestId('termul-file-path'), { shiftKey: true })
+
+    expect(openFilePathMock).not.toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 })

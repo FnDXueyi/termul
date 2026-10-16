@@ -33,7 +33,7 @@ export function SubagentDetailsDialog({
   parentTurnActive?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
-  filePathContext?: FilePathResolutionContext
+  filePathContext: FilePathResolutionContext | undefined
 }): React.JSX.Element {
   const { primary } = describeToolCall(toolCall)
   const input =
@@ -57,7 +57,15 @@ export function SubagentDetailsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[min(85vh,48rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col overflow-hidden">
+      <DialogContent
+        className="flex max-h-[min(85vh,48rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col overflow-hidden"
+        onClick={(event) => {
+          const target = event.target as Element
+          if (event.defaultPrevented && target.closest('[data-testid="termul-file-path"]')) {
+            onOpenChange(false)
+          }
+        }}
+      >
         <DialogHeader className="pr-6">
           <DialogTitle className="break-words">{primary}</DialogTitle>
           <DialogDescription>
