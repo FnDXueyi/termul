@@ -2234,6 +2234,46 @@ describe('acp provider authentication & recovery', () => {
       })
     })
 
+    it('drops the sign-in result of a failed prompt once a newer prompt has finished', async () => {
+      seedLiveAgent('agent-1', [{ id: 'cursor_login', name: 'Sign in with Cursor' }])
+      seedSession('s1', 'agent-1', false)
+      let finishSignIn: () => void = () => {}
+      let sends = 0
+      vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+        if (cmd === 'acp_authenticate') {
+          return new Promise<undefined>((resolve) => {
+            finishSignIn = () => resolve(undefined)
+          })
+        }
+        if (cmd === 'acp_send_prompt') {
+          sends += 1
+          if (sends === 1) throw authRequiredError()
+          useAcpStore.getState()._onPromptComplete({
+            agentId: 'agent-1',
+            sessionId: 's1',
+            stopReason: 'end_turn'
+          })
+          return 'end_turn'
+        }
+        throw new Error(`unexpected invoke command: ${cmd}`)
+      })
+
+      const first = useAcpStore.getState().sendPrompt('s1', 'hello')
+      await vi.waitFor(() =>
+        expect(vi.mocked(invoke).mock.calls.map(([cmd]) => cmd)).toContain('acp_authenticate')
+      )
+      await useAcpStore.getState().sendPrompt('s1', 'second')
+      await vi.waitFor(() => expect(useAcpStore.getState().sessions.s1?.activeTurn).toBe(false))
+      finishSignIn()
+      await expect(first).rejects.toThrow('not authenticated')
+
+      expect(useAcpStore.getState().sessions.s1).toMatchObject({
+        status: 'active',
+        activeTurn: false,
+        lastError: null
+      })
+    })
+
     it('points a multi-method prompt auth failure at the launcher picker', async () => {
       seedLiveAgent('agent-1', [
         { id: 'chatgpt', name: 'ChatGPT' },

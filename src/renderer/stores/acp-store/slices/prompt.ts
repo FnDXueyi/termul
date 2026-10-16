@@ -574,7 +574,13 @@ export async function runPromptTurn(
     // The agent may have run part of the turn before its token expired, so a
     // resend could repeat its tool calls.
     if (dispatchedAgentId && isAuthRetriableSessionError(err)) {
-      await reauthenticateWithoutResendingPrompt(set, get, sessionId, dispatchedAgentId)
+      await reauthenticateWithoutResendingPrompt(
+        set,
+        get,
+        sessionId,
+        dispatchedAgentId,
+        String(err)
+      )
     }
     throw err
   }
@@ -587,7 +593,8 @@ async function reauthenticateWithoutResendingPrompt(
   set: TurnEndSetter,
   get: () => AcpState,
   sessionId: SessionId,
-  agentId: AgentId
+  agentId: AgentId,
+  failedTurnError: string
 ): Promise<void> {
   let signedIn = false
   let lastError: string
@@ -600,7 +607,8 @@ async function reauthenticateWithoutResendingPrompt(
   }
   set((s) => {
     const current = s.sessions[sessionId]
-    if (!current || current.agentId !== agentId || current.activeTurn) return {}
+    // A newer turn replaced the failed turn's error: this result is stale.
+    if (current?.agentId !== agentId || current.lastError !== failedTurnError) return {}
     const revive = signedIn && current.status === 'error'
     return {
       agentStatus:
