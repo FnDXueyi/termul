@@ -215,19 +215,20 @@ describe('BrowserConsentStrip announcement', () => {
 describe('consent while an overlay covers the interface', () => {
   afterEach(() => resetNativeWebviewOcclusionForTests())
 
-  it('hides the strip and the in-chat card so neither sits unreachable under the overlay', () => {
+  it('hides the strip so it never sits unreachable under the overlay', () => {
     acpState.pendingBrowserConsents = { 'req-1': consentEvent() }
     workspaceState.activeTab = browserTab()
-    render(
+    const Page = ({ overlay }: { overlay: boolean }): React.JSX.Element => (
       <>
         <BrowserConsentStrip browserTabId={TAB_ID} />
-        <BrowserConsentCard consent={consentEvent()} />
-        <NativeWebviewOccluder />
+        {overlay && <NativeWebviewOccluder />}
       </>
     )
-
+    const { rerender } = render(<Page overlay />)
     expect(screen.queryByRole('button', { name: 'Allow for this session' })).not.toBeInTheDocument()
-    expect(screen.queryByTestId('browser-consent-card')).not.toBeInTheDocument()
+
+    rerender(<Page overlay={false} />)
+    expect(screen.getByRole('button', { name: 'Allow for this session' })).toBeInTheDocument()
   })
 })
 

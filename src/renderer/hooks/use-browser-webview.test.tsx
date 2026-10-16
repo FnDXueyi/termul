@@ -79,7 +79,7 @@ describe('useBrowserWebview bounds updates', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(LOGICAL_RECT)
     vi.mocked(browserTabCreate).mockResolvedValue({
       success: true,
-      data: { id: 'browser-1', url: 'https://example.com', title: '' }
+      data: { id: 'browser-1', url: 'https://example.com', title: '', agentControlled: false }
     })
     vi.mocked(browserTabDestroy).mockResolvedValue({ success: true, data: undefined })
     vi.mocked(browserTabResize).mockResolvedValue({ success: true, data: undefined })

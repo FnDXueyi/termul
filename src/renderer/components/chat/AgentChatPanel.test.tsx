@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RECONNECT_GRACE_MS } from '@/hooks/use-delayed-flag'
+import {
+  NativeWebviewOccluder,
+  resetNativeWebviewOcclusionForTests
+} from '@/hooks/use-native-webview-occlusion'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { commandToken } from '@/lib/skill-tokens'
 import { mockAcpSession } from '@/lib/test-utils/acp'
@@ -2018,11 +2022,22 @@ describe('AgentChatPanel browser consent card mounting (CAP-5)', () => {
 
   afterEach(() => {
     runtimeState.tauri = false
+    resetNativeWebviewOcclusionForTests()
   })
 
   function seedActiveSession(id: string): void {
     sessionRef.current = mockAcpSession({ id, cwd: '/w', status: 'active' })
   }
+
+  it('mounts no card while an overlay covers the chat, leaving it to the root host', () => {
+    seedActiveSession('s1')
+    pendingBrowserConsentsRef.current = {
+      'req-1': { requestId: 'req-1', sessionId: 's1' }
+    }
+    render(<NativeWebviewOccluder />)
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(browserConsentCardPropsRef.current).toBeNull()
+  })
 
   it('renders the pending consent belonging to this session', () => {
     seedActiveSession('s1')
