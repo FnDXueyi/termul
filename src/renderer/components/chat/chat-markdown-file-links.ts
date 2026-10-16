@@ -1,4 +1,4 @@
-import { findFilePathMatches, stripLinePosition } from '@/lib/file-path-links'
+import { findFilePathMatches } from '@/lib/file-path-links'
 
 /**
  * Escape `& < > "` so interpolated path/alt/url values cannot break out of
@@ -25,34 +25,7 @@ type MarkdownNode = {
  * their link text.
  */
 export function termulFilePathTag(path: string, label: string = path): string {
-  return filePathElement(path, escapeHtmlAttribute(label))
-}
-
-function filePathElement(path: string, innerHtml: string): string {
-  return `<termul-file-path data-path="${escapeHtmlAttribute(path)}">${innerHtml}</termul-file-path>`
-}
-
-const INLINE_CODE_FILE_EXTENSIONS = new Set([
-  ...['c', 'cc', 'cjs', 'cpp', 'cs', 'css', 'cts', 'dart', 'ex', 'exs', 'go', 'h', 'hpp'],
-  ...['java', 'js', 'jsx', 'kt', 'lua', 'mjs', 'mts', 'php', 'ps1', 'py', 'rb', 'rs'],
-  ...['sass', 'scss', 'sh', 'sql', 'svelte', 'swift', 'ts', 'tsx', 'vue', 'zig', 'zsh'],
-  ...['cfg', 'conf', 'csv', 'html', 'ini', 'json', 'jsonc', 'lock', 'md', 'mdx', 'toml'],
-  ...['tsv', 'txt', 'xml', 'yaml', 'yml'],
-  ...['avif', 'gif', 'ico', 'jpeg', 'jpg', 'pdf', 'png', 'svg', 'webp']
-])
-
-const SINGLE_SEGMENT_FILE_RE = /^[^\s\\/:*?"<>|`#]+\.([A-Za-z0-9]+)$/
-
-function isInlineCodeFilePath(code: string): boolean {
-  if (findFilePathMatches(code)[0]?.text === code) return true
-  const extension = SINGLE_SEGMENT_FILE_RE.exec(stripLinePosition(code))?.[1]
-  return extension !== undefined && INLINE_CODE_FILE_EXTENSIONS.has(extension.toLowerCase())
-}
-
-function inlineCodeToFileButton(node: MarkdownNode): MarkdownNode | null {
-  const code = (node.value ?? '').trim()
-  if (!isInlineCodeFilePath(code)) return null
-  return { type: 'html', value: filePathElement(code, `<code>${escapeHtmlAttribute(code)}</code>`) }
+  return `<termul-file-path data-path="${escapeHtmlAttribute(path)}">${escapeHtmlAttribute(label)}</termul-file-path>`
 }
 
 const URI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/
@@ -176,7 +149,6 @@ function splitTextNode(node: MarkdownNode): MarkdownNode[] {
 
 function transformNode(node: MarkdownNode): MarkdownNode[] {
   if (node.type === 'text') return splitTextNode(node)
-  if (node.type === 'inlineCode') return [inlineCodeToFileButton(node) ?? node]
   if (node.type === 'link') {
     const button = linkToFileButton(node)
     return [button ?? node]

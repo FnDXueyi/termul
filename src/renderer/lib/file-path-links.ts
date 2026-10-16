@@ -91,7 +91,7 @@ export function hasPathEvidence(text: string): boolean {
     return true
   }
 
-  if (LINE_POSITION_SUFFIX_REGEX.test(normalized)) {
+  if (LINE_POSITION_SUFFIX_REGEX.exec(normalized)?.groups?.line !== undefined) {
     return true
   }
 

@@ -84,7 +84,8 @@ describe('file-path-links parsing', () => {
     expect(extractPathCandidate('src/x.ts#L10')).toBe('src/x.ts')
     expect(extractPathCandidate('src/x.ts#L10-L20')).toBe('src/x.ts')
     expect(extractPathCandidate('`src/x.ts#L10C4`')).toBe('src/x.ts')
-    expect(hasPathEvidence('docs/notes#L3')).toBe(true)
+    expect(hasPathEvidence('owner/repo#L10')).toBe(false)
+    expect(findFilePathMatches('see owner/repo#L10 upstream')).toEqual([])
   })
 
   it('keeps plain file paths unchanged', () => {

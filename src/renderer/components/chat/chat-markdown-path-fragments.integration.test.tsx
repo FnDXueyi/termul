@@ -48,7 +48,7 @@ function renderChat(text: string): HTMLElement {
   return container
 }
 
-describe('agent prose path links with line fragments and inline-code filenames', () => {
+describe('agent prose path links with #L line fragments', () => {
   beforeEach(() => {
     mocks.getFileInfo.mockReset().mockImplementation(async (path: string) => ({
       success: true,
@@ -66,10 +66,7 @@ describe('agent prose path links with line fragments and inline-code filenames',
   it.each([
     ['See src/x.ts#L10 for the bug.', 'src/x.ts#L10', '/repo/src/x.ts', 10],
     ['See src/x.ts#L10-L20 for the bug.', 'src/x.ts#L10-L20', '/repo/src/x.ts', 10],
-    ['Edit `src/x.ts#L10` next.', 'src/x.ts#L10', '/repo/src/x.ts', 10],
-    ['Edit `main.rs` next.', 'main.rs', '/repo/main.rs', null],
-    ['Open `out.png` to check.', 'out.png', '/repo/out.png', null],
-    ['Edit `main.rs:12` next.', 'main.rs:12', '/repo/main.rs', 12]
+    ['See [the bug](src/x.ts#L10).', 'the bug', '/repo/src/x.ts', 10]
   ])('%s opens %s at %s line %s', async (markdown, label, target, line) => {
     const container = renderChat(markdown)
 
@@ -84,32 +81,16 @@ describe('agent prose path links with line fragments and inline-code filenames',
     await waitFor(() => expect(mocks.addEditorTab).toHaveBeenCalledWith(target))
     expect(mocks.getFileInfo).toHaveBeenCalledWith(target)
     expect(mocks.openFile).toHaveBeenCalledWith(target)
-    if (line === null) {
-      expect(mocks.updateCursorPosition).not.toHaveBeenCalled()
-    } else {
-      expect(mocks.updateCursorPosition).toHaveBeenCalledWith(target, line, 1)
-    }
+    expect(mocks.updateCursorPosition).toHaveBeenCalledWith(target, line, 1)
     expect(mocks.toastError).not.toHaveBeenCalled()
-  })
-
-  it('keeps an inline-code filename styled as inline code inside the button', async () => {
-    const container = renderChat('Edit `main.rs` next.')
-
-    await waitFor(() => {
-      const code = container.querySelector(
-        'button[data-testid="termul-file-path"] code[data-streamdown="inline-code"]'
-      )
-      expect(code).toHaveTextContent('main.rs')
-    })
   })
 
   it.each([
     'Run main.rs now.',
-    'Call `foo` first.',
+    'See owner/repo#L10 upstream.',
     'Pick one, e.g. the first.',
-    'Pick one, `e.g.` the first.',
-    'Use `console.log` and `process.env` here.',
-    'Bump `v1.2` and `user.id` first.'
+    'Edit `main.rs` next.',
+    'Edit `src/x.ts#L10` next.'
   ])('leaves %s unlinked', async (markdown) => {
     const container = renderChat(markdown)
 
