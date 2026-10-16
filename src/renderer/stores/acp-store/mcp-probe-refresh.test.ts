@@ -27,12 +27,20 @@ vi.mock('@/lib/acp-mcp-persistence', async (orig) => {
 })
 
 import { invoke } from '@tauri-apps/api/core'
-import type { ProbeResult } from '@/lib/acp-api'
+import { acpApi, type ProbeResult } from '@/lib/acp-api'
 import { useAcpStore } from '@/stores/acp-store'
 import { deferred } from './testkit'
 
 const CONNECTED: ProbeResult = { status: 'connected', tools: [{ name: 'read_file' }] }
 const REFUSED: ProbeResult = { status: 'disconnected', tools: [], error: 'spawn failed' }
+const AUTH_REQUIRED: ProbeResult = { status: 'authRequired', tools: [], error: 'sign in required' }
+const OAUTH_SERVER = {
+  id: 'gh',
+  type: 'http',
+  name: 'GitHub',
+  url: 'https://mcp.test/gh',
+  enabled: true
+} as const
 
 function probedConfigs(): unknown[] {
   return vi
@@ -47,6 +55,7 @@ async function settle(): Promise<void> {
 
 describe('MCP probe refresh', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.mocked(invoke).mockReset()
     useAcpStore.setState({
       mcpServers: [{ id: 'fs', type: 'stdio', name: 'Files', command: 'old-cmd', enabled: true }],
@@ -192,5 +201,55 @@ describe('MCP probe refresh', () => {
     expect(probedConfigs()).toEqual([{ type: 'stdio', name: 'Files', command: 'old-cmd' }])
     expect(useAcpStore.getState().mcpProbeStatus.fs).toBe('connected')
     expect(useAcpStore.getState().mcpTools.fs).toEqual([{ name: 'read_file' }])
+  })
+
+  it.each([
+    [
+      'sign-in',
+      (id: string) => useAcpStore.getState().connectMcpOAuth('p1', id),
+      AUTH_REQUIRED,
+      CONNECTED
+    ],
+    [
+      'sign-out',
+      (id: string) => useAcpStore.getState().disconnectMcpOAuth('p1', id),
+      CONNECTED,
+      AUTH_REQUIRED
+    ]
+  ])('shows the post-%s status when an earlier probe was still in flight', async (_, oauthAction, staleResult, freshResult) => {
+    vi.spyOn(acpApi, 'startMcpOAuth').mockResolvedValue(undefined)
+    vi.spyOn(acpApi, 'disconnectMcpOAuth').mockResolvedValue(undefined)
+    useAcpStore.setState({ mcpServers: [OAUTH_SERVER] })
+    const staleProbe = deferred<ProbeResult>()
+    vi.mocked(invoke).mockReturnValueOnce(staleProbe.promise).mockResolvedValueOnce(freshResult)
+
+    const inFlight = useAcpStore.getState().probeMcpServer('gh')
+    await oauthAction('gh')
+    staleProbe.resolve(staleResult)
+    await inFlight
+    await vi.waitFor(() => expect(useAcpStore.getState().mcpProbing.gh).toBe(false))
+
+    expect(useAcpStore.getState().mcpProbeStatus.gh).toBe(freshResult.status)
+    expect(useAcpStore.getState().mcpTools.gh).toEqual(freshResult.tools)
+    expect(probedConfigs()).toHaveLength(2)
+  })
+
+  it('does not carry a queued re-probe over to a server re-added after deletion', async () => {
+    vi.spyOn(acpApi, 'startMcpOAuth').mockResolvedValue(undefined)
+    useAcpStore.setState({ mcpServers: [OAUTH_SERVER] })
+    const staleProbe = deferred<ProbeResult>()
+    vi.mocked(invoke).mockReturnValueOnce(staleProbe.promise).mockResolvedValue(CONNECTED)
+
+    const inFlight = useAcpStore.getState().probeMcpServer('gh')
+    await useAcpStore.getState().connectMcpOAuth('p1', 'gh')
+    await useAcpStore.getState().deleteMcpServer('gh')
+    staleProbe.resolve(AUTH_REQUIRED)
+    await inFlight
+    await useAcpStore.getState().saveMcpServer(OAUTH_SERVER)
+    await useAcpStore.getState().loadMcpTools('gh')
+    await vi.waitFor(() => expect(useAcpStore.getState().mcpProbing.gh).toBe(false))
+
+    expect(probedConfigs()).toHaveLength(2)
+    expect(useAcpStore.getState().mcpProbeStatus.gh).toBe('connected')
   })
 })
