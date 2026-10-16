@@ -699,14 +699,6 @@ export interface AcpState {
    */
   applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
   openHistorySession: (id: string, options?: OpenHistoryOptions) => Promise<void>
-  /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
-   * `openHistorySessionInner`'s transcript-install + resume but skips
-   * `ensureLiveAgent` (no cold-spawn): the caller passes the authoritative
-   * live `agentId` still owned by the Rust `AcpManager` across a webview/
-   * phone reload. The backend `gate_resume_session` enforces the capability
-   * (reused, not duplicated); a rejection rejects here so the hook can record
-   * `acp-resume-skipped` and leave the transcript read-only. */
-  resumeLiveSession: (id: string, agentId: AgentId, cwd: string) => Promise<void>
   /** R4: force-flush a non-debounced snapshot of every live session's cached
    * payload on refresh unload so the durable copy is at worst one turn behind
    * (never truncated by a live-window trim). Reuses `persistSession`'s guards
