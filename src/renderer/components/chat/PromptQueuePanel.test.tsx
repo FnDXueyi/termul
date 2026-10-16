@@ -67,6 +67,13 @@ describe('PromptQueuePanel', () => {
       )
     })
 
+    it('keeps the forced-colors focus outline inside the header so the composer cannot cover it', () => {
+      renderPanel({ defaultOpen: false })
+      expect(screen.getByRole('button', { name: '2 Queued' })).toHaveClass(
+        'forced-colors:focus-visible:-outline-offset-2'
+      )
+    })
+
     it('starts collapsed with defaultOpen={false}', () => {
       renderPanel({ defaultOpen: false })
       expect(screen.getByRole('button', { name: '2 Queued' })).toHaveAttribute(
