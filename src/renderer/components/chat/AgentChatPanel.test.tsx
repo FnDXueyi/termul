@@ -607,11 +607,13 @@ describe('AgentChatPanel restored-tab rehydration', () => {
     })
   })
 
-  it('shows a reconnecting banner while a closed session is being reopened', () => {
+  it('announces a resuming banner while a closed session is being reopened', () => {
     seedLiveSession('s1')
     openingRef.current = { s1: true }
     render(<AgentChatPanel sessionId="s1" isVisible />)
-    expect(screen.getByText('Resuming chat…')).toBeInTheDocument()
+    const banner = screen.getByRole('status')
+    expect(banner).toHaveTextContent('Resuming chat…')
+    expect(banner).toHaveAttribute('aria-live', 'polite')
   })
 
   it('keeps the failed discovered restore banner hidden while reopen is pending', () => {
