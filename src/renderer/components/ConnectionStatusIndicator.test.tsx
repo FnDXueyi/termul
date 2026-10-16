@@ -32,10 +32,9 @@ function renderIndicator(): ReturnType<typeof render> {
   )
 }
 
-/** Write channel states and let any reconnect grace run out. */
-function setChannels(
-  patch: Partial<Record<'controlChannel' | 'terminalChannel', ConnectionChannelState>>
-): void {
+type ChannelPatch = Partial<Record<'controlChannel' | 'terminalChannel', ConnectionChannelState>>
+
+function setChannels(patch: ChannelPatch): void {
   act(() => {
     useConnectionStatusStore.setState(patch)
   })
@@ -160,7 +159,7 @@ describe('ConnectionStatusIndicator', () => {
 })
 
 describe('ConnectionStatusIndicator reconnect grace', () => {
-  function setChannel(patch: { controlChannel?: 'connected' | 'reconnecting' }): void {
+  function setChannel(patch: ChannelPatch): void {
     act(() => {
       useConnectionStatusStore.setState(patch)
     })

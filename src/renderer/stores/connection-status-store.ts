@@ -7,11 +7,6 @@
  * - `terminalChannel`: the `/terminal/ws` channel (fed by
  *   `WebTerminalClient.setConnectionStateListener`).
  *
- * Consumers: `ConnectedTerminal` (per-terminal reconnect overlay) and
- * `FileExplorer` (root-load retry on control-channel recovery). The
- * `ConnectionStatusIndicator` lamp and the shell announcer read the graced
- * view, {@link useShownConnectionStore}.
- *
  * Web-only: `wireConnectionStatusTracking()` is a no-op on Tauri desktop
  * (both transports there are direct IPC), so the channels stay at their
  * initial values and every consumer renders its healthy/no-op state.
@@ -58,14 +53,6 @@ export const useConnectionStatusStore = create<ConnectionStatusState>((set) => (
 
 type ShownChannels = Pick<ConnectionStatusState, 'controlChannel' | 'terminalChannel'>
 
-/**
- * The channel states the user is shown: the lamp, its label and the
- * screen-reader announcer read this, never the raw store. A `reconnecting`
- * keeps the previous shown state for {@link RECONNECT_GRACE_MS}, so a
- * reconnect on returning to the tab (usually about 300 ms) changes nothing and
- * announces nothing, the same grace `AgentChatPanel` gives its overlay. Every
- * other state shows at once.
- */
 export const useShownConnectionStore = create<ShownChannels>(() => ({
   controlChannel: useConnectionStatusStore.getState().controlChannel,
   terminalChannel: useConnectionStatusStore.getState().terminalChannel
@@ -90,8 +77,6 @@ function showChannel(channel: keyof ShownChannels, next: ConnectionChannelState)
   }, RECONNECT_GRACE_MS)
 }
 
-// A subscription, not the setters, so every write to the raw store (including
-// the test-only `setState`) reaches the shown state.
 useConnectionStatusStore.subscribe((state, prev) => {
   if (state.controlChannel !== prev.controlChannel) {
     showChannel('controlChannel', state.controlChannel)

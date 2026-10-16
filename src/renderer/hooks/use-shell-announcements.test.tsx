@@ -74,7 +74,6 @@ function permission(requestId: string, sessionId: string): Record<string, unknow
   }
 }
 
-/** Record every announcement while still delivering it to the region. */
 function spyAnnounce(): ReturnType<typeof vi.fn<(text: string) => void>> {
   const announce = vi.fn<(text: string) => void>(realAnnounce)
   useShellAnnouncerStore.setState({ announce })

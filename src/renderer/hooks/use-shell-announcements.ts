@@ -86,12 +86,6 @@ function acpSlicesUnchanged(next: AcpState, prev: AcpState): boolean {
 /**
  * Feed the mobile shell live region.
  *
- * Registers the region with the announcer store, then diffs consecutive
- * `useAcpStore` and `useShownConnectionStore` states in zustand `subscribe`
- * listeners (not React renders, so it costs nothing per streamed chunk and
- * sees values that are set and cleared within one tick). Both stores are
- * read once on mount as a silent baseline.
- *
  * Renderer-only and derived entirely from stores, so desktop shared-live
  * remote clients and standalone `termul-server` web clients behave the same.
  * Mount it once, from `MobileChatShell` only.
