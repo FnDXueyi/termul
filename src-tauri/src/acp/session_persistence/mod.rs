@@ -1445,7 +1445,13 @@ impl SessionPersistence {
                 }
                 _ => false,
             };
-            let messages_on_disk_up_to_limit = metadata.message_count.min(limit as u64);
+            // `recover()` leaves counts stale after a crash until the writer
+            // recounts, so an uncounted session deepens to the full limit.
+            let messages_on_disk_up_to_limit = if metadata.fold_counted {
+                metadata.message_count.min(limit as u64)
+            } else {
+                limit as u64
+            };
             let short = !tail.reached_head
                 && fold_counts(&mut records).message_count < messages_on_disk_up_to_limit;
             if !crosses_edge && (!short || max_lines >= TAIL_DEEPEN_MAX_LINES) {

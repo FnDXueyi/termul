@@ -276,6 +276,40 @@ async fn recover_recounts_counts_that_lag_the_log_after_a_crash() {
 }
 
 #[tokio::test]
+async fn payload_tail_ignores_a_stale_count_before_resume() {
+    let root = temp_dir("tail-stale-count");
+    let persistence = registered(&root).await;
+    let mut records = vec![prompt(1, "turn-1"), agent_chunk(2), complete(3, "turn-1")];
+    records.extend((4..=103).map(commands_update));
+    records.extend([
+        prompt(104, "turn-2"),
+        agent_chunk(105),
+        complete(106, "turn-2"),
+    ]);
+    enqueue(&persistence, records);
+    persistence.flush_session("session-1").await.unwrap();
+    let metadata_path = session_file(&persistence, METADATA_FILE);
+    let flushed_after_two_turns = fs::read(&metadata_path).unwrap();
+    let mut crashed_turn: Vec<_> = (107..=156).map(commands_update).collect();
+    crashed_turn.push(prompt(157, "turn-3"));
+    crashed_turn.extend((158..=217).map(agent_chunk));
+    enqueue(&persistence, crashed_turn);
+    persistence.shutdown().await.unwrap();
+    drop(persistence);
+    fs::write(&metadata_path, flushed_after_two_turns).unwrap();
+
+    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    let tail = reopened
+        .session_payload_tail_async("session-1", 5)
+        .await
+        .unwrap();
+    let seqs: Vec<u64> = tail.messages.iter().map(|message| message.seq).collect();
+    assert_eq!(seqs, vec![2, 104, 105, 157, 158]);
+    reopened.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn shutdown_marker_reads_only_back_to_the_open_turn() {
     let root = temp_dir("marker-tail");
     let persistence = registered(&root).await;
