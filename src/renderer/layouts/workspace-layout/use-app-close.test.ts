@@ -4,32 +4,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useWindowState, WINDOW_STATE_CLOSE_TIMEOUT_MS } from '@/hooks/use-window-state'
 import { useAppClose } from './use-app-close'
 
-const { windowMock, persistenceMock, windowApiMock, runtimeMock, logMock } = vi.hoisted(() => ({
-  windowMock: {
-    isMaximized: vi.fn(async () => false),
-    scaleFactor: vi.fn(async () => 1),
-    outerPosition: vi.fn(async () => ({ x: 40, y: 30 })),
-    outerSize: vi.fn(async () => ({ width: 1100, height: 700 })),
-    setPosition: vi.fn(async (_position: unknown) => {}),
-    setSize: vi.fn(async (_size: unknown) => {}),
-    maximize: vi.fn(async () => {}),
-    onMoved: vi.fn(async () => vi.fn()),
-    onResized: vi.fn(async () => vi.fn()),
-    onCloseRequested: vi.fn(async (_handler: unknown) => vi.fn())
-  },
-  persistenceMock: {
-    read: vi.fn(async () => ({ success: false, data: null })),
-    write: vi.fn(async (_key: string, _value: unknown) => ({ success: true })),
-    writeDebounced: vi.fn(async (_key: string, _value: unknown) => ({ success: true })),
-    flushPendingWrites: vi.fn(async () => ({ success: true }))
-  },
-  windowApiMock: {
-    onCloseRequested: vi.fn((_callback: () => Promise<boolean>) => () => {}),
-    respondToClose: vi.fn((_response: 'close' | 'cancel') => {})
-  },
-  runtimeMock: { isTauri: true },
-  logMock: vi.fn(async (_payload: unknown) => {})
-}))
+const { windowMock, persistenceMock, windowApiMock, runtimeMock, logMock, tauriEventHandlers } =
+  vi.hoisted(() => ({
+    windowMock: {
+      isMaximized: vi.fn(async () => false),
+      scaleFactor: vi.fn(async () => 1),
+      outerPosition: vi.fn(async () => ({ x: 40, y: 30 })),
+      outerSize: vi.fn(async () => ({ width: 1100, height: 700 })),
+      setPosition: vi.fn(async (_position: unknown) => {}),
+      setSize: vi.fn(async (_size: unknown) => {}),
+      maximize: vi.fn(async () => {}),
+      onMoved: vi.fn(async () => vi.fn()),
+      onResized: vi.fn(async () => vi.fn()),
+      onCloseRequested: vi.fn(async (_handler: unknown) => vi.fn())
+    },
+    persistenceMock: {
+      read: vi.fn(async () => ({ success: false, data: null })),
+      write: vi.fn(async (_key: string, _value: unknown) => ({ success: true })),
+      writeDebounced: vi.fn(async (_key: string, _value: unknown) => ({ success: true })),
+      flushPendingWrites: vi.fn(async () => ({ success: true }))
+    },
+    windowApiMock: {
+      onCloseRequested: vi.fn((_callback: () => Promise<boolean>) => () => {}),
+      respondToClose: vi.fn((_response: 'close' | 'cancel') => {})
+    },
+    runtimeMock: { isTauri: true },
+    logMock: vi.fn(async (_payload: unknown) => {}),
+    tauriEventHandlers: new Map<string, () => void>()
+  }))
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => windowMock,
@@ -48,7 +50,12 @@ vi.mock('@/lib/tauri-runtime', () => ({
     if (typeof fn === 'function') fn()
   }
 }))
-vi.mock('@/lib/tauri-event', () => ({ listen: async () => () => {} }))
+vi.mock('@/lib/tauri-event', () => ({
+  listen: async (event: string, handler: () => void) => {
+    tauriEventHandlers.set(event, handler)
+    return () => tauriEventHandlers.delete(event)
+  }
+}))
 vi.mock('@/lib/acp-history-persistence', () => ({
   flushSessionHistory: async () => {},
   waitForPendingSessionIndexWrite: async () => {}
@@ -93,6 +100,7 @@ function deferWindowStateWrite(): () => void {
 describe('useAppClose window geometry flush', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    tauriEventHandlers.clear()
     runtimeMock.isTauri = true
   })
 
@@ -107,6 +115,26 @@ describe('useAppClose window geometry flush', () => {
     await act(async () => {
       requestAppClose()
       fireWindowStateCloseListener()
+    })
+    await waitFor(() =>
+      expect(persistenceMock.write).toHaveBeenCalledWith(PersistenceKeys.windowState, geometry)
+    )
+    expect(windowApiMock.respondToClose).not.toHaveBeenCalled()
+
+    await act(async () => {
+      landWrite()
+    })
+    await waitFor(() => expect(windowApiMock.respondToClose).toHaveBeenCalledWith('close'))
+    expect(persistenceMock.write).toHaveBeenCalledOnce()
+  })
+
+  it('tray Quit destroys the window only after the geometry write lands', async () => {
+    await mountApp()
+    await waitFor(() => expect(tauriEventHandlers.has('tray:quit-requested')).toBe(true))
+    const landWrite = deferWindowStateWrite()
+
+    await act(async () => {
+      tauriEventHandlers.get('tray:quit-requested')?.()
     })
     await waitFor(() =>
       expect(persistenceMock.write).toHaveBeenCalledWith(PersistenceKeys.windowState, geometry)

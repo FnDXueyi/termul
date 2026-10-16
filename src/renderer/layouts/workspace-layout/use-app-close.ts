@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { persistWindowStateBeforeClose } from '@/hooks/use-window-state'
 import { flushSessionHistory, waitForPendingSessionIndexWrite } from '@/lib/acp-history-persistence'
 import { persistenceApi, windowApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
 import { listen, type UnlistenFn } from '@/lib/tauri-event'
+import { persistWindowStateBeforeClose } from '@/lib/window-state-close-flush'
 import { useEditorStore } from '@/stores/editor-store'
 
 /** App-close interception: unsaved-files dialog state, persistence flush, tray quit. */

@@ -13,6 +13,7 @@ import {
   primaryMonitor
 } from '@/lib/tauri-window'
 import { hasAppCloseOwner } from '@/lib/tauri-window-api'
+import { registerWindowStateCloseWriter } from '@/lib/window-state-close-flush'
 
 const DEFAULT_WIDTH = 1200
 const DEFAULT_HEIGHT = 800
@@ -27,18 +28,14 @@ export const WINDOW_RESTORE_TIMEOUT_MS = 1500
 
 export const WINDOW_STATE_CLOSE_TIMEOUT_MS = 1000
 
-let writerAfterRestore: (() => Promise<void>) | null = null
-
-export async function persistWindowStateBeforeClose(): Promise<void> {
-  if (!writerAfterRestore) return
+async function persistWithinCloseTimeout(write: () => Promise<void>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<'timeout'>((resolve) => {
     timer = setTimeout(() => resolve('timeout'), WINDOW_STATE_CLOSE_TIMEOUT_MS)
   })
-  const outcome = await Promise.race([
-    writerAfterRestore().then(() => 'done' as const),
-    timeout
-  ]).finally(() => clearTimeout(timer))
+  const outcome = await Promise.race([write().then(() => 'done' as const), timeout]).finally(() =>
+    clearTimeout(timer)
+  )
   if (outcome === 'timeout') {
     console.warn(`Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms`)
     void logFrontendError({
@@ -297,6 +294,7 @@ export function useWindowState(): boolean {
     }
 
     let cleanups: Array<() => void> = []
+    let unregisterCloseWriter = (): void => {}
     let restoreTimer: ReturnType<typeof setTimeout> | undefined
 
     const initialize = async (): Promise<void> => {
@@ -332,7 +330,9 @@ export function useWindowState(): boolean {
 
       if (disposed) return
       cleanups = registerListeners()
-      writerAfterRestore = persistImmediateShared
+      unregisterCloseWriter = registerWindowStateCloseWriter(() =>
+        persistWithinCloseTimeout(persistImmediateShared)
+      )
     }
 
     void initialize()
@@ -348,7 +348,7 @@ export function useWindowState(): boolean {
     return () => {
       disposed = true
       clearTimeout(restoreTimer)
-      if (writerAfterRestore === persistImmediateShared) writerAfterRestore = null
+      unregisterCloseWriter()
       void persistWindowState(true)
       cleanups.forEach((cleanup) => {
         cleanup()
