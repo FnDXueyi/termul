@@ -887,6 +887,47 @@ describe('acp-store', () => {
     expect(session.lastErrorData).toEqual({ reason: 'login' })
   })
 
+  it('gh-821: a stop-reason note drops the code and data of the error it replaces', async () => {
+    seedSession('s1', 'agent-1', true)
+    useAcpStore.getState()._onAgentError({
+      agentId: 'agent-1',
+      message: 'Internal error',
+      code: -32603,
+      data: { reason: 'login' }
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      stopReason: 'refusal'
+    })
+    await flushTurnEnd()
+    const session = useAcpStore.getState().sessions['s1']
+    expect(session.lastError).toBe('The agent refused to continue.')
+    expect(session.lastErrorCode).toBeNull()
+    expect(session.lastErrorData).toBeUndefined()
+  })
+
+  it("gh-821: a failed-turn terminator keeps the code and data of the turn's agent error", async () => {
+    seedSession('s1', 'agent-1', true)
+    useAcpStore.getState()._onAgentError({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      message: 'Internal error',
+      code: -32603,
+      data: { reason: 'login' }
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      stopReason: 'error'
+    })
+    await flushTurnEnd()
+    const session = useAcpStore.getState().sessions['s1']
+    expect(session.lastError).toBe('Internal error')
+    expect(session.lastErrorCode).toBe(-32603)
+    expect(session.lastErrorData).toEqual({ reason: 'login' })
+  })
+
   it('a stop-reason reply resolves the command only: the turn ends from the durable prompt_complete', async () => {
     seedSession('s1', 'agent-1', false)
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValue('end_turn')
