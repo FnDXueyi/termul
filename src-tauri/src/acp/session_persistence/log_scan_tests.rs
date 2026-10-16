@@ -212,6 +212,70 @@ async fn replay_tail_deepens_past_a_run_of_meta_records() {
 }
 
 #[tokio::test]
+async fn replay_tail_stops_once_a_short_session_is_whole() {
+    let root = temp_dir("tail-short-session");
+    let persistence = registered(&root).await;
+    let mut records: Vec<_> = (1..=300).map(commands_update).collect();
+    records.extend([
+        prompt(301, "turn-1"),
+        agent_chunk(302),
+        complete(303, "turn-1"),
+    ]);
+    enqueue(&persistence, records);
+    persistence.flush_session("session-1").await.unwrap();
+
+    let tail = persistence.replay_tail("session-1", 5).unwrap();
+    assert_eq!(
+        (tail.len(), tail.first().map(|record| record.seq)),
+        (19, Some(285)),
+        "both messages are in the first window; nothing older is read"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn recover_recounts_counts_that_lag_the_log_after_a_crash() {
+    let root = temp_dir("recount-crash-lag");
+    let persistence = registered(&root).await;
+    let turn = |first: u64| {
+        let turn_id = format!("turn-{first}");
+        vec![
+            prompt(first, &turn_id),
+            commands_update(first + 1),
+            agent_chunk(first + 2),
+            agent_chunk(first + 3),
+            complete(first + 4, &turn_id),
+        ]
+    };
+    let mut second_turn = turn(6);
+    let second_turn_end = second_turn.pop().unwrap();
+    enqueue(&persistence, [turn(1), second_turn].concat());
+    persistence.flush_session("session-1").await.unwrap();
+    let metadata_path = session_file(&persistence, METADATA_FILE);
+    let flushed_mid_turn = fs::read(&metadata_path).unwrap();
+    enqueue(&persistence, vec![second_turn_end]);
+    enqueue(&persistence, (11..=46).step_by(5).flat_map(turn).collect());
+    persistence.shutdown().await.unwrap();
+    drop(persistence);
+    fs::write(&metadata_path, flushed_mid_turn).unwrap();
+
+    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    reopened.reopen_writer("session-1").await.unwrap();
+    let healed = reopened.metadata("session-1").unwrap();
+    assert_eq!(
+        (
+            healed.last_seq,
+            healed.message_count,
+            healed.fold_open_role,
+            healed.fold_counted
+        ),
+        (50, 20, None, true)
+    );
+    reopened.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn shutdown_marker_reads_only_back_to_the_open_turn() {
     let root = temp_dir("marker-tail");
     let persistence = registered(&root).await;

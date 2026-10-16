@@ -1434,8 +1434,9 @@ impl SessionPersistence {
                 }
                 _ => false,
             };
-            let short =
-                !tail.reached_head && fold_counts(&mut records).message_count < limit as u64;
+            let messages_on_disk_up_to_limit = metadata.message_count.min(limit as u64);
+            let short = !tail.reached_head
+                && fold_counts(&mut records).message_count < messages_on_disk_up_to_limit;
             if !crosses_edge && (!short || max_lines >= TAIL_DEEPEN_MAX_LINES) {
                 log::info!(
                     "[acp-history] replay_tail session_id={} limit={} tail_records={} oldest_seq={}",
@@ -1838,6 +1839,7 @@ impl SessionPersistence {
                         metadata.last_seq
                     );
                     metadata.last_seq = tail_max;
+                    metadata.fold_counted = false;
                     dirty = true;
                 }
                 Some(tail_max) if tail_max < metadata.last_seq => {

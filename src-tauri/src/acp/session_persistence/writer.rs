@@ -136,7 +136,7 @@ fn close_writer(
 /// Issue #842: append `prompt_complete { stopReason: "interrupted" }` when
 /// the last `user_prompt` has no matching completion. The seq comes from the
 /// session's [`SeqAuthority`] when one is installed (the relay is then the sole
-/// allocator), floored at the highest seq actually on disk so it cannot
+/// allocator), floored at the seq of the last line on disk so it cannot
 /// collide with a chunk that was still queued when shutdown began. With no
 /// authority (no relay, hence no second allocator) it is `last_seq + 1`. A
 /// marker failure is logged and skipped.
