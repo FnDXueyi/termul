@@ -11,19 +11,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BrowserConsentRequestEvent } from '@/lib/acp-api'
 import type { WorkspaceTab } from '@/stores/workspace-store'
 
-const { mockRespond, acpState, workspaceState, runtimeState } =
-  vi.hoisted(() => ({
-    mockRespond: vi.fn(),
-    acpState: {
-      pendingBrowserConsents: {} as Record<string, BrowserConsentRequestEvent>,
-      configToLiveAgent: {} as Record<string, string>,
-      agentConfigs: [] as Array<{ id: string; name?: string }>
-    },
-    workspaceState: {
-      activeTab: undefined as WorkspaceTab | undefined
-    },
-    runtimeState: { tauri: true }
-  }))
+const { mockRespond, acpState, workspaceState, runtimeState } = vi.hoisted(() => ({
+  mockRespond: vi.fn(),
+  acpState: {
+    pendingBrowserConsents: {} as Record<string, BrowserConsentRequestEvent>,
+    configToLiveAgent: {} as Record<string, string>,
+    agentConfigs: [] as Array<{ id: string; name?: string }>
+  },
+  workspaceState: {
+    activeTab: undefined as WorkspaceTab | undefined
+  },
+  runtimeState: { tauri: true }
+}))
 
 vi.mock('@/lib/tauri-runtime', () => ({
   isTauriContext: () => runtimeState.tauri
