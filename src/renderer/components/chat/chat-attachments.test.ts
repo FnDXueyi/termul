@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   attachmentAriaLabel,
   attachmentToBlock,
-  basename,
   blockDisplayName,
   blockMimeType,
   blockToAttachmentData,
@@ -31,14 +30,6 @@ describe('fileExtension', () => {
     expect(fileExtension('.gitignore')).toBe('')
     expect(fileExtension('Dockerfile')).toBe('')
     expect(fileExtension('trailing.')).toBe('')
-  })
-})
-
-describe('basename', () => {
-  it('handles both slash styles', () => {
-    expect(basename('D:\\a\\b\\file.ts')).toBe('file.ts')
-    expect(basename('/home/x/file.ts')).toBe('file.ts')
-    expect(basename('plain.txt')).toBe('plain.txt')
   })
 })
 

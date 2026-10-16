@@ -3,9 +3,9 @@ import type { RefObject } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { filesystemApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
+import { basename } from '@/lib/path-basename'
 import { insertFileToken } from '@/lib/skill-tokens'
 import { randomUUID } from '@/lib/uuid'
-import { basename } from './chat-attachments'
 import type { FileMentionMenuHandle } from './FileMentionMenu'
 import {
   activeMentionToken,

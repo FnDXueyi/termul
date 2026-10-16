@@ -13,6 +13,7 @@ import { useShellAnnouncements } from '@/hooks/use-shell-announcements'
 import { closeAgentChat } from '@/lib/agent-chat-close'
 import { returnFocusAfterConfirm } from '@/lib/confirm-focus-return'
 import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
+import { basename } from '@/lib/path-basename'
 import {
   holdSheetReturnTargets,
   recordSheetOpener,
@@ -35,8 +36,6 @@ import { MobileShellDrawer } from './MobileShellDrawer'
 import { MobileShellHeader } from './MobileShellHeader'
 import { MobileTerminalActionsSheet } from './MobileTerminalActionsSheet'
 import { MobileTerminalControls } from './MobileTerminalControls'
-
-const fileBasename = (path: string): string => path.split(/[\\/]/).pop() || path
 
 /** A browser tab's name: its title, else its host, else "Browser" (as `WorkspaceTabBar`). */
 function browserTabLabel(tab: { title: string; url: string } | undefined): string {
@@ -221,19 +220,19 @@ export function MobileChatShell({
       case 'agent-chat':
         return sessionTitle ?? 'Agent Chat'
       case 'editor':
-        return fileBasename(activeTab.filePath)
+        return basename(activeTab.filePath)
       case 'git':
         return 'Git Changes'
       case 'git-history':
         return 'Git History'
       case 'diff':
-        return fileBasename(activeTab.path)
+        return basename(activeTab.path)
       case 'commit-diff':
         return commitDiffTabLabel(activeTab.path, activeTab.commit)
       case 'browser':
         return browserTabLabel(activeBrowserTab)
       case 'canvas':
-        return fileBasename(activeTab.docPath)
+        return basename(activeTab.docPath)
       default:
         reportUnknownTabKind(activeTab, 'MobileChatShell.headerTitle', 'using default title')
         return 'Termul'

@@ -8,10 +8,10 @@ import {
   readClipboardRgbaImage,
   writeBytesToTempFile
 } from '@/lib/composer-attachments-io'
+import { basename } from '@/lib/path-basename'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { randomUUID } from '@/lib/uuid'
 import {
-  basename,
   guessMimeType,
   isImageMime,
   isTextLike,
