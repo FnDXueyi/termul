@@ -249,7 +249,7 @@ impl std::fmt::Display for WorktreeError {
             Self::BranchExists => write!(f, "A branch with that name already exists."),
             Self::InvalidWorktreeName => write!(
                 f,
-                "A worktree name must be a single folder name, without slashes or \"..\"."
+                "A worktree name must be a relative folder path without \".\" or \"..\" parts."
             ),
             Self::IoError(msg) => write!(f, "Filesystem error: {}", msg),
             Self::GitError(msg) => write!(f, "Git error: {}", msg),

@@ -26,8 +26,8 @@ fn repo_with_one_commit() -> tempfile::TempDir {
 }
 
 #[test]
-fn create_rejects_a_name_that_is_not_one_folder() {
-    for name in ["../../escape", "..", ".", "", "nested/name"] {
+fn create_rejects_a_name_that_leaves_the_worktrees_folder() {
+    for name in ["../../escape", "..", ".", "", "feat/../x", "./x", "/abs"] {
         let err =
             WorktreeManager::create("/no/such/project", name, "chat/x", true, None, None, None)
                 .expect_err(name);
@@ -36,7 +36,22 @@ fn create_rejects_a_name_that_is_not_one_folder() {
 }
 
 #[test]
-fn create_treats_a_dash_branch_as_a_ref_not_a_git_option() {
+fn create_nests_a_slashed_name_under_the_worktrees_folder() {
+    if which_git().is_err() {
+        return;
+    }
+    let project = repo_with_one_commit();
+    let p = project.path().to_str().unwrap();
+    WorktreeManager::create(p, "feat/login", "feat/login", true, Some("main"), None, None)
+        .expect("a branch-shaped name creates a nested worktree");
+    assert!(project
+        .path()
+        .join(".termul/worktrees/feat/login/a.txt")
+        .exists());
+}
+
+#[test]
+fn create_rejects_an_existing_branch_that_looks_like_a_git_option() {
     if which_git().is_err() {
         return;
     }
@@ -44,8 +59,26 @@ fn create_treats_a_dash_branch_as_a_ref_not_a_git_option() {
     let p = project.path().to_str().unwrap();
     let err = WorktreeManager::create(p, "detached", "--detach", false, None, None, None)
         .expect_err("`--detach` is not a branch");
-    assert_eq!(err.error_code(), "WORKTREE_CREATE_FAILED");
+    assert_eq!(err.error_code(), "INVALID_BRANCH_NAME");
     assert!(!project.path().join(".termul/worktrees/detached").exists());
+}
+
+#[test]
+fn create_rejects_a_new_branch_that_looks_like_a_git_option() {
+    if which_git().is_err() {
+        return;
+    }
+    let project = repo_with_one_commit();
+    let p = project.path().to_str().unwrap();
+    git_in(project.path(), &["branch", "victim"]);
+    let err = WorktreeManager::create(p, "probe", "-D", true, Some("victim"), None, None)
+        .expect_err("`-D` is not a branch");
+    assert_eq!(err.error_code(), "INVALID_BRANCH_NAME");
+    git_in(
+        project.path(),
+        &["show-ref", "--verify", "--quiet", "refs/heads/victim"],
+    );
+    assert!(!project.path().join(".termul/worktrees/probe").exists());
 }
 
 #[test]

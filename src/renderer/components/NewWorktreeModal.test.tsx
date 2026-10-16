@@ -48,8 +48,7 @@ describe('NewWorktreeModal create failure', () => {
     expect(mocks.log).toHaveBeenCalledWith({
       level: 'warn',
       source: 'newWorktreeModal.worktreeCreate',
-      message:
-        'worktree create failed name=try-hero code=BRANCH_EXISTS branch=try-hero: A branch with that name already exists.'
+      message: 'worktree create failed code=BRANCH_EXISTS'
     })
   })
 })

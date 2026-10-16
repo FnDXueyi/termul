@@ -312,12 +312,10 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
 
         onClose()
       } else {
-        const failCode = result.success ? 'UNKNOWN' : result.code
-        const failError = result.success ? 'no worktree returned' : result.error
         void logFrontendError({
           level: 'warn',
           source: 'newWorktreeModal.worktreeCreate',
-          message: `worktree create failed name=${worktreeName} code=${failCode} branch=${branch}: ${failError}`
+          message: `worktree create failed code=${result.success ? 'UNKNOWN' : result.code}`
         })
         setValidationError(!result.success ? result.error : 'Failed to create worktree')
         toast({
@@ -331,7 +329,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
       void logFrontendError({
         level: 'warn',
         source: 'newWorktreeModal.worktreeCreate',
-        message: `worktree create flow threw name=${worktreeName}: ${msg}`,
+        message: `worktree create flow threw: ${msg}`,
         stack: err instanceof Error ? err.stack : undefined
       })
       setValidationError(msg)

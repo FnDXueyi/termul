@@ -100,7 +100,7 @@ impl WorktreeManager {
     ) -> Result<GitWorktreeEntry, WorktreeError> {
         let target = match target_path {
             Some(p) => Some(p.to_string()),
-            None if is_single_folder_name(name) => Some(format!(
+            None if is_only_plain_folder_names(name) => Some(format!(
                 "{}/.termul/worktrees/{}/",
                 project_path.trim_end_matches('/'),
                 name
@@ -138,6 +138,10 @@ impl WorktreeManager {
             log_failure(&WorktreeError::InvalidWorktreeName);
             return Err(WorktreeError::InvalidWorktreeName);
         };
+        if let Err(error) = ensure_valid_branch_name(branch, project_path) {
+            log_failure(&error);
+            return Err(error);
+        }
 
         // Validate path length (Windows MAX_PATH guard)
         let target_path_obj = Path::new(&target);
@@ -588,10 +592,7 @@ impl WorktreeManager {
     }
 }
 
-fn is_single_folder_name(name: &str) -> bool {
-    let mut components = Path::new(name).components();
-    matches!(
-        (components.next(), components.next()),
-        (Some(Component::Normal(_)), None)
-    )
+fn is_only_plain_folder_names(name: &str) -> bool {
+    let mut components = Path::new(name).components().peekable();
+    components.peek().is_some() && components.all(|c| matches!(c, Component::Normal(_)))
 }
