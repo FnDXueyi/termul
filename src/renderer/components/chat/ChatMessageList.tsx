@@ -385,6 +385,7 @@ export function ChatMessageList({
         <SubagentDetailsDialog
           toolCall={selectedTool}
           parentTurnActive={showRunningIndicator}
+          filePathContext={filePathContext}
           open
           onOpenChange={(open) => {
             if (!open) setSelection(null)

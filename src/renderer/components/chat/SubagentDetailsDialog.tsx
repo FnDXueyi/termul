@@ -7,6 +7,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import type { ContentBlock, ToolCall } from '@/lib/acp-api'
+import type { FilePathResolutionContext } from '@/lib/file-path-links'
 import { AgentProse } from './ChatMessage'
 import { renderContentItem } from './ToolCallCard'
 import {
@@ -25,12 +26,14 @@ export function SubagentDetailsDialog({
   toolCall,
   parentTurnActive = false,
   open,
-  onOpenChange
+  onOpenChange,
+  filePathContext
 }: {
   toolCall: ToolCall
   parentTurnActive?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
+  filePathContext?: FilePathResolutionContext
 }): React.JSX.Element {
   const { primary } = describeToolCall(toolCall)
   const input =
@@ -94,13 +97,19 @@ export function SubagentDetailsDialog({
                           text={block.text ?? ''}
                           streaming={false}
                           reduced={reduced}
+                          filePathContext={filePathContext}
                         />
                       ) : (
                         rendered
                       )
                     })
                   : resultText && (
-                      <AgentProse text={resultText} streaming={false} reduced={reduced} />
+                      <AgentProse
+                        text={resultText}
+                        streaming={false}
+                        reduced={reduced}
+                        filePathContext={filePathContext}
+                      />
                     )}
               </div>
             </section>

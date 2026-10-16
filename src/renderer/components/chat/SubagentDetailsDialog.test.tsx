@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ToolCall } from '@/lib/acp-api'
@@ -11,7 +11,21 @@ import {
 import { readOverlaySentinelDepth, useOverlayStackStore } from '@/stores/overlay-stack-store'
 import { SubagentDetailsDialog } from './SubagentDetailsDialog'
 
+const { readAttachmentBytesMock, isTauriContextMock } = vi.hoisted(() => ({
+  readAttachmentBytesMock: vi.fn(),
+  isTauriContextMock: vi.fn(() => false)
+}))
+
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
+
+vi.mock('@/lib/attachment-api', () => ({
+  readAttachmentBytes: (...args: unknown[]) => readAttachmentBytesMock(...args)
+}))
+
+vi.mock('@/lib/tauri-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/tauri-runtime')>()
+  return { ...actual, isTauriContext: () => isTauriContextMock() }
+})
 
 vi.mock('framer-motion', async () => {
   const actual = await vi.importActual<typeof import('framer-motion')>('framer-motion')
@@ -109,5 +123,63 @@ describe('SubagentDetailsDialog overlay back stack', () => {
       expect(backSpy).not.toHaveBeenCalled()
       expect(goSpy).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('SubagentDetailsDialog agent prose', () => {
+  const subagentReply = 'Edited src/foo.ts as asked.\n\n![chart](out/chart.png)'
+
+  beforeEach(() => {
+    isTauriContextMock.mockReturnValue(true)
+    readAttachmentBytesMock.mockReset()
+    readAttachmentBytesMock.mockResolvedValue(new Uint8Array([65, 66, 67]))
+  })
+
+  afterEach(() => {
+    isTauriContextMock.mockReturnValue(false)
+  })
+
+  function renderResult(toolCall: ToolCall): void {
+    render(
+      <SubagentDetailsDialog
+        toolCall={toolCall}
+        open
+        onOpenChange={() => {}}
+        filePathContext={{ cwd: '/proj', projectRoot: '/proj' }}
+      />
+    )
+  }
+
+  it.each([
+    [
+      'text content blocks',
+      {
+        ...delegatedCall,
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: subagentReply } }]
+      } satisfies ToolCall
+    ],
+    [
+      'raw output',
+      {
+        ...delegatedCall,
+        status: 'completed',
+        rawOutput: { text: subagentReply }
+      } satisfies ToolCall
+    ]
+  ])('links file paths and resolves relative images from %s', async (_label, toolCall) => {
+    renderResult(toolCall)
+
+    const dialog = screen.getByRole('dialog', { name: 'Audit branch code for slop' })
+    const fileButton = within(dialog).getByTestId('termul-file-path')
+    expect(fileButton).toHaveAttribute('data-path', 'src/foo.ts')
+    expect(fileButton).toHaveTextContent('src/foo.ts')
+    await waitFor(() => {
+      expect(within(dialog).getByRole('img', { name: 'chart' })).toHaveAttribute(
+        'src',
+        'data:image/png;base64,QUJD'
+      )
+    })
+    expect(readAttachmentBytesMock).toHaveBeenCalledWith('/proj/out/chart.png')
   })
 })
