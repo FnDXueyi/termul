@@ -143,6 +143,10 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
+  const { commands } = payload
+  if (Array.isArray(commands)) {
+    useAcpStore.setState((s) => ({ commands: { ...s.commands, [sessionId]: commands } }))
+  }
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only
@@ -2298,7 +2302,9 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       let cursor: string | undefined
       // Safety cap: 10 pages max.
       for (let i = 0; i < 10; i++) {
-        const res = await acpApi.listSessions(agentId, cwd || undefined, cursor)
+        const res = await withAuthRetry(get, agentId, 'session/list', 'text', () =>
+          acpApi.listSessions(agentId, cwd || undefined, cursor)
+        )
         if (Array.isArray(res.sessions)) {
           // De-dupe by sessionId across pages (an agent may repeat an entry
           // when paginating) so the sidebar never renders the same chat twice.

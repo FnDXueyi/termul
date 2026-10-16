@@ -201,7 +201,12 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     }
   }
 
-  function seedServerPayload(id: string, messages: TestMessage[], lastSeq: number): void {
+  function seedServerPayload(
+    id: string,
+    messages: TestMessage[],
+    lastSeq: number,
+    commands?: Array<{ name: string; description: string }>
+  ): void {
     setCachedSessionPayload(id, {
       metadata: {
         id,
@@ -215,7 +220,8 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
         lastSeq,
         status: 'closed'
       },
-      messages: messages as never
+      messages: messages as never,
+      ...(commands ? { commands } : {})
     })
   }
 
@@ -233,6 +239,46 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
       dispose: vi.fn()
     } as unknown as AcpTransport)
   }
+
+  it('restores the slash commands a reopened payload carries', async () => {
+    seedServerPayload('s-cmds', [msg('turn:t1', 'user', 'hi', 3)], 3, [
+      { name: 'review', description: 'Review the diff' }
+    ])
+    seedServerTransport()
+
+    await useAcpStore.getState().openHistorySession('s-cmds')
+
+    expect(useAcpStore.getState().commands['s-cmds']).toEqual([
+      { name: 'review', description: 'Review the diff' }
+    ])
+  })
+
+  it('restores the newest slash commands from a recovery snapshot', async () => {
+    seedSession('s-rec-cmds', 'agent-1', false)
+    await _installTransportRecoveryForTesting({
+      sessionId: 's-rec-cmds',
+      watermark: 4,
+      events: [
+        {
+          sid: 's-rec-cmds',
+          seq: 1,
+          type: 'commands_update',
+          payload: { availableCommands: [{ name: 'init', description: 'Init' }] }
+        },
+        { sid: 's-rec-cmds', seq: 2, type: 'user_prompt', payload: { turnId: 't', content: [] } },
+        {
+          sid: 's-rec-cmds',
+          seq: 3,
+          type: 'commands_update',
+          payload: { availableCommands: [{ name: 'review', description: 'Review' }] }
+        }
+      ]
+    } as never)
+
+    expect(useAcpStore.getState().commands['s-rec-cmds']).toEqual([
+      { name: 'review', description: 'Review' }
+    ])
+  })
 
   it('renders the leading agent greeting and hides the empty synthetic turn', async () => {
     // Leading agent text is a real session update. An empty user bubble and

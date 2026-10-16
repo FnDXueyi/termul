@@ -266,6 +266,7 @@ async function installTransportRecovery(
   // records — installed alongside the bubbles so reconnect recovery preserves
   // cards instead of blanking the session's tool-call list.
   const recoveredToolCalls: ToolCall[] = []
+  let recoveredCommands: CommandsUpdateEvent['availableCommands'] | null = null
   let openRole: 'agent' | 'thought' | 'user' | null = null
   for (const event of recovery.events) {
     const payload = event.payload as Record<string, unknown>
@@ -389,6 +390,9 @@ async function installTransportRecovery(
     } else if (event.type === 'prompt_complete') {
       // Split boundary: the following chunk run opens a fresh bubble.
       openRole = null
+    } else if (event.type === 'commands_update') {
+      const { availableCommands } = payload as Partial<CommandsUpdateEvent>
+      if (Array.isArray(availableCommands)) recoveredCommands = availableCommands
     }
   }
   // Single wire→display pass over the folded user bubbles (chip rendering on
@@ -438,6 +442,9 @@ async function installTransportRecovery(
             ])
           }
         : current.toolCalls,
+      commands: recoveredCommands
+        ? { ...current.commands, [recovery.sessionId]: recoveredCommands }
+        : current.commands,
       degradedRecoverySessions: dropRecordKey(current.degradedRecoverySessions, recovery.sessionId),
       sessions: session
         ? {
