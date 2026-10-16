@@ -360,7 +360,9 @@ describe('ChatChangedFilesPanel', () => {
     expect(screen.getByText('1')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /expand/i }))
     // The row's aria-label carries the canonical resolved path.
-    expect(await screen.findByRole('button', { name: '/work/src/foo.ts' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: '/work/src/foo.ts, Modified' })
+    ).toBeInTheDocument()
   })
 
   it('skips a whitespace-only tool-call path', () => {
@@ -378,7 +380,7 @@ describe('ChatChangedFilesPanel', () => {
   it('shows the absolute directory subtitle for a file outside cwd', async () => {
     renderPanel([makeToolCall({ toolCallId: 'e1', path: '/etc/hosts' })])
     fireEvent.click(screen.getByRole('button', { name: /expand/i }))
-    const row = await screen.findByRole('button', { name: '/etc/hosts' })
+    const row = await screen.findByRole('button', { name: '/etc/hosts, Modified' })
     expect(row).toHaveAttribute('title', '/etc/hosts')
     expect(screen.getByText('hosts')).toBeInTheDocument()
     const dir = screen.getByText('/etc')
@@ -482,9 +484,9 @@ describe('ChatChangedFilesPanel change kind', () => {
       makeToolCall({ toolCallId: 'm1', kind: 'move', path: 'src/moved.ts', content: [] })
     ])
     expandPanel()
-    const edited = await screen.findByRole('button', { name: '/work/src/edited.ts' })
+    const edited = await screen.findByRole('button', { name: '/work/src/edited.ts, Modified' })
     const deleted = screen.getByRole('group', { name: 'Deleted: /work/src/gone.ts' })
-    const moved = screen.getByRole('button', { name: '/work/src/moved.ts' })
+    const moved = screen.getByRole('button', { name: '/work/src/moved.ts, Renamed' })
 
     const letter = (row: HTMLElement, name: string) => within(row).getByRole('img', { name })
     expect(letter(edited, 'Modified').textContent).toBe('M')
@@ -521,7 +523,7 @@ describe('ChatChangedFilesPanel change kind', () => {
     expandPanel()
     const row = await screen.findByRole('group', { name: 'Deleted: /work/src/a.ts' })
     expect(within(row).getByText('+1')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '/work/src/a.ts' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /a\.ts/ })).not.toBeInTheDocument()
   })
 
   it('opens a file that was deleted and then recreated, marked modified', async () => {
@@ -530,10 +532,52 @@ describe('ChatChangedFilesPanel change kind', () => {
       makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/a.ts' })
     ])
     expandPanel()
-    const row = await screen.findByRole('button', { name: '/work/src/a.ts' })
+    const row = await screen.findByRole('button', { name: '/work/src/a.ts, Modified' })
     expect(within(row).getByRole('img', { name: 'Modified' }).textContent).toBe('M')
     fireEvent.click(row)
     await waitFor(() => expect(openFileRef.current).toHaveBeenCalledWith('/work/src/a.ts'))
+  })
+
+  it.each([
+    ['failed', 'failed'],
+    ['pending approval', 'pending'],
+    ['in progress', 'in_progress']
+  ])('keeps a file openable when its only delete call is %s', async (_label, status) => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/kept.ts', content: [], status })
+    ])
+    expandPanel()
+    const row = await screen.findByRole('button', { name: '/work/src/kept.ts' })
+    expect(within(row).queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: /kept\.ts/ })).not.toBeInTheDocument()
+    fireEvent.click(row)
+    await waitFor(() => expect(openFileRef.current).toHaveBeenCalledWith('/work/src/kept.ts'))
+  })
+
+  it.each([
+    ['failed', 'failed'],
+    ['pending approval', 'pending']
+  ])('keeps an edited file modified and openable after a %s delete', async (_label, status) => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/kept.ts' }),
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/kept.ts', content: [], status })
+    ])
+    expandPanel()
+    const row = await screen.findByRole('button', { name: '/work/src/kept.ts, Modified' })
+    expect(within(row).getByRole('img', { name: 'Modified' }).textContent).toBe('M')
+    fireEvent.click(row)
+    await waitFor(() => expect(openFileRef.current).toHaveBeenCalledWith('/work/src/kept.ts'))
+  })
+
+  it('ignores a failed edit when picking the kind after a delete', async () => {
+    renderPanel([
+      makeToolCall({ toolCallId: 'd1', kind: 'delete', path: 'src/gone.ts', content: [] }),
+      makeToolCall({ toolCallId: 'e1', kind: 'edit', path: 'src/gone.ts', status: 'failed' })
+    ])
+    expandPanel()
+    expect(
+      await screen.findByRole('group', { name: 'Deleted: /work/src/gone.ts' })
+    ).toBeInTheDocument()
   })
 
   it('opens the path a move call resolves', async () => {
@@ -547,7 +591,7 @@ describe('ChatChangedFilesPanel change kind', () => {
       })
     ])
     expandPanel()
-    fireEvent.click(await screen.findByRole('button', { name: '/work/src/moved.ts' }))
+    fireEvent.click(await screen.findByRole('button', { name: '/work/src/moved.ts, Renamed' }))
     await waitFor(() => {
       expect(openFileRef.current).toHaveBeenCalledWith('/work/src/moved.ts')
       expect(addEditorTabRef.current).toHaveBeenCalledWith('/work/src/moved.ts')
