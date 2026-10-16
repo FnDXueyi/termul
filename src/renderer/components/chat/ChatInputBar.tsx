@@ -391,9 +391,8 @@ export function ChatInputBar({
         )
       } else if (hasCommand) {
         // Command pill present (no skills, files, or attachments): the wire
-        // carries the `/<name> ` prefix; the display keeps the raw token text
-        // so the timeline renders the command chip. Wire stays byte-identical
-        // to the pre-token plain-text path (`wireTrimmed`).
+        // keeps `/<name>` where the user typed it. The display keeps the raw
+        // token in that same place so the timeline renders the command chip.
         onSendBlocks(
           wireTrimmed ? [{ type: 'text', text: wireTrimmed }] : [],
           displayTrimmed ? [{ type: 'text', text: displayTrimmed }] : []

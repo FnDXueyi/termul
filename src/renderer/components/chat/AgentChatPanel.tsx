@@ -20,10 +20,9 @@ import type { AgentSwitchRecord } from '@/lib/acp-history-persistence'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { logFrontendError } from '@/lib/log-api'
 import {
-  extractCommandNames,
   extractSkillNames,
-  replaceFileTokensInline,
-  stripAllCommandTokens
+  replaceCommandTokensInline,
+  replaceFileTokensInline
 } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { getProjectRootPath } from '@/lib/worktree-context'
@@ -566,14 +565,11 @@ export function AgentChatPanel({
     // The display (token) blocks are passed through unchanged so the timeline
     // keeps rendering inline chips. If a skill name no longer resolves to a
     // path (e.g. the skill was uninstalled), surface a clear error and abort.
-    // Mirrors `buildPromptParts` exactly: strip the command tokens before the
-    // skill/file framer, then prefix `/<name> ` back so a retried command turn
-    // stays byte-identical to a fresh send (no sentinel leaks to the agent).
+    // Mirrors `buildPromptParts`: command tokens become `/<name>` where the
+    // user typed them. They are not moved to the front of the prompt.
     const tokenText = lastUserText
-    const commandNames = extractCommandNames(tokenText)
-    const commandName = commandNames[0] ?? null
-    const valueDecommanded = commandNames.length > 0 ? stripAllCommandTokens(tokenText) : tokenText
-    const skillNames = extractSkillNames(valueDecommanded)
+    const valueWithCommandText = replaceCommandTokensInline(tokenText)
+    const skillNames = extractSkillNames(tokenText)
     const skills = skillNames.map((name) => ({
       name,
       path: availableSkills.find((s) => s.name === name)?.path ?? ''
@@ -585,10 +581,10 @@ export function AgentChatPanel({
     }
     // File tokens → `(display)` before the skill framer (buildPromptParts'
     // `valueDefiled`) so file-mention sentinels never leak to the wire either.
-    const valueDefiled = replaceFileTokensInline(valueDecommanded)
+    const valueDefiled = replaceFileTokensInline(valueWithCommandText)
     const wireText =
       skills.length > 0 ? buildPromptWithLoadedSkills(skills, valueDefiled) : valueDefiled
-    const wireWithCommand = commandName ? `/${commandName} ${wireText}` : wireText
+    const wireWithCommand = wireText
     // Build wire blocks: replace the text payload with the re-framed wire text,
     // preserving non-text (image/resource) blocks from the original message.
     const wireBlocks: ContentBlock[] = []
