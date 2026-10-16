@@ -320,8 +320,7 @@ export function NewWorktreeModal({ isOpen, onClose, projectId }: NewWorktreeModa
       void logFrontendError({
         level: 'warn',
         source: 'newWorktreeModal.worktreeCreate',
-        message: `worktree create flow threw: ${msg}`,
-        stack: err instanceof Error ? err.stack : undefined
+        message: 'worktree create threw code=UNKNOWN'
       })
       setValidationError(msg)
       toast.error('Error creating worktree', {

@@ -51,4 +51,21 @@ describe('NewWorktreeModal create failure', () => {
       message: 'worktree create failed code=BRANCH_EXISTS'
     })
   })
+
+  it('logs a thrown create as code=UNKNOWN only and still shows the error', async () => {
+    mocks.create.mockRejectedValue(new Error('secret detail /home/me/repo'))
+    render(<NewWorktreeModal isOpen onClose={vi.fn()} projectId="p1" />)
+    fireEvent.change(screen.getByPlaceholderText('e.g. try-new-hero'), {
+      target: { value: 'try-hero' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create & open' }))
+
+    expect(await screen.findByText('Error: secret detail /home/me/repo')).toBeTruthy()
+    expect(mocks.log).toHaveBeenCalledTimes(1)
+    expect(mocks.log).toHaveBeenCalledWith({
+      level: 'warn',
+      source: 'newWorktreeModal.worktreeCreate',
+      message: 'worktree create threw code=UNKNOWN'
+    })
+  })
 })
