@@ -207,25 +207,27 @@ export function createInvokeAcpTransport(): AcpTransport {
         },
         options
       ),
-    loadSession: (agentId, sessionId, cwd, additionalDirectories, options) =>
+    loadSession: (agentId, sessionId, cwd, additionalDirectories, mcpServers, options) =>
       invokeCommand<SessionReopenOutcome>(
         'acp_load_session',
         {
           agentId,
           sessionId,
           cwd,
-          ...(additionalDirectories?.length ? { additionalDirectories } : {})
+          ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+          ...(mcpServers ? { mcpServers } : {})
         },
         options
       ),
-    resumeSession: (agentId, sessionId, cwd, additionalDirectories, options) =>
+    resumeSession: (agentId, sessionId, cwd, additionalDirectories, mcpServers, options) =>
       invokeCommand<SessionReopenOutcome>(
         'acp_resume_session',
         {
           agentId,
           sessionId,
           cwd,
-          ...(additionalDirectories?.length ? { additionalDirectories } : {})
+          ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+          ...(mcpServers ? { mcpServers } : {})
         },
         options
       ),

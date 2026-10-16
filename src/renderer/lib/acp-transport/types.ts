@@ -266,6 +266,7 @@ export interface AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
+    mcpServers?: McpServer[],
     options?: CommandCallOptions
   ): Promise<SessionReopenOutcome>
   resumeSession(
@@ -273,6 +274,7 @@ export interface AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
+    mcpServers?: McpServer[],
     options?: CommandCallOptions
   ): Promise<SessionReopenOutcome>
   deleteAgentSession(

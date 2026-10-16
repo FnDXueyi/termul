@@ -4781,7 +4781,7 @@ describe('WsAcpTransport commands (AD-5)', () => {
     script.set('load_session', () => ({ ok: true, payload: { models: null }, visible_at: 12 }))
     const transport = await connected()
     const seen: number[] = []
-    const outcome = await transport.loadSession('a1', 's1', '/w', undefined, {
+    const outcome = await transport.loadSession('a1', 's1', '/w', undefined, undefined, {
       commandId: 'cmd-2',
       onVisibleAt: (v) => seen.push(v)
     })
@@ -4794,7 +4794,10 @@ describe('WsAcpTransport commands (AD-5)', () => {
     script.set('load_session', () => ({ ok: true, payload: {}, visible_at: 'soon' }))
     const transport = await connected()
     const onVisibleAt = vi.fn()
-    await transport.loadSession('a1', 's1', '/w', undefined, { commandId: 'c', onVisibleAt })
+    await transport.loadSession('a1', 's1', '/w', undefined, undefined, {
+      commandId: 'c',
+      onVisibleAt
+    })
     expect(onVisibleAt).not.toHaveBeenCalled()
     transport.dispose()
   })

@@ -1133,6 +1133,7 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
+    mcpServers?: McpServer[],
     options?: CommandCallOptions
   ): Promise<SessionReopenOutcome> {
     const outcome = await this.request<SessionReopenOutcome>(
@@ -1141,7 +1142,10 @@ export class WsAcpTransport implements AcpTransport {
         agentId,
         sessionId,
         cwd,
-        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+        ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+        // Present only for a reload. An empty array still asks the host to
+        // attach the plan server. Omitted keeps a normal history reopen.
+        ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
       options
@@ -1155,6 +1159,7 @@ export class WsAcpTransport implements AcpTransport {
     sessionId: SessionId,
     cwd: string,
     additionalDirectories?: string[],
+    mcpServers?: McpServer[],
     options?: CommandCallOptions
   ): Promise<SessionReopenOutcome> {
     const outcome = await this.request<SessionReopenOutcome>(
@@ -1163,7 +1168,8 @@ export class WsAcpTransport implements AcpTransport {
         agentId,
         sessionId,
         cwd,
-        ...(additionalDirectories?.length ? { additionalDirectories } : {})
+        ...(additionalDirectories?.length ? { additionalDirectories } : {}),
+        ...(mcpServers ? { mcpServers } : {})
       },
       undefined,
       options
