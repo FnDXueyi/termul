@@ -44,6 +44,8 @@ interface ToolCallGroupProps {
   summary: ToolActivitySummary
   /** The parent turn is still running. */
   active: boolean
+  /** True while this run owns the turn's last timeline item — its live edge. */
+  isLiveTail: boolean
   attentionRequired: boolean
   enter: EnterTracker
   filePathContext?: FilePathResolutionContext
@@ -52,34 +54,43 @@ interface ToolCallGroupProps {
 
 /**
  * One nested disclosure rolling up the turn's tool calls; expanding lists
- * every call's card. Mirrors the outer "Worked for" row: open while the turn
- * runs, and on the settle edge it stays open only when a call needs a look —
- * a failed call sits one click deep, not two.
+ * every call's card. Mirrors the thought group: open while the run is the
+ * turn's live edge, and once activity moves past it — or the turn settles —
+ * it stays open only when a call needs a look: an unfinished or failed call
+ * sits one click deep, not two. A manual toggle sticks (userOverride) until
+ * a call newly needs attention, which re-arms the auto-drive.
  */
 function ToolCallGroupComponent({
   items,
   summary,
   active,
+  isLiveTail,
   attentionRequired,
   enter,
   filePathContext,
   onOpenSubagent
 }: ToolCallGroupProps): React.JSX.Element {
   const reduced = useReducedMotion() ?? false
-  const [open, setOpen] = useState(active || attentionRequired)
-  const wasActive = useRef(active)
+  const [open, setOpen] = useState(isLiveTail || attentionRequired)
+  const userOverride = useRef(false)
+  const wasAttentionRequired = useRef(attentionRequired)
 
   useEffect(() => {
-    if (active) {
-      setOpen(true)
-    } else if (wasActive.current) {
-      setOpen(attentionRequired)
-    }
-    wasActive.current = active
-  }, [active, attentionRequired])
+    // A call that newly needs attention is a fresh event: it re-arms the
+    // auto-drive even after a manual toggle.
+    if (attentionRequired && !wasAttentionRequired.current) userOverride.current = false
+    wasAttentionRequired.current = attentionRequired
+    if (userOverride.current) return
+    setOpen(isLiveTail || attentionRequired)
+  }, [isLiveTail, attentionRequired])
+
+  const handleOpenChange = (next: boolean): void => {
+    userOverride.current = true
+    setOpen(next)
+  }
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0">
+    <Collapsible open={open} onOpenChange={handleOpenChange} className="min-w-0">
       <CollapsibleTrigger
         data-press-feedback="off"
         className={cn(

@@ -251,6 +251,151 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('Reading a.ts…')).toBeInTheDocument()
   })
 
+  it('expands a finished run purely because it owns the live tail', () => {
+    // A completed call needs no attention, so expansion here can only come
+    // from the run being the turn's last item.
+    render(
+      <ChatMessageList
+        items={[userItem, completedToolItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(screen.getByText('a.ts')).toBeInTheDocument()
+  })
+
+  it('collapses a finished tool run once activity moves past it mid-turn', () => {
+    const { rerender } = render(
+      <ChatMessageList
+        items={[userItem, completedToolItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+
+    // A thought starts streaming after the settled run — same shape as a
+    // settled turn: the group folds so the live thinking is the focus.
+    rerender(
+      <ChatMessageList
+        items={[userItem, completedToolItem, thoughtItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+  })
+
+  it('folds an earlier run when a later run takes the live tail', () => {
+    const midReply: TimelineItem = {
+      kind: 'message',
+      key: 'mid-1',
+      message: {
+        id: 'mid-1',
+        role: 'agent',
+        blocks: [{ type: 'text', text: 'Read it, now building' }],
+        streaming: true,
+        timestamp: 1_600,
+        seq: 3
+      }
+    }
+    const buildTool: TimelineItem = {
+      kind: 'tool',
+      key: 'tool-2',
+      tool: {
+        toolCallId: 'tool-2',
+        title: 'Build',
+        kind: 'execute',
+        rawInput: { command: 'bun run build' },
+        status: 'in_progress',
+        timestamp: 1_700,
+        seq: 4
+      }
+    }
+    render(
+      <ChatMessageList
+        items={[userItem, completedToolItem, midReply, buildTool]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    expect(screen.getByRole('button', { name: 'Ran 1 command' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+  })
+
+  it('keeps a manually collapsed live run closed as more calls join it', () => {
+    const secondRead: TimelineItem = {
+      kind: 'tool',
+      key: 'tool-2',
+      tool: {
+        toolCallId: 'tool-2',
+        title: 'Read b',
+        kind: 'read',
+        rawInput: { path: 'src/b.ts' },
+        status: 'in_progress',
+        timestamp: 1_600,
+        seq: 3
+      }
+    }
+    const { rerender } = render(
+      <ChatMessageList items={[userItem, toolItem]} sessionId="session-1" showRunningIndicator />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Read 1 file' }))
+    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+
+    // A second call joins the same run — the user's close still wins.
+    rerender(
+      <ChatMessageList
+        items={[userItem, toolItem, secondRead]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Read 2 files' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+  })
+
+  it('keeps a failed run expanded when activity moves past it mid-turn', () => {
+    render(
+      <ChatMessageList
+        items={[userItem, failedToolItem, streamingAgentItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+
+    // A call needing attention keeps its group open one click deep even
+    // though the run is no longer the live edge.
+    expect(screen.getByRole('button', { name: 'Ran 1 command' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+  })
+
   it('splits tool calls into per-run groups around an in-turn reply', () => {
     const buildTool: TimelineItem = {
       kind: 'tool',
@@ -342,6 +487,9 @@ describe('ChatMessageList', () => {
       />
     )
 
+    // The finished run folded once the streaming reply took the live tail —
+    // open it to reach the delegation card.
+    fireEvent.click(screen.getByRole('button', { name: 'Ran 1 agent' }))
     fireEvent.click(screen.getByRole('button', { name: /audit branch/i }))
     expect(screen.getByRole('dialog', { name: 'Audit branch' })).toHaveTextContent('Running')
 
