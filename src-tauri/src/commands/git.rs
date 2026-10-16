@@ -709,16 +709,7 @@ pub(crate) async fn branch_switch_guarded(
         .to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let output = crate::trackers::git_tracker::GitTracker::run_git_command(
-            &validated_str,
-            &["checkout", &name],
-        )
-        .ok_or_else(|| "Failed to run git checkout".to_string())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-        }
+        crate::web::git_api::run_simple_checkout(&validated_str, &name)
     })
     .await
     .map_err(|e| format!("git branch switch task failed: {e}"))?
