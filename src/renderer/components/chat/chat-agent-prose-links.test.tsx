@@ -91,6 +91,23 @@ describe.each(PATHS)('AgentProse same-document links %s', (_label, context) => {
     expect(scrolled.map((el) => el.id)).toEqual(['user-content-fn-1', 'user-content-fnref-1'])
   })
 
+  it('opens nothing when a fragment link is middle-clicked', () => {
+    renderProse(FOOTNOTE, context)
+    const reference = screen.getByText('1').closest('a')
+    if (!reference) throw new Error('footnote reference is not an anchor')
+
+    const notCancelled = fireEvent(
+      reference,
+      new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 })
+    )
+
+    expect({ target: reference.getAttribute('target'), notCancelled }).toEqual({
+      target: null,
+      notCancelled: false
+    })
+    expect(scrolled).toEqual([])
+  })
+
   it('scrolls within the clicked message when another message reuses the id', async () => {
     const view = render(
       <TooltipProvider>
@@ -108,6 +125,15 @@ describe.each(PATHS)('AgentProse same-document links %s', (_label, context) => {
 
     expect(scrolled).toHaveLength(1)
     expect(second.contains(scrolled[0])).toBe(true)
+  })
+
+  it('styles an external link as a link', () => {
+    renderProse('Visit [docs](https://example.com/docs).', context)
+
+    expect(screen.getByText('docs').className.split(' ')).toEqual(
+      expect.arrayContaining(['wrap-anywhere', 'font-medium', 'text-primary', 'underline'])
+    )
+    expect(screen.getByText('docs').hasAttribute('node')).toBe(false)
   })
 
   it('still confirms an external link before opening the system browser', async () => {

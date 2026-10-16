@@ -151,6 +151,7 @@ const LINK_SAFETY: LinkSafetyConfig = {
 }
 
 const StreamdownLink = defaultComponents.a
+const LINK_CLASS = 'wrap-anywhere font-medium text-primary underline'
 
 function decodeFragment(href: string): string {
   try {
@@ -350,15 +351,19 @@ export function AgentProse({
       },
       a: ({ href, children, node, className, ...props }) => {
         if (href?.startsWith('#')) {
+          const { target: _target, rel: _rel, ...anchorProps } = props
           return (
             <a
               href={href}
-              {...props}
-              className={cn('wrap-anywhere font-medium text-primary underline', className)}
+              {...anchorProps}
+              className={cn(LINK_CLASS, className)}
               data-streamdown="link"
               onClick={(event) => {
                 event.preventDefault()
                 scrollToFragment(rootRef.current, href)
+              }}
+              onAuxClick={(event) => {
+                event.preventDefault()
               }}
             >
               {children}
@@ -377,8 +382,9 @@ export function AgentProse({
             href={href}
             target="_blank"
             rel="noreferrer"
-            className={className}
             {...props}
+            className={cn(LINK_CLASS, className)}
+            data-streamdown="link"
             onClick={(event) => {
               event.preventDefault()
               if (href) setExternalUrl(href)
