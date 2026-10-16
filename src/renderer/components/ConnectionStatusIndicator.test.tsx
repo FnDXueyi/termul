@@ -18,7 +18,10 @@ vi.mock('@/stores/connection-status-store', async (importOriginal) => ({
   retryHostOffline: mockRetryHostOffline
 }))
 
-import { useConnectionStatusStore } from '@/stores/connection-status-store'
+import {
+  type ConnectionChannelState,
+  useConnectionStatusStore
+} from '@/stores/connection-status-store'
 import { ConnectionStatusIndicator, formatConnectedSummary } from './ConnectionStatusIndicator'
 
 function renderIndicator(): ReturnType<typeof render> {
@@ -29,16 +32,33 @@ function renderIndicator(): ReturnType<typeof render> {
   )
 }
 
+/** Write channel states and let any reconnect grace run out. */
+function setChannels(
+  patch: Partial<Record<'controlChannel' | 'terminalChannel', ConnectionChannelState>>
+): void {
+  act(() => {
+    useConnectionStatusStore.setState(patch)
+  })
+  act(() => {
+    vi.advanceTimersByTime(RECONNECT_GRACE_MS)
+  })
+}
+
 function lampClass(): string {
   return document.querySelector('[role="status"] svg')?.getAttribute('class') ?? ''
 }
 
 beforeEach(() => {
+  vi.useFakeTimers()
   mockIsTauriContext.mockReturnValue(false)
   useConnectionStatusStore.setState({
     controlChannel: 'connected',
     terminalChannel: 'connected'
   })
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe('ConnectionStatusIndicator', () => {
@@ -74,7 +94,7 @@ describe('ConnectionStatusIndicator', () => {
   })
 
   it('shows pulse + names the channel when the terminal channel is reconnecting', () => {
-    useConnectionStatusStore.setState({ terminalChannel: 'reconnecting' })
+    setChannels({ terminalChannel: 'reconnecting' })
     renderIndicator()
     expect(
       screen.getByRole('status', { name: 'Terminal channel: reconnecting' })
@@ -91,7 +111,7 @@ describe('ConnectionStatusIndicator', () => {
   })
 
   it('rolls up worst-of channels: disconnected wins over reconnecting', () => {
-    useConnectionStatusStore.setState({
+    setChannels({
       controlChannel: 'reconnecting',
       terminalChannel: 'disconnected'
     })
@@ -119,7 +139,7 @@ describe('ConnectionStatusIndicator', () => {
   })
 
   it('recovers to a filled lamp when the degraded channel reconnects', () => {
-    useConnectionStatusStore.setState({ controlChannel: 'reconnecting' })
+    setChannels({ controlChannel: 'reconnecting' })
     const { rerender } = render(
       <TooltipProvider>
         <ConnectionStatusIndicator />
@@ -140,13 +160,6 @@ describe('ConnectionStatusIndicator', () => {
 })
 
 describe('ConnectionStatusIndicator reconnect grace', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
   function setChannel(patch: { controlChannel?: 'connected' | 'reconnecting' }): void {
     act(() => {
       useConnectionStatusStore.setState(patch)
@@ -281,7 +294,7 @@ describe('ConnectionStatusIndicator labelled status mode', () => {
   })
 
   it('names the degraded channel and warns while it reconnects', () => {
-    useConnectionStatusStore.setState({ controlChannel: 'reconnecting' })
+    setChannels({ controlChannel: 'reconnecting' })
     renderLabelled()
 
     const status = screen.getByRole('status')
@@ -295,7 +308,7 @@ describe('ConnectionStatusIndicator labelled status mode', () => {
   })
 
   it('rolls both degraded channels into the text and turns destructive when disconnected', () => {
-    useConnectionStatusStore.setState({
+    setChannels({
       controlChannel: 'reconnecting',
       terminalChannel: 'disconnected'
     })

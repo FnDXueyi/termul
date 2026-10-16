@@ -617,6 +617,9 @@ describe('useShellAnnouncements', () => {
       act(() => {
         useConnectionStatusStore.setState({ controlChannel: 'reconnecting' })
       })
+      act(() => {
+        vi.advanceTimersByTime(RECONNECT_GRACE_MS)
+      })
       settle()
       expect(region()).toBe('Reconnecting…')
 
