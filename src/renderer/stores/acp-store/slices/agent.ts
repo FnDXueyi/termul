@@ -2,7 +2,6 @@
  * Agent slice — extracted from ../acp-store.ts (spec-04 PR B). Pure move, no logic changes.
  */
 
-import { WS_ERROR_CODES } from '@shared/types/web-protocol.types'
 import { toast } from 'sonner'
 import type { StateCreator } from 'zustand'
 import {
@@ -78,30 +77,6 @@ export const authenticatedAgents = new Set<AgentId>()
  * agent being authenticated).
  */
 const inFlightAuth = new Map<string, Promise<boolean>>()
-
-/**
- * Provider usage-limit failures (`errorKind` from the Claude ACP adapter) end
- * only the turn: the agent process stays alive and keeps the conversation, so
- * they must not mark the session or agent 'error' (that triggers a reopen).
- */
-const PROVIDER_LIMIT_ERROR_KINDS = new Set(['rate_limit', 'billing_error'])
-
-/** Provider codes that end only the turn (the host classified the refusal). */
-const PROVIDER_LIMIT_CODES: ReadonlySet<string> = new Set([
-  WS_ERROR_CODES.PROVIDER_QUOTA_EXCEEDED,
-  WS_ERROR_CODES.PROVIDER_SESSION_LIMIT
-])
-
-/**
- * The host's stable `providerCode` decides. The `data.errorKind` check stays
- * for hosts that predate the code and cannot supply it.
- */
-function isProviderLimitError(providerCode: string | undefined, data: unknown): boolean {
-  if (providerCode !== undefined) return PROVIDER_LIMIT_CODES.has(providerCode)
-  if (typeof data !== 'object' || data === null) return false
-  const kind = (data as { errorKind?: unknown }).errorKind
-  return typeof kind === 'string' && PROVIDER_LIMIT_ERROR_KINDS.has(kind)
-}
 
 /** True while an ACP `authenticate` call is still waiting. */
 export function isAnyAgentAuthInFlight(): boolean {
@@ -882,35 +857,18 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     // Flush coalesced updates so the error reflects the final transcript state.
     flushCoalescedSync()
     const detail = parseAcpErrorDetail(e)
-    const providerLimit =
-      Boolean(e.sessionId) && isProviderLimitError(detail.providerCode, detail.data)
-    if (providerLimit) {
-      void logFrontendError({
-        level: 'warn',
-        source: 'acp.onAgentError.providerLimit',
-        message: `Provider usage limit on session ${e.sessionId} (agent ${e.agentId}); keeping the chat live`
-      })
-    }
     set((s) => {
-      const agentStatus = providerLimit
-        ? s.agentStatus
-        : { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
-      if (e.sessionId && s.sessions[e.sessionId] && s.sessions[e.sessionId].status !== 'closed') {
+      if (e.sessionId) {
+        const session = s.sessions[e.sessionId]
+        if (!session || session.status === 'closed') return {}
         return {
-          agentStatus,
           // Finalize streaming markers: the turn is over (errored), and the
           // persist below must not capture a message mid-shimmer.
           messages: finalizeStreaming(s.messages, e.sessionId),
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
-              ...s.sessions[e.sessionId],
-              // Story 1.9 NFR7: a turn-scoped error (incl. the bounded turn
-              // timeout) sets `status: 'error'` so the UI shows the Error state
-              // (the agent may be wedged — the user should see an error, not
-              // a perpetually-active turn). The `_onAgentDisconnected` reducer
-              // now preserves the 'error' status (it skips 'error' sessions).
-              status: providerLimit ? s.sessions[e.sessionId].status : ('error' as SessionStatus),
+              ...session,
               lastError: detail.providerCode
                 ? describeProviderFailure(detail.providerCode, e.message)
                 : e.message,
@@ -922,6 +880,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
           }
         }
       }
+      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
       const sessions = { ...s.sessions }
       for (const id of Object.keys(sessions)) {
         if (sessions[id].agentId === e.agentId && sessions[id].status !== 'closed') {
