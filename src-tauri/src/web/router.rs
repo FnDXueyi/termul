@@ -45,6 +45,7 @@ use crate::web::origin::{self, OriginPolicy};
 use crate::web::project_icon_api;
 use crate::web::project_registry::ProjectRegistry;
 use crate::web::projects_api;
+use crate::web::route_deadline;
 use crate::web::search_api;
 use crate::web::sink::WsRelaySink;
 use crate::web::skills_api;
@@ -368,6 +369,7 @@ pub fn router(
     // layer marks them `no-cache, must-revalidate`; on the embedded path it
     // writes the same value the embed already sets (idempotent).
     r = r.layer(middleware::from_fn(assets::shell_no_cache_headers));
+    r = r.layer(middleware::from_fn(route_deadline::bound));
     // #857: gzip responses when `Accept-Encoding` allows (cold load 3.66 MB →
     // ~1 MB) + pin Vite-hashed `/assets/*` immutable for a year on the disk
     // `ServeDir` path (the embedded path already sets the same value in
@@ -649,6 +651,7 @@ pub fn router_with_static(
     // PWA parity with `router`: mark the unversioned shell/PWA files no-cache
     // so the disk-served bundle doesn't stall SW updates (same layer).
     let r = r.layer(middleware::from_fn(assets::shell_no_cache_headers));
+    let r = r.layer(middleware::from_fn(route_deadline::bound));
     // #857 parity with `router`: gzip + immutable hashed-asset caching on the
     // disk-served static bundle.
     let r = r
