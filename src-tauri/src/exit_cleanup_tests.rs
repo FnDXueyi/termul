@@ -15,6 +15,27 @@ async fn a_cleanup_that_never_finishes_is_abandoned_at_the_deadline() {
     assert_eq!(started.elapsed(), EXIT_CLEANUP_TIMEOUT);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_abandoned_at_the_deadline_does_not_resume_during_shutdown() {
+    let resumed = Arc::new(AtomicBool::new(false));
+    let flag = resumed.clone();
+
+    run_bounded(
+        async move {
+            tokio::time::sleep(EXIT_CLEANUP_TIMEOUT * 2).await;
+            flag.store(true, Ordering::SeqCst);
+        },
+        EXIT_CLEANUP_TIMEOUT,
+    )
+    .await;
+    tokio::time::sleep(EXIT_CLEANUP_TIMEOUT * 2).await;
+
+    assert!(
+        !resumed.load(Ordering::SeqCst),
+        "abandoned cleanup kept running after the deadline"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cleanup_blocking_its_thread_is_abandoned_at_the_deadline() {
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

@@ -26,14 +26,19 @@ where
 {
     // Its own task, so the deadline still fires when a teardown step blocks
     // its worker thread instead of awaiting.
-    let task = tokio::spawn(cleanup);
-    match tokio::time::timeout(timeout, task).await {
+    let mut task = tokio::spawn(cleanup);
+    match tokio::time::timeout(timeout, &mut task).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => log::error!("[exit] cleanup task failed: {error}"),
-        Err(_) => log::error!(
-            "[exit] cleanup still running after {}s; exiting without it",
-            timeout.as_secs()
-        ),
+        Err(_) => {
+            // Stops it at its next await, so it cannot keep tearing down
+            // while a relaunched instance starts.
+            task.abort();
+            log::error!(
+                "[exit] cleanup still running after {}s; exiting without it",
+                timeout.as_secs()
+            );
+        }
     }
 }
 
