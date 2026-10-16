@@ -46,7 +46,7 @@ import {
   useWorkspaceStore
 } from '@/stores/workspace-store'
 import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestration'
-import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
+import { dropPromptQueueForSession, moveQueuedPrompts } from '../../prompt-queue-orchestration'
 import { pruneRestoredChatTabs } from '../chat-tab-prune'
 import {
   cacheOptionsFromSession,
@@ -568,6 +568,7 @@ async function redirectSwitchedReopen(
   // hop → OLDEST (reverse): each fold prepends its hop before the
   // accumulated target, so the final order is oldest→newest. Idempotent on
   // repeat opens (already-present re-stamped ids are skipped).
+  const movedQueueCount = get().promptQueues[id]?.length ?? 0
   set((s) => {
     let messages = s.messages[finalTarget] ?? []
     let toolCalls = s.toolCalls[finalTarget] ?? []
@@ -603,7 +604,8 @@ async function redirectSwitchedReopen(
         [finalTarget]: trimLiveWindow(messages, finalTarget)
       },
       toolCalls: { ...s.toolCalls, [finalTarget]: trimLiveToolCalls(toolCalls) },
-      agentSwitches: { ...s.agentSwitches, [finalTarget]: switches }
+      agentSwitches: { ...s.agentSwitches, [finalTarget]: switches },
+      promptQueues: moveQueuedPrompts(s.promptQueues, id, finalTarget)
     }
   })
   // Remap the tab old → final in the same pane (guarded).
@@ -611,6 +613,14 @@ async function redirectSwitchedReopen(
   if (findPaneContainingTab(ws.root, agentChatTabId(id))) {
     ws.remapAgentChatSession(id, finalTarget)
   }
+  if (movedQueueCount > 0) {
+    void logFrontendError({
+      level: 'info',
+      source: logSource,
+      message: `Moved ${movedQueueCount} queued prompt(s) from switched session ${id} to ${finalTarget}`
+    })
+  }
+  flushNextQueuedPrompt(set, finalTarget)
   return true
 }
 
