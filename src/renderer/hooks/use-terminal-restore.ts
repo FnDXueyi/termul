@@ -922,42 +922,31 @@ async function restoreFromLayout(
     // Map old IDs to new IDs for active terminal selection and pane remapping
     const idMap = new Map<string, string>()
 
-    // Story 5 (preserved-PTY reattach): before blindly re-spawning, ask the
-    // host (web transport only) which PTYs it still preserves for this
-    // project. On success the returned claims are already adopted by the
-    // client (see listPreservedAndAdoptClaims), so an attach below replays
-    // the retained scrollback (lastSeq=0) and keeps the SAME server-side
-    // terminal id alive instead of leaking a new PTY per reload. Any failure
-    // (desktop transport without the op, network, gate refusal, malformed
-    // reply) leaves `preserved` empty and the loop below spawns exactly as
-    // before — the fallback path is the unchanged legacy behavior.
     let preserved: PreservedTerminalEntry[] = []
-    if (typeof terminalApi.listPreserved === 'function') {
-      const preservedResult = await terminalApi.listPreserved(projectId)
-      if (preservedResult.success) {
-        preserved = preservedResult.data
-        emitTerminalContinuityEvent({
-          name: 'restore-path-selected',
-          correlationId: '',
-          projectId,
-          details: {
-            path: 'preserved-reattach',
-            preservedTerminalCount: preserved.length,
-            persistedTerminalCount: layout.terminals.length
-          }
-        })
-      } else {
-        emitTerminalContinuityEvent({
-          name: 'restore-failed',
-          correlationId: '',
-          projectId,
-          details: {
-            reason: 'list-preserved-unavailable',
-            code: preservedResult.code,
-            fallback: 'spawn'
-          }
-        })
-      }
+    const preservedResult = await terminalApi.listPreserved(projectId)
+    if (preservedResult.success) {
+      preserved = preservedResult.data
+      emitTerminalContinuityEvent({
+        name: 'restore-path-selected',
+        correlationId: '',
+        projectId,
+        details: {
+          path: 'preserved-reattach',
+          preservedTerminalCount: preserved.length,
+          persistedTerminalCount: layout.terminals.length
+        }
+      })
+    } else {
+      emitTerminalContinuityEvent({
+        name: 'restore-failed',
+        correlationId: '',
+        projectId,
+        details: {
+          reason: 'list-preserved-unavailable',
+          code: preservedResult.code,
+          fallback: 'spawn'
+        }
+      })
     }
     // Consumed entries are removed as tabs claim them so a preserved PTY is
     // never attached twice; leftovers get their own tabs below (resolved Q3:

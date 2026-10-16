@@ -195,7 +195,8 @@ const P1_DOMAINS: DomainCheck[] = [
       // Tauri adapter — pins desktop↔web terminal parity.
       'attach',
       'rotateClaim',
-      'revokeClaim'
+      'revokeClaim',
+      'listPreserved'
     ],
     apiBridgeExport: 'terminalApi',
     testFile: 'tauri-terminal-api.test.ts' // May not exist yet, check in test

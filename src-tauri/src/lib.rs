@@ -1812,6 +1812,7 @@ pub fn run() {
             // Terminal commands
             commands::terminal_spawn,
             commands::terminal_attach,
+            commands::terminal_list_preserved,
             commands::terminal_rotate_claim,
             commands::terminal_revoke_claim,
             commands::terminal_write,
