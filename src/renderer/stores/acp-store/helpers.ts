@@ -1491,8 +1491,9 @@ export async function killSpawnedAgentIfUnused(
   get: () => AcpState,
   agentId: AgentId
 ): Promise<void> {
-  const hasOtherSession = Object.values(get().sessions).some(
-    (s) => s.agentId === agentId && s.status !== 'closed'
+  const { sessions, openingHistoryIds } = get()
+  const hasOtherSession = Object.values(sessions).some(
+    (s) => s.agentId === agentId && (s.status !== 'closed' || openingHistoryIds[s.id])
   )
   if (hasOtherSession) return
   try {

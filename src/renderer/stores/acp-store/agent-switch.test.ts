@@ -521,6 +521,32 @@ describe('switchAgent (story 3)', () => {
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('acp_kill_agent', { agentId: 'agent-new' })
   })
 
+  it('NEW_SESSION_FAIL: a pending history reopen on the reused agent keeps it alive', async () => {
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-new': { id: 'agent-new', capabilities: {}, authMethods: [] } },
+      agentStatus: { ...s.agentStatus, 'agent-new': 'connected' },
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-new', '/work', 'p1')]: 'agent-new'
+      },
+      sessions: {
+        ...s.sessions,
+        's-reopening': mockAcpSession({ id: 's-reopening', agentId: 'agent-new', status: 'closed' })
+      },
+      openingHistoryIds: { ...s.openingHistoryIds, 's-reopening': true }
+    }))
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'acp_new_session') throw new Error('new session rejected')
+      if (command === 'acp_kill_agent') return undefined
+      throw new Error(`unexpected invoke command: ${command}`)
+    })
+    await useAcpStore.getState().armAgentSwitch('s-old', 'cfg-new')
+    await useAcpStore.getState().switchAgent('s-old', 'cfg-new', { pendingText: 'draft' })
+
+    expect(useAcpStore.getState().sessions['s-old'].agentId).toBe('agent-old')
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('acp_kill_agent', { agentId: 'agent-new' })
+  })
+
   it('MARKER_FAIL: a marker write failure is non-blocking — the switch still completes', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'acp_spawn_agent')
