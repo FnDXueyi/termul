@@ -102,6 +102,7 @@ vi.mock('@/stores/workspace-store', () => {
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
     getAgentChatSessionIdsInAllTrees: () => new Set<string>(),
     useWorkspaceStore: {
+      subscribe: () => () => {},
       getState: () => ({
         addAgentChatTab: addAgentChatTabSpy,
         removeTab: workspaceStateRef.current.removeTab,
@@ -159,6 +160,7 @@ import {
   _resetInFlightPreparedForTesting,
   _resetLiveSwitchSourcesForTesting,
   _resetSessionIndexLoadGenerationForTesting,
+  initAcpEventListeners,
   useAcpStore
 } from '@/stores/acp-store'
 import { FRESH, flushTurnEnd, seedSession } from './testkit'
@@ -678,6 +680,42 @@ describe('acp-store', () => {
     seed('q-3')
     store._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().pendingQuestions['q-3']).toBeUndefined()
+  })
+
+  it('question_cancelled withdraws only that question mid-turn (issue #784)', () => {
+    const listeners = new Map<string, (payload: unknown, eventSeq?: number) => void>()
+    _setAcpTransportForTests({
+      onEvent: vi.fn((name: string, cb: (payload: unknown, eventSeq?: number) => void) => {
+        listeners.set(name, cb)
+        return () => {}
+      }),
+      setReconnectListener: vi.fn(),
+      setRecoveryHandler: vi.fn(),
+      setReconnectPriorityProvider: vi.fn(),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    seedSession('s1', 'agent-1')
+    const teardown = initAcpEventListeners()
+    try {
+      const ask = (questionId: string) =>
+        listeners.get('acp:question_request')!({
+          agentId: 'agent-1',
+          sessionId: 's1',
+          questionId,
+          question: 'Ship it?',
+          options: [{ value: 'Yes', label: 'Yes' }]
+        })
+      ask('q-1')
+      ask('q-2')
+      listeners.get('acp:question_cancelled')?.({
+        agentId: 'agent-1',
+        sessionId: 's1',
+        questionId: 'q-1'
+      })
+      expect(Object.keys(useAcpStore.getState().pendingQuestions)).toEqual(['q-2'])
+    } finally {
+      teardown()
+    }
   })
 
   it('answerQuestion is re-entrancy safe: second call is a no-op (issue #411)', async () => {

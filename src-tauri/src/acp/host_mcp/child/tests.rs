@@ -359,3 +359,67 @@ async fn ask_user_schema_lists_question_options_and_free_text() {
     .await;
     result.expect("tools/list timed out");
 }
+
+/// The agent's MCP client gives up on a waiting `ask_user` (its tool timeout
+/// sends `notifications/cancelled`): the child hangs up on the parent, and the
+/// parent ends the parked call so a later answer is refused.
+#[tokio::test]
+async fn a_client_cancelled_ask_user_ends_the_parked_call_in_the_parent() {
+    let parent = crate::acp::host_mcp::parent::HostPlanServer::start(vec![], None);
+    let (port, token, provisional) = parent.register_session("agent-1");
+    parent.bind_session(&token, "sess-real");
+    parent.begin_turn("agent-1", "sess-real");
+    let config = ChildConfig {
+        port,
+        token,
+        session_id: provisional,
+        agent_id: "agent-1".to_string(),
+    };
+
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client_io);
+    let serve = tokio::spawn(async move { serve_mcp_transport(config, server_read, server_write).await });
+
+    let mut reader = BufReader::new(client_read);
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"0.0.1"}}}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"Proceed?","options":[{"label":"Yes"}]}}}"#;
+    for line in [init, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, call] {
+        client_write.write_all(line.as_bytes()).await.unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        if line == init {
+            let _ = read_json_id(&mut reader, 1).await;
+        }
+    }
+
+    let mut question_id = None;
+    for _ in 0..400 {
+        question_id = parent.open_ask_ids().into_iter().next();
+        if question_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let question_id = question_id.expect("ask_user call was never parked");
+
+    client_write
+        .write_all(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"tool timeout"}}"#)
+        .await
+        .unwrap();
+    client_write.write_all(b"\n").await.unwrap();
+    for _ in 0..400 {
+        if parent.open_ask_ids().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    assert_eq!(parent.open_ask_ids(), Vec::<String>::new(), "the parked call ended");
+    assert!(
+        !parent.answer_ask(&question_id, Some(vec!["Yes".to_string()])),
+        "a late answer is refused"
+    );
+    drop(client_write);
+    drop(reader);
+    serve.await.expect("serve task").expect("serve ok");
+}

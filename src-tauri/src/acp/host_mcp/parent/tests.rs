@@ -1127,16 +1127,21 @@ fn invalid_branch_slug_keeps_the_branch_and_the_title_still_lands() {
 
 // -- issue #784: ask_user parks the call until the user answers -------------
 
-/// Captures the `acp:question_request` payloads the host emits.
+/// Captures the `acp:question_request` and `acp:question_cancelled` payloads
+/// the host emits.
 #[derive(Default)]
 struct QuestionSink {
     payloads: StdMutex<Vec<serde_json::Value>>,
+    cancelled: StdMutex<Vec<serde_json::Value>>,
 }
 
 impl EventSink for QuestionSink {
     fn emit(&self, event: &crate::web::sink::AcpEvent) {
         if event.type_ == crate::acp::events::EVENT_QUESTION_REQUEST {
             self.payloads.lock().unwrap().push(event.payload.clone());
+        }
+        if event.type_ == "acp:question_cancelled" {
+            self.cancelled.lock().unwrap().push(event.payload.clone());
         }
     }
 }
@@ -1228,6 +1233,67 @@ fn cancelled_ask_user_resolves_the_call_instead_of_hanging() {
         assert!(reply["result"]["free_text"].is_null());
     });
     assert!(server.open_ask_ids().is_empty());
+}
+
+#[test]
+fn ask_user_is_cancelled_when_its_child_connection_closes() {
+    let sink = Arc::new(QuestionSink::default());
+    let server = HostPlanServer::start(vec![sink.clone()], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let beats = Arc::clone(&beats);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |_: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(20));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut buf = serde_json::to_vec(&ask_frame(&token, &provisional, "Still there?")).unwrap();
+        buf.push(b'\n');
+        stream.write_all(&buf).await.unwrap();
+        let question_id = wait_for_open_ask(&server).await;
+
+        // The agent's MCP client gave up on the call, so the child hung up.
+        drop(stream);
+        for _ in 0..400 {
+            if !sink.cancelled.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(
+            *sink.cancelled.lock().unwrap(),
+            vec![serde_json::json!({
+                "agentId": "agent-1",
+                "sessionId": "sess-real",
+                "questionId": question_id,
+            })],
+            "the question panel is withdrawn"
+        );
+        assert_eq!(server.open_ask_ids(), Vec::<String>::new());
+        assert!(
+            !server.answer_ask(&question_id, Some(vec!["Yes".to_string()])),
+            "a late answer is refused instead of being lost"
+        );
+
+        let settled = beats.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            beats.load(std::sync::atomic::Ordering::SeqCst),
+            settled,
+            "the idle heartbeat stops with the connection"
+        );
+    });
 }
 
 #[test]
