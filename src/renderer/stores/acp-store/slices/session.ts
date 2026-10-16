@@ -49,6 +49,7 @@ import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestrati
 import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
 import { pruneRestoredChatTabs } from '../chat-tab-prune'
 import {
+  addAdvertisedOptionsKeepingCurrent,
   cacheOptionsFromSession,
   captureReopenControlBaseline,
   configIdForAgentId,
@@ -107,6 +108,7 @@ import {
   terminalAssistCollectors
 } from '../shared-state'
 import {
+  type AcpSession,
   type AcpState,
   ChatLaunchCancelledError,
   type ChatMessage,
@@ -602,6 +604,19 @@ async function redirectSwitchedReopen(
   return true
 }
 
+function echoBaselineAfterReopen(
+  prior: AcpSession['creationOptionDefaults'],
+  outcome: SessionReopenOutcome
+): AcpSession['creationOptionDefaults'] {
+  if (!outcome.modes && !outcome.models && !outcome.configOptions) return prior
+  const reported = creationOptionDefaultsFrom(outcome)
+  return {
+    modeId: outcome.modes ? reported.modeId : prior?.modeId,
+    modelId: outcome.models ? reported.modelId : prior?.modelId,
+    configValues: outcome.configOptions ? reported.configValues : (prior?.configValues ?? {})
+  }
+}
+
 // AD-6 exception (reply-driven session state kept): `session/load` and
 // `session/resume` report the session's modes / models / config options ONLY in
 // the reply (the replayed updates carry changes, not the initial state), so the
@@ -623,6 +638,7 @@ function mergeReopenOutcomeIfUnchanged(
         ...s.sessions,
         [sessionId]: {
           ...session,
+          creationOptionDefaults: echoBaselineAfterReopen(session.creationOptionDefaults, outcome),
           modes:
             outcome.modes !== undefined && Object.is(session.modes, baseline.modes)
               ? outcome.modes
@@ -757,6 +773,7 @@ async function openHistorySessionInner(
         modes: existingControls?.modes ?? null,
         models: existingControls?.models ?? null,
         configOptions: existingControls?.configOptions ?? [],
+        creationOptionDefaults: existingControls?.creationOptionDefaults,
         lastError: null,
         createdAt: meta.createdAt,
         replaying: null,
@@ -1515,16 +1532,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
               activeTurn: existing?.activeTurn ?? false,
               mcpServerCount: sessionMcpServers.length,
               openTurnId: existing?.openTurnId ?? null,
-              // An event-created stub (session_created/mode_update beating
-              // the reply) carries the SAME creation payload plus any genuine
-              // updates that landed during the await — prefer it so a real
-              // agent-side change isn't reverted by the `session/new` echo.
-              modes: existing?.modes ?? outcome.modes ?? null,
-              models: existing?.models ?? outcome.models ?? null,
-              configOptions:
-                existing && existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (outcome.configOptions ?? []),
+              ...addAdvertisedOptionsKeepingCurrent(
+                existing ?? { modes: null, models: null, configOptions: [] },
+                outcome
+              ),
               // Baseline for the creation-default echo guard: the values the
               // session was created WITH (from whichever payload populated
               // them — the `session/new` result or an earlier event stub).
@@ -2357,6 +2368,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
             modes: existingControls?.modes ?? null,
             models: existingControls?.models ?? null,
             configOptions: existingControls?.configOptions ?? [],
+            creationOptionDefaults: existingControls?.creationOptionDefaults,
             lastError: null,
             createdAt: Date.now(),
             replaying: strategy === 'load' ? 'pending' : strategy === 'resume' ? 'streaming' : null,
@@ -2541,23 +2553,12 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     set((s) => {
       const existing = s.sessions[e.sessionId]
       if (existing) {
-        // Enrich-only — the event re-delivers the SAME `session/new` payload
-        // the local create path already installed (manager.rs fans it out
-        // before send_reply, so it can land after pending launcher picks were
-        // applied). Populated option fields are authoritative: fill only
-        // EMPTY ones so a late echo of creation defaults cannot revert values
-        // the user already selected.
         return {
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
               ...existing,
-              modes: existing.modes ?? e.modes ?? null,
-              models: existing.models ?? e.models ?? null,
-              configOptions:
-                existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (e.configOptions ?? existing.configOptions),
+              ...addAdvertisedOptionsKeepingCurrent(existing, e),
               creationOptionDefaults:
                 existing.creationOptionDefaults ?? creationOptionDefaultsFrom(e)
             }

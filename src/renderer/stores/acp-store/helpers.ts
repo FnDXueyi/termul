@@ -1178,6 +1178,49 @@ export function creationOptionDefaultsFrom(input: {
   }
 }
 
+function appendUnseen<T>(current: T[], incoming: T[], key: (item: T) => string): T[] {
+  const seen = new Set(current.map(key))
+  const added = incoming.filter((item) => !seen.has(key(item)))
+  return added.length > 0 ? [...current, ...added] : current
+}
+
+export function addAdvertisedOptionsKeepingCurrent(
+  current: Pick<AcpSession, 'modes' | 'models' | 'configOptions'>,
+  payload: {
+    modes?: SessionModeState | null
+    models?: SessionModelState | null
+    configOptions?: SessionConfigOption[] | null
+  }
+): Pick<AcpSession, 'modes' | 'models' | 'configOptions'> {
+  let modes = current.modes ?? payload.modes ?? null
+  if (current.modes && payload.modes) {
+    const availableModes = appendUnseen(
+      current.modes.availableModes,
+      payload.modes.availableModes,
+      (mode) => mode.id
+    )
+    if (availableModes !== current.modes.availableModes) {
+      modes = { ...current.modes, availableModes }
+    }
+  }
+  let models = current.models ?? payload.models ?? null
+  if (current.models && payload.models) {
+    const availableModels = appendUnseen(
+      current.models.availableModels,
+      payload.models.availableModels,
+      (model) => model.modelId
+    )
+    if (availableModels !== current.models.availableModels) {
+      models = { ...current.models, availableModels }
+    }
+  }
+  return {
+    modes,
+    models,
+    configOptions: appendUnseen(current.configOptions, payload.configOptions ?? [], (o) => o.id)
+  }
+}
+
 /**
  * Merge an agent-provided config-option snapshot into the session state
  * without letting a backend-side desync clobber the user's model selection
@@ -1701,7 +1744,8 @@ export function captureReopenControlBaseline(
   return {
     modes: session.modes,
     models: session.models,
-    configOptions: session.configOptions
+    configOptions: session.configOptions,
+    creationOptionDefaults: session.creationOptionDefaults
   }
 }
 

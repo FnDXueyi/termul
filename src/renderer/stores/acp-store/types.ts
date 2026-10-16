@@ -217,8 +217,7 @@ export interface AcpSession {
    * `mergeAgentConfigOptions` compare incoming snapshots against these: a
    * snapshot that merely re-asserts the creation default must not revert a
    * value the session has since moved off (while that value is still
-   * advertised), but a genuinely new agent-side value still applies. Never
-   * persisted; absent on sessions whose creation path exposes no options.
+   * advertised), but a genuinely new agent-side value still applies.
    */
   creationOptionDefaults?: {
     modeId?: string
@@ -969,7 +968,10 @@ export class ChatLaunchCancelledError extends Error {
  * local transcript (avoids duplication); an agent that replays nothing leaves
  * the local transcript in place.
  */
-export type ReopenControlBaseline = Pick<AcpSession, 'modes' | 'models' | 'configOptions'>
+export type ReopenControlBaseline = Pick<
+  AcpSession,
+  'modes' | 'models' | 'configOptions' | 'creationOptionDefaults'
+>
 
 export interface AgentIdentity {
   /** Human-friendly agent name (e.g. "Cursor"), or null when unresolved. */

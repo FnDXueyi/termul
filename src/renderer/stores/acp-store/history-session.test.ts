@@ -697,6 +697,128 @@ describe('acp-store', () => {
     expect(session.configOptions).toEqual([])
   })
 
+  it('a session reopened after reload keeps a pick against a stale echo of its reopen values', async () => {
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-1': { id: 'agent-1', capabilities: { loadSession: true } } },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+    }))
+    const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+    ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      metadata: {
+        id: 's-reloaded',
+        agentId: 'agent-1',
+        title: 'Reloaded',
+        cwd: '/w',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 0,
+        status: 'closed'
+      },
+      messages: []
+    })
+    const modes = (currentModeId: string) => ({
+      currentModeId,
+      availableModes: [
+        { id: 'agent', name: 'Agent' },
+        { id: 'plan', name: 'Plan' }
+      ]
+    })
+    const thinking = (currentValue: string) => [
+      {
+        id: 'thinking',
+        name: 'Thinking',
+        type: 'select',
+        currentValue,
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'high', name: 'High' }
+        ]
+      }
+    ]
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'acp_load_session') {
+        return { modes: modes('agent'), configOptions: thinking('low') }
+      }
+      if (command === 'acp_set_config_option') return thinking('high')
+      return undefined
+    })
+
+    await useAcpStore.getState().openHistorySession('s-reloaded')
+    await useAcpStore.getState().setMode('s-reloaded', 'plan')
+    await useAcpStore.getState().setConfigOption('s-reloaded', 'thinking', 'high')
+    useAcpStore.getState()._onModeUpdate({
+      agentId: 'agent-1',
+      sessionId: 's-reloaded',
+      currentModeId: 'agent',
+      availableModes: modes('agent').availableModes
+    })
+    useAcpStore.getState()._onConfigOptionsUpdate({
+      agentId: 'agent-1',
+      sessionId: 's-reloaded',
+      configOptions: thinking('low')
+    })
+
+    const session = useAcpStore.getState().sessions['s-reloaded']
+    expect(session.modes?.currentModeId).toBe('plan')
+    expect(session.configOptions[0]?.currentValue).toBe('high')
+  })
+
+  it('a cached closed session keeps its creation baseline when the reopen reports no controls', async () => {
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-1': { id: 'agent-1', capabilities: { loadSession: true } } },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' },
+      sessions: {
+        ...s.sessions,
+        's-cached': {
+          id: 's-cached',
+          agentId: 'agent-1',
+          cwd: '/w',
+          projectId: 'p1',
+          status: 'closed',
+          title: 'Cached',
+          activeTurn: false,
+          openTurnId: null,
+          modes: {
+            currentModeId: 'plan',
+            availableModes: [
+              { id: 'agent', name: 'Agent' },
+              { id: 'plan', name: 'Plan' }
+            ]
+          },
+          models: null,
+          configOptions: [],
+          creationOptionDefaults: { modeId: 'agent', configValues: {} },
+          lastError: null,
+          createdAt: 1
+        }
+      }
+    }))
+    const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+    ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      metadata: {
+        id: 's-cached',
+        agentId: 'agent-1',
+        title: 'Cached',
+        cwd: '/w',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 0,
+        status: 'closed'
+      },
+      messages: []
+    })
+    vi.mocked(invoke).mockResolvedValueOnce({})
+
+    await useAcpStore.getState().openHistorySession('s-cached')
+
+    expect(useAcpStore.getState().sessions['s-cached'].creationOptionDefaults).toEqual({
+      modeId: 'agent',
+      configValues: {}
+    })
+  })
+
   it('openHistorySession load keeps in-flight live mode/config updates authoritative', async () => {
     useAcpStore.setState((s) => ({
       agents: { ...s.agents, 'agent-1': { id: 'agent-1', capabilities: { loadSession: true } } },
