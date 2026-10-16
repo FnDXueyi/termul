@@ -8,6 +8,7 @@ import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { useChatReadMarker } from './use-chat-read-marker'
 
 let visibility: DocumentVisibilityState = 'visible'
+let focused = true
 
 function setVisibility(next: DocumentVisibilityState): void {
   act(() => {
@@ -22,12 +23,19 @@ function turnEnd(sessionId: string, seq: number): void {
 
 beforeEach(() => {
   visibility = 'visible'
+  focused = true
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+  vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
   sync.markChatRead.mockReset()
   sync.markChatRead.mockImplementation((sessionId: string, seq: number) =>
     useAgentChatUnreadStore.getState().setReadMark(sessionId, seq)
   )
-  useAgentChatUnreadStore.setState({ unread: {}, seenTurnEndSeq: {}, sharedReadSeq: {} })
+  useAgentChatUnreadStore.setState({
+    unread: {},
+    unreadSince: {},
+    seenTurnEndSeq: {},
+    sharedReadSeq: {}
+  })
 })
 
 afterEach(() => {
@@ -69,5 +77,19 @@ describe('useChatReadMarker', () => {
     setVisibility('visible')
 
     expect(sync.markChatRead.mock.calls).toEqual([['a', 8]])
+  })
+
+  it('reads nothing while the window is unfocused, and catches up on focus', () => {
+    focused = false
+    turnEnd('a', 4)
+    renderHook(() => useChatReadMarker(['a']))
+    expect(sync.markChatRead).not.toHaveBeenCalled()
+
+    act(() => {
+      focused = true
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    expect(sync.markChatRead.mock.calls).toEqual([['a', 4]])
   })
 })

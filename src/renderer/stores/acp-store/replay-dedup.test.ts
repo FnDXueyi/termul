@@ -165,6 +165,7 @@ import {
   initAcpEventListeners,
   useAcpStore
 } from '@/stores/acp-store'
+import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { FRESH, flushTurnEnd, seedSession } from './testkit'
 
 describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () => {
@@ -777,6 +778,24 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     )
     _flushCoalescedForTesting()
     expect(useAcpStore.getState().messages['s-rec']).toEqual(messages)
+  })
+
+  it('records the seq of a turn end recovered from a snapshot as seen (cross-surface unread)', async () => {
+    seedSession('s-rec-end', 'agent-1', false)
+    await _installTransportRecoveryForTesting({
+      sessionId: 's-rec-end',
+      watermark: 20,
+      events: [
+        {
+          sid: 's-rec-end',
+          seq: 14,
+          type: 'prompt_complete',
+          payload: { sessionId: 's-rec-end', stopReason: 'end_turn', turnId: 't-gone' }
+        }
+      ]
+    })
+
+    expect(useAgentChatUnreadStore.getState().seenTurnEndSeq['s-rec-end']).toBe(14)
   })
 
   it('normalizes wire user_prompt + user-role chunks in the recovery fold (chip parity)', async () => {

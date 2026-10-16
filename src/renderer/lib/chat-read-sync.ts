@@ -4,7 +4,6 @@
  * desktop, a shared-live phone and a `termul-server` browser alike.
  */
 import type { ChatReadsWatchDelta, ChatReadsWatchState } from '@shared/types/web-protocol.types'
-import { ACP_EVENTS, type PromptCompleteEvent } from '@/lib/acp-api'
 import { type AcpTransport, getAcpTransport } from '@/lib/acp-transport'
 import { logFrontendError } from '@/lib/log-api'
 import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
@@ -17,17 +16,19 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Start mirroring turn ends and the host's read markers. Returns the stop. */
+/**
+ * Record that this renderer has seen the turn end `seq` of `sessionId`. The
+ * acp-store calls it for every `prompt_complete` it receives, live, replayed or
+ * recovered from a snapshot, before the turn end is applied.
+ */
+export function noteTurnEndSeq(sessionId: string, seq: number | undefined): void {
+  if (!sessionId || typeof seq !== 'number' || seq <= 0) return
+  useAgentChatUnreadStore.getState().noteTurnEnd(sessionId, seq)
+}
+
+/** Start mirroring the host's read markers. Returns the stop. */
 export function startChatReadSync(transport: AcpTransport = getAcpTransport()): () => void {
   const store = useAgentChatUnreadStore.getState
-  const offTurnEnds = transport.onEvent<PromptCompleteEvent>(
-    ACP_EVENTS.promptComplete,
-    (event, eventSeq) => {
-      if (typeof eventSeq === 'number' && eventSeq > 0 && event?.sessionId) {
-        store().noteTurnEnd(event.sessionId, eventSeq)
-      }
-    }
-  )
   const offMarks = transport.watches?.subscribe<ChatReadsWatchState, ChatReadsWatchDelta>(
     'chat_reads',
     {
@@ -46,10 +47,7 @@ export function startChatReadSync(transport: AcpTransport = getAcpTransport()): 
       }
     }
   )
-  return () => {
-    offTurnEnds()
-    offMarks?.()
-  }
+  return () => offMarks?.()
 }
 
 /**
@@ -67,12 +65,18 @@ export function markChatRead(
   const settle = () => {
     if (unansweredSeq.get(sessionId) === seq) unansweredSeq.delete(sessionId)
   }
-  transport.markChatRead(sessionId, seq).then(settle, (error: unknown) => {
-    settle()
-    void logFrontendError({
-      level: 'warn',
-      source: SOURCE,
-      message: `mark_chat_read failed for a chat at seq ${seq}: ${describe(error)}`
-    })
-  })
+  transport.markChatRead(sessionId, seq).then(
+    (mark) => {
+      settle()
+      useAgentChatUnreadStore.getState().setReadMark(mark.sessionId, mark.seq)
+    },
+    (error: unknown) => {
+      settle()
+      void logFrontendError({
+        level: 'warn',
+        source: SOURCE,
+        message: `mark_chat_read failed for a chat at seq ${seq}: ${describe(error)}`
+      })
+    }
+  )
 }

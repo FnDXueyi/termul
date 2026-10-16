@@ -35,6 +35,7 @@ export function useAgentChatUnreadTracker(activeSessionIds: readonly string[]): 
     })
   )
   const previousBusy = useRef<Record<string, boolean>>({})
+  const seenAtTurnStart = useRef<Record<string, number>>({})
 
   // Callers pass a fresh array every render; a joined key keeps the effect from
   // re-running unless the set of ids actually changed.
@@ -47,11 +48,14 @@ export function useAgentChatUnreadTracker(activeSessionIds: readonly string[]): 
   useLayoutEffect(() => {
     const previous = previousBusy.current
     previousBusy.current = busyBySession
-    const { markUnread, clearUnread } = useAgentChatUnreadStore.getState()
+    const { markUnread, clearUnread, seenTurnEndSeq } = useAgentChatUnreadStore.getState()
     for (const [sessionId, busy] of Object.entries(busyBySession)) {
+      if (busy && previous[sessionId] !== true) {
+        seenAtTurnStart.current[sessionId] = seenTurnEndSeq[sessionId] ?? 0
+      }
       const turnFinished = previous[sessionId] === true && !busy
       if (turnFinished && !activeSet.has(sessionId)) {
-        markUnread(sessionId)
+        markUnread(sessionId, seenAtTurnStart.current[sessionId])
       }
     }
     for (const sessionId of activeSet) clearUnread(sessionId)

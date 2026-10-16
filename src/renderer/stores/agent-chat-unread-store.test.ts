@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { useAgentChatUnreadStore } from './agent-chat-unread-store'
 
 beforeEach(() => {
-  useAgentChatUnreadStore.setState({ unread: {}, seenTurnEndSeq: {}, sharedReadSeq: {} })
+  useAgentChatUnreadStore.setState({
+    unread: {},
+    unreadSince: {},
+    seenTurnEndSeq: {},
+    sharedReadSeq: {}
+  })
 })
 
 function unread(): Record<string, true> {
@@ -50,11 +55,11 @@ describe('useAgentChatUnreadStore', () => {
     expect(useAgentChatUnreadStore.getState().unread).toEqual({})
   })
 
-  it('clears a dot once another surface read the newest turn end seen here', () => {
+  it('clears a dot once another surface read the turn end that raised it', () => {
     const store = useAgentChatUnreadStore.getState()
     store.noteTurnEnd('a', 12)
-    store.markUnread('a')
-    store.markUnread('b')
+    store.markUnread('a', 4)
+    store.markUnread('b', 0)
 
     store.setReadMark('a', 12)
 
@@ -64,34 +69,54 @@ describe('useAgentChatUnreadStore', () => {
   it('keeps the dot when the other surface read only an earlier turn', () => {
     const store = useAgentChatUnreadStore.getState()
     store.noteTurnEnd('a', 12)
-    store.markUnread('a')
+    store.markUnread('a', 4)
 
     store.setReadMark('a', 8)
 
     expect(unread()).toEqual({ a: true })
   })
 
-  it('keeps a dot whose turn end seq it never saw, whatever the marker says', () => {
+  it('keeps a dot whose turn end was never seen here, through every later sweep', () => {
     const store = useAgentChatUnreadStore.getState()
-    store.markUnread('a')
+    store.noteTurnEnd('a', 10)
+    store.setReadMark('a', 10)
+    store.markUnread('a', 10)
 
-    store.setReadMarks({ a: 500 })
+    store.noteTurnEnd('b', 11)
+    store.setReadMarks({ a: 10 })
 
     expect(unread()).toEqual({ a: true })
   })
 
-  it('keeps the dot of a newer turn end than the read, and clears it when the read catches up', () => {
+  it('clears that dot once a later turn end is seen and read elsewhere', () => {
     const store = useAgentChatUnreadStore.getState()
-    store.setReadMarks({ a: 12 })
-    store.noteTurnEnd('a', 12)
-    store.markUnread('a')
-    store.noteTurnEnd('a', 30)
-    store.setReadMarks({ a: 12 })
-    expect(unread()).toEqual({ a: true })
+    store.noteTurnEnd('a', 10)
+    store.markUnread('a', 10)
+    store.noteTurnEnd('a', 25)
 
-    store.setReadMark('a', 30)
+    store.setReadMark('a', 25)
 
     expect(unread()).toEqual({})
+  })
+
+  it('banks no dot for a turn end another surface already read', () => {
+    const store = useAgentChatUnreadStore.getState()
+    store.noteTurnEnd('a', 12)
+    store.setReadMark('a', 12)
+
+    store.markUnread('a', 4)
+
+    expect(unread()).toEqual({})
+  })
+
+  it('defaults a dot to needing a turn end newer than the newest seen now', () => {
+    const store = useAgentChatUnreadStore.getState()
+    store.noteTurnEnd('a', 12)
+    store.markUnread('a')
+
+    store.setReadMark('a', 12)
+
+    expect(unread()).toEqual({ a: true })
   })
 
   it('never lowers the newest turn end seen', () => {
