@@ -155,6 +155,35 @@ describe('MCP probe refresh', () => {
     ])
   })
 
+  it('forgets a server deleted while its probe was in flight', async () => {
+    const probe = deferred<ProbeResult>()
+    vi.mocked(invoke).mockReturnValueOnce(probe.promise).mockResolvedValueOnce(REFUSED)
+
+    const inFlight = useAcpStore.getState().probeMcpServer('fs')
+    await useAcpStore.getState().deleteMcpServer('fs')
+    probe.resolve(CONNECTED)
+    await inFlight
+
+    const afterDelete = useAcpStore.getState()
+    expect([
+      afterDelete.mcpProbeStatus,
+      afterDelete.mcpTools,
+      afterDelete.mcpToolsLoaded,
+      afterDelete.mcpProbing,
+      afterDelete.mcpProbeError
+    ]).toEqual([{}, {}, {}, {}, {}])
+
+    await useAcpStore
+      .getState()
+      .saveMcpServer({ id: 'fs', type: 'stdio', name: 'Files', command: 'old-cmd', enabled: true })
+    await useAcpStore.getState().loadMcpTools('fs')
+
+    expect(probedConfigs()).toHaveLength(2)
+    expect(useAcpStore.getState().mcpProbeStatus.fs).toBe('disconnected')
+    expect(useAcpStore.getState().mcpTools.fs).toEqual([])
+    expect(useAcpStore.getState().mcpProbeError.fs).toBe('spawn failed')
+  })
+
   it('retries a server whose last probe ended disconnected when its tool list is expanded', async () => {
     vi.mocked(invoke).mockResolvedValue(CONNECTED)
 
