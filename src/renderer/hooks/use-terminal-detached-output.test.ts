@@ -559,7 +559,6 @@ describe('useTerminalDetachedOutput', () => {
     unmount()
   })
 
-  // '€' is E2 82 AC in UTF-8; a PTY read() can end anywhere inside it.
   const EURO = [0xe2, 0x82, 0xac]
 
   it('renders a multi-byte character split across two chunks intact', () => {
@@ -607,13 +606,7 @@ describe('useTerminalDetachedOutput', () => {
 
   describe('never-registered pty buffers', () => {
     beforeEach(() => {
-      vi.useFakeTimers()
-      // Fake timers replace rAF; restore the deterministic frame stub.
-      globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
-        const handle = nextHandle++
-        scheduled.set(handle, cb)
-        return handle
-      }) as typeof requestAnimationFrame
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     })
 
     afterEach(() => {
@@ -637,7 +630,6 @@ describe('useTerminalDetachedOutput', () => {
           'Dropped 15 chars of PTY output buffered for pty=pty-orphan-1: no terminal record after 30000ms'
       })
 
-      // A record appearing after the reap finds nothing left to deliver.
       mockFindTerminalByPtyId.mockReturnValue({ rendererAttachmentCount: 0, isAppHidden: false })
       flushDetachedOutputNow()
       unmount()

@@ -21,12 +21,6 @@ const IS_DEV = import.meta.env.DEV
  */
 const FLUSH_BACKSTOP_MS = 250
 
-/**
- * How long a buffer may wait for its terminal record. Pre-store data normally
- * drains within a spawn round-trip; a ptyId the store never registers (or one
- * whose record was removed before its buffer flushed) would otherwise hold up
- * to MAX_TRANSCRIPT_CHARS until unmount.
- */
 const UNREGISTERED_PTY_TTL_MS = 30_000
 
 function scheduleFlush(callback: () => void): () => void {
@@ -77,7 +71,6 @@ interface PendingBuffer {
    * would lose data the pre-coalescing code captured synchronously.
    */
   capturedDetached: boolean
-  /** Armed while the buffer has no terminal record to flush into. */
   reapTimer: ReturnType<typeof setTimeout> | null
 }
 
@@ -160,8 +153,6 @@ export function flushDetachedOutputNow(): void {
 export function useTerminalDetachedOutput(): void {
   useEffect(() => {
     const pendingBuffers = new Map<string, PendingBuffer>()
-    // One streaming decoder per pty: read() chunks split multi-byte UTF-8
-    // sequences, so each stream carries its partial bytes to its next chunk.
     const decoders = new Map<string, TextDecoder>()
     let cancelFlush: (() => void) | null = null
 
@@ -171,9 +162,7 @@ export function useTerminalDetachedOutput(): void {
       pendingBuffers.delete(ptyId)
     }
 
-    const reapIfUnregistered = (ptyId: string): void => {
-      const buffer = pendingBuffers.get(ptyId)
-      if (!buffer) return
+    const reapIfUnregistered = (ptyId: string, buffer: PendingBuffer): void => {
       buffer.reapTimer = null
       if (useTerminalStore.getState().findTerminalByPtyId(ptyId)) return
       pendingBuffers.delete(ptyId)
@@ -186,7 +175,10 @@ export function useTerminalDetachedOutput(): void {
     }
 
     const armReaper = (ptyId: string, buffer: PendingBuffer): void => {
-      buffer.reapTimer ??= setTimeout(() => reapIfUnregistered(ptyId), UNREGISTERED_PTY_TTL_MS)
+      buffer.reapTimer ??= setTimeout(
+        () => reapIfUnregistered(ptyId, buffer),
+        UNREGISTERED_PTY_TTL_MS
+      )
     }
 
     const flushPending = (): void => {
@@ -203,9 +195,6 @@ export function useTerminalDetachedOutput(): void {
       for (const [ptyId, buffer] of pendingBuffers) {
         const terminal = store.findTerminalByPtyId(ptyId)
         if (!terminal) {
-          // Store record still not available — keep buffering. Delivery is
-          // retried on the next chunk or store change; the reaper bounds how
-          // long a record that never comes can hold the buffer.
           armReaper(ptyId, buffer)
           continue
         }
@@ -325,8 +314,6 @@ export function useTerminalDetachedOutput(): void {
       const decoder = decoders.get(ptyId)
       if (!decoder) return
       decoders.delete(ptyId)
-      // A stream that ends mid-character surfaces as U+FFFD, as a
-      // non-streaming decode would have shown it.
       const tail = decoder.decode()
       if (tail) capture(ptyId, tail)
     })
