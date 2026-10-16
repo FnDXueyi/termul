@@ -88,17 +88,31 @@ function headingForCategory(category: string | null | undefined, fallbackName: s
   return fallbackName
 }
 
-/** Prefix agents use when re-promoting a discovered skill as a command
- * (`skill:<name>`, e.g. Devin). */
+/** Prefix some harnesses use when they publish a discovered skill as a
+ * command (`skill:<name>`, e.g. Devin). */
 const PROMOTED_SKILL_COMMAND_PREFIX = 'skill:'
 
 /** Strip the agent skill-promotion prefix, if present. Case-insensitive on
  * the prefix (agent command names are unconstrained); the suffix is trimmed
- * and lowercased for comparison against validated-lowercase skill names. */
+ * and lowercased for comparison against skill names. */
 function promotedSkillName(name: string): string | null {
   if (!name.toLowerCase().startsWith(PROMOTED_SKILL_COMMAND_PREFIX)) return null
   const suffix = name.slice(PROMOTED_SKILL_COMMAND_PREFIX.length).trim().toLowerCase()
   return suffix || null
+}
+
+/** Names an ACP command already covers, so the matching injected skill is hidden.
+ * A bare command name and a `skill:<name>` suffix both count. Comparison is
+ * case-insensitive. */
+function coveredSkillNames(commands: AvailableCommand[]): Set<string> {
+  const covered = new Set<string>()
+  for (const command of commands) {
+    const bare = command.name.trim().toLowerCase()
+    if (bare) covered.add(bare)
+    const promoted = promotedSkillName(command.name)
+    if (promoted) covered.add(promoted)
+  }
+  return covered
 }
 
 /**
@@ -123,13 +137,14 @@ export function buildSlashSections(input: SlashMenuInput): SlashSection[] {
   const visibleCommands = commands.filter((c) => matches(filter, c.name, c.description))
   const visibleSkills = skills.filter((s) => matches(filter, s.name, s.description))
 
-  // Dedup against the agent's ACP commands: when a skill shares a name with
-  // a command the agent already surfaces natively, the command wins and the
-  // skill is hidden so the same name never appears twice. Skills the agent
-  // does NOT surface are still listed (fixes the post-#506 "skills missing").
-  const commandNames = new Set(visibleCommands.map((c) => c.name))
+  // Command is the source of truth. Hide an injected skill when a visible
+  // ACP command already represents it: the same name, or a harness
+  // re-promotion `skill:<name>`. Comparison is case-insensitive. Skills the
+  // harness does not publish stay listed. Dedupe uses the post-filter lists
+  // so a row hidden by the text filter cannot suppress the only visible row.
+  const covered = coveredSkillNames(visibleCommands)
   const skillItems: SlashItem[] = visibleSkills
-    .filter((s) => !commandNames.has(s.name))
+    .filter((s) => !covered.has(s.name.trim().toLowerCase()))
     .map((s) => ({
       kind: 'skill',
       name: s.name,
@@ -141,23 +156,15 @@ export function buildSlashSections(input: SlashMenuInput): SlashSection[] {
     sections.push({ id: 'skills', heading: 'Skills', items: skillItems })
   }
 
-  // Reverse dedup for agent-promoted skill commands (`skill:<name>`): the
-  // injected termul skill item is first class, so the mirrored command is
-  // hidden and the name appears once (Skills). Built from the RETAINED skill
-  // items — a `skill:` mirror stays listed when its skill was suppressed by
-  // the forward dedupe or names an agent-only skill termul never discovered.
-  const injectedSkillNames = new Set(skillItems.map((s) => (s.kind === 'skill' ? s.name : '')))
-  const commandItems: SlashItem[] = visibleCommands
-    .filter((c) => {
-      const promoted = promotedSkillName(c.name)
-      return promoted === null || !injectedSkillNames.has(promoted)
-    })
-    .map((c) => ({
-      kind: 'command',
-      name: c.name,
-      description: c.description ?? null,
-      hint: c.input?.hint?.trim() || null
-    }))
+  // Commands are not filtered against skills. A `skill:<name>` command stays
+  // even when it covered an injected skill, and an agent-only `skill:` command
+  // stays when termul never discovered that name.
+  const commandItems: SlashItem[] = visibleCommands.map((c) => ({
+    kind: 'command',
+    name: c.name,
+    description: c.description ?? null,
+    hint: c.input?.hint?.trim() || null
+  }))
   if (commandItems.length > 0) {
     sections.push({ id: 'commands', heading: 'Commands', items: commandItems })
   }

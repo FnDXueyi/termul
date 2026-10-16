@@ -2,10 +2,11 @@
 //! `~/.agents/skills/` (global) and `{project}/.agents/skills/` (project-local).
 //!
 //! Surfaced to the renderer slash-command menu via `commands.rs`. The renderer
-//! dedupes in both directions: a skill the agent already reports natively as an
-//! ACP `availableCommands` entry is not shown twice, and an agent command that
-//! re-promotes a discovered skill (`skill:<name>`) is hidden in favour of the
-//! injected skill item (see `slash-menu-model`).
+//! treats ACP `availableCommands` as the source of truth: an injected skill is
+//! hidden when a command already represents it, either by the same name or as
+//! a re-promoted `skill:<name>` command. Comparison is case-insensitive. The
+//! command stays. Skills the agent does not publish are still listed (see
+//! `slash-menu-model`).
 
 pub mod commands;
 
