@@ -1653,8 +1653,9 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(paneContent, 'utf-8')).toMatch(/CanvasPanel/)
 
       const tabBar = join(LIB_DIR, '..', 'components', 'workspace', 'WorkspaceTabBar.tsx')
-      expect(readFileSync(tabBar, 'utf-8')).toMatch(/case 'canvas'/)
-      expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeCanvas/)
+      expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeWorkspaceTab/)
+      const tabClose = join(LIB_DIR, 'workspace-tab-close.ts')
+      expect(readFileSync(tabClose, 'utf-8')).toMatch(/canvas: \(tab\) => \{[^}]*closeCanvas/)
 
       // The workspace store owns the singleton-per-project tab id helper.
       const workspaceStoreTree = join(LIB_DIR, '..', 'stores', 'workspace-store', 'tree.ts')
