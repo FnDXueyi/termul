@@ -172,68 +172,6 @@ async fn reopen_recounts_a_legacy_session_once() {
 }
 
 #[tokio::test]
-async fn replay_tail_deepens_past_a_run_of_meta_records() {
-    let root = temp_dir("tail-meta-run");
-    let persistence = registered(&root).await;
-    let mut records = Vec::new();
-    for turn in 0..3u64 {
-        let turn_id = format!("turn-{turn}");
-        records.push(prompt(turn * 3 + 1, &turn_id));
-        records.push(agent_chunk(turn * 3 + 2));
-        records.push(complete(turn * 3 + 3, &turn_id));
-    }
-    for seq in 10..210 {
-        records.push(commands_update(seq));
-    }
-    enqueue(&persistence, records);
-    persistence.flush_session("session-1").await.unwrap();
-
-    let tail = persistence.replay_tail("session-1", 5).unwrap();
-    let turns: Vec<(u64, &str)> = tail
-        .iter()
-        .filter(|record| record.type_ != "commands_update")
-        .map(|record| (record.seq, record.type_.as_str()))
-        .collect();
-    assert_eq!(
-        turns,
-        vec![
-            (1, "user_prompt"),
-            (2, "message_chunk"),
-            (3, "prompt_complete"),
-            (4, "user_prompt"),
-            (5, "message_chunk"),
-            (6, "prompt_complete"),
-            (7, "user_prompt"),
-            (8, "message_chunk"),
-            (9, "prompt_complete"),
-        ]
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn replay_tail_stops_once_a_short_session_is_whole() {
-    let root = temp_dir("tail-short-session");
-    let persistence = registered(&root).await;
-    let mut records: Vec<_> = (1..=300).map(commands_update).collect();
-    records.extend([
-        prompt(301, "turn-1"),
-        agent_chunk(302),
-        complete(303, "turn-1"),
-    ]);
-    enqueue(&persistence, records);
-    persistence.flush_session("session-1").await.unwrap();
-
-    let tail = persistence.replay_tail("session-1", 5).unwrap();
-    assert_eq!(
-        (tail.len(), tail.first().map(|record| record.seq)),
-        (19, Some(285)),
-        "both messages are in the first window; nothing older is read"
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn recover_recounts_counts_that_lag_the_log_after_a_crash() {
     let root = temp_dir("recount-crash-lag");
     let persistence = registered(&root).await;
@@ -271,40 +209,6 @@ async fn recover_recounts_counts_that_lag_the_log_after_a_crash() {
         ),
         (50, 20, None, true)
     );
-    reopened.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn payload_tail_ignores_a_stale_count_before_resume() {
-    let root = temp_dir("tail-stale-count");
-    let persistence = registered(&root).await;
-    let mut records = vec![prompt(1, "turn-1"), agent_chunk(2), complete(3, "turn-1")];
-    records.extend((4..=103).map(commands_update));
-    records.extend([
-        prompt(104, "turn-2"),
-        agent_chunk(105),
-        complete(106, "turn-2"),
-    ]);
-    enqueue(&persistence, records);
-    persistence.flush_session("session-1").await.unwrap();
-    let metadata_path = session_file(&persistence, METADATA_FILE);
-    let flushed_after_two_turns = fs::read(&metadata_path).unwrap();
-    let mut crashed_turn: Vec<_> = (107..=156).map(commands_update).collect();
-    crashed_turn.push(prompt(157, "turn-3"));
-    crashed_turn.extend((158..=217).map(agent_chunk));
-    enqueue(&persistence, crashed_turn);
-    persistence.shutdown().await.unwrap();
-    drop(persistence);
-    fs::write(&metadata_path, flushed_after_two_turns).unwrap();
-
-    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
-    let tail = reopened
-        .session_payload_tail_async("session-1", 5)
-        .await
-        .unwrap();
-    let seqs: Vec<u64> = tail.messages.iter().map(|message| message.seq).collect();
-    assert_eq!(seqs, vec![2, 104, 105, 157, 158]);
     reopened.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(root);
 }

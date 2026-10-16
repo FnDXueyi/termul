@@ -1445,16 +1445,7 @@ impl SessionPersistence {
                 }
                 _ => false,
             };
-            // `recover()` leaves counts stale after a crash until the writer
-            // recounts, so an uncounted session deepens to the full limit.
-            let messages_on_disk_up_to_limit = if metadata.fold_counted {
-                metadata.message_count.min(limit as u64)
-            } else {
-                limit as u64
-            };
-            let short = !tail.reached_head
-                && fold_counts(&mut records).message_count < messages_on_disk_up_to_limit;
-            if !crosses_edge && (!short || max_lines >= TAIL_DEEPEN_MAX_LINES) {
+            if !crosses_edge {
                 log::info!(
                     "[acp-history] replay_tail session_id={} limit={} tail_records={} oldest_seq={}",
                     crate::logging::redact_session_id(session_id),
@@ -1489,15 +1480,10 @@ impl SessionPersistence {
             max_lines = (max_lines.saturating_mul(2)).min(TAIL_DEEPEN_MAX_LINES);
             log::debug!(
                 "[acp-history] replay_tail session_id={} limit={} deepened max_lines={} \
-                 reason={}",
+                 (window edge continues an earlier run)",
                 crate::logging::redact_session_id(session_id),
                 limit,
-                max_lines,
-                if crosses_edge {
-                    "edge_continues_run"
-                } else {
-                    "short_window"
-                }
+                max_lines
             );
         }
     }
