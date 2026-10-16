@@ -68,6 +68,7 @@ import {
   isResumeFailureError,
   mergeSessionIndexEntries,
   normalizeUserMessages,
+  openTurnPromptSeq,
   partitionTranscriptTurns,
   refreshHostOwnedIndex,
   resolveSwitchRedirect,
@@ -100,6 +101,7 @@ import {
   isCurrentSessionReopen,
   liveSwitchSources,
   noteHistoryWatermark,
+  noteLiveTurnReplayFloor,
   persistSession,
   rebaseSeqCounter,
   rebaseUntitledCounter,
@@ -223,7 +225,14 @@ async function attachLiveTurn(
   payload: SessionPayload,
   reopenGeneration: number
 ): Promise<void> {
-  const cursor = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  const watermark = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  // The payload only summarizes the open turn's tool calls, while the relay
+  // still holds that turn's events in full. Subscribe from just before its
+  // prompt so the replay restores the cards; the history watermark keeps the
+  // replayed prompt and chunks from rendering twice.
+  const promptSeq = openTurnPromptSeq(payload.messages)
+  const cursor = promptSeq === null ? watermark : promptSeq - 1
+  if (promptSeq !== null) noteLiveTurnReplayFloor(id, cursor)
   const transport = getAcpTransport()
   transport.seedSessionCursor?.(id, {
     lastSeq: cursor,
@@ -255,7 +264,7 @@ async function attachLiveTurn(
   void logFrontendError({
     level: 'info',
     source: 'acp.attachLiveTurn',
-    message: `Attaching to live turn for session ${id} via subscribe/replay instead of resume/load`
+    message: `Attaching to live turn for session ${id} via subscribe/replay instead of resume/load (cursor ${cursor}, history watermark ${watermark})`
   })
   try {
     if (transport.subscribeSession) {
