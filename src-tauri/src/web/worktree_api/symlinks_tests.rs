@@ -102,7 +102,7 @@ async fn parse_gitignore_lists_plain_directory_entries() {
     let p = project("gitignore");
     std::fs::write(
         p.root.join(".gitignore"),
-        "# deps\nshared/\n*.log\n!keep\nsrc/build/\ndist\n.claude\nshared\n",
+        "# deps\nshared/\n*.log\n!keep\nsrc/build/\ndist\n.claude\nshared\na&echo\n",
     )
     .expect("write .gitignore");
 
@@ -276,4 +276,87 @@ async fn create_symlinks_refuses_rooted_and_drive_relative_names() {
             .all(|r| r.starts_with("Invalid symlink directory name")),
         "{reasons:?}"
     );
+}
+
+fn verdicts(body: &IpcBody<serde_json::Value>) -> Vec<(String, String)> {
+    assert!(body.success, "expected success, got {body:?}");
+    body.data
+        .as_ref()
+        .and_then(|d| d.as_array())
+        .expect("result array")
+        .iter()
+        .map(|r| {
+            let reason = r["reason"].as_str().unwrap_or_default();
+            let verdict = if reason.starts_with("Invalid symlink directory name") {
+                "invalid"
+            } else {
+                reason
+            };
+            (
+                r["status"].as_str().expect("status").to_string(),
+                verdict.to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn create_symlinks_refuses_nested_names_and_cmd_metacharacters() {
+    let p = project("links-names");
+    let names = [
+        "a/b", "a\\b", "a&echo", "p|q", "lt<x", "gt>x", "car^x", "pct%x", "bang!x", "q\"x",
+        "par(x)", "c,d", "tab\tx",
+    ];
+    for name in names {
+        let _ = std::fs::create_dir_all(p.root.join(name));
+    }
+    let body = post_from(
+        router(test_state(p.dir.path())),
+        "/worktree/create-symlinks",
+        json!({
+            "projectPath": s(&p.root),
+            "worktreePath": s(&p.worktree),
+            "symlinkDirs": names
+        }),
+        loopback(),
+    )
+    .await;
+
+    let expected: Vec<(String, String)> = names
+        .iter()
+        .map(|_| ("skipped".to_string(), "invalid".to_string()))
+        .collect();
+    assert_eq!(verdicts(&body), expected);
+    assert_eq!(
+        std::fs::read_dir(&p.worktree).expect("worktree").count(),
+        0,
+        "no link or parent dir may be created for a refused name"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_symlinks_cannot_follow_a_committed_intermediate_link_outside() {
+    let p = project("links-intermediate");
+    let outside = TempDir::new("links-intermediate-outside");
+    std::fs::create_dir_all(p.root.join("a").join("b")).expect("nested source");
+    std::os::unix::fs::symlink(outside.path(), p.worktree.join("a")).expect("intermediate link");
+
+    let body = post_from(
+        router(test_state(p.dir.path())),
+        "/worktree/create-symlinks",
+        json!({
+            "projectPath": s(&p.root),
+            "worktreePath": s(&p.worktree),
+            "symlinkDirs": ["a/b"]
+        }),
+        loopback(),
+    )
+    .await;
+
+    assert_eq!(
+        verdicts(&body),
+        vec![("skipped".to_string(), "invalid".to_string())]
+    );
+    assert!(!outside.path().join("b").exists());
 }
