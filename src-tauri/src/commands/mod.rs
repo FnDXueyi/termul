@@ -86,6 +86,7 @@ pub mod project_icon;
 pub mod remote;
 pub mod search;
 pub(crate) mod search_dirs;
+pub(crate) mod search_file_hits;
 pub mod ssh;
 pub mod terminal;
 pub mod workspace;

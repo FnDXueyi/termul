@@ -1,6 +1,7 @@
 use super::search_dirs::{
-    assemble_final_batch, dir_search_registry_key, start_dir_search, DirSearch, FileWalkResult,
+    assemble_final_batch, dir_search_registry_key, start_dir_search, DirSearch,
 };
+use super::search_file_hits::{collect_file_hits, FileHitWalk};
 use super::IpcResult;
 use crate::path_validation;
 use serde::{Deserialize, Serialize};
@@ -1001,102 +1002,22 @@ pub async fn search_file_names_stream(
         };
 
     tauri::async_runtime::spawn_blocking(move || {
-        let reader = BufReader::new(stdout);
-        let max_files: usize = 100;
-        let batch_size: usize = 25;
-        let mut truncated = false;
-        let mut stream_error: Option<String> = None;
-
-        // `files` is the default-path bucket (mid-stream batched).
-        // `non_ignored` + `ignored_bucket` are the `include_ignored`-path
-        // buckets, ranked after the walk so node_modules can't crowd out
-        // source files. See ADR 0003.
-        let mut files: Vec<SearchFileHit> = Vec::new();
-        let mut non_ignored: Vec<SearchFileHit> = Vec::new();
-        let mut ignored_bucket: Vec<SearchFileHit> = Vec::new();
-        const IGNORED_CAP: usize = 20;
-        let mut ignored_dropped: usize = 0;
-        let mut broke_at_cap = false;
-        let mut stdout_stopped_early = false;
-        let mut last_batch_count: usize = 0;
-
-        // Collect output until we hit the cap, EOF, or a pipe error. The
-        // iterator-based form `map_while(Result::ok)` would swallow I/O
-        // errors, so we use a manual loop that records the first error.
-        let mut iter = reader.lines();
-        loop {
-            match iter.next() {
-                Some(Ok(line)) => {
-                    // ripgrep on Windows may emit verbatim paths
-                    // (e.g. `\\?\C:\...`) when the root is canonicalized.
-                    // Strip the prefix before the slash-normalization so the
-                    // renderer never sees a `\\?\` blob in click paths.
-                    let normalized =
-                        path_validation::strip_verbatim_prefix(&line).replace('\\', "/");
-                    if include_ignored {
-                        // Stop as soon as the non-ignored bucket is full: later
-                        // ignored hits can no longer survive `rank_search_hits`,
-                        // so walking further just wastes time in large repos.
-                        if non_ignored.len() >= max_files {
-                            broke_at_cap = true;
-                            stdout_stopped_early = true;
-                            break;
-                        }
-                        if path_is_ignored(&normalized) {
-                            if ignored_bucket.len() < IGNORED_CAP {
-                                ignored_bucket.push(SearchFileHit {
-                                    path: normalized,
-                                    ignored: true,
-                                    kind: None,
-                                });
-                            } else {
-                                ignored_dropped += 1;
-                            }
-                        } else {
-                            non_ignored.push(SearchFileHit {
-                                path: normalized,
-                                ignored: false,
-                                kind: None,
-                            });
-                        }
-                    } else {
-                        if files.len() >= max_files {
-                            truncated = true;
-                            stdout_stopped_early = true;
-                            break;
-                        }
-                        files.push(SearchFileHit {
-                            path: normalized,
-                            ignored: false,
-                            kind: None,
-                        });
-                        // Emit a mid-stream batch when we cross a batch
-                        // boundary, but skip the trailing batch below if we
-                        // already published this exact count.
-                        if files.len().is_multiple_of(batch_size) {
-                            // Mid-stream batch — final truncation state is
-                            // not known yet, so the field is `None` (serde
-                            // omits it from the wire). The trailing batch
-                            // below carries the authoritative value.
-                            let _ = app_handle.emit(
-                                "search-file-names-batch",
-                                SearchFileNamesBatchEvent {
-                                    search_id: search_id.clone(),
-                                    files: files.clone(),
-                                    truncated: None,
-                                },
-                            );
-                            last_batch_count = files.len();
-                        }
-                    }
-                }
-                Some(Err(e)) => {
-                    stream_error = Some(format!("stdout read error: {}", e));
-                    break;
-                }
-                None => break,
-            }
-        }
+        let FileHitWalk {
+            result: walk,
+            mut stream_error,
+            stopped_early: stdout_stopped_early,
+        } = collect_file_hits(BufReader::new(stdout), include_ignored, |files| {
+            // Mid-stream batch: final truncation is not known yet, so the
+            // field is `None` (serde omits it). The final batch carries it.
+            let _ = app_handle.emit(
+                "search-file-names-batch",
+                SearchFileNamesBatchEvent {
+                    search_id: search_id.clone(),
+                    files: files.to_vec(),
+                    truncated: None,
+                },
+            );
+        });
 
         // Join the folder pass (it runs concurrently with the file walk) and
         // drop its registry entry. Its failures never fail the file search.
@@ -1125,24 +1046,8 @@ pub async fn search_file_names_stream(
         // order and the ranked order. For the default path, skip if the count
         // matches the last mid-stream batch and there are no folder hits to
         // append. Batches are cumulative snapshots: files first, then folders.
-        let batch = assemble_final_batch(
-            FileWalkResult {
-                include_ignored,
-                files,
-                non_ignored,
-                ignored: ignored_bucket,
-                max_files,
-                truncated: if include_ignored {
-                    broke_at_cap || ignored_dropped > 0
-                } else {
-                    truncated
-                },
-                last_batch_count,
-            },
-            dir_outcome.hits,
-            dir_outcome.truncated,
-        );
-        truncated = batch.truncated;
+        let batch = assemble_final_batch(walk, dir_outcome.hits, dir_outcome.truncated);
+        let truncated = batch.truncated;
         if batch.emit {
             let _ = app_handle.emit(
                 "search-file-names-batch",
