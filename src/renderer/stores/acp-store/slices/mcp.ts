@@ -320,6 +320,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
       const configEditedDuringProbe = current !== undefined && !sameProbeConfig(current, server)
       if (configEditedDuringProbe) {
         set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
+        if (current.enabled === false) return
         return get().probeMcpServer(id)
       }
       set((s) => ({
