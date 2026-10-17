@@ -11,7 +11,7 @@ import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
 import { useReloadChat } from '@/hooks/use-reload-chat'
 import { useShellAnnouncements } from '@/hooks/use-shell-announcements'
 import { closeAgentChat } from '@/lib/agent-chat-close'
-import { returnFocusAfterConfirm } from '@/lib/confirm-focus-return'
+import { returnFocusAfterConfirm, returnFocusAfterModal } from '@/lib/confirm-focus-return'
 import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import {
   holdSheetReturnTargets,
@@ -324,16 +324,16 @@ export function MobileChatShell({
   // the close raised a confirm (a dirty editor) the sheet hands off to it, as
   // the drawer does: no focus return now, the opener once the confirm is gone.
   const skipMoreSheetFocusRef = useRef(false)
-  const cancelConfirmFocusRef = useRef<(() => void) | null>(null)
-  useEffect(() => () => cancelConfirmFocusRef.current?.(), [])
+  const cancelHandoffFocusRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => cancelHandoffFocusRef.current?.(), [])
   const closeActiveOtherTab =
     activeTab && activeTab.type !== 'agent-chat' && activeTab.type !== 'terminal'
       ? (): void => {
           if (!closePaneTab(activeTab)) return
           const restoreFocus = holdSheetReturnTargets('header-more-sheet')
           skipMoreSheetFocusRef.current = true
-          cancelConfirmFocusRef.current?.()
-          cancelConfirmFocusRef.current = returnFocusAfterConfirm(restoreFocus)
+          cancelHandoffFocusRef.current?.()
+          cancelHandoffFocusRef.current = returnFocusAfterConfirm(restoreFocus)
         }
       : undefined
   const onMoreSheetCloseAutoFocus = (event: Event): void => {
@@ -373,6 +373,18 @@ export function MobileChatShell({
     : undefined
   const openCommandPalette = !isTauriContext() ? onOpenCommandPalette : undefined
   const openProjectSettings = activeProject ? onOpenProjectSettings : undefined
+  // Project settings and New project hand a sheet over to a modal. The sheet's
+  // close consumes its recorded opener, so read it here and put focus back on
+  // it once the modal is gone.
+  const handOffToModal = (sheetId: string, open: (() => void) | undefined) =>
+    open
+      ? (): void => {
+          const restoreFocus = holdSheetReturnTargets(sheetId)
+          cancelHandoffFocusRef.current?.()
+          cancelHandoffFocusRef.current = returnFocusAfterModal(restoreFocus)
+          open()
+        }
+      : undefined
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background" data-mobile-chat-shell="">
@@ -450,8 +462,8 @@ export function MobileChatShell({
         <ProjectSwitcherDrawer
           open={projectsOpen}
           onOpenChange={setProjectsOpen}
-          onAddProject={onNewProject}
-          onOpenProjectSettings={openProjectSettings}
+          onAddProject={handOffToModal('projects-sheet', onNewProject)}
+          onOpenProjectSettings={handOffToModal('projects-sheet', openProjectSettings)}
           side="bottom"
           id="mobile-project-sheet"
           onCloseAutoFocus={projectSheetCloseAutoFocus}
@@ -480,7 +492,7 @@ export function MobileChatShell({
         onOpenFiles={openFilesFromSheet}
         onOpenCommandPalette={openCommandPalette}
         onNewTerminal={newTerminal}
-        onOpenProjectSettings={openProjectSettings}
+        onOpenProjectSettings={handOffToModal('header-more-sheet', openProjectSettings)}
         onCloseChat={activeTab?.type === 'agent-chat' ? closeActiveChat : undefined}
         onReloadChat={activeTab?.type === 'agent-chat' ? chatReload.reload : undefined}
         reloadChatDisabled={chatReload.disabled}
@@ -504,7 +516,7 @@ export function MobileChatShell({
           onOpenGitChanges={openGitChangesFromSheet}
           onOpenFiles={openFilesFromSheet}
           onOpenCommandPalette={openCommandPalette}
-          onOpenProjectSettings={openProjectSettings}
+          onOpenProjectSettings={handOffToModal('terminal-actions-sheet', openProjectSettings)}
           onCloseTerminal={onCloseTerminal}
         />
       )}
