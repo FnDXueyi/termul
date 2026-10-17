@@ -29,7 +29,7 @@ Termul Manager is a project-aware desktop terminal workspace built with Tauri 2.
 - [Design system](../DESIGN.md) - Token and component rules for renderer UI (`docs/design/` for topics)
 - [Development Guide](./development-guide.md) - Local setup, commands, and developer workflows
 - [API Contracts](./api-contracts.md) - Internal Tauri IPC command/event contracts
-- [Deployment Guide](./deployment-guide.md) - Release, packaging, and updater workflow
+- [Deployment Guide](./deployment-guide.md) - Release, packaging, updater workflow, and running `termul-server` in Docker
 - [Contribution Guide](./contribution-guide.md) - Contribution process and coding conventions
 - [Native SSH](./ssh-native.md) - SSH sessions, host keys, credentials and the russh stack
 
