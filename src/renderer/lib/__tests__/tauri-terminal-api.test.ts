@@ -400,6 +400,51 @@ describe('tauri-terminal-api', () => {
       expect(mockInvoke).toHaveBeenCalledTimes(1)
     })
 
+    describe('a rotate whose reply was lost (OUTCOME_UNKNOWN)', () => {
+      const LOST_ROTATE = {
+        success: false,
+        error: 'this `terminal_rotate_claim` already ran but its reply is not retained',
+        code: 'OUTCOME_UNKNOWN'
+      }
+
+      function scriptHost(listed: Array<ReturnType<typeof mockPreservedPty>>): void {
+        mockInvoke.mockImplementation(async (command: string) => {
+          if (command === 'terminal_spawn') return { success: true, data: SPAWNED }
+          if (command === 'terminal_rotate_claim') return LOST_ROTATE
+          if (command === 'terminal_list_preserved') return { success: true, data: listed }
+          throw new Error(`unexpected command ${command}`)
+        })
+      }
+
+      it('recovers the fresh claim through list_preserved for a terminal this page spawned', async () => {
+        const { api } = await loadApi()
+        scriptHost([mockPreservedPty({ id: 'terminal-1752-1', claim: 'recovered-claim' })])
+        await api.spawn({ projectId: 'p1' })
+
+        const rotated = await api.rotateClaim('terminal-1752-1', 'issued-claim-64-hex')
+
+        expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
+        expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
+          'terminal_spawn',
+          'terminal_rotate_claim',
+          'terminal_list_preserved'
+        ])
+        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'p1' })
+      })
+
+      it('recovers the fresh claim for a terminal a reloaded page learned from listPreserved', async () => {
+        const { api } = await loadApi()
+        scriptHost([mockPreservedPty({ id: 'terminal-9', claim: 'reissued-claim' })])
+        await api.listPreserved('project-a')
+        scriptHost([mockPreservedPty({ id: 'terminal-9', claim: 'recovered-claim' })])
+
+        const rotated = await api.rotateClaim('terminal-9', 'reissued-claim')
+
+        expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'project-a' })
+      })
+    })
+
     it('a spawn resent in-call (reply lost / first run still going) keeps its id, drops the new Channel and attaches with the fresh claim', async () => {
       vi.useFakeTimers()
       try {
