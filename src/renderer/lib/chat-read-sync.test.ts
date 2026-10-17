@@ -25,8 +25,10 @@ function fakeSurface(
   } as unknown as AcpTransport
   return {
     transport,
-    readState: (marks: Record<string, number>) => watch?.onState({ marks }),
-    readDelta: (sessionId: string, seq: number) => watch?.onDelta?.({ sessionId, seq }),
+    readState: (marks: Record<string, number>, logEpochs?: Record<string, string>) =>
+      watch?.onState({ marks, logEpochs }),
+    readDelta: (sessionId: string, seq: number, logEpoch?: string) =>
+      watch?.onDelta?.({ sessionId, seq, logEpoch }),
     watching: () => watch !== null
   }
 }
@@ -69,6 +71,31 @@ describe('startChatReadSync', () => {
     noteTurnEndSeq('s1', 15)
 
     desktop.readState({ s1: 7 })
+
+    expect(unreadIds()).toEqual(['s1'])
+  })
+
+  it('clears a dot once its turn end in the restarted host log is read elsewhere', () => {
+    const phone = fakeSurface()
+    startChatReadSync(phone.transport)
+    phone.readState({})
+    noteTurnEndSeq('s1', 50, 'e1')
+    useAgentChatUnreadStore.getState().markUnread('s1')
+    noteTurnEndSeq('s1', 3, 'e2')
+
+    phone.readDelta('s1', 3, 'e2')
+
+    expect(unreadIds()).toEqual([])
+  })
+
+  it('keeps a dot from the restarted host log that only a marker from the old log covers', () => {
+    const phone = fakeSurface()
+    startChatReadSync(phone.transport)
+    noteTurnEndSeq('s1', 4, 'e2')
+    useAgentChatUnreadStore.getState().markUnread('s1')
+    noteTurnEndSeq('s1', 12, 'e2')
+
+    phone.readState({ s1: 50 }, { s1: 'e1' })
 
     expect(unreadIds()).toEqual(['s1'])
   })
