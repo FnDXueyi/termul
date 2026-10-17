@@ -100,6 +100,14 @@ export interface ChatMessage {
    */
   seq?: number
   /**
+   * Host log seq of the relay event that opened a live bubble. A live bubble
+   * keeps its renderer `seq` for timeline order and its `msg-*` id, while its
+   * durable twin carries this seq as its own `seq` and in its id. Scroll-up
+   * anchors on it once the live window's oldest bubble is not in the payload.
+   * Absent on restored bubbles, whose `seq` already is the host seq.
+   */
+  hostSeq?: number
+  /**
    * spec-agent-switch-separator-redesign: a summary-only handoff
    * `user_prompt` folds to a boundary row — it renders nothing (empty
    * blocks, filtered before display) but keeps the turn's reply visible in

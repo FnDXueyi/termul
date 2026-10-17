@@ -22,6 +22,8 @@ import {
   getCachedSessionPayload,
   loadSessionPayload,
   markSessionPayloadPinned,
+  reloadSessionPayloadFromHost,
+  type SessionPayload,
   setCachedSessionPayload,
   unpinSessionPayload
 } from '@/lib/acp-history-persistence'
@@ -639,6 +641,25 @@ export function trimLiveWindow(messages: ChatMessage[], sessionId: SessionId): C
   return messages.slice(messages.length - keepCount)
 }
 
+/** The seq a bubble's durable twin carries in the host log. */
+function hostSeqOf(message: ChatMessage): number | undefined {
+  return message.hostSeq ?? message.seq
+}
+
+/**
+ * True when `payload` already holds the window's oldest bubble, so paging from
+ * it lands right before that bubble. A cached copy left by the trim probe stops
+ * at the host seq it was read at, and live events never extend it. A head
+ * without a host seq (this client's optimistic `turn:*` prompt, whose echo is
+ * deduped) is never proven covered: its `seq` is a renderer counter.
+ */
+function payloadReachesHead(payload: SessionPayload, head: ChatMessage): boolean {
+  if (head.id.startsWith(SWITCH_SPLICE_ID_PREFIX)) return true
+  if (payload.messages.some((m) => m.id === head.id)) return true
+  const lastSeq = payload.metadata.lastSeq
+  return head.hostSeq !== undefined && lastSeq !== undefined && head.hostSeq <= lastSeq
+}
+
 /**
  * CAP-1 durability-probe bookkeeping. `trimLiveWindow` fires one async
  * `loadSessionPayload` per cold-cache over-limit session;
@@ -925,11 +946,24 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       // Best-effort read: a disk/server failure must not surface as an
       // unhandled promise rejection in the UI — the reader keeps the current
       // view and can retry by scrolling up again.
-      const payload = await loadSessionPayload(sessionId).catch((e: unknown) => {
+      let payload = await loadSessionPayload(sessionId).catch((e: unknown) => {
         console.warn('[acp] loadOlderMessages: payload read failed', e)
         return null
       })
       if (!payload) return
+      const head = get().messages[sessionId]?.[0]
+      if (head && !payloadReachesHead(payload, head)) {
+        try {
+          payload = (await reloadSessionPayloadFromHost(sessionId)) ?? payload
+        } catch {
+          void logFrontendError({
+            level: 'warn',
+            source: 'acp.loadOlderMessages',
+            message: `Host re-read for session ${sessionId.slice(0, 8)}… failed; scroll-back waits for the next scroll-up instead of paging from a stale copy`
+          })
+          return
+        }
+      }
       // Re-read current state after the async gap — new chunks may have arrived.
       const current = get().messages[sessionId] ?? []
       if (current.length === 0) return
@@ -954,15 +988,14 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (oldestIdx === -1) {
         // Id anchor missed: the live head's id is absent from the persisted
         // payload. This happens when the live head is a locally-created
-        // bubble (live-only session, or created after the last persist), and
-        // historically when a tail fold minted a window-local `snapshot:` id
-        // for a run that opened before the tail window (the backend now
-        // deepens the window to a fold boundary, but persisted installs may
-        // still carry the drift). Fall back to seq anchoring: the bubble that
-        // contains `oldestSeq` is the last persisted message whose seq is at
-        // or below it — restored ids share the persisted seq domain, and the
-        // live counter is rebased above the max restored seq on install.
-        const oldestSeq = current[0].seq
+        // bubble (`msg-*` streams, whose twins carry `snapshot:*`/`user:seq-*`
+        // ids), and historically when a tail fold minted a window-local
+        // `snapshot:` id for a run that opened before the tail window (the
+        // backend now deepens the window to a fold boundary, but persisted
+        // installs may still carry the drift). Fall back to seq anchoring: the
+        // bubble that contains the head's host seq is the last persisted
+        // message whose seq is at or below it.
+        const oldestSeq = hostSeqOf(current[0])
         if (typeof oldestSeq === 'number' && Number.isFinite(oldestSeq)) {
           for (let i = fullMessages.length - 1; i >= 0; i -= 1) {
             const seq = fullMessages[i].seq
@@ -1141,7 +1174,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         blocks: content,
         streaming: false,
         timestamp: Date.now(),
-        seq: nextSeq()
+        seq: nextSeq(),
+        hostSeq: eventSeq
       }
       if (duplicate) return {}
       return {
@@ -1324,6 +1358,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         streaming: true,
         timestamp: Date.now(),
         seq: nextSeq(),
+        hostSeq: eventSeq,
         messageId: e.messageId
       }
       return { messages: { ...s.messages, [e.sessionId]: [...list, message] } }
