@@ -18,7 +18,10 @@ import { isTauriContext } from '@/lib/tauri-runtime'
 import { cn } from '@/lib/utils'
 import { reconcileProjectWorktrees } from '@/lib/worktree-reconciler'
 import { useDefaultProjectColor } from '@/stores/app-settings-store'
-import { useOverlayRegistration } from '@/stores/overlay-stack-store'
+import {
+  NEW_PROJECT_MODAL_OVERLAY_PREFIX,
+  useOverlayRegistration
+} from '@/stores/overlay-stack-store'
 import { useProjectStore, useProjects } from '@/stores/project-store'
 import type { EnvVariable, Project, ProjectColor } from '@/types/project'
 
@@ -48,7 +51,7 @@ const DOUBLED_NAME_RE = /^(.{2,}?)\1$/
 
 export function NewProjectModal({ isOpen, onClose, onCreateProject }: NewProjectModalProps) {
   // Mobile web shell: system back closes this modal (inert on desktop).
-  const overlayId = `new-project-modal:${useId()}`
+  const overlayId = `${NEW_PROJECT_MODAL_OVERLAY_PREFIX}${useId()}`
   useOverlayRegistration(overlayId, isOpen, onClose, { mobileShellOnly: true })
   const defaultColor = useDefaultProjectColor() as ProjectColor
   // Simple defaults (empty template, app default color, detected default shell,
