@@ -89,7 +89,7 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
   })
 
   it('exports exactly 51 request types including warm-pool promotion and host-owned session delete', () => {
-    expect(WS_REQUEST_TYPES).toHaveLength(51)
+    expect(WS_REQUEST_TYPES).toHaveLength(52)
     const expected = [
       'send_prompt',
       'cancel_prompt',
@@ -128,6 +128,7 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       'respond_elicitation',
       'list_acp_catalog',
       'set_catalog_opt_in',
+      'fetch_acp_registry_snapshot',
       // CAP-6 / Story 9: host-owned verified-atomic ACP install.
       'install_acp_agent',
       // Issue #613: server-side generic key-value store.

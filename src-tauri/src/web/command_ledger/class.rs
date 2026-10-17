@@ -151,6 +151,7 @@ pub const WS_COMMAND_CLASSES: &[(&str, CommandClass)] = &[
     ("get_session_payload_tail", CommandClass::read()),
     ("list_acp_catalog", CommandClass::read()),
     ("set_catalog_opt_in", CommandClass::idempotent()),
+    ("fetch_acp_registry_snapshot", CommandClass::read()),
     ("install_acp_agent", CommandClass::command(Replay::Payload)),
     (
         "acp_deliver_auth_redirect",

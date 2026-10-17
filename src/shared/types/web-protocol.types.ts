@@ -176,6 +176,10 @@ export const WS_REQUEST_TYPES = [
   // host is the single source of truth.
   'list_acp_catalog',
   'set_catalog_opt_in',
+  // The registry check behind "Check for updates": `{ reason: 'manual' |
+  // 'background' }`, answered with the host's `AcpRegistrySnapshot`
+  // (`source: 'cache'` when the registry was unreachable).
+  'fetch_acp_registry_snapshot',
   // CAP-6 / Story 9: host-owned verified-atomic ACP install. The web client
   // installs a catalog agent through `install_acp_agent` (the host downloads +
   // verifies sha256 + extracts + atomically activates). The request is
@@ -315,6 +319,7 @@ export const WS_COMMAND_CLASSES: Readonly<
   get_session_payload_tail: ['read', null],
   list_acp_catalog: ['read', null],
   set_catalog_opt_in: ['idempotent', null],
+  fetch_acp_registry_snapshot: ['read', null],
   install_acp_agent: ['command', 'payload'],
   acp_deliver_auth_redirect: ['command', 'receipt-only'],
   store_read: ['read', null],

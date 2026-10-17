@@ -20,7 +20,6 @@
 //! until the full transport lands — bounded-scrollback + `Lossy` backpressure
 //! per `terminal_ws.rs`).
 use std::collections::BTreeMap;
-use std::io::BufRead;
 
 use std::net::SocketAddr;
 
@@ -32,10 +31,11 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::commands::search_dirs::start_dir_search;
+use crate::commands::search_dirs::{assemble_final_batch, root_prefix_for, start_dir_search};
+use crate::commands::search_file_hits::{collect_file_hits, FileHitWalk};
 use crate::commands::{
     build_file_name_search_args, build_search_args, configure_background_command, detect_rg_path,
-    path_is_ignored, rank_search_hits, resolve_rg_path, search_processes, validated_search_root,
+    reap_rg_child_after_stdout, resolve_rg_path, search_processes, validated_search_root,
     FileSearchMatch, FileSearchResponse, FileSearchResult, RgInfoResponse,
     SearchContentCancelRequest, SearchContentRequest, SearchFileHit, MAX_SEARCH_QUERY_LEN,
 };
@@ -281,7 +281,7 @@ pub async fn content(
 /// one-shot filename search (issue #848). Reuses the SAME ripgrep walk the
 /// desktop `#[tauri::command] search_file_names_stream` runs
 /// (`validated_search_root` + `build_file_name_search_args` +
-/// `detect_rg_path` + `path_is_ignored` + `rank_search_hits`), but instead of
+/// `detect_rg_path` + `collect_file_hits` + `assemble_final_batch`), but instead of
 /// emitting `search-file-names-batch`/`-done` Tauri events it returns the
 /// full ranked result list in one `IpcBody`. The web composer mention hook
 /// debounces queries client-side, so a single batch is an acceptable
@@ -292,10 +292,10 @@ pub async fn content(
 /// hits, with the same ignore rules and ranking. A dir-pass failure is logged
 /// and the file hits are still returned.
 ///
-/// Paths are returned relative to `root` (identical to the desktop stream:
-/// the desktop command searches the `root` directory and rg emits
-/// root-relative lines there). SECURITY: paths are logged only as lengths
-/// and codes, never the full string (path data is sensitive).
+/// Paths are returned relative to `root`: the file pass is the shared
+/// `commands::search_file_hits::collect_file_hits` walk the desktop stream
+/// runs, which strips the root from every rg line. SECURITY: paths are logged
+/// only as lengths and codes, never the full string (path data is sensitive).
 ///
 /// Error codes mirror the desktop stream's `done` event codes:
 /// `QUERY_TOO_LONG`, `PATH_VALIDATION_FAILED`, `OUTSIDE_PROJECT_ROOT`,
@@ -382,12 +382,7 @@ pub async fn file_names(
 
     let include_ignored = req.include_ignored;
     let args = build_file_name_search_args(&trimmed_query, &validated_root, include_ignored);
-    // Slash-normalized, no-trailing-separator form of the validated root —
-    // the prefix stripped from each rg line so hits are root-relative.
-    let root_prefix = format!(
-        "{}/",
-        validated_root.replace('\\', "/").trim_end_matches('/')
-    );
+    let root_prefix = root_prefix_for(&validated_root);
 
     let result = tokio::task::spawn_blocking(
         move || -> Result<FileNameSearchResponse, (String, &'static str)> {
@@ -421,84 +416,26 @@ pub async fn file_names(
                 }
             };
 
-            // Same caps/buckets as the desktop stream (ADR 0003): non-ignored
-            // first, ignored bucketed + ranked after the walk when
-            // `include_ignored`, plain cap otherwise.
-            let max_files: usize = 100;
-            const IGNORED_CAP: usize = 20;
-            let mut truncated = false;
-            let mut stream_error: Option<String> = None;
-            let mut files: Vec<SearchFileHit> = Vec::new();
-            let mut non_ignored: Vec<SearchFileHit> = Vec::new();
-            let mut ignored_bucket: Vec<SearchFileHit> = Vec::new();
-            let mut ignored_dropped: usize = 0;
-            let mut broke_at_cap = false;
-
-            let reader = std::io::BufReader::new(stdout);
-            let mut lines = reader.lines();
-            loop {
-                match lines.next() {
-                    Some(Ok(line)) => {
-                        // rg echoes the root argument's shape: with an
-                        // absolute root it emits ABSOLUTE paths, with a
-                        // relative/cwd-root it emits relative ones. The
-                        // desktop stream passes the validated (canonical,
-                        // absolute) root yet surfaces root-RELATIVE hits —
-                        // its renderer composes `absPath = root + '/' +
-                        // hit.path`. Strip the root prefix here (after
-                        // verbatim/slash normalization) so the web response
-                        // carries the SAME root-relative contract and the
-                        // composer never builds `/root//root/...`.
-                        let absolute = crate::path_validation::strip_verbatim_prefix(&line)
-                            .replace('\\', "/");
-                        let normalized = absolute
-                            .strip_prefix(&root_prefix)
-                            .map(|rel| rel.trim_start_matches('/').to_string())
-                            .filter(|rel| !rel.is_empty())
-                            .unwrap_or(absolute);
-                        if include_ignored {
-                            if non_ignored.len() >= max_files {
-                                broke_at_cap = true;
-                                break;
-                            }
-                            if path_is_ignored(&normalized) {
-                                if ignored_bucket.len() < IGNORED_CAP {
-                                    ignored_bucket.push(SearchFileHit {
-                                        path: normalized,
-                                        ignored: true,
-                                        kind: None,
-                                    });
-                                } else {
-                                    ignored_dropped += 1;
-                                }
-                            } else {
-                                non_ignored.push(SearchFileHit {
-                                    path: normalized,
-                                    ignored: false,
-                                    kind: None,
-                                });
-                            }
-                        } else {
-                            if files.len() >= max_files {
-                                truncated = true;
-                                break;
-                            }
-                            files.push(SearchFileHit {
-                                path: normalized,
-                                ignored: false,
-                                kind: None,
-                            });
-                        }
-                    }
-                    Some(Err(e)) => {
-                        stream_error = Some(format!("stdout read error: {e}"));
-                        break;
-                    }
-                    None => break,
-                }
+            // The desktop stream's file walk; this route answers with one
+            // final batch, so mid-stream batches are dropped.
+            let FileHitWalk {
+                result: walk,
+                stream_error,
+                stopped_early,
+                skipped_lines,
+            } = collect_file_hits(
+                std::io::BufReader::new(stdout),
+                &root_prefix,
+                include_ignored,
+                |_| {},
+            );
+            reap_rg_child_after_stdout(&mut child, stopped_early);
+            if skipped_lines > 0 {
+                tracing::warn!(
+                    "[Search] file name pass skipped {} line(s) outside the search root",
+                    skipped_lines
+                );
             }
-            let _ = child.kill();
-            let _ = child.wait();
 
             // Join the folder pass before any early return so its rg child and
             // collector thread never outlive the request.
@@ -526,17 +463,10 @@ pub async fn file_names(
 
             // Files first, then folder hits (the picker renders a separate
             // "Folders" section after "Files").
-            let mut out_files = if include_ignored {
-                truncated = broke_at_cap || ignored_dropped > 0;
-                rank_search_hits(non_ignored, ignored_bucket, max_files)
-            } else {
-                files
-            };
-            truncated |= dir_outcome.truncated;
-            out_files.extend(dir_outcome.hits);
+            let batch = assemble_final_batch(walk, dir_outcome.hits, dir_outcome.truncated);
             Ok(FileNameSearchResponse {
-                files: out_files,
-                truncated,
+                files: batch.files,
+                truncated: batch.truncated,
             })
         },
     )

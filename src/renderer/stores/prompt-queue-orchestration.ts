@@ -137,7 +137,14 @@ export interface RecoverPromptArgs {
 }
 
 export interface RecoverPromptState {
-  sessions: Record<SessionId, TurnBusySession & { lastError?: string | null }>
+  sessions: Record<
+    SessionId,
+    TurnBusySession & {
+      lastError?: string | null
+      lastErrorCode?: number | null
+      lastErrorData?: unknown
+    }
+  >
   messages: Record<SessionId, RecoverableChatMessage[]>
   promptQueues: PromptQueueMap
 }
@@ -186,7 +193,9 @@ export function buildRecoverPromptToQueuePatch(
             ...session,
             activeTurn: Boolean(restoredOpenTurnId),
             openTurnId: restoredOpenTurnId,
-            lastError: null
+            lastError: null,
+            lastErrorCode: null,
+            lastErrorData: undefined
           }
         }
       : state.sessions

@@ -48,12 +48,41 @@ describe('formatAcpSpawnError', () => {
     expect(formatAcpSpawnError(bare, { command: 'node' })).toBe(bare)
   })
 
+  it.each([
+    ['npx', 'Could not run npx. Install Node.js and ensure npx is on your PATH, then try again.'],
+    ['uvx', 'Could not run uvx. Install uv and ensure uvx is on your PATH, then try again.'],
+    [
+      'cursor-agent',
+      'Could not start "cursor-agent". Check that the binary exists and is on your PATH.'
+    ]
+  ])('rewrites an OS spawn error for %s even though its trailing text is not the command', (command, guidance) => {
+    const osError =
+      'agent failed to start: Internal error: "No such file or directory (os error 2)"'
+    expect(formatAcpSpawnError(osError, { command })).toBe(guidance)
+    expect(classifySetupError(osError, { command })).toMatchObject({
+      category: 'spawn',
+      detail: guidance
+    })
+  })
+
+  it('keeps resolver wording verbatim when it is wrapped in a transport message', () => {
+    const wrapped = 'agent failed to start: Internal error: "program not found on PATH: claude"'
+    expect(formatAcpSpawnError(wrapped, { command: 'node' })).toBe(wrapped)
+  })
+
   it('still rewrites a resolver failure that names the command itself', () => {
     expect(formatAcpSpawnError('program not found on PATH: node', { command: 'node' })).toBe(
       'Could not start "node". Check that the binary exists and is on your PATH.'
     )
     expect(formatAcpSpawnError('spawn C:\\tools\\node.exe ENOENT', { command: 'node' })).toBe(
       'Could not start "node". Check that the binary exists and is on your PATH.'
+    )
+    expect(
+      formatAcpSpawnError('program not found or not executable: C:\\tools\\node.exe', {
+        command: 'C:\\tools\\node.exe'
+      })
+    ).toBe(
+      'Could not start "C:\\tools\\node.exe". Check that the binary exists and is on your PATH.'
     )
   })
 })

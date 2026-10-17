@@ -65,7 +65,7 @@ vi.mock('@/stores/shell-layout-store', () => ({
   useShellLayoutStore: { getState: () => ({ hydrate: h.hydrateShellLayout }) }
 }))
 
-import { persistenceApi } from '@/lib/api'
+import { persistenceApi, secureStorageApi } from '@/lib/api'
 import { _resetProjectPrefsForTests } from '@/lib/project-prefs'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
@@ -383,6 +383,37 @@ describe('useProjectRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
       expect(savedGroupNames()).toEqual(['First', 'Second'])
+    })
+
+    it('keeps the retry of a newer failed save when an older save succeeds after it', async () => {
+      h.tauri.value = true
+      vi.mocked(secureStorageApi.setSecret).mockResolvedValue({ success: true, data: undefined })
+      await mountWithOneProjectSaved()
+      h.heldWrites = []
+      act(() =>
+        useProjectStore.setState({
+          projects: useProjectStore.getState().projects.map((p) => ({
+            ...p,
+            envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+          }))
+        })
+      )
+      await vi.waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2))
+      vi.useFakeTimers()
+      vi.mocked(secureStorageApi.setSecret).mockResolvedValueOnce({
+        success: false,
+        code: 'SECRET_ERROR',
+        error: 'secure storage refused'
+      })
+      act(() => useProjectStore.getState().addGroup('Created while the older save was in flight'))
+      await vi.advanceTimersByTimeAsync(0)
+      const held = h.heldWrites ?? []
+      h.heldWrites = null
+      for (const resolve of held) resolve({ success: true, data: undefined })
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Created while the older save was in flight'])
     })
 
     it('stops retrying a failed save once the hook is unmounted', async () => {

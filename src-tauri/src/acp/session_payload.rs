@@ -185,10 +185,34 @@ pub struct MaterializedSessionPayload {
     /// none) — legacy sessions recorded before the summary fields existed
     /// materialize an empty array.
     pub tool_calls: Vec<MaterializedToolCallSummary>,
-    /// The session's last known `availableCommands` list (the newest
-    /// `commands_update`). Absent when the host knows of none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commands: Option<Value>,
+    /// The session's last known slash-command list. Both keys are absent
+    /// when the host knows of none.
+    #[serde(flatten)]
+    pub commands: Option<CommandList>,
+}
+
+/// The newest `commands_update` record's `availableCommands` and seq. The
+/// renderer installs a list only when its seq is not older than the one it
+/// holds.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandList {
+    pub commands: Value,
+    pub commands_seq: u64,
+}
+
+impl CommandList {
+    /// The list a `commands_update` record carries, `None` when it has none.
+    #[must_use]
+    pub fn of_record(record: &PersistedEventRecord) -> Option<Self> {
+        record
+            .payload
+            .get("availableCommands")
+            .map(|commands| Self {
+                commands: commands.clone(),
+                commands_seq: record.seq,
+            })
+    }
 }
 
 /// Materialize the renderer-shaped payload for one session from its durable
@@ -251,13 +275,12 @@ pub fn materialize_session_payload(
 }
 
 #[must_use]
-fn last_command_list(records: &[PersistedEventRecord]) -> Option<Value> {
+fn last_command_list(records: &[PersistedEventRecord]) -> Option<CommandList> {
     records
         .iter()
         .rev()
         .find(|record| record.type_ == "commands_update")
-        .and_then(|record| record.payload.get("availableCommands"))
-        .cloned()
+        .and_then(CommandList::of_record)
 }
 
 /// Partially-folded summary state for one `toolCallId`.

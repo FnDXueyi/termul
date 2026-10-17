@@ -19,6 +19,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::acp::atomic_file;
+use crate::acp::session_payload::CommandList;
 use crate::path_validation::strip_verbatim_prefix;
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 const INDEX_FILE: &str = "sessions.json";
@@ -150,7 +151,7 @@ struct Inner {
     /// order; a tail payload seeds a missing one from the log. Only
     /// `delete_session` removes one: a seed racing an append can then never
     /// fill a hole with the older list.
-    last_commands: Mutex<HashMap<String, Option<Value>>>,
+    last_commands: Mutex<HashMap<String, Option<CommandList>>>,
     /// Test gate: the writer awaits this before executing each command so a
     /// close can be queued behind appends that have not been written yet.
     #[cfg(test)]
@@ -690,8 +691,7 @@ impl SessionPersistence {
         record.payload = normalize_durable_payload(&record.type_, &record.payload);
         let session_id = record.session_id.clone();
         let runtime = self.runtime(&session_id)?;
-        let commands = (record.type_ == "commands_update")
-            .then(|| record.payload.get("availableCommands").cloned());
+        let commands = (record.type_ == "commands_update").then(|| CommandList::of_record(&record));
         let _order = runtime.send_lock.lock();
         Self::deliver(&runtime, &session_id, WriterCommand::Append(record))?;
         if let Some(commands) = commands {
@@ -1759,7 +1759,10 @@ impl SessionPersistence {
     /// The session's newest `availableCommands`. A miss (after a host restart,
     /// or a session no append of this process touched) scans the log once on
     /// the blocking pool and keeps the result, absent lists included.
-    async fn last_commands_async(self: &Arc<Self>, session_id: &str) -> Result<Option<Value>> {
+    async fn last_commands_async(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<Option<CommandList>> {
         if let Some(known) = self.inner.last_commands.lock().get(session_id) {
             return Ok(known.clone());
         }

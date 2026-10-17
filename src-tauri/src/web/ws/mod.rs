@@ -787,6 +787,8 @@ mod project_command_tests;
 #[cfg(test)]
 mod provider_error_tests;
 #[cfg(test)]
+mod registry_check_tests;
+#[cfg(test)]
 mod spawn_rejection_tests;
 #[cfg(test)]
 mod tests;

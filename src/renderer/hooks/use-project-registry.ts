@@ -155,9 +155,11 @@ function createPrefsSaver(isCancelled: () => boolean): {
   }
 
   function attempt(projects: Project[], groups: ProjectGroup[], previousProjects: Project[]): void {
+    // A success must not cancel the timer: it may belong to a newer save that
+    // failed while this one was in flight. A retry for state that already
+    // landed finds the same signature and writes nothing.
     persistProjectPrefs(projects, groups, previousProjects).then(() => {
       failures = 0
-      cancel()
     }, scheduleRetry)
   }
 

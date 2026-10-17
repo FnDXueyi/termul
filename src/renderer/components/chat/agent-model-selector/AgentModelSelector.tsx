@@ -4,7 +4,9 @@ import { ComposerPill } from '@/components/chat/ComposerPill'
 import {
   flattenConfigOptionValues,
   isFastModeEnabled,
-  oppositeFastModeValue
+  oppositeFastModeValue,
+  storedConfigValue,
+  wireConfigValue
 } from '@/components/chat/chat-input-bar-config'
 import { useOptimisticSelect } from '@/components/chat/use-optimistic-select'
 import { X } from '@/components/icons'
@@ -154,14 +156,19 @@ export function AgentModelSelector({
   const selectFast = useCallback(
     (valueId: string) => {
       if (!fastMode) return
-      return onSetConfig(fastMode.id, valueId)
+      const wireValue = wireConfigValue(fastMode, valueId)
+      if (wireValue === null) return
+      return onSetConfig(fastMode.id, wireValue)
     },
     [fastMode, onSetConfig]
   )
 
   const modelSelect = useOptimisticSelect(selectValue(modelOption?.currentValue), selectModel)
   const effortSelect = useOptimisticSelect(selectValue(thoughtLevel?.currentValue), selectEffort)
-  const fastSelect = useOptimisticSelect(selectValue(fastMode?.currentValue), selectFast)
+  const fastSelect = useOptimisticSelect(
+    fastMode ? (storedConfigValue(fastMode) ?? undefined) : undefined,
+    selectFast
+  )
 
   const modelName = modelOption
     ? flattenConfigOptionValues(modelOption).find(
@@ -294,9 +301,12 @@ export function AgentModelSelector({
         onCloseAutoFocus={onCloseAutoFocus}
         // The sheet's built-in close button is the last child; the grabber
         // and a tap on the scrim close this sheet.
-        className="gap-0 border-border bg-popover p-0 pb-[env(safe-area-inset-bottom)] pt-2 [&>button:last-child]:hidden"
+        className="flex max-h-[85dvh] flex-col gap-0 border-border bg-popover p-0 pb-[env(safe-area-inset-bottom)] pt-2 [&>button:last-child]:hidden"
       >
-        <div aria-hidden="true" className="mx-auto mb-1.5 h-1 w-9 rounded-full bg-foreground/20" />
+        <div
+          aria-hidden="true"
+          className="mx-auto mb-1.5 h-1 w-9 shrink-0 rounded-full bg-foreground/20"
+        />
         <SheetTitle className="sr-only">Model and agent</SheetTitle>
         <SheetDescription className="sr-only">
           Choose a model, an agent, and its options.
@@ -318,7 +328,9 @@ export function AgentModelSelector({
         onEscapeKeyDown={onEscapeKeyDown}
         onCloseAutoFocus={onCloseAutoFocus}
         contentClassName="z-[100] max-w-[calc(100vw-1rem)]"
-        className="overflow-hidden rounded-xl border-border p-0"
+        // Radix writes the room above or below the trigger onto the popper. The
+        // panel shrinks its list to fit; the surface scrolls only if that is not enough.
+        className="flex max-h-[var(--radix-popper-available-height,70vh)] flex-col overflow-y-auto overscroll-contain rounded-xl border-border p-0"
       >
         {panel}
       </AnimatedMenuContent>

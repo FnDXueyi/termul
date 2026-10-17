@@ -45,7 +45,8 @@ describe('DesktopAcpTransport host-local domain commands', () => {
     await transport.installRegistryBinary({ agentId: 'a1' } as never)
     await transport.probeRuntime()
     await transport.probeMcpServer({ name: 'm', transport: 'stdio' } as never)
-    await transport.fetchRegistrySnapshot(true)
+    await transport.fetchRegistrySnapshot('manual')
+    await transport.fetchRegistrySnapshot('background')
     await transport.setTurnTimeout(30)
     await transport.setTurnIdleTimeout(null)
     await transport.setSessionNewTimeout(45)
@@ -61,6 +62,7 @@ describe('DesktopAcpTransport host-local domain commands', () => {
       ['acp_install_registry_binary', { request: { agentId: 'a1' } }],
       ['acp_probe_runtime'],
       ['acp_probe_mcp_server', { server: { name: 'm', transport: 'stdio' } }],
+      ['acp_fetch_registry_snapshot', { forceRefresh: true }],
       ['acp_fetch_registry_snapshot', { forceRefresh: true }],
       ['acp_set_turn_timeout', { secs: 30 }],
       ['acp_set_turn_idle_timeout', { secs: null }],

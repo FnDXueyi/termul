@@ -683,8 +683,8 @@ pub(super) async fn run_command_loop(
                     // hard wall-clock cap. Both default to `None` (unlimited):
                     // a turn is bounded only if the operator/user configured a
                     // value. On idle/hard timeout → signal cancel +
-                    // `CANCEL_GRACE` + a typed error (`acp-store` sets
-                    // `status: 'error'`). See [`race_turn`].
+                    // `CANCEL_GRACE` + a typed error (an `agent_error` and a
+                    // `timeout` terminator). See [`race_turn`].
                     let idle = turn_idle_timeout();
                     let hard = resolved_turn_timeout();
                     let cancel_state = turn_state.clone();

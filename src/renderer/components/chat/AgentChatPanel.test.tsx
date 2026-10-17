@@ -18,6 +18,7 @@ const {
   mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
+  agentStatusRef,
   mockMarkResumeFailed,
   mockSendPrompt,
   mockSendPromptBlocks,
@@ -72,6 +73,7 @@ const {
   // never retryCrashedSession, and never toast a circular "Could not retry").
   mockRetryCrashed: vi.fn(),
   mockRetryFailed: vi.fn(),
+  agentStatusRef: { current: {} as Record<string, string> },
   // spec-stopped-chat-status-signals: the idle-stop auto-resume records a
   // failure through this store action when the store wrote none itself.
   mockMarkResumeFailed: vi.fn(),
@@ -113,6 +115,8 @@ const {
   errorNoticePropsRef: {
     current: null as {
       message: string | null
+      code?: number | null
+      data?: unknown
       onRetry?: () => void
       onDismiss: () => void
     } | null
@@ -229,6 +233,7 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/acp-store', () => {
   const state = () => ({
     agents: agentsRef.current,
+    agentStatus: agentStatusRef.current,
     commands: commandsRef.current,
     agentSwitches: agentSwitchesRef.current,
     agentConfigs: agentConfigsRef.current,
@@ -352,6 +357,8 @@ vi.mock('@/stores/git-sheet-store', () => ({
 vi.mock('./ChatErrorNotice', () => ({
   ChatErrorNotice: (props: {
     message: string | null
+    code?: number | null
+    data?: unknown
     onRetry?: () => void
     retryLabel?: string
     onDismiss: () => void
@@ -928,6 +935,22 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
     expect(mockOpen).toHaveBeenCalledTimes(1)
   })
 
+  it('gh-821: hands the agent error code and data to the error notice', () => {
+    indexRef.current = []
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      status: 'error',
+      lastError: 'Internal error',
+      lastErrorCode: -32603,
+      lastErrorData: { reason: 'login' }
+    })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(errorNoticePropsRef.current?.message).toBe('Internal error')
+    expect(errorNoticePropsRef.current?.code).toBe(-32603)
+    expect(errorNoticePropsRef.current?.data).toEqual({ reason: 'login' })
+  })
+
   it('leaves a crashed (error) chat on the unchanged error notice', () => {
     indexRef.current = []
     sessionRef.current = mockAcpSession({
@@ -1401,6 +1424,10 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     messagesRef.current = []
   })
 
+  afterEach(() => {
+    agentStatusRef.current = {}
+  })
+
   function seedFailedLaunchSession(id: string): void {
     sessionRef.current = mockAcpSession({
       id,
@@ -1465,6 +1492,25 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     // relaunch+replay path runs, never the failed-launch path.
     expect(mockRetryCrashed).toHaveBeenCalledWith('s1')
     expect(mockRetryFailed).not.toHaveBeenCalled()
+  })
+
+  it('restarts a live chat whose agent a turn error left unusable instead of re-sending to it', async () => {
+    mockSendPromptBlocks.mockReset().mockResolvedValue(undefined)
+    agentStatusRef.current = { 'agent-1': 'error' }
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      agentId: 'agent-1',
+      cwd: '/w',
+      status: 'active',
+      lastError: 'Authentication required'
+    })
+    messagesRef.current = [{ id: 'm1', role: 'user', blocks: [{ type: 'text', text: 'hello' }] }]
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    const props = errorNoticePropsRef.current
+    expect(props?.retryLabel).toBe('Retry')
+    props?.onRetry?.()
+    await waitFor(() => expect(mockRetryCrashed).toHaveBeenCalledWith('s1'))
+    expect(mockSendPromptBlocks).not.toHaveBeenCalled()
   })
 })
 

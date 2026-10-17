@@ -30,8 +30,16 @@ pub(super) fn worktree_add_args<'a>(
     args
 }
 
-/// Run a git command and return (stdout, stderr, success).
-pub(super) fn run_git(args: &[&str], cwd: Option<&str>) -> Result<(String, String), WorktreeError> {
+/// What a finished git process produced, for callers that read the exit code
+/// themselves (`git merge-tree` exits 1 for a merge that has conflicts).
+pub(super) struct GitOutput {
+    pub(super) code: Option<i32>,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
+}
+
+/// Run a git command and return its exit code and output without judging success.
+pub(super) fn run_git_output(args: &[&str], cwd: Option<&str>) -> Result<GitOutput, WorktreeError> {
     let git = which_git()?;
 
     let mut cmd = quiet_command(&git);
@@ -52,14 +60,20 @@ pub(super) fn run_git(args: &[&str], cwd: Option<&str>) -> Result<(String, Strin
         }
     })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(GitOutput {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
 
-    if !output.status.success() {
-        return Err(parse_git_stderr(&stderr));
+/// Run a git command and return (stdout, stderr, success).
+pub(super) fn run_git(args: &[&str], cwd: Option<&str>) -> Result<(String, String), WorktreeError> {
+    let output = run_git_output(args, cwd)?;
+    if output.code != Some(0) {
+        return Err(parse_git_stderr(&output.stderr));
     }
-
-    Ok((stdout, stderr))
+    Ok((output.stdout, output.stderr))
 }
 
 /// Drain complete lines from `buf`. Git worktree progress uses `\r`-delimited

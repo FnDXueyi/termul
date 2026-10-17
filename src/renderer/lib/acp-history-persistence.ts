@@ -115,6 +115,8 @@ export interface SessionPayload {
    * of none, and on older hosts.
    */
   commands?: AvailableCommand[]
+  /** Seq of the `commands_update` record that set `commands`. */
+  commandsSeq?: number
 }
 
 /**
@@ -731,6 +733,26 @@ export async function loadSessionPayload(id: string): Promise<SessionPayload | n
   if (mode === 'live_only') return null
   const payload = withPlanFences(id, await acpHistoryApi.get(id))
   if (payload) touchPayload(id, payload)
+  return payload
+}
+
+/**
+ * Re-read a session's full payload from the host, replacing the cached copy
+ * in place (pin and plan fences kept). `null` in server and `live_only` modes.
+ */
+export async function reloadSessionPayloadFromHost(id: string): Promise<SessionPayload | null> {
+  const transport = getAcpTransport()
+  const mode = transport.historyMode?.()
+  if ((mode === 'server' && transport.getSessionPayload) || mode === 'live_only') return null
+  const stale = payloadCache.get(id)
+  if (stale) rememberPlanFences(id, stale)
+  const payload = withPlanFences(id, await acpHistoryApi.get(id))
+  if (payload) touchPayload(id, payload)
+  void logFrontendError({
+    level: 'info',
+    source: 'acp.historyPersistence',
+    message: `Re-read session ${id.slice(0, 8)}… from the host: the cached copy ended at seq ${stale?.metadata.lastSeq ?? 'unknown'}, the host is at seq ${payload?.metadata.lastSeq ?? 'unknown'}`
+  })
   return payload
 }
 

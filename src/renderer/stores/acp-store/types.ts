@@ -100,6 +100,14 @@ export interface ChatMessage {
    */
   seq?: number
   /**
+   * Host log seq of the relay event that opened a live bubble. A live bubble
+   * keeps its renderer `seq` for timeline order and its `msg-*` id, while its
+   * durable twin carries this seq as its own `seq` and in its id. Scroll-up
+   * anchors on it once the live window's oldest bubble is not in the payload.
+   * Absent on restored bubbles, whose `seq` already is the host seq.
+   */
+  hostSeq?: number
+  /**
    * spec-agent-switch-separator-redesign: a summary-only handoff
    * `user_prompt` folds to a boundary row — it renders nothing (empty
    * blocks, filtered before display) but keeps the turn's reply visible in
@@ -162,10 +170,6 @@ export interface AcpSession {
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
   lastError: string | null
-  /** gh-821: JSON-RPC code of the error behind `lastError`, when it was an
-   * agent RPC error (`null`/absent otherwise). Only set by the `agent_error` /
-   * `agent_crashed` reducers: other `lastError` writers do not touch it, so
-   * read it only while the `lastError` it accompanies is the event's message. */
   lastErrorCode?: number | null
   /** gh-821: JSON-RPC `data` of the error behind `lastError`, when present. */
   lastErrorData?: unknown
@@ -479,6 +483,8 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
+  /** Seq of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, number>
   pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
@@ -909,7 +915,7 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void

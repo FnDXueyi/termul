@@ -138,8 +138,13 @@ class FakeWebSocket {
   listAgentsAsStrings = false
   /** CAP-6 / Story 8: when set, `list_acp_catalog` replies with this catalog
    * payload; unset → falls through to the `not_implemented` fallback (so
-   * `probeRuntime`/`fetchRegistrySnapshot` degrade gracefully). */
+   * `probeRuntime` degrades gracefully). */
   catalogReply: unknown = null
+  /** When set, `fetch_acp_registry_snapshot` answers with this reply. */
+  registrySnapshotReply:
+    | { ok: true; payload: unknown }
+    | { ok: false; err: { code: string; message: string } }
+    | null = null
   historyMode: 'server' | 'live_only' = 'server'
   runtimePolicy = {
     turnTimeoutMs: 3_600_000,
@@ -281,9 +286,13 @@ class FakeWebSocket {
     // CAP-6 / Story 8: the WS transport resolves the ACP catalog through
     // `list_acp_catalog` (the host's OS/arch/runtime + per-agent status). When
     // `catalogReply` is set, reply with it; otherwise fall through to the
-    // `not_implemented` stub so `probeRuntime`/`fetchRegistrySnapshot` degrade.
+    // `not_implemented` stub so `probeRuntime` degrades.
     if (req.type === 'list_acp_catalog' && this.catalogReply) {
       this.emitReply({ id: req.id, ok: true, payload: this.catalogReply })
+      return
+    }
+    if (req.type === 'fetch_acp_registry_snapshot' && this.registrySnapshotReply) {
+      this.emitReply({ id: req.id, ...this.registrySnapshotReply })
       return
     }
     if (req.type === 'create_session') {
@@ -1076,10 +1085,10 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
-  // CAP-6 / Story 8: the fake `probeRuntime`/`fetchRegistrySnapshot` stubs
-  // (hardcoded `{npx:true,uvx:true}` / `{agents:[]}`) are replaced by a real
-  // `list_acp_catalog` WS request — the host probes npx/uvx/node/bun/python3
-  // and returns the resolved catalog. These tests pin the request shape + the
+  // CAP-6 / Story 8: the fake `probeRuntime` stub (hardcoded
+  // `{npx:true,uvx:true}`) is replaced by a real `list_acp_catalog` WS
+  // request — the host probes npx/uvx/node/bun/python3 and returns the
+  // resolved catalog. These tests pin the request shape + the
   // reply mapping + the graceful degradation when the host is unavailable.
   it('probeRuntime sends list_acp_catalog and maps host.runtimes', async () => {
     const transport = new WsAcpTransport({
@@ -1105,24 +1114,47 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
-  it('fetchRegistrySnapshot sends list_acp_catalog and maps agents', async () => {
+  it.each([
+    'manual',
+    'background'
+  ] as const)('fetchRegistrySnapshot sends a %s fetch_acp_registry_snapshot and returns the host snapshot', async (reason) => {
     const transport = new WsAcpTransport({
       url: 'ws://test/ws',
       WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
     })
     await transport.connect()
     const sock = (transport as unknown as { socket: FakeWebSocket }).socket
-    sock.catalogReply = {
-      host: { os: 'linux', arch: 'x86_64', runtimes: {} },
-      agents: [{ id: 'a', name: 'A', source: 'bundled', distribution: {} }]
+    const hostSnapshot = {
+      agents: [{ id: 'a', name: 'A', version: '1.0.0', description: '', distribution: {} }],
+      source: 'cache',
+      fetchedAt: '2026-10-15T12:00:00+00:00'
+    }
+    sock.registrySnapshotReply = { ok: true, payload: hostSnapshot }
+
+    await expect(transport.fetchRegistrySnapshot(reason)).resolves.toEqual(hostSnapshot)
+
+    const sent = sock.sent
+      .map((s) => JSON.parse(s) as { type: string; payload: unknown })
+      .filter((r) => r.type === 'fetch_acp_registry_snapshot')
+    expect(sent.map((r) => r.payload)).toEqual([{ reason }])
+    transport.dispose()
+  })
+
+  it('fetchRegistrySnapshot rejects with the host error code when the registry and cache both fail', async () => {
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    await transport.connect()
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+    sock.registrySnapshotReply = {
+      ok: false,
+      err: { code: 'REGISTRY_FETCH_FAILED', message: 'ACP registry request failed: timeout' }
     }
 
-    const snapshot = await transport.fetchRegistrySnapshot()
-    expect(snapshot.agents).toHaveLength(1)
-    expect(snapshot.source).toBe('network')
-
-    const sent = sock.sent.map((s) => JSON.parse(s) as { type: string })
-    expect(sent.some((r) => r.type === 'list_acp_catalog')).toBe(true)
+    await expect(transport.fetchRegistrySnapshot('manual')).rejects.toMatchObject({
+      code: 'REGISTRY_FETCH_FAILED'
+    })
     transport.dispose()
   })
 

@@ -502,6 +502,8 @@ impl AcpManager {
         sinks: Vec<Arc<dyn EventSink>>,
         claude_agent: Arc<crate::acp::claude_agent::ClaudeAgentService>,
     ) -> Self {
+        #[cfg(unix)]
+        let _ = crate::acp::browser_shim::host_shim_dir();
         let host_plan_server =
             crate::acp::host_mcp::parent::HostPlanServer::start(sinks.clone(), None);
         Self {
@@ -535,6 +537,11 @@ impl AcpManager {
         persistence: Arc<SessionPersistence>,
         claude_agent: Arc<crate::acp::claude_agent::ClaudeAgentService>,
     ) -> Self {
+        // Host start: claim this process's browser-shim dir and sweep the dirs
+        // that killed hosts left behind. `with_claude_agent` does the same for
+        // a desktop host whose session store failed to open.
+        #[cfg(unix)]
+        let _ = crate::acp::browser_shim::host_shim_dir();
         let host_plan_server = crate::acp::host_mcp::parent::HostPlanServer::start(
             sinks.clone(),
             Some(Arc::clone(&persistence)),

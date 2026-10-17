@@ -12,7 +12,7 @@ import { decideResume } from '@/lib/acp-resume-policy'
 import { logFrontendError } from '@/lib/log-api'
 import { type AcpState, switchBlockedReason, useAcpStore } from '@/stores/acp-store'
 import { ephemeralSessionIds } from '@/stores/acp-store/ephemeral-ids'
-import { reloadInFlight } from '@/stores/acp-store/reload-guard'
+import { liveSiblingCount, reloadInFlight } from '@/stores/acp-store/reload-guard'
 import { sessionAgentConfigId } from '@/stores/claude-account-switch'
 
 const CANNOT_REOPEN = 'This agent cannot reload a chat. Open a new chat to use the new settings.'
@@ -51,16 +51,6 @@ export function reloadChatBlockedReason(state: AcpState, sessionId: SessionId): 
   return null
 }
 
-function liveSiblingCount(state: AcpState, sessionId: SessionId, agentId: string): number {
-  return Object.values(state.sessions).filter(
-    (other) =>
-      other.id !== sessionId &&
-      other.agentId === agentId &&
-      other.status !== 'closed' &&
-      !ephemeralSessionIds.has(other.id)
-  ).length
-}
-
 /**
  * Reload `sessionId`. Keeps the tab and the transcript. Does not send the
  * last prompt again. Throws when the chat is busy or the agent cannot reopen
@@ -78,7 +68,7 @@ export async function reloadAgentChat(sessionId: SessionId): Promise<void> {
     state.mcpServers ?? [],
     capabilities
   ).servers
-  const siblings = liveSiblingCount(state, sessionId, session.agentId)
+  const siblings = liveSiblingCount(state.sessions, sessionId, session.agentId)
 
   void logFrontendError({
     level: 'info',
@@ -117,7 +107,9 @@ export async function reloadAgentChat(sessionId: SessionId): Promise<void> {
               status: 'closed',
               activeTurn: false,
               openTurnId: null,
-              lastError: null
+              lastError: null,
+              lastErrorCode: null,
+              lastErrorData: undefined
             }
           }
         }

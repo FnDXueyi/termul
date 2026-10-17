@@ -452,6 +452,16 @@ impl AcpCatalogService {
         force_refresh: bool,
     ) -> Result<AcpRegistrySnapshot, String> {
         let result = (self.snapshot_fetch)(self.snapshot_cache_path(), force_refresh).await;
+        match &result {
+            Ok(resolved) => log::info!(
+                "[acp-catalog] registry check force_refresh={force_refresh} outcome={:?} agents={}",
+                resolved.outcome,
+                resolved.snapshot.agents.len()
+            ),
+            Err(error) => {
+                log::warn!("[acp-catalog] registry check force_refresh={force_refresh} failed: {error}")
+            }
+        }
         self.apply_snapshot_fetch_outcome(&result, force_refresh);
         match result {
             Ok(resolved) => {

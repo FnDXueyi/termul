@@ -47,6 +47,7 @@ import {
   mergeAgentConfigOptions,
   newId,
   nextQueueId,
+  plainLastError,
   recoverPromptToQueue,
   SWITCH_SPLICE_ID_PREFIX,
   writeAgentOptionsCache
@@ -150,10 +151,7 @@ function scheduleTurnEnd(
               ...current,
               openTurnId: null,
               activeTurn: false,
-              lastError:
-                stopReason !== undefined
-                  ? lastErrorAfterStop(current.lastError, stopReason)
-                  : current.lastError
+              ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
             }
           }
         }
@@ -187,10 +185,7 @@ function scheduleTurnEnd(
             ...current,
             openTurnId: null,
             activeTurn: false,
-            lastError:
-              stopReason !== undefined
-                ? lastErrorAfterStop(current.lastError, stopReason)
-                : current.lastError
+            ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
           }
         }
       }
@@ -337,7 +332,7 @@ export async function runPromptTurn(
                 activeTurn: true,
                 openTurnId,
                 latestPromptTurnId: turnId,
-                lastError: null
+                ...plainLastError(null)
               }
             }
           }
@@ -366,7 +361,7 @@ export async function runPromptTurn(
               activeTurn: true,
               openTurnId,
               latestPromptTurnId: turnId,
-              lastError: null
+              ...plainLastError(null)
             }
           }
         }
@@ -385,7 +380,7 @@ export async function runPromptTurn(
             activeTurn: true,
             openTurnId,
             latestPromptTurnId: turnId,
-            lastError: null
+            ...plainLastError(null)
           }
         }
       }
@@ -411,7 +406,7 @@ export async function runPromptTurn(
           activeTurn: true,
           openTurnId,
           latestPromptTurnId: turnId,
-          lastError: null
+          ...plainLastError(null)
         }
       }
     }
@@ -640,7 +635,11 @@ async function reauthenticateWithoutResendingPrompt(
           : s.agentStatus,
       sessions: {
         ...s.sessions,
-        [sessionId]: { ...current, lastError, ...(revive ? { status: 'active' } : {}) }
+        [sessionId]: {
+          ...current,
+          ...plainLastError(lastError),
+          ...(revive ? { status: 'active' } : {})
+        }
       }
     }
   })
@@ -1222,11 +1221,17 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
         pendingPermissions,
         pendingQuestions,
         pendingElicitations,
+        // A timed-out turn may have been cancelled cleanly or may sit on a
+        // wedged agent; the host cannot tell. Retire the process from reuse so
+        // a new chat spawns its own and Retry restarts this one.
+        ...(e.stopReason === 'timeout'
+          ? { agentStatus: { ...s.agentStatus, [e.agentId]: 'error' as const } }
+          : {}),
         sessions: {
           ...s.sessions,
           [e.sessionId]: {
             ...session,
-            lastError: lastErrorAfterStop(session.lastError, e.stopReason),
+            ...lastErrorAfterStop(session, e.stopReason),
             opencodeNotice: undefined
           }
         }

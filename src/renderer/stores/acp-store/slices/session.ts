@@ -70,12 +70,14 @@ import {
   normalizeUserMessages,
   openTurnPromptSeq,
   partitionTranscriptTurns,
+  plainLastError,
   refreshHostOwnedIndex,
   resolveSwitchRedirect,
   SWITCH_SPLICE_ID_PREFIX,
   scanPlanFenceFromMessages,
   spliceSwitchTranscript,
   trimLiveToolCalls,
+  withCommands,
   withSessionActive,
   withSessionResumeError,
   withSwitchMarker
@@ -89,7 +91,7 @@ import {
   selectLaunchRecoverySessions,
   takeDroppedLaunchPlaceholders
 } from '../live-turn'
-import { reloadInFlight } from '../reload-guard'
+import { liveSiblingCount, reloadInFlight } from '../reload-guard'
 import {
   adoptHostOwnedAgent,
   beginSessionReopen,
@@ -145,10 +147,6 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
-  const { commands } = payload
-  if (Array.isArray(commands)) {
-    useAcpStore.setState((s) => ({ commands: { ...s.commands, [sessionId]: commands } }))
-  }
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only
@@ -252,7 +250,7 @@ async function attachLiveTurn(
           ...session,
           agentId,
           status: 'active',
-          lastError: null,
+          ...plainLastError(null),
           replaying: 'streaming',
           activeTurn: true,
           openTurnId: session.openTurnId ?? 'turn:live'
@@ -808,7 +806,10 @@ async function openHistorySessionInner(
     toolCalls: { ...s.toolCalls, [id]: trimLiveToolCalls(installed.toolCalls) },
     // CAP-2: restore the durable switch markers so the timeline shows the
     // borderless separators at their seq positions after a reopen.
-    agentSwitches: { ...s.agentSwitches, [id]: installed.switches }
+    agentSwitches: { ...s.agentSwitches, [id]: installed.switches },
+    ...(Array.isArray(payload.commands)
+      ? withCommands(s, id, payload.commands, payload.commandsSeq)
+      : {})
   }))
   onTranscriptInstalled()
 
@@ -1592,6 +1593,8 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
                   configOptions: outcome.configOptions ?? existing?.configOptions
                 }),
               lastError: existing?.lastError ?? null,
+              lastErrorCode: existing?.lastErrorCode,
+              lastErrorData: existing?.lastErrorData,
               createdAt: existing?.createdAt ?? Date.now(),
               replaying: null,
               worktreePath: opts?.worktreePath ?? existing?.worktreePath,
@@ -1801,9 +1804,32 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     // Dedupe concurrent Retry clicks: only one relaunch+replay+resend per session.
     if (inFlightCrashedRetries.has(sessionId)) return
     inFlightCrashedRetries.add(sessionId)
+    let releasing = false
     try {
       const session = get().sessions[sessionId]
       if (!session) throw new Error(`unknown session ${sessionId}`)
+      // A turn error retired this chat's agent, but the process still runs
+      // and owns the session, so a web reopen would adopt it again. Release
+      // it first. Stop the process, or close only this session when other
+      // chats still run on it. Its close can land while the reopen still
+      // names it, so the reload guard keeps that close from cancelling the
+      // reopen.
+      if (
+        session.status !== 'error' &&
+        session.status !== 'closed' &&
+        get().agentStatus[session.agentId] === 'error' &&
+        !reloadInFlight.has(sessionId)
+      ) {
+        releasing = true
+        reloadInFlight.add(sessionId)
+        if (liveSiblingCount(get().sessions, sessionId, session.agentId) === 0) {
+          await get()
+            .killAgent(session.agentId)
+            .catch(() => undefined)
+        } else {
+          await acpApi.closeSession(session.agentId, sessionId).catch(() => undefined)
+        }
+      }
       // Force the reopen path: mark closed so `openHistorySession` re-runs its
       // reopen (re-launch a fresh agent via `ensureLiveAgent`, replay persisted
       // history via `session/load`, restore the local transcript) instead of its
@@ -1817,12 +1843,16 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...cur, status: 'closed', lastError: null }
+            [sessionId]: { ...cur, status: 'closed', ...plainLastError(null) }
           },
           suppressQueueFlush: { ...s.suppressQueueFlush, [sessionId]: true }
         }
       })
-      await get().openHistorySession(sessionId)
+      try {
+        await get().openHistorySession(sessionId)
+      } finally {
+        if (releasing) reloadInFlight.delete(sessionId)
+      }
       // Reopen failed (still closed / no live agent): leave the recovered
       // transcript + let the resume error show — do not blank.
       const reopened = get().sessions[sessionId]
@@ -1915,7 +1945,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         return {
           sessions: {
             ...s.sessions,
-            [sessionId]: { ...cur, status: 'initializing', lastError: null }
+            [sessionId]: { ...cur, status: 'initializing', ...plainLastError(null) }
           },
           launchingSessionIds: { ...s.launchingSessionIds, [sessionId]: true }
         }
@@ -2443,6 +2473,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
   },
 
   _onSessionClosed: (e) => {
+    // A stopped process can announce its close after the chat reopened on a
+    // new one. That close is about the old process, so the chat ignores it.
+    const owner = get().sessions[e.sessionId]?.agentId
+    if (e.agentId && owner && owner !== e.agentId) return
     if (reloadInFlight.has(e.sessionId)) {
       // A reload asked the old process to release this session. Keep the
       // transcript and do not cancel the reopen that follows. Once the chat

@@ -124,6 +124,10 @@ vi.mock('@/hooks/use-keyboard-shortcuts', () => ({
   useResetAllShortcuts: () => mockResetAllShortcuts
 }))
 
+vi.mock('@/hooks/use-agent-skills', () => ({
+  useAgentSkills: () => ({ skills: [], loading: false, reload: () => {} })
+}))
+
 vi.mock('@/components/settings/AcpAgentsSettings', () => ({
   AcpAgentsSettings: () => null
 }))

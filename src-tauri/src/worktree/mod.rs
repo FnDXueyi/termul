@@ -25,7 +25,7 @@ pub use types::{
 use conflict::{
     chrono_timestamp, create_dir_symlink, glob_to_regex, thirty_days_from_now, ConflictBlock,
 };
-use git::{ensure_valid_branch_name, run_git, run_git_streaming, worktree_add_args};
+use git::{ensure_valid_branch_name, run_git, run_git_output, run_git_streaming, worktree_add_args};
 #[cfg(windows)]
 use junction::create_junction;
 use launch_registry::note_launch_created;

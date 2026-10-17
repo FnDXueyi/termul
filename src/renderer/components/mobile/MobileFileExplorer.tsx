@@ -37,6 +37,7 @@ import {
 import { useClippedSegments } from '@/hooks/use-clipped-segments'
 import { useServerPathsCaseInsensitive } from '@/hooks/use-server-paths-case-insensitive'
 import { filesystemApi, persistenceApi } from '@/lib/api'
+import { moveOpenEditorTabs } from '@/lib/editor-tab-rename'
 import { sortDirectoryEntries } from '@/lib/filesystem-sort'
 import { logFrontendError } from '@/lib/log-api'
 import {
@@ -313,7 +314,7 @@ export function MobileFileExplorer({
       toast.error('Failed to rename', { description: result.error })
       return
     }
-    closeAffectedTabs(entry)
+    await moveOpenEditorTabs(entry.path, newPath)
     if (currentPath && normalizePath(currentPath).startsWith(`${normalizePath(entry.path)}/`)) {
       setCurrentPath(parent)
       setNavigationDirection(-1)

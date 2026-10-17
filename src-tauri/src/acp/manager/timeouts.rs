@@ -19,7 +19,7 @@ use super::*;
 // (`turn_idle_timeout`) is also unlimited by default, so neither a chatty
 // nor a silent agent is killed by default — the hard cap is an opt-in
 // diagnostic backstop. On either idle or hard timeout → cancel +
-// `CANCEL_GRACE` → `status: 'error'`.
+// `CANCEL_GRACE` → an `agent_error` and a `timeout` terminator for the turn.
 
 /// `session/new` timeout. Precedence: `TERMUL_ACP_SESSION_NEW_TIMEOUT_SECS`
 /// (env, operator/diagnostic; seconds, must be > 0) → in-process UI override

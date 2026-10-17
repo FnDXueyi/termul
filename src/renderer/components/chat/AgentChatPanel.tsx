@@ -229,6 +229,11 @@ export function AgentChatPanel({
   const removeQueuedPrompt = useAcpStore((s) => s.removeQueuedPrompt)
   const sendQueuedPromptNow = useAcpStore((s) => s.sendQueuedPromptNow)
   const retryCrashedSession = useAcpStore((s) => s.retryCrashedSession)
+  // A turn error (auth required, timeout) can retire the chat's agent while
+  // the chat itself stays live with its error banner.
+  const agentRetired = useAcpStore((s) =>
+    session ? s.agentStatus[session.agentId] === 'error' : false
+  )
   const markResumeFailed = useAcpStore((s) => s.markResumeFailed)
   const retryFailedLaunch = useAcpStore((s) => s.retryFailedLaunch)
   const promptQueue = usePromptQueue(sessionId)
@@ -563,7 +568,9 @@ export function AgentChatPanel({
     // A crashed/disconnected chat can't re-send into the dead agent — restart
     // the agent + replay history first (user-initiated Retry; honors ADR-003's
     // no-silent-respawn: the crash is still surfaced, respawn is on click).
-    if (session?.status === 'error' || session?.status === 'closed') {
+    // A retired agent cannot take the re-send either: the restart stops it
+    // and reopens the chat on a fresh one.
+    if (session?.status === 'error' || session?.status === 'closed' || agentRetired) {
       void retryCrashedSession(sessionId).catch((err) => {
         if (isAgentDeadError(err)) return
         toast.error('Could not retry. Try again.')
@@ -617,6 +624,7 @@ export function AgentChatPanel({
     availableSkills,
     sendPromptBlocks,
     retryCrashedSession,
+    agentRetired,
     retryFailedLaunch,
     resumeStoppedChat,
     discoveredReopenContext,
@@ -886,6 +894,8 @@ export function AgentChatPanel({
       )}
       <ChatErrorNotice
         message={activeError}
+        code={session.lastErrorCode}
+        data={session.lastErrorData}
         onRetry={canOfferNoticeRetry ? handleRetry : undefined}
         retryLabel={
           !session.launchConfigId && (session.status === 'error' || session.status === 'closed')
