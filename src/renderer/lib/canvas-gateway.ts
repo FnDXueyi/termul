@@ -7,7 +7,7 @@
  *
  * `host.save` is the one call answered here instead of in the editor: the
  * agent's `save_file` is Termul's save of the project's document (AD-18,
- * AD-23), reached through `onHostSave`.
+ * AD-23), and it answers with the document's project-relative path.
  */
 
 import { type AcpTransport, getAcpTransport } from '@/lib/acp-transport'
@@ -15,49 +15,50 @@ import {
   answerGatewayCall,
   asJsonText,
   bridgeFailure,
-  type CanvasBridgeError,
   type CanvasBridgeReply
 } from '@/lib/canvas-bridge'
 import { type CanvasSession, useCanvasStore } from '@/stores/canvas-store'
-
-/** The host save's outcome: the saved document's project-relative path. */
-export type HostSaveResult = { ok: true; path: string } | { ok: false; error: CanvasBridgeError }
-
-/** Save the project's mounted canvas document now. */
-export type HostSave = (projectId: string) => Promise<HostSaveResult>
-
-export interface CanvasGatewayOptions {
-  onHostSave?: HostSave
-}
+import { useProjectStore } from '@/stores/project-store'
 
 const HOST_SAVE = 'host.save'
-
-const unwiredHostSave: HostSave = async () => ({
-  ok: false,
-  error: { code: 'CANVAS_CLOSED', message: 'saving the canvas is not available yet' }
-})
 
 function mountedSeqOf(session: CanvasSession | undefined): number | null {
   const phase = session?.phase
   return phase?.kind === 'loading' || phase?.kind === 'ready' ? phase.mount.mountSeq : null
 }
 
-async function hostSaveReply(save: HostSave, projectId: string): Promise<CanvasBridgeReply> {
+/** `docPath` relative to `root` with forward slashes; the absolute path when
+ * the document is not under the root. Drive-letter roots compare
+ * case-insensitively, as Windows paths do. */
+export function projectRelativePath(docPath: string, root: string | undefined): string {
+  const doc = docPath.replace(/\\/g, '/')
+  if (!root) return doc
+  const prefix = `${root.replace(/\\/g, '/').replace(/\/+$/, '')}/`
+  const fold = (path: string): string => (/^[A-Za-z]:/.test(path) ? path.toLowerCase() : path)
+  return fold(doc).startsWith(fold(prefix)) ? doc.slice(prefix.length) : doc
+}
+
+async function hostSave(projectId: string): Promise<CanvasBridgeReply> {
+  const canvas = useCanvasStore.getState()
+  const session = canvas.sessions[projectId]
+  if (session?.phase.kind !== 'ready') {
+    return bridgeFailure('CANVAS_CLOSED', 'the canvas document is not loaded')
+  }
   try {
-    const saved = await save(projectId)
-    return saved.ok
-      ? { ok: true, result: asJsonText(JSON.stringify({ path: saved.path })) }
-      : { ok: false, error: saved.error }
+    if (!(await canvas.saveCanvas(projectId))) {
+      const saveError = useCanvasStore.getState().sessions[projectId]?.saveError
+      return bridgeFailure('ENGINE_ERROR', saveError ?? 'the canvas could not be saved')
+    }
   } catch (error) {
     return bridgeFailure('ENGINE_ERROR', error instanceof Error ? error.message : String(error))
   }
+  const root = useProjectStore.getState().projects.find((p) => p.id === projectId)?.path
+  const path = projectRelativePath(session.docPath, root)
+  return { ok: true, result: asJsonText(JSON.stringify({ path })) }
 }
 
 /** Start serving gateway calls from this renderer's canvases. Returns the stop. */
-export function startCanvasGateway(
-  transport: AcpTransport = getAcpTransport(),
-  { onHostSave = unwiredHostSave }: CanvasGatewayOptions = {}
-): () => void {
+export function startCanvasGateway(transport: AcpTransport = getAcpTransport()): () => void {
   const gateway = transport.canvas
   if (!gateway) return () => {}
   const store = useCanvasStore.getState
@@ -65,7 +66,7 @@ export function startCanvasGateway(
   gateway.setCallHandler((call) =>
     answerGatewayCall(call, mountedSeqOf(store().sessions[call.projectId]), (method, params) =>
       method === HOST_SAVE
-        ? hostSaveReply(onHostSave, call.projectId)
+        ? hostSave(call.projectId)
         : store().callCanvas(call.projectId, method, params)
     )
   )
