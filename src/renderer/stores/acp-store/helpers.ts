@@ -48,6 +48,7 @@ import {
 } from '@/lib/skill-tokens'
 import { wireBlocksToDisplay, wireTextToDisplay } from '@/lib/skills-wire-reverse'
 import { randomUUID } from '@/lib/uuid'
+import { isAfter, type LogPoint } from '@/stores/agent-chat-unread-store'
 import {
   configIdFromReuseKey,
   detachedReuseKey,
@@ -815,26 +816,26 @@ export function nextQueueId(): string {
 
 /**
  * Install `list` as the session's slash commands unless the store holds a
- * list from a newer record. `seq` is the seq of the `commands_update` record
- * that set the list; a list without one (an older host) installs and drops
- * the held seq.
+ * list from a newer record of the same log incarnation. `point` locates the
+ * `commands_update` record that set the list; a list without one (an older
+ * host) installs and drops the held point.
  */
 export function withCommands(
   state: Pick<AcpState, 'commands' | 'commandsSeq'>,
   sessionId: SessionId,
   list: AvailableCommand[],
-  seq: number | undefined
+  point: LogPoint | undefined
 ): Pick<AcpState, 'commands' | 'commandsSeq'> {
   const held = state.commandsSeq[sessionId]
-  if (seq !== undefined && held !== undefined && seq < held) {
+  if (point !== undefined && held !== undefined && !isAfter(point, held) && point.seq < held.seq) {
     return { commands: state.commands, commandsSeq: state.commandsSeq }
   }
   return {
     commands: { ...state.commands, [sessionId]: list },
     commandsSeq:
-      seq === undefined
+      point === undefined
         ? dropRecordKey(state.commandsSeq, sessionId)
-        : { ...state.commandsSeq, [sessionId]: seq }
+        : { ...state.commandsSeq, [sessionId]: point }
   }
 }
 

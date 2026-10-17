@@ -5,11 +5,7 @@ import type { AcpTransport } from '@/lib/acp-transport'
 export type AcpRecovery = SessionSnapshotEvent | { sessionId: string; degraded: true }
 
 export interface AcpConnectionCoordinatorOptions {
-  installRecovery: (
-    recovery: AcpRecovery,
-    reopenGeneration?: number,
-    logEpochChanged?: boolean
-  ) => Promise<void>
+  installRecovery: (recovery: AcpRecovery, reopenGeneration?: number) => Promise<void>
   /**
    * Store's per-session reopen generation (0 when never reopened). The
    * transport captures it before the recovery round-trip and hands it back

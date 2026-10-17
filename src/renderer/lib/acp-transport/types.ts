@@ -495,8 +495,7 @@ export interface AcpTransport {
   setRecoveryHandler?(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-      reopenGeneration?: number,
-      logEpochChanged?: boolean
+      reopenGeneration?: number
     ) => Promise<void>
   ): void
   /**

@@ -624,13 +624,16 @@ describe('warm session pool', () => {
     const state = {
       ...useAcpStore.getState(),
       commands: { 'sess-prep': init, other: init },
-      commandsSeq: { 'sess-prep': 4, other: 2 }
+      commandsSeq: {
+        'sess-prep': { logEpoch: 'e', seq: 4 },
+        other: { logEpoch: 'e', seq: 2 }
+      }
     }
 
     const next = dropEphemeralSessionState(state, 'sess-prep')
 
     expect(next.commands).toEqual({ other: init })
-    expect(next.commandsSeq).toEqual({ other: 2 })
+    expect(next.commandsSeq).toEqual({ other: { logEpoch: 'e', seq: 2 } })
   })
 
   describe('warm slot lifecycle', () => {

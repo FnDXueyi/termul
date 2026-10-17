@@ -832,7 +832,14 @@ async function openHistorySessionInner(
     // borderless separators at their seq positions after a reopen.
     agentSwitches: { ...s.agentSwitches, [id]: installed.switches },
     ...(Array.isArray(payload.commands)
-      ? withCommands(s, id, payload.commands, payload.commandsSeq)
+      ? withCommands(
+          s,
+          id,
+          payload.commands,
+          payload.commandsSeq === undefined
+            ? undefined
+            : { logEpoch: payload.metadata.logEpoch ?? null, seq: payload.commandsSeq }
+        )
       : {})
   }))
   onTranscriptInstalled()
