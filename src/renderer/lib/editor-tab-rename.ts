@@ -22,17 +22,16 @@ export async function renamePathWithOpenEditors(
 ): Promise<IpcResult<void>> {
   const from = forwardSlashes(fromPath)
   const to = forwardSlashes(toPath)
-  const moves: Array<[string, string]> = []
-  for (const openPath of useEditorStore.getState().openFiles.keys()) {
-    const open = forwardSlashes(openPath)
-    if (open === from || open.startsWith(`${from}/`)) {
-      moves.push([openPath, `${to}${open.slice(from.length)}`])
-    }
-  }
-
-  return renameBetweenSaves(moves, async () => {
+  return renameBetweenSaves(from, to, async () => {
     const result = await filesystemApi.renameFile(fromPath, toPath)
     if (!result.success) return result
+    const moves: Array<[string, string]> = []
+    for (const openPath of useEditorStore.getState().openFiles.keys()) {
+      const open = forwardSlashes(openPath)
+      if (open === from || open.startsWith(`${from}/`)) {
+        moves.push([openPath, `${to}${open.slice(from.length)}`])
+      }
+    }
     for (const [oldPath, newPath] of moves) {
       try {
         // Pull any keystrokes the editor has not handed to the store yet.

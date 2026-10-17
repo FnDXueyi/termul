@@ -205,6 +205,35 @@ describe('moving an open file with cut and paste', () => {
       expect(mockApi.writeFile).toHaveBeenCalledTimes(1)
       expect(mockApi.writeFile).toHaveBeenCalledWith('/project/lib/a.ts', 'saved edit')
     })
+
+    it('moves a file opened under the folder while the move is in flight, and saves it at the new path', async () => {
+      disk.set('/project/src/b.ts', 'b on disk')
+      const reply = held()
+      mockApi.renameFile.mockImplementation(async (from: string, to: string) => {
+        for (const path of [...disk.keys()]) {
+          if (path.startsWith(`${from}/`)) moveOnDisk(path, `${to}${path.slice(from.length)}`)
+        }
+        await reply.promise
+        return ok
+      })
+      openFile('/project/src/a.ts', 'a on disk', 'a on disk')
+
+      const move = cutAndPaste(['/project/src'], '/project/lib')
+      await settle()
+      expect(mockApi.renameFile).toHaveBeenCalledWith('/project/src', '/project/lib/src')
+      openFile('/project/src/b.ts', 'b edit', 'b on disk')
+      const save = useEditorStore.getState().saveFile('/project/src/b.ts')
+      await settle()
+      reply.release()
+      await Promise.all([save, move])
+
+      expect(editorTabIds().sort()).toEqual([
+        editorTabId('/project/lib/src/a.ts'),
+        editorTabId('/project/lib/src/b.ts')
+      ])
+      expect([...disk.keys()].sort()).toEqual(['/project/lib/src/a.ts', '/project/lib/src/b.ts'])
+      expect(disk.get('/project/lib/src/b.ts')).toBe('b edit')
+    })
   })
 
   it('keeps the open file where it is when copying', async () => {
