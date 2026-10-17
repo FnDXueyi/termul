@@ -24,6 +24,12 @@ import { useEffect, useRef } from 'react'
 import { create } from 'zustand'
 import { logFrontendError } from '@/lib/log-api'
 
+/** Overlay-stack id of the Project settings / App preferences modal. */
+export const SETTINGS_MODAL_OVERLAY_ID = 'settings-modal'
+
+/** Prefix of the overlay-stack id of each `NewProjectModal` instance. */
+export const NEW_PROJECT_MODAL_OVERLAY_PREFIX = 'new-project-modal:'
+
 export interface OverlayEntry {
   /** Stable unique id, e.g. 'mobile-drawer' or 'git-sheet'. */
   id: string

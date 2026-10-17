@@ -34,3 +34,34 @@ export function findTreeEntry(
   }
   return undefined
 }
+
+/**
+ * Entries a delete acts on. A right-clicked entry that belongs to the
+ * selection stands for the whole selection; one outside it stands alone.
+ * `clicked` is omitted for the Delete key, which always acts on the selection.
+ * An entry whose ancestor folder is also in the list is dropped: deleting the
+ * folder already removes it.
+ */
+export function resolveDeleteTargets(
+  directoryContents: ReadonlyMap<string, DirectoryEntry[]>,
+  selectedPaths: ReadonlySet<string>,
+  clicked?: DirectoryEntry
+): DirectoryEntry[] {
+  const entries =
+    clicked && !selectedPaths.has(clicked.path)
+      ? [clicked]
+      : [...selectedPaths].flatMap((path) => findTreeEntry(directoryContents, path) ?? [])
+  if (entries.length === 0 && clicked) return [clicked]
+
+  const paths = new Set(entries.map((entry) => normalizeTreePath(entry.path)))
+  return entries.filter((entry) => {
+    let ancestor = parentTreePath(entry.path)
+    while (ancestor) {
+      if (paths.has(ancestor)) return false
+      const next = parentTreePath(ancestor)
+      if (next === ancestor) break
+      ancestor = next
+    }
+    return true
+  })
+}

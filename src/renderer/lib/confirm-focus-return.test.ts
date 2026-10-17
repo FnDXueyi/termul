@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CONFIRM_DIALOG_OVERLAY_PREFIX } from '@/components/ConfirmDialog'
 import { logFrontendError } from '@/lib/log-api'
-import { useOverlayStackStore } from '@/stores/overlay-stack-store'
+import {
+  NEW_PROJECT_MODAL_OVERLAY_PREFIX,
+  SETTINGS_MODAL_OVERLAY_ID,
+  useOverlayStackStore
+} from '@/stores/overlay-stack-store'
 import {
   CONFIRM_APPEAR_TIMEOUT_MS,
   CONFIRM_EXIT_TIMEOUT_MS,
-  returnFocusAfterConfirm
+  returnFocusAfterConfirm,
+  returnFocusAfterModal
 } from './confirm-focus-return'
 
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
@@ -235,6 +240,94 @@ describe('returnFocusAfterConfirm', () => {
     closeConfirm(root)
     root.remove()
     vi.advanceTimersByTime(CONFIRM_APPEAR_TIMEOUT_MS)
+
+    expect(restore).not.toHaveBeenCalled()
+  })
+})
+
+describe('returnFocusAfterModal', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.mocked(logFrontendError).mockClear()
+    useOverlayStackStore.setState({ stack: [] })
+    ;(document.activeElement as HTMLElement | null)?.blur()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    useOverlayStackStore.setState({ stack: [] })
+    document.body.innerHTML = ''
+  })
+
+  function openModal(id: string): HTMLElement {
+    useOverlayStackStore.getState().registerOverlay(id, () => {})
+    const card = document.createElement('div')
+    card.tabIndex = -1
+    document.body.appendChild(card)
+    card.focus()
+    return card
+  }
+
+  /** The modal unregisters at once; its focused card leaves the DOM after the exit animation. */
+  function closeModal(id: string, card: HTMLElement): void {
+    useOverlayStackStore.getState().unregisterOverlay(id)
+    vi.advanceTimersByTime(150)
+    card.remove()
+  }
+
+  it.each([
+    ['the settings modal', SETTINGS_MODAL_OVERLAY_ID],
+    ['the New project modal', `${NEW_PROJECT_MODAL_OVERLAY_PREFIX}:r1:`]
+  ])('restores focus once %s closed and its card left the DOM', (_name, id) => {
+    const opener = mountButton()
+    returnFocusAfterModal(() => {
+      opener.focus()
+      return document.activeElement === opener
+    })
+
+    const card = openModal(id)
+    closeModal(id, card)
+    expect(document.activeElement).toBe(document.body)
+    vi.advanceTimersByTime(20)
+
+    expect(document.activeElement).toBe(opener)
+  })
+
+  it('waits while the focused card is still animating out', () => {
+    const restore = vi.fn(() => true)
+    returnFocusAfterModal(restore)
+
+    const card = openModal(SETTINGS_MODAL_OVERLAY_ID)
+    useOverlayStackStore.getState().unregisterOverlay(SETTINGS_MODAL_OVERLAY_ID)
+    vi.advanceTimersByTime(100)
+    expect(restore).not.toHaveBeenCalled()
+
+    card.remove()
+    vi.advanceTimersByTime(20)
+    expect(restore).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves focus where the user moved it before the modal closed', () => {
+    const restore = vi.fn(() => true)
+    returnFocusAfterModal(restore)
+    const elsewhere = mountButton()
+
+    const card = openModal(SETTINGS_MODAL_OVERLAY_ID)
+    elsewhere.focus()
+    closeModal(SETTINGS_MODAL_OVERLAY_ID, card)
+    vi.advanceTimersByTime(CONFIRM_EXIT_TIMEOUT_MS + 100)
+
+    expect(restore).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(elsewhere)
+  })
+
+  it('ignores a confirm dialog on the stack', () => {
+    const restore = vi.fn(() => true)
+    returnFocusAfterModal(restore)
+
+    const card = openModal(CONFIRM_ID)
+    closeModal(CONFIRM_ID, card)
+    vi.advanceTimersByTime(CONFIRM_APPEAR_TIMEOUT_MS * 2)
 
     expect(restore).not.toHaveBeenCalled()
   })

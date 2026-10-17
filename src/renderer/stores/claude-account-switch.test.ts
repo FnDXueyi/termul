@@ -1,6 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAcpStore } from '@/stores/acp-store'
+import { acpApi } from '@/lib/acp-api'
+import { logFrontendError } from '@/lib/log-api'
+import { agentReuseKey } from '@/stores/acp-reuse-keys'
+import {
+  _addEphemeralSessionIdForTesting,
+  _resetEphemeralSessionIdsForTesting,
+  useAcpStore
+} from '@/stores/acp-store'
 import { FRESH } from '@/stores/acp-store/testkit'
+import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
+import {
+  buildProjectWorkspace,
+  createProjectWorkspace,
+  useWorkspaceStore
+} from '@/stores/workspace-store'
 import {
   applyProjectClaudeAccount,
   CLAUDE_AGENT_CONFIG_ID,
@@ -13,6 +26,7 @@ const { api } = vi.hoisted(() => ({ api: { setProjectAccount: vi.fn() } }))
 vi.mock('@/lib/claude-accounts-api', () => ({ claudeAccountsApi: api }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 
+const realKillAgent = useAcpStore.getState().killAgent
 const killAgent = vi.fn()
 const retryCrashedSession = vi.fn()
 const cancelPrompt = vi.fn()
@@ -46,8 +60,32 @@ const indexEntry = (id: string, agentConfigId: string) => ({
   status: 'active' as const
 })
 
+function openChatTabs(sessionIds: string[]): void {
+  useWorkspaceStore.setState({ activeProjectId: '', parkedTrees: {}, ...createProjectWorkspace() })
+  useWorkspaceStore.getState().activateProject(
+    'office',
+    buildProjectWorkspace({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: `chat-${sessionIds[0]}`,
+      tabs: sessionIds.map((sessionId) => ({
+        type: 'agent-chat' as const,
+        id: `chat-${sessionId}`,
+        sessionId
+      }))
+    })
+  )
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  _resetEphemeralSessionIdsForTesting()
+  useAgentChatLifetimeStore.setState({
+    retainedByProject: {},
+    activeSessionByProject: {},
+    focusSessionByProject: {}
+  })
+  openChatTabs(['c1', 'c2', 'other', 'elsewhere'])
   killAgent.mockResolvedValue(undefined)
   retryCrashedSession.mockResolvedValue(undefined)
   cancelPrompt.mockImplementation(async (id: string) => {
@@ -143,11 +181,98 @@ describe('claude account switch', () => {
     expect(restarted).toHaveLength(2)
   })
 
+  it('does not reopen a busy chat whose tab closed while it waited', async () => {
+    await applyProjectClaudeAccount('office')
+    openChatTabs(['c1'])
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, c2: { ...s.sessions.c2, activeTurn: false, openTurnId: null } }
+    }))
+    await vi.waitFor(() => expect(killAgent).toHaveBeenCalledWith('agent-c2'))
+    expect(retryCrashedSession.mock.calls.map(([id]) => id)).toEqual(['c1'])
+  })
+
   it('saves the project account on the host before restarting', async () => {
     await switchProjectClaudeAccount('office', 'ab12')
     expect(api.setProjectAccount).toHaveBeenCalledWith('office', 'ab12')
     expect(api.setProjectAccount.mock.invocationCallOrder[0]).toBeLessThan(
       killAgent.mock.invocationCallOrder[0]
     )
+  })
+})
+
+describe('claude account switch with chats that have no open tab', () => {
+  const warmKey = agentReuseKey(CLAUDE_AGENT_CONFIG_ID, '/work', 'office')
+
+  beforeEach(() => {
+    vi.spyOn(acpApi, 'killAgent').mockResolvedValue(undefined)
+    killAgent.mockImplementation((agentId: string) => realKillAgent(agentId))
+    retryCrashedSession.mockImplementation(async (id: string) => {
+      if (id === 'warm') throw new Error('unknown session')
+    })
+    _addEphemeralSessionIdForTesting('warm')
+    useAcpStore.setState((s) => ({
+      agents: { 'agent-warm': {} as never, 'agent-bg': {} as never, 'agent-c1': {} as never },
+      agentStatus: {
+        'agent-warm': 'connected',
+        'agent-bg': 'connected',
+        'agent-c1': 'connected'
+      },
+      configToLiveAgent: { [warmKey]: 'agent-warm' },
+      preparedSessions: { [`${CLAUDE_AGENT_CONFIG_ID}\0/work\0`]: 'warm' },
+      sessions: {
+        c1: s.sessions.c1,
+        warm: session('warm'),
+        bg: session('bg')
+      },
+      sessionIndex: [
+        indexEntry('c1', CLAUDE_AGENT_CONFIG_ID),
+        indexEntry('bg', CLAUDE_AGENT_CONFIG_ID)
+      ]
+    }))
+    openChatTabs(['c1'])
+  })
+
+  it('drops a warm-pool chat on the old account instead of restarting it', async () => {
+    await applyProjectClaudeAccount('office')
+    const state = useAcpStore.getState()
+    expect(retryCrashedSession.mock.calls.map(([id]) => id)).toEqual(['c1'])
+    expect(state.preparedSessions).toEqual({})
+    expect(state.configToLiveAgent[warmKey]).toBeUndefined()
+    expect(state.sessions.warm?.status).toBe('closed')
+    expect(vi.mocked(logFrontendError).mock.calls.filter(([e]) => e.level === 'warn')).toEqual([])
+  })
+
+  it('stops the agent of an idle chat whose tab was closed and does not reopen it', async () => {
+    await applyProjectClaudeAccount('office')
+    expect(acpApi.killAgent).toHaveBeenCalledWith('agent-bg')
+    expect(useAcpStore.getState().sessions.bg?.status).toBe('closed')
+    expect(retryCrashedSession).not.toHaveBeenCalledWith('bg', expect.anything())
+  })
+
+  it('lets a closed-tab chat finish its turn before stopping its agent', async () => {
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, bg: { ...s.sessions.bg, activeTurn: true, openTurnId: 'turn-1' } }
+    }))
+    await applyProjectClaudeAccount('office')
+    expect(acpApi.killAgent).not.toHaveBeenCalledWith('agent-bg')
+    expect(useAcpStore.getState().sessions.bg?.status).toBe('active')
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, bg: { ...s.sessions.bg, activeTurn: false, openTurnId: null } }
+    }))
+    await vi.waitFor(() => expect(acpApi.killAgent).toHaveBeenCalledWith('agent-bg'))
+    expect(useAcpStore.getState().sessions.bg?.status).toBe('closed')
+    expect(retryCrashedSession).not.toHaveBeenCalledWith('bg', expect.anything())
+  })
+
+  it('still restarts the open chat on the new account', async () => {
+    await applyProjectClaudeAccount('office')
+    expect(acpApi.killAgent).toHaveBeenCalledWith('agent-c1')
+    expect(retryCrashedSession).toHaveBeenCalledWith('c1', { resend: false })
+  })
+
+  it('treats a chat kept for an off-screen project as open', async () => {
+    useAgentChatLifetimeStore.getState().retainProjectChats('office', ['bg'])
+    await applyProjectClaudeAccount('office')
+    expect(retryCrashedSession).toHaveBeenCalledWith('bg', { resend: false })
   })
 })

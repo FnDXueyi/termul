@@ -13,6 +13,7 @@ import {
   primaryMonitor
 } from '@/lib/tauri-window'
 import { hasAppCloseOwner } from '@/lib/tauri-window-api'
+import { registerWindowStateCloseWriter } from '@/lib/window-state-close-flush'
 
 const DEFAULT_WIDTH = 1200
 const DEFAULT_HEIGHT = 800
@@ -24,6 +25,26 @@ const MIN_VISIBLE_PIXELS = 100
  * still flips so `TauriApp` can show the window.
  */
 export const WINDOW_RESTORE_TIMEOUT_MS = 1500
+
+export const WINDOW_STATE_CLOSE_TIMEOUT_MS = 1000
+
+async function persistWithinCloseTimeout(write: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), WINDOW_STATE_CLOSE_TIMEOUT_MS)
+  })
+  const outcome = await Promise.race([write().then(() => 'done' as const), timeout]).finally(() =>
+    clearTimeout(timer)
+  )
+  if (outcome === 'timeout') {
+    console.warn(`Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms`)
+    void logFrontendError({
+      level: 'warn',
+      source: 'use-window-state',
+      message: `Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms; closing anyway`
+    })
+  }
+}
 
 interface LogicalRect {
   x: number
@@ -218,6 +239,14 @@ export function useWindowState(): boolean {
       await operation
     }
 
+    let closeWrite: Promise<void> | null = null
+    const persistImmediateShared = (): Promise<void> => {
+      closeWrite ??= persistWindowState(true).finally(() => {
+        closeWrite = null
+      })
+      return closeWrite
+    }
+
     const registerListeners = (): Array<() => void> => {
       const movedUnlisten = window.onMoved(() => void persistWindowState())
       const resizedUnlisten = window.onResized(() => void persistWindowState())
@@ -229,7 +258,12 @@ export function useWindowState(): boolean {
       // route) the default destroy stays, so the window can still close.
       const closeRequestedUnlisten = window.onCloseRequested((event) => {
         if (hasAppCloseOwner()) event.preventDefault()
-        void persistWindowState(true)
+        persistImmediateShared().catch((error) => {
+          void logFrontendError({
+            source: 'use-window-state',
+            message: `Failed to persist window state on close: ${error instanceof Error ? error.message : String(error)}`
+          })
+        })
       })
 
       return [
@@ -260,6 +294,7 @@ export function useWindowState(): boolean {
     }
 
     let cleanups: Array<() => void> = []
+    let unregisterCloseWriter = (): void => {}
     let restoreTimer: ReturnType<typeof setTimeout> | undefined
 
     const initialize = async (): Promise<void> => {
@@ -295,6 +330,9 @@ export function useWindowState(): boolean {
 
       if (disposed) return
       cleanups = registerListeners()
+      unregisterCloseWriter = registerWindowStateCloseWriter(() =>
+        persistWithinCloseTimeout(persistImmediateShared)
+      )
     }
 
     void initialize()
@@ -310,6 +348,7 @@ export function useWindowState(): boolean {
     return () => {
       disposed = true
       clearTimeout(restoreTimer)
+      unregisterCloseWriter()
       void persistWindowState(true)
       cleanups.forEach((cleanup) => {
         cleanup()

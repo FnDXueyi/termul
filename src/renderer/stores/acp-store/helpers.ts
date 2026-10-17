@@ -5,6 +5,7 @@
  */
 
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
+import { flattenConfigOptionValues } from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import {
@@ -1328,9 +1329,7 @@ export function mergeAgentConfigOptions(
       typeof prior.currentValue === 'boolean' || typeof option.currentValue === 'boolean'
     if (
       !booleanOption &&
-      !(option.options ?? []).some(
-        (entry) => typeof entry.value === 'string' && entry.value === priorComparable
-      )
+      !flattenConfigOptionValues(option).some((entry) => entry.value === priorComparable)
     ) {
       return option
     }
@@ -1884,11 +1883,28 @@ export function selectConfigWarmState(state: AcpState, configId: string): Config
 }
 
 /**
+ * Server seq of the prompt that opened the trailing turn: the last user bubble
+ * when it is a real prompt (visible content, not a handoff boundary row) with
+ * a positive seq. `null` when the window cuts the turn off from its prompt or
+ * the trailing turn is a hidden one, whose cards never render.
+ */
+export function openTurnPromptSeq(messages: ChatMessage[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user') continue
+    const seq = message.seq
+    const prompt = message.handoffBoundary !== true && hasVisibleContent(message)
+    return prompt && typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? seq : null
+  }
+  return null
+}
+
+/**
  * Issue #838: derive the open turn (a `user_prompt` with no matching
  * `prompt_complete`) from an installed transcript. The server's session
- * metadata may carry `turnActive` (authoritative, set when the host knows a
- * turn is running); the transcript derivation covers older hosts and any
- * window where metadata lagged. Returns the open turn id (`turn:<turnId>`)
+ * metadata may carry `turnActive` (authoritative: `true` when a turn runs,
+ * `false` when it ended); the transcript derivation covers older hosts and a
+ * prompt without a turn id, where the host leaves it absent. Returns the open turn id (`turn:<turnId>`)
  * or null. A turn id missing from the bubble (older records) yields
  * `turn:<lastUserSeq>` so the stop button + spinner have a stable handle.
  */
@@ -1901,6 +1917,12 @@ export function deriveOpenTurn(
   // assistant reply after it — a streaming turn may have zero agent output
   // yet, so absence of a reply is not proof of completion, but its presence
   // IS proof the turn finished).
+  // An explicit `false` is the host saying the turn ended (a completion or a
+  // host terminator closed it, or the session is not active). A transcript can
+  // still end on the user's bubble then — a failed turn has no agent reply — so
+  // it must not be read as a turn still running (issue #1192). `undefined` is an
+  // older host, or an open prompt without a turn id: derive it from the tail.
+  if (metadataTurnActive === false) return null
   if (metadataTurnActive) {
     // Metadata says a turn runs; recover the id from the last user bubble.
     for (let i = messages.length - 1; i >= 0; i--) {

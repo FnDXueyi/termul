@@ -81,6 +81,7 @@ import {
   writeTextFile
 } from '@tauri-apps/plugin-fs'
 import { _resetFilesystemStateForTesting, tauriFilesystemApi } from '../tauri-filesystem-api'
+import notifyWatchEvents from './fixtures/notify-watch-events.json'
 
 function makeFileInfo(overrides: Partial<FileInfo>): FileInfo {
   return {
@@ -656,10 +657,6 @@ describe('tauriFilesystemApi', () => {
       }
     }
 
-    function emitEvent(kindType: string, path: string): unknown {
-      return { type: { type: kindType }, paths: [path] }
-    }
-
     it('routes create events only to onFileCreated subscribers', async () => {
       const emit = await watchAndCapture()
       const onChanged = vi.fn()
@@ -669,7 +666,7 @@ describe('tauriFilesystemApi', () => {
       const cleanupCreated = tauriFilesystemApi.onFileCreated(onCreated)
       const cleanupDeleted = tauriFilesystemApi.onFileDeleted(onDeleted)
 
-      emit(emitEvent('create', '/test/new.txt'))
+      emit(notifyWatchEvents.createFile)
 
       expect(onCreated).toHaveBeenCalledTimes(1)
       expect(onCreated).toHaveBeenCalledWith({ type: 'add', path: '/test/new.txt' })
@@ -690,7 +687,7 @@ describe('tauriFilesystemApi', () => {
       const cleanupCreated = tauriFilesystemApi.onFileCreated(onCreated)
       const cleanupDeleted = tauriFilesystemApi.onFileDeleted(onDeleted)
 
-      emit(emitEvent('modify', '/test/saved.txt'))
+      emit(notifyWatchEvents.modifyData)
 
       expect(onChanged).toHaveBeenCalledTimes(1)
       expect(onChanged).toHaveBeenCalledWith({ type: 'change', path: '/test/saved.txt' })
@@ -711,7 +708,7 @@ describe('tauriFilesystemApi', () => {
       const cleanupCreated = tauriFilesystemApi.onFileCreated(onCreated)
       const cleanupDeleted = tauriFilesystemApi.onFileDeleted(onDeleted)
 
-      emit(emitEvent('remove', '/test/gone.txt'))
+      emit(notifyWatchEvents.removeFile)
 
       expect(onDeleted).toHaveBeenCalledTimes(1)
       expect(onDeleted).toHaveBeenCalledWith({ type: 'unlink', path: '/test/gone.txt' })
@@ -723,6 +720,56 @@ describe('tauriFilesystemApi', () => {
       cleanupDeleted()
     })
 
+    function subscribeToAllTypes(callback: (event: unknown) => void): () => void {
+      const cleanups = [
+        tauriFilesystemApi.onFileChanged(callback),
+        tauriFilesystemApi.onFileCreated(callback),
+        tauriFilesystemApi.onFileDeleted(callback)
+      ]
+      return () => {
+        for (const cleanup of cleanups) cleanup()
+      }
+    }
+
+    it.each([
+      ['createFile', { type: 'add', path: '/test/new.txt' }],
+      ['createAny', { type: 'add', path: '/test/new.txt' }],
+      ['modifyData', { type: 'change', path: '/test/saved.txt' }],
+      ['modifyMetadata', { type: 'change', path: '/test/saved.txt' }],
+      ['removeFile', { type: 'unlink', path: '/test/gone.txt' }],
+      ['removeAny', { type: 'unlink', path: '/test/gone.txt' }],
+      ['renameFrom', { type: 'unlink', path: '/test/old.txt' }],
+      ['renameTo', { type: 'add', path: '/test/renamed.txt' }],
+      ['renameAny', { type: 'change', path: '/test/renamed.txt' }],
+      ['any', { type: 'change', path: '/test/open.md' }],
+      ['other', { type: 'change', path: '/test/open.md' }]
+    ] as const)('dispatches a real %s event as %o', async (name, expected) => {
+      const emit = await watchAndCapture()
+      const received = vi.fn()
+      const cleanup = subscribeToAllTypes(received)
+
+      emit(notifyWatchEvents[name])
+
+      expect(received.mock.calls).toEqual([[expected]])
+      cleanup()
+    })
+
+    it('reports an inotify rename as one unlink of the old path and one add of the new path', async () => {
+      const emit = await watchAndCapture()
+      const received = vi.fn()
+      const cleanup = subscribeToAllTypes(received)
+
+      emit(notifyWatchEvents.renameFrom)
+      emit(notifyWatchEvents.renameTo)
+      emit(notifyWatchEvents.renameBoth)
+
+      expect(received.mock.calls).toEqual([
+        [{ type: 'unlink', path: '/test/old.txt' }],
+        [{ type: 'add', path: '/test/renamed.txt' }]
+      ])
+      cleanup()
+    })
+
     it('drops access events so a file read never reports a change', async () => {
       // An open editor tab reloads by reading the file; if that read came back
       // as a change the tab would reload again and spin forever.
@@ -730,21 +777,14 @@ describe('tauriFilesystemApi', () => {
       const onChanged = vi.fn()
       const cleanupChanged = tauriFilesystemApi.onFileChanged(onChanged)
 
-      for (const access of [
-        { kind: 'open', mode: 'any' },
-        { kind: 'open', mode: 'write' },
-        { kind: 'close', mode: 'read' },
-        { kind: 'close', mode: 'write' },
-        { kind: 'any' },
-        { kind: 'other' }
-      ]) {
-        emit({ type: { access }, paths: ['/test/open.md'] })
-      }
+      emit(notifyWatchEvents.accessOpenAny)
+      emit(notifyWatchEvents.accessCloseRead)
+      emit(notifyWatchEvents.accessCloseWrite)
+      emit(notifyWatchEvents.accessAny)
       expect(onChanged).not.toHaveBeenCalled()
 
-      emit({ type: { modify: { kind: 'data', mode: 'any' } }, paths: ['/test/open.md'] })
-      emit({ type: 'any', paths: ['/test/open.md'] })
-      expect(onChanged).toHaveBeenCalledTimes(2)
+      emit(notifyWatchEvents.any)
+      expect(onChanged).toHaveBeenCalledTimes(1)
       expect(onChanged).toHaveBeenCalledWith({ type: 'change', path: '/test/open.md' })
 
       cleanupChanged()
@@ -761,9 +801,9 @@ describe('tauriFilesystemApi', () => {
         tauriFilesystemApi.onFileDeleted(invalidate)
       ]
 
-      emit(emitEvent('create', '/test/a.txt'))
-      emit(emitEvent('modify', '/test/a.txt'))
-      emit(emitEvent('remove', '/test/a.txt'))
+      emit(notifyWatchEvents.createFile)
+      emit(notifyWatchEvents.modifyData)
+      emit(notifyWatchEvents.removeFile)
 
       expect(invalidate).toHaveBeenCalledTimes(3)
       expect(invalidate.mock.calls.map((call) => call[0].type)).toEqual(['add', 'change', 'unlink'])
@@ -776,13 +816,13 @@ describe('tauriFilesystemApi', () => {
       const onChanged = vi.fn()
       const cleanupChanged = tauriFilesystemApi.onFileChanged(onChanged)
 
-      emit(emitEvent('modify', '/test/one.txt'))
+      emit(notifyWatchEvents.modifyData)
       expect(onChanged).toHaveBeenCalledTimes(1)
 
       cleanupChanged()
-      emit(emitEvent('modify', '/test/one.txt'))
-      emit(emitEvent('create', '/test/two.txt'))
-      emit(emitEvent('remove', '/test/one.txt'))
+      emit(notifyWatchEvents.modifyData)
+      emit(notifyWatchEvents.createFile)
+      emit(notifyWatchEvents.removeFile)
 
       expect(onChanged).toHaveBeenCalledTimes(1)
     })
@@ -795,11 +835,11 @@ describe('tauriFilesystemApi', () => {
 
       cleanupChanged()
 
-      emit(emitEvent('modify', '/test/a.txt'))
-      emit(emitEvent('create', '/test/b.txt'))
+      emit(notifyWatchEvents.modifyData)
+      emit(notifyWatchEvents.createFile)
 
       expect(shared).toHaveBeenCalledTimes(1)
-      expect(shared).toHaveBeenCalledWith({ type: 'add', path: '/test/b.txt' })
+      expect(shared).toHaveBeenCalledWith({ type: 'add', path: '/test/new.txt' })
 
       cleanupCreated()
     })

@@ -477,15 +477,17 @@ impl WsRelaySink {
     /// Relay-event policy for a failed durable enqueue: never lose the live
     /// event.
     ///
-    /// `SessionNotFound` is the expected outcome for BOTH a deleted session
-    /// (delete won the race against a still-streaming event: the durable
-    /// record is intentionally absent) AND a session whose registration has
-    /// not installed the durable writer yet (an agent's first events can beat
-    /// `register_session`, issue #836). The not-yet-registered case is
-    /// BUFFERED (flushed the moment registration lands) so the JSONL keeps a
-    /// contiguous seq run; the deleted case stays dropped. Writer-stopped and
-    /// I/O failures stay warn. A full queue does not reject: `enqueue_event`
-    /// diverts to the writer's overflow forwarder.
+    /// `SessionNotFound` means the session has no writer installed. The
+    /// record is always buffered (drop-oldest past capacity), and the next
+    /// durable emit or `note_session_registered` after a writer installs
+    /// drains the buffer ahead of it, so the JSONL keeps a contiguous seq
+    /// run. A session the catalog still knows had its writer finalized (agent
+    /// killed or closed): its buffer lands once the chat reopens and records
+    /// again. A session the catalog does not know is either not registered
+    /// yet (issue #836) or deleted; a deleted session's buffer is never
+    /// flushed. Writer-stopped and I/O failures warn and drop the record. A
+    /// full queue does not reject: `enqueue_event` diverts to the writer's
+    /// overflow forwarder.
     fn absorb_persist_error(
         &self,
         persistence: &SessionPersistence,
@@ -498,27 +500,24 @@ impl WsRelaySink {
             return Ok(());
         }
         let seq = record.seq;
-        let known_deleted = {
+        {
             let mut pending = self.pre_registration_events.lock();
             let queue = pending.entry(sid.clone()).or_default();
             queue.push_back(record);
             while queue.len() > self.pre_registration_capacity {
                 queue.pop_front(); // drop-oldest
             }
-            // A session that was known (registered) and then deleted has no
-            // catalog entry: nothing to flush into, and buffering forever
-            // would leak. Drop the buffer for ids the catalog no longer knows.
-            !matches!(
-                persistence.metadata(&sid),
-                Err(SessionPersistenceError::SessionNotFound)
-            )
-        };
-        if known_deleted {
-            info!("[sessions] persistence queue skipped event for deleted session {sid}");
+        }
+        let catalog_known = persistence.metadata(&sid).is_ok();
+        if catalog_known {
+            info!(
+                "[sessions] persistence queue buffered event for session {sid} (seq {seq}) \
+                 whose writer is closed; it is written once the session reopens and records again"
+            );
         } else {
             info!(
-                "[sessions] persistence queue buffered pre-registration event \
-                 for session {sid} (seq {seq})"
+                "[sessions] persistence queue buffered event for session {sid} (seq {seq}) \
+                 with no catalog entry (not registered yet, or deleted)"
             );
         }
         Ok(())

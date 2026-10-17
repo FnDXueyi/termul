@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const MOCK_AGENT: &str = r#"
-import json, sys
+import json, os, subprocess, sys
 
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -59,6 +59,10 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": rid,
                   "error": {"code": -32603, "message": "Internal error",
                             "data": {"status": 400}}})
+        elif text == "browser":
+            subprocess.run([os.environ["BROWSER"], "https://auth.example.com/login?state=mock"],
+                           check=True)
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
         elif text == "crash":
             chunk("partial")
             sys.exit(3)
@@ -446,6 +450,38 @@ async fn normal_turn_orders_user_prompt_chunk_terminator() {
     let done = terminators(&events);
     assert_eq!(done[0]["stopReason"], "end_turn");
     assert_eq!(done[0]["turnId"], "t1");
+    h.finish().await;
+}
+
+/// The production spawn path installs the browser-open shim: the agent's
+/// `$BROWSER <url>` reaches every sink as an agent-level
+/// `acp:browser_open_request` carrying that URL. The shim exists only on POSIX
+/// hosts, so this test is POSIX only.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_browser_open_reaches_every_sink_as_a_browser_open_request() {
+    let Some(h) = Harness::start().await else {
+        return;
+    };
+    assert_eq!(h.run("browser", "t1").await.unwrap(), StopReason::EndTurn);
+    let expected = (
+        crate::acp::events::EVENT_BROWSER_OPEN_REQUEST.to_string(),
+        serde_json::json!({
+            "agentId": h.agent_id.0,
+            "url": "https://auth.example.com/login?state=mock",
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    for log in &h.logs {
+        while !log.0.lock().contains(&expected) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no browser_open_request reached the sink: {:?}",
+                log.0.lock()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     h.finish().await;
 }
 
