@@ -328,5 +328,15 @@ fn opaque_tags(list: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Embedded figcraft web bundle (spine AD-24), fetched by
+/// `scripts/canvas/fetch-figcraft-bundle.mjs` into `canvas/bundle/` before a
+/// release build. Same mechanism as [`Assets`], so the desktop binary and
+/// `termul-server` carry one copy each with no Tauri resources.
+/// `#[allow_missing]` keeps dev/CI compiling without the fetch.
+#[derive(rust_embed::Embed)]
+#[folder = "../canvas/bundle/"]
+#[allow_missing = true]
+pub struct CanvasBundle;
+
 #[cfg(test)]
 mod tests;

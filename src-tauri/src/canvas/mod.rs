@@ -24,8 +24,11 @@
 
 pub mod managed;
 pub mod mcp_proxy;
+pub mod pin;
 pub mod pool;
 
+#[cfg(test)]
+mod pin_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
