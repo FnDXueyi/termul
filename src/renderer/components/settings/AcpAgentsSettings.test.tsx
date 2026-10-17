@@ -228,7 +228,9 @@ describe('AcpAgentsSettings Check for updates', () => {
 
     await waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1))
     const [, options] = toast.warning.mock.calls[0] as [string, { description: string }]
-    expect(options.description).toMatch(/^Cached results from Oct 15, 2026, .+ show 2 agent updates\.$/)
+    expect(options.description).toMatch(
+      /^Cached results from Oct 15, 2026, .+ show 2 agent updates\.$/
+    )
   })
 
   it('still says all agents are up to date after a reachable check', async () => {

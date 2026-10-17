@@ -165,6 +165,9 @@ pub(super) async fn route_request(req: WsRequest, env: &HandlerEnv) -> WsReply {
         "set_catalog_opt_in" => {
             handle_set_catalog_opt_in(id, &req.payload, acp_catalog).await
         }
+        "fetch_acp_registry_snapshot" => {
+            handle_fetch_acp_registry_snapshot(id, &req.payload, acp_catalog).await
+        }
         // CAP-6 / Story 9: host-owned verified-atomic ACP install. The web
         // client installs a catalog agent through `install_acp_agent`; the
         // host resolves the agent by id from the catalog, downloads the HTTPS

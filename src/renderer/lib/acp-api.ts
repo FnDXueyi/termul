@@ -916,6 +916,9 @@ export interface AcpRegistrySnapshot {
   fetchedAt?: string | null
 }
 
+/** Who asked for a registry check: the Settings button or the scheduler. */
+export type RegistryCheckReason = 'manual' | 'background'
+
 // --- Ledgered commands (AD-5) ----------------------------------------------
 //
 // Every mutating command below runs through the command engine: its
@@ -948,8 +951,10 @@ async function untilSessionVisible(
   )
 }
 
-export async function acpFetchRegistrySnapshot(forceRefresh = false): Promise<AcpRegistrySnapshot> {
-  return getAcpTransport().fetchRegistrySnapshot(forceRefresh)
+export async function acpFetchRegistrySnapshot(
+  reason: RegistryCheckReason
+): Promise<AcpRegistrySnapshot> {
+  return getAcpTransport().fetchRegistrySnapshot(reason)
 }
 
 export async function acpSpawnAgent(

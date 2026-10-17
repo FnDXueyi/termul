@@ -34,6 +34,7 @@ import type {
   NewSessionOutcome,
   ProbeResult,
   PromptDispatchResult,
+  RegistryCheckReason,
   SessionConfigOption,
   SessionId,
   SessionReopenOutcome,
@@ -210,7 +211,7 @@ export interface AcpTransport {
    * `setting`, or `default`.
    */
   getAgentIdleWindow(): Promise<AgentIdleWindowStatus>
-  fetchRegistrySnapshot(forceRefresh?: boolean): Promise<AcpRegistrySnapshot>
+  fetchRegistrySnapshot(reason: RegistryCheckReason): Promise<AcpRegistrySnapshot>
   /**
    * On-demand MCP client probe (Termul's own rmcp client connection — NOT the
    * agent's). Stateless: takes the renderer-supplied wire config, opens a fresh

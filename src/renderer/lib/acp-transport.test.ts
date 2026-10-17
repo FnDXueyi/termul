@@ -141,8 +141,10 @@ class FakeWebSocket {
    * `probeRuntime` degrades gracefully). */
   catalogReply: unknown = null
   /** When set, `fetch_acp_registry_snapshot` answers with this reply. */
-  registrySnapshotReply: { ok: true; payload: unknown } | { ok: false; err: { code: string; message: string } } | null =
-    null
+  registrySnapshotReply:
+    | { ok: true; payload: unknown }
+    | { ok: false; err: { code: string; message: string } }
+    | null = null
   historyMode: 'server' | 'live_only' = 'server'
   runtimePolicy = {
     turnTimeoutMs: 3_600_000,
@@ -1083,10 +1085,10 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
-  // CAP-6 / Story 8: the fake `probeRuntime`/`fetchRegistrySnapshot` stubs
-  // (hardcoded `{npx:true,uvx:true}` / `{agents:[]}`) are replaced by a real
-  // `list_acp_catalog` WS request — the host probes npx/uvx/node/bun/python3
-  // and returns the resolved catalog. These tests pin the request shape + the
+  // CAP-6 / Story 8: the fake `probeRuntime` stub (hardcoded
+  // `{npx:true,uvx:true}`) is replaced by a real `list_acp_catalog` WS
+  // request — the host probes npx/uvx/node/bun/python3 and returns the
+  // resolved catalog. These tests pin the request shape + the
   // reply mapping + the graceful degradation when the host is unavailable.
   it('probeRuntime sends list_acp_catalog and maps host.runtimes', async () => {
     const transport = new WsAcpTransport({
