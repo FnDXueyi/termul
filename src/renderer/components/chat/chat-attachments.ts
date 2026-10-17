@@ -1,5 +1,6 @@
 import type { FileUIPart } from 'ai'
 import type { ContentBlock } from '@/lib/acp-api'
+import { basename } from '@/lib/path-basename'
 
 /**
  * A file/image staged in the composer before sending. The variant is keyed on
@@ -140,12 +141,6 @@ export function fileExtension(name: string): string {
   const dot = base.lastIndexOf('.')
   if (dot <= 0 || dot === base.length - 1) return ''
   return base.slice(dot + 1).toLowerCase()
-}
-
-/** Last path segment, splitting on both `/` and `\`. */
-export function basename(p: string): string {
-  const parts = p.split(/[\\/]/)
-  return parts[parts.length - 1] || p
 }
 
 export function isImageMime(mimeType: string | undefined): boolean {

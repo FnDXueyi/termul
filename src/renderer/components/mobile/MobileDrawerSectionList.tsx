@@ -8,6 +8,7 @@ import { useMobileTabActions } from '@/hooks/use-mobile-tab-actions'
 import { commitDiffTabLabel } from '@/lib/diff-tab-identity'
 import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { logFrontendError } from '@/lib/log-api'
+import { basename } from '@/lib/path-basename'
 import { cn } from '@/lib/utils'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useCanvasStore } from '@/stores/canvas-store'
@@ -29,10 +30,6 @@ function rowButtonClass(isActive: boolean): string {
     'h-auto min-h-11 min-w-0 flex-1 justify-start gap-3 rounded-full px-4 py-2 text-base font-normal',
     isActive ? 'bg-secondary text-foreground' : 'text-foreground'
   )
-}
-
-function basename(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() || filePath
 }
 
 /**
