@@ -283,7 +283,7 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('a.ts')).toBeInTheDocument()
   })
 
-  it('collapses a finished tool run once activity moves past it mid-turn', () => {
+  it('keeps a run open while a thought joins it, then folds it once narration lands', () => {
     const { rerender } = render(
       <ChatMessageList
         items={[userItem, completedToolItem]}
@@ -296,8 +296,6 @@ describe('ChatMessageList', () => {
       'true'
     )
 
-    // A thought starts streaming after the settled run — same shape as a
-    // settled turn: the group folds so the live thinking is the focus.
     rerender(
       <ChatMessageList
         items={[userItem, completedToolItem, thoughtItem]}
@@ -305,7 +303,19 @@ describe('ChatMessageList', () => {
         showRunningIndicator
       />
     )
-    expect(screen.getByRole('button', { name: 'Read 1 file' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Thought, read 1 file' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+
+    rerender(
+      <ChatMessageList
+        items={[userItem, completedToolItem, thoughtItem, streamingAgentItem]}
+        sessionId="session-1"
+        showRunningIndicator
+      />
+    )
+    expect(screen.getByRole('button', { name: 'Thought, read 1 file' })).toHaveAttribute(
       'aria-expanded',
       'false'
     )

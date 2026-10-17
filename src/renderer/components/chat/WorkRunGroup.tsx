@@ -11,11 +11,13 @@ import { CHEVRON_TRANSITION } from './chat-motion'
 import type { TimelineItem } from './chat-timeline'
 import { RowReveal } from './RowReveal'
 import { ThinkingStatus } from './ThinkingStatus'
+import { ThoughtGroup } from './ThoughtGroup'
 import { ToolCallCard } from './ToolCallCard'
 import type { ToolActivitySummary } from './tool-call-summary'
 import type { EnterTracker } from './use-enter-tracker'
 
-export type ToolTimelineItem = Extract<TimelineItem, { kind: 'tool' }>
+/** One step of agent work between two narration messages. */
+export type WorkRunItem = Extract<TimelineItem, { kind: 'tool' } | { kind: 'thought-group' }>
 
 interface DiffStatProps {
   added: number
@@ -37,10 +39,10 @@ export function DiffStat({ added, removed }: DiffStatProps): React.JSX.Element |
   )
 }
 
-interface ToolCallGroupProps {
-  /** The turn's tool calls, in timeline order. */
-  items: ToolTimelineItem[]
-  /** Categorized rollup on the trigger line — "Ran 2 commands, created 1 file". */
+interface WorkRunGroupProps {
+  /** The run's thoughts and tool calls, in timeline order. */
+  items: WorkRunItem[]
+  /** Categorized rollup on the trigger line — "Thought 2 times, ran 3 commands". */
   summary: ToolActivitySummary
   /** The parent turn is still running. */
   active: boolean
@@ -53,14 +55,15 @@ interface ToolCallGroupProps {
 }
 
 /**
- * One nested disclosure rolling up the turn's tool calls; expanding lists
- * every call's card. Mirrors the thought group: open while the run is the
- * turn's live edge, and once activity moves past it — or the turn settles —
- * it stays open only when a call needs a look: an unfinished or failed call
- * sits one click deep, not two. A manual toggle sticks (userOverride) until
- * a call newly needs attention, which re-arms the auto-drive.
+ * One nested disclosure rolling up a run of thoughts and tool calls between
+ * two narration messages; expanding lists them in order. Mirrors the thought
+ * group: open while the run is the turn's live edge, and once activity moves
+ * past it — or the turn settles — it stays open only when a call needs a
+ * look: an unfinished or failed call sits one click deep, not two. A manual
+ * toggle sticks (userOverride) until a call newly needs attention, which
+ * re-arms the auto-drive.
  */
-function ToolCallGroupComponent({
+function WorkRunGroupComponent({
   items,
   summary,
   active,
@@ -69,7 +72,7 @@ function ToolCallGroupComponent({
   enter,
   filePathContext,
   onOpenSubagent
-}: ToolCallGroupProps): React.JSX.Element {
+}: WorkRunGroupProps): React.JSX.Element {
   const reduced = useReducedMotion() ?? false
   const [open, setOpen] = useState(isLiveTail || attentionRequired)
   const userOverride = useRef(false)
@@ -112,7 +115,21 @@ function ToolCallGroupComponent({
       <CollapsibleContent forceMount>
         <CollapseExpandMotion open={open} motion="chat">
           <div className="min-w-0 pl-4">
-            {items.map((item) => {
+            {items.map((item, index) => {
+              if (item.kind === 'thought-group') {
+                return (
+                  <RowReveal
+                    key={item.key}
+                    animate={enter.animate(item.key)}
+                    staggerIndex={enter.staggerIndex(item.key)}
+                  >
+                    <ThoughtGroup
+                      messages={item.messages}
+                      isLiveTail={isLiveTail && index === items.length - 1}
+                    />
+                  </RowReveal>
+                )
+              }
               const id = item.tool.toolCallId
               return (
                 <RowReveal
@@ -137,7 +154,7 @@ function ToolCallGroupComponent({
 }
 
 /**
- * Memoized like the turn row above it: the group wraps every tool card in
- * the turn, so a `statusLine`-only re-render of TurnActivity skips the walk.
+ * Memoized like the turn row above it: the group wraps every card in its run,
+ * so a `statusLine`-only re-render of TurnActivity skips the walk.
  */
-export const ToolCallGroup = memo(ToolCallGroupComponent)
+export const WorkRunGroup = memo(WorkRunGroupComponent)
