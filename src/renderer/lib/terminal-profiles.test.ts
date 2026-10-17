@@ -11,31 +11,31 @@ import {
 const draft = {
   name: '  Node dev ',
   shell: '/bin/zsh',
-  args: '-l\n\n  -i  \n',
+  args: '-c\n\n echo $0 \n',
   cwd: ' /work/app ',
-  env: '# comment\nNODE_ENV=development\nAPI_URL="http://localhost:3000"\n'
+  env: '# comment\nNODE_ENV=development\n API_URL ="http://localhost:3000" \n'
 }
 
 const stored = {
   id: 'p1',
   name: 'Node dev',
   shell: '/bin/zsh',
-  args: ['-l', '-i'],
+  args: ['-l', ' -i '],
   cwd: '/work/app',
-  env: { NODE_ENV: 'development' }
+  env: { NODE_ENV: 'development', GREETING: '"hi" ' }
 }
 
 describe('parseTerminalProfileDraft', () => {
-  it('turns the editor fields into a trimmed profile', () => {
+  it('trims the name and folder but keeps arguments and env values as typed', () => {
     expect(parseTerminalProfileDraft(draft, 'p1')).toEqual({
       ok: true,
       profile: {
         id: 'p1',
         name: 'Node dev',
         shell: '/bin/zsh',
-        args: ['-l', '-i'],
+        args: ['-c', ' echo $0 '],
         cwd: '/work/app',
-        env: { NODE_ENV: 'development', API_URL: 'http://localhost:3000' }
+        env: { NODE_ENV: 'development', API_URL: '"http://localhost:3000" ' }
       }
     })
   })
