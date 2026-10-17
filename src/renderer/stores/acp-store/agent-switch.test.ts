@@ -166,6 +166,7 @@ import {
   _handoffOnlyTurnIdsForTesting,
   _installTransportRecoveryForTesting,
   _resetAcpAuthForTesting,
+  _resetBackfillForTesting,
   _resetCoalesceForTesting,
   _resetEphemeralSessionIdsForTesting,
   _resetHistorySeqWatermarksForTesting,
@@ -2379,6 +2380,7 @@ describe('switchAgent (story 3)', () => {
 
     beforeEach(() => {
       _clearPayloadCacheForTesting()
+      _resetBackfillForTesting()
     })
 
     it('MULTI_HOP_RESPLICE: reinstalling C of a live A→B→C chain restores both earlier bands in order', async () => {
@@ -2508,17 +2510,18 @@ describe('switchAgent (story 3)', () => {
       expect(separatorSeq('s-3')).toBeLessThan(seqOf('C 1'))
     })
 
-    it('SCROLL_BACK_REOPENED_CHAIN: a reopened A→B→C chain pages both earlier agents back without live switch links', async () => {
-      const band = (idPrefix: string, label: string, count: number): Row[] =>
-        Array.from({ length: count }, (_, i) => ({
-          id: `${idPrefix}${i + 1}`,
-          role: i % 2 === 0 ? 'user' : 'agent',
-          text: `${label} ${i + 1}`,
-          seq: i + 1
-        }))
-      seedHistory('s-a', 'agent-a', 'cfg-a', band('a', 'A', 60), [marker(61, 'cfg-b', 's-b')])
+    const band = (idPrefix: string, label: string, count: number): Row[] =>
+      Array.from({ length: count }, (_, i) => ({
+        id: `${idPrefix}${i + 1}`,
+        role: i % 2 === 0 ? 'user' : 'agent',
+        text: `${label} ${i + 1}`,
+        seq: i + 1
+      }))
+
+    async function reopenChainAndScrollBack(aRows: Row[], cRows: Row[]): Promise<void> {
+      seedHistory('s-a', 'agent-a', 'cfg-a', aRows, [marker(61, 'cfg-b', 's-b')])
       seedHistory('s-b', 'agent-b', 'cfg-b', band('b', 'B', 60), [marker(61, 'cfg-c', 's-c')])
-      seedHistory('s-c', 'agent-c', 'cfg-c', band('c', 'C', MAX_LIVE_WINDOW_MESSAGES))
+      seedHistory('s-c', 'agent-c', 'cfg-c', cRows)
       useAcpStore.setState({
         agentConfigs: [
           { id: 'cfg-b', name: 'Bee', command: 'bee', args: [], env: {} },
@@ -2526,15 +2529,17 @@ describe('switchAgent (story 3)', () => {
         ]
       })
       connectForReopen('agent-c')
-
       await useAcpStore.getState().openHistorySession('s-a')
       await flushTurnEnd()
       expect(liveSwitchSources.size).toBe(0)
-      expect(texts('s-c')[0]).toBe('C 1')
-
+      expect(texts('s-c')[0]).toBe(cRows[0].text)
       for (let page = 0; page < 10; page++) {
         await useAcpStore.getState().loadOlderMessages('s-c', 50)
       }
+    }
+
+    it('SCROLL_BACK_REOPENED_CHAIN: a reopened A→B→C chain pages both earlier agents back without live switch links', async () => {
+      await reopenChainAndScrollBack(band('a', 'A', 60), band('c', 'C', MAX_LIVE_WINDOW_MESSAGES))
 
       const label = (name: string, count: number): string[] =>
         Array.from({ length: count }, (_, i) => `${name} ${i + 1}`)
@@ -2550,6 +2555,18 @@ describe('switchAgent (story 3)', () => {
       ])
       const seqs = window.map((m) => m.seq ?? Number.NaN)
       expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1])).toBe(true)
+    })
+
+    it('SCROLL_BACK_REPEATED_PROMPT: a prompt of an earlier agent equal to one in the window still pages back', async () => {
+      const aRows = band('a', 'A', 60).map((r) => (r.id === 'a1' ? { ...r, text: 'continue' } : r))
+      const cRows = band('c', 'C', MAX_LIVE_WINDOW_MESSAGES).map((r) =>
+        r.id === 'c299' ? { ...r, text: 'continue' } : r
+      )
+
+      await reopenChainAndScrollBack(aRows, cRows)
+
+      expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
+      expect(texts('s-c').slice(0, 2)).toEqual(['continue', 'A 2'])
     })
 
     it('MARKER_FAIL_RESPLICE: a reinstall after a failed marker write still renders one separator between the bands', async () => {
