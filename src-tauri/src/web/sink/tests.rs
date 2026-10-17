@@ -3,8 +3,8 @@ use tokio_util::sync::CancellationToken;
 use crate::web::ws::SequencedEvent;
 use super::session_log::{missing_seq_ranges, SeqRange};
 use crate::acp::session_persistence::{
-    now_millis, PersistedEventRecord, SessionPersistence, SessionRegistration,
-    SESSION_SCHEMA_VERSION,
+    now_millis, PersistedEventRecord, PersistedSessionStatus, SessionPersistence,
+    SessionRegistration, SESSION_SCHEMA_VERSION,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -1267,6 +1267,91 @@ async fn registration_flush_reaches_sinks_through_the_event_sink_trait() {
         (1..=2).collect::<Vec<_>>(),
         "trait-dispatched registration must flush the buffered records"
     );
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An event that arrives after the agent was killed (writer finalized,
+/// catalog entry kept) stays buffered: reopening the writer alone does not
+/// write it, and the session's next event writes it once, ahead of itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_event_after_kill_reaches_the_log_once_after_reopen() {
+    let sid = "sess-late";
+    let root = temp_dir("late-after-kill");
+    let cwd = root.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let relay = Arc::new(WsRelaySink::with_persistence(64, persistence.clone()));
+    let sinks: Vec<Arc<dyn EventSink>> = vec![relay.clone()];
+    let emit = |text: &str| {
+        fan_out(
+            &sinks,
+            Some(sid),
+            "acp:message_chunk",
+            &TestPayload::new("a", sid, text),
+        );
+    };
+    let disk = |persistence: &SessionPersistence| {
+        persistence
+            .replay_after(sid, 0)
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.seq, record.payload["message"].as_str().unwrap().to_string()))
+            .collect::<Vec<_>>()
+    };
+    let on_disk = |entries: &[(u64, &str)]| {
+        entries
+            .iter()
+            .map(|(seq, message)| (*seq, message.to_string()))
+            .collect::<Vec<_>>()
+    };
+    persistence
+        .register_session(SessionRegistration {
+            session_id: sid.to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    relay.note_session_registered_inherent(sid);
+    emit("before-kill-1");
+    emit("before-kill-2");
+    persistence.flush_session(sid).await.unwrap();
+
+    persistence
+        .finalize_session(sid, PersistedSessionStatus::Closed)
+        .await
+        .unwrap();
+    emit("late");
+    assert_eq!(
+        disk(&persistence),
+        on_disk(&[(1, "before-kill-1"), (2, "before-kill-2")]),
+        "no writer after the kill: the late event is buffered, not written"
+    );
+
+    persistence.reopen_writer(sid).await.unwrap();
+    persistence.flush_session(sid).await.unwrap();
+    assert_eq!(
+        disk(&persistence),
+        on_disk(&[(1, "before-kill-1"), (2, "before-kill-2")]),
+        "reopening the writer alone does not drain the buffer"
+    );
+
+    emit("after-reopen");
+    persistence.flush_session(sid).await.unwrap();
+    assert_eq!(
+        disk(&persistence),
+        on_disk(&[
+            (1, "before-kill-1"),
+            (2, "before-kill-2"),
+            (3, "late"),
+            (4, "after-reopen"),
+        ]),
+        "the next event writes the late record once, ahead of itself"
+    );
+
     persistence.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
