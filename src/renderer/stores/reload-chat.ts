@@ -107,7 +107,9 @@ export async function reloadAgentChat(sessionId: SessionId): Promise<void> {
               status: 'closed',
               activeTurn: false,
               openTurnId: null,
-              lastError: null
+              lastError: null,
+              lastErrorCode: null,
+              lastErrorData: undefined
             }
           }
         }

@@ -47,6 +47,7 @@ import {
   mergeAgentConfigOptions,
   newId,
   nextQueueId,
+  plainLastError,
   recoverPromptToQueue,
   SWITCH_SPLICE_ID_PREFIX,
   writeAgentOptionsCache
@@ -150,10 +151,7 @@ function scheduleTurnEnd(
               ...current,
               openTurnId: null,
               activeTurn: false,
-              lastError:
-                stopReason !== undefined
-                  ? lastErrorAfterStop(current.lastError, stopReason)
-                  : current.lastError
+              ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
             }
           }
         }
@@ -187,10 +185,7 @@ function scheduleTurnEnd(
             ...current,
             openTurnId: null,
             activeTurn: false,
-            lastError:
-              stopReason !== undefined
-                ? lastErrorAfterStop(current.lastError, stopReason)
-                : current.lastError
+            ...(stopReason !== undefined ? lastErrorAfterStop(current, stopReason) : {})
           }
         }
       }
@@ -337,7 +332,7 @@ export async function runPromptTurn(
                 activeTurn: true,
                 openTurnId,
                 latestPromptTurnId: turnId,
-                lastError: null
+                ...plainLastError(null)
               }
             }
           }
@@ -366,7 +361,7 @@ export async function runPromptTurn(
               activeTurn: true,
               openTurnId,
               latestPromptTurnId: turnId,
-              lastError: null
+              ...plainLastError(null)
             }
           }
         }
@@ -385,7 +380,7 @@ export async function runPromptTurn(
             activeTurn: true,
             openTurnId,
             latestPromptTurnId: turnId,
-            lastError: null
+            ...plainLastError(null)
           }
         }
       }
@@ -411,7 +406,7 @@ export async function runPromptTurn(
           activeTurn: true,
           openTurnId,
           latestPromptTurnId: turnId,
-          lastError: null
+          ...plainLastError(null)
         }
       }
     }
@@ -640,7 +635,11 @@ async function reauthenticateWithoutResendingPrompt(
           : s.agentStatus,
       sessions: {
         ...s.sessions,
-        [sessionId]: { ...current, lastError, ...(revive ? { status: 'active' } : {}) }
+        [sessionId]: {
+          ...current,
+          ...plainLastError(lastError),
+          ...(revive ? { status: 'active' } : {})
+        }
       }
     }
   })
@@ -1232,7 +1231,7 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
           ...s.sessions,
           [e.sessionId]: {
             ...session,
-            lastError: lastErrorAfterStop(session.lastError, e.stopReason),
+            ...lastErrorAfterStop(session, e.stopReason),
             opencodeNotice: undefined
           }
         }

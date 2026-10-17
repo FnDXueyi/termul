@@ -894,6 +894,8 @@ export function AgentChatPanel({
       )}
       <ChatErrorNotice
         message={activeError}
+        code={session.lastErrorCode}
+        data={session.lastErrorData}
         onRetry={canOfferNoticeRetry ? handleRetry : undefined}
         retryLabel={
           !session.launchConfigId && (session.status === 'error' || session.status === 'closed')

@@ -115,6 +115,8 @@ const {
   errorNoticePropsRef: {
     current: null as {
       message: string | null
+      code?: number | null
+      data?: unknown
       onRetry?: () => void
       onDismiss: () => void
     } | null
@@ -355,6 +357,8 @@ vi.mock('@/stores/git-sheet-store', () => ({
 vi.mock('./ChatErrorNotice', () => ({
   ChatErrorNotice: (props: {
     message: string | null
+    code?: number | null
+    data?: unknown
     onRetry?: () => void
     retryLabel?: string
     onDismiss: () => void
@@ -929,6 +933,22 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
     expect(lastComposerProps()?.disabled).toBe(true)
     expect(lastComposerProps()?.onDraftStart).toBeUndefined()
     expect(mockOpen).toHaveBeenCalledTimes(1)
+  })
+
+  it('gh-821: hands the agent error code and data to the error notice', () => {
+    indexRef.current = []
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      status: 'error',
+      lastError: 'Internal error',
+      lastErrorCode: -32603,
+      lastErrorData: { reason: 'login' }
+    })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(errorNoticePropsRef.current?.message).toBe('Internal error')
+    expect(errorNoticePropsRef.current?.code).toBe(-32603)
+    expect(errorNoticePropsRef.current?.data).toEqual({ reason: 'login' })
   })
 
   it('leaves a crashed (error) chat on the unchanged error notice', () => {

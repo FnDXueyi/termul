@@ -25,6 +25,7 @@ import {
   detachOldAgentForSwitch,
   killSpawnedAgentIfUnused,
   MAX_LIVE_TOOL_CALLS,
+  plainLastError,
   type SwitchMarkerFacts,
   setSwitchRejection,
   spliceSwitchTranscript,
@@ -613,7 +614,9 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
                   ...session,
                   activeTurn: false,
                   openTurnId: null,
-                  lastError: `Could not deliver the handoff prompt: ${err instanceof Error ? err.message : String(err)}`
+                  ...plainLastError(
+                    `Could not deliver the handoff prompt: ${err instanceof Error ? err.message : String(err)}`
+                  )
                 }
               }
             }
