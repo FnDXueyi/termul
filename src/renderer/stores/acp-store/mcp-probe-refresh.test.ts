@@ -27,8 +27,8 @@ vi.mock('@/lib/acp-mcp-persistence', async (orig) => {
 })
 
 import { invoke } from '@tauri-apps/api/core'
-import { loadMcpServers } from '@/lib/acp-mcp-persistence'
 import type { ProbeResult } from '@/lib/acp-api'
+import { loadMcpServers } from '@/lib/acp-mcp-persistence'
 import { useAcpStore } from '@/stores/acp-store'
 import { deferred } from './testkit'
 
