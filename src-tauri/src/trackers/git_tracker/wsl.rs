@@ -59,6 +59,8 @@ impl WslPath {
         let mut command = backend_command("wsl.exe");
         command
             .args(["-d", &self.distro, "--exec", "git", "-C", &self.linux_path])
+            // wsl.exe writes its own errors (an unknown distro) as UTF-16 otherwise.
+            .env("WSL_UTF8", "1")
             .env(
                 "WSLENV",
                 wslenv_with_git_vars(std::env::var("WSLENV").ok().as_deref()),

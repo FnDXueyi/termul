@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::HashSet;
+
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone)]
 struct WindowsPollTarget {
@@ -26,6 +28,31 @@ impl PollingGuard {
 impl Drop for PollingGuard {
     fn drop(&mut self) {
         self.is_polling.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Cwds whose git snapshot still runs on a blocking thread. The snapshot
+/// timeout stops the wait, not the thread, and git through `wsl.exe` can run
+/// for 15s, so polls would otherwise stack threads for one slow repository.
+static SNAPSHOTS_IN_FLIGHT: std::sync::LazyLock<parking_lot::Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Marks a cwd's snapshot as running until dropped.
+pub(super) struct SnapshotInFlight(String);
+
+impl SnapshotInFlight {
+    /// `None` while another snapshot of `cwd` still runs.
+    pub(super) fn begin(cwd: &str) -> Option<Self> {
+        SNAPSHOTS_IN_FLIGHT
+            .lock()
+            .insert(cwd.to_string())
+            .then(|| Self(cwd.to_string()))
+    }
+}
+
+impl Drop for SnapshotInFlight {
+    fn drop(&mut self) {
+        SNAPSHOTS_IN_FLIGHT.lock().remove(&self.0);
     }
 }
 
@@ -154,8 +181,11 @@ impl GitTracker {
                     };
 
                     for target in poll_targets {
-                        let (new_status, new_branch) =
-                            Self::poll_git_snapshot(target.cwd.clone()).await;
+                        let Some((new_status, new_branch)) =
+                            Self::poll_git_snapshot(target.cwd.clone()).await
+                        else {
+                            continue;
+                        };
 
                         {
                             let mut cwd_poll_states_write = cwd_poll_states.write();
@@ -194,7 +224,10 @@ impl GitTracker {
                         .collect();
 
                     for (terminal_id, cwd) in terminals {
-                        let (new_status, new_branch) = Self::poll_git_snapshot(cwd).await;
+                        let Some((new_status, new_branch)) = Self::poll_git_snapshot(cwd).await
+                        else {
+                            continue;
+                        };
                         let terminal_ids = vec![terminal_id.clone()];
                         let (branch_emits, status_emits) =
                             Self::apply_git_results(&states, &terminal_ids, new_branch, new_status);

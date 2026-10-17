@@ -69,11 +69,15 @@ fn git_runs_inside_the_distro_with_the_runner_env_forwarded() {
             "/home/me/my repo"
         ]
     );
-    let wslenv = command
-        .get_envs()
-        .find(|(key, _)| *key == "WSLENV")
-        .and_then(|(_, value)| value)
-        .unwrap();
+    let env = |name: &str| {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value)
+            .unwrap()
+    };
+    assert_eq!(env("WSL_UTF8"), "1");
+    let wslenv = env("WSLENV");
     assert!(
         wslenv
             .to_string_lossy()

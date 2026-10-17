@@ -1416,3 +1416,15 @@ fn it_commit_context_reports_fields() {
     assert_eq!(ctx.last_body, "body text");
     std::fs::remove_dir_all(&repo).ok();
 }
+
+#[tokio::test]
+async fn a_cwd_snapshot_is_skipped_while_its_previous_one_still_runs() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cwd = dir.path().to_string_lossy().into_owned();
+
+    let running = SnapshotInFlight::begin(&cwd).expect("first snapshot");
+    assert_eq!(GitTracker::poll_git_snapshot(cwd.clone()).await, None);
+
+    drop(running);
+    assert_eq!(GitTracker::poll_git_snapshot(cwd).await, Some((None, None)));
+}
