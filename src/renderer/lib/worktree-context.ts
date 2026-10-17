@@ -1,5 +1,6 @@
 import { activeWorktreeOf } from '@/lib/active-worktree'
 import { worktreeApi } from '@/lib/api'
+import { serverAdmitsRemoteWrites } from '@/lib/tauri-runtime'
 import { useProjectStore } from '@/stores/project-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import type { Worktree } from '@/types/project'
@@ -42,6 +43,7 @@ export function getActiveWorktreeForProject(projectId: string): Worktree | undef
  * Best-effort: logs warnings on failure but does not block terminal spawn.
  */
 export async function ensureWorktreeSymlinks(projectId: string): Promise<void> {
+  if (!serverAdmitsRemoteWrites()) return
   const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
   if (!project?.path || !project.isGitRepo) return
 

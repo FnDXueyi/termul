@@ -46,9 +46,10 @@ import {
   useWorkspaceStore
 } from '@/stores/workspace-store'
 import { pendingRestartVersionsAfterSpawn } from '../../agent-update-orchestration'
-import { dropPromptQueueForSession } from '../../prompt-queue-orchestration'
+import { dropPromptQueueForSession, moveQueuedPrompts } from '../../prompt-queue-orchestration'
 import { pruneRestoredChatTabs } from '../chat-tab-prune'
 import {
+  addAdvertisedOptionsKeepingCurrent,
   cacheOptionsFromSession,
   captureReopenControlBaseline,
   configIdForAgentId,
@@ -67,6 +68,7 @@ import {
   isResumeFailureError,
   mergeSessionIndexEntries,
   normalizeUserMessages,
+  openTurnPromptSeq,
   partitionTranscriptTurns,
   refreshHostOwnedIndex,
   resolveSwitchRedirect,
@@ -76,8 +78,7 @@ import {
   trimLiveToolCalls,
   withSessionActive,
   withSessionResumeError,
-  withSwitchMarker,
-  writeAgentOptionsCache
+  withSwitchMarker
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
@@ -100,6 +101,7 @@ import {
   isCurrentSessionReopen,
   liveSwitchSources,
   noteHistoryWatermark,
+  noteLiveTurnReplayFloor,
   persistSession,
   rebaseSeqCounter,
   rebaseUntitledCounter,
@@ -143,6 +145,10 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
+  const { commands } = payload
+  if (Array.isArray(commands)) {
+    useAcpStore.setState((s) => ({ commands: { ...s.commands, [sessionId]: commands } }))
+  }
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only
@@ -219,7 +225,14 @@ async function attachLiveTurn(
   payload: SessionPayload,
   reopenGeneration: number
 ): Promise<void> {
-  const cursor = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  const watermark = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  // The payload only summarizes the open turn's tool calls, while the relay
+  // still holds that turn's events in full. Subscribe from just before its
+  // prompt so the replay restores the cards; the history watermark keeps the
+  // replayed prompt and chunks from rendering twice.
+  const promptSeq = openTurnPromptSeq(payload.messages)
+  const cursor = promptSeq === null ? watermark : promptSeq - 1
+  if (promptSeq !== null) noteLiveTurnReplayFloor(id, cursor)
   const transport = getAcpTransport()
   transport.seedSessionCursor?.(id, {
     lastSeq: cursor,
@@ -251,7 +264,7 @@ async function attachLiveTurn(
   void logFrontendError({
     level: 'info',
     source: 'acp.attachLiveTurn',
-    message: `Attaching to live turn for session ${id} via subscribe/replay instead of resume/load`
+    message: `Attaching to live turn for session ${id} via subscribe/replay instead of resume/load (cursor ${cursor}, history watermark ${watermark})`
   })
   try {
     if (transport.subscribeSession) {
@@ -568,6 +581,7 @@ async function redirectSwitchedReopen(
   // hop → OLDEST (reverse): each fold prepends its hop before the
   // accumulated target, so the final order is oldest→newest. Idempotent on
   // repeat opens (already-present re-stamped ids are skipped).
+  const movedQueueCount = get().promptQueues[id]?.length ?? 0
   set((s) => {
     let messages = s.messages[finalTarget] ?? []
     let toolCalls = s.toolCalls[finalTarget] ?? []
@@ -603,7 +617,8 @@ async function redirectSwitchedReopen(
         [finalTarget]: trimLiveWindow(messages, finalTarget)
       },
       toolCalls: { ...s.toolCalls, [finalTarget]: trimLiveToolCalls(toolCalls) },
-      agentSwitches: { ...s.agentSwitches, [finalTarget]: switches }
+      agentSwitches: { ...s.agentSwitches, [finalTarget]: switches },
+      promptQueues: moveQueuedPrompts(s.promptQueues, id, finalTarget)
     }
   })
   // Remap the tab old → final in the same pane (guarded).
@@ -611,6 +626,14 @@ async function redirectSwitchedReopen(
   if (findPaneContainingTab(ws.root, agentChatTabId(id))) {
     ws.remapAgentChatSession(id, finalTarget)
   }
+  if (movedQueueCount > 0) {
+    void logFrontendError({
+      level: 'info',
+      source: logSource,
+      message: `Moved ${movedQueueCount} queued prompt(s) from switched session ${id} to ${finalTarget}`
+    })
+  }
+  flushNextQueuedPrompt(set, finalTarget)
   return true
 }
 
@@ -1555,16 +1578,10 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
               activeTurn: existing?.activeTurn ?? false,
               mcpServerCount: sessionMcpServers.length,
               openTurnId: existing?.openTurnId ?? null,
-              // An event-created stub (session_created/mode_update beating
-              // the reply) carries the SAME creation payload plus any genuine
-              // updates that landed during the await — prefer it so a real
-              // agent-side change isn't reverted by the `session/new` echo.
-              modes: existing?.modes ?? outcome.modes ?? null,
-              models: existing?.models ?? outcome.models ?? null,
-              configOptions:
-                existing && existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (outcome.configOptions ?? []),
+              ...addAdvertisedOptionsKeepingCurrent(
+                existing ?? { modes: null, models: null, configOptions: [] },
+                outcome
+              ),
               // Baseline for the creation-default echo guard: the values the
               // session was created WITH (from whichever payload populated
               // them — the `session/new` result or an earlier event stub).
@@ -1600,14 +1617,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       }
       // Cache models/modes even for ephemeral prepares so the launcher can paint
       // instantly from the warm pool.
-      const configId = configIdForAgentId(get(), agentId)
-      if (configId) {
-        writeAgentOptionsCache(set, configId, {
-          models: outcome.models ?? null,
-          modes: outcome.modes ?? null,
-          configOptions: outcome.configOptions ?? []
-        })
-      }
+      cacheOptionsFromSession(set, get, sessionId)
       return sessionId
     } catch (err) {
       const { category } = classifySetupError(err)
@@ -2301,7 +2311,9 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       let cursor: string | undefined
       // Safety cap: 10 pages max.
       for (let i = 0; i < 10; i++) {
-        const res = await acpApi.listSessions(agentId, cwd || undefined, cursor)
+        const res = await withAuthRetry(get, agentId, 'session/list', 'text', () =>
+          acpApi.listSessions(agentId, cwd || undefined, cursor)
+        )
         if (Array.isArray(res.sessions)) {
           // De-dupe by sessionId across pages (an agent may repeat an entry
           // when paginating) so the sidebar never renders the same chat twice.
@@ -2582,23 +2594,12 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
     set((s) => {
       const existing = s.sessions[e.sessionId]
       if (existing) {
-        // Enrich-only — the event re-delivers the SAME `session/new` payload
-        // the local create path already installed (manager.rs fans it out
-        // before send_reply, so it can land after pending launcher picks were
-        // applied). Populated option fields are authoritative: fill only
-        // EMPTY ones so a late echo of creation defaults cannot revert values
-        // the user already selected.
         return {
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
               ...existing,
-              modes: existing.modes ?? e.modes ?? null,
-              models: existing.models ?? e.models ?? null,
-              configOptions:
-                existing.configOptions.length > 0
-                  ? existing.configOptions
-                  : (e.configOptions ?? existing.configOptions),
+              ...addAdvertisedOptionsKeepingCurrent(existing, e),
               creationOptionDefaults:
                 existing.creationOptionDefaults ?? creationOptionDefaultsFrom(e)
             }
