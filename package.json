@@ -1,7 +1,7 @@
 {
   "name": "termul-manager",
   "productName": "Termul Manager",
-  "version": "0.4.20",
+  "version": "0.4.21",
   "description": "Project-aware terminal that treats workspaces as first-class citizens",
   "author": "gnoviawan",
   "contributors": [
@@ -103,7 +103,6 @@
     "@codemirror/state": "^6.5.4",
     "@codemirror/view": "^6.39.14",
     "@fontsource-variable/inter": "^5.2.8",
-    "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@hookform/resolvers": "^3.10.0",
     "@hugeicons/core-free-icons": "^4.1.4",
     "@hugeicons/react": "^1.1.6",
@@ -188,7 +187,7 @@
     "recharts": "^2.15.4",
     "shiki": "^3.23.0",
     "sonner": "^1.7.4",
-    "streamdown": "2.5.0",
+    "streamdown": "2.7.0",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
     "tauri-pty": "^0.1",
@@ -209,7 +208,8 @@
     "@types/node": "^22.16.5",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react-swc": "^3.11.0",
+    "@types/ws": "^8.18.2",
+    "@vitejs/plugin-react-swc": "^4.3.3",
     "agentation": "3.0.2",
     "autoprefixer": "^10.4.21",
     "bats": "^1.13.0",
@@ -223,6 +223,7 @@
     "tailwindcss": "^4",
     "typescript": "^7.0.2",
     "vite": "^8.0.14",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "ws": "^8.22.0"
   }
 }

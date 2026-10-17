@@ -10,7 +10,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A description or title edit uses action `edited`. Code jobs skip that
+  # action. Cancelling the in-progress run would abort the synchronize jobs
+  # and leave them skipped.
+  # A base-branch edit is also `edited`, but the merge commit changed.
+  # Cancel the older run. The code jobs on this run still execute.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
   pr-title-check:
@@ -115,8 +120,9 @@ jobs:
 
   validate:
     name: Lint, Typecheck & Test
-    # Code jobs don't need to re-run when only the PR description is edited.
-    if: github.event.action != 'edited'
+    # Skip a description or title edit. A base-branch edit changes the merge
+    # commit, so these jobs still run.
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,9 +148,12 @@ jobs:
       - name: Test
         run: bun run test
 
+      - name: Shell tests (installer and Homebrew cask)
+        run: bun run test:shell
+
   rust-checks:
     name: Rust Checks
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -207,7 +216,7 @@ jobs:
 
   web-build:
     name: Web Client Build
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -232,7 +241,7 @@ jobs:
 
   standalone-server-build:
     name: Standalone Server Build
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -289,9 +298,11 @@ jobs:
 
   rust-windows-check:
     name: Rust Windows Smoke Check
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: windows-latest
-    timeout-minutes: 20
+    # A cold-cache run builds for up to about 18 min, and the post-job cache
+    # save adds up to about 6 min. The budget covers both.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -334,7 +345,7 @@ jobs:
 
   build-check:
     name: Verify Tauri Frontend Build
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     needs: [validate, rust-checks, rust-windows-check, web-build, standalone-server-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15

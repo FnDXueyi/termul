@@ -176,6 +176,24 @@ describe('pending-launcher-options', () => {
       expect(hasPendingLauncherOptions(pending)).toBe(false)
     })
 
+    it('stores a boolean option as true or false text', () => {
+      const pending = optionsToPending({
+        models: null,
+        modes: null,
+        configOptions: [
+          {
+            id: 'approvals',
+            name: 'Approvals',
+            category: null,
+            type: 'boolean',
+            currentValue: true
+          }
+        ]
+      })
+
+      expect(pending.configValues).toEqual({ approvals: 'true' })
+    })
+
     it('only carries DISPLAYED options — hidden and duplicate-singleton entries stay out', () => {
       const pending = optionsToPending({
         models: null,
@@ -266,6 +284,25 @@ describe('pending-launcher-options', () => {
       expect(overlaid.configOptions[0]?.currentValue).toBe('m2')
     })
 
+    it('paints a stored boolean back onto the option', () => {
+      const overlaid = overlayPendingLauncherOptions({
+        models: null,
+        modes: null,
+        configOptions: [
+          {
+            id: 'approvals',
+            name: 'Approvals',
+            category: null,
+            type: 'boolean',
+            currentValue: false
+          }
+        ],
+        pending: { configValues: { approvals: 'true' } }
+      })
+
+      expect(overlaid.configOptions[0]?.currentValue).toBe(true)
+    })
+
     it('does not paint a modelId the model config option does not advertise', () => {
       const overlaid = overlayPendingLauncherOptions({
         models: null,
@@ -284,6 +321,33 @@ describe('pending-launcher-options', () => {
       })
 
       expect(overlaid.configOptions[0]?.currentValue).toBe('m1')
+    })
+
+    it('paints pending.modelId onto a model inside a grouped select option', () => {
+      const overlaid = overlayPendingLauncherOptions({
+        models: null,
+        modes: null,
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'gemini-flash',
+            options: [
+              { value: 'gemini-flash', name: 'Gemini Flash' },
+              {
+                group: 'anthropic',
+                name: 'Anthropic',
+                options: [{ value: 'claude-sonnet', name: 'Claude Sonnet' }]
+              }
+            ]
+          }
+        ],
+        pending: { modelId: 'claude-sonnet', configValues: {} }
+      })
+
+      expect(overlaid.configOptions[0]?.currentValue).toBe('claude-sonnet')
     })
   })
 })

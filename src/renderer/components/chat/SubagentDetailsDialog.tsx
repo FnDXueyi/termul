@@ -7,6 +7,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import type { ContentBlock, ToolCall } from '@/lib/acp-api'
+import type { FilePathResolutionContext } from '@/lib/file-path-links'
 import { AgentProse } from './ChatMessage'
 import { renderContentItem } from './ToolCallCard'
 import {
@@ -25,12 +26,14 @@ export function SubagentDetailsDialog({
   toolCall,
   parentTurnActive = false,
   open,
-  onOpenChange
+  onOpenChange,
+  filePathContext
 }: {
   toolCall: ToolCall
   parentTurnActive?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
+  filePathContext: FilePathResolutionContext | undefined
 }): React.JSX.Element {
   const { primary } = describeToolCall(toolCall)
   const input =
@@ -38,6 +41,7 @@ export function SubagentDetailsDialog({
       ? (toolCall.rawInput as Record<string, unknown>)
       : null
   const taskPrompt = firstString(input, ['prompt'])
+  const activityKind = firstString(input, ['activityKind', 'activity_kind'])
   const reduced = useReducedMotion() ?? false
   const running = isToolCallRunning(toolCall) || (parentTurnActive && toolCall.status == null)
   const taskStatus = running
@@ -53,11 +57,19 @@ export function SubagentDetailsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[min(85vh,48rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col overflow-hidden">
+      <DialogContent
+        className="flex max-h-[min(85vh,48rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col overflow-hidden"
+        onClick={(event) => {
+          const target = event.target as Element
+          if (event.defaultPrevented && target.closest('[data-testid="termul-file-path"]')) {
+            onOpenChange(false)
+          }
+        }}
+      >
         <DialogHeader className="pr-6">
           <DialogTitle className="break-words">{primary}</DialogTitle>
           <DialogDescription>
-            {taskStatus} · Live subagent activity is not available for this delegation.
+            {activityKind ? `${taskStatus} · ${activityKind}` : taskStatus}
           </DialogDescription>
         </DialogHeader>
         <div className="scroller-thin min-h-0 space-y-4 overflow-y-auto">
@@ -77,19 +89,35 @@ export function SubagentDetailsDialog({
                         item.type === 'content'
                           ? (item as { content?: ContentBlock }).content
                           : undefined
+                      const rendered = renderContentItem(item, i, undefined, {
+                        terminalOutput:
+                          typeof toolCall.terminalOutput === 'string'
+                            ? toolCall.terminalOutput
+                            : undefined,
+                        terminalExitCode:
+                          typeof toolCall.terminalExitCode === 'number'
+                            ? toolCall.terminalExitCode
+                            : undefined
+                      })
                       return block?.type === 'text' ? (
                         <AgentProse
                           key={i}
                           text={block.text ?? ''}
                           streaming={false}
                           reduced={reduced}
+                          filePathContext={filePathContext}
                         />
                       ) : (
-                        renderContentItem(item, i)
+                        rendered
                       )
                     })
                   : resultText && (
-                      <AgentProse text={resultText} streaming={false} reduced={reduced} />
+                      <AgentProse
+                        text={resultText}
+                        streaming={false}
+                        reduced={reduced}
+                        filePathContext={filePathContext}
+                      />
                     )}
               </div>
             </section>

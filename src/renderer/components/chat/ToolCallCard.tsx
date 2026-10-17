@@ -20,7 +20,7 @@ import {
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { IconActionButton } from '@/components/ui/icon-action-button'
 import { ShimmerText } from '@/components/ui/shimmer-text'
-import type { ContentBlock, ToolCall, ToolCallContent } from '@/lib/acp-api'
+import type { ContentBlock, DiffContent, ToolCall, ToolCallContent } from '@/lib/acp-api'
 import { resolveDiffLanguage } from '@/lib/diff-highlight'
 import { type FilePathResolutionContext, openFilePathFromTerminal } from '@/lib/file-path-links'
 import { logFrontendError } from '@/lib/log-api'
@@ -29,6 +29,7 @@ import { MediaBlocks } from './ChatMessage'
 import { CHAT_ROW_ICON, CHAT_ROW_MIN_H } from './chat-layout'
 import { CHEVRON_TRANSITION } from './chat-motion'
 import { DiffPreview } from './DiffPreview'
+import { EditDiffBlock } from './EditDiffBlock'
 import { HighlightedCode } from './highlighted-code'
 import { type ToolIconName, toolIconName } from './tool-call-format'
 import {
@@ -124,36 +125,40 @@ function extractItemText(item: ToolCallContent): string | null {
   return null
 }
 
+function diffContent(item: ToolCallContent): DiffContent {
+  const d = item as { path: string; oldText?: string | null; newText: string }
+  return { path: d.path, oldText: d.oldText ?? null, newText: d.newText }
+}
+
 /** Render one `ToolCallContent` item; shared with `SubagentDetailsDialog`. */
 export function renderContentItem(
   item: ToolCallContent,
   key: number,
-  language?: string
+  language?: string,
+  stream?: { terminalOutput?: string; terminalExitCode?: number | null }
 ): React.JSX.Element | null {
   if (item.type === 'diff') {
-    const d = item as { path: string; oldText?: string | null; newText: string }
-    return (
-      <DiffPreview
-        key={key}
-        diff={{ path: d.path, oldText: d.oldText ?? null, newText: d.newText }}
-      />
-    )
+    return <DiffPreview key={key} diff={diffContent(item)} />
   }
   if (item.type === 'content') {
     const c = item as { content?: ContentBlock }
     return c.content ? renderContentBlock(c.content, key, language) : null
   }
   if (item.type === 'terminal') {
-    // The ACP `terminal` content variant only references a terminal by id; its
-    // live output is fetched separately via `terminal/output` (not embedded in
-    // the tool call), so we surface the reference rather than inline output.
     const terminalId = (item as { terminalId?: string }).terminalId
+    const output = stream?.terminalOutput
+    const exitCode = stream?.terminalExitCode
     return (
-      <div
-        key={key}
-        className="rounded border border-border/40 px-2 py-1 text-xs text-muted-foreground"
-      >
-        {terminalId ? `Terminal ${terminalId}` : 'Terminal'}
+      <div key={key} className="space-y-1">
+        <div className="rounded border border-border/40 px-2 py-1 text-xs text-muted-foreground">
+          {terminalId ? `Terminal ${terminalId}` : 'Terminal'}
+          {typeof exitCode === 'number' ? ` · exit ${exitCode}` : ''}
+        </div>
+        {output ? (
+          <pre className="scroller-thin max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border/40 bg-background/60 px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground/90">
+            {output}
+          </pre>
+        ) : null}
       </div>
     )
   }
@@ -235,13 +240,26 @@ function ToolCallCardComponent({
   const Icon = ICONS[toolIconName(toolCall)]
   const content = toolCall.content ?? []
   const hasContent = content.length > 0
+  const hasDiff = content.some((item) => item.type === 'diff')
+  const terminalOutput = typeof toolCall.terminalOutput === 'string' ? toolCall.terminalOutput : ''
+  const terminalExitCode =
+    typeof toolCall.terminalExitCode === 'number' ? toolCall.terminalExitCode : undefined
+  const stream = {
+    ...(terminalOutput ? { terminalOutput } : {}),
+    ...(terminalExitCode !== undefined ? { terminalExitCode } : {})
+  }
   // Show the readable RESULT only — never the raw input or the JSON envelope.
   // Structured content (diffs/text) is canonical; otherwise extract the output.
   const resultText = hasContent ? '' : readableOutput(toolCall.rawOutput)
-  const hasDetail = hasContent || resultText.length > 0
   const status = toolCall.status
   const failed = status === 'failed'
   const isSubagent = isSubagentCall(toolCall)
+  // Diffs render as inline blocks. Anything else the call carries (text,
+  // terminal output) stays behind the collapsible row.
+  const inlineDiff = hasDiff && !isSubagent
+  const detailItems = inlineDiff ? content.filter((item) => item.type !== 'diff') : content
+  const hasDetail =
+    detailItems.length > 0 || (!inlineDiff && resultText.length > 0) || terminalOutput.length > 0
 
   // Collapsed by default for a clean, scannable list; a click reveals details.
   // Settle time is stamped only on an observed transition, so history-loaded
@@ -265,21 +283,51 @@ function ToolCallCardComponent({
   const label = `${verb} ${primary}`.trim()
 
   const openFilePath = filePathContext ? toolCallFilePath(toolCall) : undefined
-  const openFile = useCallback(() => {
-    if (!openFilePath || !filePathContext) return
-    void openFilePathFromTerminal(openFilePath, filePathContext)
-      .then((result) => {
-        if (!result.ok) toast.error(result.message)
-      })
-      .catch((error: unknown) => {
-        void logFrontendError({
-          level: 'warn',
-          source: 'ToolCallCard.openFile',
-          message: `Failed to open ${openFilePath}: ${String(error)}`
+  const openFileAt = useCallback(
+    (path: string, line?: number) => {
+      if (!filePathContext) return
+      void openFilePathFromTerminal(line ? `${path}:${line}` : path, filePathContext)
+        .then((result) => {
+          if (!result.ok) toast.error(result.message)
         })
-        toast.error('Failed to open file from chat.')
-      })
-  }, [openFilePath, filePathContext])
+        .catch((error: unknown) => {
+          void logFrontendError({
+            level: 'warn',
+            source: 'ToolCallCard.openFile',
+            message: `Failed to open ${path}: ${String(error)}`
+          })
+          toast.error('Failed to open file from chat.')
+        })
+    },
+    [filePathContext]
+  )
+  const openFile = useCallback(() => {
+    if (openFilePath) openFileAt(openFilePath)
+  }, [openFilePath, openFileAt])
+
+  if (inlineDiff && !hasDetail) {
+    return (
+      <div
+        aria-busy={running || undefined}
+        data-status={status}
+        className="group/tool relative w-full overflow-hidden px-1"
+      >
+        {content.map((item, i) =>
+          item.type === 'diff' ? (
+            <EditDiffBlock
+              key={i}
+              diff={diffContent(item)}
+              running={running}
+              failed={failed}
+              onOpenFile={filePathContext ? openFileAt : undefined}
+            />
+          ) : (
+            renderContentItem(item, i, language, stream)
+          )
+        )}
+      </div>
+    )
+  }
 
   // Row summary (icon + label + meta) lives inside the disclosure button so
   // clicking the label toggles details. The open-file button and chevron are
@@ -322,6 +370,25 @@ function ToolCallCardComponent({
 
   return (
     <>
+      {inlineDiff ? (
+        <div
+          aria-busy={running || undefined}
+          data-status={status}
+          className="group/tool relative w-full overflow-hidden px-1"
+        >
+          {content.map((item, i) =>
+            item.type === 'diff' ? (
+              <EditDiffBlock
+                key={i}
+                diff={diffContent(item)}
+                running={running}
+                failed={failed}
+                onOpenFile={filePathContext ? openFileAt : undefined}
+              />
+            ) : null
+          )}
+        </div>
+      ) : null}
       <div
         aria-busy={running || undefined}
         data-status={status}
@@ -392,9 +459,20 @@ function ToolCallCardComponent({
           {hasDetail && !isSubagent && (
             <CollapseExpandMotion open={open} motion="chat">
               <div className="ml-4 flex flex-col gap-1.5 border-l border-border/50 px-2 pb-2 pt-1.5">
-                {hasContent
-                  ? content.map((item, i) => renderContentItem(item, i, language))
-                  : resultText && <ResultBlock text={resultText} language={language} />}
+                {detailItems.length > 0 ? (
+                  detailItems.map((item, i) => renderContentItem(item, i, language, stream))
+                ) : resultText ? (
+                  <ResultBlock text={resultText} language={language} />
+                ) : terminalOutput ? (
+                  <ResultBlock
+                    text={
+                      terminalExitCode === undefined
+                        ? terminalOutput
+                        : `${terminalOutput}\nexit ${terminalExitCode}`
+                    }
+                    language={language}
+                  />
+                ) : null}
               </div>
             </CollapseExpandMotion>
           )}

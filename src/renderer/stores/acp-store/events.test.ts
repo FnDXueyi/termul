@@ -97,9 +97,12 @@ vi.mock('@/stores/workspace-store', () => {
   }
   return {
     getAllLeafPanes,
+    getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
+    getAgentChatSessionIdsInAllTrees: () => new Set<string>(),
     useWorkspaceStore: {
+      subscribe: () => () => {},
       getState: () => ({
         addAgentChatTab: addAgentChatTabSpy,
         removeTab: workspaceStateRef.current.removeTab,
@@ -157,6 +160,7 @@ import {
   _resetInFlightPreparedForTesting,
   _resetLiveSwitchSourcesForTesting,
   _resetSessionIndexLoadGenerationForTesting,
+  initAcpEventListeners,
   useAcpStore
 } from '@/stores/acp-store'
 import { FRESH, flushTurnEnd, seedSession } from './testkit'
@@ -428,15 +432,42 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().sessionIndex).toEqual([])
   })
 
-  it('agent_disconnected marks the agent error and closes its sessions', () => {
+  it('agent_disconnected(crashed) marks the agent error and closes its sessions', () => {
     seedSession('s1', 'agent-1')
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().agentStatus['agent-1']).toBe('error')
     expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
     expect(useAcpStore.getState().sessions['s1'].activeTurn).toBe(false)
   })
 
-  it('agent_disconnected preserves a content session transcript instead of blanking', () => {
+  it.each([
+    'killed',
+    'reaped',
+    'closed'
+  ] as const)('agent_disconnected(%s) drops the agent like a local kill instead of marking it error', (reason) => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.setState({
+      agents: { 'agent-1': {} as never },
+      agentStatus: { 'agent-1': 'connected' },
+      configToLiveAgent: { 'cfg-1': 'agent-1', 'cfg-2': 'agent-2' }
+    })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason })
+    const state = useAcpStore.getState()
+    expect(state.agents['agent-1']).toBeUndefined()
+    expect(state.agentStatus['agent-1']).toBeUndefined()
+    expect(state.configToLiveAgent).toEqual({ 'cfg-2': 'agent-2' })
+    expect(state.sessions['s1'].status).toBe('closed')
+
+    // Idempotent: a second delivery (kill reply + event) changes nothing.
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason })
+    expect(useAcpStore.getState().agentStatus['agent-1']).toBeUndefined()
+    expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
+  })
+
+  it.each([
+    'crashed',
+    'reaped'
+  ] as const)('agent_disconnected(%s) preserves a content session transcript instead of blanking', (reason) => {
     seedSession('s1', 'agent-1', false)
     useAcpStore.setState({
       messages: {
@@ -452,7 +483,7 @@ describe('acp-store', () => {
         ]
       }
     })
-    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1' })
+    useAcpStore.getState()._onAgentDisconnected({ agentId: 'agent-1', reason })
     const state = useAcpStore.getState()
     // The session record survives (not deleted) and its transcript is kept in
     // memory so the pane shows history + "disconnected" — not a blank chat.
@@ -517,7 +548,9 @@ describe('acp-store', () => {
         }
       }
     })
-    useAcpStore.getState()._onSessionClosed({ agentId: 'agent-1', sessionId: 's1' })
+    useAcpStore
+      .getState()
+      ._onSessionClosed({ agentId: 'agent-1', sessionId: 's1', reason: 'closed' })
     expect(useAcpStore.getState().sessions['s1'].status).toBe('closed')
     expect(useAcpStore.getState().sessions['s2'].status).toBe('active')
   })
@@ -569,7 +602,7 @@ describe('acp-store', () => {
       toolCall: { toolCallId: 'tc-1' },
       options: []
     })
-    store._onSessionClosed({ agentId: 'agent-1', sessionId: 's1' })
+    store._onSessionClosed({ agentId: 'agent-1', sessionId: 's1', reason: 'closed' })
     expect(useAcpStore.getState().pendingPermissions['req-1']).toBeUndefined()
 
     store._onPermissionRequest({
@@ -579,7 +612,7 @@ describe('acp-store', () => {
       toolCall: { toolCallId: 'tc-2' },
       options: []
     })
-    store._onAgentDisconnected({ agentId: 'agent-1' })
+    store._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().pendingPermissions['req-2']).toBeUndefined()
   })
 
@@ -641,12 +674,48 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().pendingQuestions['q-1']).toBeUndefined()
 
     seed('q-2')
-    store._onSessionClosed({ agentId: 'agent-1', sessionId: 's1' })
+    store._onSessionClosed({ agentId: 'agent-1', sessionId: 's1', reason: 'closed' })
     expect(useAcpStore.getState().pendingQuestions['q-2']).toBeUndefined()
 
     seed('q-3')
-    store._onAgentDisconnected({ agentId: 'agent-1' })
+    store._onAgentDisconnected({ agentId: 'agent-1', reason: 'crashed' })
     expect(useAcpStore.getState().pendingQuestions['q-3']).toBeUndefined()
+  })
+
+  it('question_cancelled withdraws only that question mid-turn (issue #784)', () => {
+    const listeners = new Map<string, (payload: unknown, eventSeq?: number) => void>()
+    _setAcpTransportForTests({
+      onEvent: vi.fn((name: string, cb: (payload: unknown, eventSeq?: number) => void) => {
+        listeners.set(name, cb)
+        return () => {}
+      }),
+      setReconnectListener: vi.fn(),
+      setRecoveryHandler: vi.fn(),
+      setReconnectPriorityProvider: vi.fn(),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    seedSession('s1', 'agent-1')
+    const teardown = initAcpEventListeners()
+    try {
+      const ask = (questionId: string) =>
+        listeners.get('acp:question_request')!({
+          agentId: 'agent-1',
+          sessionId: 's1',
+          questionId,
+          question: 'Ship it?',
+          options: [{ value: 'Yes', label: 'Yes' }]
+        })
+      ask('q-1')
+      ask('q-2')
+      listeners.get('acp:question_cancelled')?.({
+        agentId: 'agent-1',
+        sessionId: 's1',
+        questionId: 'q-1'
+      })
+      expect(Object.keys(useAcpStore.getState().pendingQuestions)).toEqual(['q-2'])
+    } finally {
+      teardown()
+    }
   })
 
   it('answerQuestion is re-entrancy safe: second call is a no-op (issue #411)', async () => {
@@ -663,6 +732,121 @@ describe('acp-store', () => {
     const second = useAcpStore.getState().answerQuestion('q-1', ['a'])
     await Promise.all([first, second])
     expect(invoke).toHaveBeenCalledTimes(1)
+  })
+
+  // GH-935: Devin-style `elicitation/create` form (multi-question
+  // ask_user_question) — the event carries `title`/`description`, structured
+  // `{value,label,description}` options, a `multi-enum` kind, and `allowOther`
+  // through to the pending entry verbatim.
+  it('elicitation_request stores allowOther and structured field options (GH-935)', () => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.getState()._onElicitationRequest({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      requestId: 'el-1',
+      mode: 'form',
+      message: 'Which color should I use?',
+      allowOther: true,
+      fields: [
+        {
+          name: 'q0',
+          kind: 'enum',
+          required: true,
+          title: 'Color',
+          description: 'Which color should I use?',
+          options: [
+            { value: 'Red', label: 'Red', description: 'Use the red color' },
+            { value: 'Blue', label: 'Blue', description: 'Use the blue color' }
+          ]
+        },
+        {
+          name: 'q1',
+          kind: 'multi-enum',
+          required: true,
+          title: 'Features',
+          description: 'Which features should I enable?',
+          options: [
+            { value: 'Logging', label: 'Logging', description: 'Enable logging' },
+            { value: 'Tracing', label: 'Tracing', description: 'Enable tracing' }
+          ]
+        }
+      ]
+    })
+    const pending = useAcpStore.getState().pendingElicitations['el-1']
+    expect(pending).toBeTruthy()
+    expect(pending.allowOther).toBe(true)
+    expect(pending.fields[0].name).toBe('q0')
+    expect(pending.fields[0].title).toBe('Color')
+    expect(pending.fields[0].description).toBe('Which color should I use?')
+    expect(pending.fields[0].options).toEqual([
+      { value: 'Red', label: 'Red', description: 'Use the red color' },
+      { value: 'Blue', label: 'Blue', description: 'Use the blue color' }
+    ])
+    expect(pending.fields[1].kind).toBe('multi-enum')
+    expect(pending.fields[1].options).toEqual([
+      { value: 'Logging', label: 'Logging', description: 'Enable logging' },
+      { value: 'Tracing', label: 'Tracing', description: 'Enable tracing' }
+    ])
+  })
+
+  it('elicitation_request leaves allowOther undefined when the event omits it', () => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.getState()._onElicitationRequest({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      requestId: 'el-1',
+      mode: 'form',
+      message: 'Enter a value',
+      fields: [{ name: 'f1', kind: 'string', required: true, options: [] }]
+    })
+    expect(useAcpStore.getState().pendingElicitations['el-1'].allowOther).toBeUndefined()
+  })
+
+  it('respondElicitation forwards string[] multi-select content verbatim (GH-935)', async () => {
+    seedSession('s1', 'agent-1')
+    ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
+    useAcpStore.getState()._onElicitationRequest({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      requestId: 'el-1',
+      mode: 'form',
+      message: 'Pick',
+      allowOther: true,
+      fields: [
+        {
+          name: 'q0',
+          kind: 'enum',
+          required: true,
+          title: 'Color',
+          options: [
+            { value: 'Red', label: 'Red' },
+            { value: 'Blue', label: 'Blue' }
+          ]
+        },
+        {
+          name: 'q1',
+          kind: 'multi-enum',
+          required: true,
+          title: 'Features',
+          options: [
+            { value: 'Logging', label: 'Logging' },
+            { value: 'Tracing', label: 'Tracing' }
+          ]
+        }
+      ]
+    })
+    await useAcpStore.getState().respondElicitation('el-1', 'accept', {
+      q0: 'Red',
+      q1: ['Logging', 'Tracing']
+    })
+    expect(useAcpStore.getState().pendingElicitations['el-1']).toBeUndefined()
+    expect(invoke).toHaveBeenCalledWith('acp_respond_elicitation', {
+      agentId: 'agent-1',
+      requestId: 'el-1',
+      action: 'accept',
+      content: { q0: 'Red', q1: ['Logging', 'Tracing'] },
+      commandId: expect.any(String)
+    })
   })
 
   it('_onToolCall upserts by toolCallId so duplicates produce one entry', async () => {
@@ -945,6 +1129,59 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().sessions['unknown']).toBeUndefined()
   })
 
+  it('_onSessionInfoUpdate keeps the title and shows compaction, then clears it', () => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.setState((s) => ({
+      sessions: { ...s.sessions, s1: { ...s.sessions['s1'], title: 'Keep me' } }
+    }))
+    useAcpStore.getState()._onSessionInfoUpdate({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      compaction: { status: 'started', messageId: 'msg_1', reason: 'auto' }
+    })
+    expect(useAcpStore.getState().sessions['s1'].title).toBe('Keep me')
+    expect(useAcpStore.getState().sessions['s1'].opencodeNotice).toEqual({
+      compaction: 'started',
+      retryAttempt: null
+    })
+    useAcpStore.getState()._onSessionInfoUpdate({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      compaction: { status: 'completed' },
+      retry: { attempt: 1, errorMessage: 'slow down' }
+    })
+    expect(useAcpStore.getState().sessions['s1'].opencodeNotice).toEqual({
+      compaction: null,
+      retryAttempt: 1
+    })
+    useAcpStore.getState()._onSessionInfoUpdate({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      retry: null
+    })
+    expect(useAcpStore.getState().sessions['s1'].opencodeNotice).toBeUndefined()
+    expect(useAcpStore.getState().sessions['s1'].title).toBe('Keep me')
+  })
+
+  it('_onPromptComplete clears the OpenCode status line', () => {
+    seedSession('s1', 'agent-1')
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        s1: {
+          ...s.sessions['s1'],
+          opencodeNotice: { compaction: 'started', retryAttempt: 2 }
+        }
+      }
+    }))
+    useAcpStore.getState()._onPromptComplete({
+      agentId: 'agent-1',
+      sessionId: 's1',
+      stopReason: 'end_turn'
+    })
+    expect(useAcpStore.getState().sessions['s1'].opencodeNotice).toBeUndefined()
+  })
+
   it('_onSessionInfoUpdate leaves the title untouched when the field is omitted', () => {
     seedSession('s1', 'agent-1')
     useAcpStore.setState((s) => ({
@@ -973,6 +1210,26 @@ describe('acp-store', () => {
     expect(usage?.baselineUsed).toBe(53_000)
     expect(usage?.cost).toEqual({ amount: 0.045, currency: 'USD' })
     expect(usage?.source).toBe('reported')
+  })
+
+  it('_onUsageUpdate keeps the latest Claude rate limit across updates without one', () => {
+    seedSession('s1', 'agent-1')
+    const rateLimit = {
+      status: 'allowed_warning',
+      resetsAt: 1_760_360_399,
+      kind: 'five_hour',
+      percent: 83,
+      overageInUse: false
+    }
+    const update = { agentId: 'agent-1', sessionId: 's1', size: 200_000 }
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 50_000, rateLimit })
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 60_000 })
+    const usage = useAcpStore.getState().sessionUsage.s1
+    expect(usage?.used).toBe(60_000)
+    expect(usage?.rateLimit).toEqual(rateLimit)
+    const rejected = { ...rateLimit, status: 'rejected', percent: 100 }
+    useAcpStore.getState()._onUsageUpdate({ ...update, used: 61_000, rateLimit: rejected })
+    expect(useAcpStore.getState().sessionUsage.s1?.rateLimit).toEqual(rejected)
   })
 
   it('_onUsageUpdate ignores zero cost placeholders', () => {

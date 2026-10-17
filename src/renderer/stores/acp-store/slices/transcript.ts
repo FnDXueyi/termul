@@ -3,10 +3,16 @@
  */
 
 import type { StateCreator } from 'zustand'
+import {
+  alignSessionModelProjection,
+  withSessionModelOnIndex
+} from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
+import { applyTerminalStream, type TerminalStreamFields } from '@/components/chat/terminal-output'
 import type {
   ContentBlock,
   SessionId,
+  SessionInfoUpdateEvent,
   SessionMode,
   SessionUsage,
   ToolCall,
@@ -39,16 +45,20 @@ import {
   SWITCH_SPLICE_ID_PREFIX,
   sessionTurnBusy,
   toolIntervened,
-  trimLiveToolCalls
+  trimLiveToolCalls,
+  withCommands
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
-  acceptedServerPromptTurnIds,
+  activeWirePromptTurns,
   commitMessageCollectors,
+  echoedWirePromptTurns,
   handoffOnlyTurnIds,
   historySeqWatermarks,
   isHistoryCoveredEvent,
+  isHistoryCoveredToolEvent,
   liveSwitchSources,
+  liveTurnReplaySeq,
   MAX_COMMIT_MESSAGE_RESPONSE_CHARS,
   MAX_TERMINAL_ASSIST_RESPONSE_CHARS,
   nextSeq,
@@ -57,7 +67,50 @@ import {
   rejectTerminalAssistCollector,
   terminalAssistCollectors
 } from '../shared-state'
-import type { AcpState, ChatMessage, MessageRole } from '../types'
+import type {
+  AcpSession,
+  AcpState,
+  ChatMessage,
+  MessageRole,
+  OpenCodeSessionNotice
+} from '../types'
+import { clearPromptReconcile, clearPromptReconcileForTurn } from './prompt-reconcile'
+import { createFlushClock, type FlushTier } from './transcript-flush-clock'
+
+function sameOpencodeNotice(
+  left: OpenCodeSessionNotice | undefined,
+  right: OpenCodeSessionNotice | undefined
+): boolean {
+  if (left == null && right == null) return true
+  if (left == null || right == null) return false
+  return left.compaction === right.compaction && left.retryAttempt === right.retryAttempt
+}
+
+/** Apply one session-info marker. Absent fields keep the previous notice. */
+export function nextOpencodeNotice(
+  prev: OpenCodeSessionNotice | undefined,
+  event: Pick<SessionInfoUpdateEvent, 'compaction' | 'retry'>
+): OpenCodeSessionNotice | undefined {
+  let compaction = prev?.compaction ?? null
+  let retryAttempt = prev?.retryAttempt ?? null
+  let changed = false
+  if (event.compaction) {
+    changed = true
+    if (event.compaction.status === 'completed') compaction = null
+    else if (event.compaction.status === 'started') compaction = 'started'
+    else if (event.compaction.status === 'failed') compaction = 'failed'
+  }
+  if (event.retry === null) {
+    changed = true
+    retryAttempt = null
+  } else if (event.retry) {
+    changed = true
+    retryAttempt = event.retry.attempt
+  }
+  if (!changed) return prev
+  if (compaction == null && retryAttempt == null) return undefined
+  return { compaction, retryAttempt }
+}
 
 /**
  * Slack (in messages) for the streaming-prefix twin rule, measured as
@@ -77,7 +130,7 @@ const TWIN_SEAM_SLACK = 4
  * rAF flush: the FIRST text append of a flush takes a private copy of the
  * trailing block (cheap — the text string is shared by reference) and buffers
  * the chunk text; every later append of the same flush pushes its suffix onto
- * that buffer. {@link sealPendingTextDeltas} (end of `flushCoalesced`) joins
+ * that buffer. {@link sealPendingTextDeltas} (end of `flushCoalescedTier`) joins
  * the buffered parts into the copy's `text` exactly once, so a frame's chunk
  * burst costs O(total delta) instead of O(N × full text) full-text copies —
  * and because the first append copies, no previously committed object (an
@@ -295,6 +348,17 @@ function clampLiveFieldText(text: string): string {
     : text.slice(0, MAX_LIVE_TOOL_CALL_FIELD_CHARS) + FIELD_TRUNCATION_MARKER
 }
 
+/** Keep accumulated Codex shell output inside the same leaf bound as other text. */
+function boundTerminalStream(stream: TerminalStreamFields): TerminalStreamFields {
+  if (
+    typeof stream.terminalOutput !== 'string' ||
+    stream.terminalOutput.length <= MAX_LIVE_TOOL_CALL_FIELD_CHARS
+  ) {
+    return stream
+  }
+  return { ...stream, terminalOutput: clampLiveFieldText(stream.terminalOutput) }
+}
+
 /**
  * Bound a single streamed `ContentBlock` (F-2 sibling). Text blocks pass
  * through — message prose is legitimately long and merges into the trailing
@@ -474,6 +538,15 @@ export function clampLiveToolCallFields<T extends LiveToolCallShape>(
     reduced.locations = next.locations
   }
   if (next.rawOutput !== undefined) reduced.rawOutput = next.rawOutput
+  if (
+    typeof next.terminalOutput === 'string' &&
+    next.terminalOutput.length <= MAX_LIVE_TOOL_CALL_FIELD_CHARS
+  ) {
+    reduced.terminalOutput = next.terminalOutput
+  }
+  if (typeof next.terminalExitCode === 'number' && Number.isFinite(next.terminalExitCode)) {
+    reduced.terminalExitCode = next.terminalExitCode
+  }
   for (const key of ['timestamp', 'seq'] as const) {
     if (typeof next[key] === 'number') reduced[key] = next[key]
   }
@@ -580,36 +653,55 @@ const inFlightDurabilityProbes = new Set<SessionId>()
 const untrimmableSessions = new Set<SessionId>()
 
 /**
- * Free per-session transcript maps held in the WebView heap.
- * Disk history is untouched — reopen lazy-loads via `openHistorySession`.
- * Call only after any needed `persistSession` so the last mirror is flushed.
+ * Drop per-session module-level bookkeeping so a closed/deleted session never
+ * leaks a backfill allowance, an in-flight load guard, a stale history
+ * watermark, a durability-probe/untrimmable mark, a pending prompt command, or
+ * a live-switch link (a recreated session must re-establish its own; a
+ * resolving probe must not resurrect a pin). Runs on every close, including a
+ * close that keeps the transcript maps for an open chat tab.
  */
-export function dropSessionTranscriptState(
-  state: Pick<
-    AcpState,
-    'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-  >,
-  sessionId: SessionId
-): Pick<
-  AcpState,
-  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-> {
-  // Drop per-session module-level bookkeeping too so a closed/deleted session
-  // never leaks a backfill allowance, an in-flight load guard, a stale history
-  // watermark, a durability-probe/untrimmable mark, or clamp-log dedup entries
-  // (a recreated session must re-establish its own; a resolving probe must not
-  // resurrect a pin).
+export function dropSessionBookkeeping(
+  sessionId: SessionId,
+  opts: { keepLiveSwitchLinks?: boolean } = {}
+): void {
   backfillCounts.delete(sessionId)
+  // A pending (unconfirmed) prompt command — its reconcile timer, store flag and
+  // wire-turn tracking — dies with the session: nothing may resend into it.
+  clearPromptReconcile(sessionId)
+  activeWirePromptTurns.delete(sessionId)
+  echoedWirePromptTurns.delete(sessionId)
   loadingOlderSessions.delete(sessionId)
   historySeqWatermarks.delete(sessionId)
   inFlightDurabilityProbes.delete(sessionId)
   untrimmableSessions.delete(sessionId)
+  // A close that keeps the transcript for an open tab keeps the links too: a
+  // later history reopen re-splices the pre-switch conversation through them.
+  if (opts.keepLiveSwitchLinks) return
   // Live-switch source links die with either endpoint: the target's entry
   // outright, and any entry pointing at the dropped session as source.
   liveSwitchSources.delete(sessionId)
-  for (const [target, source] of liveSwitchSources) {
-    if (source === sessionId) liveSwitchSources.delete(target)
+  for (const [target, link] of liveSwitchSources) {
+    if (link.sourceId === sessionId) liveSwitchSources.delete(target)
   }
+}
+
+export type SessionTranscriptState = Pick<
+  AcpState,
+  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'commandsSeq' | 'sessionUsage' | 'plans'
+>
+
+/**
+ * Free per-session transcript maps held in the WebView heap, plus the
+ * session's bookkeeping (`dropSessionBookkeeping`), clamp-log dedup entries
+ * and payload pin. Disk history is untouched — reopen lazy-loads via
+ * `openHistorySession`. Call only after any needed `persistSession` so the
+ * last mirror is flushed. Idempotent.
+ */
+export function dropSessionTranscriptState(
+  state: SessionTranscriptState,
+  sessionId: SessionId
+): SessionTranscriptState {
+  dropSessionBookkeeping(sessionId)
   for (const call of state.toolCalls[sessionId] ?? []) {
     clampedToolCallIds.delete(clampLogKey(call.toolCallId))
   }
@@ -619,6 +711,7 @@ export function dropSessionTranscriptState(
     toolCalls: dropRecordKey(state.toolCalls, sessionId),
     agentSwitches: dropRecordKey(state.agentSwitches, sessionId),
     commands: dropRecordKey(state.commands, sessionId),
+    commandsSeq: dropRecordKey(state.commandsSeq, sessionId),
     sessionUsage: dropRecordKey(state.sessionUsage, sessionId),
     plans: dropRecordKey(state.plans, sessionId)
   }
@@ -639,18 +732,25 @@ interface CoalescedUpdate {
 
 let coalescedBuffer: CoalescedUpdate[] = []
 
-let coalesceRafId: number | null = null
-let coalesceTimerId: ReturnType<typeof setTimeout> | null = null
-
 /**
- * Max delay the coalesced buffer may sit undrained when rAF is suspended.
- * WebView2 keeps the rAF callback armed but never fires it while the window
- * is occluded/minimized — the PTY sibling (`use-terminal-detached-output`)
- * carries the same 250 ms backstop for the same reason. Without it a hidden-
- * but-streaming session buffers chunk updates unboundedly (F-1, the #133
- * memory-growth class) until the next repaint.
+ * Tiered flush clock (see `transcript-flush-clock.ts`): the watched session
+ * flushes on rAF at most every ~30 ms, background sessions on a ~100 ms timer,
+ * and a 250 ms timer backstop drains everything when rAF is suspended
+ * (WebView2 keeps the callback armed but never fires it while the window is
+ * occluded/minimized — without the backstop a hidden-but-streaming session
+ * buffers chunk updates unboundedly: F-1, the #133 memory-growth class).
  */
-const COALESCE_BACKSTOP_MS = 250
+const coalesceClock = createFlushClock({
+  isWatched: (sessionId) => useAcpStore.getState().activeSessionId === sessionId,
+  flush: (tier) => flushCoalescedTier(tier),
+  hasPending: (tier) => coalescedBuffer.some((update) => tierMatches(tier, update.sessionId))
+})
+
+function tierMatches(tier: FlushTier, sessionId: SessionId): boolean {
+  if (tier === 'all') return true
+  const watched = useAcpStore.getState().activeSessionId === sessionId
+  return tier === 'watched' ? watched : !watched
+}
 
 /** Sessions whose `loadOlderMessages` is in flight (prevents concurrent loads). */
 const loadingOlderSessions = new Set<SessionId>()
@@ -670,28 +770,6 @@ export function _resetBackfillForTesting(): void {
   backfillCounts.clear()
 }
 
-function cancelCoalesceSchedule(): void {
-  if (coalesceRafId !== null) {
-    cancelAnimationFrame(coalesceRafId)
-    coalesceRafId = null
-  }
-  if (coalesceTimerId !== null) {
-    clearTimeout(coalesceTimerId)
-    coalesceTimerId = null
-  }
-}
-
-function scheduleCoalesceFlush(): void {
-  if (coalesceRafId !== null || coalesceTimerId !== null) return
-  // rAF stays the primary scheduler; the timer only covers the suspended-rAF
-  // case (occluded/minimized WebView). Whichever fires first drains the
-  // buffer and clears both. When rAF is unavailable the 16 ms timer simply
-  // replicates the per-frame cadence.
-  coalesceRafId =
-    typeof requestAnimationFrame === 'function' ? requestAnimationFrame(flushCoalesced) : null
-  coalesceTimerId = setTimeout(flushCoalesced, coalesceRafId === null ? 16 : COALESCE_BACKSTOP_MS)
-}
-
 /**
  * Drain the coalesced buffer and apply a single merged `set()`. Each buffered
  * update is applied sequentially against a working copy so the second event
@@ -699,10 +777,14 @@ function scheduleCoalesceFlush(): void {
  * trimmed for affected sessions after all updates are merged; buffered text
  * deltas are sealed into their blocks BEFORE the `set()` returns its patch.
  */
-function flushCoalesced(): void {
-  cancelCoalesceSchedule()
-  const updates = coalescedBuffer
-  coalescedBuffer = []
+function flushCoalescedTier(tier: FlushTier): void {
+  const updates: CoalescedUpdate[] = []
+  const remaining: CoalescedUpdate[] = []
+  for (const update of coalescedBuffer) {
+    if (tierMatches(tier, update.sessionId)) updates.push(update)
+    else remaining.push(update)
+  }
+  coalescedBuffer = remaining
   if (updates.length === 0) return
   useAcpStore.setState((s) => {
     let working = s
@@ -742,9 +824,13 @@ function flushCoalesced(): void {
   })
 }
 
-/** Cancel any pending schedule and flush synchronously (turn-complete / disconnect). */
+/**
+ * Cancel any pending schedule and flush every session synchronously
+ * (turn-complete / disconnect / approval / question / visibilitychange).
+ */
 export function flushCoalescedSync(): void {
-  flushCoalesced()
+  coalesceClock.cancel()
+  flushCoalescedTier('all')
   // Defensive: a seal cannot survive a flush (sealPendingTextDeltas ran inside
   // the setState updater), but never leave buffered deltas dangling if an
   // updater threw before reaching the seal.
@@ -758,14 +844,14 @@ export function _flushCoalescedForTesting(): void {
 
 /** Test-only: reset coalescing state (clear buffer + cancel pending schedule). */
 export function _resetCoalesceForTesting(): void {
-  cancelCoalesceSchedule()
+  coalesceClock.cancel()
   coalescedBuffer = []
   textDeltaParts.clear()
 }
 
 /** Test-only: check whether a coalesce flush is pending. */
 export function _isCoalescePendingForTesting(): boolean {
-  return coalesceRafId !== null || coalesceTimerId !== null || coalescedBuffer.length > 0
+  return coalesceClock.isArmed() || coalescedBuffer.length > 0
 }
 
 /** Test-only: clear the loading-older guard set. */
@@ -781,7 +867,13 @@ export function _clampedToolCallIdsSizeForTesting(): number {
 /** Queue a streaming update for rAF-batched `set()`. */
 function coalesceSet(sessionId: SessionId, apply: (s: AcpState) => Partial<AcpState>): void {
   coalescedBuffer.push({ sessionId, apply })
-  scheduleCoalesceFlush()
+  coalesceClock.note(sessionId)
+}
+
+// Everything buffered flushes the moment the page is shown or hidden: a hidden
+// page's frames/timers throttle, and a returning user must see current text.
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', flushCoalescedSync)
 }
 
 type TranscriptSliceState = Pick<
@@ -790,6 +882,7 @@ type TranscriptSliceState = Pick<
   | 'toolCalls'
   | 'plans'
   | 'commands'
+  | 'commandsSeq'
   | 'loadOlderMessages'
   | 'clearSessionBackfill'
   | '_onUserPrompt'
@@ -812,6 +905,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   toolCalls: {},
   plans: {},
   commands: {},
+  commandsSeq: {},
 
   // --- Live window: scroll-up lazy-load -------------------------------------
 
@@ -965,14 +1059,21 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   },
 
   _onUserPrompt: (e, eventSeq) => {
+    // AD-6: an echo citing a turn id is the host's proof it ACCEPTED that
+    // command (the driver sequences it on acceptance). Both steps run before
+    // the replay-coverage drop, since a history-covered echo is the same proof:
+    // the echo of THIS client's open wire turn is recorded (`runPromptTurn`
+    // reads it when the dispatch reply is lost, so an accepted turn never
+    // enters pending-reconcile), and a prompt already waiting to confirm stops
+    // waiting and is never resent.
+    if (e.turnId) {
+      if (activeWirePromptTurns.get(e.sessionId) === e.turnId) {
+        echoedWirePromptTurns.set(e.sessionId, e.turnId)
+      }
+      clearPromptReconcileForTurn(e.sessionId, e.turnId)
+    }
     // CAP-3 replay contract: drop events the installed payload already covers.
     if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
-    // Issue #846: an echo citing a turn id is the server's proof the prompt
-    // was accepted (and persisted) BEFORE the agent dispatch. Record it so a
-    // later transport drop during the turn resolves as "outcome unknown" in
-    // `runPromptTurn`'s catch — resubscribe, never blind re-send. Cleared
-    // when the dispatch settles.
-    if (e.turnId) acceptedServerPromptTurnIds.add(e.turnId)
     // Story 3: the echo of a summary-only handoff turn (no draft → no
     // optimistic user bubble) carries the summary wire text; it must not
     // render as a user bubble. The dispatch closure registered the turn id.
@@ -1027,7 +1128,13 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       // turn active whenever the session is not already busy so the spinner,
       // stop button, and queue flush work everywhere. Do NOT clear it here:
       // `_onPromptComplete`/`scheduleTurnEnd` own the close.
-      const markTurnActive = !duplicate && !sessionTurnBusy(session) && session.status !== 'closed'
+      const markTurnActive =
+        !duplicate &&
+        !sessionTurnBusy(session) &&
+        // Replayed echoes are history, not liveness proof: a dead turn's
+        // persisted open user message must not re-arm the busy flags.
+        !session.replaying &&
+        session.status !== 'closed'
       const message: ChatMessage = {
         id: e.turnId ? `turn:${e.turnId}` : newId('msg'),
         role: 'user',
@@ -1192,7 +1299,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       ) {
         // `own` = coalesced path: appendBlocks amortizes the text merge per
         // flush (copy-on-first-touch + buffered deltas sealed in
-        // flushCoalesced) instead of copying the full text per chunk. User
+        // flushCoalescedTier) instead of copying the full text per chunk. User
         // runs keep the RAW wire text here too — `wireBlocksToDisplay` runs
         // once in `finalizeStreaming` against the fully-joined text, so it
         // never sees a partial framing (and the amortized delta buffer never
@@ -1240,8 +1347,10 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       rejectTerminalAssistCollector(e.sessionId, 'The ACP agent attempted to use a tool')
       return
     }
-    // CAP-3 replay contract: drop events the installed payload already covers.
-    if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
+    // CAP-3 replay contract: drop events the installed payload already covers,
+    // unless the open turn's attach replay re-delivers them in full.
+    if (isHistoryCoveredToolEvent(e.sessionId, eventSeq)) return
+    const replaySeq = liveTurnReplaySeq(e.sessionId, eventSeq)
     const session = get().sessions[e.sessionId]
     const useCoalesce = !session?.replaying
     const apply = (s: AcpState): Partial<AcpState> => {
@@ -1249,13 +1358,20 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (!acceptsSessionTranscriptEvents(s.sessions[e.sessionId])) return {}
       // Stamp arrival time + monotonic seq (unless already present) so the UI
       // can interleave tool calls with messages on one chronological timeline.
-      // CAP-2/F-2: clamp `rawOutput`/`title`/`content`/`rawInput`/`locations`
-      // on the initial call too — the host forwards them verbatim and
-      // unbounded, so an oversized first emission must not bypass the bound.
+      // A replayed card keeps its server seq, which places it among the
+      // payload's messages instead of below them.
+      // CAP-2/F-2: clamp rawOutput/title/content/rawInput/locations on the
+      // initial call. Codex terminal chunks are accumulated first, then the
+      // same bound applies so a long shell stream cannot bypass it.
+      const prior = (s.toolCalls[e.sessionId] ?? []).find(
+        (t) => t.toolCallId === e.toolCall.toolCallId
+      )
+      const stream = boundTerminalStream(applyTerminalStream(prior, e.toolCall))
       const stamped = clampLiveToolCallFields(e.sessionId, {
         ...e.toolCall,
+        ...stream,
         timestamp: typeof e.toolCall.timestamp === 'number' ? e.toolCall.timestamp : Date.now(),
-        seq: typeof e.toolCall.seq === 'number' ? e.toolCall.seq : nextSeq()
+        seq: typeof e.toolCall.seq === 'number' ? e.toolCall.seq : (replaySeq ?? nextSeq())
       })
       // Dropped entirely: even the structural subset exceeds the live bound
       // (the agent-sent toolCallId/kind/status alone is oversized).
@@ -1282,6 +1398,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       const merged = clampLiveToolCallFields(e.sessionId, {
         ...list[idx],
         ...stamped,
+        // A live event turns a restored summary into a real timeline card.
+        restoredSummary: undefined,
         timestamp: list[idx].timestamp,
         seq: list[idx].seq
       })
@@ -1301,8 +1419,9 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
 
   _onToolCallUpdate: (e, eventSeq) => {
     // CAP-3 replay contract: drop events the installed payload already covers
-    // (the restored card already reflects the persisted update).
-    if (isHistoryCoveredEvent(e.sessionId, eventSeq)) return
+    // (the restored card already reflects the persisted update), unless the
+    // open turn's attach replay re-delivers them in full.
+    if (isHistoryCoveredToolEvent(e.sessionId, eventSeq)) return
     const session = get().sessions[e.sessionId]
     const useCoalesce = !session?.replaying
     const apply = (s: AcpState): Partial<AcpState> => {
@@ -1310,15 +1429,19 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       const list = s.toolCalls[e.sessionId] ?? []
       const idx = list.findIndex((t) => t.toolCallId === e.update.toolCallId)
       if (idx === -1) return {}
-      // CAP-2/F-2: clamp `rawOutput`/`title`/`content`/`rawInput`/`locations`
-      // to the live bounds so one giant tool payload cannot balloon the
-      // WebView heap (logged once per call, without the content).
-      const clampedUpdate = clampLiveToolCallFields(e.sessionId, e.update)
+      // CAP-2/F-2: clamp rawOutput/title/content/rawInput/locations, and the
+      // accumulated Codex terminal stream, so one giant payload cannot grow
+      // the WebView heap. Then clamp the merged call: successive updates
+      // carrying different fields would otherwise accumulate past the bound.
+      const stream = boundTerminalStream(applyTerminalStream(list[idx], e.update))
+      const clampedUpdate = clampLiveToolCallFields(e.sessionId, { ...e.update, ...stream })
       if (!clampedUpdate) return {}
-      // Then clamp the MERGED call, not just the update: successive updates
-      // carrying different arbitrary fields would otherwise accumulate in
-      // `list[idx]` and grow one retained call past the live bound.
-      const merged = clampLiveToolCallFields(e.sessionId, { ...list[idx], ...clampedUpdate })
+      // A live update turns a restored summary into a real timeline card.
+      const merged = clampLiveToolCallFields(e.sessionId, {
+        ...list[idx],
+        ...clampedUpdate,
+        restoredSummary: undefined
+      })
       if (!merged) return {}
       const next = [...list]
       next[idx] = merged
@@ -1342,10 +1465,10 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       return { plans: { ...s.plans, [e.sessionId]: entries } }
     }),
 
-  _onCommandsUpdate: (e) =>
+  _onCommandsUpdate: (e, eventSeq) =>
     set((s) => {
       if (!acceptsSessionTranscriptEvents(s.sessions[e.sessionId])) return {}
-      return { commands: { ...s.commands, [e.sessionId]: e.availableCommands ?? [] } }
+      return withCommands(s, e.sessionId, e.availableCommands ?? [], eventSeq)
     }),
 
   _onModeUpdate: (e) => {
@@ -1414,11 +1537,18 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         creationEchoLogged = { ...creationEchoLogged }
         for (const optionId of preservedOptionIds) creationEchoLogged[optionId] = true
       }
+      const draft: AcpSession = {
+        ...session,
+        configOptions: merged,
+        creationEchoLogged
+      }
+      const next = alignSessionModelProjection(draft)
       return {
         sessions: {
           ...s.sessions,
-          [e.sessionId]: { ...session, configOptions: merged, creationEchoLogged }
-        }
+          [e.sessionId]: next
+        },
+        sessionIndex: withSessionModelOnIndex(s.sessionIndex, e.sessionId, next)
       }
     })
     for (const optionId of preservedOptionIds) {
@@ -1435,19 +1565,32 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
     // `title` is `undefined` when the field is absent (no change), `null` when
     // the agent explicitly cleared it, or a string when set. An omitted title
     // must leave the existing title (and the persisted index) untouched.
-    if (e.title === undefined) return
-    const nextTitle = e.title
+    // OpenCode compaction / retry markers can arrive with no title.
+    const session = get().sessions[e.sessionId]
+    if (!session) return
+    const titleUpdate = e.title !== undefined
+    const nextNotice = nextOpencodeNotice(session.opencodeNotice, e)
+    const noticeChanged = !sameOpencodeNotice(session.opencodeNotice, nextNotice)
+    if (!titleUpdate && !noticeChanged) return
     set((s) => {
-      const session = s.sessions[e.sessionId]
-      if (!session) return {}
+      const current = s.sessions[e.sessionId]
+      if (!current) return {}
       return {
-        sessions: { ...s.sessions, [e.sessionId]: { ...session, title: nextTitle } }
+        sessions: {
+          ...s.sessions,
+          [e.sessionId]: {
+            ...current,
+            title: titleUpdate ? (e.title ?? null) : current.title,
+            opencodeNotice: nextNotice
+          }
+        }
       }
     })
     // Gate on sessionIndex membership so an un-promoted (ephemeral) pooled
     // session is never persisted by an event before `startChat` promotes it
-    // (matches the prompt/error reducers).
+    // (matches the prompt/error reducers). Notice-only updates stay in memory.
     if (
+      titleUpdate &&
       get().sessions[e.sessionId] &&
       get().sessionIndex.some((entry) => entry.id === e.sessionId)
     ) {
@@ -1474,6 +1617,8 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (e.cost && Number.isFinite(e.cost.amount) && e.cost.amount > 0 && e.cost.currency) {
         next.cost = { amount: e.cost.amount, currency: e.cost.currency }
       }
+      const rateLimit = e.rateLimit ?? prev?.rateLimit
+      if (rateLimit) next.rateLimit = rateLimit
       return {
         sessionUsage: { ...s.sessionUsage, [e.sessionId]: next }
       }

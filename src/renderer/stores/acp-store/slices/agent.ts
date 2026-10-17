@@ -9,10 +9,15 @@ import {
   type AuthMethod,
   acpApi,
   browserConsentRespond,
+  parseAcpErrorDetail,
   type SessionId
 } from '@/lib/acp-api'
 import { saveAuthMethodMemory as saveAuthMethodMemoryToDisk } from '@/lib/acp-auth-method-memory'
-import { AmbiguousAuthError, isAmbiguousAuthError } from '@/lib/agents/acp-spawn-errors'
+import {
+  AmbiguousAuthError,
+  describeProviderFailure,
+  isAmbiguousAuthError
+} from '@/lib/agents/acp-spawn-errors'
 import { factoryKeyApi } from '@/lib/factory-key-api'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
@@ -28,6 +33,7 @@ import { isDetachedReuseKey, parseReuseKey } from '../../acp-reuse-keys'
 import {
   authPickerUnavailableError,
   configIdForAgentId,
+  dropElicitationsForAgent,
   dropPermissionsForAgent,
   dropPreparedSlots,
   dropQuestionsForAgent,
@@ -38,8 +44,9 @@ import {
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
-  acceptedServerPromptTurnIds,
+  activeWirePromptTurns,
   commitMessageCollectors,
+  echoedWirePromptTurns,
   ephemeralSessionIds,
   persistSession,
   rejectCommitMessageCollector,
@@ -47,7 +54,12 @@ import {
   terminalAssistCollectors
 } from '../shared-state'
 import type { AcpState, AgentStatus, SessionStatus } from '../types'
-import { dropSessionTranscriptState, flushCoalescedSync } from './transcript'
+import { clearPromptReconcile } from './prompt-reconcile'
+import {
+  dropSessionTranscriptState,
+  flushCoalescedSync,
+  type SessionTranscriptState
+} from './transcript'
 
 /**
  * Agents that have completed ACP `authenticate` in this process lifetime, so
@@ -69,6 +81,17 @@ export const authenticatedAgents = new Set<AgentId>()
  * agent being authenticated).
  */
 const inFlightAuth = new Map<string, Promise<boolean>>()
+
+/**
+ * ACP `AuthRequired`. A turn rejected with it needs a sign-in, so its process
+ * is retired: Retry restarts it and no new chat inherits it.
+ */
+const ACP_AUTH_REQUIRED_RPC_CODE = -32000
+
+/** True while an ACP `authenticate` call is still waiting. */
+export function isAnyAgentAuthInFlight(): boolean {
+  return inFlightAuth.size > 0
+}
 
 /** Drop every in-flight authenticate for a torn-down agent (any method). */
 function dropInFlightAuthForAgent(agentId: AgentId): void {
@@ -300,6 +323,10 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
   // the explicit sign-in paths). A missing `type` (older host) is treated as
   // 'agent' — the pre-extension wire only ever carried agent methods.
   if (method.type !== 'agent' && method.type != null) return Promise.resolve(false)
+  if (method.id.trim() === 'gateway') {
+    if (configId) forgetAuthMethodForConfig(configId)
+    return Promise.resolve(false)
+  }
 
   const methodId = method.id.trim()
   const flightKey = inFlightAuthKey(agentId, methodId)
@@ -344,7 +371,7 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
     // Persist the winning method id so the next process for this config can
     // auto-authenticate on demand (never a credential — just the id). Method
     // selection above already guarantees agent/untyped eligibility.
-    if (configId) rememberAuthMethodForConfig(configId, methodId)
+    if (configId && methodId !== 'gateway') rememberAuthMethodForConfig(configId, methodId)
     // Auth succeeded — a pending browser-open request for this agent is
     // resolved; drop it so the dialog dismisses. Module-scope helper: the
     // store exists by the time any auth flow runs.
@@ -363,9 +390,44 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
   return task
 }
 
+type RetriableAuthOp =
+  | 'session/new'
+  | 'session/load'
+  | 'session/resume'
+  | 'session/list'
+  | 'session/set_mode'
+  | 'session/set_model'
+  | 'session/set_config_option'
+
+type AuthGatedOp = RetriableAuthOp | 'session/prompt'
+
+export async function reauthenticateOnDemand(
+  get: () => AcpState,
+  agentId: AgentId,
+  op: AuthGatedOp,
+  surface: 'picker' | 'text'
+): Promise<boolean> {
+  void logFrontendError({
+    level: 'info',
+    source: 'acp-store.withAuthRetry',
+    message: `${op} reported auth required; authenticating on demand`
+  })
+  // The failed call just proved the process is NOT authenticated — a stale
+  // `authenticatedAgents` flag (e.g. a token that expired server-side
+  // mid-process) must not make authenticateBeforeSession early-return.
+  authenticatedAgents.delete(agentId)
+  try {
+    return await authenticateBeforeSession(get, agentId)
+  } catch (err) {
+    // A text-only surface has no method picker — translate the "pick one of
+    // the methods below" error into guidance the user can act on there.
+    throw surface === 'text' && isAmbiguousAuthError(err) ? authPickerUnavailableError() : err
+  }
+}
+
 /**
- * Authenticate-on-demand wrapper for agent session calls (`session/new`,
- * `session/load`, `session/resume`) — spec-acp-persistent-auth-reuse. The call
+ * Authenticate-on-demand wrapper for auth-gated agent calls
+ * ({@link RetriableAuthOp}) — spec-acp-persistent-auth-reuse. The call
  * runs FIRST with no preemptive auth: a globally logged-in agent (or a reused
  * process) goes straight through. Only when the call reports an auth failure
  * ({@link isAuthRetriableSessionError}) does it run
@@ -380,15 +442,22 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
  *
  * `surface` is how auth failures are presented: 'picker' (session/new — the
  * launcher renders the method picker for AmbiguousAuthError) or 'text'
- * (history reopen / resume — text-only `lastError` + Retry, where the
+ * (history reopen / resume, option setters, session/list — text-only
+ * `lastError` + Retry or a toast, where the
  * ambiguous-methods error is translated into actionable guidance).
  * `op` is a static label for the redacted boundary logs — never raw errors or
  * method payloads.
+ *
+ * AD-5: the auth-required reply is a DEFINITE rejection, recorded by the host
+ * under that call's `commandId`; replaying the same id would replay the
+ * rejection. `fn` goes through the `acpApi` facade, whose command engine mints a
+ * NEW id for every try after a rejection (and reuses one only after an
+ * uncertain outcome), so the retry below is a new command by construction.
  */
 export async function withAuthRetry<T>(
   get: () => AcpState,
   agentId: AgentId,
-  op: 'session/new' | 'session/load' | 'session/resume',
+  op: RetriableAuthOp,
   surface: 'picker' | 'text',
   fn: () => Promise<T>
 ): Promise<T> {
@@ -396,26 +465,9 @@ export async function withAuthRetry<T>(
     return await fn()
   } catch (firstErr) {
     if (!isAuthRetriableSessionError(firstErr)) throw firstErr
-    void logFrontendError({
-      level: 'info',
-      source: 'acp-store.withAuthRetry',
-      message: `${op} reported auth required; authenticating on demand`
-    })
-    // The failed call just proved the process is NOT authenticated — a stale
-    // `authenticatedAgents` flag (e.g. a token that expired server-side
-    // mid-process) must not make authenticateBeforeSession early-return.
-    authenticatedAgents.delete(agentId)
-    let didAuthenticate: boolean
-    try {
-      didAuthenticate = await authenticateBeforeSession(get, agentId)
-    } catch (err) {
-      // A text-only surface has no method picker — translate the "pick one of
-      // the methods below" error into guidance the user can act on there.
-      throw surface === 'text' && isAmbiguousAuthError(err) ? authPickerUnavailableError() : err
-    }
     // Nothing was sent (zero valid methods / only non-agent methods): the
     // retry would fail identically — surface the ORIGINAL error instead.
-    if (!didAuthenticate) throw firstErr
+    if (!(await reauthenticateOnDemand(get, agentId, op, surface))) throw firstErr
     try {
       const outcome = await fn()
       void logFrontendError({
@@ -474,6 +526,7 @@ type AgentSliceState = Pick<
   | 'clearPendingBrowserOpen'
   | 'completeBrowserAuth'
   | 'authenticateAgent'
+  | 'logoutAgent'
   | '_onAgentSpawned'
   | '_onAgentError'
   | '_onAgentCrashed'
@@ -484,6 +537,32 @@ type AgentSliceState = Pick<
   | 'respondBrowserConsent'
 >
 
+/**
+ * An agent-level failure ends the in-flight turn of the session it names — or,
+ * when the event carries no `sessionId`, of EVERY non-closed session of that
+ * agent (the reducers clear those turns). A prompt still waiting to confirm
+ * must stop resending for each of them, and its wire-turn tracking must go.
+ */
+function endPromptTrackingForAgentFailure(
+  state: AcpState,
+  agentId: AgentId,
+  sessionId: SessionId | null | undefined
+): void {
+  const ended = new Set<SessionId>()
+  if (sessionId) ended.add(sessionId)
+  const named = sessionId ? state.sessions[sessionId] : undefined
+  if (!named || named.status === 'closed') {
+    for (const [id, session] of Object.entries(state.sessions)) {
+      if (session.agentId === agentId && session.status !== 'closed') ended.add(id)
+    }
+  }
+  for (const id of ended) {
+    clearPromptReconcile(id)
+    activeWirePromptTurns.delete(id)
+    echoedWirePromptTurns.delete(id)
+  }
+}
+
 export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> = (set, get) => ({
   agents: {},
   agentStatus: {},
@@ -492,11 +571,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
 
   pendingRestartVersions: {},
 
-  spawnAgent: async (config) => {
+  spawnAgent: async (config, projectId) => {
     const tempKey = config.name
     set((s) => ({ agentStatus: { ...s.agentStatus, [tempKey]: 'spawning' } }))
     try {
-      const result = await acpApi.spawnAgent(config)
+      const result = await acpApi.spawnAgent(config, projectId)
       const agentId = result.agentId
       set((s) => {
         // Drop the transient name-keyed `spawning` marker now that we have the
@@ -504,6 +583,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         const agentStatus = { ...s.agentStatus }
         delete agentStatus[tempKey]
         agentStatus[agentId] = 'connected'
+        // AD-6 exception (reply-driven agent state kept): `acp:agent_spawned`
+        // carries the same `authMethods` / `hostAuthReady`, but it is an
+        // agent-level event with no subscription anchoring its delivery to this
+        // client before the reply (a web client, or a resend answered after the
+        // event fired, may never see it). The reply is the one source that is
+        // guaranteed to reach the caller that needs the data now.
         // The spawn response is the authoritative source of capabilities +
         // authMethods (CAP-4: metadata delivery cannot depend on a session
         // subscription that does not yet exist). The `acp:agent_spawned` event
@@ -572,14 +657,17 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         agentStatus,
         configToLiveAgent,
         sessions,
-        // An intentional kill emits no lifecycle events (L4), so no event
-        // handler will retire this agent's warm-pool slots — drop them here.
+        // The host also announces the kill (`session_closed` +
+        // `agent_disconnected`) and that handler converges on the same state;
+        // drop the warm-pool slots here too so the result never depends on
+        // event order.
         preparedSessions: dropPreparedSlots(
           s.preparedSessions,
           (sid) => s.sessions[sid]?.agentId === agentId
         ),
         pendingPermissions: dropPermissionsForAgent(s.pendingPermissions, agentId),
-        pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, agentId)
+        pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, agentId),
+        pendingElicitations: dropElicitationsForAgent(s.pendingElicitations ?? {}, agentId)
       }
     })
     // A killed agent can never finish its browser-open flow — drop the
@@ -632,7 +720,10 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       if (isDetachedReuseKey(reuseKey)) continue
       const { configId, cwd } = parseReuseKey(reuseKey)
       for (const [errKey, err] of Object.entries(get().prepareChatErrors)) {
-        if (!errKey.startsWith(`${reuseKey}\0`)) continue
+        // Prepare keys stay `configId\0cwd\0mcpKey`. A Project-scoped reuse
+        // key has more segments, so match the config and cwd, not the prefix.
+        const parsedError = parseReuseKey(errKey)
+        if (parsedError.configId !== configId || parsedError.cwd !== cwd) continue
         if (err.category !== 'auth' && err.category !== 'multi-auth') continue
         get().cancelPreparedChat(errKey)
         get().prepareChat(configId, cwd, undefined, projectId)
@@ -640,7 +731,25 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     }
   },
 
-  authenticateAgent: async (agentId, methodId) => {
+  logoutAgent: async (agentId) => {
+    const supports = get().agents[agentId]?.capabilities?.auth?.logout
+    if (!supports) {
+      throw new Error('This agent does not support sign out.')
+    }
+    try {
+      await acpApi.logout(agentId)
+    } catch (error) {
+      void logFrontendError({
+        level: 'warn',
+        source: 'acp.logoutAgent',
+        message: `Logout failed for agent ${agentId}: ${error instanceof Error ? error.message : String(error)}`
+      })
+      throw error
+    }
+    authenticatedAgents.delete(agentId)
+  },
+
+  authenticateAgent: async (agentId, methodId, gateway) => {
     // Normalize and validate BEFORE the dedup check (P5 parity with
     // `authenticateBeforeSession`): an empty/whitespace method id is unusable
     // and must be rejected up front instead of being sent to the agent, and an
@@ -680,7 +789,8 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
         // redirect lands out-of-band without an authenticate reply) can
         // persist the winning method id per config.
         lastAuthAttempt.set(agentId, normalizedMethodId)
-        await acpApi.authenticate(agentId, normalizedMethodId)
+        if (gateway) await acpApi.authenticate(agentId, normalizedMethodId, gateway)
+        else await acpApi.authenticate(agentId, normalizedMethodId)
       } catch (err) {
         // Redacted (see `authenticateBeforeSession`): no method id, no raw
         // error text — an agent's auth failure may echo credentials.
@@ -704,7 +814,11 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       const method = (get().agents[agentId]?.authMethods ?? []).find(
         (m) => m.id.trim() === normalizedMethodId
       )
-      if (configId && (method?.type === 'agent' || method?.type == null)) {
+      if (
+        configId &&
+        normalizedMethodId !== 'gateway' &&
+        (method?.type === 'agent' || method?.type == null)
+      ) {
         rememberAuthMethodForConfig(configId, normalizedMethodId)
       }
       // Auth succeeded — a pending browser-open request for this agent is
@@ -766,39 +880,49 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     if (hadAssist && sessionId)
       rejectTerminalAssistCollector(sessionId, e.message || 'The ACP agent reported an error')
     if (hadCommit || hadAssist) return
+    // The turn ends here (below) — a prompt still waiting to confirm must stop
+    // resending; the host's `error`/`timeout` terminator follows.
+    endPromptTrackingForAgentFailure(get(), e.agentId, sessionId)
     // Flush coalesced updates so the error reflects the final transcript state.
     flushCoalescedSync()
+    const detail = parseAcpErrorDetail(e)
     set((s) => {
-      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
-      if (e.sessionId && s.sessions[e.sessionId] && s.sessions[e.sessionId].status !== 'closed') {
+      if (e.sessionId) {
+        const session = s.sessions[e.sessionId]
+        if (!session || session.status === 'closed') return {}
         return {
-          agentStatus,
+          // The chat stays live either way; only a retired process leaves the
+          // reuse pool, and Retry restarts it (AgentChatPanel).
+          ...(detail.code === ACP_AUTH_REQUIRED_RPC_CODE
+            ? { agentStatus: { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus } }
+            : {}),
           // Finalize streaming markers: the turn is over (errored), and the
           // persist below must not capture a message mid-shimmer.
           messages: finalizeStreaming(s.messages, e.sessionId),
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
-              ...s.sessions[e.sessionId],
-              // Story 1.9 NFR7: a turn-scoped error (incl. the bounded turn
-              // timeout) sets `status: 'error'` so the UI shows the Error state
-              // (the agent may be wedged — the user should see an error, not
-              // a perpetually-active turn). The `_onAgentDisconnected` reducer
-              // now preserves the 'error' status (it skips 'error' sessions).
-              status: 'error' as SessionStatus,
-              lastError: e.message,
+              ...session,
+              lastError: detail.providerCode
+                ? describeProviderFailure(detail.providerCode, e.message)
+                : e.message,
+              lastErrorCode: detail.code ?? null,
+              lastErrorData: detail.data,
               activeTurn: false,
               openTurnId: null
             }
           }
         }
       }
+      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
       const sessions = { ...s.sessions }
       for (const id of Object.keys(sessions)) {
         if (sessions[id].agentId === e.agentId && sessions[id].status !== 'closed') {
           sessions[id] = {
             ...sessions[id],
             lastError: e.message,
+            lastErrorCode: detail.code ?? null,
+            lastErrorData: detail.data,
             activeTurn: false,
             openTurnId: null
           }
@@ -818,11 +942,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     }
   },
 
-  // Story 1.9 FR26: the agent subprocess crashed mid-turn. Mirrors
-  // `_onAgentError` (sets `agentStatus[agentId]='error'`, finalizes streaming,
-  // sets `lastError`, persists) but is the typed crash event emitted BEFORE
-  // `agent_error` + `agent_disconnected`. The UI shows a manual-restart action
-  // (no silent respawn, honoring ADR-003).
+  // Story 1.9 FR26: the agent subprocess crashed mid-turn. Sets
+  // `agentStatus[agentId]='error'` and the session `status: 'error'`,
+  // finalizes streaming, sets `lastError` and persists. Unlike a turn-scoped
+  // `_onAgentError`, this marks the chat dead, so it reopens onto a fresh
+  // agent. The UI shows a manual-restart action (no silent respawn, honoring
+  // ADR-003).
   _onAgentCrashed: (e) => {
     const sessionId = e.sessionId
     const hadCommit = sessionId ? commitMessageCollectors.has(sessionId) : false
@@ -832,32 +957,45 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     if (hadAssist && sessionId)
       rejectTerminalAssistCollector(sessionId, e.message || 'The ACP agent crashed')
     if (hadCommit || hadAssist) return
-    // #846: a crashed agent can never complete an accepted prompt — clear
-    // the accepted-turn tracking so a future Retry (or reload) re-sends
-    // rather than silently "resubscribing" to a turn that will never produce
-    // a prompt_complete.
-    if (sessionId) {
-      acceptedServerPromptTurnIds.delete(sessionId)
-    } else {
-      acceptedServerPromptTurnIds.clear()
-    }
+    // A crashed agent can never complete an accepted prompt: stop waiting to
+    // confirm / resending it (the host closes the turn with a `crashed`
+    // terminator and the Retry path starts a new intent with a new id).
+    endPromptTrackingForAgentFailure(get(), e.agentId, sessionId)
     // Flush coalesced updates so the crash reflects the final transcript state.
     flushCoalescedSync()
+    const detail = parseAcpErrorDetail(e)
     set((s) => {
       const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      // A crashed agent can never land its in-flight launch: drop the stale
+      // launch markers for its sessions so the armed evidence cannot hold a
+      // chat's busy/Closing state open forever.
+      const launchingSessionIds = { ...s.launchingSessionIds }
+      for (const id of Object.keys(launchingSessionIds)) {
+        if (s.sessions[id]?.agentId === e.agentId) delete launchingSessionIds[id]
+      }
+      const preparedSessions = dropPreparedSlots(
+        s.preparedSessions,
+        (sid) => s.sessions[sid]?.agentId === e.agentId
+      )
       // Story 1.9 review: don't resurrect a closed session to 'error' (a late
       // crash event for an already-closed session should not overwrite its
       // terminal status).
       if (e.sessionId && s.sessions[e.sessionId] && s.sessions[e.sessionId].status !== 'closed') {
         return {
           agentStatus,
+          launchingSessionIds,
+          preparedSessions,
           messages: finalizeStreaming(s.messages, e.sessionId),
           sessions: {
             ...s.sessions,
             [e.sessionId]: {
               ...s.sessions[e.sessionId],
               status: 'error' as SessionStatus,
-              lastError: e.message,
+              lastError: detail.providerCode
+                ? describeProviderFailure(detail.providerCode, e.message)
+                : e.message,
+              lastErrorCode: detail.code ?? null,
+              lastErrorData: detail.data,
               activeTurn: false,
               openTurnId: null
             }
@@ -871,12 +1009,14 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
             ...sessions[id],
             status: 'error' as SessionStatus,
             lastError: e.message,
+            lastErrorCode: detail.code ?? null,
+            lastErrorData: detail.data,
             activeTurn: false,
             openTurnId: null
           }
         }
       }
-      return { agentStatus, sessions }
+      return { agentStatus, launchingSessionIds, preparedSessions, sessions }
     })
     if (
       e.sessionId &&
@@ -910,7 +1050,29 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     const affected: SessionId[] = []
     const dropTranscriptIds: SessionId[] = []
     set((s) => {
-      const agentStatus = { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      // A deliberate end (kill / idle reap / close) is not an error: drop the
+      // agent exactly like a local `killAgent` does, so a stopped agent never
+      // lingers as 'error' or stays mapped from its config. Only a crash keeps
+      // the 'error' status (manual restart). Both paths are idempotent.
+      const deliberate = e.reason !== 'crashed'
+      const agentStatus = deliberate
+        ? { ...s.agentStatus }
+        : { ...s.agentStatus, [e.agentId]: 'error' as AgentStatus }
+      const agents = { ...s.agents }
+      const configToLiveAgent = { ...s.configToLiveAgent }
+      if (deliberate) {
+        delete agentStatus[e.agentId]
+        delete agents[e.agentId]
+        for (const cid of Object.keys(configToLiveAgent)) {
+          if (configToLiveAgent[cid] === e.agentId) delete configToLiveAgent[cid]
+        }
+      }
+      // Same stale-marker rule as _onAgentCrashed: a disconnected agent can
+      // never land a launch still marked in flight.
+      const launchingSessionIds = { ...s.launchingSessionIds }
+      for (const id of Object.keys(launchingSessionIds)) {
+        if (s.sessions[id]?.agentId === e.agentId) delete launchingSessionIds[id]
+      }
       const sessions = { ...s.sessions }
       for (const id of Object.keys(sessions)) {
         if (sessions[id].agentId === e.agentId && sessions[id].status !== 'closed') {
@@ -969,9 +1131,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       )
       return {
         agentStatus,
+        launchingSessionIds,
+        ...(deliberate ? { agents, configToLiveAgent } : {}),
         sessions,
         pendingPermissions: dropPermissionsForAgent(s.pendingPermissions, e.agentId),
         pendingQuestions: dropQuestionsForAgent(s.pendingQuestions, e.agentId),
+        pendingElicitations: dropElicitationsForAgent(s.pendingElicitations ?? {}, e.agentId),
         discoveredSessions,
         preparedSessions
       }
@@ -986,10 +1151,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     }
     if (dropTranscriptIds.length > 0) {
       set((s) => {
-        let next: Pick<
-          AcpState,
-          'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-        > = s
+        let next: SessionTranscriptState = s
 
         for (const id of dropTranscriptIds) {
           next = dropSessionTranscriptState(next, id)
@@ -1047,7 +1209,6 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     if (e.action === 'open') {
       const url = typeof e.url === 'string' && /^https?:\/\//i.test(e.url) ? e.url : undefined
       useBrowserSessionStore.getState().createTab(e.tabId, url)
-      useBrowserSessionStore.getState().setAgentControlled(e.tabId, true)
       useWorkspaceStore.getState().openAgentBrowserTab(e.tabId, url)
       void logFrontendError({
         level: 'info',

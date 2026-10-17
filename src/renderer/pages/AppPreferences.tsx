@@ -3,32 +3,38 @@ import { useEffect, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { SettingsLayout } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
-import { useResetAppSettings, useUpdateAppSetting } from '@/hooks/use-app-settings'
+import {
+  queueAgentIdleWindowPush,
+  useResetAppSettings,
+  useUpdateAppSetting
+} from '@/hooks/use-app-settings'
 import {
   useResetAllShortcuts,
   useResetShortcut,
   useUpdateShortcut
 } from '@/hooks/use-keyboard-shortcuts'
-import { acpApi, shellApi, terminalApi } from '@/lib/api'
+import { acpApi, shellApi } from '@/lib/api'
 import { scheduleAllDirtyAutoSaves } from '@/lib/editor-auto-save'
+import { logFrontendError } from '@/lib/log-api'
 import { isAurUpdateMode } from '@/lib/tauri-updater-api'
 import {
   useAcpSessionNewTimeout,
   useAcpSessionReopenTimeout,
   useAcpTurnIdleTimeout,
   useAcpTurnTimeout,
+  useAgentIdleWindow,
   useConfirmTerminalClose,
   useDefaultProjectColor,
   useDefaultShell,
   useEditorAutoSave,
   useEditorAutoSaveDelayMs,
-  useMaxTerminalsPerProject,
-  useOrphanDetectionEnabled,
-  useOrphanDetectionTimeout,
+  useNotifyOnAgentChatNeedsYou,
+  useNotifyOnAgentChatTurnFinished,
+  useNotifyOnTerminalIdle,
   useTerminalBufferSize,
-  useTerminalFontFamily,
   useTerminalFontSize,
   useTerminalRenderer,
+  useTerminalScreenReaderMode,
   useTerminalUrlOpenMode,
   useUiZoomLevel
 } from '@/stores/app-settings-store'
@@ -48,33 +54,36 @@ import { APP_PREF_CATEGORIES, APP_PREF_SEARCH_INDEX } from './app-preferences/ca
 import { DiagnosticsSection } from './app-preferences/diagnostics-section'
 import { McpServersSection } from './app-preferences/mcp-servers-section'
 import { ProjectDefaultsSection } from './app-preferences/project-defaults-section'
+import { ProviderSection } from './app-preferences/provider-section'
 import { ResetSection } from './app-preferences/reset-section'
 import { ShellSection } from './app-preferences/shell-section'
 import { ShortcutsSection } from './app-preferences/shortcuts-section'
+import { SkillsSection } from './app-preferences/skills-section'
 import { UpdatesSection } from './app-preferences/updates-section'
 
 export function AppPreferencesModal(): React.JSX.Element {
   const isOpen = useSettingsModalStore((state) => state.view === 'app')
   const close = useSettingsModalStore((state) => state.close)
   const isAurUpdater = isAurUpdateMode()
-  const fontFamily = useTerminalFontFamily()
   const fontSize = useTerminalFontSize()
   const uiZoomLevel = useUiZoomLevel()
   const bufferSize = useTerminalBufferSize()
   const terminalRenderer = useTerminalRenderer()
+  const terminalScreenReaderMode = useTerminalScreenReaderMode()
   const defaultShell = useDefaultShell()
   const defaultProjectColor = useDefaultProjectColor() as ProjectColor
-  const maxTerminals = useMaxTerminalsPerProject()
-  const orphanDetectionEnabled = useOrphanDetectionEnabled()
-  const orphanDetectionTimeout = useOrphanDetectionTimeout()
   const _confirmTerminalClose = useConfirmTerminalClose()
   const terminalUrlOpenMode = useTerminalUrlOpenMode()
   const acpTurnTimeoutSecs = useAcpTurnTimeout()
   const editorAutoSave = useEditorAutoSave()
   const editorAutoSaveDelayMs = useEditorAutoSaveDelayMs()
+  const notifyOnTerminalIdle = useNotifyOnTerminalIdle()
+  const notifyOnAgentChatTurnFinished = useNotifyOnAgentChatTurnFinished()
+  const notifyOnAgentChatNeedsYou = useNotifyOnAgentChatNeedsYou()
   const acpTurnIdleTimeoutSecs = useAcpTurnIdleTimeout()
   const acpSessionNewTimeoutSecs = useAcpSessionNewTimeout()
   const acpSessionReopenTimeoutSecs = useAcpSessionReopenTimeout()
+  const agentIdleWindowSecs = useAgentIdleWindow()
   const updateSetting = useUpdateAppSetting()
   const resetSettings = useResetAppSettings()
 
@@ -118,10 +127,6 @@ export function AppPreferencesModal(): React.JSX.Element {
     void loadShells()
   }, [])
 
-  const handleFontFamilyChange = (value: string) => {
-    updateSetting('terminalFontFamily', value)
-  }
-
   const handleFontSizeChange = (value: number) => {
     updateSetting('terminalFontSize', value)
   }
@@ -144,16 +149,23 @@ export function AppPreferencesModal(): React.JSX.Element {
     }
   }
 
+  const handleScreenReaderModeChange = async (enabled: boolean) => {
+    await updateSetting('terminalScreenReaderMode', enabled)
+    // Boundary log (not a failure): the setting only reaches terminals created
+    // after the toggle, and xterm.js #3467 / repo #267 can double typed bytes.
+    void logFrontendError({
+      level: 'info',
+      source: 'AppPreferences.terminalScreenReaderMode',
+      message: `Terminal screen reader mode ${enabled ? 'enabled' : 'disabled'}; applies to new terminals only (can repeat typed characters, xterm.js #3467 / repo #267)`
+    })
+  }
+
   const handleDefaultShellChange = (value: string) => {
     updateSetting('defaultShell', value)
   }
 
   const handleDefaultProjectColorChange = (value: ProjectColor) => {
     updateSetting('defaultProjectColor', value)
-  }
-
-  const handleMaxTerminalsChange = (value: number) => {
-    updateSetting('maxTerminalsPerProject', value)
   }
 
   const isTerminalUrlOpenMode = (value: string): value is TerminalUrlOpenMode =>
@@ -169,26 +181,6 @@ export function AppPreferencesModal(): React.JSX.Element {
 
   const _handleConfirmTerminalCloseToggle = async (enabled: boolean) => {
     await updateSetting('confirmTerminalClose', enabled)
-  }
-
-  const handleOrphanDetectionToggle = async (enabled: boolean) => {
-    await updateSetting('orphanDetectionEnabled', enabled)
-    // Apply to PtyManager immediately
-    try {
-      await terminalApi.updateOrphanDetection(enabled, orphanDetectionTimeout)
-    } catch (error) {
-      console.error('Failed to update orphan detection:', error)
-    }
-  }
-
-  const handleOrphanTimeoutChange = async (value: number | null) => {
-    await updateSetting('orphanDetectionTimeout', value)
-    // Apply to PtyManager immediately
-    try {
-      await terminalApi.updateOrphanDetection(orphanDetectionEnabled, value)
-    } catch (error) {
-      console.error('Failed to update orphan detection timeout:', error)
-    }
   }
 
   const handleAcpTurnTimeoutChange = async (value: number | null) => {
@@ -211,6 +203,18 @@ export function AppPreferencesModal(): React.JSX.Element {
 
   const handleEditorAutoSaveDelayChange = async (value: number) => {
     await updateSetting('editorAutoSaveDelayMs', value)
+  }
+
+  const handleNotifyOnTerminalIdleToggle = async (enabled: boolean) => {
+    await updateSetting('notifyOnTerminalIdle', enabled)
+  }
+
+  const handleNotifyOnAgentChatTurnFinishedToggle = async (enabled: boolean) => {
+    await updateSetting('notifyOnAgentChatTurnFinished', enabled)
+  }
+
+  const handleNotifyOnAgentChatNeedsYouToggle = async (enabled: boolean) => {
+    await updateSetting('notifyOnAgentChatNeedsYou', enabled)
   }
 
   const handleAcpTurnIdleTimeoutChange = async (value: number | null) => {
@@ -243,6 +247,12 @@ export function AppPreferencesModal(): React.JSX.Element {
     }
   }
 
+  const handleAgentIdleWindowChange = async (value: number | null) => {
+    const push = queueAgentIdleWindowPush(value)
+    await updateSetting('agentIdleWindowSecs', value)
+    await push
+  }
+
   const handleResetConfirm = async () => {
     await resetSettings()
     await resetAllShortcuts()
@@ -267,22 +277,24 @@ export function AppPreferencesModal(): React.JSX.Element {
         subtitle="Configure global application settings"
       >
         {/* Content */}
-        <SettingsLayout categories={APP_PREF_CATEGORIES} searchIndex={APP_PREF_SEARCH_INDEX}>
+        <SettingsLayout
+          title="Preferences"
+          categories={APP_PREF_CATEGORIES}
+          searchIndex={APP_PREF_SEARCH_INDEX}
+        >
           {/* Terminal Appearance Section */}
           <AppearanceSection
-            fontFamily={fontFamily}
             fontSize={fontSize}
             uiZoomLevel={uiZoomLevel}
             bufferSize={bufferSize}
             terminalRenderer={terminalRenderer}
-            maxTerminals={maxTerminals}
-            handleFontFamilyChange={handleFontFamilyChange}
+            screenReaderMode={terminalScreenReaderMode}
             handleFontSizeChange={handleFontSizeChange}
             handleUiZoomChange={handleUiZoomChange}
             handleUiZoomReset={handleUiZoomReset}
             handleBufferSizeChange={handleBufferSizeChange}
             handleRendererChange={handleRendererChange}
-            handleMaxTerminalsChange={handleMaxTerminalsChange}
+            handleScreenReaderModeChange={handleScreenReaderModeChange}
           />
           {/* Default Shell Section */}
           <ShellSection
@@ -293,15 +305,17 @@ export function AppPreferencesModal(): React.JSX.Element {
           {/* Terminal Behavior Section */}
           <BehaviorSection
             terminalUrlOpenMode={terminalUrlOpenMode}
-            orphanDetectionEnabled={orphanDetectionEnabled}
-            orphanDetectionTimeout={orphanDetectionTimeout}
             editorAutoSave={editorAutoSave}
             editorAutoSaveDelayMs={editorAutoSaveDelayMs}
+            notifyOnTerminalIdle={notifyOnTerminalIdle}
+            notifyOnAgentChatTurnFinished={notifyOnAgentChatTurnFinished}
+            notifyOnAgentChatNeedsYou={notifyOnAgentChatNeedsYou}
             handleTerminalUrlOpenModeChange={handleTerminalUrlOpenModeChange}
-            handleOrphanDetectionToggle={handleOrphanDetectionToggle}
-            handleOrphanTimeoutChange={handleOrphanTimeoutChange}
             handleEditorAutoSaveToggle={handleEditorAutoSaveToggle}
             handleEditorAutoSaveDelayChange={handleEditorAutoSaveDelayChange}
+            handleNotifyOnTerminalIdleToggle={handleNotifyOnTerminalIdleToggle}
+            handleNotifyOnAgentChatTurnFinishedToggle={handleNotifyOnAgentChatTurnFinishedToggle}
+            handleNotifyOnAgentChatNeedsYouToggle={handleNotifyOnAgentChatNeedsYouToggle}
           />
           {/* New Project Defaults Section */}
           <ProjectDefaultsSection
@@ -314,11 +328,15 @@ export function AppPreferencesModal(): React.JSX.Element {
             acpTurnIdleTimeoutSecs={acpTurnIdleTimeoutSecs}
             acpSessionNewTimeoutSecs={acpSessionNewTimeoutSecs}
             acpSessionReopenTimeoutSecs={acpSessionReopenTimeoutSecs}
+            agentIdleWindowSecs={agentIdleWindowSecs}
             handleAcpTurnTimeoutChange={handleAcpTurnTimeoutChange}
             handleAcpTurnIdleTimeoutChange={handleAcpTurnIdleTimeoutChange}
             handleAcpSessionNewTimeoutChange={handleAcpSessionNewTimeoutChange}
             handleAcpSessionReopenTimeoutChange={handleAcpSessionReopenTimeoutChange}
+            handleAgentIdleWindowChange={handleAgentIdleWindowChange}
           />
+          <SkillsSection />
+          <ProviderSection />
           <McpServersSection />
           {/* Keyboard Shortcuts Section */}
           <ShortcutsSection
