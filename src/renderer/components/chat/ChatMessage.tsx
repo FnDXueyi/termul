@@ -127,7 +127,7 @@ function UserMessageText({ text }: { text: string }): React.JSX.Element {
     }
   }
   return (
-    <BubbleContent className="whitespace-pre-wrap break-words">
+    <BubbleContent className="whitespace-pre-wrap">
       {!hasPills && flat.length === 0
         ? text
         : flat.map((seg, i) =>
@@ -176,10 +176,10 @@ function MediaGridItem({ block, id }: { block: ContentBlock; id: string }): Reac
     if (initial.url) return
     const uri = blockUri(block) ?? ''
     if (!isLocalFileUri(uri) || !blockIsImage(block)) return
-    const resolvedPath = fileUrlToPath(uri)
     let cancelled = false
     void (async () => {
       try {
+        const resolvedPath = fileUrlToPath(uri)
         const bytes = await readAttachmentBytes(resolvedPath)
         if (cancelled) return
         const mime = guessMimeType(resolvedPath)
