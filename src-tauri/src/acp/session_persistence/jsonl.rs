@@ -300,7 +300,10 @@ static COMMANDS_UPDATE_NEEDLE: LazyLock<memmem::Finder<'static>> =
 /// value `materialize_session_payload` folds from a full replay. One backward
 /// pass that parses only lines naming that type and stops at the first that
 /// is one.
-pub(super) fn newest_command_list(path: &Path, session_id: &str) -> io::Result<Option<Value>> {
+pub(super) fn newest_command_list(
+    path: &Path,
+    session_id: &str,
+) -> io::Result<Option<CommandList>> {
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -318,7 +321,7 @@ pub(super) fn newest_command_list(path: &Path, session_id: &str) -> io::Result<O
                     && record.session_id == session_id
                     && record.type_ == "commands_update" =>
             {
-                commands = record.payload.get("availableCommands").cloned();
+                commands = CommandList::of_record(&record);
                 ControlFlow::Break(())
             }
             _ => ControlFlow::Continue(()),
