@@ -143,6 +143,7 @@ vi.mock('@/lib/api', async (importActual) => {
 })
 
 import { invoke } from '@tauri-apps/api/core'
+import { fromPersistedSessionSummary, loadSessionIndex } from '@/lib/acp-history-persistence'
 import { logFrontendError } from '@/lib/log-api'
 import {
   _resetEphemeralSessionIdsForTesting,
@@ -299,6 +300,61 @@ describe('warm session pool', () => {
         true
       )
     })
+    await promptDone
+  })
+
+  it('a host index refetch from the promote keeps the title the first prompt gave the chat', async () => {
+    await seedConnectedAgent('cfg-1', 'agent-9')
+    vi.mocked(invoke).mockResolvedValueOnce({ sessionId: 'sess-prep' })
+    useAcpStore.getState().prepareChat('cfg-1', '/work', undefined, 'p1')
+    const key = prepareChatKey('cfg-1', '/work', undefined)
+    await vi.waitFor(() => expect(useAcpStore.getState().preparedSessions[key]).toBe('sess-prep'))
+
+    let releasePromote!: () => void
+    const promoteGate = new Promise<void>((resolve) => {
+      releasePromote = resolve
+    })
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === 'acp_promote_session') await promoteGate
+      if (command === 'acp_send_prompt') return 'end_turn'
+      return undefined
+    })
+
+    await useAcpStore.getState().startChat('cfg-1', '/work', undefined, 'p1')
+    const promptDone = useAcpStore.getState().sendPrompt('sess-prep', 'color survey [ELICIT]')
+    await vi.waitFor(() => {
+      expect(
+        useAcpStore.getState().sessionIndex.find((entry) => entry.id === 'sess-prep')?.title
+      ).toBe('color survey [ELICIT]')
+    })
+
+    // The host registered the promoted session after the renderer's last
+    // index write, and has no title until the first prompt reaches it.
+    vi.mocked(loadSessionIndex).mockResolvedValueOnce([
+      fromPersistedSessionSummary({
+        storageKey: 'opaque',
+        sessionId: 'sess-prep',
+        stableAgentNamespace: 'config:cfg-1',
+        runtimeAgentId: 'agent-9',
+        projectId: 'p1',
+        cwd: '/work',
+        title: null,
+        createdAt: Date.now(),
+        lastActivityAt: Date.now() + 1_000,
+        status: 'active',
+        messageCount: 0,
+        toolCount: 0,
+        lastSeq: 1,
+        resumeEligible: true
+      })
+    ])
+    await useAcpStore.getState().loadSessionIndex()
+
+    expect(
+      useAcpStore.getState().sessionIndex.find((entry) => entry.id === 'sess-prep')?.title
+    ).toBe('color survey [ELICIT]')
+
+    releasePromote()
     await promptDone
   })
 

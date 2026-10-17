@@ -28,7 +28,8 @@ import {
   type AgentSwitchRecord,
   maxPayloadSeq,
   type PersistedTurnError,
-  type SessionIndexEntry
+  type SessionIndexEntry,
+  UNTITLED_HOST_TITLE
 } from '@/lib/acp-history-persistence'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { agentConfigIdentityKey } from '@/lib/agents/acp-config-identity'
@@ -1013,11 +1014,21 @@ export function mergeSessionIndexEntries(
             turnActive: mergeTurnActive(entry.turnActive, hostEntry.turnActive, true)
           }
         }
-      } else if (entry.turnActive === true && hostEntry.turnActive === undefined) {
-        // The host index omits `turnActive`. A newer host row must not erase
-        // a live-turn flag the client already projected.
+      } else {
+        // A newer host row must not erase what the client already projected
+        // and the host cannot know yet: the host titles a chat only once its
+        // first prompt is durable (a promoted warm session registers
+        // untitled), and its index omits `turnActive`.
+        const keepTitle = hostEntry.title === UNTITLED_HOST_TITLE
+        const keepTurn = entry.turnActive === true && hostEntry.turnActive === undefined
         const idx = merged.findIndex((e) => e.id === entry.id)
-        if (idx >= 0) merged[idx] = { ...hostEntry, turnActive: true }
+        if ((keepTitle || keepTurn) && idx >= 0) {
+          merged[idx] = {
+            ...hostEntry,
+            ...(keepTitle ? { title: entry.title } : {}),
+            ...(keepTurn ? { turnActive: true } : {})
+          }
+        }
       }
     } else if (liveSessionIds.has(entry.id) && !mergedIds.has(entry.id)) {
       // Host omits it but it is a live session (created/restored locally and
