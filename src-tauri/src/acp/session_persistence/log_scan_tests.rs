@@ -341,3 +341,26 @@ async fn shutdown_marker_follows_a_tool_call_the_bookkeeping_missed() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn shutdown_marker_is_written_without_a_tool_calls_log() {
+    let root = temp_dir("marker-no-tool-calls");
+    let persistence = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let messages = session_file(&persistence, MESSAGES_FILE);
+    fs::remove_file(session_file(&persistence, TOOL_CALLS_FILE)).unwrap();
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+    let mut tails = TailState::default();
+    append_record(&store, &shared, &mut tails, prompt(1, "turn-1")).unwrap();
+
+    writer::append_interrupted_marker_if_open(&store, &shared, &mut tails, Some(&NextSeq));
+    assert_eq!(
+        log_records(&messages),
+        vec![
+            (1, "user_prompt".to_string()),
+            (2, "prompt_complete".to_string()),
+        ]
+    );
+    let _ = fs::remove_dir_all(root);
+}

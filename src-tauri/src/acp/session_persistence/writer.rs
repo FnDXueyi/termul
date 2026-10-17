@@ -184,6 +184,7 @@ pub(super) fn append_interrupted_marker_if_open(
     });
     let tool_calls_last = match tool_calls_last {
         Ok(seq) => seq.unwrap_or(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
         Err(error) => {
             log::warn!(
                 "[acp-history] interrupted-marker tool-call tail probe failed for session {}: \
