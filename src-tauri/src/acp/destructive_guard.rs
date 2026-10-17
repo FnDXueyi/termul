@@ -56,15 +56,14 @@ pub fn start_ref_rewrites_tree(start_ref: Option<&str>) -> bool {
 /// The git work-tree root containing `dir`, or `None` outside a repository
 /// (or when git cannot run). Blocking: call from `spawn_blocking`.
 fn try_git_toplevel(dir: &Path) -> Option<PathBuf> {
-    let output = crate::trackers::git_tracker::GitTracker::run_git_command(
-        dir.to_str()?,
-        &["rev-parse", "--show-toplevel"],
-    )?;
+    use crate::trackers::git_tracker::{git_path_on_host, GitTracker};
+    let dir = dir.to_str()?;
+    let output = GitTracker::run_git_command(dir, &["rev-parse", "--show-toplevel"])?;
     if !output.status.success() {
         return None;
     }
     let top = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!top.is_empty()).then(|| PathBuf::from(top))
+    (!top.is_empty()).then(|| git_path_on_host(dir, &top))
 }
 
 /// The git work-tree root containing `dir` (`dir` itself when it is not in a

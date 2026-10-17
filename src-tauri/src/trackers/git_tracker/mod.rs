@@ -20,6 +20,7 @@ mod git_exec;
 mod polling;
 mod resolve;
 mod types;
+mod wsl;
 
 // Internal items shared across the `git_tracker` submodule tree — bound here so
 // `use super::*` in each child (including `tests`) resolves them exactly as
@@ -52,6 +53,15 @@ pub use commit_detail::{
 pub use diff_stat::{git_get_diff_stat, DiffStatError, GitDiffStat};
 pub use resolve::{resolve_executable, resolve_git_binary};
 pub use types::{GitCommit, GitCommitContext, GitStatus, GitStatusDetail};
+
+/// An absolute path that git printed for the repository at `cwd`, as a path
+/// this process can open: git inside WSL prints Linux paths.
+pub fn git_path_on_host(cwd: &str, git_path: &str) -> std::path::PathBuf {
+    match wsl::wsl_target(cwd) {
+        Some(target) if git_path.starts_with('/') => target.host_path(git_path),
+        _ => std::path::PathBuf::from(git_path),
+    }
+}
 
 const POLL_INTERVAL_MS: u64 = 6000;
 const GIT_COMMAND_TIMEOUT_MS: u64 = 2000;
@@ -490,34 +500,31 @@ impl GitTracker {
         args: &[S],
         timeout_ms: u64,
     ) -> Option<std::process::Output> {
-        let mut command = backend_command(resolve_git_binary());
-        command
-            .args(args.iter().map(|a| a.as_ref()))
-            .current_dir(cwd);
-        Self::spawn_and_wait(command, args, cwd, timeout_ms)
+        let mut git = git_exec::git_command(cwd);
+        git.command.args(args.iter().map(|a| a.as_ref()));
+        Self::spawn_and_wait(git, args, cwd, timeout_ms)
     }
 
     /// Run `git push <args>` with the network timeout and `GIT_TERMINAL_PROMPT=0`
     /// so a remote that requires credentials fails fast ("could not read
     /// Username") instead of blocking on a terminal prompt until the timeout.
     pub fn run_git_push(cwd: &str, args: &[&str], timeout_ms: u64) -> Option<std::process::Output> {
-        let mut command = backend_command(resolve_git_binary());
-        command
+        let mut git = git_exec::git_command(cwd);
+        git.command
             .args(args)
-            .current_dir(cwd)
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null());
-        Self::spawn_and_wait(command, args, cwd, timeout_ms)
+        Self::spawn_and_wait(git, args, cwd, timeout_ms)
     }
 
     /// `args`/`cwd` are used only for the timeout log line.
     fn spawn_and_wait<S: AsRef<std::ffi::OsStr>>(
-        mut command: Command,
+        git: git_exec::GitCommand,
         args: &[S],
         cwd: &str,
         timeout_ms: u64,
     ) -> Option<std::process::Output> {
-        let child = git_exec::spawn_git(&mut command, git_exec::StdoutCap::Unbounded).ok()?;
+        let child = git.spawn(git_exec::StdoutCap::Unbounded).ok()?;
         match child.wait(timeout_ms) {
             Ok(output) => Some(output),
             Err(git_exec::GitWaitError::TimedOut) => {
