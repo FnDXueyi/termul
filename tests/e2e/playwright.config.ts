@@ -5,6 +5,8 @@ import { E2E_BASE_URL, E2E_DEVICE_ID } from './helpers'
  * E2E tests for the termul-server web client (long-running agent survival
  * across chat close, tab switch, project switch, and browser reload).
  *
+ * Run it with `bun run test:e2e`. CI runs it in `.github/workflows/e2e.yml`.
+ *
  * Requires from the environment (the global-setup enforces these):
  * - A freshly built `dist-web/` (bun run build:web).
  * - A release `termul-server` binary at src-tauri/target/release/termul-server
@@ -45,7 +47,7 @@ export default defineConfig({
   // sessions; parallel browser contexts are created inside tests where the
   // scenario needs them (tab switching), the rest stays sequential.
   workers: 1,
-  reporter: [['list']],
+  reporter: process.env.CI ? [['list'], ['github']] : [['list']],
   // Chat turns stream for tens of seconds — transcript assertions need the
   // headroom (default expect timeout is 5s).
   expect: { timeout: 30_000 },
