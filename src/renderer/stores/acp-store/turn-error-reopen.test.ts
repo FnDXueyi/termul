@@ -449,6 +449,52 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     )
   })
 
+  it('Retry releases only this chat when another chat still runs on the retired agent', async () => {
+    const transport = fakeWebTransport([], { [SESSION]: persistedRecord('active') })
+    _setAcpTransportForTests(transport)
+    const SIBLING = 's2'
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [SIBLING]: {
+          ...s.sessions[SESSION],
+          id: SIBLING,
+          title: 'Sibling',
+          activeTurn: true,
+          openTurnId: 'turn:sibling'
+        }
+      }
+    }))
+
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'turn idle timeout: no agent activity for 5s'
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'timeout'
+    })
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+
+    const { sessions } = useAcpStore.getState()
+    expect(transport.killAgent).not.toHaveBeenCalled()
+    expect(transport.closeSession).toHaveBeenCalledWith(OWNER, SESSION, expect.anything())
+    expect(sessions[SIBLING].status).toBe('active')
+    expect(sessions[SIBLING].agentId).toBe(OWNER)
+    expect(sessions[SIBLING].activeTurn).toBe(true)
+    expect(sessions[SESSION].status).toBe('active')
+    expect(sessions[SESSION].agentId).toBe(FRESH_AGENT)
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      SESSION,
+      'do the thing',
+      expect.any(String),
+      expect.anything()
+    )
+  })
+
   function retireOnAuthRequired(): void {
     useAcpStore.getState()._onAgentError({
       agentId: OWNER,
