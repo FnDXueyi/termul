@@ -4,23 +4,19 @@ use super::git_exec::{
 use super::GitTracker;
 // ---- stdout cap while draining ----
 
+fn drain_all(data: &[u8], cap: StdoutCap) -> Vec<u8> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let drained =
+        drain_capped(Some(std::io::Cursor::new(data.to_vec())), cap).collect_until(deadline);
+    assert!(drained.reached_eof);
+    drained.bytes
+}
+
 #[test]
 fn drain_capped_keeps_first_n_nul_paths_and_drains_the_rest() {
     let data: Vec<u8> = b"a\0b\0c\0d\0e\0".to_vec();
-    let kept = drain_capped(
-        Some(std::io::Cursor::new(data.clone())),
-        StdoutCap::NulPaths(3),
-    )
-    .join()
-    .unwrap();
-    assert_eq!(kept, b"a\0b\0c\0");
-    let all = drain_capped(
-        Some(std::io::Cursor::new(data.clone())),
-        StdoutCap::Unbounded,
-    )
-    .join()
-    .unwrap();
-    assert_eq!(all, data);
+    assert_eq!(drain_all(&data, StdoutCap::NulPaths(3)), b"a\0b\0c\0");
+    assert_eq!(drain_all(&data, StdoutCap::Unbounded), data);
 }
 
 #[test]
@@ -31,33 +27,16 @@ fn drain_capped_reads_past_the_cap_across_chunk_boundaries() {
     for i in 0..5000 {
         data.extend_from_slice(format!("dir/file-{i}.txt\0").as_bytes());
     }
-    let kept = drain_capped(Some(std::io::Cursor::new(data)), StdoutCap::NulPaths(1000))
-        .join()
-        .unwrap();
+    let kept = drain_all(&data, StdoutCap::NulPaths(1000));
     assert_eq!(kept.iter().filter(|b| **b == 0).count(), 1000);
 }
 
 #[test]
 fn drain_capped_bytes_keeps_the_first_n_bytes_across_chunks() {
     let data: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
-    let kept = drain_capped(
-        Some(std::io::Cursor::new(data.clone())),
-        StdoutCap::Bytes(20_000),
-    )
-    .join()
-    .unwrap();
-    assert_eq!(kept, data[..20_000]);
-    let short = drain_capped(
-        Some(std::io::Cursor::new(data.clone())),
-        StdoutCap::Bytes(40_000),
-    )
-    .join()
-    .unwrap();
-    assert_eq!(short, data);
-    let none = drain_capped(Some(std::io::Cursor::new(data)), StdoutCap::Bytes(0))
-        .join()
-        .unwrap();
-    assert!(none.is_empty());
+    assert_eq!(drain_all(&data, StdoutCap::Bytes(20_000)), data[..20_000]);
+    assert_eq!(drain_all(&data, StdoutCap::Bytes(40_000)), data);
+    assert!(drain_all(&data, StdoutCap::Bytes(0)).is_empty());
 }
 
 #[test]
