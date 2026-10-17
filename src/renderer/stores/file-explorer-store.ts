@@ -184,8 +184,12 @@ function ensureFileNameStreamSubscription(
 
     // Folder hits (`kind: 'dir'`) exist for the composer @-picker only; the
     // explorer lists files, so drop them to keep its results unchanged.
+    // Hits are root-relative; the explorer opens absolute paths.
+    const root = (state.rootPath ?? '').replace(/\/$/, '')
     set({
-      searchFileNameMatches: event.files.filter((f) => f.kind !== 'dir').map((f) => f.path),
+      searchFileNameMatches: event.files
+        .filter((f) => f.kind !== 'dir')
+        .map((f) => `${root}/${f.path}`),
       searchTruncated: event.truncated || state.searchTruncated
     })
   })
