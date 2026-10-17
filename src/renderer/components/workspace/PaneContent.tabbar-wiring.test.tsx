@@ -49,7 +49,9 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: vi.fn((selector: (s: { activeProjectId: string }) => unknown) =>
     selector({ activeProjectId: 'proj-1' })
-  )
+  ),
+  // NewTabMenu (the tab bar `+` menu) reads the active project.
+  useActiveProject: () => undefined
 }))
 
 vi.mock('@/stores/terminal-store', () => ({
@@ -89,7 +91,8 @@ vi.mock('@/stores/acp-store', () => ({
       agentStatus: {},
       launchingSessionIds: {},
       pendingPermissions: {},
-      pendingQuestions: {}
+      pendingQuestions: {},
+      pendingElicitations: {}
     })
   ),
   isEphemeralAcpSession: () => false,
@@ -99,18 +102,14 @@ vi.mock('@/stores/acp-store', () => ({
   useSessionIndexTitle: () => 'Chat 1'
 }))
 
-vi.mock('@/stores/agent-chat-lifetime-store', () => ({
-  useAgentChatLifetimeStore: vi.fn((selector: (state: unknown) => unknown) =>
-    selector({ closingSessionIds: {} })
-  )
-}))
-
-vi.mock('@/stores/git-status-store', () => ({
+vi.mock('@/stores/git-status-store', async (importOriginal) => ({
+  selectChangedFileCount: (await importOriginal<typeof import('@/stores/git-status-store')>())
+    .selectChangedFileCount,
   useGitStatusStore: vi.fn((selector: (state: unknown) => unknown) => selector({ statuses: {} }))
 }))
 
-vi.mock('@/hooks/use-agent-idle-shutdown', () => ({
-  requestCloseAgentChat: vi.fn((_sessionId: string, closeTab: () => void) => closeTab())
+vi.mock('@/lib/agent-chat-close', () => ({
+  closeAgentChat: vi.fn((_sessionId: string, closeTab: () => void) => closeTab())
 }))
 
 vi.mock('@/lib/tauri-runtime', () => ({
@@ -183,98 +182,7 @@ vi.mock('@/components/workspace/DropZoneOverlay', () => ({
   DropZoneOverlay: () => null
 }))
 
-// Same stateful stub as WorkspaceTabBar.test.tsx: opens the menu on
-// `contextmenu`, renders items as clickable divs (onSelect → click).
-vi.mock('@/components/ui/context-menu', async () => {
-  const React = await import('react')
-  const MenuCtx = React.createContext<{ open: boolean; setOpen: (o: boolean) => void }>({
-    open: false,
-    setOpen: () => {}
-  })
-  const ContextMenu = ({ children }: { children: React.ReactNode }) => {
-    const [open, setOpen] = React.useState(false)
-    React.useEffect(() => {
-      if (!open) return
-      const onKey = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') setOpen(false)
-      }
-      document.addEventListener('keydown', onKey)
-      return () => document.removeEventListener('keydown', onKey)
-    }, [open])
-    return <MenuCtx.Provider value={{ open, setOpen }}>{children}</MenuCtx.Provider>
-  }
-  const ContextMenuTrigger = ({
-    children,
-    asChild
-  }: {
-    children: React.ReactNode
-    asChild?: boolean
-  }) => {
-    const { setOpen } = React.useContext(MenuCtx)
-    const merged = (e: React.MouseEvent) => {
-      if (e.defaultPrevented) return
-      e.preventDefault()
-      setOpen(true)
-    }
-    if (asChild && React.isValidElement(children)) {
-      const child = children as React.ReactElement<{
-        onContextMenu?: (e: React.MouseEvent) => void
-      }>
-      return React.cloneElement(child, {
-        onContextMenu: (e: React.MouseEvent) => {
-          child.props.onContextMenu?.(e)
-          merged(e)
-        }
-      })
-    }
-    return <div onContextMenu={merged}>{children}</div>
-  }
-  const ContextMenuContent = ({
-    children,
-    className
-  }: {
-    children: React.ReactNode
-    className?: string
-  }) => {
-    const { open } = React.useContext(MenuCtx)
-    if (!open) return null
-    return (
-      <div role="menu" className={className}>
-        {children}
-      </div>
-    )
-  }
-  const ContextMenuItem = ({
-    children,
-    disabled,
-    onSelect,
-    variant
-  }: {
-    children: React.ReactNode
-    disabled?: boolean
-    onSelect?: () => void
-    variant?: 'default' | 'destructive'
-  }) => (
-    <div
-      role="menuitem"
-      data-disabled={disabled ? '' : undefined}
-      data-variant={variant}
-      onClick={() => {
-        if (!disabled) onSelect?.()
-      }}
-    >
-      {children}
-    </div>
-  )
-  const ContextMenuSeparator = () => <hr />
-  return {
-    ContextMenu,
-    ContextMenuTrigger,
-    ContextMenuContent,
-    ContextMenuItem,
-    ContextMenuSeparator
-  }
-})
+vi.mock('@/components/ui/context-menu', () => import('@/lib/test-utils/context-menu'))
 
 import { PaneContent } from './PaneContent'
 import { PaneRenderer } from './PaneRenderer'
@@ -299,7 +207,7 @@ describe('PaneContent → WorkspaceTabBar onCloseTabs wiring', () => {
     const onCloseTabs = vi.fn()
     render(<PaneContent pane={gitPane} onCloseTabs={onCloseTabs} />)
 
-    const tabEl = screen.getAllByText('Git Changes')[0].closest('.group') as HTMLElement
+    const tabEl = screen.getAllByText('Git Changes')[0].closest('[role="tab"]') as HTMLElement
     expect(tabEl).toBeTruthy()
     fireEvent.contextMenu(tabEl)
 
@@ -313,7 +221,7 @@ describe('PaneContent → WorkspaceTabBar onCloseTabs wiring', () => {
     const onCloseTabs = vi.fn()
     render(<PaneContent pane={gitPane} onCloseTabs={onCloseTabs} />)
 
-    const tabEl = screen.getAllByText('Git Changes')[0].closest('.group') as HTMLElement
+    const tabEl = screen.getAllByText('Git Changes')[0].closest('[role="tab"]') as HTMLElement
     fireEvent.contextMenu(tabEl)
 
     fireEvent.click(await screen.findByText('Close Other Tabs'))
@@ -342,7 +250,7 @@ describe('PaneContent → WorkspaceTabBar onCloseTabs wiring', () => {
     const onCloseTabs = vi.fn()
     render(<PaneRenderer node={splitRoot} onCloseTabs={onCloseTabs} />)
 
-    const tabEl = screen.getAllByText('Git Changes')[0].closest('.group') as HTMLElement
+    const tabEl = screen.getAllByText('Git Changes')[0].closest('[role="tab"]') as HTMLElement
     expect(tabEl).toBeTruthy()
     fireEvent.contextMenu(tabEl)
 

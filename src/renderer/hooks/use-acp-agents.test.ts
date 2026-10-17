@@ -96,6 +96,10 @@ vi.mock('@/stores/acp-store', () => {
   return { useAcpStore }
 })
 
+function prewarmedCwds(): string[] {
+  return mockPrewarmAgent.mock.calls.map(([, cwd]) => cwd as string)
+}
+
 function config(id: string): StoredAgentConfig {
   return { id, name: id, command: 'npx', args: [], env: {}, templateId: id }
 }
@@ -181,29 +185,28 @@ describe('useAcpAgents', () => {
     expect(mockPrewarmAgent).not.toHaveBeenCalled()
   })
 
-  it('re-warms when activeProjectId changes after mount', async () => {
-    projectRef.current.activeProjectId = 'proj-1'
-    mockLoadAgentConfigs.mockImplementation(async () => {
-      stateRef.current.agentConfigs = [config('acp-registry:claude-acp')]
-    })
-    mockPersistRead.mockResolvedValue({ success: true, data: undefined })
+  it('prewarms at once on boot and only the last project of a rapid switch burst', async () => {
+    vi.useFakeTimers()
+    try {
+      mockLoadAgentConfigs.mockImplementation(async () => {
+        stateRef.current.agentConfigs = [config('acp-registry:claude-acp')]
+      })
+      const { rerender } = renderHook(() => useAcpAgents())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(prewarmedCwds()).toEqual(['/work/proj-1'])
 
-    const { rerender } = renderHook(() => useAcpAgents())
+      for (const projectId of ['proj-2', 'proj-3', 'proj-4']) {
+        projectRef.current.activeProjectId = projectId
+        rerender()
+        await vi.advanceTimersByTimeAsync(500)
+      }
+      expect(prewarmedCwds()).toEqual(['/work/proj-1'])
 
-    await waitFor(() => {
-      expect(mockPrewarmAgent).toHaveBeenCalledWith(expect.any(String), '/work/proj-1')
-    })
-
-    const firstCallCount = mockPrewarmAgent.mock.calls.length
-
-    // Simulate project switch
-    projectRef.current.activeProjectId = 'proj-2'
-    rerender()
-
-    await waitFor(() => {
-      expect(mockPrewarmAgent).toHaveBeenCalledWith(expect.any(String), '/work/proj-2')
-    })
-    expect(mockPrewarmAgent.mock.calls.length).toBeGreaterThan(firstCallCount)
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(prewarmedCwds()).toEqual(['/work/proj-1', '/work/proj-4'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not prewarm on mount when activeProjectId is empty, then prewarms after it resolves', async () => {
@@ -302,7 +305,7 @@ describe('useAcpAgents', () => {
     expect(mockPrewarmAgent).not.toHaveBeenCalled()
   })
 
-  it('web honors a persisted selection only when the agent is configured', async () => {
+  it('web honors a persisted selection when the agent is ready with a derivable config', async () => {
     tauriContextRef.current = false
     mockLoadAgentConfigs.mockImplementation(async () => {
       // Only claude is configured; the persisted selection points at codex.
@@ -315,6 +318,33 @@ describe('useAcpAgents', () => {
 
     renderHook(() => useAcpAgents())
 
+    // Issue #907: a READY entry with a derivable config (codex via npx)
+    // restores the SELECTION — a reload must keep the user's agent, not
+    // silently swap to another configured one. Boot still persists nothing
+    // and prewarms nothing on web (#840 invariant): selection-only.
+    await waitFor(() => {
+      expect(mockSetSelectedAgentConfigId).toHaveBeenCalledWith('acp-registry:codex-acp')
+    })
+    expect(mockSaveAgentConfig).not.toHaveBeenCalled()
+    expect(mockPrewarmAgent).not.toHaveBeenCalled()
+  })
+
+  it('web falls back to the configured default when the persisted selection is not ready', async () => {
+    tauriContextRef.current = false
+    mockLoadAgentConfigs.mockImplementation(async () => {
+      // Only claude is configured; the persisted selection points at an
+      // install-required binary agent with no derivable config.
+      stateRef.current.agentConfigs = [config('acp-registry:claude-acp')]
+    })
+    mockPersistRead.mockResolvedValue({
+      success: true,
+      data: { agentId: 'acp-registry:opencode', mode: 'acp' }
+    })
+
+    renderHook(() => useAcpAgents())
+
+    // Issue #840 unchanged: an install-required (not-ready, config-less)
+    // entry must NOT restore on web — the configured default wins.
     await waitFor(() => {
       expect(mockSetSelectedAgentConfigId).toHaveBeenCalledWith('acp-registry:claude-acp')
     })

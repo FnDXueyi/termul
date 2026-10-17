@@ -8,22 +8,20 @@ const {
   mockAddTerminal,
   mockSetTerminalPtyId,
   mockSetTerminalClaim,
-  mockIsTerminalLimitReached,
   mockAddTabToPane,
   mockTerminalApiSpawn,
   mockTerminals,
-  mockSetActiveWorktree,
+  mockSetWorktreePick,
   mockActivePaneId,
   mockLogFrontendError
 } = vi.hoisted(() => ({
   mockAddTerminal: vi.fn(),
   mockSetTerminalPtyId: vi.fn(),
   mockSetTerminalClaim: vi.fn(),
-  mockIsTerminalLimitReached: vi.fn(),
   mockAddTabToPane: vi.fn(),
   mockTerminalApiSpawn: vi.fn(),
   mockTerminals: [] as Array<{ projectId: string }>,
-  mockSetActiveWorktree: vi.fn(),
+  mockSetWorktreePick: vi.fn(),
   // Mutable so the no-pane branch can be exercised without re-registering the
   // workspace-store mock. Defaults to an active pane so existing tests pass.
   mockActivePaneId: { current: 'pane-1' as string | null },
@@ -36,8 +34,7 @@ vi.mock('@/stores/terminal-store', () => ({
       terminals: mockTerminals,
       addTerminal: mockAddTerminal,
       setTerminalPtyId: mockSetTerminalPtyId,
-      setTerminalClaim: mockSetTerminalClaim,
-      isTerminalLimitReached: mockIsTerminalLimitReached
+      setTerminalClaim: mockSetTerminalClaim
     })
   }
 }))
@@ -54,15 +51,15 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: {
     getState: () => ({
-      projects: [{ id: 'proj-1', name: 'Test', path: '/test', defaultShell: 'bash', envVars: [] }],
-      setActiveWorktree: mockSetActiveWorktree
+      projects: [{ id: 'proj-1', name: 'Test', path: '/test', defaultShell: 'bash', envVars: [] }]
     })
   }
 }))
 
-vi.mock('@/stores/app-settings-store', () => ({
-  useAppSettingsStore: {
-    getState: () => ({ settings: { maxTerminalsPerProject: 10 } })
+// Spawning a terminal must never move the Workspace-switcher pick.
+vi.mock('@/stores/shell-layout-store', () => ({
+  useShellLayoutStore: {
+    getState: () => ({ worktreePickByProject: {}, setWorktreePick: mockSetWorktreePick })
   }
 }))
 
@@ -88,7 +85,6 @@ describe('spawnTerminalInPane', () => {
     vi.clearAllMocks()
     mockTerminals.length = 0
     mockActivePaneId.current = 'pane-1'
-    mockIsTerminalLimitReached.mockReturnValue(false)
     mockAddTerminal.mockReturnValue({ id: 'term-new-1' })
     // CAP-3: spawn is the only claim issuance path — the fixture carries the
     // issued lease credential alongside the terminal info.
@@ -131,56 +127,31 @@ describe('spawnTerminalInPane', () => {
     expect(mockSetTerminalClaim).not.toHaveBeenCalled()
   })
 
-  it('returns error when global terminal limit is reached', async () => {
-    mockIsTerminalLimitReached.mockReturnValue(true)
+  it('leaves the terminal cap to the host: a crowded store never blocks the spawn call', async () => {
+    for (let i = 0; i < 40; i++) {
+      mockTerminals.push({ projectId: 'proj-1' })
+    }
 
     const result = await spawnTerminalInPane('pane-1', 'proj-1', '/test/worktree')
 
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('Maximum')
-    expect(mockTerminalApiSpawn).not.toHaveBeenCalled()
+    expect(result.success).toBe(true)
+    expect(mockTerminalApiSpawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the host terminal_limit refusal and records nothing', async () => {
+    const hostMessage =
+      'Terminal limit reached (10 per project, 30 total): this project is at its limit'
+    mockTerminalApiSpawn.mockResolvedValue({
+      success: false,
+      error: hostMessage,
+      code: 'TERMINAL_LIMIT'
+    })
+
+    const result = await spawnTerminalInPane('pane-1', 'proj-1', '/test/worktree')
+
+    expect(result).toEqual({ success: false, error: hostMessage })
     expect(mockAddTerminal).not.toHaveBeenCalled()
-  })
-
-  it('returns error when per-project terminal limit is reached', async () => {
-    // 10 terminals already in this project
-    for (let i = 0; i < 10; i++) {
-      mockTerminals.push({ projectId: 'proj-1' })
-    }
-
-    const result = await spawnTerminalInPane('pane-1', 'proj-1', '/test/worktree', {
-      maxTerminalsPerProject: 10
-    })
-
-    expect(result.success).toBe(false)
-    expect(result.error).toContain('Maximum 10 terminals per project')
-    expect(mockTerminalApiSpawn).not.toHaveBeenCalled()
-  })
-
-  it('allows spawn when under per-project limit', async () => {
-    // 9 terminals in this project (limit is 10)
-    for (let i = 0; i < 9; i++) {
-      mockTerminals.push({ projectId: 'proj-1' })
-    }
-
-    const result = await spawnTerminalInPane('pane-1', 'proj-1', '/test/worktree', {
-      maxTerminalsPerProject: 10
-    })
-
-    expect(result.success).toBe(true)
-  })
-
-  it('per-project limit only counts terminals for same project', async () => {
-    // 10 terminals in a different project
-    for (let i = 0; i < 10; i++) {
-      mockTerminals.push({ projectId: 'proj-other' })
-    }
-
-    const result = await spawnTerminalInPane('pane-1', 'proj-1', '/test/worktree', {
-      maxTerminalsPerProject: 10
-    })
-
-    expect(result.success).toBe(true)
+    expect(mockAddTabToPane).not.toHaveBeenCalled()
   })
 
   it('returns error when PTY spawn fails', async () => {
@@ -237,7 +208,6 @@ describe('openTerminalAtCwd', () => {
     vi.clearAllMocks()
     mockTerminals.length = 0
     mockActivePaneId.current = 'pane-1'
-    mockIsTerminalLimitReached.mockReturnValue(false)
     mockAddTerminal.mockReturnValue({ id: 'term-new-1' })
     mockTerminalApiSpawn.mockResolvedValue({
       success: true,
@@ -246,7 +216,7 @@ describe('openTerminalAtCwd', () => {
     mockLogFrontendError.mockReset()
   })
 
-  it('opens a terminal at the given cwd WITHOUT syncing activeWorktreeId', async () => {
+  it('opens a terminal at the given cwd without touching the switcher pick', async () => {
     const result = await openTerminalAtCwd('proj-1', '/chat/cwd')
 
     expect(result.status).toBe('opened')
@@ -260,9 +230,8 @@ describe('openTerminalAtCwd', () => {
       'pane-1',
       expect.objectContaining({ type: 'terminal' })
     )
-    // The chat terminal path must NOT touch the active worktree — that is the
-    // user's "make this the active chat" gesture, not a worktree switch.
-    expect(mockSetActiveWorktree).not.toHaveBeenCalled()
+    // Opening a terminal is not a worktree switch.
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
     // Successful spawns are not logged (no info level; warn-on-success is noise).
     expect(mockLogFrontendError).not.toHaveBeenCalled()
   })
@@ -274,20 +243,20 @@ describe('openTerminalAtCwd', () => {
 
     expect(result).toEqual({ status: 'no-pane' })
     expect(mockTerminalApiSpawn).not.toHaveBeenCalled()
-    expect(mockSetActiveWorktree).not.toHaveBeenCalled()
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
     // Durable boundary log for the recoverable no-pane outcome.
     expect(mockLogFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({ level: 'warn', source: 'terminal-spawn.openTerminalAtCwd' })
     )
   })
 
-  it('returns spawn-failed (without syncing active worktree) when spawn fails (error-logged)', async () => {
+  it('returns spawn-failed (pick untouched) when spawn fails (error-logged)', async () => {
     mockTerminalApiSpawn.mockResolvedValue({ success: false, error: 'Shell not found' })
 
     const result = await openTerminalAtCwd('proj-1', '/chat/cwd')
 
     expect(result).toEqual({ status: 'spawn-failed', error: 'Shell not found' })
-    expect(mockSetActiveWorktree).not.toHaveBeenCalled()
+    expect(mockSetWorktreePick).not.toHaveBeenCalled()
     // Durable failure log carries the spawn error.
     expect(mockLogFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({

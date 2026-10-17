@@ -183,7 +183,10 @@ describe('perf-commit-counts (CAP-8)', () => {
       plans: {},
       pendingPermissions: {},
       pendingQuestions: {},
+      pendingElicitations: {},
       sessions: FRESH_SESSIONS,
+      // The watched session streams on the rAF clock the harness drives.
+      activeSessionId: SESSION_ID,
       messages: { [SESSION_ID]: [] },
       toolCalls: { [SESSION_ID]: [] },
       agentSwitches: {},
@@ -200,12 +203,7 @@ describe('perf-commit-counts (CAP-8)', () => {
       withProfiler(
         'ChatMessageList',
         list.onRender,
-        <ChatMessageList
-          items={[]}
-          sessionId={SESSION_ID}
-          agentId={AGENT_ID}
-          showRunningIndicator
-        />
+        <ChatMessageList items={[]} sessionId={SESSION_ID} showRunningIndicator />
       )
     )
 
@@ -311,12 +309,7 @@ describe('perf-commit-counts (CAP-8)', () => {
       withProfiler(
         'ChatMessageList',
         list.onRender,
-        <ChatMessageList
-          items={[]}
-          sessionId={SESSION_ID}
-          agentId={AGENT_ID}
-          showRunningIndicator
-        />
+        <ChatMessageList items={[]} sessionId={SESSION_ID} showRunningIndicator />
       )
     )
 
@@ -351,12 +344,7 @@ describe('perf-commit-counts (CAP-8)', () => {
       withProfiler(
         'ChatMessageList',
         list.onRender,
-        <ChatMessageList
-          items={[]}
-          sessionId={SESSION_ID}
-          agentId={AGENT_ID}
-          showRunningIndicator
-        />
+        <ChatMessageList items={[]} sessionId={SESSION_ID} showRunningIndicator />
       )
     )
 

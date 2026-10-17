@@ -3,7 +3,6 @@
  * (spec-04 PR A). Pure declarations only: no store logic lives here.
  */
 
-import type { SwitchProjectReply } from '@shared/types/web-projects.types'
 import type { PendingLauncherOptions } from '@/components/agents/pending-launcher-options'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type {
@@ -25,6 +24,8 @@ import type {
   CommandsUpdateEvent,
   ConfigOptionsUpdateEvent,
   ContentBlock,
+  ElicitationField,
+  ElicitationRequestEvent,
   McpServer,
   McpToolInfo,
   MessageChunkEvent,
@@ -35,6 +36,7 @@ import type {
   PlanUpdateEvent,
   ProbeStatus,
   PromptCompleteEvent,
+  QuestionCancelledEvent,
   QuestionOption,
   SessionClosedEvent,
   SessionConfigOption,
@@ -54,12 +56,23 @@ import type {
 } from '@/lib/acp-api'
 import type { AgentSwitchRecord, SessionIndexEntry } from '@/lib/acp-history-persistence'
 import type { StoredMcpServer } from '@/lib/acp-mcp-persistence'
+import type { TurnEndNotice } from '@/lib/agent-chat-notify'
 import type { RegistryAgent } from '@/lib/agents/acp-registry'
 import type { PrepareChatError } from '@/lib/agents/acp-spawn-errors'
+import type { CommandState } from '@/lib/command-engine'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
+
+/** A prompt command's state while the chat waits to confirm it (AD-6). */
+export type PromptCommandState = CommandState
 
 export type AgentStatus = 'idle' | 'spawning' | 'connected' | 'error'
 export type SessionStatus = 'initializing' | 'active' | 'error' | 'closed'
+
+/** Live OpenCode 2 status for the active turn. `null` fields are cleared. */
+export interface OpenCodeSessionNotice {
+  compaction: 'started' | 'failed' | null
+  retryAttempt: number | null
+}
 export type MessageRole = 'user' | 'agent' | 'thought'
 
 /**
@@ -101,6 +114,16 @@ export interface ChatMessage {
   messageId?: string
 }
 
+/**
+ * Options for one history open. A reload passes the current MCP list and
+ * asks for a new agent process. A normal history open omits both.
+ */
+export interface OpenHistoryOptions {
+  mcpServers?: McpServer[]
+  /** Skip adopting the process that already owns this session. */
+  forceNewAgent?: boolean
+}
+
 export interface AcpSession {
   id: SessionId
   agentId: AgentId
@@ -113,6 +136,11 @@ export interface AcpSession {
   projectId: string
   status: SessionStatus
   title: string | null
+  /**
+   * Live OpenCode compaction / retry line. Ephemeral: a finished prompt
+   * clears it, and it is not written to the session index.
+   */
+  opencodeNotice?: OpenCodeSessionNotice
   /** True while a prompt turn is in flight (UI spinners, cancel). */
   activeTurn: boolean
   /** Project-scoped MCP attachments active for this session when known. */
@@ -124,10 +152,19 @@ export interface AcpSession {
    * are not dropped.
    */
   openTurnId: string | null
+  /**
+   * Wire turn id of the newest prompt turn this renderer opened. Unlike
+   * `openTurnId` it survives the turn's end, so a late result of an older turn
+   * can tell a newer one superseded it.
+   */
+  latestPromptTurnId?: string
   modes: SessionModeState | null
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
   lastError: string | null
+  lastErrorCode?: number | null
+  /** gh-821: JSON-RPC `data` of the error behind `lastError`, when present. */
+  lastErrorData?: unknown
   createdAt: number
   /**
    * Set while a `session/load` replay may still deliver history chunks.
@@ -250,6 +287,25 @@ export interface PendingQuestion {
   sessionId: SessionId
   question: string
   options: QuestionOption[]
+  /** `ask_user` (issue #784): show the free-text "Other" row. */
+  allowFreeText?: boolean
+  /** `ask_user` (issue #784): more than one option may be picked. */
+  multiSelect?: boolean
+}
+
+export interface PendingElicitation {
+  requestId: string
+  agentId: AgentId
+  sessionId: SessionId
+  mode: string
+  message: string
+  url?: string
+  fields: ElicitationField[]
+  /**
+   * GH-935: the agent permits a free-text "Other" answer per question field
+   * (`_meta["cognition.ai/allowOther"]` on the elicitation request).
+   */
+  allowOther?: boolean
 }
 
 export interface GeneratedCommitMessage {
@@ -304,11 +360,21 @@ export interface AcpState {
    * `createSession` after spawn would otherwise hide Restart.
    */
   pendingRestartVersions: Record<string, string>
+  /**
+   * Chats with a reload in progress. The Reload control stays disabled and
+   * reads "Reloading…".
+   */
+  reloadingChatIds: Record<SessionId, true>
+  /**
+   * In-memory "Agent reloaded" mark. `afterMessageId` is the last message at
+   * the moment of reload, so later messages stay below the line. Not persisted.
+   */
+  agentReloadMarks: Record<SessionId, { afterMessageId: string | null }>
 
   // User-configured agents (persisted, distinct from the live `agents` map)
   agentConfigs: StoredAgentConfig[]
   /**
-   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd)`) to its
+   * Maps a per-project agent reuse key (`agentReuseKey(configId, cwd, projectId)`) to its
    * live spawned AgentId (for reuse). Keyed by config+cwd — not config alone —
    * so the same configured agent runs an independent process per project/cwd
    * and one process's disconnect can't cascade to another project's sessions.
@@ -409,12 +475,28 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
-  pendingPermissions: Record<string, PendingPermission> // P3 renders, keyed by requestId
+  /** Seq of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, number>
+  pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
+  pendingElicitations: Record<string, PendingElicitation>
   /** Pending user prompts keyed by session (sent FIFO when the turn ends). */
   promptQueues: Record<SessionId, QueuedPrompt[]>
+  /**
+   * In-memory turn-close signal for system notifications. Not written to the
+   * session index. `seq` increases each time the turn actually closes.
+   */
+  turnEndNotices: Record<SessionId, TurnEndNotice>
   /** Sessions whose auto-flush is suppressed during cancel+send-now. */
   suppressQueueFlush: Record<SessionId, true>
+  /**
+   * AD-6: the command state of sessions whose in-flight prompt command lost
+   * its reply to a transport drop (`pending-reconcile`). The chat shows a
+   * non-error "Waiting to confirm" state while the same `turnId` is resent —
+   * or "outcome unknown — check" when the host no longer knows the outcome;
+   * never a failure. Absent once the command resolves.
+   */
+  promptCommandStates: Record<SessionId, PromptCommandState>
 
   /**
    * Story 5.3 (AC3): WS transport-level reconnect flag. True while the WS
@@ -425,15 +507,15 @@ export interface AcpState {
    * (which fires when `openHistorySession` is in flight — both can show).
    */
   transportReconnecting: boolean
-  /** Sessions recovered live-only after stale because no server snapshot exists. */
+  /** Sessions whose stream could not be fully re-synced: recovered live-only (no server snapshot exists) or resubscribe retries ran out. */
   degradedRecoverySessions: Record<SessionId, true>
-  /** Target project waiting for the current turn to finish, if any. */
-  queuedProjectSwitchId: string | null
-  /** Target project whose switch just failed (transient inline indicator). */
-  failedProjectSwitchId: string | null
 
   // Actions — lifecycle
-  spawnAgent: (config: Parameters<typeof acpApi.spawnAgent>[0]) => Promise<AgentId>
+  /** `projectId` selects the Claude Account of a managed Claude agent. */
+  spawnAgent: (
+    config: Parameters<typeof acpApi.spawnAgent>[0],
+    projectId?: string | null
+  ) => Promise<AgentId>
   killAgent: (agentId: AgentId) => Promise<void>
   /**
    * Headless ACP auth (spec-acp-terminal-auth): dismiss the BrowserAuthDialog
@@ -458,7 +540,11 @@ export interface AcpState {
    * `authenticateBeforeSession` skips its own authenticate step, and persists
    * the method id as this config's remembered sign-in for future processes.
    */
-  authenticateAgent: (agentId: AgentId, methodId: string) => Promise<void>
+  authenticateAgent: (
+    agentId: AgentId,
+    methodId: string,
+    gateway?: { baseUrl: string; apiKey?: string }
+  ) => Promise<void>
   createSession: (
     agentId: AgentId,
     cwd: string,
@@ -480,10 +566,8 @@ export interface AcpState {
   ) => Promise<SessionId>
   closeSession: (sessionId: SessionId) => Promise<void>
   setActiveSession: (sessionId: SessionId | null) => void
-  switchProject: (projectId: string) => Promise<SwitchProjectReply>
-  setFailedProjectSwitch: (projectId: string | null) => void
 
-  // Actions — configured agents (P4)
+  // Actions — configured agents
   loadAgentConfigs: () => Promise<void>
   saveAgentConfig: (config: StoredAgentConfig) => Promise<void>
   /**
@@ -616,17 +700,14 @@ export interface AcpState {
     exitCode: number | null
   ) => Promise<string>
 
-  // Actions — chat history (P5)
+  // Actions — chat history
   loadSessionIndex: () => Promise<void>
-  openHistorySession: (id: string) => Promise<void>
-  /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
-   * `openHistorySessionInner`'s transcript-install + resume but skips
-   * `ensureLiveAgent` (no cold-spawn): the caller passes the authoritative
-   * live `agentId` still owned by the Rust `AcpManager` across a webview/
-   * phone reload. The backend `gate_resume_session` enforces the capability
-   * (reused, not duplicated); a rejection rejects here so the hook can record
-   * `acp-resume-skipped` and leave the transcript read-only. */
-  resumeLiveSession: (id: string, agentId: AgentId, cwd: string) => Promise<void>
+  /**
+   * Merge a host-pushed full index (the `chat_history` watch state) into the
+   * local projection, with the same stale-response guard as `loadSessionIndex`.
+   */
+  applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
+  openHistorySession: (id: string, options?: OpenHistoryOptions) => Promise<void>
   /** R4: force-flush a non-debounced snapshot of every live session's cached
    * payload on refresh unload so the durable copy is at worst one turn behind
    * (never truncated by a live-window trim). Reuses `persistSession`'s guards
@@ -637,7 +718,12 @@ export interface AcpState {
   /** Restart the agent for a crashed chat and replay the last user prompt.
    * User-initiated (Retry click) — honors ADR-003's no-silent-respawn (the crash
    * is still surfaced; respawn only happens on explicit user action). */
-  retryCrashedSession: (sessionId: SessionId) => Promise<void>
+  /** Reopen on a fresh agent and (unless `resend: false`) send the last user prompt again. */
+  retryCrashedSession: (sessionId: SessionId, options?: { resend?: boolean }) => Promise<void>
+  /** Record a failed resume of a stopped (`closed`) chat as a `Resume failed: <reason>`
+   * `lastError` so Attention, the panel and remounts agree. No-op when the
+   * session is missing, not `closed`, or already carries a resume failure. */
+  markResumeFailed: (sessionId: SessionId, reason: string) => void
   /** Re-run prepare for a failed chat launch (status 'error' +
    * `launchConfigId`) against the recorded agent config. On success the real
    * session replaces the placeholder and the tab remaps; on failure the
@@ -665,7 +751,7 @@ export interface AcpState {
     projectId: string
   ) => Promise<void>
 
-  // Actions — MCP server registry (P6)
+  // Actions — MCP server registry
   loadMcpServers: () => Promise<void>
   saveMcpServer: (server: StoredMcpServer) => Promise<void>
   /**
@@ -692,12 +778,12 @@ export interface AcpState {
    */
   upsertCanvasMcpServer: (projectId: string, url: string, token?: string) => Promise<void>
   /**
-   * CAP-7: mirror the app-store MCP registry to the active project's
-   * `.termul/mcp-servers.json` (best-effort, non-fatal). Called on a desktop
-   * host-level project switch so the new project's file is synced with the
-   * desktop's app-store registry before the web route reads it.
+   * CAP-7: mirror the app-store MCP registry to the named project's
+   * `.termul/mcp-servers.json` (best-effort, non-fatal). Called when the host
+   * project list lands and when shared-live starts, so the web route reads the
+   * desktop's app-store registry for that project.
    */
-  syncMcpRegistryToProjectFile: () => Promise<void>
+  syncMcpRegistryToProjectFile: (projectId: string) => Promise<void>
 
   // Actions — MCP probe (on-demand, read-only). State slices above.
   /**
@@ -714,13 +800,15 @@ export interface AcpState {
    * loaded; otherwise delegates to `probeMcpServer(id)`.
    */
   loadMcpTools: (id: string) => Promise<void>
-  /** Start the OAuth flow for an HTTP/SSE MCP server that returned `authRequired`.
-   * Opens the system browser, waits for the callback, stores the token. */
-  connectMcpOAuth: (id: string) => Promise<void>
+  /** Start the OAuth flow for an HTTP/SSE MCP server that returned `authRequired`,
+   * on behalf of `projectId` (the web host authorizes the URL against that
+   * project's MCP list). Opens the system browser, waits for the callback,
+   * stores the token. */
+  connectMcpOAuth: (projectId: string, id: string) => Promise<void>
   /** Check whether a stored OAuth token exists and update `mcpOAuthConnected`. */
-  checkMcpOAuthStatus: (id: string) => Promise<void>
+  checkMcpOAuthStatus: (projectId: string, id: string) => Promise<void>
   /** Delete the stored OAuth token (the "Disconnect" action). */
-  disconnectMcpOAuth: (id: string) => Promise<void>
+  disconnectMcpOAuth: (projectId: string, id: string) => Promise<void>
 
   // Actions — conversation
   sendPrompt: (sessionId: SessionId, text: string) => Promise<void>
@@ -737,6 +825,11 @@ export interface AcpState {
     options?: { skipUserAppend?: boolean; displayBlocks?: ContentBlock[] }
   ) => Promise<void>
   cancelPrompt: (sessionId: SessionId) => Promise<void>
+  /**
+   * AD-6 manual re-check of a prompt waiting to confirm: resends the SAME turn
+   * id now (the only way out of an `outcome_unknown` hold besides Stop).
+   */
+  recheckPromptCommand: (sessionId: SessionId) => void
   removeQueuedPrompt: (sessionId: SessionId, queueId: string) => void
   /** Cancel the active turn if needed, then send a queued prompt immediately. */
   sendQueuedPromptNow: (sessionId: SessionId, queueId: string) => Promise<void>
@@ -782,16 +875,27 @@ export interface AcpState {
     }
   ) => Promise<void>
 
-  // Actions — config (P2 drives the UI; method available now)
-  setConfigOption: (sessionId: SessionId, configId: string, valueId: string) => Promise<void>
+  // Actions — config
+  setConfigOption: (
+    sessionId: SessionId,
+    configId: string,
+    valueId: string | boolean
+  ) => Promise<void>
   setMode: (sessionId: SessionId, modeId: string) => Promise<void>
   setModel: (sessionId: SessionId, modelId: string) => Promise<void>
 
-  // Actions — permission (P3 drives the UI; method available now)
+  // Actions — permission
   respondPermission: (requestId: string, optionId?: string) => Promise<void>
 
   // Actions — structured questions (issue #411)
   answerQuestion: (questionId: string, values?: string[]) => Promise<void>
+  respondElicitation: (
+    requestId: string,
+    action: 'accept' | 'decline' | 'cancel',
+    // GH-935: `string[]` = multi-select (`multi-enum`) answers.
+    content?: Record<string, string | number | boolean | string[]>
+  ) => Promise<void>
+  logoutAgent: (agentId: AgentId) => Promise<void>
 
   // Internal event reducers (exposed for tests)
   _onAgentSpawned: (e: AgentSpawnedEvent) => void
@@ -803,13 +907,15 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void
   _onUsageUpdate: (e: UsageUpdateEvent) => void
   _onPermissionRequest: (e: PermissionRequestEvent, eventSeq?: number) => void
   _onQuestionRequest: (e: AskUserQuestionEvent, eventSeq?: number) => void
+  _onQuestionCancelled: (e: QuestionCancelledEvent) => void
+  _onElicitationRequest: (e: ElicitationRequestEvent, eventSeq?: number) => void
   _onPromptComplete: (e: PromptCompleteEvent, eventSeq?: number) => void
   _onAgentError: (e: AgentErrorEvent) => void
   /** Story 1.9 FR26: typed crash event → `status: 'error'` + manual restart. */

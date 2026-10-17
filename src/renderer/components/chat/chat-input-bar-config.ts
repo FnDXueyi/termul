@@ -5,7 +5,13 @@
  * to dedicated chips rendered ahead of generic options
  * (issue #286).
  */
-import type { SessionConfigOption, SessionModelState, SessionModeState } from '@/lib/acp-api'
+import type {
+  SessionConfigOption,
+  SessionConfigOptionEntry,
+  SessionModelState,
+  SessionModeState
+} from '@/lib/acp-api'
+import type { SessionIndexEntry } from '@/lib/acp-history-persistence'
 
 /** ACP semantic category for reasoning/thinking-depth config options. */
 export const THOUGHT_LEVEL_CATEGORY = 'thought_level'
@@ -13,12 +19,16 @@ export const THOUGHT_LEVEL_CATEGORY = 'thought_level'
 export const MODEL_CATEGORY = 'model'
 /** ACP semantic category for session mode config options. */
 export const MODE_CATEGORY = 'mode'
+/** ACP semantic category for model parameters such as speed or context size. */
+export const MODEL_CONFIG_CATEGORY = 'model_config'
 
 export interface PartitionedConfigOptions {
   /** The first `model` option, if the agent advertises one. */
   model: SessionConfigOption | null
   /** The first `thought_level` option, if the agent advertises one. */
   thoughtLevel: SessionConfigOption | null
+  /** Model-parameter options, kept beside the model chip. */
+  modelConfig: SessionConfigOption[]
   /** All remaining options, in their original relative order. */
   rest: SessionConfigOption[]
 }
@@ -68,17 +78,87 @@ export function dropDuplicateSingletonConfigOptions(
 export function partitionConfigOptions(options: SessionConfigOption[]): PartitionedConfigOptions {
   let model: SessionConfigOption | null = null
   let thoughtLevel: SessionConfigOption | null = null
+  const modelConfig: SessionConfigOption[] = []
   const rest: SessionConfigOption[] = []
   for (const option of options) {
     if (option.category === MODEL_CATEGORY) {
       if (model === null) model = option
     } else if (option.category === THOUGHT_LEVEL_CATEGORY) {
       if (thoughtLevel === null) thoughtLevel = option
+    } else if (option.category === MODEL_CONFIG_CATEGORY) {
+      modelConfig.push(option)
     } else {
       rest.push(option)
     }
   }
-  return { model, thoughtLevel, rest }
+  return { model, thoughtLevel, modelConfig, rest }
+}
+
+export function isConfigValue(
+  entry: SessionConfigOptionEntry
+): entry is SessionConfigOptionEntry & {
+  value: string
+} {
+  return typeof entry.value === 'string' && !Array.isArray(entry.options)
+}
+
+export interface FlatConfigValue {
+  value: string
+  name: string
+  description?: string | null
+  group?: string
+}
+
+/** Select values, or an empty list when the option has none (boolean options). */
+export function configOptionEntries(option: SessionConfigOption): SessionConfigOptionEntry[] {
+  return option.options ?? []
+}
+
+/** A boolean option, or a select option that has at least one value. */
+export function isUsableConfigOption(option: SessionConfigOption): boolean {
+  return option.type === 'boolean' || configOptionEntries(option).length > 0
+}
+
+/** Launcher persistence stores booleans as "true" / "false". */
+export function storedConfigValue(option: SessionConfigOption): string | null {
+  if (option.type === 'boolean') {
+    if (option.currentValue === true) return 'true'
+    if (option.currentValue === false) return 'false'
+    return null
+  }
+  return typeof option.currentValue === 'string' && option.currentValue ? option.currentValue : null
+}
+
+/** Restore a stored launcher value to the type the agent expects. */
+export function wireConfigValue(
+  option: SessionConfigOption,
+  stored: string
+): string | boolean | null {
+  if (option.type === 'boolean') {
+    if (stored === 'true') return true
+    if (stored === 'false') return false
+    return null
+  }
+  return stored
+}
+
+/** Expand grouped select values into a flat list with an optional group label. */
+export function flattenConfigOptionValues(option: SessionConfigOption): FlatConfigValue[] {
+  const flat: FlatConfigValue[] = []
+  for (const entry of configOptionEntries(option)) {
+    if (entry.group && Array.isArray(entry.options)) {
+      for (const child of entry.options) {
+        flat.push({ ...child, group: entry.name || entry.group })
+      }
+    } else if (isConfigValue(entry)) {
+      flat.push({
+        value: entry.value,
+        name: entry.name,
+        description: entry.description
+      })
+    }
+  }
+  return flat
 }
 
 /**
@@ -109,6 +189,84 @@ export function resolveModelOption(
   }
 }
 
+/** Id plus display name of the model a session is on right now. */
+export interface SessionModelSnapshot {
+  modelId: string
+  modelName: string
+}
+
+/**
+ * The model the composer shows for this session. A `model` config option wins
+ * over the native `models` projection, which stays at the session/new value
+ * until something copies the option across.
+ */
+export function sessionModelSnapshot(
+  session:
+    | {
+        models?: SessionModelState | null
+        configOptions?: readonly SessionConfigOption[] | null
+      }
+    | null
+    | undefined
+): SessionModelSnapshot | null {
+  if (!session) return null
+  const configModel =
+    session.configOptions?.find(
+      (option) =>
+        option.category === MODEL_CATEGORY &&
+        typeof option.currentValue === 'string' &&
+        option.currentValue.length > 0 &&
+        (option.options?.length ?? 0) > 0
+    ) ?? null
+  const resolved = resolveModelOption(configModel, session.models)
+  const current = resolved.option?.currentValue
+  if (typeof current !== 'string' || current.length === 0 || !resolved.option) return null
+  const named = flattenConfigOptionValues(resolved.option).find((entry) => entry.value === current)
+  const trimmed = named?.name.trim() ?? ''
+  return { modelId: current, modelName: trimmed.length > 0 ? trimmed : current }
+}
+
+/**
+ * Copy the displayed model onto `session.models` when that projection exists.
+ * Leaves a session with no native model list unchanged.
+ */
+export function alignSessionModelProjection<
+  T extends {
+    models?: SessionModelState | null
+    configOptions?: readonly SessionConfigOption[] | null
+  }
+>(session: T): T {
+  const snapshot = sessionModelSnapshot(session)
+  if (!snapshot || !session.models || session.models.currentModelId === snapshot.modelId) {
+    return session
+  }
+  return {
+    ...session,
+    models: { ...session.models, currentModelId: snapshot.modelId }
+  }
+}
+
+/**
+ * Write the displayed model onto one index row. Returns the same array when
+ * the row is missing or already current.
+ */
+export function withSessionModelOnIndex(
+  index: readonly SessionIndexEntry[],
+  sessionId: string,
+  session: Parameters<typeof sessionModelSnapshot>[0]
+): SessionIndexEntry[] {
+  const snapshot = sessionModelSnapshot(session)
+  if (!snapshot) return index as SessionIndexEntry[]
+  let changed = false
+  const next = index.map((entry) => {
+    if (entry.id !== sessionId) return entry
+    if (entry.modelId === snapshot.modelId && entry.modelName === snapshot.modelName) return entry
+    changed = true
+    return { ...entry, modelId: snapshot.modelId, modelName: snapshot.modelName }
+  })
+  return changed ? next : (index as SessionIndexEntry[])
+}
+
 /**
  * Some agents advertise modes both through `session.modes` and a `mode` config
  * option. When the native modes API is available, keep one Agent picker that
@@ -131,8 +289,9 @@ function isOnOffToken(value: string): boolean {
 
 /** True when an option is a two-value On/Off (or true/false) switch. */
 export function isBinaryOnOffOption(option: SessionConfigOption): boolean {
-  if (option.options.length !== 2) return false
-  return option.options.every((entry) => isOnOffToken(entry.value) || isOnOffToken(entry.name))
+  const values = flattenConfigOptionValues(option)
+  if (values.length !== 2) return false
+  return values.every((entry) => isOnOffToken(entry.value) || isOnOffToken(entry.name))
 }
 
 /**
@@ -144,16 +303,16 @@ export function isFastModeOption(option: SessionConfigOption): boolean {
   return haystack.includes('fast') && isBinaryOnOffOption(option)
 }
 
-function entryIsOn(entry: SessionConfigOption['options'][number]): boolean {
+function entryIsOn(entry: FlatConfigValue): boolean {
   return ON_TOKEN.test(entry.value) || ON_TOKEN.test(entry.name)
 }
 
 /** Whether the option's current value is the On side of a Fast Mode switch. */
 export function isFastModeEnabled(
   option: SessionConfigOption,
-  currentValue: string = option.currentValue
+  currentValue: string = typeof option.currentValue === 'string' ? option.currentValue : ''
 ): boolean {
-  const current = option.options.find((entry) => entry.value === currentValue)
+  const current = flattenConfigOptionValues(option).find((entry) => entry.value === currentValue)
   if (!current) return false
   return entryIsOn(current)
 }
@@ -161,9 +320,9 @@ export function isFastModeEnabled(
 /** Opposite value for a Fast Mode toggle click. */
 export function oppositeFastModeValue(
   option: SessionConfigOption,
-  currentValue: string = option.currentValue
+  currentValue: string = typeof option.currentValue === 'string' ? option.currentValue : ''
 ): string | null {
-  const other = option.options.find((entry) => entry.value !== currentValue)
+  const other = flattenConfigOptionValues(option).find((entry) => entry.value !== currentValue)
   return other?.value ?? null
 }
 

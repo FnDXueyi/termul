@@ -39,6 +39,7 @@ export function LauncherStatusBanners({
   authMethods,
   signingInMethodId,
   handleAuthMethod,
+  handleGatewayAuth,
   handleRetryPrepare,
   factoryKeyAuth,
   inlineKeyMethodId
@@ -61,6 +62,7 @@ export function LauncherStatusBanners({
   authMethods: AuthMethod[]
   signingInMethodId: string | null
   handleAuthMethod: (method: AuthMethod) => void
+  handleGatewayAuth: (method: AuthMethod, gateway: { baseUrl: string; apiKey?: string }) => void
   handleRetryPrepare: () => void
   factoryKeyAuth: FactoryKeyAuth
   inlineKeyMethodId: string | undefined
@@ -111,11 +113,13 @@ export function LauncherStatusBanners({
       {prepareError &&
         (prepareError.category === 'auth' || prepareError.category === 'multi-auth') && (
           <AuthRequiredBanner
+            key={`${selectedEntry?.id ?? 'agent'}\0${authMethods.map((method) => method.id).join('\0')}`}
             agentName={selectedEntry?.agent.name ?? 'Agent'}
             setupError={prepareError}
             authMethods={authMethods}
             signingInMethodId={signingInMethodId}
             onAuthenticate={handleAuthMethod}
+            onGatewayAuth={handleGatewayAuth}
             onRetry={handleRetryPrepare}
           />
         )}
@@ -123,13 +127,14 @@ export function LauncherStatusBanners({
         <FactoryApiKeyForm auth={factoryKeyAuth} />
       ) : null}
       {/* Story 11 (QA F12/F9): non-auth prepare failures (spawn /
-        transport / timeout) previously surfaced only as a "Setup
+        transport / provider / timeout) previously surfaced only as a "Setup
         failed" pill with Retry buried inside the model-picker modal.
         Render them in-flow above the composer — same pattern as
         AuthRequiredBanner — with a Retry that re-runs prepare. */}
       {prepareError &&
         (prepareError.category === 'spawn' ||
           prepareError.category === 'transport' ||
+          prepareError.category === 'provider' ||
           prepareError.category === 'timeout') && (
           <NonAuthFailureBanner
             agentName={selectedEntry?.agent.name ?? 'Agent'}

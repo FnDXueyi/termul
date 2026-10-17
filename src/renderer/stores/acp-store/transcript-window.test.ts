@@ -97,8 +97,10 @@ vi.mock('@/stores/workspace-store', () => {
   }
   return {
     getAllLeafPanes,
+    getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
+    getAgentChatSessionIdsInAllTrees: () => new Set<string>(),
     useWorkspaceStore: {
       getState: () => ({
         addAgentChatTab: addAgentChatTabSpy,
@@ -241,7 +243,9 @@ describe('acp-store transcript eviction (WebView memory)', () => {
 
   it('_onSessionClosed drops transcript maps after persist', () => {
     seedTranscript('sess-closed')
-    useAcpStore.getState()._onSessionClosed({ agentId: 'agent-1', sessionId: 'sess-closed' })
+    useAcpStore
+      .getState()
+      ._onSessionClosed({ agentId: 'agent-1', sessionId: 'sess-closed', reason: 'closed' })
     const st = useAcpStore.getState()
     expect(st.sessions['sess-closed']?.status).toBe('closed')
     expect(st.messages['sess-closed']).toBeUndefined()
@@ -949,6 +953,55 @@ describe('acp-store live window + lazy-load + coalescing', () => {
     ])
   })
 
+  it('(c3e) twin folding ignores folder tokens: a live folder-token prompt folds against its plain-text persisted twin', async () => {
+    // A folder pick sends as plain relative-path text with no resource block,
+    // so the live `\uE006…\uE007` folder token must leave no file evidence.
+    const sid = 's-twin-folder-evidence'
+    seedSession(sid, 'agent-1', false)
+    const persisted: ChatMessage[] = [
+      ...buildMessages(2),
+      {
+        id: 'user:seq-10',
+        role: 'user',
+        blocks: [{ type: 'text', text: 'look in src/x/' }],
+        streaming: false,
+        timestamp: 10,
+        seq: 10
+      },
+      {
+        id: 'snapshot:agent:11',
+        role: 'agent',
+        blocks: [{ type: 'text', text: 'done' }],
+        streaming: false,
+        timestamp: 11,
+        seq: 11
+      }
+    ]
+    setCachedSessionPayload(sid, { metadata: fakeMetadata(sid, 4), messages: persisted })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          {
+            id: 'turn:live-1',
+            role: 'user',
+            blocks: [{ type: 'text', text: `look in ${fileToken('src/x/', '/work/src/x/')}` }],
+            streaming: false,
+            timestamp: 0,
+            seq: 900
+          }
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+    // Folded: no duplicated prompt.
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'm1',
+      'turn:live-1'
+    ])
+  })
+
   it('(c4) twin folding is count-bounded: a repeated identical prompt keeps its older copy', async () => {
     // The user sent the same prompt twice — the persisted copy adjacent to
     // the live seam is the live bubble's twin, but the identical older copy
@@ -1358,8 +1411,13 @@ describe('acp-store live window + lazy-load + coalescing', () => {
         }
       ]
     })
-    // resumeLiveSession: tail-first install, then resume; chunks that
-    // streamed during the fetch window must APPEND via gap replay.
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-1': { id: 'agent-1', capabilities: { sessionCapabilities: { resume: {} } } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+    }))
     ;(invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd !== 'acp_resume_session') {
         throw new Error(`unexpected invoke command in reopen-streaming test: ${cmd}`)
@@ -1380,7 +1438,8 @@ describe('acp-store live window + lazy-load + coalescing', () => {
       })
       return undefined
     })
-    await useAcpStore.getState().resumeLiveSession(sid, 'agent-1', '/work')
+    await useAcpStore.getState().openHistorySession(sid)
+    await flushTurnEnd()
     _flushCoalescedForTesting()
     const msgs = useAcpStore.getState().messages[sid]
     // No blank, no truncation: the tail-first install kept both restored
@@ -1435,6 +1494,9 @@ describe('acp-store live window + lazy-load + coalescing', () => {
   it('(k) drains buffered updates via the timer backstop while rAF is suspended (hidden webview)', () => {
     const sid = 's-backstop'
     seedSession(sid, 'agent-1', true)
+    // The watched session rides rAF (background sessions use a 100 ms timer);
+    // the backstop must still drain it when the frame never fires.
+    useAcpStore.setState({ activeSessionId: sid })
     vi.useFakeTimers()
     // An occluded/minimized WebView suspends rAF indefinitely — the frame
     // callback arms but never fires (same precondition as #133). The

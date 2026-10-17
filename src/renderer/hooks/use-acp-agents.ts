@@ -1,6 +1,6 @@
 import type { LastSelectedAgent } from '@shared/types/persistence.types'
 import { PersistenceKeys } from '@shared/types/persistence.types'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import {
   pickDefaultConfiguredAgent,
   pickDefaultSupportedAgent,
@@ -11,6 +11,8 @@ import { isTauriContext } from '@/lib/tauri-runtime'
 import { getDefaultCwdForProject } from '@/lib/worktree-context'
 import { useAcpStore } from '@/stores/acp-store'
 import { useProjectStore } from '@/stores/project-store'
+
+const PROJECT_SWITCH_PREWARM_DEBOUNCE_MS = 3_000
 
 /**
  * Load persisted ACP agent configs once at app mount, then resolve the
@@ -33,8 +35,10 @@ export function useAcpAgents(): void {
   const saveAgentConfig = useAcpStore((s) => s.saveAgentConfig)
   const setSelectedAgentConfigId = useAcpStore((s) => s.setSelectedAgentConfigId)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const bootPrewarmDoneRef = useRef(false)
   useEffect(() => {
     let cancelled = false
+    let prewarmTimer: ReturnType<typeof setTimeout> | undefined
     void (async () => {
       await loadAgentConfigs()
       if (cancelled) return
@@ -53,13 +57,23 @@ export function useAcpAgents(): void {
       // agent is actually configured — a stale/foreign id must not resurrect
       // an unconfigured catalog entry (e.g. a codex `npx` launcher) as the
       // preselected default.
+      // Issue #840 (narrowed by #907): on web a persisted selection is
+      // honored when the agent is CONFIGURED, or when it is a `ready` entry
+      // with a derivable `config` (host-installed binary catalog agent, e.g.
+      // OpenCode) — a reload must keep the agent the user last selected, not
+      // fall through to a different configured default. A ready npx-derived
+      // entry therefore also restores its SELECTION — but selection-only:
+      // web boot still never persists or prewarms, so the #840 no-auto-spawn
+      // invariant holds (the spawn harm #840 guarded against).
       const selected =
         saved?.mode === 'acp' && typeof saved.agentId === 'string'
           ? supportedAgents.find(
               (entry) =>
                 entry.configId === saved.agentId &&
                 entry.status === 'ready' &&
-                (desktop || agentConfigs.some((config) => config.id === entry.config?.id))
+                (desktop ||
+                  Boolean(entry.config) ||
+                  agentConfigs.some((config) => config.id === entry.config?.id))
             )
           : null
       // Issue #840: on web the default is restricted to CONFIGURED agents —
@@ -78,7 +92,17 @@ export function useAcpAgents(): void {
         setSelectedAgentConfigId(null)
         return
       }
-      if (!agentConfigs.some((config) => config.id === entry.config?.id)) {
+      // Issue #907: on web an unconfigured-but-restorable entry (ready with
+      // a derivable config) is SELECTED only — boot must never persist a
+      // catalog-derived config or spawn a process the user did not pick
+      // (#840). The launcher's prewarm effect handles persistence after an
+      // explicit user pick. Desktop keeps the eager persist.
+      const entryConfigured = agentConfigs.some((config) => config.id === entry.config?.id)
+      if (!entryConfigured) {
+        if (!desktop) {
+          setSelectedAgentConfigId(entry.config.id)
+          return
+        }
         await saveAgentConfig(entry.config)
         if (cancelled) return
       }
@@ -93,10 +117,21 @@ export function useAcpAgents(): void {
       // Issue #840: web never prewarms on page load. The launcher's
       // `retargetWarmPool` (composer open, configured agent only) is the
       // first — and only — web prewarm path.
-      if (desktop) void prewarmAgent(entry.config.id, cwd)
+      if (!desktop) return
+      const configId = entry.config.id
+      if (bootPrewarmDoneRef.current) {
+        prewarmTimer = setTimeout(
+          () => void prewarmAgent(configId, cwd),
+          PROJECT_SWITCH_PREWARM_DEBOUNCE_MS
+        )
+        return
+      }
+      bootPrewarmDoneRef.current = true
+      void prewarmAgent(configId, cwd)
     })()
     return () => {
       cancelled = true
+      clearTimeout(prewarmTimer)
     }
   }, [loadAgentConfigs, saveAgentConfig, setSelectedAgentConfigId, activeProjectId])
 }

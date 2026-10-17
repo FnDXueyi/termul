@@ -10,7 +10,6 @@ import { terminalApi } from '@/lib/api'
 import { resolveEnvForSpawn } from '@/lib/env-parser'
 import { logFrontendError } from '@/lib/log-api'
 import { ensureWorktreeSymlinks } from '@/lib/worktree-context'
-import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -20,8 +19,6 @@ export interface SpawnTerminalOptions {
   shell?: string
   /** Project environment variables for spawn. */
   envVars?: Array<{ key: string; value: string; enabled?: boolean }>
-  /** Per-project terminal limit. If set, spawns are blocked when the project's terminal count reaches this value. */
-  maxTerminalsPerProject?: number
 }
 
 export interface SpawnTerminalResult {
@@ -44,27 +41,6 @@ export async function spawnTerminalInPane(
 ): Promise<SpawnTerminalResult> {
   const terminalStore = useTerminalStore.getState()
   const workspaceStore = useWorkspaceStore.getState()
-
-  // Check per-project terminal limit
-  if (options?.maxTerminalsPerProject !== undefined) {
-    const projectTerminalCount = terminalStore.terminals.filter(
-      (t) => t.projectId === projectId
-    ).length
-    if (projectTerminalCount >= options.maxTerminalsPerProject) {
-      return {
-        success: false,
-        error: `Maximum ${options.maxTerminalsPerProject} terminals per project`
-      }
-    }
-  }
-
-  // Check global terminal limit
-  if (terminalStore.isTerminalLimitReached()) {
-    return {
-      success: false,
-      error: `Maximum ${terminalStore.terminals.length} terminals allowed across all projects`
-    }
-  }
 
   // Resolve shell: explicit → project default → app default → undefined (backend picks)
   const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
@@ -130,45 +106,26 @@ export async function spawnTerminalInPane(
   }
 }
 
-/** Outcome of {@link activateAndOpenTerminal}, so callers can phrase their own toast. */
-export type ActivateAndOpenTerminalOutcome =
+/** Outcome of {@link openTerminalAtCwd}, so callers can phrase their own toast. */
+export type OpenTerminalOutcome =
   | { status: 'opened'; terminalId?: string }
   | { status: 'no-pane' }
   | { status: 'spawn-failed'; error?: string }
 
 /**
- * Activate a worktree (or the project root when `worktreeId` is null) and open a
- * terminal in `worktreePath`. The active-worktree sync is the only difference
- * from {@link openTerminalAtCwd}; the spawn + outcome mapping is shared there.
- * Used by the create-worktree flow (NewWorktreeModal). Callers own the toast
- * copy via the returned outcome.
- */
-export async function activateAndOpenTerminal(
-  projectId: string,
-  worktreeId: string | null,
-  worktreePath: string
-): Promise<ActivateAndOpenTerminalOutcome> {
-  useProjectStore.getState().setActiveWorktree(projectId, worktreeId)
-  return openTerminalAtCwd(projectId, worktreePath)
-}
-
-/**
- * Open a terminal at an arbitrary `cwd` (e.g. a chat's worktree path) WITHOUT
- * the `setActiveWorktree` side effect that {@link activateAndOpenTerminal}
- * performs. Used by the project chat-row terminal icon, where the user's
- * "active worktree" must not change just because they spawned a terminal in a
- * chat's cwd. This is the shared spawn core: {@link activateAndOpenTerminal}
- * delegates here after syncing the worktree. Reuses {@link spawnTerminalInPane}
+ * Open a terminal at an arbitrary `cwd` (e.g. a chat's or a new worktree's
+ * path). It never changes the Workspace-switcher pick: spawning a terminal in
+ * a worktree must not move the user's active worktree. Used by the project
+ * chat-row terminal icon and the create-worktree flow. Reuses {@link spawnTerminalInPane}
  * (which still wires worktree symlinks when `cwd` matches a stored worktree
- * path) and reads `activePaneId` + the per-project terminal limit from the
- * stores at call time. Durable failure logs go through `log-api.ts`
+ * path) and reads `activePaneId` from the store at call time. Durable failure logs go through `log-api.ts`
  * (`no-pane` warn, `spawn-failed` error); successful spawns are not logged
  * (the facade exposes no info level, and warn-on-success would be noise).
  */
 export async function openTerminalAtCwd(
   projectId: string,
   cwd: string
-): Promise<ActivateAndOpenTerminalOutcome> {
+): Promise<OpenTerminalOutcome> {
   const paneId = useWorkspaceStore.getState().activePaneId
   if (!paneId) {
     void logFrontendError({
@@ -179,10 +136,7 @@ export async function openTerminalAtCwd(
     return { status: 'no-pane' }
   }
 
-  const maxTerminalsPerProject = useAppSettingsStore.getState().settings.maxTerminalsPerProject
-  const result = await spawnTerminalInPane(paneId, projectId, cwd, {
-    maxTerminalsPerProject
-  })
+  const result = await spawnTerminalInPane(paneId, projectId, cwd)
 
   if (result.success) {
     return { status: 'opened', terminalId: result.terminalId }
