@@ -38,14 +38,23 @@ fn repo_with_diverged_topic() -> tempfile::TempDir {
     project
 }
 
-fn start_conflicted_merge(repo: &Path) {
+fn commit_conflicting_main_change(repo: &Path) {
     std::fs::write(repo.join("a.txt"), "main\n").unwrap();
     git_in(repo, &["commit", "-q", "-am", "main change"]);
+}
+
+fn start_conflicted_merge(repo: &Path) {
+    commit_conflicting_main_change(repo);
     let mut cmd = quiet_command(&which_git().expect("git"));
     cmd.args(["merge", "topic"]).current_dir(repo);
     let out = cmd.output().expect("run git");
     assert!(!out.status.success(), "the setup merge must conflict");
     assert!(repo.join(".git/MERGE_HEAD").exists());
+}
+
+fn porcelain_status(dir: &Path) -> String {
+    let (stdout, _) = run_git(&["status", "--porcelain"], dir.to_str()).expect("status");
+    stdout
 }
 
 #[test]
@@ -94,4 +103,73 @@ fn merge_execute_still_merges_a_named_branch() {
     WorktreeManager::merge_execute(p.to_str().unwrap(), "chat/topic")
         .expect("merge a normal branch");
     assert!(p.join("b.txt").exists());
+}
+
+#[test]
+fn merge_preview_of_a_clean_merge_lists_the_incoming_changes_and_touches_nothing() {
+    if which_git().is_err() {
+        return;
+    }
+    let project = repo_with_diverged_topic();
+    let p = project.path();
+    std::fs::write(p.join("c.txt"), "c\n").unwrap();
+    git_in(p, &["add", "c.txt"]);
+    git_in(p, &["commit", "-q", "-m", "main adds c"]);
+    let before = head(p);
+
+    let preview = WorktreeManager::merge_preview(p.to_str().unwrap(), "topic")
+        .expect("a clean merge previews");
+
+    assert!(preview.conflict_files.is_empty());
+    assert_eq!(preview.changed_files, vec!["a.txt", "b.txt"]);
+    assert_eq!(preview.total_changes, 2);
+    assert_eq!(preview.source_branch, "main");
+    assert_eq!(preview.target_branch, "topic");
+    assert_eq!(preview.detection_mode, "accurate");
+    assert!(!preview.has_auto_resolvable);
+    assert_eq!(head(p), before);
+    assert_eq!(porcelain_status(p), "");
+    assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "a\n");
+    assert!(!p.join("b.txt").exists());
+    assert!(!p.join(".git/MERGE_HEAD").exists());
+}
+
+#[test]
+fn merge_preview_of_a_conflicting_merge_lists_the_conflicted_file_and_touches_nothing() {
+    if which_git().is_err() {
+        return;
+    }
+    let project = repo_with_diverged_topic();
+    let p = project.path();
+    commit_conflicting_main_change(p);
+    let before = head(p);
+
+    let preview = WorktreeManager::merge_preview(p.to_str().unwrap(), "topic")
+        .expect("a conflicting merge previews");
+
+    assert_eq!(preview.conflict_files.len(), 1);
+    let conflict = &preview.conflict_files[0];
+    assert_eq!(conflict.path, "a.txt");
+    assert_eq!(conflict.severity, "high");
+    assert_eq!(conflict.conflict_count, 1);
+    assert!(!conflict.is_lock_file);
+    assert_eq!(conflict.suggestions.len(), 1);
+    assert_eq!(conflict.suggestions[0].strategy, "manual");
+    assert!(!preview.has_auto_resolvable);
+    assert!(preview.changed_files.contains(&"b.txt".to_string()));
+    assert_eq!(preview.detection_mode, "accurate");
+    assert_eq!(head(p), before);
+    assert_eq!(porcelain_status(p), "");
+    assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "main\n");
+    assert!(!p.join(".git/MERGE_HEAD").exists());
+}
+
+#[test]
+fn merge_preview_rejects_an_unknown_branch() {
+    if which_git().is_err() {
+        return;
+    }
+    let project = repo_with_diverged_topic();
+    WorktreeManager::merge_preview(project.path().to_str().unwrap(), "no-such-branch")
+        .expect_err("an unknown branch cannot be previewed");
 }
