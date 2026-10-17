@@ -781,7 +781,9 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
       // lastError stamping and skip the launchConfigId + index projection —
       // the real session already has its index entry from createSession, and
       // its retry stays on the retryCrashedSession reopen path so no orphan
-      // host session is created.
+      // host session is created. It also keeps the code and data: runPromptTurn
+      // clears them at turn start, so any present belong to this prompt's
+      // agent_error.
       const placeholderAlive = Boolean(get().sessions[placeholderId])
       // Actionable banner text: the additive `agent_auth_required` wire code /
       // `ACP_AUTH_REQUIRED` prefix classifies as auth (sign-in guidance); any
@@ -812,16 +814,13 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
               status: 'error',
               activeTurn: false,
               openTurnId: null,
-              ...plainLastError(
-                placeholderAlive
-                  ? `${classified.label}: ${classified.detail}`
-                  : err instanceof Error
-                    ? err.message
-                    : String(err)
-              ),
               ...(placeholderAlive
-                ? { launchConfigId: configId, pendingLauncherOptions: pending ?? null }
-                : {})
+                ? {
+                    ...plainLastError(`${classified.label}: ${classified.detail}`),
+                    launchConfigId: configId,
+                    pendingLauncherOptions: pending ?? null
+                  }
+                : { lastError: err instanceof Error ? err.message : String(err) })
             }
           },
           launchingSessionIds: dropRecordKey(launchingSessionIds, failedId)
