@@ -42,6 +42,7 @@ vi.mock('@/lib/acp-history-persistence', async (orig) => {
     // Read-through the module-level cache so tests can seed payloads via
     // setCachedSessionPayload (preferred over per-test mockResolvedValue).
     loadSessionPayload: vi.fn(async (id: string) => actual.getCachedSessionPayload(id) ?? null),
+    reloadSessionPayloadFromHost: vi.fn(),
     // Tail-first: the store calls `loadSessionPayloadTail` first, then falls
     // back to `loadSessionPayload`. Mock both to the same cache-backed fn so
     // per-test `mockResolvedValueOnce` on `loadSessionPayload` still fires
@@ -145,7 +146,9 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   _clearPayloadCacheForTesting,
   type AgentSwitchRecord,
+  getCachedSessionPayload,
   loadSessionPayload,
+  reloadSessionPayloadFromHost,
   type SessionPayload,
   setCachedSessionPayload
 } from '@/lib/acp-history-persistence'
@@ -203,6 +206,14 @@ function completeWireTurn(sessionId: string, agentId: string): void {
     turnId: activeWirePromptTurns.get(sessionId)
   })
 }
+
+beforeEach(() => {
+  // The host re-read defaults to the cached copy (no host divergence); a test
+  // models a diverged host by overriding it.
+  vi.mocked(reloadSessionPayloadFromHost).mockImplementation(
+    async (id) => getCachedSessionPayload(id) ?? null
+  )
+})
 
 describe('switchAgent (story 3)', () => {
   /** Read one field off a command's recorded invoke payloads. The field read
@@ -1870,6 +1881,247 @@ describe('switchAgent (story 3)', () => {
     ])
   })
 
+  it('REOPEN_TARGET_DESKTOP: a desktop re-splice reads the source from the host, not a stale cached copy', async () => {
+    _clearPayloadCacheForTesting()
+    mockHappyPathInvoke()
+    useAcpStore.setState({
+      messages: {
+        's-old': [
+          {
+            id: 'm1',
+            role: 'user',
+            blocks: [{ type: 'text', text: 'hello old agent' }],
+            streaming: false,
+            timestamp: 1,
+            seq: 1
+          }
+        ] as never
+      }
+    })
+    await useAcpStore.getState().armAgentSwitch('s-old', 'cfg-new')
+    await useAcpStore.getState().sendPrompt('s-old', 'please continue')
+    await flushTurnEnd()
+
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        's-new': { ...s.sessions['s-new']!, status: 'closed' as const }
+      },
+      messages: { ...s.messages, 's-new': [] },
+      toolCalls: { ...s.toolCalls, 's-new': [] },
+      agentSwitches: { ...s.agentSwitches, 's-new': [] }
+    }))
+    const sourceMetadata = {
+      id: 's-old',
+      agentId: 'agent-old',
+      agentConfigId: 'cfg-old',
+      title: 'Old chat',
+      cwd: '/work',
+      projectId: 'p1',
+      createdAt: 1,
+      lastActivityAt: 2,
+      status: 'closed' as const
+    }
+    const sourceTurn = (seq: number, text: string) => ({
+      id: `user:seq-${seq}`,
+      role: 'user' as const,
+      blocks: [{ type: 'text' as const, text }],
+      streaming: false,
+      timestamp: seq,
+      seq
+    })
+    setCachedSessionPayload('s-new', {
+      metadata: {
+        id: 's-new',
+        agentId: 'agent-new',
+        agentConfigId: 'cfg-new',
+        title: 'Continuation',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 1,
+        lastSeq: 1,
+        status: 'closed'
+      },
+      messages: [
+        {
+          id: 'snapshot:agent:1',
+          role: 'agent',
+          blocks: [{ type: 'text', text: 'new agent reply' }],
+          streaming: false,
+          timestamp: 2,
+          seq: 1
+        }
+      ] as never
+    })
+    // The cache holds the source as it was before the switch: no marker, and
+    // none of the turns the host has since written.
+    setCachedSessionPayload('s-old', {
+      metadata: { ...sourceMetadata, messageCount: 1, lastSeq: 1 },
+      messages: [sourceTurn(1, 'hello old agent')] as never
+    })
+    const hostSource = {
+      metadata: { ...sourceMetadata, messageCount: 2, lastSeq: 3 },
+      messages: [sourceTurn(1, 'hello old agent'), sourceTurn(2, 'newest old turn')],
+      switches: [
+        {
+          id: 'switch:seq-3',
+          fromConfigId: 'cfg-old',
+          toConfigId: 'cfg-new',
+          newSessionId: 's-new',
+          summaryText: 'Handoff summary',
+          timestamp: 3,
+          seq: 3
+        }
+      ]
+    }
+    vi.mocked(reloadSessionPayloadFromHost).mockImplementation(async (id) =>
+      id === 's-old' ? hostSource : null
+    )
+    const loadSession = vi.fn(async () => ({}))
+    _setAcpTransportForTests({
+      historyMode: () => 'tauri_store',
+      loadSession,
+      recordAgentSwitch: vi.fn(async () => {}),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-new': { id: 'agent-new', capabilities: { loadSession: true } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-new': 'connected' }
+    }))
+
+    await useAcpStore.getState().openHistorySession('s-new')
+    await flushTurnEnd()
+
+    const state = useAcpStore.getState()
+    const texts = (state.messages['s-new'] ?? []).map(
+      (m) => m.blocks.find((b) => b.type === 'text')?.text
+    )
+    expect(texts).toEqual(['hello old agent', 'newest old turn', 'new agent reply'])
+    expect(state.agentSwitches['s-new']).toEqual([
+      expect.objectContaining({ id: 'switch-splice:s-old:switch:seq-3', newSessionId: 's-new' })
+    ])
+  })
+
+  it('REOPEN_TARGET_HOST_READ_FAILS: a desktop re-splice falls back to the cached source when the host re-read throws', async () => {
+    _clearPayloadCacheForTesting()
+    mockHappyPathInvoke()
+    useAcpStore.setState({
+      messages: {
+        's-old': [
+          {
+            id: 'm1',
+            role: 'user',
+            blocks: [{ type: 'text', text: 'hello old agent' }],
+            streaming: false,
+            timestamp: 1,
+            seq: 1
+          }
+        ] as never
+      }
+    })
+    await useAcpStore.getState().armAgentSwitch('s-old', 'cfg-new')
+    await useAcpStore.getState().sendPrompt('s-old', 'please continue')
+    await flushTurnEnd()
+
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        's-new': { ...s.sessions['s-new']!, status: 'closed' as const }
+      },
+      messages: { ...s.messages, 's-new': [] },
+      toolCalls: { ...s.toolCalls, 's-new': [] },
+      agentSwitches: { ...s.agentSwitches, 's-new': [] }
+    }))
+    setCachedSessionPayload('s-new', {
+      metadata: {
+        id: 's-new',
+        agentId: 'agent-new',
+        agentConfigId: 'cfg-new',
+        title: 'Continuation',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 1,
+        lastSeq: 1,
+        status: 'closed'
+      },
+      messages: [
+        {
+          id: 'snapshot:agent:1',
+          role: 'agent',
+          blocks: [{ type: 'text', text: 'new agent reply' }],
+          streaming: false,
+          timestamp: 2,
+          seq: 1
+        }
+      ] as never
+    })
+    setCachedSessionPayload('s-old', {
+      metadata: {
+        id: 's-old',
+        agentId: 'agent-old',
+        agentConfigId: 'cfg-old',
+        title: 'Old chat',
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 1,
+        lastSeq: 2,
+        status: 'closed'
+      },
+      messages: [
+        {
+          id: 'user:seq-1',
+          role: 'user',
+          blocks: [{ type: 'text', text: 'hello old agent' }],
+          streaming: false,
+          timestamp: 1,
+          seq: 1
+        }
+      ] as never,
+      switches: [
+        {
+          id: 'switch:seq-2',
+          fromConfigId: 'cfg-old',
+          toConfigId: 'cfg-new',
+          newSessionId: 's-new',
+          summaryText: 'Handoff summary',
+          timestamp: 2,
+          seq: 2
+        }
+      ]
+    })
+    vi.mocked(reloadSessionPayloadFromHost).mockRejectedValue(new Error('ACP_HISTORY_GET_FAILED'))
+    _setAcpTransportForTests({
+      historyMode: () => 'tauri_store',
+      loadSession: vi.fn(async () => ({})),
+      recordAgentSwitch: vi.fn(async () => {}),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-new': { id: 'agent-new', capabilities: { loadSession: true } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-new': 'connected' }
+    }))
+
+    await useAcpStore.getState().openHistorySession('s-new')
+    await flushTurnEnd()
+
+    const texts = (useAcpStore.getState().messages['s-new'] ?? []).map(
+      (m) => m.blocks.find((b) => b.type === 'text')?.text
+    )
+    expect(texts).toEqual(['hello old agent', 'new agent reply'])
+  })
+
   it('REOPEN_INFLIGHT_TARGET: reopening the source while the target is still opening joins the in-flight open instead of reopening standalone', async () => {
     // Live repro from the Tauri MCP drive: a restored tab rehydrates the
     // switch target at startup; clicking the SOURCE row before that open
@@ -3083,6 +3335,90 @@ describe('switchAgent CAP-7 reopen (story 3)', () => {
     expect(texts).toEqual(['turn on A', 'turn on B', 'B reply', 'turn on C'])
     expect(state.sessions['s-c']?.agentId).toBe('agent-c')
     expect(state.sessions['s-c']?.status).toBe('active')
+  })
+
+  it('TWO_HOP_DESKTOP: the chain walk follows a hop marker the host wrote after the cache was filled', async () => {
+    const turn = (seq: number, value: string) => ({
+      id: `user:seq-${seq}`,
+      role: 'user' as const,
+      blocks: [{ type: 'text' as const, text: value }],
+      streaming: false,
+      timestamp: seq,
+      seq
+    })
+    const meta = (id: string, agentId: string, agentConfigId: string, lastSeq: number) => ({
+      id,
+      agentId,
+      agentConfigId,
+      title: id,
+      cwd: '/work',
+      projectId: 'p1',
+      createdAt: 1,
+      lastActivityAt: 2,
+      messageCount: 1,
+      lastSeq,
+      status: 'closed' as const
+    })
+    const marker = (seq: number, from: string, to: string, newSessionId: string) => ({
+      id: `switch:seq-${seq}`,
+      fromConfigId: from,
+      toConfigId: to,
+      newSessionId,
+      summaryText: `${from} to ${to}`,
+      timestamp: seq,
+      seq
+    })
+    setCachedSessionPayload('s-a', {
+      metadata: meta('s-a', 'agent-a', 'cfg-a', 2),
+      messages: [turn(1, 'turn on A')] as never,
+      switches: [marker(2, 'cfg-a', 'cfg-b', 's-b')]
+    })
+    // The cache holds B from before it switched on to C.
+    setCachedSessionPayload('s-b', {
+      metadata: meta('s-b', 'agent-b', 'cfg-b', 1),
+      messages: [turn(1, 'turn on B')] as never
+    })
+    setCachedSessionPayload('s-c', {
+      metadata: meta('s-c', 'agent-c', 'cfg-c', 1),
+      messages: [turn(1, 'turn on C')] as never
+    })
+    const hostB = {
+      metadata: meta('s-b', 'agent-b', 'cfg-b', 2),
+      messages: [turn(1, 'turn on B')],
+      switches: [marker(2, 'cfg-b', 'cfg-c', 's-c')]
+    }
+    vi.mocked(reloadSessionPayloadFromHost).mockImplementation(async (id) =>
+      id === 's-b' ? hostB : (getCachedSessionPayload(id) ?? null)
+    )
+    const loadSession = vi.fn(async () => ({}))
+    _setAcpTransportForTests({
+      historyMode: () => 'tauri_store',
+      loadSession,
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    useAcpStore.setState({
+      agentConfigs: [
+        { id: 'cfg-b', name: 'Bee', command: 'bee', args: [], env: {} },
+        { id: 'cfg-c', name: 'Cee', command: 'cee', args: [], env: {} }
+      ],
+      agents: { 'agent-c': { id: 'agent-c', capabilities: { loadSession: true } } },
+      agentStatus: { 'agent-c': 'connected' }
+    })
+    workspaceStateRef.current.root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'chat-s-a',
+      tabs: [{ type: 'agent-chat', id: 'chat-s-a', sessionId: 's-a' }]
+    }
+
+    await useAcpStore.getState().openHistorySession('s-a')
+    await flushTurnEnd()
+
+    expect(workspaceStateRef.current.remapAgentChatSession.mock.calls).toEqual([['s-a', 's-c']])
+    const texts = (useAcpStore.getState().messages['s-c'] ?? []).map(
+      (m) => m.blocks.find((b) => b.type === 'text')?.text
+    )
+    expect(texts).toEqual(['turn on A', 'turn on B', 'turn on C'])
   })
 
   describe('splice-source watermark', () => {

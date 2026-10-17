@@ -22,6 +22,7 @@ import {
   loadSessionPayloadTail,
   maxPayloadSeq,
   queueSessionPayloadDelete,
+  reloadSessionPayloadFromHost,
   restoredSwitches,
   restoredToolCalls,
   type SessionIndexEntry,
@@ -428,6 +429,24 @@ export function _resetSessionIndexLoadGenerationForTesting(): void {
 }
 
 /**
+ * Source payloads for a switch re-splice or redirect walk must be current: the
+ * desktop cache is never refreshed by live events, so a cached copy can predate
+ * the switch marker and the source's latest turns. A failed or absent host re-read
+ * (`null` in server and `live_only` modes) falls back to the normal load.
+ */
+async function loadFreshSourcePayload(id: string): Promise<SessionPayload | null> {
+  const fresh = await reloadSessionPayloadFromHost(id).catch((error: unknown) => {
+    void logFrontendError({
+      level: 'warn',
+      source: 'acp.switchAgent.splice',
+      message: `Host re-read of switch source ${id} failed; using the cached copy if there is one: ${error instanceof Error ? error.message : String(error)}`
+    })
+    return null
+  })
+  return fresh ?? (await loadSessionPayload(id))
+}
+
+/**
  * spec-agent-switch-live-merged-transcript: re-splice the pre-switch band
  * after an in-session wholesale reinstall on a live switch TARGET (crash
  * retry, direct history open, resume install). The durable install replaces
@@ -455,7 +474,7 @@ async function respliceLiveSwitchTarget(
   let successor = targetId
   for (let link = liveSwitchSources.get(successor); link; link = liveSwitchSources.get(successor)) {
     if (visited.has(link.sourceId)) break
-    const sourcePayload = await loadSessionPayload(link.sourceId).catch(() => null)
+    const sourcePayload = await loadFreshSourcePayload(link.sourceId).catch(() => null)
     if (!sourcePayload) {
       void logFrontendError({
         level: 'info',
@@ -551,7 +570,7 @@ async function redirectSwitchedReopen(
   // self-await, so the redirect is declined.)
   let finalTargetChainResolved = false
   for (let hop = 0; hop < 8; hop++) {
-    const hopPayload = await loadSessionPayload(finalTarget).catch(() => null)
+    const hopPayload = await loadFreshSourcePayload(finalTarget).catch(() => null)
     if (!hopPayload) break
     const next = resolveSwitchRedirect(restoredSwitches(hopPayload))
     if (next && next.newSessionId !== finalTarget && !inFlightHistoryOpens.has(next.newSessionId)) {
