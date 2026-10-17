@@ -273,15 +273,16 @@ async fn panicking_probe_task_leaves_no_in_flight_entry() {
     let stale = futures::future::ready(ProbeResult::disconnected("stale"))
         .boxed()
         .shared();
-    IN_FLIGHT_PROBES.lock().insert(config.clone(), stale);
+    let key = (config, 0);
+    IN_FLIGHT_PROBES.lock().insert(key.clone(), stale);
 
-    let key = config.clone();
+    let entry = key.clone();
     let joined = tokio::spawn(async move {
-        let _entry = InFlightEntry(key);
+        let _entry = InFlightEntry(entry);
         panic!("probe panicked");
     })
     .await;
 
     assert!(joined.unwrap_err().is_panic());
-    assert!(!IN_FLIGHT_PROBES.lock().contains_key(&config));
+    assert!(!IN_FLIGHT_PROBES.lock().contains_key(&key));
 }
