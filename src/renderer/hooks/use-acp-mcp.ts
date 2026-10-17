@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { useAcpStore } from '@/stores/acp-store'
+import { mcpServerDeletionCount, useAcpStore } from '@/stores/acp-store'
 import { useProjectStore } from '@/stores/project-store'
 
 /**
@@ -22,9 +22,11 @@ import { useProjectStore } from '@/stores/project-store'
  * per id — a popover expand mid-probe cannot double-probe.
  */
 
-// Per-app-run probe bookkeeping (module scope — survives root remounts).
-// Dynamic membership with insertion at runtime → Set (project rule).
-const autoProbedServerIds = new Set<string>()
+// Per-app-run probe bookkeeping (module scope — survives root remounts):
+// each probed id with the store's deletion count at that time. A deleted and
+// re-added id has a newer count and is probed again; absence from the list
+// proves nothing (a web project switch swaps the whole list).
+const autoProbedServerIds = new Map<string, number>()
 
 /**
  * True when the boot auto-probe pass already covered `id` this app run.
@@ -32,19 +34,12 @@ const autoProbedServerIds = new Set<string>()
  * duplicate probe for servers whose status is already live.
  */
 export function isMcpServerAutoProbed(id: string): boolean {
-  return autoProbedServerIds.has(id)
+  return autoProbedServerIds.get(id) === mcpServerDeletionCount(id)
 }
 
 /** Mark `id` as covered by the auto-probe pass (probe fan-out caller). */
 export function markMcpServerAutoProbed(id: string): void {
-  autoProbedServerIds.add(id)
-}
-
-function forgetRemovedMcpServers(live: readonly { id: string }[]): void {
-  const liveIds = new Set(live.map((s) => s.id))
-  for (const id of autoProbedServerIds) {
-    if (!liveIds.has(id)) autoProbedServerIds.delete(id)
-  }
+  autoProbedServerIds.set(id, mcpServerDeletionCount(id))
 }
 
 /** Test-only: clear the per-app-run probe set between tests. */
@@ -82,7 +77,6 @@ export function useAcpMcp(): void {
   // issue #378) so a fleet of stdio probes never competes with first paint.
   useEffect(() => {
     if (!mcpServersLoaded) return
-    forgetRemovedMcpServers(mcpServers)
     const toProbe = mcpServers.filter((s) => s.enabled !== false && !isMcpServerAutoProbed(s.id))
     if (toProbe.length === 0) return
     for (const server of toProbe) {

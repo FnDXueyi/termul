@@ -107,19 +107,19 @@ function withoutProbeState(s: McpProbeState, id: string): McpProbeState {
   }
 }
 
-// Ids deleted while a probe for them was in flight. Absence from `mcpServers`
-// alone does not mean deleted: a web project switch swaps in another
-// project's list, and a probe finishing then must keep its result.
-const deletedWhileProbing = new Set<string>()
-
-// Per-id count of completed deletions. An OAuth call compares it across its
-// await: the id may have been re-added meanwhile, so a deleted id's result must
-// not land on the new server either.
+// Per-id count of completed deletions. Absence from `mcpServers` alone does not
+// mean deleted: a web project switch swaps in another project's list. A probe
+// or OAuth call compares the count across its await, so a deleted id's result
+// never lands, even on a server re-added under the same id.
 const deletionCounts = new Map<string, number>()
 
+export function mcpServerDeletionCount(id: string): number {
+  return deletionCounts.get(id) ?? 0
+}
+
 function deletionGuard(id: string): () => boolean {
-  const before = deletionCounts.get(id) ?? 0
-  return () => (deletionCounts.get(id) ?? 0) !== before
+  const before = mcpServerDeletionCount(id)
+  return () => mcpServerDeletionCount(id) !== before
 }
 
 // Ids whose in-flight probe started before an OAuth sign-in or sign-out
@@ -142,11 +142,12 @@ function probeAfterInFlight(get: Parameters<McpSliceCreator>[1], id: string): Pr
 function settleStaleProbe(
   set: Parameters<McpSliceCreator>[0],
   get: Parameters<McpSliceCreator>[1],
-  probed: StoredMcpServer
+  probed: StoredMcpServer,
+  wasDeleted: () => boolean
 ): Promise<void> | null {
   const { id } = probed
   const reprobe = reprobeAfterInFlight.delete(id)
-  const deleted = deletedWhileProbing.delete(id)
+  const deleted = wasDeleted()
   const current = get().mcpServers.find((s) => s.id === id)
   if (!current) return deleted ? Promise.resolve() : null
   if (!reprobe && sameProbeConfig(current, probed)) return null
@@ -277,8 +278,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         })
         throw err
       }
-      if (get().mcpProbing[id]) deletedWhileProbing.add(id)
-      deletionCounts.set(id, (deletionCounts.get(id) ?? 0) + 1)
+      deletionCounts.set(id, mcpServerDeletionCount(id) + 1)
       set((s) => ({
         ...withoutProbeState(s, id),
         mcpOAuthConnected: omitKey(s.mcpOAuthConnected, id),
@@ -388,10 +388,11 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     if (get().mcpProbing[id]) return
     const server = get().mcpServers.find((s) => s.id === id)
     if (!server) return
+    const deleted = deletionGuard(id)
     set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: true } }))
     try {
       const result: ProbeResult = await acpApi.probeMcpServer(probeConfigOf(server))
-      const stale = settleStaleProbe(set, get, server)
+      const stale = settleStaleProbe(set, get, server, deleted)
       if (stale) return stale
       set((s) => ({
         mcpProbeStatus: { ...s.mcpProbeStatus, [id]: result.status },
@@ -410,7 +411,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         source: 'acp-store.probeMcpServer',
         message: `MCP probe failed for server '${server.name}' (${String(err)})`
       })
-      const stale = settleStaleProbe(set, get, server)
+      const stale = settleStaleProbe(set, get, server, deleted)
       if (stale) return stale
       // Transport/parse failure (NOT a disconnected probe — that's a
       // `status:'disconnected'` ProbeResult, not a throw). Surface the
