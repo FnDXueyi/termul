@@ -44,6 +44,7 @@ import {
   type AgentSpawnedEvent,
   type AgentSwitchEvent,
   type AskUserQuestionEvent,
+  type AvailableCommand,
   acpApi,
   type BrowserAgentTabEvent,
   type BrowserConsentRequestEvent,
@@ -88,7 +89,8 @@ import {
   SWITCH_SPLICE_ID_PREFIX,
   selectAgentIdentity,
   selectConfigWarmState,
-  trimLiveToolCalls
+  trimLiveToolCalls,
+  withCommands
 } from './helpers'
 import { setLaunchPlaceholderNotedListener, setLiveLaunchSessionLookup } from './live-turn'
 import {
@@ -269,7 +271,7 @@ async function installTransportRecovery(
   // records — installed alongside the bubbles so reconnect recovery preserves
   // cards instead of blanking the session's tool-call list.
   const recoveredToolCalls: ToolCall[] = []
-  let recoveredCommands: CommandsUpdateEvent['availableCommands'] | null = null
+  let recoveredCommands: { list: AvailableCommand[]; seq: number } | null = null
   let openRole: 'agent' | 'thought' | 'user' | null = null
   for (const event of recovery.events) {
     const payload = event.payload as Record<string, unknown>
@@ -395,7 +397,9 @@ async function installTransportRecovery(
       openRole = null
     } else if (event.type === 'commands_update') {
       const { availableCommands } = payload as Partial<CommandsUpdateEvent>
-      if (Array.isArray(availableCommands)) recoveredCommands = availableCommands
+      if (Array.isArray(availableCommands)) {
+        recoveredCommands = { list: availableCommands, seq: event.seq }
+      }
     }
   }
   // Single wire→display pass over the folded user bubbles (chip rendering on
@@ -445,9 +449,9 @@ async function installTransportRecovery(
             ])
           }
         : current.toolCalls,
-      commands: recoveredCommands
-        ? { ...current.commands, [recovery.sessionId]: recoveredCommands }
-        : current.commands,
+      ...(recoveredCommands
+        ? withCommands(current, recovery.sessionId, recoveredCommands.list, recoveredCommands.seq)
+        : {}),
       degradedRecoverySessions: dropRecordKey(current.degradedRecoverySessions, recovery.sessionId),
       sessions: session
         ? {
@@ -574,8 +578,8 @@ export function initAcpEventListeners(): () => void {
     acpApi.onEvent<PlanUpdateEvent>(ACP_EVENTS.planUpdate, (e) =>
       useAcpStore.getState()._onPlanUpdate(e)
     ),
-    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e) =>
-      useAcpStore.getState()._onCommandsUpdate(e)
+    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e, eventSeq) =>
+      useAcpStore.getState()._onCommandsUpdate(e, eventSeq)
     ),
     acpApi.onEvent<ModeUpdateEvent>(ACP_EVENTS.modeUpdate, (e) =>
       useAcpStore.getState()._onModeUpdate(e)

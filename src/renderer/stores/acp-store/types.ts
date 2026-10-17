@@ -475,6 +475,8 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
+  /** Seq of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, number>
   pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
@@ -905,7 +907,7 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void

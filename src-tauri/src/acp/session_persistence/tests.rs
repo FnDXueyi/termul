@@ -3928,6 +3928,10 @@ async fn session_payload_tail_carries_the_last_command_list_outside_its_window()
             {"name": "compact", "description": "compact command"}
         ])
     );
+    assert_eq!(
+        serde_json::to_value(&tail).unwrap()["commandsSeq"],
+        json!(2)
+    );
     let _ = fs::remove_dir_all(root);
 }
 
@@ -3969,5 +3973,6 @@ async fn session_payload_tail_reads_the_command_list_from_the_log_after_restart(
         serde_json::to_value(&tail).unwrap()["commands"],
         json!([{"name": "init", "description": "init command"}])
     );
+    assert_eq!(serde_json::to_value(&tail).unwrap()["commandsSeq"], json!(1));
     let _ = fs::remove_dir_all(root);
 }

@@ -115,6 +115,8 @@ export interface SessionPayload {
    * of none, and on older hosts.
    */
   commands?: AvailableCommand[]
+  /** Seq of the `commands_update` record that set `commands`. */
+  commandsSeq?: number
 }
 
 /**

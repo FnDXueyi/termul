@@ -55,7 +55,11 @@ import {
 } from '../shared-state'
 import type { AcpState, AgentStatus, SessionStatus } from '../types'
 import { clearPromptReconcile } from './prompt-reconcile'
-import { dropSessionTranscriptState, flushCoalescedSync } from './transcript'
+import {
+  dropSessionTranscriptState,
+  flushCoalescedSync,
+  type SessionTranscriptState
+} from './transcript'
 
 /**
  * Agents that have completed ACP `authenticate` in this process lifetime, so
@@ -1147,10 +1151,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
     }
     if (dropTranscriptIds.length > 0) {
       set((s) => {
-        let next: Pick<
-          AcpState,
-          'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-        > = s
+        let next: SessionTranscriptState = s
 
         for (const id of dropTranscriptIds) {
           next = dropSessionTranscriptState(next, id)

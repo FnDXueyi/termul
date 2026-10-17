@@ -77,6 +77,7 @@ import {
   scanPlanFenceFromMessages,
   spliceSwitchTranscript,
   trimLiveToolCalls,
+  withCommands,
   withSessionActive,
   withSessionResumeError,
   withSwitchMarker
@@ -146,10 +147,6 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
-  const { commands } = payload
-  if (Array.isArray(commands)) {
-    useAcpStore.setState((s) => ({ commands: { ...s.commands, [sessionId]: commands } }))
-  }
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only
@@ -809,7 +806,10 @@ async function openHistorySessionInner(
     toolCalls: { ...s.toolCalls, [id]: trimLiveToolCalls(installed.toolCalls) },
     // CAP-2: restore the durable switch markers so the timeline shows the
     // borderless separators at their seq positions after a reopen.
-    agentSwitches: { ...s.agentSwitches, [id]: installed.switches }
+    agentSwitches: { ...s.agentSwitches, [id]: installed.switches },
+    ...(Array.isArray(payload.commands)
+      ? withCommands(s, id, payload.commands, payload.commandsSeq)
+      : {})
   }))
   onTranscriptInstalled()
 

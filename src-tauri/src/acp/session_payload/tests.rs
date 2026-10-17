@@ -879,6 +879,27 @@ fn payload_omits_commands_when_the_log_has_no_command_list() {
         .is_some_and(|object| !object.contains_key("commands")));
 }
 
+#[test]
+fn payload_reports_the_seq_of_the_last_command_list_record() {
+    let records = vec![
+        record(
+            1,
+            "commands_update",
+            json!({"availableCommands": [{"name": "init"}]}),
+        ),
+        user_prompt(2, Some("t1"), "hi"),
+        record(
+            3,
+            "commands_update",
+            json!({"availableCommands": [{"name": "review"}]}),
+        ),
+        user_prompt(4, Some("t2"), "again"),
+    ];
+    let payload = serde_json::to_value(materialize_session_payload(&metadata(), &records)).unwrap();
+    assert_eq!(payload["commands"], json!([{"name": "review"}]));
+    assert_eq!(payload["commandsSeq"], json!(3));
+}
+
 // --- issue #1192: the payload says explicitly when no turn is running --------
 
 /// The wire value of `metadata.turnActive` for `records`, or `None` when the

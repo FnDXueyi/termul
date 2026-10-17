@@ -10,6 +10,7 @@ import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import {
   type AgentId,
+  type AvailableCommand,
   acpApi,
   type ContentBlock,
   type McpServer,
@@ -771,6 +772,31 @@ export function dropQuestionsForAgent(
 
 export function nextQueueId(): string {
   return newId('queue')
+}
+
+/**
+ * Install `list` as the session's slash commands unless the store holds a
+ * list from a newer record. `seq` is the seq of the `commands_update` record
+ * that set the list; a list without one (an older host) installs and drops
+ * the held seq.
+ */
+export function withCommands(
+  state: Pick<AcpState, 'commands' | 'commandsSeq'>,
+  sessionId: SessionId,
+  list: AvailableCommand[],
+  seq: number | undefined
+): Pick<AcpState, 'commands' | 'commandsSeq'> {
+  const held = state.commandsSeq[sessionId]
+  if (seq !== undefined && held !== undefined && seq < held) {
+    return { commands: state.commands, commandsSeq: state.commandsSeq }
+  }
+  return {
+    commands: { ...state.commands, [sessionId]: list },
+    commandsSeq:
+      seq === undefined
+        ? dropRecordKey(state.commandsSeq, sessionId)
+        : { ...state.commandsSeq, [sessionId]: seq }
+  }
 }
 
 export function dropRecordKey<T>(

@@ -45,7 +45,8 @@ import {
   SWITCH_SPLICE_ID_PREFIX,
   sessionTurnBusy,
   toolIntervened,
-  trimLiveToolCalls
+  trimLiveToolCalls,
+  withCommands
 } from '../helpers'
 import { useAcpStore } from '../index'
 import {
@@ -684,6 +685,11 @@ export function dropSessionBookkeeping(
   }
 }
 
+export type SessionTranscriptState = Pick<
+  AcpState,
+  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'commandsSeq' | 'sessionUsage' | 'plans'
+>
+
 /**
  * Free per-session transcript maps held in the WebView heap, plus the
  * session's bookkeeping (`dropSessionBookkeeping`), clamp-log dedup entries
@@ -692,15 +698,9 @@ export function dropSessionBookkeeping(
  * last mirror is flushed. Idempotent.
  */
 export function dropSessionTranscriptState(
-  state: Pick<
-    AcpState,
-    'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-  >,
+  state: SessionTranscriptState,
   sessionId: SessionId
-): Pick<
-  AcpState,
-  'messages' | 'toolCalls' | 'agentSwitches' | 'commands' | 'sessionUsage' | 'plans'
-> {
+): SessionTranscriptState {
   dropSessionBookkeeping(sessionId)
   for (const call of state.toolCalls[sessionId] ?? []) {
     clampedToolCallIds.delete(clampLogKey(call.toolCallId))
@@ -711,6 +711,7 @@ export function dropSessionTranscriptState(
     toolCalls: dropRecordKey(state.toolCalls, sessionId),
     agentSwitches: dropRecordKey(state.agentSwitches, sessionId),
     commands: dropRecordKey(state.commands, sessionId),
+    commandsSeq: dropRecordKey(state.commandsSeq, sessionId),
     sessionUsage: dropRecordKey(state.sessionUsage, sessionId),
     plans: dropRecordKey(state.plans, sessionId)
   }
@@ -881,6 +882,7 @@ type TranscriptSliceState = Pick<
   | 'toolCalls'
   | 'plans'
   | 'commands'
+  | 'commandsSeq'
   | 'loadOlderMessages'
   | 'clearSessionBackfill'
   | '_onUserPrompt'
@@ -903,6 +905,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
   toolCalls: {},
   plans: {},
   commands: {},
+  commandsSeq: {},
 
   // --- Live window: scroll-up lazy-load -------------------------------------
 
@@ -1462,10 +1465,10 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       return { plans: { ...s.plans, [e.sessionId]: entries } }
     }),
 
-  _onCommandsUpdate: (e) =>
+  _onCommandsUpdate: (e, eventSeq) =>
     set((s) => {
       if (!acceptsSessionTranscriptEvents(s.sessions[e.sessionId])) return {}
-      return { commands: { ...s.commands, [e.sessionId]: e.availableCommands ?? [] } }
+      return withCommands(s, e.sessionId, e.availableCommands ?? [], eventSeq)
     }),
 
   _onModeUpdate: (e) => {

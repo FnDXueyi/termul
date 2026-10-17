@@ -205,7 +205,8 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     id: string,
     messages: TestMessage[],
     lastSeq: number,
-    commands?: Array<{ name: string; description: string }>
+    commands?: Array<{ name: string; description: string }>,
+    commandsSeq?: number
   ): void {
     setCachedSessionPayload(id, {
       metadata: {
@@ -221,7 +222,8 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
         status: 'closed'
       },
       messages: messages as never,
-      ...(commands ? { commands } : {})
+      ...(commands ? { commands } : {}),
+      ...(commandsSeq !== undefined ? { commandsSeq } : {})
     })
   }
 
@@ -278,6 +280,85 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     expect(useAcpStore.getState().commands['s-rec-cmds']).toEqual([
       { name: 'review', description: 'Review' }
     ])
+  })
+
+  function seedWiredTransport(): Map<string, (payload: unknown, eventSeq?: number) => void> {
+    const listeners = new Map<string, (payload: unknown, eventSeq?: number) => void>()
+    _setAcpTransportForTests({
+      historyMode: () => 'server',
+      loadSession: vi.fn(async () => ({})),
+      onEvent: vi.fn((name: string, cb: (payload: unknown, eventSeq?: number) => void) => {
+        listeners.set(name, cb)
+        return () => {}
+      }),
+      setReconnectListener: vi.fn(),
+      setRecoveryHandler: vi.fn(),
+      setReconnectPriorityProvider: vi.fn(),
+      dispose: vi.fn()
+    } as unknown as AcpTransport)
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-1': { id: 'agent-1', capabilities: { loadSession: true } } },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+    }))
+    return listeners
+  }
+
+  function commandsUpdate(sessionId: string, name: string): unknown {
+    return { agentId: 'agent-1', sessionId, availableCommands: [{ name, description: name }] }
+  }
+
+  it('keeps a newer live slash-command list when a reopen installs an older payload', async () => {
+    const listeners = seedWiredTransport()
+    seedServerPayload(
+      's-cmds-race',
+      [msg('turn:t1', 'user', 'hi', 3)],
+      6,
+      [{ name: 'review', description: 'review' }],
+      5
+    )
+    const teardown = initAcpEventListeners()
+    try {
+      await useAcpStore.getState().openHistorySession('s-cmds-race')
+      listeners.get('acp:commands_update')!(commandsUpdate('s-cmds-race', 'compact'), 7)
+      useAcpStore
+        .getState()
+        ._onAgentCrashed({ agentId: 'agent-1', sessionId: 's-cmds-race', message: 'crashed' })
+      useAcpStore.setState((s) => ({ agentStatus: { ...s.agentStatus, 'agent-1': 'connected' } }))
+
+      await useAcpStore.getState().openHistorySession('s-cmds-race')
+
+      expect(useAcpStore.getState().commands['s-cmds-race']).toEqual([
+        { name: 'compact', description: 'compact' }
+      ])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('drops a live commands_update older than the installed slash commands', async () => {
+    const listeners = seedWiredTransport()
+    seedServerPayload(
+      's-cmds-live',
+      [msg('turn:t1', 'user', 'hi', 3)],
+      6,
+      [{ name: 'review', description: 'review' }],
+      5
+    )
+    const teardown = initAcpEventListeners()
+    try {
+      await useAcpStore.getState().openHistorySession('s-cmds-live')
+      const onCommands = listeners.get('acp:commands_update')!
+      onCommands(commandsUpdate('s-cmds-live', 'init'), 3)
+      expect(useAcpStore.getState().commands['s-cmds-live']).toEqual([
+        { name: 'review', description: 'review' }
+      ])
+      onCommands(commandsUpdate('s-cmds-live', 'compact'), 7)
+      expect(useAcpStore.getState().commands['s-cmds-live']).toEqual([
+        { name: 'compact', description: 'compact' }
+      ])
+    } finally {
+      teardown()
+    }
   })
 
   it('renders the leading agent greeting and hides the empty synthetic turn', async () => {

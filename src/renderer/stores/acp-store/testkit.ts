@@ -38,6 +38,7 @@ export const FRESH = {
   agentSwitches: {},
   plans: {},
   commands: {},
+  commandsSeq: {},
   pendingPermissions: {},
   pendingQuestions: {},
   pendingElicitations: {},
