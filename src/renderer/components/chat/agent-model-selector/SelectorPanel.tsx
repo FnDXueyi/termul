@@ -585,7 +585,10 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
           {footer}
         </>
       ) : null}
-      {!searching && ownFooter && capabilityRows(props.capabilities).length > 0 ? (
+      {!searching &&
+      viewId !== null &&
+      viewId === sw.currentConfigId &&
+      capabilityRows(props.capabilities).length > 0 ? (
         <>
           <div className="h-px bg-border" />
           <CapabilitySummary capabilities={props.capabilities} touch={touch} />

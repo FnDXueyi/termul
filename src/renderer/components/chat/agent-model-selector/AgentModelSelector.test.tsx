@@ -285,6 +285,35 @@ describe('AgentModelSelector agent capabilities', () => {
     expect(screen.queryByTestId('agent-capabilities')).toBeNull()
   })
 
+  it('never shows the chat agent profile under another agent tab', () => {
+    seed([readyEntry(CLAUDE)])
+    seedAgent(advertised)
+    renderSelector()
+    open()
+    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Claude Agent' }))
+
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+  })
+
+  it('with a switch armed, shows the profile only on the chat agent tab', () => {
+    seed([readyEntry(CLAUDE)], { switching: { toConfigId: CLAUDE.id } })
+    seedAgent(advertised)
+    renderSelector()
+    open()
+
+    expect(screen.getByRole('tab', { name: 'Claude Agent' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Cursor' }))
+
+    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
+  })
+
   it('hides the summary while the search results are showing', () => {
     seedAgent(advertised)
     renderSelector()

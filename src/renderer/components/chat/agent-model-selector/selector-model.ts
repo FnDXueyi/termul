@@ -30,7 +30,6 @@ export interface ModelCatalog {
 
 export interface CapabilityItem {
   name: string
-  title?: string
 }
 
 export interface CapabilityRow {
@@ -52,10 +51,7 @@ export function capabilityRows(
     const extras: CapabilityItem[] = []
     if (prompt.image) extras.push({ name: 'Images' })
     if (prompt.audio) {
-      extras.push({
-        name: 'Audio',
-        title: 'The agent accepts audio. Termul cannot attach audio yet.'
-      })
+      extras.push({ name: 'Audio (cannot attach yet)' })
     }
     if (prompt.embeddedContext) extras.push({ name: 'Embedded context' })
     rows.push({

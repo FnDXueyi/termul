@@ -376,7 +376,7 @@ export function CapabilitySummary({
             {row.items.map((item, index) => (
               <Fragment key={item.name}>
                 {index > 0 ? ' · ' : null}
-                <span title={item.title}>{item.name}</span>
+                {item.name}
               </Fragment>
             ))}
           </dd>

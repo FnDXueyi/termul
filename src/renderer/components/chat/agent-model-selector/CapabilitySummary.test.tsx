@@ -31,17 +31,8 @@ describe('CapabilitySummary', () => {
       mcpCapabilities: { http: true, sse: true }
     })
 
-    expect(rowText('Accepts')).toBe('Text · Audio')
+    expect(rowText('Accepts')).toBe('Text · Audio (cannot attach yet)')
     expect(rowText('MCP servers')).toBe('stdio · HTTP · SSE')
-  })
-
-  it('says Termul cannot attach audio, which the agent accepts', () => {
-    renderSummary({ promptCapabilities: { audio: true } })
-
-    expect(screen.getByText('Audio')).toHaveAttribute(
-      'title',
-      'The agent accepts audio. Termul cannot attach audio yet.'
-    )
   })
 
   it('names the baseline when the agent advertises nothing beyond it', () => {
