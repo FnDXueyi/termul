@@ -31,6 +31,26 @@ async fn wait_for_exit(instance: &TerminalInstance) {
     panic!("the short-lived child never exited");
 }
 
+/// `has_exited` flips when the reader hits EOF, before the flusher publishes
+/// the last buffered output. The flusher ends only after that final publish,
+/// so joining it is the point where the output is replayable.
+async fn wait_for_output_published(instance: &TerminalInstance) {
+    let flusher = instance
+        .flusher_handle
+        .lock()
+        .await
+        .take()
+        .expect("flusher thread is running");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || flusher.join()),
+    )
+    .await
+    .expect("the flusher never published the final output")
+    .expect("join task")
+    .expect("flusher thread panicked");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_live_detached_pty_is_never_swept_however_old() {
@@ -96,6 +116,7 @@ async fn an_exited_pty_keeps_its_output_until_the_ttl_then_expires() {
     let id = spawned.info.id.clone();
     let instance = manager.get(&id).expect("tracked");
     wait_for_exit(&instance).await;
+    wait_for_output_published(&instance).await;
     assert!(instance.exited_for().is_some());
 
     // Within the TTL it stays tracked and a late client replays its output.
