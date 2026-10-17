@@ -79,6 +79,11 @@ pub struct SessionPayloadMetadata {
     /// Additive: older clients ignore the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_active: Option<bool>,
+    /// How the LAST turn failed, when it ended in an `error`, `timeout` or
+    /// `crashed` terminator and nothing newer (a prompt or an agent switch)
+    /// followed. A client rebuilds its error banner from it on reopen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_turn_error: Option<LastTurnError>,
     /// Worktree the chat runs in (CAP-4/6). Carried through the materialized
     /// payload so history reopen + post-reload resume preserve the worktree
     /// binding the agent reattaches to.
@@ -91,6 +96,21 @@ pub struct SessionPayloadMetadata {
     pub model_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
+}
+
+/// The failure behind the last turn's terminator. `message` and the rest
+/// come from the terminator's `error` field and are absent when the host
+/// recorded none (a `crashed` terminator, or a log from an older host).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTurnError {
+    pub stop_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
 }
 
 /// The renderer `ChatMessage` shape. camelCase keys; `seq` always present
@@ -260,6 +280,7 @@ pub fn materialize_session_payload(
         // persists no terminal record, so the prompt stays unmatched but
         // the turn is dead — reporting it active would be self-inconsistent).
         turn_active: payload_turn_active(&metadata.status, records),
+        last_turn_error: last_turn_error(records),
         worktree_path: metadata.worktree_path.clone(),
         worktree_branch: metadata.worktree_branch.clone(),
         model_id: metadata.model_id.clone(),
@@ -438,6 +459,41 @@ fn payload_turn_active(
         // Open but unnameable: the client derives it from the transcript tail.
         Some(_) => None,
     }
+}
+
+/// The last turn's failure: the newest turn boundary (`user_prompt`,
+/// `prompt_complete` or `agent_switch`) must be a failed terminator. A newer
+/// prompt or switch means the failure is no longer the chat's current state.
+fn last_turn_error(records: &[PersistedEventRecord]) -> Option<LastTurnError> {
+    let boundary = records.iter().rev().find(|record| {
+        matches!(
+            record.type_.as_str(),
+            "user_prompt" | "prompt_complete" | "agent_switch"
+        )
+    })?;
+    if boundary.type_ != "prompt_complete" {
+        return None;
+    }
+    let payload = &boundary.payload;
+    let stop_reason = payload.get("stopReason")?.as_str()?;
+    if !matches!(stop_reason, "error" | "timeout" | "crashed") {
+        return None;
+    }
+    let error = payload.get("error");
+    let text = |key: &str| {
+        error
+            .and_then(|error| error.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    Some(LastTurnError {
+        stop_reason: stop_reason.to_string(),
+        message: text("message"),
+        code: error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64),
+        provider_code: text("providerCode"),
+    })
 }
 
 /// Outcome of stripping a handoff preamble from a `user_prompt` text block

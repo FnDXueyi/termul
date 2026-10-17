@@ -7,6 +7,7 @@ fn rpc(code: i32, message: &str, data: Option<Value>) -> AcpErrorDetail {
         message: message.to_string(),
         code: Some(code),
         data,
+        rpc_message_len: None,
         timed_out: false,
         connection_closed: false,
     }

@@ -843,6 +843,7 @@ pub(super) async fn run_command_loop(
                             &turn_session,
                             spawn_turn_id,
                             events::TurnFailureStop::Error.into(),
+                            None,
                         );
                     }
                     let _ = accepted.send(Err(error.clone()));

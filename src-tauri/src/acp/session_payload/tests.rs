@@ -961,3 +961,100 @@ fn a_non_active_session_serializes_turn_active_false() {
     let value = serde_json::to_value(&payload.metadata).expect("metadata serializes");
     assert_eq!(value.get("turnActive"), Some(&json!(false)));
 }
+
+// --- issue #1298: the payload names how the last turn failed -----------------
+
+fn wire_last_turn_error(records: &[PersistedEventRecord]) -> Option<Value> {
+    let payload = materialize_session_payload(&metadata(), records);
+    let value = serde_json::to_value(&payload.metadata).expect("metadata serializes");
+    value.get("lastTurnError").cloned()
+}
+
+fn failed_terminator(seq: u64, stop_reason: &str, error: Option<Value>) -> PersistedEventRecord {
+    let mut payload =
+        json!({"sessionId": "session-1", "turnId": "turn-1", "stopReason": stop_reason});
+    if let Some(error) = error {
+        payload["error"] = error;
+    }
+    record(seq, "prompt_complete", payload)
+}
+
+#[test]
+fn a_failed_last_turn_carries_its_error_detail() {
+    let records = vec![
+        user_prompt(1, Some("turn-1"), "this will fail"),
+        failed_terminator(
+            2,
+            "error",
+            Some(json!({
+                "message": "Internal error",
+                "code": -32603,
+                "providerCode": "provider_quota_exceeded",
+            })),
+        ),
+    ];
+    assert_eq!(
+        wire_last_turn_error(&records),
+        Some(json!({
+            "stopReason": "error",
+            "message": "Internal error",
+            "code": -32603,
+            "providerCode": "provider_quota_exceeded",
+        }))
+    );
+}
+
+#[test]
+fn a_failed_terminator_without_detail_still_names_its_stop_reason() {
+    let records = vec![
+        user_prompt(1, Some("turn-1"), "agent died"),
+        failed_terminator(2, "crashed", None),
+    ];
+    assert_eq!(
+        wire_last_turn_error(&records),
+        Some(json!({"stopReason": "crashed"}))
+    );
+}
+
+#[test]
+fn a_timed_out_last_turn_is_a_turn_error() {
+    let records = vec![
+        user_prompt(1, Some("turn-1"), "wedged"),
+        failed_terminator(2, "timeout", Some(json!({"message": "turn idle timeout"}))),
+    ];
+    assert_eq!(
+        wire_last_turn_error(&records),
+        Some(json!({"stopReason": "timeout", "message": "turn idle timeout"}))
+    );
+}
+
+#[test]
+fn a_successful_last_turn_has_no_turn_error() {
+    let records = vec![
+        user_prompt(1, Some("turn-1"), "hi"),
+        chunk(2, "agent", "hello"),
+        prompt_complete(3, "turn-1"),
+    ];
+    assert_eq!(wire_last_turn_error(&records), None);
+    assert_eq!(wire_last_turn_error(&[]), None);
+}
+
+#[test]
+fn a_newer_prompt_or_switch_retires_the_earlier_failure() {
+    let failed = failed_terminator(2, "error", Some(json!({"message": "Internal error"})));
+    let retried = vec![
+        user_prompt(1, Some("turn-1"), "fails"),
+        failed.clone(),
+        user_prompt(3, Some("turn-2"), "try again"),
+    ];
+    assert_eq!(wire_last_turn_error(&retried), None);
+
+    let later_success = vec![
+        user_prompt(1, Some("turn-1"), "fails"),
+        failed,
+        user_prompt(3, Some("turn-2"), "try again"),
+        chunk(4, "agent", "ok"),
+        prompt_complete(5, "turn-2"),
+    ];
+    assert_eq!(wire_last_turn_error(&later_success), None);
+}

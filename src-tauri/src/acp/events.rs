@@ -701,6 +701,24 @@ pub struct PromptCompleteEvent {
     /// desktop payloads when unset).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// The failure behind an `error` or `timeout` terminator, so the durable
+    /// record can rebuild the error banner after a reload. Absent for every
+    /// terminator that has no error detail of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnErrorSummary>,
+}
+
+/// The part of a failed turn's `acp:agent_error` that its durable terminator
+/// keeps. No `data`: it is agent-authored and unbounded, and the log's
+/// key-name redaction cannot see a secret inside an arbitrary value.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnErrorSummary {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<&'static str>,
 }
 
 /// An error flattened for the manager's `Err(String)` / event boundaries while
@@ -714,6 +732,11 @@ pub struct AcpErrorDetail {
     pub message: String,
     pub code: Option<i32>,
     pub data: Option<serde_json::Value>,
+    /// Byte length of the RPC error's own message (its code when empty) at
+    /// the start of `message`, which `Display` follows with any `data`.
+    /// `None` for non-RPC failures. A length, not a copy, keeps the type
+    /// under clippy's `result_large_err` size.
+    pub rpc_message_len: Option<u32>,
     /// Typed marker for an idle/hard turn deadline (set only by
     /// `From<TurnTimeout>`); the turn terminator is `timeout` instead of
     /// `error`. Never derived from the message text.
@@ -731,6 +754,12 @@ impl From<&agent_client_protocol::Error> for AcpErrorDetail {
             message: error.to_string(),
             code: Some(i32::from(error.code)),
             data: error.data.clone(),
+            rpc_message_len: u32::try_from(if error.message.is_empty() {
+                i32::from(error.code).to_string().len()
+            } else {
+                error.message.len()
+            })
+            .ok(),
             timed_out: false,
             connection_closed: agent_client_protocol::is_incoming_transport_closed(error),
         }
@@ -749,6 +778,7 @@ impl From<String> for AcpErrorDetail {
             message,
             code: None,
             data: None,
+            rpc_message_len: None,
             timed_out: false,
             connection_closed: false,
         }
@@ -764,9 +794,19 @@ impl AcpErrorDetail {
             message: generic_message.to_string(),
             code: None,
             data: None,
+            rpc_message_len: None,
             timed_out: self.timed_out,
             connection_closed: self.connection_closed,
         }
+    }
+
+    /// The RPC error's own message without the `data` that `message`
+    /// appends, else the whole message.
+    #[must_use]
+    pub fn rpc_message(&self) -> &str {
+        self.rpc_message_len
+            .and_then(|len| self.message.get(..len as usize))
+            .unwrap_or(&self.message)
     }
 
     /// The host terminator for a turn that ended with this error.

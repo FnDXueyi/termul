@@ -2630,6 +2630,72 @@ fn failed_turn_emits_agent_error_then_one_terminator() {
     assert_eq!(done[0].1["turnId"], "t1");
     assert_eq!(done[1].1["stopReason"], "error");
     assert!(done[1].1.get("turnId").is_none());
+    assert_eq!(
+        done[0].1["error"]["message"],
+        "turn idle timeout: no agent activity for 5s"
+    );
+    assert_eq!(done[1].1["error"]["message"], "rpc failed");
+}
+
+fn failed_turn_terminator(error: agent_client_protocol::Error) -> serde_json::Value {
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    emit_turn_outcome(
+        &sinks,
+        &AgentId("a1".to_string()),
+        &SessionId::new("s1"),
+        Some("t1".to_string()),
+        &Err(events::AcpErrorDetail::from(error)),
+    );
+    let mut done = terminators(&sink);
+    assert_eq!(done.len(), 1);
+    done.remove(0).1
+}
+
+/// Issue #1298 review: the terminator is durable and replayed on reopen, so it
+/// keeps the RPC error's own message and code, never the `data` that the
+/// error's `Display` appends to the live `agent_error` message.
+#[test]
+fn a_failed_turn_terminator_keeps_no_secret_from_the_error_data() {
+    let error = agent_client_protocol::Error::new(-32603, "Internal error")
+        .data(serde_json::json!({"headers": {"authorization": "Bearer sk-test"}}));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"],
+        serde_json::json!({"message": "Internal error", "code": -32603})
+    );
+    assert!(!terminator.to_string().contains("sk-test"), "{terminator}");
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_secret_in_the_error_message() {
+    let error =
+        agent_client_protocol::Error::new(-32603, "upstream said Bearer abcdefgh12345678 expired");
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream said Bearer [redacted] expired"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_cookie_in_the_error_message() {
+    let error = agent_client_protocol::Error::new(
+        -32603,
+        "upstream 401, sent Cookie: sid=9f82b5e7c4a69130; theme=dark",
+    );
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream 401, sent Cookie: [redacted]"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_caps_a_huge_error_message() {
+    let error = agent_client_protocol::Error::new(-32603, "x".repeat(100 * 1024));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(terminator["error"]["message"], "x".repeat(1_000));
 }
 
 /// Connection teardown with active turns: one `crashed` terminator per
