@@ -119,7 +119,19 @@ fn sweep_removes_only_dirs_whose_host_died() {
     std::fs::create_dir(&legacy).unwrap();
     std::fs::write(legacy.join("xdg-open"), SHIM_SCRIPT).unwrap();
 
-    sweep_stale_host_dirs(&root);
+    // Another test thread that forks while `drop(dead)` runs inherits the
+    // lock's file description until its exec, so a sweep in that window sees
+    // the dead host's lock as held and correctly skips it. The lock is free
+    // for good once those children exec, so sweep until the dir is gone.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while dead_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dead host's dir was never swept"
+        );
+        sweep_stale_host_dirs(&root);
+        std::thread::sleep(Duration::from_millis(10));
+    }
     sweep_stale_host_dirs(&root);
 
     let mut left: Vec<PathBuf> = std::fs::read_dir(&root)
