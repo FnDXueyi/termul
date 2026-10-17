@@ -62,6 +62,7 @@ use crate::web::store::WebStore;
 mod access;
 mod agents;
 pub mod channel;
+mod chat_reads;
 mod claude_accounts;
 mod commands;
 mod dispatch;
@@ -79,6 +80,7 @@ mod watch;
 // for `tests.rs`' `use super::*` without widening visibility past `ws`.
 use access::*;
 use agents::*;
+use chat_reads::*;
 use claude_accounts::*;
 use commands::*;
 use dispatch::*;
@@ -784,6 +786,8 @@ mod project_binding_tests;
 mod project_command_tests;
 #[cfg(test)]
 mod provider_error_tests;
+#[cfg(test)]
+mod registry_check_tests;
 #[cfg(test)]
 mod spawn_rejection_tests;
 #[cfg(test)]

@@ -13,6 +13,7 @@ import type {
 import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AddProjectPayload,
+  type ChatReadMark,
   type HistoryMode,
   type PersistedSessionSummary,
   type ProjectBusyDetails,
@@ -33,6 +34,7 @@ import type {
   NewSessionOutcome,
   ProbeResult,
   PromptDispatchResult,
+  RegistryCheckReason,
   SessionConfigOption,
   SessionId,
   SessionReopenOutcome,
@@ -209,7 +211,7 @@ export interface AcpTransport {
    * `setting`, or `default`.
    */
   getAgentIdleWindow(): Promise<AgentIdleWindowStatus>
-  fetchRegistrySnapshot(forceRefresh?: boolean): Promise<AcpRegistrySnapshot>
+  fetchRegistrySnapshot(reason: RegistryCheckReason): Promise<AcpRegistrySnapshot>
   /**
    * On-demand MCP client probe (Termul's own rmcp client connection — NOT the
    * agent's). Stateless: takes the renderer-supplied wire config, opens a fresh
@@ -433,6 +435,13 @@ export interface AcpTransport {
    * `/ws` over its Channel too.
    */
   readonly watches?: WatchClient
+  /**
+   * Tell the host this surface read `sessionId` up to `seq` (the newest turn
+   * end it showed) of the log incarnation `logEpoch`. Resolves to the shared
+   * marker as it stands; every `chat_reads` watcher hears when it moves. WS:
+   * `mark_chat_read`.
+   */
+  markChatRead?(sessionId: SessionId, seq: number, logEpoch: string | null): Promise<ChatReadMark>
   historyMode?(): HistoryMode | 'tauri_store'
   listPersistedSessions?(): Promise<PersistedSessionSummary[]>
   openPersistedSession?(sessionId: SessionId, lastSeq?: number): Promise<void>
@@ -486,7 +495,8 @@ export interface AcpTransport {
   setRecoveryHandler?(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-      reopenGeneration?: number
+      reopenGeneration?: number,
+      logEpochChanged?: boolean
     ) => Promise<void>
   ): void
   /**

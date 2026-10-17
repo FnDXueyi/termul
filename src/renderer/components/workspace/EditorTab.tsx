@@ -1,15 +1,11 @@
 import { useShallow } from 'zustand/shallow'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
 import { fileNeedsAttention } from '@/lib/editor-file-attention'
+import { basename } from '@/lib/path-basename'
 import { useEditorStore } from '@/stores/editor-store'
 import { type TabBulkMenuProps, TabContextMenu } from './tab-context-menu'
 import { TabChrome } from './tabs/tab-chrome'
 import type { TabInlineProps } from './tabs/types'
-
-function getBasename(filePath: string): string {
-  const parts = filePath.split(/[\\/]/)
-  return parts[parts.length - 1] || filePath
-}
 
 export interface EditorTabProps extends TabInlineProps {
   tab: { type: 'editor'; id: string; filePath: string }
@@ -34,7 +30,7 @@ export function EditorTab({
   onDragLeave,
   onDrop
 }: EditorTabProps): React.JSX.Element {
-  const fileName = getBasename(tab.filePath)
+  const fileName = basename(tab.filePath)
 
   const { isDirty, operationStatus } = useEditorStore(
     useShallow((state) => {

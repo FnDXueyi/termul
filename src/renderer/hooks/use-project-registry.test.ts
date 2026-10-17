@@ -1,7 +1,8 @@
+import type { IpcResult } from '@shared/types/ipc.types'
 import type { ProjectPrefsRecord } from '@shared/types/persistence.types'
 import type { ProjectListPayload, ProjectSummary } from '@shared/types/web-projects.types'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const h = vi.hoisted(() => {
   const store = new Map<string, unknown>()
@@ -9,6 +10,7 @@ const h = vi.hoisted(() => {
   return {
     store,
     calls,
+    heldWrites: null as Array<(result: IpcResult<void>) => void> | null,
     tauri: { value: false },
     subscribe: vi.fn(),
     unwatch: vi.fn(),
@@ -35,9 +37,11 @@ vi.mock('@/lib/api', () => ({
       return { success: true, data: undefined }
     }),
     writeDebounced: vi.fn(async (key: string, data: unknown) => {
+      if (h.heldWrites) return new Promise((resolve) => h.heldWrites?.push(resolve))
       h.store.set(key, data)
       return { success: true, data: undefined }
-    })
+    }),
+    flushPendingWrites: vi.fn(async () => ({ success: true, data: undefined }))
   },
   secureStorageApi: { getSecret: vi.fn(), setSecret: vi.fn(), deleteSecret: vi.fn() },
   filesystemApi: { grantFsScope: h.grantFsScope }
@@ -62,11 +66,12 @@ vi.mock('@/stores/shell-layout-store', () => ({
   useShellLayoutStore: { getState: () => ({ hydrate: h.hydrateShellLayout }) }
 }))
 
-import { persistenceApi } from '@/lib/api'
+import { persistenceApi, secureStorageApi } from '@/lib/api'
+import { CLOSE_WRITE_TIMEOUT_MS, runCloseWriters } from '@/lib/close-flush'
 import { _resetProjectPrefsForTests } from '@/lib/project-prefs'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
-import { useProjectRegistry } from './use-project-registry'
+import { PREFS_SAVE_RETRY_MS, useProjectRegistry } from './use-project-registry'
 
 function summary(id: string, extra: Partial<ProjectSummary> = {}): ProjectSummary {
   return {
@@ -111,6 +116,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   h.store.clear()
   h.calls.length = 0
+  h.heldWrites = null
   h.tauri.value = false
   h.subscribe.mockReturnValue(h.unwatch)
   h.importLegacyProjects.mockResolvedValue('skipped')
@@ -312,6 +318,243 @@ describe('useProjectRegistry', () => {
       // Longer than the first retry delay: a live hook would read the prefs again by now.
       await new Promise((resolve) => setTimeout(resolve, 800))
       expect(prefsReads()).toBe(1)
+    })
+  })
+
+  describe('prefs save failure', () => {
+    afterEach(() => vi.useRealTimers())
+
+    function savedGroupNames(): string[] | undefined {
+      return (h.store.get('project-prefs') as ProjectPrefsRecord | undefined)?.groups.map(
+        (g) => g.name
+      )
+    }
+
+    async function mountWithOneProjectSaved(): Promise<ReturnType<typeof renderHook>> {
+      const rendered = await mountAndDeliver(list([summary('a')]))
+      await waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(1))
+      return rendered
+    }
+
+    async function addGroupsOverHeldWrites(names: string[]): Promise<void> {
+      const before = vi.mocked(persistenceApi.writeDebounced).mock.calls.length
+      h.heldWrites = []
+      for (const name of names) act(() => useProjectStore.getState().addGroup(name))
+      await vi.waitFor(() =>
+        expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(before + names.length)
+      )
+    }
+
+    /** The real debounce answers every write it merged with the one result. */
+    async function failHeldWritesTogether(): Promise<void> {
+      const held = h.heldWrites ?? []
+      h.heldWrites = null
+      for (const resolve of held) {
+        resolve({ success: false, code: 'WS_ERROR', error: 'WebSocket closed' })
+      }
+      await vi.advanceTimersByTimeAsync(0)
+    }
+
+    it('saves the group again on its own after the save failed', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Survives the retry'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Survives the retry'])
+    })
+
+    it('retries within the first ladder step when the debounce fails a burst of saves at once', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['One', 'Two', 'Three', 'Four'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['One', 'Two', 'Three', 'Four'])
+    })
+
+    it('writes the newest state when the store changes while a retry is pending', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['First'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      await addGroupsOverHeldWrites(['Second'])
+      await failHeldWritesTogether()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['First', 'Second'])
+    })
+
+    it('keeps the retry of a newer failed save when an older save succeeds after it', async () => {
+      h.tauri.value = true
+      vi.mocked(secureStorageApi.setSecret).mockResolvedValue({ success: true, data: undefined })
+      await mountWithOneProjectSaved()
+      h.heldWrites = []
+      act(() =>
+        useProjectStore.setState({
+          projects: useProjectStore.getState().projects.map((p) => ({
+            ...p,
+            envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+          }))
+        })
+      )
+      await vi.waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2))
+      vi.useFakeTimers()
+      vi.mocked(secureStorageApi.setSecret).mockResolvedValueOnce({
+        success: false,
+        code: 'SECRET_ERROR',
+        error: 'secure storage refused'
+      })
+      act(() => useProjectStore.getState().addGroup('Created while the older save was in flight'))
+      await vi.advanceTimersByTimeAsync(0)
+      const held = h.heldWrites ?? []
+      h.heldWrites = null
+      for (const resolve of held) resolve({ success: true, data: undefined })
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Created while the older save was in flight'])
+    })
+
+    function failNextWrites(count: number): void {
+      for (let i = 0; i < count; i++) {
+        vi.mocked(persistenceApi.writeDebounced).mockResolvedValueOnce({
+          success: false,
+          code: 'WS_ERROR',
+          error: 'WebSocket closed'
+        })
+      }
+    }
+
+    it('retries a newer failed save within the first ladder step while a 30 s retry is pending', async () => {
+      await mountWithOneProjectSaved()
+      vi.useFakeTimers()
+      failNextWrites(4)
+      act(() => useProjectStore.getState().addGroup('Pending'))
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[1])
+      act(() => useProjectStore.getState().addGroup('Newer'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Pending', 'Newer'])
+    })
+
+    it('writes a pending retry at once when the page hides', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on pagehide'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(savedGroupNames()).toEqual(['Saved on pagehide'])
+    })
+
+    it('writes a pending retry at once when the tab turns hidden', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on hide'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      visibility.mockRestore()
+      expect(savedGroupNames()).toEqual(['Saved on hide'])
+    })
+
+    it('writes a save that gave up retrying when the page hides', async () => {
+      await mountWithOneProjectSaved()
+      vi.useFakeTimers()
+      failNextWrites(4)
+      act(() => useProjectStore.getState().addGroup('Gave up'))
+      for (const delay of PREFS_SAVE_RETRY_MS) await vi.advanceTimersByTimeAsync(delay)
+      expect(savedGroupNames()).toEqual([])
+
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(savedGroupNames()).toEqual(['Gave up'])
+    })
+
+    it('writes a pending retry before the window closes', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on quit'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await runCloseWriters()
+      expect(savedGroupNames()).toEqual(['Saved on quit'])
+    })
+
+    it('closes after the time limit when the close-time prefs write hangs', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Never lands'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      vi.mocked(persistenceApi.write).mockImplementationOnce(() => new Promise(() => {}))
+      const closed = vi.fn()
+
+      void runCloseWriters().then(closed)
+      await vi.advanceTimersByTimeAsync(CLOSE_WRITE_TIMEOUT_MS - 1)
+      expect(closed).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(closed).toHaveBeenCalledOnce()
+    })
+
+    it('waits for a save still preparing its record before the window closes', async () => {
+      h.tauri.value = true
+      await mountWithOneProjectSaved()
+      let releaseSecret: () => void = () => {}
+      vi.mocked(secureStorageApi.setSecret).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecret = () => resolve({ success: true, data: undefined })
+          })
+      )
+      act(() =>
+        useProjectStore.setState({
+          projects: useProjectStore.getState().projects.map((p) => ({
+            ...p,
+            envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+          }))
+        })
+      )
+      const closed = vi.fn()
+
+      void runCloseWriters().then(closed)
+      await act(async () => {})
+      expect(closed).not.toHaveBeenCalled()
+      expect(persistenceApi.flushPendingWrites).not.toHaveBeenCalled()
+
+      releaseSecret()
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce())
+      const lastWrite =
+        vi.mocked(persistenceApi.writeDebounced).mock.invocationCallOrder.at(-1) ?? 0
+      expect(
+        vi.mocked(persistenceApi.flushPendingWrites).mock.invocationCallOrder[0]
+      ).toBeGreaterThan(lastWrite)
+    })
+
+    it('writes nothing at close when no save is pending', async () => {
+      await mountWithOneProjectSaved()
+
+      await runCloseWriters()
+      expect(persistenceApi.write).not.toHaveBeenCalled()
+    })
+
+    it('stops retrying a failed save once the hook is unmounted', async () => {
+      const { unmount } = await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Lost with the hook'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      unmount()
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[PREFS_SAVE_RETRY_MS.length - 1])
+      expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2)
+      expect(savedGroupNames()).toEqual([])
     })
   })
 

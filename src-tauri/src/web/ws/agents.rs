@@ -202,6 +202,62 @@ pub(super) async fn handle_set_catalog_opt_in(
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RegistryCheckReason {
+    Manual,
+    Background,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct FetchAcpRegistrySnapshotPayload {
+    reason: RegistryCheckReason,
+}
+
+/// `fetch_acp_registry_snapshot`: the web side of the desktop
+/// `acp_fetch_registry_snapshot` command. Every check forces past the cache
+/// TTL, as the desktop does for both reasons; a failed fetch with a cache on
+/// disk still answers `ok` with `source: "cache"`.
+pub(super) async fn handle_fetch_acp_registry_snapshot(
+    id: String,
+    payload: &Value,
+    acp_catalog: Option<&Arc<crate::acp::AcpCatalogService>>,
+) -> WsReply {
+    let parsed: FetchAcpRegistrySnapshotPayload = match serde_json::from_value(payload.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return WsReply::err_with_code(
+                id,
+                "VALIDATION_ERROR",
+                format!("malformed fetch_acp_registry_snapshot payload (want reason): {e}"),
+            )
+        }
+    };
+    let Some(service) = acp_catalog.cloned() else {
+        return WsReply::err_with_code(
+            id,
+            "ACP_CATALOG_UNAVAILABLE",
+            "acp catalog store is unavailable",
+        );
+    };
+    match service.fetch_registry_snapshot(true).await {
+        Ok(snapshot) => {
+            tracing::info!(
+                reason = ?parsed.reason,
+                source = %snapshot.source,
+                agents = snapshot.agents.len(),
+                "[ws] registry check answered"
+            );
+            ok_with_payload(id, &snapshot)
+        }
+        Err(error) => {
+            tracing::warn!(reason = ?parsed.reason, error = %error, "[ws] registry check failed");
+            WsReply::err_with_code(id, "REGISTRY_FETCH_FAILED", error)
+        }
+    }
+}
+
 // --- CAP-6 / Story 9: ACP install WS handler --------------------------------
 
 /// `install_acp_agent` WS request payload. `deny_unknown_fields` rejects an

@@ -14,11 +14,14 @@
 
 import { buildAgentArgv, type TerminalAgentDefinition } from '@/lib/agents/agent-registry'
 import { terminalApi } from '@/lib/api'
-import { resolveEnvForSpawn } from '@/lib/env-parser'
+import { resolveAgentEnv, resolveEnvForSpawn } from '@/lib/env-parser'
 import { ensureWorktreeSymlinks } from '@/lib/worktree-context'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
+
+/** Re-exported for restore/spawn paths that merge agent env with project env. */
+export { resolveAgentEnv }
 
 export interface LaunchAgentOptions {
   /** Project environment variables for spawn. */
@@ -38,26 +41,6 @@ export interface LaunchAgentResult {
  * decide how to surface errors. On success the pane gains a terminal tab whose
  * foreground process is the agent binary, seeded with `prompt`.
  */
-/** Exported for restore/spawn paths that merge agent env with project env. */
-export function resolveAgentEnv(
-  defEnv: Record<string, string> | undefined,
-  surroundingEnv: Record<string, string>
-): Record<string, string> {
-  if (!defEnv) return {}
-  const out: Record<string, string> = {}
-  for (const [key, raw] of Object.entries(defEnv)) {
-    if (!key.trim()) continue
-    let value = raw
-    if (raw.startsWith('$')) {
-      value = surroundingEnv[raw.slice(1)] ?? ''
-    }
-    if (value !== '') {
-      out[key] = value
-    }
-  }
-  return out
-}
-
 export async function launchAgentInPane(
   paneId: string,
   projectId: string,

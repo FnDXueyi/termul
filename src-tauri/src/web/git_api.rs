@@ -137,7 +137,7 @@ pub struct GitCwdQuery {
     pub cwd: String,
 }
 
-/// `POST /git/branch-switch | branch-create { cwd, name }` body.
+/// `POST /git/branch-switch { cwd, name }` body.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchNameRequest {
@@ -860,25 +860,6 @@ pub async fn branch_switch(
     .await
 }
 
-/// `POST /git/branch-create` — `git checkout -b <name>` (write).
-pub async fn branch_create(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Json(req): Json<GitBranchNameRequest>,
-) -> impl IntoResponse {
-    run_branch_name_write(
-        &state,
-        peer,
-        &headers,
-        req,
-        ("checkout -b", "git_create_branch"),
-        "GIT_BRANCH_CREATE_ERROR",
-        run_simple_checkout_b,
-    )
-    .await
-}
-
 /// [`destructive_op_refusal`] for a checkout run from `cwd`: the target is the
 /// enclosing git work-tree root (a checkout rewrites all of it, whichever
 /// subdirectory the caller named).
@@ -1024,8 +1005,7 @@ async fn run_stash_index_write(
     (StatusCode::OK, Json(body))
 }
 
-/// Run a branch-name write op (`switch`/`create`). `runner` builds the actual
-/// git command for the op (e.g. `checkout` vs `checkout -b`).
+/// Run a branch-name write op. `runner` builds the actual git command for the op.
 async fn run_branch_name_write(
     state: &AppState,
     peer: SocketAddr,
@@ -1035,8 +1015,6 @@ async fn run_branch_name_write(
     code: &'static str,
     runner: fn(&str, &str) -> Result<(), String>,
 ) -> (StatusCode, Json<IpcBody<()>>) {
-    // A branch switch rewrites the work tree; creating a branch does not.
-    let guard_active_turns = kind == "git_branch_switch";
     let resolved = match resolve_cwd::<()>(&req.cwd, state, Some(peer), true) {
         Ok(p) => p,
         Err((st, body)) => return (st, body),
@@ -1045,18 +1023,15 @@ async fn run_branch_name_write(
         Ok(s) => s,
         Err((st, body)) => return (st, body),
     };
-    if guard_active_turns {
-        if let Some(blocked) = checkout_refusal(state, &resolved).await {
-            return blocked;
-        }
+    if let Some(blocked) = checkout_refusal(state, &resolved).await {
+        return blocked;
     }
     let (raw_cwd, req_name) = (req.cwd, req.name);
-    let name_field = if kind == "git_create_branch" { "branch" } else { "name" };
     let body = run_http(
         state.relay.ledger(),
         headers,
         kind,
-        fingerprint_of(kind, &[("cwd", &raw_cwd), (name_field, &req_name)]),
+        fingerprint_of(kind, &[("cwd", &raw_cwd), ("name", &req_name)]),
         no_entity(),
         async move {
             let cwd_for_log = cwd.clone();
@@ -1085,68 +1060,21 @@ async fn run_branch_name_write(
     (StatusCode::OK, Json(body))
 }
 
-/// `git checkout <name>` (branch-switch desktop parity). F-007: the previous
+/// `git checkout <name>` (shared by `POST /git/branch-switch` and the desktop
+/// `git_branch_switch` command). F-007: the previous
 /// local re-implementation built `["checkout", "--", name]`, which makes
 /// `name` a PATHSPEC, not a branch — the switch never happened, and a branch
 /// name colliding with a worktree path silently reverted that file's local
-/// changes and returned success. The fix refuses any `name` that is not a
-/// resolvable branch ref BEFORE running git, so git's pathspec fallback can
-/// never trigger: `checkout <name>` with a non-branch name is an error, not a
-/// file revert.
-fn run_simple_checkout(cwd: &str, name: &str) -> Result<(), String> {
-    let Some(is_remote) = resolve_branch_ref(cwd, name)? else {
-        return Err(format!(
-            "'{name}' is not a branch; refusing checkout (a branch switch must target a branch, not a pathspec)"
-        ));
-    };
+/// changes and returned success. `git_checkout_branch` refuses any `name` that
+/// is not an existing branch ref BEFORE running git, so git's pathspec
+/// fallback can never trigger. A name that resolves to no branch takes the
+/// local path and is refused there.
+pub(crate) fn run_simple_checkout(cwd: &str, name: &str) -> Result<(), String> {
     // Remote-tracking refs (e.g. `origin/feature`) must go through
     // `--track` so git creates a local tracking branch — a plain
     // `checkout <remote-ref>` lands in detached HEAD instead.
+    let is_remote = git_tracker::resolve_branch_ref(cwd, name)?.unwrap_or(false);
     git_tracker::git_checkout_branch(cwd, name, is_remote)
-}
-
-/// `git checkout -b <name>` (branch-create desktop parity). F-008: the
-/// previous local re-implementation built `["checkout", "-b", "--", name]` —
-/// `-b` consumes `--` as the branch name and `name` as the start ref, so the
-/// route could NEVER succeed (git: "a branch '--' cannot be created"). The
-/// fix delegates to the SAME [`git_tracker::git_create_branch`] the desktop
-/// `git_create_branch` command calls, after refusing option-shaped names
-/// (`--detach` & co. would be parsed as flags — no legitimate branch starts
-/// with `-`, git's check-ref-format rejects it).
-fn run_simple_checkout_b(cwd: &str, name: &str) -> Result<(), String> {
-    if name.trim().is_empty() || name.starts_with('-') {
-        return Err(format!(
-            "invalid branch name '{name}': branch names must be non-empty and must not start with '-'"
-        ));
-    }
-    git_tracker::git_create_branch(cwd, name, None)
-}
-
-/// Whether `name` resolves as a branch ref in the repo at `cwd`, and if so
-/// whether it is remote-tracking. Returns `Some(false)` for a local branch
-/// (`refs/heads/<name>`), `Some(true)` for a remote-tracking branch
-/// (`refs/remotes/<name>`), `None` for anything else. Local wins when both
-/// exist (mirrors `git checkout <name>` ambiguity resolution). Refuses
-/// option-shaped names and anything git would treat as a pathspec instead of
-/// a ref. Uses `--verify` + `--quiet` with the fully-qualified ref so no
-/// ambiguity with worktree files is possible and no ref-name can be parsed
-/// as an option.
-fn resolve_branch_ref(cwd: &str, name: &str) -> Result<Option<bool>, String> {
-    if name.trim().is_empty() || name.starts_with('-') {
-        return Ok(None);
-    }
-    for (ref_name, is_remote) in [
-        (format!("refs/heads/{name}"), false),
-        (format!("refs/remotes/{name}"), true),
-    ] {
-        let output =
-            GitTracker::run_git_command(cwd, &["rev-parse", "--verify", "--quiet", &ref_name])
-                .ok_or_else(|| "Failed to run git rev-parse".to_string())?;
-        if output.status.success() {
-            return Ok(Some(is_remote));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

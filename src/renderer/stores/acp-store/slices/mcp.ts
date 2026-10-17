@@ -87,6 +87,75 @@ function sameProbeConfig(a: StoredMcpServer, b: StoredMcpServer): boolean {
 
 type McpSliceCreator = StateCreator<AcpState, [], [], McpSliceState>
 
+type McpProbeState = Pick<
+  AcpState,
+  'mcpProbeStatus' | 'mcpTools' | 'mcpToolsLoaded' | 'mcpProbing' | 'mcpProbeError'
+>
+
+function omitKey<V>(record: Record<string, V>, id: string): Record<string, V> {
+  const { [id]: _dropped, ...rest } = record
+  return rest
+}
+
+function withoutProbeState(s: McpProbeState, id: string): McpProbeState {
+  return {
+    mcpProbeStatus: omitKey(s.mcpProbeStatus, id),
+    mcpTools: omitKey(s.mcpTools, id),
+    mcpToolsLoaded: omitKey(s.mcpToolsLoaded, id),
+    mcpProbing: omitKey(s.mcpProbing, id),
+    mcpProbeError: omitKey(s.mcpProbeError, id)
+  }
+}
+
+// Per-id count of completed deletions. Absence from `mcpServers` alone does not
+// mean deleted: a web project switch swaps in another project's list. A probe
+// or OAuth call compares the count across its await, so a deleted id's result
+// never lands, even on a server re-added under the same id.
+const deletionCounts = new Map<string, number>()
+
+export function mcpServerDeletionCount(id: string): number {
+  return deletionCounts.get(id) ?? 0
+}
+
+function deletionGuard(id: string): () => boolean {
+  const before = mcpServerDeletionCount(id)
+  return () => mcpServerDeletionCount(id) !== before
+}
+
+// Ids whose in-flight probe started before an OAuth sign-in or sign-out
+// finished, so its result is stale. The host joins identical in-flight probes,
+// so the fresh probe can only start once this one ends.
+const reprobeAfterInFlight = new Set<string>()
+
+function probeAfterInFlight(get: Parameters<McpSliceCreator>[1], id: string): Promise<void> {
+  if (get().mcpProbing[id]) {
+    reprobeAfterInFlight.add(id)
+    return Promise.resolve()
+  }
+  return get().probeMcpServer(id)
+}
+
+// Returns null when a finished probe of `probed` should write its result.
+// Otherwise the result is dropped: a server deleted mid-probe stays cleared,
+// and a server whose config was edited or whose OAuth state changed is
+// probed again.
+function settleStaleProbe(
+  set: Parameters<McpSliceCreator>[0],
+  get: Parameters<McpSliceCreator>[1],
+  probed: StoredMcpServer,
+  wasDeleted: () => boolean
+): Promise<void> | null {
+  const { id } = probed
+  const reprobe = reprobeAfterInFlight.delete(id)
+  const deleted = wasDeleted()
+  const current = get().mcpServers.find((s) => s.id === id)
+  if (!current) return deleted ? Promise.resolve() : null
+  if (!reprobe && sameProbeConfig(current, probed)) return null
+  set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
+  if (current.enabled === false) return Promise.resolve()
+  return get().probeMcpServer(id)
+}
+
 function reprobeEditedServer(
   set: Parameters<McpSliceCreator>[0],
   get: Parameters<McpSliceCreator>[1],
@@ -209,6 +278,12 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         })
         throw err
       }
+      deletionCounts.set(id, mcpServerDeletionCount(id) + 1)
+      set((s) => ({
+        ...withoutProbeState(s, id),
+        mcpOAuthConnected: omitKey(s.mcpOAuthConnected, id),
+        mcpOAuthConnecting: omitKey(s.mcpOAuthConnecting, id)
+      }))
     }),
 
   // OpenPencil canvas mode (CAP-2 / AD-5): one persisted http entry per
@@ -313,16 +388,12 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     if (get().mcpProbing[id]) return
     const server = get().mcpServers.find((s) => s.id === id)
     if (!server) return
+    const deleted = deletionGuard(id)
     set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: true } }))
     try {
       const result: ProbeResult = await acpApi.probeMcpServer(probeConfigOf(server))
-      const current = get().mcpServers.find((s) => s.id === id)
-      const configEditedDuringProbe = current !== undefined && !sameProbeConfig(current, server)
-      if (configEditedDuringProbe) {
-        set((s) => ({ mcpProbing: { ...s.mcpProbing, [id]: false } }))
-        if (current.enabled === false) return
-        return get().probeMcpServer(id)
-      }
+      const stale = settleStaleProbe(set, get, server, deleted)
+      if (stale) return stale
       set((s) => ({
         mcpProbeStatus: { ...s.mcpProbeStatus, [id]: result.status },
         mcpTools: { ...s.mcpTools, [id]: result.tools },
@@ -336,6 +407,12 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         }
       }))
     } catch (err) {
+      void logFrontendError({
+        source: 'acp-store.probeMcpServer',
+        message: `MCP probe failed for server '${server.name}' (${String(err)})`
+      })
+      const stale = settleStaleProbe(set, get, server, deleted)
+      if (stale) return stale
       // Transport/parse failure (NOT a disconnected probe — that's a
       // `status:'disconnected'` ProbeResult, not a throw). Surface the
       // failure in the dot + log WITHOUT env/header values, tokens, or
@@ -352,10 +429,6 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         mcpProbing: { ...s.mcpProbing, [id]: false },
         mcpProbeError: { ...s.mcpProbeError, [id]: undefined }
       }))
-      void logFrontendError({
-        source: 'acp-store.probeMcpServer',
-        message: `MCP probe failed for server '${server.name}' (${String(err)})`
-      })
     }
   },
 
@@ -371,6 +444,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     if (!server) return
     const url = (server as Extract<StoredMcpServer, { type: 'http' | 'sse' }>).url
     if (!url) return
+    const deleted = deletionGuard(id)
     set((s) => ({ mcpOAuthConnecting: { ...s.mcpOAuthConnecting, [id]: true } }))
     void logFrontendError({
       source: 'acp-store.connectMcpOAuth',
@@ -381,6 +455,7 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
       // startMcpOAuth now blocks until the token is stored (desktop: the
       // Tauri command blocks; web: polls the status endpoint). Setting
       // connected state here is correct — the token is confirmed.
+      if (deleted()) return
       set((s) => ({
         mcpOAuthConnected: { ...s.mcpOAuthConnected, [id]: true },
         mcpOAuthConnecting: { ...s.mcpOAuthConnecting, [id]: false }
@@ -390,9 +465,9 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
         message: `OAuth token confirmed for server '${server.name}'`
       })
       // Re-probe now that we have a token — should succeed.
-      await get().probeMcpServer(id)
+      await probeAfterInFlight(get, id)
     } catch (err) {
-      set((s) => ({ mcpOAuthConnecting: { ...s.mcpOAuthConnecting, [id]: false } }))
+      if (!deleted()) set((s) => ({ mcpOAuthConnecting: { ...s.mcpOAuthConnecting, [id]: false } }))
       void logFrontendError({
         source: 'acp-store.connectMcpOAuth',
         message: `OAuth flow failed for server '${server.name}' (${String(err)})`
@@ -406,8 +481,10 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     if (!server) return
     const url = (server as Extract<StoredMcpServer, { type: 'http' | 'sse' }>).url
     if (!url) return
+    const deleted = deletionGuard(id)
     try {
       const hasToken = await acpApi.hasMcpOAuthToken(projectId, url)
+      if (deleted()) return
       set((s) => ({ mcpOAuthConnected: { ...s.mcpOAuthConnected, [id]: hasToken } }))
     } catch {
       // Best-effort — the probe will still detect authRequired.
@@ -419,15 +496,17 @@ export const createMcpSlice: McpSliceCreator = (set, get) => ({
     if (!server) return
     const url = (server as Extract<StoredMcpServer, { type: 'http' | 'sse' }>).url
     if (!url) return
+    const deleted = deletionGuard(id)
     try {
       await acpApi.disconnectMcpOAuth(projectId, url)
+      if (deleted()) return
       set((s) => ({ mcpOAuthConnected: { ...s.mcpOAuthConnected, [id]: false } }))
       void logFrontendError({
         source: 'acp-store.disconnectMcpOAuth',
         message: `OAuth disconnect completed for server '${server.name}'`
       })
       // Re-probe — should return authRequired again.
-      await get().probeMcpServer(id)
+      await probeAfterInFlight(get, id)
     } catch (err) {
       void logFrontendError({
         source: 'acp-store.disconnectMcpOAuth',

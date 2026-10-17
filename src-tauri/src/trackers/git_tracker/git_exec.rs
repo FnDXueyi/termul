@@ -1,16 +1,9 @@
-//! Drained, capped, time-limited git runs shared by the read-only services
-//! (`diff_stat`, `commit_detail`, the history log).
-//!
-//! `GitTracker::run_git_command*` polls `try_wait()` without reading the pipes,
-//! so output past the pipe buffer (~64 KB) blocks git until the timeout kills
-//! it. [`run_git_capture`] drains stdout and stderr on helper threads instead,
-//! so large output never stalls the child.
-//!
 //! File contents are never logged here.
 
 use super::*;
 
 use std::io::Read;
+use std::sync::mpsc;
 
 /// Object id of git's well-known empty tree in a SHA-1 repository; the diff
 /// base when there is no commit to diff against.
@@ -77,8 +70,6 @@ pub(super) fn git_stdout(
     }
 }
 
-/// Spawn git, drain stdout/stderr on helper threads (so large output cannot
-/// fill the pipe and stall the child), and kill it after `timeout_ms`.
 pub(super) fn run_git_capture(
     cwd: &str,
     cap: StdoutCap,
@@ -91,38 +82,117 @@ pub(super) fn run_git_capture(
         .current_dir(cwd)
         // Read-only: never take the index lock for an opportunistic refresh.
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|e| GitRunError::GitUnavailable(e.to_string()))?;
+        .stdin(Stdio::null());
+    let child =
+        spawn_git(&mut command, cap).map_err(|e| GitRunError::GitUnavailable(e.to_string()))?;
+    child.wait(timeout_ms).map_err(|error| match error {
+        GitWaitError::TimedOut => GitRunError::GitUnavailable(format!(
+            "git {} timed out",
+            args.first().copied().unwrap_or("")
+        )),
+        GitWaitError::Io(e) => GitRunError::GitUnavailable(e.to_string()),
+    })
+}
 
+/// How long to keep reading git's pipes after git exits. Everything git wrote
+/// is already in the pipe buffer by then, so this only covers scheduling the
+/// drain threads; it is spent in full only when a process git started (a hook's
+/// background job) inherited the pipes and keeps them open.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+pub(super) struct GitChild {
+    child: std::process::Child,
+    #[cfg(windows)]
+    job: Option<crate::process_util::KillOnCloseJob>,
+    stdout: Drain,
+    stderr: Drain,
+}
+
+#[derive(Debug)]
+pub(super) enum GitWaitError {
+    TimedOut,
+    Io(std::io::Error),
+}
+
+/// Spawn `command` with stdout and stderr drained on helper threads, so
+/// output past the pipe buffer never blocks git, keeping stdout per `cap`.
+pub(super) fn spawn_git(command: &mut Command, cap: StdoutCap) -> std::io::Result<GitChild> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // `PATH` usually resolves Git for Windows' `cmd\git.exe` launcher, which
+    // runs the real `mingw64\bin\git.exe` (and ssh or credential helpers) as
+    // children, so a timeout must kill the job, not just the child.
+    #[cfg(windows)]
+    let job = {
+        use std::os::windows::io::AsRawHandle as _;
+        crate::process_util::KillOnCloseJob::new_assigned(child.as_raw_handle(), "git", true)
+    };
     let stdout = drain_capped(child.stdout.take(), cap);
     let stderr = drain_capped(child.stderr.take(), StdoutCap::Unbounded);
-
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(GitRunError::GitUnavailable(format!(
-                    "git {} timed out",
-                    args.first().copied().unwrap_or("")
-                )));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return Err(GitRunError::GitUnavailable(e.to_string())),
-        }
-    };
-
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+    Ok(GitChild {
+        child,
+        #[cfg(windows)]
+        job,
+        stdout,
+        stderr,
     })
+}
+
+impl GitChild {
+    pub(super) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub(super) fn wait(mut self, timeout_ms: u64) -> Result<std::process::Output, GitWaitError> {
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() >= deadline => {
+                    self.kill_tree();
+                    return Err(GitWaitError::TimedOut);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => return Err(GitWaitError::Io(e)),
+            }
+        };
+        // Whatever git left running (its fsmonitor daemon) is meant to
+        // outlive it.
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.close_without_killing();
+        }
+        let grace_end = Instant::now() + DRAIN_GRACE;
+        let stdout = self.stdout.collect_until(grace_end);
+        let stderr = self.stderr.collect_until(grace_end);
+        if !(stdout.reached_eof && stderr.reached_eof) {
+            log::warn!(
+                "[GitTracker] git exited but a process it started still holds its output \
+                 pipes; returning the output read within {}ms",
+                DRAIN_GRACE.as_millis()
+            );
+        }
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        })
+    }
+
+    fn kill_tree(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            if let Err(error) = job.terminate() {
+                log::warn!(
+                    "[GitTracker] TerminateJobObject failed; git helpers may survive: {error}"
+                );
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// How much of a child's stdout to retain while it is drained.
@@ -138,29 +208,53 @@ pub(super) enum StdoutCap {
     Bytes(usize),
 }
 
+/// A pipe being drained on a helper thread: the retained chunks arrive in
+/// order, and the channel disconnects when the pipe reaches EOF.
+pub(super) struct Drain(mpsc::Receiver<Vec<u8>>);
+
+pub(super) struct Drained {
+    pub(super) bytes: Vec<u8>,
+    pub(super) reached_eof: bool,
+}
+
+impl Drain {
+    /// The output retained by `deadline`. Dropping the drain early leaves its
+    /// thread reading and discarding until every holder of the pipe exits.
+    pub(super) fn collect_until(self, deadline: Instant) -> Drained {
+        let mut bytes = Vec::new();
+        let reached_eof = loop {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match self.0.recv_timeout(wait) {
+                Ok(chunk) => bytes.extend_from_slice(&chunk),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break true,
+                Err(mpsc::RecvTimeoutError::Timeout) => break false,
+            }
+        };
+        Drained { bytes, reached_eof }
+    }
+}
+
 /// Drain `pipe` to EOF on a helper thread, retaining output per `cap`.
-pub(super) fn drain_capped<R: Read + Send + 'static>(
-    pipe: Option<R>,
-    cap: StdoutCap,
-) -> std::thread::JoinHandle<Vec<u8>> {
+pub(super) fn drain_capped<R: Read + Send + 'static>(pipe: Option<R>, cap: StdoutCap) -> Drain {
+    let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut kept = Vec::new();
         let Some(mut pipe) = pipe else {
-            return kept;
+            return;
         };
         let mut chunk = [0u8; 8192];
+        let mut kept = 0usize;
         let mut paths = 0usize;
-        let mut full = false;
+        let mut discard = false;
         loop {
             let n = match pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => n,
             };
-            if full {
+            if discard {
                 continue;
             }
-            match cap {
-                StdoutCap::Unbounded => kept.extend_from_slice(&chunk[..n]),
+            let end = match cap {
+                StdoutCap::Unbounded => n,
                 StdoutCap::NulPaths(max) => {
                     let mut end = n;
                     for (idx, byte) in chunk[..n].iter().enumerate() {
@@ -168,20 +262,26 @@ pub(super) fn drain_capped<R: Read + Send + 'static>(
                             paths += 1;
                             if paths >= max {
                                 end = idx + 1;
-                                full = true;
+                                discard = true;
                                 break;
                             }
                         }
                     }
-                    kept.extend_from_slice(&chunk[..end]);
+                    end
                 }
                 StdoutCap::Bytes(max) => {
-                    let take = n.min(max - kept.len());
-                    kept.extend_from_slice(&chunk[..take]);
-                    full = kept.len() >= max;
+                    let take = n.min(max - kept);
+                    discard = kept + take >= max;
+                    take
                 }
+            };
+            kept += end;
+            // Once the waiter has gone, keep reading so a process still
+            // holding the pipe never blocks or dies on a closed pipe.
+            if end > 0 && sender.send(chunk[..end].to_vec()).is_err() {
+                discard = true;
             }
         }
-        kept
-    })
+    });
+    Drain(receiver)
 }

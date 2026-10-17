@@ -33,7 +33,9 @@ import {
 } from './acp-transport/ws-transport-timing'
 import { entityKeyOf, runIpcCommand } from './ipc/http'
 import { logFrontendError } from './log-api'
+import { recoverLostRotation } from './terminal-claim-recovery'
 import { terminalCursorEpoch } from './terminal-cursor'
+import { trackTerminalKill } from './terminal-kill-requests'
 import { randomUUID } from './uuid'
 import { getWebAuthToken } from './web-auth-token'
 import { buildAuthenticatePayload } from './web-client-identity'
@@ -1400,24 +1402,6 @@ function killTerminal(terminalId: string): Promise<IpcResult<void>> {
   })
 }
 
-/**
- * A rotate whose first run applied but whose reply (the new claim) is gone:
- * `list_preserved` re-issues a claim for the terminal and the client adopts it.
- * Needs the project the terminal was spawned for; otherwise the failure stands.
- */
-async function recoverRotatedClaim(
-  terminalId: string,
-  unknown: IpcResult<RotatedClaim>
-): Promise<IpcResult<RotatedClaim>> {
-  const projectId = client.terminalProject(terminalId)
-  if (!projectId) return unknown
-  const listed = await listPreservedAndAdoptClaims(projectId)
-  const entry = listed.success ? listed.data.find((item) => item.id === terminalId) : undefined
-  if (!entry?.claim) return unknown
-  client.severClaim(terminalId, entry.claim)
-  return { success: true, data: { claim: entry.claim } }
-}
-
 export function createWebTerminalApi(): TerminalApi {
   return {
     async spawn(options: TerminalSpawnOptions = {}): Promise<IpcResult<SpawnedTerminal>> {
@@ -1469,20 +1453,19 @@ export function createWebTerminalApi(): TerminalApi {
         send: (commandId) =>
           client.request<RotatedClaim>('rotate_claim', { terminalId, claim }, commandId)
       })
-      if (result.success) {
+      const rotated = await recoverLostRotation(
+        result,
+        terminalId,
+        client.terminalProject(terminalId),
+        listPreservedAndAdoptClaims
+      )
+      if (rotated.success) {
         // Teardown (amendment R1): the server detached this connection's
         // attachment and authorization. Adopt the fresh credential and force
         // a re-verified attach for any outstanding refs.
-        client.severClaim(terminalId, result.data.claim)
-        return result
+        client.severClaim(terminalId, rotated.data.claim)
       }
-      // The rotation ran but its reply was lost, and the new credential was
-      // never kept host-side: list the project's preserved terminals, which
-      // re-issues a claim for each.
-      if (result.code === COMMAND_RESULT_CODES.OUTCOME_UNKNOWN) {
-        return recoverRotatedClaim(terminalId, result)
-      }
-      return result
+      return rotated
     },
     async revokeClaim(terminalId: string, claim: string): Promise<IpcResult<void>> {
       const result = await runIpcCommand<void>({
@@ -1502,7 +1485,7 @@ export function createWebTerminalApi(): TerminalApi {
     write: (terminalId, data) => client.write(terminalId, data),
     resize: (terminalId, cols, rows) => client.request('resize', { terminalId, cols, rows }),
     async kill(terminalId): Promise<IpcResult<void>> {
-      const result = await killTerminal(terminalId)
+      const result = await trackTerminalKill(terminalId, () => killTerminal(terminalId))
       // The server authorizes kill BEFORE any existence check: an unknown or
       // foreign id returns the generic UNAUTHORIZED (an already-dead terminal
       // this connection still owns is idempotent success).

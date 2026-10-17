@@ -97,6 +97,7 @@ vi.mock('@/stores/workspace-store', () => {
   }
   return {
     getAllLeafPanes,
+    getAllTreeRoots: (state: { root: PaneNodeLike }) => [state.root],
     findPaneContainingTab,
     agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
     useWorkspaceStore: {
@@ -821,6 +822,82 @@ describe('acp-store', () => {
     expect(cached?.models?.currentModelId).toBe('m1')
     expect(cached?.modes?.currentModeId).toBe('agent')
     expect(cached?.configOptions[0]?.currentValue).toBe('m1')
+  })
+
+  it('caches options session_created advertised before the session/new reply', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Gemini', command: 'gemini', args: [], env: {} })
+    useAcpStore.setState((s) => ({
+      agents: { ...s.agents, 'agent-9': { id: 'agent-9', capabilities: null } },
+      agentStatus: { ...s.agentStatus, 'agent-9': 'connected' },
+      configToLiveAgent: {
+        ...s.configToLiveAgent,
+        [agentReuseKey('cfg-1', '/work', 'p1')]: 'agent-9'
+      }
+    }))
+    ;(invoke as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      useAcpStore.getState()._onSessionCreated({
+        agentId: 'agent-9',
+        sessionId: 'sess-race',
+        models: {
+          currentModelId: 'm1',
+          availableModels: [
+            { modelId: 'm1', name: 'Model One' },
+            { modelId: 'm2', name: 'Model Two' }
+          ]
+        },
+        modes: {
+          currentModeId: 'agent',
+          availableModes: [
+            { id: 'agent', name: 'Agent' },
+            { id: 'plan', name: 'Plan' }
+          ]
+        },
+        configOptions: [
+          {
+            id: 'effort',
+            name: 'Effort',
+            type: 'select',
+            currentValue: 'low',
+            options: [{ value: 'low', name: 'Low' }]
+          }
+        ]
+      })
+      return {
+        sessionId: 'sess-race',
+        models: {
+          currentModelId: 'm1',
+          availableModels: [{ modelId: 'm1', name: 'Model One' }]
+        },
+        modes: {
+          currentModeId: 'agent',
+          availableModes: [{ id: 'agent', name: 'Agent' }]
+        },
+        configOptions: []
+      }
+    })
+
+    await useAcpStore.getState().createSession('agent-9', '/work', undefined, 'p1')
+
+    const cached = useAcpStore.getState().agentOptionsCache['cfg-1']
+    expect(cached?.models?.availableModels).toEqual([
+      { modelId: 'm1', name: 'Model One' },
+      { modelId: 'm2', name: 'Model Two' }
+    ])
+    expect(cached?.modes?.availableModes).toEqual([
+      { id: 'agent', name: 'Agent' },
+      { id: 'plan', name: 'Plan' }
+    ])
+    expect(cached?.configOptions).toEqual([
+      {
+        id: 'effort',
+        name: 'Effort',
+        type: 'select',
+        currentValue: 'low',
+        options: [{ value: 'low', name: 'Low' }]
+      }
+    ])
   })
 
   it('cancelPreparedChat + reopen does not let a stale prepare clobber the newer one', async () => {

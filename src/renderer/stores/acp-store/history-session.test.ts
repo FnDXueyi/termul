@@ -438,7 +438,17 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().messages['s-corrupt']).toHaveLength(1)
   })
 
-  it('resumeLiveSession restores persisted tool calls with the transcript', async () => {
+  it('openHistorySession resume rebases the seq counter past restored tool-call seqs', async () => {
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-r': {
+          id: 'agent-r',
+          capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+        }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-r': 'connected' }
+    }))
     setCachedSessionPayload('s-resume', {
       metadata: {
         id: 's-resume',
@@ -472,7 +482,7 @@ describe('acp-store', () => {
       toolCalls: [{ toolCallId: 'tc-9', kind: 'read', status: 'completed', timestamp: 5, seq: 3 }]
     })
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({})
-    await useAcpStore.getState().resumeLiveSession('s-resume', 'agent-r', '/w')
+    await useAcpStore.getState().openHistorySession('s-resume')
     expect(invoke).toHaveBeenCalledWith('acp_resume_session', {
       agentId: 'agent-r',
       sessionId: 's-resume',
@@ -498,7 +508,17 @@ describe('acp-store', () => {
     expect(liveCall.seq!).toBeGreaterThan(3)
   })
 
-  it('resumeLiveSession keeps the restored transcript and tool calls when resume fails', async () => {
+  it('openHistorySession keeps the restored transcript and tool calls when resume fails', async () => {
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-r': {
+          id: 'agent-r',
+          capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+        }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-r': 'connected' }
+    }))
     setCachedSessionPayload('s-resume-fail', {
       metadata: {
         id: 's-resume-fail',
@@ -532,9 +552,9 @@ describe('acp-store', () => {
       toolCalls: [{ toolCallId: 'tc-f', kind: 'edit', status: 'completed', timestamp: 5, seq: 2 }]
     })
     ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('agent gone'))
-    await expect(
-      useAcpStore.getState().resumeLiveSession('s-resume-fail', 'agent-r', '/w')
-    ).rejects.toBeDefined()
+    await expect(useAcpStore.getState().openHistorySession('s-resume-fail')).rejects.toThrow(
+      'agent gone'
+    )
     expect(useAcpStore.getState().messages['s-resume-fail']).toHaveLength(2)
     expect(useAcpStore.getState().toolCalls['s-resume-fail']).toEqual([
       expect.objectContaining({ toolCallId: 'tc-f', seq: 2 })
@@ -736,6 +756,121 @@ describe('acp-store', () => {
     expect(session.modes).toBe(cachedModes)
     expect(session.models).toBe(cachedModels)
     expect(session.configOptions).toEqual([])
+  })
+
+  describe('agent updates after a reopen', () => {
+    const modes = (currentModeId: string) => ({
+      currentModeId,
+      availableModes: [
+        { id: 'default', name: 'Default' },
+        { id: 'acceptEdits', name: 'Accept edits' },
+        { id: 'plan', name: 'Plan' }
+      ]
+    })
+    const thinking = (currentValue: string) => [
+      {
+        id: 'thinking',
+        name: 'Thinking',
+        type: 'select',
+        currentValue,
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'high', name: 'High' }
+        ]
+      }
+    ]
+
+    async function reopen(id: string, outcome: Record<string, unknown>): Promise<void> {
+      useAcpStore.setState((s) => ({
+        agents: { ...s.agents, 'agent-1': { id: 'agent-1', capabilities: { loadSession: true } } },
+        agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+      }))
+      const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+      ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        metadata: {
+          id,
+          agentId: 'agent-1',
+          title: 'Reopened',
+          cwd: '/w',
+          projectId: 'p1',
+          createdAt: 1,
+          lastActivityAt: 2,
+          messageCount: 0,
+          status: 'closed'
+        },
+        messages: []
+      })
+      vi.mocked(invoke).mockImplementation(async (command: string) => {
+        if (command === 'acp_load_session') return outcome
+        if (command === 'acp_set_config_option') return thinking('high')
+        return undefined
+      })
+      await useAcpStore.getState().openHistorySession(id)
+    }
+
+    function agentModeUpdate(sessionId: string, currentModeId: string): void {
+      useAcpStore.getState()._onModeUpdate({
+        agentId: 'agent-1',
+        sessionId,
+        currentModeId,
+        availableModes: modes(currentModeId).availableModes
+      })
+    }
+
+    it('applies an agent change back to the reopen values after the user picked others', async () => {
+      await reopen('s-picked', { modes: modes('default'), configOptions: thinking('low') })
+      await useAcpStore.getState().setMode('s-picked', 'plan')
+      await useAcpStore.getState().setConfigOption('s-picked', 'thinking', 'high')
+
+      agentModeUpdate('s-picked', 'default')
+      useAcpStore.getState()._onConfigOptionsUpdate({
+        agentId: 'agent-1',
+        sessionId: 's-picked',
+        configOptions: thinking('low')
+      })
+
+      const session = useAcpStore.getState().sessions['s-picked']
+      expect(session.modes?.currentModeId).toBe('default')
+      expect(session.configOptions[0]?.currentValue).toBe('low')
+    })
+
+    it('applies an agent change that returns to the reopen mode', async () => {
+      await reopen('s-hops', { modes: modes('acceptEdits') })
+
+      agentModeUpdate('s-hops', 'plan')
+      agentModeUpdate('s-hops', 'acceptEdits')
+
+      expect(useAcpStore.getState().sessions['s-hops'].modes?.currentModeId).toBe('acceptEdits')
+    })
+
+    it('applies an agent change back to a cached session creation mode after the reopen', async () => {
+      useAcpStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          's-cached': {
+            id: 's-cached',
+            agentId: 'agent-1',
+            cwd: '/w',
+            projectId: 'p1',
+            status: 'closed',
+            title: 'Cached',
+            activeTurn: false,
+            openTurnId: null,
+            modes: modes('plan'),
+            models: null,
+            configOptions: [],
+            creationOptionDefaults: { modeId: 'default', configValues: {} },
+            lastError: null,
+            createdAt: 1
+          }
+        }
+      }))
+      await reopen('s-cached', {})
+
+      agentModeUpdate('s-cached', 'default')
+
+      expect(useAcpStore.getState().sessions['s-cached'].modes?.currentModeId).toBe('default')
+    })
   })
 
   it('openHistorySession load keeps in-flight live mode/config updates authoritative', async () => {

@@ -3,9 +3,11 @@ import { useEffect } from 'react'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { readActiveProject } from '@/lib/active-project'
 import { filesystemApi } from '@/lib/api'
+import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { importLegacyProjects } from '@/lib/legacy-project-import'
 import { logFrontendError } from '@/lib/log-api'
 import {
+  flushProjectPrefsWrites,
   getProjectLayout,
   getProjectPrefs,
   loadProjectPrefs,
@@ -19,11 +21,16 @@ import { applyRegistryList } from '@/stores/project-registry-feed'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
-import type { Project } from '@/types/project'
+import type { Project, ProjectGroup } from '@/types/project'
 
-function logFailure(source: string, message: string, error: unknown): void {
+function logFailure(
+  source: string,
+  message: string,
+  error: unknown,
+  level: 'warn' | 'error' = 'warn'
+): void {
   void logFrontendError({
-    level: 'warn',
+    level,
     source: `use-project-registry.${source}`,
     message: `${message}: ${error instanceof Error ? error.message : String(error)}`
   })
@@ -102,6 +109,107 @@ function mergeRecoveredPrefs(): void {
 }
 
 /**
+ * A longer outage needs no further step: the projects watch resends full
+ * state on reconnect, and that triggers a fresh save.
+ */
+export const PREFS_SAVE_RETRY_MS = [1000, 5000, 30000]
+
+/**
+ * A transport failure shows the user no toast, so without the retry a group
+ * made as the last change of a session stays in memory until the restart and
+ * is then gone (#1155).
+ */
+function createPrefsSaver(isCancelled: () => boolean): {
+  save: (projects: Project[], groups: ProjectGroup[], previousProjects: Project[]) => void
+  flush: () => Promise<void>
+  cancel: () => void
+} {
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+  let retryDueAt = 0
+  let failures = 0
+  let gaveUp = false
+  let inFlight = 0
+
+  function cancel(): void {
+    if (retryTimer) clearTimeout(retryTimer)
+    retryTimer = undefined
+  }
+
+  function scheduleRetry(error: unknown): void {
+    if (isCancelled()) return
+    const delay = PREFS_SAVE_RETRY_MS[failures]
+    if (delay === undefined) {
+      if (retryTimer) return
+      gaveUp = true
+      logFailure(
+        'persistProjectPrefs',
+        `saving the project prefs failed ${failures + 1} times, giving up until the next change`,
+        error,
+        'error'
+      )
+      return
+    }
+    // A newer failed save restarts the ladder, so its retry may be due sooner
+    // than the long one an older failure armed.
+    if (retryTimer && retryDueAt <= Date.now() + delay) return
+    cancel()
+    failures++
+    logFailure(
+      'persistProjectPrefs',
+      `saving the project prefs failed, retrying in ${delay} ms`,
+      error
+    )
+    retryDueAt = Date.now() + delay
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined
+      const state = useProjectStore.getState()
+      attempt(state.projects, state.groups, [])
+    }, delay)
+  }
+
+  function attempt(
+    projects: Project[],
+    groups: ProjectGroup[],
+    previousProjects: Project[],
+    immediate = false
+  ): Promise<void> {
+    // A success must not cancel the timer: it may belong to a newer save that
+    // failed while this one was in flight. A retry for state that already
+    // landed finds the same signature and writes nothing.
+    inFlight++
+    return persistProjectPrefs(projects, groups, previousProjects, { immediate })
+      .then(() => {
+        failures = 0
+      }, scheduleRetry)
+      .finally(() => {
+        inFlight--
+      })
+  }
+
+  return {
+    save: (projects, groups, previousProjects) => {
+      failures = 0
+      gaveUp = false
+      void attempt(projects, groups, previousProjects)
+    },
+    // A quit or a hidden page cannot wait for the backoff: write the state a
+    // failed save left unsaved now, and let a save still preparing issue its
+    // write.
+    flush: async () => {
+      if (isCancelled()) return
+      if (retryTimer || gaveUp) {
+        cancel()
+        gaveUp = false
+        const state = useProjectStore.getState()
+        await attempt(state.projects, state.groups, [], true)
+      }
+      if (inFlight > 0) await flushProjectPrefsWrites()
+    },
+    cancel
+  }
+}
+
+/**
  * Re-grant the Tauri fs scope for project roots and their worktrees the host
  * lists: the dialog plugin's pick-time grant dies with the process, and the
  * static capability only allowlists specific drives, so projects elsewhere
@@ -151,6 +259,16 @@ export function useProjectRegistry(): void {
     let cancelled = false
     let unwatch: (() => void) | undefined
     let unsubscribeStore: (() => void) | undefined
+    const saver = createPrefsSaver(() => cancelled)
+    const flushOnHide = (): void => {
+      if (document.visibilityState === 'hidden') void saver.flush()
+    }
+    const flushOnPageHide = (): void => void saver.flush()
+    document.addEventListener('visibilitychange', flushOnHide)
+    window.addEventListener('pagehide', flushOnPageHide)
+    const unregisterCloseWriter = registerCloseWriter(() =>
+      withinCloseTimeout('use-project-registry', 'project prefs', saver.flush)
+    )
 
     async function start(): Promise<void> {
       if (isTauriContext()) {
@@ -229,10 +347,7 @@ export function useProjectRegistry(): void {
         unsubscribeStore = useProjectStore.subscribe((state, prevState) => {
           if (!state.isLoaded) return
           if (state.projects === prevState.projects && state.groups === prevState.groups) return
-          persistProjectPrefs(state.projects, state.groups, prevState.projects).catch(
-            (error: unknown) =>
-              logFailure('persistProjectPrefs', 'saving the project prefs failed', error)
-          )
+          saver.save(state.projects, state.groups, prevState.projects)
         })
       }
       if (prefsReadable) {
@@ -246,11 +361,7 @@ export function useProjectRegistry(): void {
           mergeRecoveredPrefs()
           installSaves()
           const state = useProjectStore.getState()
-          if (state.isLoaded) {
-            persistProjectPrefs(state.projects, state.groups, []).catch((error: unknown) =>
-              logFailure('persistProjectPrefs', 'saving the recovered project prefs failed', error)
-            )
-          }
+          if (state.isLoaded) saver.save(state.projects, state.groups, [])
         })
       }
     }
@@ -260,6 +371,10 @@ export function useProjectRegistry(): void {
       cancelled = true
       unwatch?.()
       unsubscribeStore?.()
+      saver.cancel()
+      document.removeEventListener('visibilitychange', flushOnHide)
+      window.removeEventListener('pagehide', flushOnPageHide)
+      unregisterCloseWriter()
     }
   }, [webAuthGateOk])
 }

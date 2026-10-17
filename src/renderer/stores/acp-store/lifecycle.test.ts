@@ -346,6 +346,48 @@ describe('failed session lifecycle (story 5)', () => {
     expect(real.launchConfigId).toBeUndefined()
   })
 
+  it('gh-821: a rejected first prompt keeps the code and data of its agent error', async () => {
+    await useAcpStore
+      .getState()
+      .saveAgentConfig({ id: 'cfg-1', name: 'Gemini', command: 'gemini', args: [], env: {} })
+    const placeholderId = useAcpStore.getState().createLaunchPlaceholder({
+      cwd: '/work',
+      projectId: 'p1',
+      initialUserBlocks: [{ type: 'text', text: 'hello agent' }]
+    })
+    ;(invoke as ReturnType<typeof vi.fn>).mockImplementation(async (command: string) => {
+      if (command === 'acp_spawn_agent')
+        return { agentId: 'agent-1', capabilities: {}, authMethods: [] }
+      if (command === 'acp_new_session') return { sessionId: 'sess-real' }
+      if (command === 'acp_send_prompt') {
+        useAcpStore.getState()._onAgentError({
+          agentId: 'agent-1',
+          sessionId: 'sess-real',
+          message: 'Internal error',
+          code: -32603,
+          data: { reason: 'login' }
+        })
+        throw new Error('Internal error: login')
+      }
+      throw new Error(`unexpected invoke command: ${command}`)
+    })
+    await expect(
+      useAcpStore.getState().finalizeChatLaunch({
+        placeholderId,
+        configId: 'cfg-1',
+        cwd: '/work',
+        projectId: 'p1',
+        initialBlocks: [{ type: 'text', text: 'hello agent' }]
+      })
+    ).rejects.toThrow('Internal error: login')
+
+    const real = useAcpStore.getState().sessions['sess-real']
+    expect(real.status).toBe('error')
+    expect(real.lastError).toBe('Internal error: login')
+    expect(real.lastErrorCode).toBe(-32603)
+    expect(real.lastErrorData).toEqual({ reason: 'login' })
+  })
+
   it('LAUNCH_FAIL: an ENOENT spawn failure carries command-specific guidance', async () => {
     await useAcpStore
       .getState()

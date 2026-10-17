@@ -71,6 +71,7 @@ vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   getAllLeafPanes: () => [],
   findPaneContainingTab: () => null,
+  getAgentChatSessionIdsInAllTrees: () => new Set(['s-background']),
   useWorkspaceStore: {
     getState: () => ({ addAgentChatTab: vi.fn(), root: null })
   }
@@ -96,7 +97,9 @@ import type { ChatMessage } from '@/lib/acp-api'
 import {
   _clearPayloadCacheForTesting,
   getCachedSessionPayload,
+  getPinnedSessionPayloadIds,
   HISTORY_TAIL_MESSAGE_LIMIT,
+  markSessionPayloadPinned,
   type SessionPayload,
   setCachedSessionPayload
 } from '@/lib/acp-history-persistence'
@@ -104,7 +107,9 @@ import type { AcpTransport } from '@/lib/acp-transport'
 import { _resetAcpTransportForTests, _setAcpTransportForTests } from '@/lib/acp-transport'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import {
+  _flushCoalescedForTesting,
   _resetAcpAuthForTesting,
+  _resetCoalesceForTesting,
   _resetEphemeralSessionIdsForTesting,
   _resetHistorySeqWatermarksForTesting,
   _resetInFlightHistoryOpensForTesting,
@@ -137,8 +142,8 @@ const message = (
 })
 
 /** A host-folded message: the ids `session_payload.rs` mints. */
-const hostMessage = (role: 'user' | 'agent', text: string, seq: number): ChatMessage =>
-  message(role === 'user' ? `user:seq-${seq}` : `snapshot:agent:${seq}`, role, text, seq)
+const hostMessage = (role: 'user' | 'agent' | 'thought', text: string, seq: number): ChatMessage =>
+  message(role === 'user' ? `user:seq-${seq}` : `snapshot:${role}:${seq}`, role, text, seq)
 
 const hostPayload = (messages: ChatMessage[], lastSeq: number): SessionPayload => ({
   metadata: {
@@ -299,5 +304,230 @@ describe('acp-store: a reopen never installs a stale cached transcript', () => {
       hostMessages.map((m) => m.id)
     )
     expect(historyApi.get).toHaveBeenCalledWith(SESSION)
+  })
+})
+
+describe('acp-store: scroll-up in a long live chat never skips past a stale cached copy', () => {
+  const hostMessages = Array.from({ length: 710 }, (_, i) =>
+    hostMessage(i % 2 === 0 ? 'user' : 'agent', `message ${i + 1}`, (i + 1) * 10)
+  )
+  const fullHostLog = hostPayload(hostMessages, 7100)
+  const cachedByTrimProbe = hostPayload(hostMessages.slice(0, 310), 3100)
+
+  /**
+   * Every message arrives as a live relay event under its host log seq, so
+   * the window holds what production holds: `msg-*` bubbles with renderer
+   * counter seqs, trimmed to the newest 300 against the cached copy.
+   */
+  function streamLiveChat(messages = hostMessages): void {
+    seedLiveChat([])
+    let sendCounter = 0
+    for (const m of messages) {
+      const content = { type: 'text', text: textOf(m) } as const
+      if (m.role === 'user') {
+        // A `turn:<id>` record was sent from this client: the composer appends
+        // the optimistic bubble (counter seq, no host seq) before the echo.
+        const turnId = m.id.startsWith('turn:') ? m.id.slice('turn:'.length) : undefined
+        if (turnId) {
+          sendCounter += 1
+          useAcpStore.setState((s) => ({
+            messages: {
+              ...s.messages,
+              [SESSION]: [
+                ...(s.messages[SESSION] ?? []),
+                { ...message(m.id, 'user', textOf(m), 0), seq: sendCounter }
+              ]
+            }
+          }))
+        }
+        useAcpStore
+          .getState()
+          ._onUserPrompt(
+            { agentId: OLD_AGENT, sessionId: SESSION, content: [content], turnId },
+            m.seq
+          )
+      } else {
+        useAcpStore
+          .getState()
+          ._onMessageChunk({ agentId: OLD_AGENT, sessionId: SESSION, role: m.role, content }, m.seq)
+        _flushCoalescedForTesting()
+      }
+    }
+  }
+
+  const liveWindow = () => useAcpStore.getState().messages[SESSION] ?? []
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    _resetAcpTransportForTests(null)
+    _resetHistorySeqWatermarksForTesting()
+    _resetCoalesceForTesting()
+    _clearPayloadCacheForTesting()
+    useAcpStore.setState(FRESH)
+    useAcpStore.getState().clearSessionBackfill(SESSION)
+    markSessionPayloadPinned(SESSION)
+    setCachedSessionPayload(SESSION, cachedByTrimProbe)
+  })
+
+  it('desktop history: the next page is the messages right before the oldest loaded one', async () => {
+    historyApi.get.mockResolvedValue(fullHostLog)
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat()
+    expect(liveWindow()).toHaveLength(300)
+    expect(liveWindow()[0]?.id).toMatch(/^msg-/)
+    expect(textOf(liveWindow()[0]!)).toBe('message 411')
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(
+      liveWindow()
+        .slice(0, 4)
+        .map((m) => m.id)
+    ).toEqual(['user:seq-4070', 'snapshot:agent:4080', 'user:seq-4090', 'snapshot:agent:4100'])
+    expect(liveWindow()).toHaveLength(304)
+    expect(historyApi.get).toHaveBeenCalledTimes(1)
+    expect(getCachedSessionPayload(SESSION)?.messages).toHaveLength(710)
+    expect(getPinnedSessionPayloadIds()).toEqual([SESSION])
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(
+      liveWindow()
+        .slice(0, 5)
+        .map((m) => m.id)
+    ).toEqual([
+      'user:seq-4030',
+      'snapshot:agent:4040',
+      'user:seq-4050',
+      'snapshot:agent:4060',
+      'user:seq-4070'
+    ])
+    expect(historyApi.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('desktop history: the page is right when the oldest loaded bubble is an agent reply', async () => {
+    const turnsWithThoughts = Array.from({ length: 710 }, (_, i) =>
+      hostMessage((['user', 'thought', 'agent'] as const)[i % 3], `message ${i + 1}`, (i + 1) * 10)
+    )
+    historyApi.get.mockResolvedValue(hostPayload(turnsWithThoughts, 7100))
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat(turnsWithThoughts)
+    expect(liveWindow()[0]?.role).toBe('agent')
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(
+      liveWindow()
+        .slice(0, 4)
+        .map((m) => m.id)
+    ).toEqual([
+      'snapshot:thought:4070',
+      'snapshot:agent:4080',
+      'user:seq-4090',
+      'snapshot:thought:4100'
+    ])
+  })
+
+  it('desktop history: the page is right when the oldest loaded bubble is a prompt this client sent', async () => {
+    const sentPrompts = hostMessages.map((m, i) =>
+      m.role === 'user' ? { ...m, id: `turn:t${i + 1}` } : m
+    )
+    setCachedSessionPayload(SESSION, hostPayload(sentPrompts.slice(0, 310), 3100))
+    historyApi.get.mockResolvedValue(hostPayload(sentPrompts, 7100))
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat(sentPrompts)
+    expect(liveWindow()[0]?.id).toBe('turn:t411')
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(historyApi.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('desktop history: a cached copy that already holds the oldest loaded message pages without a host read', async () => {
+    setCachedSessionPayload(SESSION, fullHostLog)
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat()
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(historyApi.get).not.toHaveBeenCalled()
+  })
+
+  it('desktop history: a failed host re-read prepends nothing, and the next scroll-up retries', async () => {
+    historyApi.get.mockRejectedValueOnce(new Error('ipc down')).mockResolvedValue(fullHostLog)
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat()
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(textOf(liveWindow()[0]!)).toBe('message 411')
+    expect(liveWindow()).toHaveLength(300)
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(historyApi.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('server history: one host read per page, the same page, and no desktop read', async () => {
+    const transport = fakeTransport('server', fullHostLog)
+    _setAcpTransportForTests(transport as unknown as AcpTransport)
+    streamLiveChat()
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(transport.getSessionPayload).toHaveBeenCalledTimes(1)
+    expect(historyApi.get).not.toHaveBeenCalled()
   })
 })

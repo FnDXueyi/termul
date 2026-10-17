@@ -1,6 +1,7 @@
 import type {
   GitStatus,
   IpcResult,
+  PreservedTerminalEntry,
   RotatedClaim,
   SpawnedTerminal,
   TerminalApi,
@@ -18,8 +19,11 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { invokeIpcCommand } from './acp-transport/tauri-verdicts'
 import { entityKeyOf } from './ipc/http'
 import { invokeIpc } from './ipc/tauri'
+import { logFrontendError } from './log-api'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
+import { recoverLostRotation } from './terminal-claim-recovery'
 import { terminalCursorEpoch } from './terminal-cursor'
+import { trackTerminalKill } from './terminal-kill-requests'
 
 /**
  * IPC Event names matching Rust commands in src-tauri/src/commands.rs
@@ -55,6 +59,7 @@ type SharedListenerEntry<T> = {
 const IPC_COMMANDS = {
   SPAWN: 'terminal_spawn',
   ATTACH: 'terminal_attach',
+  LIST_PRESERVED: 'terminal_list_preserved',
   ROTATE_CLAIM: 'terminal_rotate_claim',
   REVOKE_CLAIM: 'terminal_revoke_claim',
   WRITE: 'terminal_write',
@@ -209,6 +214,8 @@ function captureStackTrace(): string {
 export function createTauriTerminalApi(): TerminalApi {
   // Per-terminal data callback stored between onData registration and spawn
   const dataCallbacks = new Set<TerminalDataCallback>()
+  /** Project each terminal was spawned or listed for (recovers a rotated claim via `list_preserved`). */
+  const terminalProjects = new Map<string, string>()
   const _registerListener = <T>(
     eventName: string,
     callback: (payload: T) => void,
@@ -297,6 +304,22 @@ export function createTauriTerminalApi(): TerminalApi {
     const replay = held
     held = null
     for (const bytes of replay) deliver(bytes)
+    return result
+  }
+
+  async function listPreserved(projectId: string): Promise<IpcResult<PreservedTerminalEntry[]>> {
+    const result = await invokeIpc<PreservedTerminalEntry[]>(IPC_COMMANDS.LIST_PRESERVED, {
+      projectId
+    })
+    if (!result.success) {
+      void logFrontendError({
+        level: 'warn',
+        source: 'TauriTerminalAPI.listPreserved',
+        message: `list preserved terminals failed (${result.code ?? 'UNKNOWN'})`
+      })
+      return result
+    }
+    for (const entry of result.data) terminalProjects.set(entry.id, projectId)
     return result
   }
 
@@ -454,23 +477,31 @@ export function createTauriTerminalApi(): TerminalApi {
         on_data.onmessage = () => {}
       }
 
+      if (result.success && options?.projectId) {
+        terminalProjects.set(result.data.id, options.projectId)
+      }
       return result
     },
 
     attach,
+
+    listPreserved,
 
     /**
      * CAP-3: possession-based rotation — the returned credential replaces the
      * presented one atomically.
      */
     async rotateClaim(terminalId: string, claim: string): Promise<IpcResult<RotatedClaim>> {
-      // A replay after a lost reply is `OUTCOME_UNKNOWN` (the new credential was
-      // never kept host-side); the desktop has no `list_preserved`, so the
-      // failure stands and the caller falls back to a fresh spawn.
-      return invokeIpcCommand<RotatedClaim>(
+      const result = await invokeIpcCommand<RotatedClaim>(
         IPC_COMMANDS.ROTATE_CLAIM,
         { terminalId, claim },
         { kind: 'terminal_rotate_claim', entityKey: terminalId }
+      )
+      return recoverLostRotation(
+        result,
+        terminalId,
+        terminalProjects.get(terminalId),
+        listPreserved
       )
     },
 
@@ -505,10 +536,13 @@ export function createTauriTerminalApi(): TerminalApi {
      * Kill terminal PTY
      */
     async kill(terminalId: string): Promise<IpcResult<void>> {
-      return invokeIpcCommand<void>(
-        IPC_COMMANDS.KILL,
-        { terminalId },
-        { kind: 'terminal_kill', entityKey: terminalId }
+      terminalProjects.delete(terminalId)
+      return trackTerminalKill(terminalId, () =>
+        invokeIpcCommand<void>(
+          IPC_COMMANDS.KILL,
+          { terminalId },
+          { kind: 'terminal_kill', entityKey: terminalId }
+        )
       )
     },
 

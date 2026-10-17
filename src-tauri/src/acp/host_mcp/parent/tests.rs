@@ -284,6 +284,7 @@ fn browser_frame_round_trip_serializes_payload_fields() {
         browser_action: Some("click".into()),
         browser_args: Some(serde_json::json!({"ref": "@e3"})),
         browser_element: Some("the save button".into()),
+        ask: None,
     };
     let value = serde_json::to_value(&frame).unwrap();
     assert_eq!(value["kind"], "browser");
@@ -591,6 +592,7 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
         browser_action: Some(input.action),
         browser_args: Some(input.args),
         browser_element: input.element,
+        ask: None,
     };
 
     let server = HostPlanServer::start(vec![], None);
@@ -1121,4 +1123,294 @@ fn invalid_branch_slug_keeps_the_branch_and_the_title_still_lands() {
         );
         fx.persistence.shutdown().await.unwrap();
     });
+}
+
+// -- issue #784: ask_user parks the call until the user answers -------------
+
+/// Captures the `acp:question_request` and `acp:question_cancelled` payloads
+/// the host emits.
+#[derive(Default)]
+struct QuestionSink {
+    payloads: StdMutex<Vec<serde_json::Value>>,
+    cancelled: StdMutex<Vec<serde_json::Value>>,
+}
+
+impl EventSink for QuestionSink {
+    fn emit(&self, event: &crate::web::sink::AcpEvent) {
+        if event.type_ == crate::acp::events::EVENT_QUESTION_REQUEST {
+            self.payloads.lock().unwrap().push(event.payload.clone());
+        }
+        if event.type_ == "acp:question_cancelled" {
+            self.cancelled.lock().unwrap().push(event.payload.clone());
+        }
+    }
+}
+
+fn ask_frame(token: &str, provisional: &str, question: &str) -> serde_json::Value {
+    serde_json::json!({
+        "token": token,
+        "session_id": provisional,
+        "kind": "ask_user",
+        "ask": {
+            "question": question,
+            "options": [
+                {"label": "Yes", "description": "Proceed"},
+                {"label": "No"},
+            ],
+            "multi_select": false,
+        },
+    })
+}
+
+/// Wait until the host has parked at least one `ask_user` call.
+async fn wait_for_open_ask(server: &HostPlanServer) -> String {
+    for _ in 0..200 {
+        if let Some(id) = server.open_ask_ids().into_iter().next() {
+            return id;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("ask_user call was never parked");
+}
+
+#[test]
+fn ask_user_parks_until_answered_and_splits_picks_from_free_text() {
+    let sink = Arc::new(QuestionSink::default());
+    let server = HostPlanServer::start(vec![sink.clone()], None);
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Ship it?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+
+        let question_id = wait_for_open_ask(&server).await;
+        // Still parked: no reply before the user answers.
+        assert!(!call.is_finished());
+        assert!(server.answer_ask(
+            &question_id,
+            Some(vec!["Yes".to_string(), "after lunch".to_string()]),
+        ));
+
+        let reply = call.await.unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["cancelled"], false);
+        assert_eq!(reply["result"]["answers"], serde_json::json!(["Yes"]));
+        assert_eq!(reply["result"]["free_text"], "after lunch");
+    });
+
+    let payloads = sink.payloads.lock().unwrap();
+    assert_eq!(payloads.len(), 1, "exactly one question event");
+    assert_eq!(payloads[0]["sessionId"], "sess-real");
+    assert_eq!(payloads[0]["question"], "Ship it?");
+    assert_eq!(payloads[0]["allowFreeText"], true);
+    assert_eq!(payloads[0]["options"][0]["label"], "Yes");
+    assert_eq!(payloads[0]["options"][0]["cardinality"], "single");
+}
+
+#[test]
+fn cancelled_ask_user_resolves_the_call_instead_of_hanging() {
+    let server = HostPlanServer::start(vec![], None);
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Continue?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+
+        wait_for_open_ask(&server).await;
+        // The turn ends with the question unanswered.
+        server.cancel_asks_for_session("sess-real");
+
+        let reply = call.await.unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["result"]["cancelled"], true);
+        assert_eq!(reply["result"]["answers"], serde_json::json!([]));
+        assert!(reply["result"]["free_text"].is_null());
+    });
+    assert!(server.open_ask_ids().is_empty());
+}
+
+#[test]
+fn ask_user_is_cancelled_when_its_child_connection_closes() {
+    let sink = Arc::new(QuestionSink::default());
+    let server = HostPlanServer::start(vec![sink.clone()], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let beats = Arc::clone(&beats);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |_: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(20));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut buf = serde_json::to_vec(&ask_frame(&token, &provisional, "Still there?")).unwrap();
+        buf.push(b'\n');
+        stream.write_all(&buf).await.unwrap();
+        let question_id = wait_for_open_ask(&server).await;
+
+        // The agent's MCP client gave up on the call, so the child hung up.
+        drop(stream);
+        for _ in 0..400 {
+            if !sink.cancelled.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(
+            *sink.cancelled.lock().unwrap(),
+            vec![serde_json::json!({
+                "agentId": "agent-1",
+                "sessionId": "sess-real",
+                "questionId": question_id,
+            })],
+            "the question panel is withdrawn"
+        );
+        assert_eq!(server.open_ask_ids(), Vec::<String>::new());
+        assert!(
+            !server.answer_ask(&question_id, Some(vec!["Yes".to_string()])),
+            "a late answer is refused instead of being lost"
+        );
+
+        let settled = beats.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            beats.load(std::sync::atomic::Ordering::SeqCst),
+            settled,
+            "the idle heartbeat stops with the connection"
+        );
+    });
+}
+
+#[test]
+fn ask_user_with_no_question_is_rejected_and_answer_for_unknown_id_is_refused() {
+    let server = HostPlanServer::start(vec![], None);
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "   ");
+        let reply = connect_and_send(port, &frame).await;
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "question must not be empty");
+    });
+    assert!(!server.answer_ask("q-missing", Some(vec!["Yes".to_string()])));
+}
+
+// -- issue #784 review: a pending ask_user keeps the turn's idle clock alive --
+
+#[test]
+fn pending_ask_user_resets_the_idle_deadline_until_it_is_answered() {
+    let server = HostPlanServer::start(vec![], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_session = Arc::new(StdMutex::new(String::new()));
+    {
+        let beats = Arc::clone(&beats);
+        let seen_session = Arc::clone(&seen_session);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |session_id: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *seen_session.lock().unwrap() = session_id.to_string();
+            }),
+        );
+    }
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(20));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Take your time?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+        let question_id = wait_for_open_ask(&server).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let while_pending = beats.load(std::sync::atomic::Ordering::SeqCst);
+        // One beat on arrival, then one per interval: far more than one.
+        assert!(
+            while_pending >= 4,
+            "expected a steady beat, got {while_pending}"
+        );
+        assert!(!call.is_finished(), "the call must stay parked");
+        assert_eq!(*seen_session.lock().unwrap(), "sess-real");
+
+        assert!(server.answer_ask(&question_id, Some(vec!["Yes".to_string()])));
+        call.await.unwrap();
+
+        // Answered: the beat stops with the call.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let settled = beats.load(std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), settled);
+    });
+}
+
+#[test]
+fn cleared_idle_signal_is_not_called_by_a_later_ask_user() {
+    let server = HostPlanServer::start(vec![], None);
+    let beats = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let beats = Arc::clone(&beats);
+        server.set_idle_signal(
+            "agent-1",
+            Arc::new(move |_: &str| {
+                beats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+    }
+    server.clear_idle_signal("agent-1");
+    server.set_ask_heartbeat_for_tests(std::time::Duration::from_millis(10));
+    let (port, token, provisional) = server.register_session("agent-1");
+    server.bind_session(&token, "sess-real");
+    server.begin_turn("agent-1", "sess-real");
+
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async {
+        let frame = ask_frame(&token, &provisional, "Anyone there?");
+        let call = tokio::spawn(async move { connect_and_send(port, &frame).await });
+        let question_id = wait_for_open_ask(&server).await;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(server.answer_ask(&question_id, None));
+        call.await.unwrap();
+    });
+    assert_eq!(beats.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn ask_idle_heartbeat_is_a_third_of_the_idle_timeout_within_bounds() {
+    use super::ask::ask_idle_heartbeat;
+    use std::time::Duration;
+    assert_eq!(ask_idle_heartbeat(None), Duration::from_secs(30));
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_secs(60))),
+        Duration::from_secs(20)
+    );
+    // A tiny timeout still beats at least every 250 ms.
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_millis(300))),
+        Duration::from_millis(250)
+    );
+    // A huge timeout does not stretch the beat past 30 s.
+    assert_eq!(
+        ask_idle_heartbeat(Some(Duration::from_secs(3600))),
+        Duration::from_secs(30)
+    );
 }

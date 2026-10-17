@@ -217,3 +217,69 @@ fn agent_reported_unknown_question_leaves_a_tombstone() {
         );
     });
 }
+
+/// Issue #784: a free-text answer is accepted only where the agent offered
+/// one. Without the flag the same value is rejected (TOCTOU, as before).
+#[test]
+fn question_free_text_is_accepted_only_when_the_agent_offered_it() {
+    let rdz = test_question_rendezvous();
+    let client = ClientId::new();
+    block_on(async {
+        rdz.register(
+            "q-closed".to_string(),
+            AgentId("a1".to_string()),
+            "sess-1".to_string(),
+            question_options_value(&["Yes", "No"]),
+        );
+        let rejected = rdz
+            .try_respond(client, "q-closed", Some(&["custom".to_string()]))
+            .await;
+        assert_eq!(rejected, Err(QuestionRespondError::InvalidOption));
+
+        rdz.register(
+            "q-open".to_string(),
+            AgentId("a1".to_string()),
+            "sess-1".to_string(),
+            question_options_value(&["Yes", "No"]),
+        );
+        rdz.allow_free_text("q-open");
+        let accepted = rdz
+            .try_respond(client, "q-open", Some(&["custom answer".to_string()]))
+            .await;
+        assert_eq!(accepted, Ok(QuestionRespondOutcome::Resolved));
+    });
+}
+
+/// Issue #784: free text stays one value — a second non-option value, or an
+/// empty one, is still rejected even when free text is allowed.
+#[test]
+fn question_free_text_allows_one_value_and_rejects_blank_text() {
+    let rdz = test_question_rendezvous();
+    let client = ClientId::new();
+    block_on(async {
+        rdz.register(
+            "q-multi".to_string(),
+            AgentId("a1".to_string()),
+            "sess-1".to_string(),
+            question_options_value(&["Yes", "No"]),
+        );
+        rdz.allow_free_text("q-multi");
+        let two_free = rdz
+            .try_respond(
+                client,
+                "q-multi",
+                Some(&["first".to_string(), "second".to_string()]),
+            )
+            .await;
+        assert_eq!(two_free, Err(QuestionRespondError::InvalidOption));
+        let blank = rdz
+            .try_respond(client, "q-multi", Some(&["   ".to_string()]))
+            .await;
+        assert_eq!(blank, Err(QuestionRespondError::InvalidOption));
+        // The ticket stays open after rejections, so a valid answer still wins.
+        let valid = rdz
+            .try_respond(client, "q-multi", Some(&["Yes".to_string()]))
+            .await;
+        assert_eq!(valid, Ok(QuestionRespondOutcome::Resolved));
+    });
+}

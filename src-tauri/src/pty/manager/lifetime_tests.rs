@@ -31,6 +31,26 @@ async fn wait_for_exit(instance: &TerminalInstance) {
     panic!("the short-lived child never exited");
 }
 
+/// `has_exited` flips when the reader hits EOF, before the flusher publishes
+/// the last buffered output. The flusher ends only after that final publish,
+/// so joining it is the point where the output is replayable.
+async fn wait_for_output_published(instance: &TerminalInstance) {
+    let flusher = instance
+        .flusher_handle
+        .lock()
+        .await
+        .take()
+        .expect("flusher thread is running");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || flusher.join()),
+    )
+    .await
+    .expect("the flusher never published the final output")
+    .expect("join task")
+    .expect("flusher thread panicked");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_live_detached_pty_is_never_swept_however_old() {
@@ -40,7 +60,7 @@ async fn a_live_detached_pty_is_never_swept_however_old() {
         .await
         .expect("spawn");
     let instance = manager.get(&spawned.info.id).expect("tracked");
-    assert!(!instance.has_web_attachment(), "nobody is attached");
+    assert!(!instance.has_live_attachment(), "nobody is attached");
 
     // A zero TTL is the harshest possible window: any age exceeds it.
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -65,22 +85,22 @@ async fn closing_a_pane_only_drops_the_attachment() {
         .expect("spawn");
     let instance = manager.get(&spawned.info.id).expect("tracked");
 
-    instance.add_web_attachment();
-    instance.add_web_attachment();
-    instance.remove_web_attachment();
+    instance.add_live_attachment();
+    instance.add_live_attachment();
+    instance.remove_live_attachment();
     assert!(
-        instance.has_web_attachment(),
+        instance.has_live_attachment(),
         "a second viewer is still attached"
     );
-    instance.remove_web_attachment();
+    instance.remove_live_attachment();
 
-    assert!(!instance.has_web_attachment());
+    assert!(!instance.has_live_attachment());
     assert!(!instance.has_exited());
     assert!(manager.get(&spawned.info.id).is_some());
     assert_eq!(manager.live_terminal_count(), 1);
     // Removing more than was added never underflows the count.
-    instance.remove_web_attachment();
-    assert!(!instance.has_web_attachment());
+    instance.remove_live_attachment();
+    assert!(!instance.has_live_attachment());
 
     manager.force_kill(&spawned.info.id).await.unwrap();
 }
@@ -96,6 +116,7 @@ async fn an_exited_pty_keeps_its_output_until_the_ttl_then_expires() {
     let id = spawned.info.id.clone();
     let instance = manager.get(&id).expect("tracked");
     wait_for_exit(&instance).await;
+    wait_for_output_published(&instance).await;
     assert!(instance.exited_for().is_some());
 
     // Within the TTL it stays tracked and a late client replays its output.

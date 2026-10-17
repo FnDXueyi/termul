@@ -126,6 +126,43 @@ pub enum FrameKind {
     /// `browser` tool call — action + args forwarded to
     /// `browser_automation::dispatch`; the reply carries `result`/`code`.
     Browser,
+    /// `ask_user` tool call (issue #784): the parent shows the question panel
+    /// and holds the reply until the user answers or the call is cancelled.
+    AskUser,
+}
+
+/// One option the agent offers in an `ask_user` question.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct TermulAskUserOption {
+    /// Text shown on the choice and returned in `answers` when picked.
+    pub label: String,
+    /// Optional context shown under the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Input the agent sends to `ask_user`. The answer returns as the tool result
+/// `{"answers": [...], "free_text": "..." | null, "cancelled": bool}`.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct TermulAskUserInput {
+    /// The question to put to the user.
+    pub question: String,
+    /// Choices the user can pick from. May be empty when only free text fits.
+    #[serde(default)]
+    pub options: Vec<TermulAskUserOption>,
+    /// Allow more than one option to be picked.
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Show a free-text field next to the options. Defaults to true.
+    #[serde(default = "default_allow_free_text")]
+    pub allow_free_text: bool,
+    /// Optional short heading shown above the question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+}
+
+fn default_allow_free_text() -> bool {
+    true
 }
 
 /// Input the agent sends to the `browser` tool. `action` selects the verb;
@@ -316,6 +353,9 @@ pub struct FrameRequest {
     pub browser_args: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_element: Option<String>,
+    /// The question of an `AskUser` frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<TermulAskUserInput>,
 }
 
 /// Parent reply frame (one per connection). `result` carries the browser

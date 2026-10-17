@@ -9,6 +9,7 @@ import {
   Palette,
   RotateCcw,
   Sliders,
+  Sparkles,
   Terminal
 } from '@/components/icons'
 import type { SettingsCategory } from '@/components/settings/SettingsLayout'
@@ -23,6 +24,7 @@ const ALL_APP_PREF_CATEGORIES: SettingsCategory[] = [
   { id: 'behavior', label: 'Behavior', icon: <Sliders size={16} /> },
   { id: 'project-defaults', label: 'New Project Defaults', icon: <Monitor size={16} /> },
   { id: 'ai-agents', label: 'AI Agents', icon: <Bot size={16} /> },
+  { id: 'skills', label: 'Skills', icon: <Sparkles size={16} /> },
   { id: 'provider', label: 'Provider', icon: <KeyRound size={16} /> },
   { id: 'mcp-servers', label: 'MCP Servers', icon: <Network size={16} /> },
   { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
@@ -38,12 +40,6 @@ export const APP_PREF_CATEGORIES: SettingsCategory[] = isTauriContext()
 // The updates search entries are desktop-only with the category itself;
 // web keeps one entry that lands on the server-version note.
 const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
-  {
-    categoryId: 'appearance',
-    label: 'Font Family',
-    description: 'Choose a monospace font for terminal text.',
-    keywords: ['typeface', 'monospace']
-  },
   {
     categoryId: 'appearance',
     label: 'Font Size',
@@ -169,6 +165,12 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     label: 'Usage and limits',
     description: 'See how much of the 5-hour and weekly limits each account has used.',
     keywords: ['usage', 'limit', 'rate limit', 'quota', 'reset']
+  },
+  {
+    categoryId: 'skills',
+    label: 'Skills',
+    description: 'See skills installed for every project and for the open project.',
+    keywords: ['skill', 'agents', 'SKILL.md', 'slash']
   },
   {
     categoryId: 'mcp-servers',

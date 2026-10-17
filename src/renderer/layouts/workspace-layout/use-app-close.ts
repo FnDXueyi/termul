@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { flushSessionHistory, waitForPendingSessionIndexWrite } from '@/lib/acp-history-persistence'
 import { persistenceApi, windowApi } from '@/lib/api'
+import { runCloseWriters } from '@/lib/close-flush'
 import { listen, type UnlistenFn } from '@/lib/tauri-event'
 import { useEditorStore } from '@/stores/editor-store'
 
@@ -16,7 +17,8 @@ export function useAppClose() {
         await Promise.allSettled([
           persistenceApi.flushPendingWrites(),
           waitForPendingSessionIndexWrite(),
-          flushSessionHistory()
+          flushSessionHistory(),
+          runCloseWriters()
         ])
 
       // Note: waitForPendingSessionIndexWrite swallows rejections internally

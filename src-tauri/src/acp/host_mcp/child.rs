@@ -20,8 +20,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::TcpStream;
 
 use crate::acp::host_mcp::{
-    FrameKind, FrameReply, FrameRequest, TermulBrowserInput, TermulPlanInput, TermulSetTitleInput,
-    ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN, TERMUL_CHAT_INSTRUCTIONS,
+    FrameKind, FrameReply, FrameRequest, TermulAskUserInput, TermulBrowserInput, TermulPlanInput,
+    TermulSetTitleInput, ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN,
+    TERMUL_CHAT_INSTRUCTIONS,
 };
 
 /// Env-derived configuration for the child. Extracted so the arg parser is
@@ -128,6 +129,7 @@ impl TermulPlanServer {
             browser_action: None,
             browser_args: None,
             browser_element: None,
+            ask: None,
         };
         match forward_to_parent(&self.config, request, "plan updated").await {
             Ok(msg) => msg,
@@ -150,6 +152,7 @@ impl TermulPlanServer {
             browser_action: Some(input.action),
             browser_args: Some(input.args),
             browser_element: input.element,
+            ask: None,
         };
         match forward_to_parent_raw(&self.config, request).await {
             Ok(reply) if reply.ok => reply
@@ -188,10 +191,54 @@ impl TermulPlanServer {
             browser_action: None,
             browser_args: None,
             browser_element: None,
+            ask: None,
         };
         match forward_to_parent(&self.config, request, "title updated").await {
             Ok(msg) => msg,
             Err(e) => format!("set_session_title error: {e}"),
+        }
+    }
+
+    #[tool(
+        name = "ask_user",
+        description = "Ask the user a question and wait for the answer. Use this INSTEAD of asking in plain text whenever you need a decision, a preference or missing details: the question appears as a panel in Termul and this call returns the answer. Pass `options` (label and optional description) for choices, `multi_select` to allow several picks, and `allow_free_text` (default true) to let the user type their own answer. The result is JSON: {\"answers\": [...], \"free_text\": string or null, \"cancelled\": boolean}. When cancelled is true the user dismissed the question; do not ask again unless you need the answer to continue."
+    )]
+    async fn ask_user(
+        &self,
+        Parameters(input): Parameters<TermulAskUserInput>,
+        cancelled: tokio_util::sync::CancellationToken,
+    ) -> String {
+        let request = FrameRequest {
+            token: self.config.token.clone(),
+            session_id: self.config.session_id.clone(),
+            kind: FrameKind::AskUser,
+            todos: Vec::new(),
+            title: None,
+            branch: None,
+            browser_action: None,
+            browser_args: None,
+            browser_element: None,
+            ask: Some(input),
+        };
+        // No client-side timeout: the user decides when to answer, and the
+        // parent always resolves the call (answer, cancel, or session end).
+        // rmcp only signals a client cancel (a tool timeout, an abort) and
+        // keeps polling this future, so hang up on the parent ourselves: that
+        // is how it learns to take the question down.
+        let reply = tokio::select! {
+            reply = exchange_frame(&self.config, request) => reply,
+            () = cancelled.cancelled() => return "ask_user cancelled by the client".to_string(),
+        };
+        match reply {
+            Ok(reply) if reply.ok => reply
+                .result
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".to_string()),
+            Ok(reply) => format!(
+                "ask_user error: {}",
+                reply.error.unwrap_or_else(|| "unknown".to_string())
+            ),
+            Err(e) => format!("ask_user transport error: {e}"),
         }
     }
 }
@@ -240,28 +287,32 @@ async fn forward_to_parent_raw(
     request: FrameRequest,
 ) -> Result<FrameReply, String> {
     const BROWSER_ROUND_TRIP: std::time::Duration = std::time::Duration::from_secs(150);
-    tokio::time::timeout(BROWSER_ROUND_TRIP, async move {
-        let mut stream = TcpStream::connect(("127.0.0.1", config.port))
-            .await
-            .map_err(|e| format!("connect to parent failed: {e}"))?;
-        let mut buf = serde_json::to_vec(&request).map_err(|e| format!("encode frame: {e}"))?;
-        buf.push(b'\n');
-        stream
-            .write_all(&buf)
-            .await
-            .map_err(|e| format!("write frame: {e}"))?;
-        // Snapshot payloads are large; keep the cap generous.
-        const MAX_REPLY: u64 = 1024 * 1024;
-        let mut reader = BufReader::new(stream.take(MAX_REPLY));
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("read reply: {e}"))?;
-        serde_json::from_str(&line).map_err(|e| format!("decode reply: {e}"))
-    })
-    .await
-    .map_err(|_| "parent round trip timed out".to_string())?
+    tokio::time::timeout(BROWSER_ROUND_TRIP, exchange_frame(config, request))
+        .await
+        .map_err(|_| "parent round trip timed out".to_string())?
+}
+
+/// Send one frame to the parent and read its reply, with no timeout of its
+/// own. Callers bound it when the parent is expected to answer promptly.
+async fn exchange_frame(config: &ChildConfig, request: FrameRequest) -> Result<FrameReply, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", config.port))
+        .await
+        .map_err(|e| format!("connect to parent failed: {e}"))?;
+    let mut buf = serde_json::to_vec(&request).map_err(|e| format!("encode frame: {e}"))?;
+    buf.push(b'\n');
+    stream
+        .write_all(&buf)
+        .await
+        .map_err(|e| format!("write frame: {e}"))?;
+    // Snapshot payloads are large; keep the cap generous.
+    const MAX_REPLY: u64 = 1024 * 1024;
+    let mut reader = BufReader::new(stream.take(MAX_REPLY));
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .await
+        .map_err(|e| format!("read reply: {e}"))?;
+    serde_json::from_str(&line).map_err(|e| format!("decode reply: {e}"))
 }
 
 async fn forward_to_parent_inner(

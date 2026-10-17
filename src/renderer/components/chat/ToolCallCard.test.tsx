@@ -75,6 +75,7 @@ describe('ToolCallCard', () => {
         parentTurnActive
         open
         onOpenChange={() => {}}
+        filePathContext={undefined}
       />
     )
     const dialog = screen.getByRole('dialog', { name: 'Audit branch code for slop' })
@@ -100,6 +101,7 @@ describe('ToolCallCard', () => {
         parentTurnActive
         open
         onOpenChange={() => {}}
+        filePathContext={undefined}
       />
     )
     expect(screen.getByRole('dialog', { name: 'Explore the tree' })).toHaveTextContent(
@@ -131,6 +133,7 @@ describe('ToolCallCard', () => {
         toolCall={onOpenSubagent.mock.calls[0][0]}
         open
         onOpenChange={() => {}}
+        filePathContext={undefined}
       />
     )
     const dialog = screen.getByRole('dialog', { name: 'Summarize findings' })

@@ -9,6 +9,12 @@ import { DEFINITE_SPAWN_REJECTIONS } from '@/lib/acp-transport/tauri-verdicts'
 const ENOENT_PATTERN =
   /enoent|no such file|program not found|command not found|spawn.*fail|failed to spawn/i
 
+// The Rust resolver's own wording (`pty/manager/resolve.rs`): `program not
+// found or not executable: <path>`, `program not found on PATH: <name>`, and
+// the `Agent program not found[ on PATH]: <name>` variants. Group 1 is the
+// file it names.
+const RESOLVER_FAILURE_PATTERN = /program not found(?: or not executable| on PATH)?: (.+)$/i
+
 /**
  * Turn a raw spawn/setup error into a user-facing message. Only ENOENT-style
  * failures (a missing/unresolvable command) are rewritten into actionable
@@ -20,6 +26,22 @@ export function formatAcpSpawnError(raw: unknown, config?: Pick<AgentConfig, 'co
   // transport prefixes are not user-visible text.
   const message = definiteSpawnRejectionMessage(raw)
   if (!ENOENT_PATTERN.test(message)) return message
+
+  // Resolver-level failures name the file they could not prepare (e.g.
+  // `program not found or not executable: C:\…\npm\claude.cmd`). When that
+  // file is not the spawned command — managed `claude-acp` runs `node` while
+  // its *pre-spawn CLI probe* is the piece that failed — rewriting against
+  // `config.command` would blame the wrong binary, so the resolver's own
+  // wording stays. Any other message (an OS error such as `No such file or
+  // directory (os error 2)`) names no such file and is rewritten.
+  const namedPath = RESOLVER_FAILURE_PATTERN.exec(message)?.[1]?.trim().replace(/^"|"$/g, '')
+  if (namedPath) {
+    const namedBase = namedPath.split(/[\\/]/).filter(Boolean).pop()
+    const commandBase = config?.command?.split(/[\\/]/).pop()
+    if (namedBase && commandBase && namedBase.toLowerCase() !== commandBase.toLowerCase()) {
+      return message
+    }
+  }
 
   if (config?.command === 'npx') {
     return 'Could not run npx. Install Node.js and ensure npx is on your PATH, then try again.'

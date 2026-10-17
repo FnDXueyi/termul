@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetCommandEngineForTesting, AWAITED_RESEND_DELAYS_MS } from '@/lib/command-engine'
 import { __clearCommandJournalForTesting } from '@/lib/command-journal'
-import { mockSpawnedTerminal } from '@/lib/test-utils/terminal'
+import { mockPreservedPty, mockSpawnedTerminal } from '@/lib/test-utils/terminal'
 
 const { mockInvoke, mockListen } = vi.hoisted(() => ({ mockInvoke: vi.fn(), mockListen: vi.fn() }))
 
@@ -330,6 +330,66 @@ describe('tauri-terminal-api', () => {
       expect(result).toEqual({ success: true, data: undefined })
     })
 
+    it('a reloaded renderer lists the live PTY and reattaches to it with the fresh claim, spawning nothing', async () => {
+      const { api } = await loadApi()
+      const preserved = mockPreservedPty({
+        id: 'terminal-1752-1',
+        shell: 'pwsh',
+        cwd: 'C:/dev/project',
+        claim: 'reissued-claim-64-hex',
+        hasLiveAttachment: false
+      })
+      mockInvoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+        if (command === 'terminal_list_preserved') return { success: true, data: [preserved] }
+        if (command === 'terminal_attach') {
+          ;(args.onData as unknown as ChannelLike).onmessage?.(new Uint8Array([111, 107]).buffer)
+          return { success: true, data: ATTACHED }
+        }
+        throw new Error(`unexpected command ${command}`)
+      })
+      const received: Array<{ terminalId: string; bytes: number[] }> = []
+      const off = api.onData((terminalId, bytes) =>
+        received.push({ terminalId, bytes: Array.from(bytes) })
+      )
+
+      const listed = await api.listPreserved('project-a')
+      if (!listed.success) throw new Error(listed.error)
+      const attached = await api.attach(listed.data[0].id, listed.data[0].claim ?? '', 0)
+
+      expect(listed.data).toEqual([preserved])
+      expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
+        'terminal_list_preserved',
+        'terminal_attach'
+      ])
+      expect(mockInvoke.mock.calls[0][1]).toEqual({ projectId: 'project-a' })
+      expect(mockInvoke.mock.calls[1][1]).toMatchObject({
+        terminalId: 'terminal-1752-1',
+        claim: 'reissued-claim-64-hex',
+        lastSeq: 0
+      })
+      expect(attached).toEqual({ success: true, data: ATTACHED })
+      expect(received).toEqual([{ terminalId: 'terminal-1752-1', bytes: [111, 107] }])
+
+      off()
+    })
+
+    it('listPreserved surfaces a host refusal as a failed result', async () => {
+      const { api } = await loadApi()
+      mockInvoke.mockResolvedValue({
+        success: false,
+        error: 'missing projectId',
+        code: 'VALIDATION_ERROR'
+      })
+
+      const result = await api.listPreserved('')
+
+      expect(result).toEqual({
+        success: false,
+        error: 'missing projectId',
+        code: 'VALIDATION_ERROR'
+      })
+    })
+
     it('outcome_unknown from a spawn resend surfaces as a failure and is never resent', async () => {
       const { api } = await loadApi()
       mockInvoke.mockRejectedValue('outcome_unknown: no longer known')
@@ -338,6 +398,51 @@ describe('tauri-terminal-api', () => {
 
       expect(result).toMatchObject({ success: false, code: 'OUTCOME_UNKNOWN' })
       expect(mockInvoke).toHaveBeenCalledTimes(1)
+    })
+
+    describe('a rotate whose reply was lost (OUTCOME_UNKNOWN)', () => {
+      const LOST_ROTATE = {
+        success: false,
+        error: 'this `terminal_rotate_claim` already ran but its reply is not retained',
+        code: 'OUTCOME_UNKNOWN'
+      }
+
+      function scriptHost(listed: Array<ReturnType<typeof mockPreservedPty>>): void {
+        mockInvoke.mockImplementation(async (command: string) => {
+          if (command === 'terminal_spawn') return { success: true, data: SPAWNED }
+          if (command === 'terminal_rotate_claim') return LOST_ROTATE
+          if (command === 'terminal_list_preserved') return { success: true, data: listed }
+          throw new Error(`unexpected command ${command}`)
+        })
+      }
+
+      it('recovers the fresh claim through list_preserved for a terminal this page spawned', async () => {
+        const { api } = await loadApi()
+        scriptHost([mockPreservedPty({ id: 'terminal-1752-1', claim: 'recovered-claim' })])
+        await api.spawn({ projectId: 'p1' })
+
+        const rotated = await api.rotateClaim('terminal-1752-1', 'issued-claim-64-hex')
+
+        expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
+        expect(mockInvoke.mock.calls.map(([command]) => command)).toEqual([
+          'terminal_spawn',
+          'terminal_rotate_claim',
+          'terminal_list_preserved'
+        ])
+        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'p1' })
+      })
+
+      it('recovers the fresh claim for a terminal a reloaded page learned from listPreserved', async () => {
+        const { api } = await loadApi()
+        scriptHost([mockPreservedPty({ id: 'terminal-9', claim: 'reissued-claim' })])
+        await api.listPreserved('project-a')
+        scriptHost([mockPreservedPty({ id: 'terminal-9', claim: 'recovered-claim' })])
+
+        const rotated = await api.rotateClaim('terminal-9', 'reissued-claim')
+
+        expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'project-a' })
+      })
     })
 
     it('a spawn resent in-call (reply lost / first run still going) keeps its id, drops the new Channel and attaches with the fresh claim', async () => {

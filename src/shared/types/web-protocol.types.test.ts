@@ -88,8 +88,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
     expect(WS_REQUEST_TYPES).toContain('get_session_payload')
   })
 
-  it('exports exactly 50 request types including warm-pool promotion and host-owned session delete', () => {
-    expect(WS_REQUEST_TYPES).toHaveLength(50)
+  it('exports exactly 51 request types including warm-pool promotion and host-owned session delete', () => {
+    expect(WS_REQUEST_TYPES).toHaveLength(52)
     const expected = [
       'send_prompt',
       'cancel_prompt',
@@ -128,6 +128,7 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       'respond_elicitation',
       'list_acp_catalog',
       'set_catalog_opt_in',
+      'fetch_acp_registry_snapshot',
       // CAP-6 / Story 9: host-owned verified-atomic ACP install.
       'install_acp_agent',
       // Issue #613: server-side generic key-value store.
@@ -144,6 +145,8 @@ describe('web-protocol.types — event/request type registries (AC2)', () => {
       'acp_deliver_auth_redirect',
       // CAP-2 (spec-in-chat-agent-switch): host-authored durable marker.
       'record_agent_switch',
+      // A surface read a chat: move the shared last-read marker.
+      'mark_chat_read',
       // Watches (projects, chat history, agents, fs, store, terminals).
       'watch',
       'unwatch',

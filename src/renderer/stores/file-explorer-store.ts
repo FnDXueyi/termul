@@ -2,6 +2,7 @@ import type { DirectoryEntry, FileSearchResult } from '@shared/types/filesystem.
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
 import { filesystemApi } from '@/lib/api'
+import { moveOpenEditorTabs } from '@/lib/editor-tab-rename'
 import { logFrontendError } from '@/lib/log-api'
 import { useSidePanelVisible } from '@/stores/shell-layout-store'
 
@@ -184,8 +185,12 @@ function ensureFileNameStreamSubscription(
 
     // Folder hits (`kind: 'dir'`) exist for the composer @-picker only; the
     // explorer lists files, so drop them to keep its results unchanged.
+    // Hits are root-relative; the explorer opens absolute paths.
+    const root = (state.rootPath ?? '').replace(/\/$/, '')
     set({
-      searchFileNameMatches: event.files.filter((f) => f.kind !== 'dir').map((f) => f.path),
+      searchFileNameMatches: event.files
+        .filter((f) => f.kind !== 'dir')
+        .map((f) => `${root}/${f.path}`),
       searchTruncated: event.truncated || state.searchTruncated
     })
   })
@@ -694,6 +699,8 @@ export const useFileExplorerStore = create<FileExplorerState>((set, get) => ({
         const renameResult = await filesystemApi.renameFile(normalizedSrc, destPath)
         if (!renameResult.success) {
           console.error('Failed to move:', renameResult.error)
+        } else {
+          await moveOpenEditorTabs(normalizedSrc, destPath)
         }
       }
     }

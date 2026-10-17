@@ -74,6 +74,7 @@ import {
   PERSISTED_TOOL_CALLS_LIMIT,
   queueSessionPayloadDelete,
   queueSessionPayloadSave,
+  reloadSessionPayloadFromHost,
   restoredSwitches,
   restoredToolCalls,
   runHistoryWipeMigration,
@@ -981,6 +982,54 @@ describe('bounded full-payload cache', () => {
     mockHistoryApi.get.mockResolvedValueOnce(payload('s-fence', [...early, reply]))
     const full = await loadSessionPayload('s-fence')
     expect(full?.messages[1].blocks.map((b) => b.text)).toEqual(['final reply', '\n', fence])
+  })
+
+  it('a desktop reload replaces the cached copy in place, keeping its pin and plan fences', async () => {
+    const fence = '```termul-plan\n[{"content":"ship","status":"completed"}]\n```'
+    const reply = { ...msg('agent', 'final reply'), seq: 1478 }
+    const later = { ...msg('agent', 'more work'), seq: 1600 }
+    markSessionPayloadPinned('s-reload')
+    setCachedSessionPayload(
+      's-reload',
+      atSeq(
+        payload('s-reload', [
+          ...early,
+          { ...reply, blocks: [...reply.blocks, { type: 'text', text: fence }] }
+        ]),
+        1500
+      )
+    )
+    mockHistoryApi.get.mockResolvedValueOnce(
+      atSeq(payload('s-reload', [...early, reply, later]), 1655)
+    )
+
+    const fresh = await reloadSessionPayloadFromHost('s-reload')
+
+    expect(mockHistoryApi.get).toHaveBeenCalledWith('s-reload')
+    expect(fresh?.messages.map((m) => m.id)).toEqual(['m-prompt', 'm-final reply', 'm-more work'])
+    expect(fresh?.messages[1].blocks.map((b) => b.text)).toEqual(['final reply', '\n', fence])
+    expect(getCachedSessionPayload('s-reload')).toBe(fresh)
+    expect(getPinnedSessionPayloadIds()).toEqual(['s-reload'])
+    expect(logFrontendError).toHaveBeenCalledWith({
+      level: 'info',
+      source: 'acp.historyPersistence',
+      message:
+        'Re-read session s-reload… from the host: the cached copy ended at seq 1500, the host is at seq 1655'
+    })
+  })
+
+  it('a reload reads nothing in server and live-only modes, and leaves the cache as it is', async () => {
+    const cached = atSeq(payload('s-noreload', early), 7)
+    setCachedSessionPayload('s-noreload', cached)
+
+    for (const mode of ['server', 'live_only'] as const) {
+      mockTransport.historyMode.mockReturnValue(mode)
+      await expect(reloadSessionPayloadFromHost('s-noreload')).resolves.toBeNull()
+    }
+
+    expect(mockHistoryApi.get).not.toHaveBeenCalled()
+    expect(mockTransport.getSessionPayload).not.toHaveBeenCalled()
+    expect(getCachedSessionPayload('s-noreload')).toBe(cached)
   })
 
   it('evicts least-recent inactive entries and reloads them from Rust', async () => {

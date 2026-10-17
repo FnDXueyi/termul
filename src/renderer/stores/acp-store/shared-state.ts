@@ -20,9 +20,11 @@ import { isDefiniteSpawnRejection } from '@/lib/agents/acp-spawn-errors'
 import { persistenceApi } from '@/lib/api'
 import { __resetCommandEngineForTesting } from '@/lib/command-engine'
 import { __clearCommandJournalForTesting } from '@/lib/command-journal'
+import { projectForCwd, resolveAgentSpawnEnv } from '@/lib/env-parser'
 import { logFrontendError } from '@/lib/log-api'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useProjectStore } from '@/stores/project-store'
+import type { Project } from '@/types/project'
 import {
   agentReuseKey,
   configIdFromReuseKey,
@@ -116,6 +118,36 @@ export function isHistoryCoveredEvent(sessionId: SessionId, eventSeq?: number): 
   return eventSeq <= (historySeqWatermarks.get(sessionId) ?? 0)
 }
 
+/**
+ * Per session, the subscribe cursor `attachLiveTurn` lowered to just before the
+ * open turn's prompt. The payload only summarizes that turn's tool calls, while
+ * the relay replays the turn in full: a covered tool_call/tool_call_update
+ * above the floor restores its card. Prompts and chunks stay covered.
+ */
+const liveTurnReplayFloors = new Map<SessionId, number>()
+
+export function noteLiveTurnReplayFloor(sessionId: SessionId, floor: number): void {
+  liveTurnReplayFloors.set(sessionId, floor)
+}
+
+export function forgetLiveTurnReplayFloor(sessionId: SessionId): void {
+  liveTurnReplayFloors.delete(sessionId)
+}
+
+/** The server seq of a covered tool event the attach replay re-delivers, else null. */
+export function liveTurnReplaySeq(sessionId: SessionId, eventSeq?: number): number | null {
+  const floor = liveTurnReplayFloors.get(sessionId)
+  if (floor === undefined || typeof eventSeq !== 'number' || eventSeq <= floor) return null
+  return isHistoryCoveredEvent(sessionId, eventSeq) ? eventSeq : null
+}
+
+/** A covered tool event, unless the attach replay re-delivers it in full. */
+export function isHistoryCoveredToolEvent(sessionId: SessionId, eventSeq?: number): boolean {
+  return (
+    isHistoryCoveredEvent(sessionId, eventSeq) && liveTurnReplaySeq(sessionId, eventSeq) === null
+  )
+}
+
 /** Record the authoritative history watermark for an installed payload. */
 export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPayload): void {
   // `metadata.lastSeq` is the persisted-log cursor and can legitimately exceed
@@ -123,6 +155,7 @@ export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPaylo
   // stale-low value must never under-cover the payload's own messages.
   const watermark = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
   if (watermark > 0) historySeqWatermarks.set(sessionId, watermark)
+  liveTurnReplayFloors.delete(sessionId)
   // Keep the local seq counter above the server watermark (the recovery path
   // rebases the same way) so post-install live messages never receive local
   // stamps below the envelope seqs they arrived with.
@@ -132,6 +165,7 @@ export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPaylo
 /** Test-only: clear per-session history watermarks between tests. */
 export function _resetHistorySeqWatermarksForTesting(): void {
   historySeqWatermarks.clear()
+  liveTurnReplayFloors.clear()
 }
 
 /**
@@ -241,19 +275,26 @@ const inFlightWarmOutcomes = new Map<string, Promise<AgentId | null>>()
  */
 const definiteSpawnRejections = new Map<string, string>()
 
-function spawnSignature(config: AgentConfigLaunchFields): string {
-  return JSON.stringify([
-    config.name,
-    config.command,
-    config.args,
-    config.env,
-    config.allowTerminal
-  ])
+/**
+ * The launch signature each agent this renderer spawned was started with, by
+ * agent id. A warm agent whose signature no longer matches the current launch
+ * (an edited project env, for example) is not reused, so the next chat runs
+ * with the env the project has now. In-memory only.
+ */
+const liveAgentSignatures = new Map<AgentId, string>()
+
+/**
+ * The effective launch of a config in a working directory: the agent config
+ * plus the env the project owning `cwd` adds underneath it.
+ */
+function spawnSignature(config: AgentConfigLaunchFields, env: Record<string, string>): string {
+  return JSON.stringify([config.name, config.command, config.args, env, config.allowTerminal])
 }
 
 /** Test-only: forget recorded definite spawn rejections between tests. */
 export function _resetDefiniteSpawnRejectionsForTesting(): void {
   definiteSpawnRejections.clear()
+  liveAgentSignatures.clear()
 }
 
 /** In-flight `session/new` for a prepare key. */
@@ -576,7 +617,7 @@ export async function adoptHostOwnedAgent(
     source: 'acp-store.adoptHostOwnedAgent',
     message: `Reusing host agent ${match.id} that owns session ${sessionId} instead of spawning a duplicate`
   })
-  const projectId = (options?.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const projectId = resolveSpawnProject(trimmedCwd, options?.projectId)?.id ?? ''
   const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
   set((s) => ({
     agents: {
@@ -623,23 +664,19 @@ export type EnsureLiveAgentOptions = {
 }
 
 /**
- * The Project whose folder is `cwd` or holds it (longest match), so a spawn
- * with no explicit Project still uses that Project's Claude Account.
+ * The Project a spawn in `cwd` belongs to: `projectId` when given, else the
+ * Project whose worktree or root is `cwd`, else the one whose root holds it
+ * (longest match). The reuse key, the Claude Account and the project env of a
+ * spawn all come from this one resolution.
  */
-export function projectIdForCwd(cwd: string): string | null {
-  const normalize = (path: string): string => path.replace(/[\\/]+$/, '')
-  const target = normalize(cwd)
-  let best: { id: string; length: number } | null = null
-  for (const project of useProjectStore.getState().projects) {
-    if (!project.path) continue
-    const root = normalize(project.path)
-    const inside =
-      target === root || target.startsWith(`${root}/`) || target.startsWith(`${root}\\`)
-    if (inside && (!best || root.length > best.length)) {
-      best = { id: project.id, length: root.length }
-    }
-  }
-  return best?.id ?? null
+export function resolveSpawnProject(
+  cwd: string,
+  projectId?: string | null
+): Pick<Project, 'id' | 'envVars'> | null {
+  const { projects } = useProjectStore.getState()
+  const explicit = projectId?.trim()
+  if (explicit) return projects.find((p) => p.id === explicit) ?? { id: explicit }
+  return projectForCwd(projects, cwd) ?? null
 }
 
 type AgentConfigLaunchFields = Pick<
@@ -665,20 +702,32 @@ export function ensureLiveAgent(
   const config = get().agentConfigs.find((c) => c.id === configId)
   if (!config) return Promise.resolve(null)
 
-  const projectId = (options.projectId?.trim() || projectIdForCwd(trimmedCwd) || '').trim()
+  const project = resolveSpawnProject(trimmedCwd, options.projectId)
+  const projectId = project?.id ?? ''
   const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
+  // The project contributes its env underneath the agent config, exactly as a
+  // terminal tab in that project gets it (`spawnTerminalInPane`) and as a
+  // terminal-native agent does (`launchAgentInPane`).
+  const env = resolveAgentSpawnEnv(project?.envVars, config.env)
+  const signature = spawnSignature(config, env)
   const currentAgentId = get().configToLiveAgent[reuseKey]
+  const currentSignature = currentAgentId ? liveAgentSignatures.get(currentAgentId) : undefined
+  const staleLaunch = currentSignature !== undefined && currentSignature !== signature
   if (
     currentAgentId &&
-    Object.values(get().sessions).some(
-      (session) =>
-        session.agentId === currentAgentId &&
-        session.status !== 'closed' &&
-        !ephemeralSessionIds.has(session.id)
-    )
+    (staleLaunch ||
+      Object.values(get().sessions).some(
+        (session) =>
+          session.agentId === currentAgentId &&
+          session.status !== 'closed' &&
+          !ephemeralSessionIds.has(session.id)
+      ))
   ) {
-    // One Agent process per Agent chat. Keep this process for its live chat
-    // and reserve the canonical key for the next chat.
+    // One Agent process per Agent chat, and none started with an outdated
+    // launch. Keep this process for whatever it still serves (a chat, or an
+    // ephemeral session such as a commit message whose session/new may not be
+    // in `sessions` yet; the host's idle reaper stops it once quiet) and
+    // reserve the canonical key for the next chat.
     set((s) => {
       if (s.configToLiveAgent[reuseKey] !== currentAgentId) return {}
       const configToLiveAgent = { ...s.configToLiveAgent }
@@ -689,9 +738,12 @@ export function ensureLiveAgent(
     void logFrontendError({
       level: 'info',
       source: 'acp-store.ensureLiveAgent',
-      message: `Detached agent ${currentAgentId} so the next Agent chat gets its own process`
+      message: staleLaunch
+        ? `Detached agent ${currentAgentId}: its launch env no longer matches the project`
+        : `Detached agent ${currentAgentId} so the next Agent chat gets its own process`
     })
   }
+
   const existing = get().configToLiveAgent[reuseKey]
   if (existing && isReusableStatus(get().agentStatus[existing])) {
     return Promise.resolve(existing)
@@ -706,7 +758,6 @@ export function ensureLiveAgent(
     return strict ? asCallerView(strict, reuseKey, configId, options) : inFlight
   }
 
-  const signature = spawnSignature(config)
   if (
     options.silentSpawnFailure &&
     !options.surfaceDefiniteRejection &&
@@ -729,19 +780,27 @@ export function ensureLiveAgent(
 
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
+      if (project?.envVars?.length) {
+        void logFrontendError({
+          level: 'info',
+          source: 'acp-store.ensureLiveAgent',
+          message: `Spawning ${config.name} with the env of project ${project.id} (${project.envVars.length} var(s))`
+        })
+      }
       const agentId = await get().spawnAgent(
         {
           configId,
           name: config.name,
           command: config.command,
           args: config.args,
-          env: config.env,
+          env,
           allowTerminal: config.allowTerminal
         },
         projectId || undefined
       )
       definiteSpawnRejections.delete(reuseKey)
       if (get().agentConfigs.some((c) => c.id === configId)) {
+        liveAgentSignatures.set(agentId, signature)
         set((s) => ({ configToLiveAgent: { ...s.configToLiveAgent, [reuseKey]: agentId } }))
         return agentId
       }

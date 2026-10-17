@@ -1,6 +1,12 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { describe, expect, it } from 'vitest'
-import { findTreeEntry, joinTreePath, normalizeTreePath, parentTreePath } from './tree-paths'
+import {
+  findTreeEntry,
+  joinTreePath,
+  normalizeTreePath,
+  parentTreePath,
+  resolveDeleteTargets
+} from './tree-paths'
 
 function entry(path: string, type: DirectoryEntry['type'] = 'file'): DirectoryEntry {
   return {
@@ -39,5 +45,35 @@ describe('tree-paths', () => {
     ])
     expect(findTreeEntry(contents, '/project/src/app.ts')?.name).toBe('app.ts')
     expect(findTreeEntry(contents, '/project/missing.ts')).toBeUndefined()
+  })
+})
+
+describe('resolveDeleteTargets', () => {
+  const dirA = entry('/proj/a', 'directory')
+  const one = entry('/proj/a/one.ts')
+  const two = entry('/proj/a/two.ts')
+  const four = entry('/proj/b/four.ts')
+  const contents = new Map([
+    ['/proj', [dirA, entry('/proj/b', 'directory')]],
+    ['/proj/a', [one, two]],
+    ['/proj/b', [four]]
+  ])
+
+  it('acts on the whole selection when the clicked entry is part of it', () => {
+    const selected = new Set([one.path, four.path])
+    expect(resolveDeleteTargets(contents, selected, four)).toEqual([one, four])
+  })
+
+  it('acts on the clicked entry alone when it is outside the selection', () => {
+    expect(resolveDeleteTargets(contents, new Set([one.path, two.path]), four)).toEqual([four])
+  })
+
+  it('acts on the selection when no entry was clicked', () => {
+    expect(resolveDeleteTargets(contents, new Set([two.path, four.path]))).toEqual([two, four])
+  })
+
+  it('drops an entry whose ancestor folder is also selected', () => {
+    const selected = new Set([one.path, dirA.path, four.path])
+    expect(resolveDeleteTargets(contents, selected, one)).toEqual([dirA, four])
   })
 })

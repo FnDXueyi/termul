@@ -84,7 +84,6 @@ fn test_router(state: AppState) -> axum::Router {
         .route("/git/stash-drop", post(stash_drop))
         .route("/git/branch-list", get(branch_list))
         .route("/git/branch-switch", post(branch_switch))
-        .route("/git/branch-create", post(branch_create))
         .with_state(state)
 }
 
@@ -588,11 +587,92 @@ async fn branch_switch_remote_tracking_creates_local_tracking_branch() {
     );
 }
 
-/// F-008 regression: `POST /git/branch-create` must actually create and
-/// check out the branch. The previous `["checkout", "-b", "--", name]`
-/// consumed `--` as the branch name — the route could never succeed.
+/// `POST /git/checkout-branch` passed the branch straight to `git checkout`,
+/// so `.` restored every tracked file and `-f` was read as an option.
 #[tokio::test]
-async fn branch_create_actually_creates_and_switches() {
+async fn checkout_branch_refuses_pathspec_option_and_revision_names_without_touching_the_tree() {
+    if git_missing() {
+        return;
+    }
+    let repo = repo_with_feature_branch("checkout-branch-guard");
+    std::fs::write(repo.join("a.txt"), "committed\n").expect("write");
+    GitTracker::run_git_command(repo.to_str().unwrap(), &["add", "-A"]).expect("add runs");
+    GitTracker::run_git_command(repo.to_str().unwrap(), &["commit", "-qm", "add a"])
+        .expect("commit runs");
+    std::fs::write(repo.join("a.txt"), "precious-local-edit\n").expect("modify");
+    let before = head_branch(&repo);
+
+    for is_remote in [false, true] {
+        for name in [".", "-f", "a.txt", "", "feature~0", "feature@{0}"] {
+            let state = test_state(repo.parent().unwrap_or_else(|| std::path::Path::new(".")));
+            let resp = post_json(
+                state,
+                "/git/checkout-branch",
+                &serde_json::json!({
+                    "cwd": repo.to_string_lossy(),
+                    "branch": name,
+                    "isRemote": is_remote,
+                }),
+            )
+            .await;
+            let body: IpcBody<()> = body_as(resp.into_body()).await;
+            assert!(!body.success, "{name:?} (remote: {is_remote}) must be refused");
+            assert!(
+                body.error.unwrap_or_default().contains("not a branch"),
+                "{name:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.join("a.txt")).expect("read"),
+                "precious-local-edit\n",
+                "{name:?} must not discard the local edit"
+            );
+            assert_eq!(head_branch(&repo), before, "{name:?} must not move HEAD");
+        }
+    }
+}
+
+#[tokio::test]
+async fn checkout_branch_switches_to_a_local_branch_and_tracks_a_remote_one() {
+    if git_missing() {
+        return;
+    }
+    let remote = repo_with_feature_branch("checkout-branch-remote-src");
+    GitTracker::run_git_command(remote.to_str().unwrap(), &["branch", "topic"])
+        .expect("remote branch runs");
+    let repo = init_repo("checkout-branch-remote");
+    for args in [
+        ["commit", "--allow-empty", "-qm", "init"].as_slice(),
+        ["branch", "local-topic"].as_slice(),
+        ["remote", "add", "origin", remote.to_str().unwrap()].as_slice(),
+        ["fetch", "-q", "origin"].as_slice(),
+    ] {
+        let out = GitTracker::run_git_command(repo.to_str().unwrap(), args).expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let root = repo.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+    for (branch, is_remote, expected_head) in
+        [("local-topic", false, "local-topic"), ("origin/topic", true, "topic")]
+    {
+        let resp = post_json(
+            test_state(root),
+            "/git/checkout-branch",
+            &serde_json::json!({
+                "cwd": repo.to_string_lossy(),
+                "branch": branch,
+                "isRemote": is_remote,
+            }),
+        )
+        .await;
+        let body: IpcBody<()> = body_as(resp.into_body()).await;
+        assert!(body.success, "{branch}: {:?}", body.error);
+        assert_eq!(head_branch(&repo), expected_head);
+    }
+}
+
+/// `POST /git/create-branch` must actually create and check out the branch.
+#[tokio::test]
+async fn create_branch_actually_creates_and_switches() {
     if git_missing() {
         return;
     }
@@ -605,15 +685,15 @@ async fn branch_create_actually_creates_and_switches() {
     let state = test_state(repo.parent().unwrap_or_else(|| std::path::Path::new(".")));
     let resp = post_json(
         state,
-        "/git/branch-create",
-        &serde_json::json!({ "cwd": repo.to_string_lossy(), "name": "newbr" }),
+        "/git/create-branch",
+        &serde_json::json!({ "cwd": repo.to_string_lossy(), "branch": "newbr" }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: IpcBody<()> = body_as(resp.into_body()).await;
     assert!(
         body.success,
-        "branch-create should succeed: {:?}",
+        "create-branch should succeed: {:?}",
         body.error
     );
     let head =
@@ -740,23 +820,6 @@ async fn idle_or_sibling_sessions_do_not_block_a_branch_switch() {
     );
     assert_eq!(head_branch(&repo), original);
     let _ = std::fs::remove_dir_all(sibling);
-}
-
-#[tokio::test]
-async fn branch_create_is_not_a_destructive_op() {
-    if git_missing() {
-        return;
-    }
-    let repo = repo_with_feature_branch("guard-create");
-    let state = state_with_session(&repo, repo.clone(), true);
-    let resp = post_json(
-        state,
-        "/git/branch-create",
-        &serde_json::json!({ "cwd": repo.to_string_lossy(), "name": "topic" }),
-    )
-    .await;
-    let body: IpcBody<()> = body_as(resp.into_body()).await;
-    assert!(body.success, "{:?}", body.error);
 }
 
 #[tokio::test]

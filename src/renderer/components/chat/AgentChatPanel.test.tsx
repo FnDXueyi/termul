@@ -18,6 +18,7 @@ const {
   mockRecheckPromptCommand,
   mockRetryCrashed,
   mockRetryFailed,
+  agentStatusRef,
   mockMarkResumeFailed,
   mockSendPrompt,
   mockSendPromptBlocks,
@@ -27,6 +28,8 @@ const {
   mockSetMode,
   mockSetModel,
   sessionsMapRef,
+  agentsRef,
+  commandsRef,
   preparedSessionsRef,
   optionsCacheRef,
   mockRemoveTab,
@@ -70,6 +73,7 @@ const {
   // never retryCrashedSession, and never toast a circular "Could not retry").
   mockRetryCrashed: vi.fn(),
   mockRetryFailed: vi.fn(),
+  agentStatusRef: { current: {} as Record<string, string> },
   // spec-stopped-chat-status-signals: the idle-stop auto-resume records a
   // failure through this store action when the store wrote none itself.
   mockMarkResumeFailed: vi.fn(),
@@ -93,6 +97,8 @@ const {
   // Extra sessions addressable by id (e.g. the switch target's prepared warm
   // session) so useAcpSession('s-warm') resolves in armed-switch tests.
   sessionsMapRef: { current: {} as Record<string, object> },
+  agentsRef: { current: {} as Record<string, object> },
+  commandsRef: { current: {} as Record<string, unknown[]> },
   // Armed-switch option scoping seams: the target's prepared session id (per
   // prepareChatKey) and its cached advertised options.
   preparedSessionsRef: { current: {} as Record<string, string> },
@@ -109,6 +115,8 @@ const {
   errorNoticePropsRef: {
     current: null as {
       message: string | null
+      code?: number | null
+      data?: unknown
       onRetry?: () => void
       onDismiss: () => void
     } | null
@@ -224,8 +232,9 @@ vi.mock('@/stores/workspace-store', () => ({
 
 vi.mock('@/stores/acp-store', () => {
   const state = () => ({
-    agents: {},
-    commands: {},
+    agents: agentsRef.current,
+    agentStatus: agentStatusRef.current,
+    commands: commandsRef.current,
     agentSwitches: agentSwitchesRef.current,
     agentConfigs: agentConfigsRef.current,
     toolCalls: toolCallsRef.current,
@@ -238,7 +247,7 @@ vi.mock('@/stores/acp-store', () => {
     // useAcpMessages mock serves one flat list for ANY session, so the map
     // is a Proxy answering every key with messagesRef.
     messages: new Proxy({}, { get: () => messagesRef.current }),
-    sessions: {},
+    sessions: sessionsMapRef.current,
     configToLiveAgent: {},
     preparedSessions: preparedSessionsRef.current,
     agentOptionsCache: optionsCacheRef.current,
@@ -348,6 +357,8 @@ vi.mock('@/stores/git-sheet-store', () => ({
 vi.mock('./ChatErrorNotice', () => ({
   ChatErrorNotice: (props: {
     message: string | null
+    code?: number | null
+    data?: unknown
     onRetry?: () => void
     retryLabel?: string
     onDismiss: () => void
@@ -377,7 +388,15 @@ const { chatInputBarPropsRef } = vi.hoisted(() => ({
       onSend?: (text: string) => void
       onSendBlocks?: (blocks: unknown[], displayBlocks?: unknown[]) => void
       onDraftStart?: () => void
-      session?: { models?: unknown; modes?: unknown; configOptions?: unknown[] }
+      session?: {
+        models?: unknown
+        modes?: unknown
+        configOptions?: unknown[]
+        mcpServerCount?: number
+      }
+      commands?: unknown[]
+      imageCapable?: boolean
+      embedCapable?: boolean
       configOptions?: unknown[]
       modes?: unknown
       onSetConfig?: (configId: string, valueId: string) => Promise<void>
@@ -916,6 +935,22 @@ describe('AgentChatPanel idle-stopped chat seamless resume', () => {
     expect(mockOpen).toHaveBeenCalledTimes(1)
   })
 
+  it('gh-821: hands the agent error code and data to the error notice', () => {
+    indexRef.current = []
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      cwd: '/w',
+      status: 'error',
+      lastError: 'Internal error',
+      lastErrorCode: -32603,
+      lastErrorData: { reason: 'login' }
+    })
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    expect(errorNoticePropsRef.current?.message).toBe('Internal error')
+    expect(errorNoticePropsRef.current?.code).toBe(-32603)
+    expect(errorNoticePropsRef.current?.data).toEqual({ reason: 'login' })
+  })
+
   it('leaves a crashed (error) chat on the unchanged error notice', () => {
     indexRef.current = []
     sessionRef.current = mockAcpSession({
@@ -1389,6 +1424,10 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     messagesRef.current = []
   })
 
+  afterEach(() => {
+    agentStatusRef.current = {}
+  })
+
   function seedFailedLaunchSession(id: string): void {
     sessionRef.current = mockAcpSession({
       id,
@@ -1453,6 +1492,25 @@ describe('AgentChatPanel failed-launch retry (story 5)', () => {
     // relaunch+replay path runs, never the failed-launch path.
     expect(mockRetryCrashed).toHaveBeenCalledWith('s1')
     expect(mockRetryFailed).not.toHaveBeenCalled()
+  })
+
+  it('restarts a live chat whose agent a turn error left unusable instead of re-sending to it', async () => {
+    mockSendPromptBlocks.mockReset().mockResolvedValue(undefined)
+    agentStatusRef.current = { 'agent-1': 'error' }
+    sessionRef.current = mockAcpSession({
+      id: 's1',
+      agentId: 'agent-1',
+      cwd: '/w',
+      status: 'active',
+      lastError: 'Authentication required'
+    })
+    messagesRef.current = [{ id: 'm1', role: 'user', blocks: [{ type: 'text', text: 'hello' }] }]
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+    const props = errorNoticePropsRef.current
+    expect(props?.retryLabel).toBe('Retry')
+    props?.onRetry?.()
+    await waitFor(() => expect(mockRetryCrashed).toHaveBeenCalledWith('s1'))
+    expect(mockSendPromptBlocks).not.toHaveBeenCalled()
   })
 })
 
@@ -1852,6 +1910,8 @@ describe('AgentChatPanel armed-switch composer scoping', () => {
     mockSetModel.mockReset()
     sessionRef.current = null
     sessionsMapRef.current = {}
+    agentsRef.current = {}
+    commandsRef.current = {}
     preparedSessionsRef.current = {}
     optionsCacheRef.current = {}
     indexRef.current = []
@@ -1903,6 +1963,35 @@ describe('AgentChatPanel armed-switch composer scoping', () => {
     expect(props?.modes).toEqual({ ...targetModes, currentModeId: 'code' })
     expect(props?.configOptions).toEqual([{ ...targetConfigOptions[0], currentValue: 'max' }])
     expect(props?.session?.configOptions?.[0]).not.toMatchObject({ id: 'old_opt' })
+  })
+
+  it('offers the target session commands, prompt capabilities and MCP count while armed', () => {
+    seedArmedSession()
+    sessionsMapRef.current['s-warm'] = { ...sessionsMapRef.current['s-warm'], mcpServerCount: 3 }
+    agentsRef.current = {
+      'agent-old': { capabilities: { promptCapabilities: {} } },
+      'agent-new': { capabilities: { promptCapabilities: { image: true, embeddedContext: true } } }
+    }
+    commandsRef.current = {
+      s1: [{ name: 'old-only', description: 'Old agent command' }],
+      's-warm': [{ name: 'target-only', description: 'Target agent command' }]
+    }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    const props = chatInputBarPropsRef.current.at(-1)
+    expect(props?.commands).toEqual([{ name: 'target-only', description: 'Target agent command' }])
+    expect(props?.imageCapable).toBe(true)
+    expect(props?.embedCapable).toBe(true)
+    expect(props?.session?.mcpServerCount).toBe(3)
+  })
+
+  it('offers no old-agent commands while the armed target has no prepared session', () => {
+    seedArmedSession()
+    preparedSessionsRef.current = {}
+    commandsRef.current = { s1: [{ name: 'old-only', description: 'Old agent command' }] }
+    render(<AgentChatPanel sessionId="s1" isVisible />)
+
+    expect(chatInputBarPropsRef.current.at(-1)?.commands).toEqual([])
   })
 
   it('routes armed composer picks into setSwitchPendingOption (old session untouched)', async () => {

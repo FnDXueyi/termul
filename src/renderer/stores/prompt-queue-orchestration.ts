@@ -93,6 +93,17 @@ export function dropPromptQueueForSession(
   return next
 }
 
+export function moveQueuedPrompts(
+  queues: PromptQueueMap,
+  fromSessionId: SessionId,
+  toSessionId: SessionId
+): PromptQueueMap {
+  const moved = queues[fromSessionId]
+  if (!moved || moved.length === 0) return queues
+  const next = dropPromptQueueForSession(queues, fromSessionId)
+  return { ...next, [toSessionId]: [...(next[toSessionId] ?? []), ...moved] }
+}
+
 export function appendQueuedPrompt(
   queues: PromptQueueMap,
   sessionId: SessionId,
@@ -126,7 +137,14 @@ export interface RecoverPromptArgs {
 }
 
 export interface RecoverPromptState {
-  sessions: Record<SessionId, TurnBusySession & { lastError?: string | null }>
+  sessions: Record<
+    SessionId,
+    TurnBusySession & {
+      lastError?: string | null
+      lastErrorCode?: number | null
+      lastErrorData?: unknown
+    }
+  >
   messages: Record<SessionId, RecoverableChatMessage[]>
   promptQueues: PromptQueueMap
 }
@@ -175,7 +193,9 @@ export function buildRecoverPromptToQueuePatch(
             ...session,
             activeTurn: Boolean(restoredOpenTurnId),
             openTurnId: restoredOpenTurnId,
-            lastError: null
+            lastError: null,
+            lastErrorCode: null,
+            lastErrorData: undefined
           }
         }
       : state.sessions

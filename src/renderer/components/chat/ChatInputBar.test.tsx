@@ -515,6 +515,47 @@ describe('ChatInputBar config controls', () => {
     expect(mockSetConfig).not.toHaveBeenCalled()
   })
 
+  it('shows a boolean Fast mode option as the one bolt toggle, not a second switch', () => {
+    const s = session()
+    const configOptions: SessionConfigOption[] = [
+      option('model', 'Model', 'model', 'opus', [
+        { value: 'opus', name: 'Opus 5.5' },
+        { value: 'sonnet', name: 'Sonnet 5.5' }
+      ]),
+      option('effort', 'Effort', 'thought_level', 'high', [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' }
+      ]),
+      { id: 'fast_mode', name: 'Fast mode', type: 'boolean', currentValue: false }
+    ]
+
+    render(
+      <TooltipProvider>
+        <ChatInputBar
+          session={s}
+          busy={false}
+          disabled={false}
+          onSend={vi.fn()}
+          onSendBlocks={vi.fn()}
+          onCancel={vi.fn()}
+          commands={[]}
+          configOptions={configOptions}
+          modes={s.modes}
+          onSetConfig={mockSetConfig}
+          onSetMode={mockSetMode}
+          onSetModel={mockSetModel}
+        />
+      </TooltipProvider>
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Opus 5\.5/ }))
+
+    expect(screen.getAllByTestId('selector-fast')).toHaveLength(1)
+    expect(screen.getByTestId('selector-fast')).toBeEnabled()
+    expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull()
+    fireEvent.click(screen.getByTestId('selector-fast'))
+    expect(mockSetConfig).toHaveBeenCalledWith('fast_mode', true)
+  })
+
   it('searches and scroll-limits large active-chat model menus', async () => {
     const s = session()
     const configOptions = [
@@ -1270,8 +1311,7 @@ describe('ChatInputBar command chip', () => {
     // Send
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
 
-    // Wire: `/compact hello` (byte-identical to the plain-prefix path).
-    // Display: the raw token text so the timeline renders the command chip.
+    // Wire: `/compact` stays where the token was. Display keeps the token.
     await waitFor(() => {
       expect(onSendBlocks).toHaveBeenCalledWith(
         [{ type: 'text', text: '/compact hello' }],
@@ -1366,27 +1406,37 @@ describe('ChatInputBar command chip', () => {
     expect(mockToastError).toHaveBeenCalledWith('This message already has a command.')
   })
 
-  it('places a command picked in the middle of a sentence at the front', async () => {
+  it('keeps a command picked in the middle of a sentence in that place', async () => {
+    const onSendBlocks = vi.fn()
     const commands = [{ name: 'compact', description: 'Compact the conversation' }]
-    renderInputBar({ commands })
+    renderInputBar({ commands, onSendBlocks })
 
     setComposerValue('buatkan design baru /compact')
 
     await selectSlashOption('/compact')
 
     await waitFor(() => {
-      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design baru `)
+      expect(getComposerValue()).toBe(`buatkan design baru ${commandToken('compact')} `)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(onSendBlocks).toHaveBeenCalledWith(
+        [{ type: 'text', text: 'buatkan design baru /compact' }],
+        [{ type: 'text', text: `buatkan design baru ${commandToken('compact')}` }]
+      )
     })
   })
 
-  it('moves a stored mid-sentence command to the front when the composer loads it', async () => {
+  it('keeps a stored mid-sentence command where the draft put it', async () => {
     const commands = [{ name: 'compact', description: 'Compact' }]
     renderInputBar({ commands })
 
     setComposerValue(`buatkan ${commandToken('compact')} design`)
 
     await waitFor(() => {
-      expect(getComposerValue()).toBe(`${commandToken('compact')} buatkan design`)
+      expect(getComposerValue()).toBe(`buatkan ${commandToken('compact')} design`)
     })
   })
 
@@ -1436,14 +1486,12 @@ describe('ChatInputBar command chip', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
 
-    // Wire: `/<name> ` prefix + the image block (byte-identical to the
-    // pre-token plain-prefix path). Display: raw token text + the image
-    // block so the timeline renders the command chip inline.
+    // Wire keeps `/compact` where the pill was. Display keeps the token.
     const imageBlock = { type: 'image', mimeType: 'image/png', data: 'c2NyZWVuc2hvdA==' }
     await waitFor(() => {
       expect(onSendBlocks).toHaveBeenCalledWith(
-        [{ type: 'text', text: '/compact ' }, imageBlock],
-        [{ type: 'text', text: commandToken('compact') }, imageBlock]
+        [{ type: 'text', text: '/compact' }, imageBlock],
+        [{ type: 'text', text: `${commandToken('compact')} ` }, imageBlock]
       )
     })
   })

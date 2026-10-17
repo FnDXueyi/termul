@@ -36,6 +36,7 @@ import type {
   PlanUpdateEvent,
   ProbeStatus,
   PromptCompleteEvent,
+  QuestionCancelledEvent,
   QuestionOption,
   SessionClosedEvent,
   SessionConfigOption,
@@ -99,6 +100,14 @@ export interface ChatMessage {
    */
   seq?: number
   /**
+   * Host log seq of the relay event that opened a live bubble. A live bubble
+   * keeps its renderer `seq` for timeline order and its `msg-*` id, while its
+   * durable twin carries this seq as its own `seq` and in its id. Scroll-up
+   * anchors on it once the live window's oldest bubble is not in the payload.
+   * Absent on restored bubbles, whose `seq` already is the host seq.
+   */
+  hostSeq?: number
+  /**
    * spec-agent-switch-separator-redesign: a summary-only handoff
    * `user_prompt` folds to a boundary row — it renders nothing (empty
    * blocks, filtered before display) but keeps the turn's reply visible in
@@ -151,14 +160,16 @@ export interface AcpSession {
    * are not dropped.
    */
   openTurnId: string | null
+  /**
+   * Wire turn id of the newest prompt turn this renderer opened. Unlike
+   * `openTurnId` it survives the turn's end, so a late result of an older turn
+   * can tell a newer one superseded it.
+   */
+  latestPromptTurnId?: string
   modes: SessionModeState | null
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
   lastError: string | null
-  /** gh-821: JSON-RPC code of the error behind `lastError`, when it was an
-   * agent RPC error (`null`/absent otherwise). Only set by the `agent_error` /
-   * `agent_crashed` reducers: other `lastError` writers do not touch it, so
-   * read it only while the `lastError` it accompanies is the event's message. */
   lastErrorCode?: number | null
   /** gh-821: JSON-RPC `data` of the error behind `lastError`, when present. */
   lastErrorData?: unknown
@@ -284,6 +295,10 @@ export interface PendingQuestion {
   sessionId: SessionId
   question: string
   options: QuestionOption[]
+  /** `ask_user` (issue #784): show the free-text "Other" row. */
+  allowFreeText?: boolean
+  /** `ask_user` (issue #784): more than one option may be picked. */
+  multiSelect?: boolean
 }
 
 export interface PendingElicitation {
@@ -468,7 +483,9 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
-  pendingPermissions: Record<string, PendingPermission> // P3 renders, keyed by requestId
+  /** Seq of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, number>
+  pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
   /** Pending user prompts keyed by session (sent FIFO when the turn ends). */
@@ -558,7 +575,7 @@ export interface AcpState {
   closeSession: (sessionId: SessionId) => Promise<void>
   setActiveSession: (sessionId: SessionId | null) => void
 
-  // Actions — configured agents (P4)
+  // Actions — configured agents
   loadAgentConfigs: () => Promise<void>
   saveAgentConfig: (config: StoredAgentConfig) => Promise<void>
   /**
@@ -691,7 +708,7 @@ export interface AcpState {
     exitCode: number | null
   ) => Promise<string>
 
-  // Actions — chat history (P5)
+  // Actions — chat history
   loadSessionIndex: () => Promise<void>
   /**
    * Merge a host-pushed full index (the `chat_history` watch state) into the
@@ -699,14 +716,6 @@ export interface AcpState {
    */
   applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
   openHistorySession: (id: string, options?: OpenHistoryOptions) => Promise<void>
-  /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
-   * `openHistorySessionInner`'s transcript-install + resume but skips
-   * `ensureLiveAgent` (no cold-spawn): the caller passes the authoritative
-   * live `agentId` still owned by the Rust `AcpManager` across a webview/
-   * phone reload. The backend `gate_resume_session` enforces the capability
-   * (reused, not duplicated); a rejection rejects here so the hook can record
-   * `acp-resume-skipped` and leave the transcript read-only. */
-  resumeLiveSession: (id: string, agentId: AgentId, cwd: string) => Promise<void>
   /** R4: force-flush a non-debounced snapshot of every live session's cached
    * payload on refresh unload so the durable copy is at worst one turn behind
    * (never truncated by a live-window trim). Reuses `persistSession`'s guards
@@ -750,7 +759,7 @@ export interface AcpState {
     projectId: string
   ) => Promise<void>
 
-  // Actions — MCP server registry (P6)
+  // Actions — MCP server registry
   loadMcpServers: () => Promise<void>
   saveMcpServer: (server: StoredMcpServer) => Promise<void>
   /**
@@ -874,7 +883,7 @@ export interface AcpState {
     }
   ) => Promise<void>
 
-  // Actions — config (P2 drives the UI; method available now)
+  // Actions — config
   setConfigOption: (
     sessionId: SessionId,
     configId: string,
@@ -883,7 +892,7 @@ export interface AcpState {
   setMode: (sessionId: SessionId, modeId: string) => Promise<void>
   setModel: (sessionId: SessionId, modelId: string) => Promise<void>
 
-  // Actions — permission (P3 drives the UI; method available now)
+  // Actions — permission
   respondPermission: (requestId: string, optionId?: string) => Promise<void>
 
   // Actions — structured questions (issue #411)
@@ -906,13 +915,14 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void
   _onUsageUpdate: (e: UsageUpdateEvent) => void
   _onPermissionRequest: (e: PermissionRequestEvent, eventSeq?: number) => void
   _onQuestionRequest: (e: AskUserQuestionEvent, eventSeq?: number) => void
+  _onQuestionCancelled: (e: QuestionCancelledEvent) => void
   _onElicitationRequest: (e: ElicitationRequestEvent, eventSeq?: number) => void
   _onPromptComplete: (e: PromptCompleteEvent, eventSeq?: number) => void
   _onAgentError: (e: AgentErrorEvent) => void

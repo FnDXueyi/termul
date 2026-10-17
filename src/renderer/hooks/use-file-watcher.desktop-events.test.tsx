@@ -1,5 +1,6 @@
 import { render } from '@testing-library/react'
 import { createElement } from 'react'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import notifyWatchEvents from '@/lib/__tests__/fixtures/notify-watch-events.json'
 import { filesystemApi } from '@/lib/api'
@@ -56,12 +57,12 @@ function at(event: WatchEvent, ...paths: string[]): WatchEvent {
   return { ...event, paths }
 }
 
-function seedOpenFile(content: string): void {
+function seedOpenFile(content: string, unsavedEdit?: string): void {
   const fileState: EditorFileState = {
     filePath: path,
-    content,
+    content: unsavedEdit ?? content,
     originalContent: content,
-    isDirty: false,
+    isDirty: unsavedEdit !== undefined,
     language: 'markdown',
     lastModified: 0,
     viewMode: 'code',
@@ -106,6 +107,34 @@ describe('desktop watcher events reaching an open editor tab', () => {
 
     expect(useEditorStore.getState().openFiles.has(path)).toBe(false)
     expect(mocks.removeTab).toHaveBeenCalledWith(`edit-${path}`)
+  })
+
+  it('keeps the unsaved edits and says the file is gone when the file of a dirty tab is deleted', async () => {
+    seedOpenFile('before', 'before plus unsaved edits')
+    mocks.disk.delete(path)
+    mocks.emit?.(at(notifyWatchEvents.removeFile, path))
+    await settle()
+
+    const file = useEditorStore.getState().openFiles.get(path)
+    expect(file?.content).toBe('before plus unsaved edits')
+    expect(file?.isDirty).toBe(true)
+    expect(mocks.removeTab).not.toHaveBeenCalled()
+    expect(toast).toHaveBeenCalledWith(
+      'File deleted on disk',
+      expect.objectContaining({ description: 'notes.md (unsaved edits kept)' })
+    )
+  })
+
+  it('keeps the unsaved edits when a tool moves the file of a dirty tab away (mv)', async () => {
+    seedOpenFile('before', 'before plus unsaved edits')
+    mocks.disk.delete(path)
+    mocks.emit?.(at(notifyWatchEvents.renameFrom, path))
+    mocks.emit?.(at(notifyWatchEvents.renameTo, '/test/moved.md'))
+    await settle()
+
+    expect(useEditorStore.getState().openFiles.get(path)?.content).toBe('before plus unsaved edits')
+    expect(mocks.removeTab).not.toHaveBeenCalled()
+    expect(toast).toHaveBeenCalledWith('File deleted on disk', expect.anything())
   })
 
   it('keeps and reloads the tab when git removes and rewrites the file (checkout, stash)', async () => {

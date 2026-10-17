@@ -5,9 +5,9 @@
  * All backend access goes through `@/lib/acp-api`. Backend events are wired into
  * this store exactly once via `initAcpEventListeners()` (called at app mount).
  *
- * P1 scope: text conversations. `toolCalls`, `plans`, `commands`,
- * `pendingPermissions`, and config/mode state are tracked here; tool, plan,
- * permission, and slash-command UI render them when present.
+ * `toolCalls`, `plans`, `commands`, `pendingPermissions`, and config/mode
+ * state are tracked here; tool, plan, permission, and slash-command UI render
+ * them when present.
  *
  * ## Architecture D6 reconciliation (Story 1.5)
  *
@@ -44,6 +44,7 @@ import {
   type AgentSpawnedEvent,
   type AgentSwitchEvent,
   type AskUserQuestionEvent,
+  type AvailableCommand,
   acpApi,
   type BrowserAgentTabEvent,
   type BrowserConsentRequestEvent,
@@ -57,6 +58,7 @@ import {
   type PermissionRequestEvent,
   type PlanUpdateEvent,
   type PromptCompleteEvent,
+  type QuestionCancelledEvent,
   type SessionClosedEvent,
   type SessionCreatedEvent,
   type SessionId,
@@ -71,6 +73,7 @@ import {
 } from '@/lib/acp-api'
 import { AcpConnectionCoordinator, type AcpRecovery } from '@/lib/acp-connection'
 import { getAcpTransport, isTransientAcpTransportError } from '@/lib/acp-transport'
+import { noteTurnEndSeq } from '@/lib/chat-read-sync'
 import { logFrontendError } from '@/lib/log-api'
 import { wireBlocksToDisplay } from '@/lib/skills-wire-reverse'
 import { getAgentChatSessionIdsInAllTrees, useWorkspaceStore } from '@/stores/workspace-store'
@@ -82,10 +85,12 @@ import {
   dropRecordKey,
   normalizeUserMessages,
   partitionTranscriptTurns,
+  plainLastError,
   SWITCH_SPLICE_ID_PREFIX,
   selectAgentIdentity,
   selectConfigWarmState,
-  trimLiveToolCalls
+  trimLiveToolCalls,
+  withCommands
 } from './helpers'
 import { setLaunchPlaceholderNotedListener, setLiveLaunchSessionLookup } from './live-turn'
 import {
@@ -138,6 +143,7 @@ export {
   persistComposerOptions
 } from './shared-state'
 export { _resetAcpAuthForTesting } from './slices/agent'
+export { mcpServerDeletionCount } from './slices/mcp'
 export {
   _resetInFlightHistoryOpensForTesting,
   _resetSessionIndexLoadGenerationForTesting
@@ -209,7 +215,8 @@ let teardown: Array<() => void> = []
  */
 async function installTransportRecovery(
   recovery: AcpRecovery,
-  reopenGeneration?: number
+  reopenGeneration?: number,
+  logEpochChanged = false
 ): Promise<void> {
   // Round-2 review: the WS transport captures the session's reopen generation
   // before the recovery round-trip; a close, delete, or reopen in that window
@@ -233,8 +240,9 @@ async function installTransportRecovery(
               ...state.sessions,
               [recovery.sessionId]: {
                 ...session,
-                lastError:
+                ...plainLastError(
                   'This session could not be fully re-synced; events emitted while disconnected may be missing.'
+                )
               }
             }
           : state.sessions
@@ -265,6 +273,7 @@ async function installTransportRecovery(
   // records — installed alongside the bubbles so reconnect recovery preserves
   // cards instead of blanking the session's tool-call list.
   const recoveredToolCalls: ToolCall[] = []
+  let recoveredCommands: { list: AvailableCommand[]; seq: number } | null = null
   let openRole: 'agent' | 'thought' | 'user' | null = null
   for (const event of recovery.events) {
     const payload = event.payload as Record<string, unknown>
@@ -388,6 +397,11 @@ async function installTransportRecovery(
     } else if (event.type === 'prompt_complete') {
       // Split boundary: the following chunk run opens a fresh bubble.
       openRole = null
+    } else if (event.type === 'commands_update') {
+      const { availableCommands } = payload as Partial<CommandsUpdateEvent>
+      if (Array.isArray(availableCommands)) {
+        recoveredCommands = { list: availableCommands, seq: event.seq }
+      }
     }
   }
   // Single wire→display pass over the folded user bubbles (chip rendering on
@@ -415,6 +429,14 @@ async function installTransportRecovery(
     if (!recoveryIsCurrent()) return {}
     const session = current.sessions[recovery.sessionId]
     const replacing = normalizedMessages.length > 0
+    // A held list seq belongs to the old host log; against the new log it
+    // would reject the lists the new log sends with lower seqs.
+    const held = logEpochChanged
+      ? {
+          commands: current.commands,
+          commandsSeq: dropRecordKey(current.commandsSeq, recovery.sessionId)
+        }
+      : current
     const splicedMessages = (current.messages[recovery.sessionId] ?? []).filter((m) =>
       m.id.startsWith(SWITCH_SPLICE_ID_PREFIX)
     )
@@ -437,15 +459,23 @@ async function installTransportRecovery(
             ])
           }
         : current.toolCalls,
+      ...(recoveredCommands
+        ? withCommands(held, recovery.sessionId, recoveredCommands.list, recoveredCommands.seq)
+        : { commandsSeq: held.commandsSeq }),
       degradedRecoverySessions: dropRecordKey(current.degradedRecoverySessions, recovery.sessionId),
       sessions: session
         ? {
             ...current.sessions,
-            [recovery.sessionId]: { ...session, lastError: null }
+            [recovery.sessionId]: { ...session, ...plainLastError(null) }
           }
         : current.sessions
     }
   })
+  for (const event of recovery.events) {
+    if (event.type === 'prompt_complete') {
+      noteTurnEndSeq(recovery.sessionId, event.seq, recovery.logEpoch ?? null)
+    }
+  }
   // AD-6: a prompt that lost its reply resolves from the recovered log.
   reconcilePromptAfterRecovery(recovery.sessionId, recovery.events)
 }
@@ -560,8 +590,8 @@ export function initAcpEventListeners(): () => void {
     acpApi.onEvent<PlanUpdateEvent>(ACP_EVENTS.planUpdate, (e) =>
       useAcpStore.getState()._onPlanUpdate(e)
     ),
-    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e) =>
-      useAcpStore.getState()._onCommandsUpdate(e)
+    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e, eventSeq) =>
+      useAcpStore.getState()._onCommandsUpdate(e, eventSeq)
     ),
     acpApi.onEvent<ModeUpdateEvent>(ACP_EVENTS.modeUpdate, (e) =>
       useAcpStore.getState()._onModeUpdate(e)
@@ -581,12 +611,17 @@ export function initAcpEventListeners(): () => void {
     acpApi.onEvent<AskUserQuestionEvent>(ACP_EVENTS.questionRequest, (e, eventSeq) =>
       useAcpStore.getState()._onQuestionRequest(e, eventSeq)
     ),
+    acpApi.onEvent<QuestionCancelledEvent>(ACP_EVENTS.questionCancelled, (e) =>
+      useAcpStore.getState()._onQuestionCancelled(e)
+    ),
     acpApi.onEvent<ElicitationRequestEvent>(ACP_EVENTS.elicitationRequest, (e, eventSeq) =>
       useAcpStore.getState()._onElicitationRequest(e, eventSeq)
     ),
-    acpApi.onEvent<PromptCompleteEvent>(ACP_EVENTS.promptComplete, (e, eventSeq) =>
+    acpApi.onEvent<PromptCompleteEvent>(ACP_EVENTS.promptComplete, (e, eventSeq) => {
+      const logEpoch = getAcpTransport().getSessionCursor?.(e.sessionId)?.logEpoch ?? null
+      noteTurnEndSeq(e.sessionId, eventSeq, logEpoch)
       useAcpStore.getState()._onPromptComplete(e, eventSeq)
-    ),
+    }),
     acpApi.onEvent<AgentCrashedEvent>(ACP_EVENTS.agentCrashed, (e) => {
       useAcpStore.getState()._onAgentCrashed(e)
       toast.error(e.message || 'Agent crashed')

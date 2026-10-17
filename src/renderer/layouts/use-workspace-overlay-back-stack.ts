@@ -4,6 +4,7 @@ import {
   notifyOverlayRouteChange,
   type OverlayRegistrationOptions,
   pushOverlaySentinel,
+  SETTINGS_MODAL_OVERLAY_ID,
   useOverlayRegistration,
   useOverlayStackStore
 } from '@/stores/overlay-stack-store'
@@ -88,7 +89,7 @@ export function useWorkspaceOverlayBackStack({
   useOverlayRegistration('command-palette', isCommandPaletteOpen, () =>
     setIsCommandPaletteOpen(false)
   )
-  useOverlayRegistration('settings-modal', settingsModalOpen, () =>
+  useOverlayRegistration(SETTINGS_MODAL_OVERLAY_ID, settingsModalOpen, () =>
     useSettingsModalStore.getState().close()
   )
 

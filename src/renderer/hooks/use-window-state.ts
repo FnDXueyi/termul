@@ -1,6 +1,7 @@
 import { PersistenceKeys, type WindowState } from '@shared/types/persistence.types'
 import { useEffect, useRef, useState } from 'react'
 import { persistenceApi } from '@/lib/api'
+import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { logFrontendError } from '@/lib/log-api'
 import { cleanupTauriListener, isTauriContext } from '@/lib/tauri-runtime'
 import { isWaylandSession } from '@/lib/tauri-wayland'
@@ -218,6 +219,14 @@ export function useWindowState(): boolean {
       await operation
     }
 
+    let closeWrite: Promise<void> | null = null
+    const persistImmediateShared = (): Promise<void> => {
+      closeWrite ??= persistWindowState(true).finally(() => {
+        closeWrite = null
+      })
+      return closeWrite
+    }
+
     const registerListeners = (): Array<() => void> => {
       const movedUnlisten = window.onMoved(() => void persistWindowState())
       const resizedUnlisten = window.onResized(() => void persistWindowState())
@@ -229,7 +238,12 @@ export function useWindowState(): boolean {
       // route) the default destroy stays, so the window can still close.
       const closeRequestedUnlisten = window.onCloseRequested((event) => {
         if (hasAppCloseOwner()) event.preventDefault()
-        void persistWindowState(true)
+        persistImmediateShared().catch((error) => {
+          void logFrontendError({
+            source: 'use-window-state',
+            message: `Failed to persist window state on close: ${error instanceof Error ? error.message : String(error)}`
+          })
+        })
       })
 
       return [
@@ -260,6 +274,7 @@ export function useWindowState(): boolean {
     }
 
     let cleanups: Array<() => void> = []
+    let unregisterCloseWriter = (): void => {}
     let restoreTimer: ReturnType<typeof setTimeout> | undefined
 
     const initialize = async (): Promise<void> => {
@@ -295,6 +310,9 @@ export function useWindowState(): boolean {
 
       if (disposed) return
       cleanups = registerListeners()
+      unregisterCloseWriter = registerCloseWriter(() =>
+        withinCloseTimeout('use-window-state', 'window state', persistImmediateShared)
+      )
     }
 
     void initialize()
@@ -310,6 +328,7 @@ export function useWindowState(): boolean {
     return () => {
       disposed = true
       clearTimeout(restoreTimer)
+      unregisterCloseWriter()
       void persistWindowState(true)
       cleanups.forEach((cleanup) => {
         cleanup()

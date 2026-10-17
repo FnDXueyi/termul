@@ -3,9 +3,8 @@
 //! The durable tool DTO never persists diff text, so the line counts the
 //! renderer's Changed files panel shows for a restored session must be
 //! computed here, at normalize time, from the live event's diff items. This
-//! mirrors the renderer's `diffLineCounts` (`tool-call-format.ts`); within
-//! the exact-LCS bound below, a restored row shows the same counts the live
-//! card showed:
+//! mirrors the renderer's `diffLineCounts` (`tool-call-format.ts`), so a
+//! restored row shows the same counts the live card showed:
 //!
 //! - Same `splitLines` rules: empty text → no lines; the trailing empty
 //!   segment after a final `\n` is dropped; one trailing `\r` per line is
@@ -13,19 +12,13 @@
 //! - `oldText` null/absent/`""` → every new line is an addition (new file).
 //! - `newText` `""` (or absent — the renderer defaults it to `""`) → every
 //!   old line is a removal (deleted file).
-//! - Otherwise `added = n − LCS`, `removed = m − LCS`, where the LCS is
-//!   computed exactly after trimming the common prefix/suffix, as long as the
-//!   trimmed middle fits [`MAX_LCS_CELLS`] (the renderer's exact-diff bound).
-//!
-//! Above the bound there is NO parity. The renderer switches to an
-//! anchor-chained heuristic; the host instead uses a **multiset
-//! approximation**: the common-line count of the trimmed middle is the size
-//! of the multiset intersection of its lines (each line value matched at
-//! most as many times as it occurs on both sides). That is an upper bound on
-//! the true LCS, so it never inflates counts but can under-report them
-//! heavily on large reordered rewrites — e.g. a reversed 1500-line file with
-//! one line replaced restores as `+1 −1` where the renderer shows roughly
-//! `+1499 −1499`. It is linear in the input.
+//! - Otherwise the renderer's bounded diff (`diffRange` / `anchorEmit`),
+//!   counting kept lines only: trim the common prefix and suffix, take the
+//!   exact LCS of the middle when it fits [`MAX_LCS_CELLS`], else chain
+//!   anchors (lines unique on both sides, greedily kept while their new-side
+//!   index rises) and recurse between them up to [`MAX_ANCHOR_DEPTH`]. A
+//!   middle with no anchor, or past the depth cap, keeps nothing.
+//!   `added = n − kept`, `removed = m − kept`.
 
 use std::collections::HashMap;
 
@@ -34,6 +27,10 @@ use serde_json::Value;
 /// Max (trimmed) cells for the exact LCS — parity with the renderer's
 /// `MAX_LCS_CELLS`.
 pub(crate) const MAX_LCS_CELLS: usize = 2_000_000;
+
+/// Recursion cap on the anchor chain — parity with the renderer's
+/// `MAX_ANCHOR_DEPTH`.
+const MAX_ANCHOR_DEPTH: usize = 24;
 
 /// Added/removed line counts for one or more diff items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,10 +73,10 @@ pub(crate) fn diff_line_counts(old_text: Option<&str>, new_text: &str) -> LineCo
             removed: old_lines.len() as u64,
         };
     }
-    let common = common_line_count(&old_lines, &new_lines);
+    let kept = kept_in_range(&old_lines, &new_lines, 0);
     LineCounts {
-        added: (new_lines.len() - common) as u64,
-        removed: (old_lines.len() - common) as u64,
+        added: (new_lines.len() - kept) as u64,
+        removed: (old_lines.len() - kept) as u64,
     }
 }
 
@@ -106,9 +103,8 @@ pub(crate) fn is_diff_item(item: &Value) -> bool {
     item.get("type").and_then(Value::as_str) == Some("diff")
 }
 
-/// Count of lines common to both sides: shared prefix + shared suffix + the
-/// (exact or approximated) LCS of the trimmed middle.
-fn common_line_count(old: &[&str], new: &[&str]) -> usize {
+/// Renderer `diffRange` parity, counting `keep` ops only.
+fn kept_in_range(old: &[&str], new: &[&str], depth: usize) -> usize {
     let head = old
         .iter()
         .zip(new.iter())
@@ -123,15 +119,53 @@ fn common_line_count(old: &[&str], new: &[&str]) -> usize {
         .count();
     let old_mid = &old_rest[..old_rest.len() - tail];
     let new_mid = &new_rest[..new_rest.len() - tail];
-    if old_mid.is_empty() || new_mid.is_empty() {
-        return head + tail;
-    }
-    let middle = if old_mid.len().saturating_mul(new_mid.len()) <= MAX_LCS_CELLS {
+    let middle = if old_mid.is_empty() || new_mid.is_empty() {
+        0
+    } else if old_mid.len().saturating_mul(new_mid.len()) <= MAX_LCS_CELLS {
         lcs_len(old_mid, new_mid)
+    } else if depth < MAX_ANCHOR_DEPTH {
+        anchor_kept(old_mid, new_mid, depth)
     } else {
-        multiset_common(old_mid, new_mid)
+        0
     };
     head + tail + middle
+}
+
+/// Renderer `anchorEmit` parity, counting `keep` ops only.
+fn anchor_kept(old: &[&str], new: &[&str], depth: usize) -> usize {
+    let mut old_counts: HashMap<&str, usize> = HashMap::new();
+    for line in old {
+        *old_counts.entry(*line).or_insert(0) += 1;
+    }
+    let mut new_counts: HashMap<&str, usize> = HashMap::new();
+    for line in new {
+        *new_counts.entry(*line).or_insert(0) += 1;
+    }
+    let new_unique: HashMap<&str, usize> = new
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| new_counts[*line] == 1 && old_counts.get(*line) == Some(&1))
+        .map(|(j, line)| (*line, j))
+        .collect();
+    let mut anchors: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in old.iter().enumerate() {
+        if let Some(&j) = new_unique.get(line) {
+            if anchors.last().is_none_or(|&(_, last)| j > last) {
+                anchors.push((i, j));
+            }
+        }
+    }
+    if anchors.is_empty() {
+        return 0;
+    }
+    let (mut old_start, mut new_start) = (0, 0);
+    let mut kept = anchors.len();
+    for &(i, j) in &anchors {
+        kept += kept_in_range(&old[old_start..i], &new[new_start..j], depth + 1);
+        old_start = i + 1;
+        new_start = j + 1;
+    }
+    kept + kept_in_range(&old[old_start..], &new[new_start..], depth + 1)
 }
 
 /// Exact LCS length with a single rolling row over the shorter side
@@ -152,23 +186,4 @@ fn lcs_len(a: &[&str], b: &[&str]) -> usize {
         }
     }
     row[inner.len()]
-}
-
-/// Above-bound approximation: size of the multiset intersection of the two
-/// line sequences (an upper bound on the LCS; see the module docs).
-fn multiset_common(a: &[&str], b: &[&str]) -> usize {
-    let mut remaining: HashMap<&str, usize> = HashMap::new();
-    for line in a {
-        *remaining.entry(*line).or_insert(0) += 1;
-    }
-    let mut common = 0;
-    for line in b {
-        if let Some(count) = remaining.get_mut(line) {
-            if *count > 0 {
-                *count -= 1;
-                common += 1;
-            }
-        }
-    }
-    common
 }

@@ -18,6 +18,7 @@ import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
   type AddProjectPayload,
+  type ChatReadMark,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
@@ -50,6 +51,7 @@ import type {
   NewSessionOutcome,
   ProbeResult,
   PromptDispatchResult,
+  RegistryCheckReason,
   SessionConfigOption,
   SessionId,
   SessionReopenOutcome,
@@ -267,7 +269,8 @@ export class WsAcpTransport implements AcpTransport {
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
     recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-    reopenGeneration?: number
+    reopenGeneration?: number,
+    logEpochChanged?: boolean
   ) => Promise<void>
   /**
    * Serializes `handleEvent` dispatch across WebSocket frames. Each frame's
@@ -391,7 +394,8 @@ export class WsAcpTransport implements AcpTransport {
   setRecoveryHandler(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-      reopenGeneration?: number
+      reopenGeneration?: number,
+      logEpochChanged?: boolean
     ) => Promise<void>
   ): void {
     this.recoveryHandler = handler
@@ -588,7 +592,7 @@ export class WsAcpTransport implements AcpTransport {
         message: `Session ${sessionId} log epoch changed under the cursor; installing a snapshot`
       })
       this.clearCursor(sessionId)
-      await this.recoverSession(sessionId, timeoutMs)
+      await this.recoverSession(sessionId, timeoutMs, epoch)
       return
     }
     this.logEpochs.set(sessionId, replyEpoch)
@@ -604,7 +608,11 @@ export class WsAcpTransport implements AcpTransport {
    * live stream and by the per-session retry once cursor resubscribes keep
    * failing.
    */
-  private async recoverSession(sessionId: SessionId, timeoutMs?: number): Promise<void> {
+  private async recoverSession(
+    sessionId: SessionId,
+    timeoutMs?: number,
+    priorEpoch: string | undefined = this.logEpochs.get(sessionId)
+  ): Promise<void> {
     // First statement, before any await: events that arrive from here on wait
     // for the snapshot instead of racing it.
     this.beginSync(sessionId)
@@ -628,7 +636,11 @@ export class WsAcpTransport implements AcpTransport {
         if (recovery.logEpoch) this.logEpochs.set(sessionId, recovery.logEpoch)
         else this.logEpochs.delete(sessionId)
         this.seenTurnIds.delete(sessionId)
-        await this.recoveryHandler?.(recovery, reopenGeneration)
+        await this.recoveryHandler?.(
+          recovery,
+          reopenGeneration,
+          priorEpoch !== undefined && !!recovery.logEpoch && priorEpoch !== recovery.logEpoch
+        )
         // handle_recover_session_snapshot server-side re-registers the
         // subscription for continued live delivery — no separate subscribe
         // call needed here.
@@ -874,38 +886,9 @@ export class WsAcpTransport implements AcpTransport {
     return res.data
   }
 
-  /**
-   * CAP-6 / Story 8: fetchRegistrySnapshot is replaced by the host-resolved
-   * catalog. The web client calls `acpCatalogApi.listCatalog()` (the facade)
-   * which returns the host's resolved catalog including CDN entries (when
-   * the opt-in is set). This method now delegates to the WS
-   * `list_acp_catalog` request; the fake `{agents:[]}` hardcoded stub is
-   * removed. Callers that need the full catalog (the registry-catalog hook)
-   * switch to `acpCatalogApi.listCatalog()` instead.
-   */
-  async fetchRegistrySnapshot(forceRefresh = false): Promise<AcpRegistrySnapshot> {
-    // Delegate to the host-resolved catalog. The host embeds the trusted
-    // bundled `agents.json` + optionally augments with the CDN snapshot
-    // (gated on the host-persisted opt-in). This replaces the fake
-    // `{agents:[], source:'empty'}` hardcoded stub.
-    //
-    // The WS `list_acp_catalog` payload field is `refresh` (camelCase, matching
-    // the Rust `ListAcpCatalogPayload.refresh` + the HTTP `?refresh=true` query).
-    // Propagate `forceRefresh` so an explicit user refresh bypasses the host's
-    // 60s TTL — the previous `{}` left `refresh` defaulted to `false`, so a
-    // "check for updates" action could serve a stale cached catalog.
-    try {
-      const catalog = await this.request<AcpCatalogFromHost>('list_acp_catalog', {
-        refresh: forceRefresh
-      })
-      return {
-        agents: catalog.agents,
-        source: 'network',
-        fetchedAt: null
-      }
-    } catch {
-      return { agents: [], source: 'empty', fetchedAt: null }
-    }
+  /** `fetch_acp_registry_snapshot`: the host's registry check (desktop: `acp_fetch_registry_snapshot`). */
+  fetchRegistrySnapshot(reason: RegistryCheckReason): Promise<AcpRegistrySnapshot> {
+    return this.request<AcpRegistrySnapshot>('fetch_acp_registry_snapshot', { reason })
   }
 
   // --- Agent lifecycle (desktop parity over WS) ----------------------------
@@ -1229,6 +1212,18 @@ export class WsAcpTransport implements AcpTransport {
     options?: CommandCallOptions
   ): Promise<void> {
     await this.request('record_agent_switch', { sessionId, ...record }, undefined, options)
+  }
+
+  async markChatRead(
+    sessionId: SessionId,
+    seq: number,
+    logEpoch: string | null
+  ): Promise<ChatReadMark> {
+    return this.request<ChatReadMark>('mark_chat_read', {
+      sessionId,
+      seq,
+      ...(logEpoch ? { logEpoch } : {})
+    })
   }
 
   async sendPrompt(

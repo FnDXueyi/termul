@@ -8,6 +8,11 @@ import {
   setSheetFocusDestination
 } from '@/lib/sheet-focus-return'
 import {
+  __resetServerCapabilityCache,
+  primeServerCapability,
+  serverPathsCaseInsensitive
+} from '@/lib/tauri-runtime'
+import {
   armMobileOverlayBackStack,
   pressSystemBack,
   settleOverlayBackStack,
@@ -50,6 +55,8 @@ const mockCollapseAll = vi.fn()
 
 const mockOpenFile = vi.fn()
 const mockCloseFile = vi.fn()
+const mockRenameOpenFile = vi.fn()
+const mockRenameEditorTab = vi.fn()
 const mockAddEditorTab = vi.fn()
 const mockRemoveTab = vi.fn()
 
@@ -58,7 +65,8 @@ const mockRemoveTab = vi.fn()
 const mockEditorStore = {
   openFile: mockOpenFile,
   openFiles: new Map<string, unknown>(),
-  closeFile: mockCloseFile
+  closeFile: mockCloseFile,
+  renameOpenFile: mockRenameOpenFile
 }
 
 const mockCreateFile = vi.fn()
@@ -102,7 +110,8 @@ vi.mock('@/stores/workspace-store', () => ({
   useWorkspaceStore: {
     getState: vi.fn(() => ({
       addEditorTab: mockAddEditorTab,
-      removeTab: mockRemoveTab
+      removeTab: mockRemoveTab,
+      renameEditorTab: mockRenameEditorTab
     }))
   },
   editorTabId: (path: string) => `edit-${path}`
@@ -280,6 +289,12 @@ describe('MobileFileExplorer', () => {
     expect(await screen.findByRole('heading', { name: 'proj' })).toBeInTheDocument()
     expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
     expect(mockPersistenceRead).toHaveBeenCalledWith('mobile-file-explorer/proj-1')
+    expect(mockLogFrontendError).toHaveBeenCalledWith({
+      level: 'warn',
+      source: 'MobileFileExplorer.restore',
+      message:
+        'saved folder is outside the project root under a case-insensitive compare; showing the root'
+    })
   })
 
   it('falls back to the project root when a persisted `..` path escapes the root', async () => {
@@ -332,6 +347,128 @@ describe('MobileFileExplorer', () => {
     expect(await screen.findByRole('heading', { name: 'sub' })).toBeInTheDocument()
     expect(screen.getByLabelText('Back to parent folder')).toBeEnabled()
     expect(mockPersistenceRead).toHaveBeenCalledWith('mobile-file-explorer/proj-1')
+  })
+
+  describe('on a host whose filesystem keeps path case (#641)', () => {
+    beforeEach(async () => {
+      __resetServerCapabilityCache()
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', allowRemoteWrites: true, caseInsensitivePaths: false })
+        })
+      )
+      primeServerCapability()
+      await waitFor(() => expect(serverPathsCaseInsensitive()).toBe(false))
+    })
+
+    afterEach(() => {
+      __resetServerCapabilityCache()
+      vi.unstubAllGlobals()
+    })
+
+    it('falls back to the root instead of restoring a differently cased folder outside it', async () => {
+      mockProjectId = 'proj-1'
+      mockPersistenceRead.mockResolvedValue({ success: true, data: '/work/repo/child' })
+      mockExplorerState.rootPath = '/Work/Repo'
+      mockExplorerState.directoryContents = new Map([
+        ['/Work/Repo', [entry('a.txt', 'file', '/Work/Repo/a.txt')]]
+      ])
+
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+
+      expect(await screen.findByRole('heading', { name: 'Repo' })).toBeInTheDocument()
+      expect(await screen.findByText('a.txt')).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
+      expect(mockToggleDirectory).not.toHaveBeenCalledWith('/work/repo/child')
+      expect(mockLogFrontendError).toHaveBeenCalledWith({
+        level: 'warn',
+        source: 'MobileFileExplorer.restore',
+        message:
+          'saved folder is outside the project root under a case-sensitive compare; showing the root'
+      })
+    })
+
+    it('still restores an exactly cased persisted folder', async () => {
+      mockProjectId = 'proj-1'
+      mockPersistenceRead.mockResolvedValue({ success: true, data: '/Work/Repo/child' })
+      mockExplorerState.rootPath = '/Work/Repo'
+      mockExplorerState.directoryContents = new Map([
+        ['/Work/Repo', [entry('child', 'directory', '/Work/Repo/child')]],
+        ['/Work/Repo/child', []]
+      ])
+
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+
+      expect(await screen.findByRole('heading', { name: 'child' })).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeEnabled()
+      expect(mockLogFrontendError).not.toHaveBeenCalledWith(
+        expect.objectContaining({ source: 'MobileFileExplorer.restore' })
+      )
+    })
+  })
+
+  describe('when /health answers after the drawer opened (#641)', () => {
+    const keepsCase = { status: 'ok', allowRemoteWrites: true, caseInsensitivePaths: false }
+    let resolveHealth!: (body: Record<string, unknown>) => void
+    let resolveRead!: (res: { success: boolean; data?: string }) => void
+
+    beforeEach(() => {
+      __resetServerCapabilityCache()
+      const health = new Promise<Record<string, unknown>>((resolve) => {
+        resolveHealth = resolve
+      })
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockReturnValue(
+            health.then((body) => ({ ok: true, status: 200, json: async () => body }))
+          )
+      )
+      mockPersistenceRead.mockReturnValue(
+        new Promise<{ success: boolean; data?: string }>((resolve) => {
+          resolveRead = resolve
+        })
+      )
+      mockProjectId = 'proj-1'
+      mockExplorerState.rootPath = '/Work/Repo'
+      mockExplorerState.directoryContents = new Map([
+        ['/Work/Repo', [entry('a.txt', 'file', '/Work/Repo/a.txt')]]
+      ])
+      primeServerCapability()
+    })
+
+    afterEach(() => {
+      __resetServerCapabilityCache()
+      vi.unstubAllGlobals()
+    })
+
+    it('drops a differently cased saved folder once /health says the host keeps case', async () => {
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+      await act(async () => resolveRead({ success: true, data: '/work/repo/child' }))
+      expect(await screen.findByRole('heading', { name: 'child' })).toBeInTheDocument()
+
+      await act(async () => resolveHealth(keepsCase))
+
+      expect(await screen.findByRole('heading', { name: 'Repo' })).toBeInTheDocument()
+      expect(await screen.findByText('a.txt')).toBeInTheDocument()
+      expect(screen.getByLabelText('Back to parent folder')).toBeDisabled()
+    })
+
+    it('finishes the restore when /health answers while the saved-folder read is pending', async () => {
+      render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
+      expect(screen.getByText('Loading…')).toBeInTheDocument()
+
+      await act(async () => resolveHealth(keepsCase))
+      await act(async () => resolveRead({ success: true, data: '/work/repo/child' }))
+
+      expect(await screen.findByRole('heading', { name: 'Repo' })).toBeInTheDocument()
+      expect(await screen.findByText('a.txt')).toBeInTheDocument()
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    })
   })
 
   it('restores the new project folder after a project switch', async () => {
@@ -621,10 +758,10 @@ describe('MobileFileExplorer', () => {
     await waitFor(() => expect(mockRefreshDirectory).toHaveBeenCalledWith('/proj'))
   })
 
-  it('renames a file via Enter using the parentOf-derived target and reconciles the open tab', async () => {
+  it('renames a file via Enter using the parentOf-derived target and moves the open tab with its edits', async () => {
     const file = entry('old.txt', 'file')
     setRoot([file])
-    mockEditorStore.openFiles.set('/proj/old.txt', { isDirty: false })
+    mockEditorStore.openFiles.set('/proj/old.txt', { isDirty: true })
 
     render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
 
@@ -640,8 +777,12 @@ describe('MobileFileExplorer', () => {
     )
     // Clearing rename state before the await prevents a double submit.
     expect(mockRenameFile).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(mockCloseFile).toHaveBeenCalledWith('/proj/old.txt'))
-    await waitFor(() => expect(mockRemoveTab).toHaveBeenCalledWith('edit-/proj/old.txt'))
+    await waitFor(() =>
+      expect(mockRenameOpenFile).toHaveBeenCalledWith('/proj/old.txt', '/proj/new.txt')
+    )
+    expect(mockRenameEditorTab).toHaveBeenCalledWith('/proj/old.txt', '/proj/new.txt')
+    expect(mockCloseFile).not.toHaveBeenCalled()
+    expect(mockRemoveTab).not.toHaveBeenCalled()
     await waitFor(() => expect(mockRefreshDirectory).toHaveBeenCalledWith('/proj'))
   })
 
@@ -1139,7 +1280,7 @@ describe('MobileFileExplorer', () => {
 
   describe('navigateTo guard', () => {
     it('ignores a target outside the root and logs a warning', () => {
-      expect(resolveBreadcrumbTarget('/other/sub', '/proj', '/proj/sub')).toBeNull()
+      expect(resolveBreadcrumbTarget('/other/sub', '/proj', '/proj/sub', false)).toBeNull()
 
       expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
       expect(mockLogFrontendError).toHaveBeenCalledWith(
@@ -1148,7 +1289,7 @@ describe('MobileFileExplorer', () => {
     })
 
     it('ignores a target when there is no root and logs a warning', () => {
-      expect(resolveBreadcrumbTarget('/proj/sub', null, null)).toBeNull()
+      expect(resolveBreadcrumbTarget('/proj/sub', null, null, false)).toBeNull()
 
       expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
       expect(mockLogFrontendError).toHaveBeenCalledWith(
@@ -1157,22 +1298,24 @@ describe('MobileFileExplorer', () => {
     })
 
     it('does not mistake a sibling that shares the root prefix for a child', () => {
-      expect(resolveBreadcrumbTarget('/proj-two/sub', '/proj', '/proj/sub')).toBeNull()
+      expect(resolveBreadcrumbTarget('/proj-two/sub', '/proj', '/proj/sub', false)).toBeNull()
       expect(mockLogFrontendError).toHaveBeenCalledTimes(1)
     })
 
     it('is silent for the folder already shown and resolves a valid ancestor', () => {
-      expect(resolveBreadcrumbTarget('/proj/sub', '/proj', '/proj/sub')).toBeNull()
-      expect(resolveBreadcrumbTarget('E:/proj/sub', 'e:/proj', 'E:/proj/sub')).toBeNull()
-      expect(resolveBreadcrumbTarget('/proj/src', '/proj', '/proj/src/lib')).toBe('/proj/src')
-      expect(resolveBreadcrumbTarget('e:/proj', 'e:/proj', 'E:/proj/sub')).toBe('e:/proj')
+      expect(resolveBreadcrumbTarget('/proj/sub', '/proj', '/proj/sub', false)).toBeNull()
+      expect(resolveBreadcrumbTarget('E:/proj/sub', 'e:/proj', 'E:/proj/sub', true)).toBeNull()
+      expect(resolveBreadcrumbTarget('/proj/src', '/proj', '/proj/src/lib', false)).toBe(
+        '/proj/src'
+      )
+      expect(resolveBreadcrumbTarget('e:/proj', 'e:/proj', 'E:/proj/sub', true)).toBe('e:/proj')
       expect(mockLogFrontendError).not.toHaveBeenCalled()
     })
 
     it('resolves dot segments before the containment check', () => {
       // Lexically under `/proj` by prefix, but outside once `..` is applied.
-      expect(resolveBreadcrumbTarget('/proj/../private', '/proj', '/proj/sub')).toBeNull()
-      expect(resolveBreadcrumbTarget('/proj/..', '/proj', '/proj/sub')).toBeNull()
+      expect(resolveBreadcrumbTarget('/proj/../private', '/proj', '/proj/sub', false)).toBeNull()
+      expect(resolveBreadcrumbTarget('/proj/..', '/proj', '/proj/sub', false)).toBeNull()
       expect(mockLogFrontendError).toHaveBeenCalledTimes(2)
       expect(mockLogFrontendError).toHaveBeenCalledWith(
         expect.objectContaining({ level: 'warn', source: 'MobileFileExplorer.navigateTo' })
@@ -1180,25 +1323,29 @@ describe('MobileFileExplorer', () => {
 
       // Dot segments that stay inside the root resolve to the clean folder.
       mockLogFrontendError.mockClear()
-      expect(resolveBreadcrumbTarget('/proj/./sub/../src', '/proj', '/proj/sub/lib')).toBe(
+      expect(resolveBreadcrumbTarget('/proj/./sub/../src', '/proj', '/proj/sub/lib', false)).toBe(
         '/proj/src'
       )
       expect(mockLogFrontendError).not.toHaveBeenCalled()
     })
 
     it('keeps drive and posix roots when resolving dot segments', () => {
-      expect(resolveBreadcrumbTarget('C:/Users/Alice/..', 'C:/', 'C:/Users/Alice')).toBe('C:/Users')
+      expect(resolveBreadcrumbTarget('C:/Users/Alice/..', 'C:/', 'C:/Users/Alice', true)).toBe(
+        'C:/Users'
+      )
       // `..` cannot climb above a drive root.
-      expect(resolveBreadcrumbTarget('C:\\Users\\..\\..', 'C:/', 'C:/Users/Alice')).toBe('C:/')
-      expect(resolveBreadcrumbTarget('/usr/lib/..', '/', '/usr/lib')).toBe('/usr')
-      expect(resolveBreadcrumbTarget('/usr/../../..', '/', '/usr/lib')).toBe('/')
+      expect(resolveBreadcrumbTarget('C:\\Users\\..\\..', 'C:/', 'C:/Users/Alice', true)).toBe(
+        'C:/'
+      )
+      expect(resolveBreadcrumbTarget('/usr/lib/..', '/', '/usr/lib', false)).toBe('/usr')
+      expect(resolveBreadcrumbTarget('/usr/../../..', '/', '/usr/lib', false)).toBe('/')
       expect(mockLogFrontendError).not.toHaveBeenCalled()
     })
 
     it('builds no crumbs at or outside the root', () => {
-      expect(buildFolderCrumbs('/proj', '/proj')).toBeNull()
-      expect(buildFolderCrumbs('/proj', '/elsewhere/sub')).toBeNull()
-      expect(buildFolderCrumbs('/', '/usr/lib')).toEqual({
+      expect(buildFolderCrumbs('/proj', '/proj', false)).toBeNull()
+      expect(buildFolderCrumbs('/proj', '/elsewhere/sub', false)).toBeNull()
+      expect(buildFolderCrumbs('/', '/usr/lib', false)).toEqual({
         ancestors: [
           { label: '/', path: '/' },
           { label: 'usr', path: '/usr' }

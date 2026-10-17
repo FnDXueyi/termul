@@ -5,15 +5,18 @@
  */
 
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
+import { flattenConfigOptionValues } from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import {
   type AgentId,
+  type AvailableCommand,
   acpApi,
   type ContentBlock,
   type McpServer,
   type PlanEntry,
   type SessionConfigOption,
+  type SessionConfigOptionEntry,
   type SessionId,
   type SessionModelState,
   type SessionModeState,
@@ -437,16 +440,24 @@ export function isFailedTurnStopReason(reason: StopReason): boolean {
   return reason === 'error' || reason === 'timeout' || reason === 'crashed'
 }
 
+type LastErrorFields = Pick<AcpSession, 'lastError' | 'lastErrorCode' | 'lastErrorData'>
+
 /**
  * `lastError` after a turn terminator: a failed-turn terminator keeps the
  * specific error already recorded by the preceding `agent_error` and only
  * falls back to the generic note; every other reason keeps the existing
- * `note ?? current` rule.
+ * `note ?? current` rule. The code and data stay only with the error they
+ * came with.
  */
-export function lastErrorAfterStop(current: string | null, reason: StopReason): string | null {
+export function lastErrorAfterStop(current: LastErrorFields, reason: StopReason): LastErrorFields {
   const note = noteForStopReason(reason)
-  if (isFailedTurnStopReason(reason)) return current ?? note
-  return note ?? current
+  const keep = isFailedTurnStopReason(reason) ? current.lastError !== null : note === null
+  if (!keep) return plainLastError(note)
+  return {
+    lastError: current.lastError,
+    lastErrorCode: current.lastErrorCode,
+    lastErrorData: current.lastErrorData
+  }
 }
 
 /**
@@ -483,7 +494,11 @@ export function withSessionActive(
 ): Record<SessionId, AcpSession> {
   const session = sessions[sessionId]
   if (!session) return sessions
-  return { ...sessions, [sessionId]: { ...session, status: 'active', lastError: null } }
+  return { ...sessions, [sessionId]: { ...session, status: 'active', ...plainLastError(null) } }
+}
+
+export function plainLastError(message: string | null): LastErrorFields {
+  return { lastError: message, lastErrorCode: null, lastErrorData: undefined }
 }
 
 /** Prefix of the `lastError` a failed history load/resume writes. */
@@ -511,7 +526,7 @@ export function withSessionResumeError(
     [sessionId]: {
       ...session,
       replaying: null,
-      lastError: `${RESUME_FAILED_PREFIX}${String(err)}`
+      ...plainLastError(`${RESUME_FAILED_PREFIX}${String(err)}`)
     }
   }
 }
@@ -757,6 +772,31 @@ export function dropQuestionsForAgent(
 
 export function nextQueueId(): string {
   return newId('queue')
+}
+
+/**
+ * Install `list` as the session's slash commands unless the store holds a
+ * list from a newer record. `seq` is the seq of the `commands_update` record
+ * that set the list; a list without one (an older host) installs and drops
+ * the held seq.
+ */
+export function withCommands(
+  state: Pick<AcpState, 'commands' | 'commandsSeq'>,
+  sessionId: SessionId,
+  list: AvailableCommand[],
+  seq: number | undefined
+): Pick<AcpState, 'commands' | 'commandsSeq'> {
+  const held = state.commandsSeq[sessionId]
+  if (seq !== undefined && held !== undefined && seq < held) {
+    return { commands: state.commands, commandsSeq: state.commandsSeq }
+  }
+  return {
+    commands: { ...state.commands, [sessionId]: list },
+    commandsSeq:
+      seq === undefined
+        ? dropRecordKey(state.commandsSeq, sessionId)
+        : { ...state.commandsSeq, [sessionId]: seq }
+  }
 }
 
 export function dropRecordKey<T>(
@@ -1182,6 +1222,93 @@ export function creationOptionDefaultsFrom(input: {
   }
 }
 
+function appendUnseen<T>(
+  current: T[],
+  incoming: T[],
+  key: (item: T) => string,
+  enrich?: (item: T, other: T) => T
+): T[] {
+  const incomingByKey = new Map(incoming.map((item) => [key(item), item]))
+  const enriched = enrich
+    ? current.map((item) => {
+        const other = incomingByKey.get(key(item))
+        return other ? enrich(item, other) : item
+      })
+    : current
+  const seen = new Set(current.map(key))
+  const added = incoming.filter((item) => !seen.has(key(item)))
+  const changed = enriched.some((item, index) => item !== current[index])
+  return changed || added.length > 0 ? [...enriched, ...added] : current
+}
+
+const configEntryKey = (entry: SessionConfigOptionEntry): string =>
+  Array.isArray(entry.options) ? `group:${entry.group ?? entry.name}` : `value:${entry.value}`
+
+function appendUnseenGroupValues(
+  entry: SessionConfigOptionEntry,
+  other: SessionConfigOptionEntry
+): SessionConfigOptionEntry {
+  if (!entry.options || !other.options) return entry
+  const options = appendUnseen(entry.options, other.options, (value) => value.value)
+  return options === entry.options ? entry : { ...entry, options }
+}
+
+function appendUnseenConfigValues(
+  option: SessionConfigOption,
+  other: SessionConfigOption
+): SessionConfigOption {
+  if (!option.options || !other.options) return option
+  const options = appendUnseen(
+    option.options,
+    other.options,
+    configEntryKey,
+    appendUnseenGroupValues
+  )
+  return options === option.options ? option : { ...option, options }
+}
+
+export function addAdvertisedOptionsKeepingCurrent(
+  current: Pick<AcpSession, 'modes' | 'models' | 'configOptions'>,
+  payload: {
+    modes?: SessionModeState | null
+    models?: SessionModelState | null
+    configOptions?: SessionConfigOption[] | null
+  }
+): Pick<AcpSession, 'modes' | 'models' | 'configOptions'> {
+  let modes = current.modes ?? payload.modes ?? null
+  if (current.modes && payload.modes) {
+    const availableModes = appendUnseen(
+      current.modes.availableModes,
+      payload.modes.availableModes,
+      (mode) => mode.id
+    )
+    if (availableModes !== current.modes.availableModes) {
+      modes = { ...current.modes, availableModes }
+    }
+  }
+  let models = current.models ?? payload.models ?? null
+  if (current.models && payload.models) {
+    const availableModels = appendUnseen(
+      current.models.availableModels,
+      payload.models.availableModels,
+      (model) => model.modelId
+    )
+    if (availableModels !== current.models.availableModels) {
+      models = { ...current.models, availableModels }
+    }
+  }
+  return {
+    modes,
+    models,
+    configOptions: appendUnseen(
+      current.configOptions,
+      payload.configOptions ?? [],
+      (option) => option.id,
+      appendUnseenConfigValues
+    )
+  }
+}
+
 /**
  * Merge an agent-provided config-option snapshot into the session state
  * without letting a backend-side desync clobber the user's model selection
@@ -1228,9 +1355,7 @@ export function mergeAgentConfigOptions(
       typeof prior.currentValue === 'boolean' || typeof option.currentValue === 'boolean'
     if (
       !booleanOption &&
-      !(option.options ?? []).some(
-        (entry) => typeof entry.value === 'string' && entry.value === priorComparable
-      )
+      !flattenConfigOptionValues(option).some((entry) => entry.value === priorComparable)
     ) {
       return option
     }
@@ -1369,6 +1494,7 @@ export function dropEphemeralSessionState(
     agentSwitches,
     plans,
     commands,
+    commandsSeq: dropRecordKey(state.commandsSeq, sessionId),
     sessionUsage,
     pendingPermissions: dropPermissionsForSession(state.pendingPermissions, sessionId),
     pendingQuestions: dropQuestionsForSession(state.pendingQuestions, sessionId),
@@ -1443,7 +1569,7 @@ export function setSwitchRejection(
         [sessionId]: {
           ...session,
           switching: null,
-          lastError: `Could not switch agent: ${message}`
+          ...plainLastError(`Could not switch agent: ${message}`)
         }
       }
     }
@@ -1784,11 +1910,28 @@ export function selectConfigWarmState(state: AcpState, configId: string): Config
 }
 
 /**
+ * Server seq of the prompt that opened the trailing turn: the last user bubble
+ * when it is a real prompt (visible content, not a handoff boundary row) with
+ * a positive seq. `null` when the window cuts the turn off from its prompt or
+ * the trailing turn is a hidden one, whose cards never render.
+ */
+export function openTurnPromptSeq(messages: ChatMessage[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user') continue
+    const seq = message.seq
+    const prompt = message.handoffBoundary !== true && hasVisibleContent(message)
+    return prompt && typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? seq : null
+  }
+  return null
+}
+
+/**
  * Issue #838: derive the open turn (a `user_prompt` with no matching
  * `prompt_complete`) from an installed transcript. The server's session
- * metadata may carry `turnActive` (authoritative, set when the host knows a
- * turn is running); the transcript derivation covers older hosts and any
- * window where metadata lagged. Returns the open turn id (`turn:<turnId>`)
+ * metadata may carry `turnActive` (authoritative: `true` when a turn runs,
+ * `false` when it ended); the transcript derivation covers older hosts and a
+ * prompt without a turn id, where the host leaves it absent. Returns the open turn id (`turn:<turnId>`)
  * or null. A turn id missing from the bubble (older records) yields
  * `turn:<lastUserSeq>` so the stop button + spinner have a stable handle.
  */
@@ -1801,6 +1944,12 @@ export function deriveOpenTurn(
   // assistant reply after it — a streaming turn may have zero agent output
   // yet, so absence of a reply is not proof of completion, but its presence
   // IS proof the turn finished).
+  // An explicit `false` is the host saying the turn ended (a completion or a
+  // host terminator closed it, or the session is not active). A transcript can
+  // still end on the user's bubble then — a failed turn has no agent reply — so
+  // it must not be read as a turn still running (issue #1192). `undefined` is an
+  // older host, or an open prompt without a turn id: derive it from the tail.
+  if (metadataTurnActive === false) return null
   if (metadataTurnActive) {
     // Metadata says a turn runs; recover the id from the last user bubble.
     for (let i = messages.length - 1; i >= 0; i--) {

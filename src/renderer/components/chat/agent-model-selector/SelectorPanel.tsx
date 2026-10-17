@@ -10,7 +10,7 @@ import {
 } from 'react'
 import { MoreHorizontal, Search } from '@/components/icons'
 import { INNER_FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
-import type { SessionConfigOption, SessionUsage } from '@/lib/acp-api'
+import type { AgentCapabilities, SessionConfigOption, SessionUsage } from '@/lib/acp-api'
 import type { SupportedAcpAgentEntry } from '@/lib/agents/supported-acp-agents'
 import { cn } from '@/lib/utils'
 import { shouldShowSessionUsage } from '../context-usage-utils'
@@ -19,6 +19,7 @@ import { SelectorFooter } from './SelectorFooter'
 import {
   AgentRow,
   BusyBlock,
+  CapabilitySummary,
   ContextSummary,
   Hint,
   InstallState,
@@ -32,6 +33,7 @@ import {
   armableConfigId,
   buildAgentTabs,
   type CatalogModel,
+  capabilityRows,
   catalogModels,
   entryDisableReason,
   MORE_AGENTS_VIEW,
@@ -80,6 +82,8 @@ export interface SelectorPanelProps {
   /** Session context usage for the summary row (chat only; launcher omits it). */
   usage?: SessionUsage | null
   messages?: ReadonlyArray<{ role: string }>
+  /** What the chat's agent advertised (chat only; the launcher omits it). */
+  capabilities?: AgentCapabilities | null
   onClose: () => void
   /** Set by the panel: clears its inner state on Escape; true when it did. */
   escapeRef: MutableRefObject<(() => boolean) | null>
@@ -504,7 +508,10 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
       : null
 
   return (
-    <div data-testid="agent-model-selector-panel" className={cn('flex flex-col', !touch && 'w-80')}>
+    <div
+      data-testid="agent-model-selector-panel"
+      className={cn('flex min-h-0 flex-col', !touch && 'w-80')}
+    >
       <div className={cn('peer flex items-center gap-2', touch ? 'h-12 px-5' : 'h-10 px-3')}>
         <Search
           size={touch ? 16 : 14}
@@ -576,6 +583,15 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
         <>
           <div className="h-px bg-border" />
           {footer}
+        </>
+      ) : null}
+      {!searching &&
+      viewId !== null &&
+      viewId === sw.currentConfigId &&
+      capabilityRows(props.capabilities).length > 0 ? (
+        <>
+          <div className="h-px bg-border" />
+          <CapabilitySummary capabilities={props.capabilities} touch={touch} />
         </>
       ) : null}
       {otherHint ? (

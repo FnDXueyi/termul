@@ -1,4 +1,4 @@
-use super::git_exec::{run_git_capture, StdoutCap, GIT_READ_TIMEOUT_MS};
+use super::git_exec::{run_git_capture, spawn_git, GitWaitError, StdoutCap, GIT_READ_TIMEOUT_MS};
 use super::*;
 
 pub fn git_get_status_detail(cwd: &str) -> Result<Vec<GitStatusDetail>, String> {
@@ -201,20 +201,55 @@ pub(super) fn repo_has_head(cwd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `name` is an existing branch of the requested kind: `refs/heads/<name>`
+/// for a local branch, `refs/remotes/<name>` for a remote-tracking one.
+/// `show-ref --verify` matches the fully-qualified ref only, so revision syntax
+/// (`main~1`, `main@{1}`) and option-shaped or pathspec-shaped names never match.
+fn branch_ref_exists(cwd: &str, name: &str, is_remote: bool) -> Result<bool, String> {
+    if name.trim().is_empty() || name.starts_with('-') {
+        return Ok(false);
+    }
+    let prefix = if is_remote { "refs/remotes" } else { "refs/heads" };
+    let output = GitTracker::run_git_command(
+        cwd,
+        &["show-ref", "--verify", "--quiet", &format!("{prefix}/{name}")],
+    )
+    .ok_or_else(|| "Failed to run git show-ref".to_string())?;
+    Ok(output.status.success())
+}
+
+/// Whether `name` is a branch in the repo at `cwd`, and if so whether it is
+/// remote-tracking: `Some(false)` local, `Some(true)` remote-tracking, `None`
+/// for anything else. Local wins when both exist, as in `git checkout <name>`.
+pub(crate) fn resolve_branch_ref(cwd: &str, name: &str) -> Result<Option<bool>, String> {
+    for is_remote in [false, true] {
+        if branch_ref_exists(cwd, name, is_remote)? {
+            return Ok(Some(is_remote));
+        }
+    }
+    Ok(None)
+}
+
 /// Check out an existing branch. Remote branches use `--track`.
+///
+/// `branch` must name an existing branch of the requested kind. Otherwise git
+/// would read `.` as a pathspec and discard uncommitted edits, or read `-f` as
+/// an option, so the name is refused before any checkout runs.
 pub fn git_checkout_branch(cwd: &str, branch: &str, is_remote: bool) -> Result<(), String> {
-    if branch.trim().is_empty() {
-        return Err("Branch name is required".to_string());
+    if !branch_ref_exists(cwd, branch, is_remote)? {
+        return Err(format!(
+            "'{branch}' is not a branch; refusing checkout (a branch switch must target a branch, not a pathspec)"
+        ));
     }
 
     if is_remote {
         git_command_result_with_long_timeout(
             cwd,
-            &["checkout", "-q", "--track", branch],
+            &["checkout", "-q", "--track", branch, "--"],
             "git checkout --track",
         )
     } else {
-        git_command_result_with_long_timeout(cwd, &["checkout", "-q", branch], "git checkout")
+        git_command_result_with_long_timeout(cwd, &["checkout", "-q", branch, "--"], "git checkout")
     }
 }
 
@@ -376,9 +411,7 @@ fn strip_first_path_component(s: &str) -> &str {
 
 /// Run `git apply` with a patch supplied on stdin. Used for per-hunk
 /// stage/unstage where the patch is a single-hunk fragment built by the
-/// renderer from the displayed diff. Follows the same deadline pattern as
-/// `GitTracker::spawn_and_wait` so a wedged `git apply` cannot hang the
-/// caller.
+/// renderer from the displayed diff.
 fn run_git_apply(cwd: &str, args: &[&str], patch: &str) -> Result<(), String> {
     use std::io::Write;
 
@@ -386,44 +419,29 @@ fn run_git_apply(cwd: &str, args: &[&str], patch: &str) -> Result<(), String> {
     let mut command = backend_command(git);
     command.current_dir(cwd).args(args.iter());
     command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    let mut child = spawn_git(&mut command, StdoutCap::Unbounded)
         .map_err(|e| format!("Failed to spawn git apply: {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.take_stdin() {
         // Ignore broken pipe: git may finish reading the patch and exit
         // before we finish writing (e.g. it rejects the patch early). The
         // exit status below is the source of truth.
         let _ = stdin.write_all(patch.as_bytes());
     }
 
-    let deadline = Instant::now() + Duration::from_millis(GIT_COMMAND_TIMEOUT_MS);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|e| format!("git apply wait failed: {e}"))?;
-                if output.status.success() {
-                    return Ok(());
-                }
-                return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    let output = child
+        .wait(GIT_COMMAND_TIMEOUT_MS)
+        .map_err(|error| match error {
+            GitWaitError::TimedOut => {
+                format!("git apply timed out after {GIT_COMMAND_TIMEOUT_MS}ms")
             }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "git apply timed out after {GIT_COMMAND_TIMEOUT_MS}ms"
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => return Err(format!("git apply wait error: {e}")),
-        }
+            GitWaitError::Io(e) => format!("git apply wait error: {e}"),
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 

@@ -164,8 +164,8 @@ export function createInvokeAcpTransport(): AcpTransport {
       invoke<{ secs: number; source: 'default' | 'setting' | 'env' | 'operator' }>(
         'acp_get_agent_idle_window'
       ),
-    fetchRegistrySnapshot: (forceRefresh = false) =>
-      invoke<AcpRegistrySnapshot>('acp_fetch_registry_snapshot', { forceRefresh }),
+    fetchRegistrySnapshot: () =>
+      invoke<AcpRegistrySnapshot>('acp_fetch_registry_snapshot', { forceRefresh: true }),
     probeMcpServer: (server) => invoke<ProbeResult>('acp_probe_mcp_server', { server }),
     listClaudeAccounts: () => invoke<ClaudeAccountsSnapshot>('claude_accounts_list'),
     listClaudeUsage: (force = false) =>

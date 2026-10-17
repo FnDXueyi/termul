@@ -176,6 +176,10 @@ export const WS_REQUEST_TYPES = [
   // host is the single source of truth.
   'list_acp_catalog',
   'set_catalog_opt_in',
+  // The registry check behind "Check for updates": `{ reason: 'manual' |
+  // 'background' }`, answered with the host's `AcpRegistrySnapshot`
+  // (`source: 'cache'` when the registry was unreachable).
+  'fetch_acp_registry_snapshot',
   // CAP-6 / Story 9: host-owned verified-atomic ACP install. The web client
   // installs a catalog agent through `install_acp_agent` (the host downloads +
   // verifies sha256 + extracts + atomically activates). The request is
@@ -222,6 +226,13 @@ export const WS_REQUEST_TYPES = [
   // `acp:agent_switch` event to live clients under the same seq. Reply `{}`;
   // unknown session → `not_found`; live-only mode → `unsupported`.
   'record_agent_switch',
+  // A surface read a chat: `{ sessionId, seq, logEpoch? }` (the session-log
+  // seq of the newest turn end it showed, and the log epoch it belongs to) →
+  // `{ sessionId, seq, logEpoch }`, the host's shared last-read marker as it
+  // stands. Idempotent and monotonic: an older seq, or one from another log
+  // epoch, is a no-op. Every `chat_reads` watcher hears when the marker moves.
+  // Unknown session → `not_found`.
+  'mark_chat_read',
   // Watches `{ watch, scope? }` (`projects`, `chat_history`, `agents`; `fs`
   // and `terminals` scoped to a project id; `store` scoped to a key): `watch`
   // queues the full-state frame, then replies `{ watch, scope, revision }`;
@@ -309,6 +320,7 @@ export const WS_COMMAND_CLASSES: Readonly<
   get_session_payload_tail: ['read', null],
   list_acp_catalog: ['read', null],
   set_catalog_opt_in: ['idempotent', null],
+  fetch_acp_registry_snapshot: ['read', null],
   install_acp_agent: ['command', 'payload'],
   acp_deliver_auth_redirect: ['command', 'receipt-only'],
   store_read: ['read', null],
@@ -319,6 +331,7 @@ export const WS_COMMAND_CLASSES: Readonly<
   remove_project: ['idempotent', null],
   set_default_project: ['idempotent', null],
   record_agent_switch: ['command', 'payload'],
+  mark_chat_read: ['idempotent', null],
   watch: ['read', null],
   unwatch: ['read', null]
 }
@@ -901,9 +914,9 @@ export interface WsHeartbeatFrame {
 export const WS_WATCH_FRAME_TYPE = 'watch'
 
 /**
- * The watches a connection can hold. `projects`, `chat_history` and `agents`
- * have the empty scope; `fs` and `terminals` are scoped to a project id, `store`
- * to a store key.
+ * The watches a connection can hold. `projects`, `chat_history`, `agents` and
+ * `chat_reads` have the empty scope; `fs` and `terminals` are scoped to a
+ * project id, `store` to a store key.
  */
 export const WS_WATCH_NAMES = [
   'projects',
@@ -911,7 +924,8 @@ export const WS_WATCH_NAMES = [
   'agents',
   'fs',
   'store',
-  'terminals'
+  'terminals',
+  'chat_reads'
 ] as const
 
 /** One of {@link WS_WATCH_NAMES}. */
@@ -988,6 +1002,30 @@ export interface AgentsWatchDelta {
     | 'browser_open_request'
   payload: unknown
 }
+
+/**
+ * `mark_chat_read` request payload and reply: a chat's shared last-read
+ * marker. `seq` counts within the host log incarnation `logEpoch` names; a
+ * host ignores a read sent against another epoch than the session's.
+ * `logEpoch` is absent only from a peer that predates it.
+ */
+export interface ChatReadMark {
+  sessionId: string
+  seq: number
+  logEpoch?: string
+}
+
+/**
+ * `chat_reads` watch state: the last-read marker of every chat a surface has
+ * read, and the log epoch of each (absent from a host that predates it).
+ */
+export interface ChatReadsWatchState {
+  marks: Record<string, number>
+  logEpochs?: Record<string, string>
+}
+
+/** A `chat_reads` delta: one session's marker as it stands after it moved. */
+export type ChatReadsWatchDelta = ChatReadMark
 
 /** `fs` watch state: the canonical root being watched. A new state means: refresh the trees. */
 export interface FsWatchState {

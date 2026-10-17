@@ -123,9 +123,66 @@ impl<'de> Deserialize<'de> for PayloadProbe {
 pub(super) fn probe_record(line: &[u8], session_id: &str) -> Option<RecordProbe> {
     serde_json::from_slice::<RecordProbe>(line)
         .ok()
-        .filter(|probe| {
-            probe.schema_version == SESSION_SCHEMA_VERSION && probe.session_id == session_id
-        })
+        .filter(|probe| probe.belongs_to(session_id))
+}
+
+impl RecordProbe {
+    fn belongs_to(&self, session_id: &str) -> bool {
+        self.schema_version == SESSION_SCHEMA_VERSION && self.session_id == session_id
+    }
+}
+
+/// Read size of [`rposition`], which is all the memory it holds.
+const RPOSITION_BLOCK: u64 = 64 * 1024;
+
+/// Offset of the last byte of `file[..end)` that satisfies `matches`, read
+/// backward in fixed blocks.
+fn rposition(
+    file: &mut fs::File,
+    end: u64,
+    matches: impl Fn(u8) -> bool,
+) -> io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut buf = vec![0u8; RPOSITION_BLOCK.min(end) as usize];
+    let mut block_end = end;
+    while block_end > 0 {
+        let start = block_end.saturating_sub(RPOSITION_BLOCK);
+        let block = &mut buf[..(block_end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(block)?;
+        if let Some(index) = block.iter().rposition(|byte| matches(*byte)) {
+            return Ok(Some(start + index as u64));
+        }
+        block_end = start;
+    }
+    Ok(None)
+}
+
+/// Seq of the last non-empty line of `file[..end)`, terminated or not, when
+/// it is a whole record of `session_id` (the [`probe_record`] rule). The line
+/// is streamed, never held: a multi-MiB tool output costs one sequential
+/// read, and the probe skips its payload without buffering it.
+pub(super) fn last_line_seq(
+    file: &mut fs::File,
+    end: u64,
+    session_id: &str,
+) -> io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Some(last_byte) = rposition(file, end, |byte| byte != b'\n')? else {
+        return Ok(None);
+    };
+    let line_end = last_byte + 1;
+    let line_start =
+        rposition(file, line_end, |byte| byte == b'\n')?.map_or(0, |newline| newline + 1);
+    file.seek(SeekFrom::Start(line_start))?;
+    let line = io::BufReader::new(Read::take(&mut *file, line_end - line_start));
+    match serde_json::from_reader::<_, RecordProbe>(line) {
+        Ok(probe) => Ok(probe.belongs_to(session_id).then_some(probe.seq)),
+        Err(error) if error.is_io() => Err(error.into()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Read sizes of [`scan_lines_backward`]: the first read is small so probing
@@ -220,8 +277,21 @@ pub(super) struct FoldTailScan {
     /// A candidate line did not probe: the fold is unknown.
     pub(super) unreadable: bool,
     pub(super) bytes_read: u64,
-    /// Seq of the last line when it is newline-terminated and probes.
-    pub(super) last_seq: Option<u64>,
+    pub(super) last_line: Option<LastLine>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct LastLine {
+    pub(super) seq: u64,
+    pub(super) terminated: bool,
+}
+
+impl FoldTailScan {
+    pub(super) fn open_turn(&self) -> Option<Option<&Value>> {
+        self.records.iter().rev().fold(None, |pending, record| {
+            open_turn_step(pending, &record.type_, record.payload.turn_id.as_ref())
+        })
+    }
 }
 
 /// One backward pass over `file[floor..end)` collecting the records the
@@ -240,7 +310,7 @@ pub(super) fn scan_fold_tail(
         records: Vec::new(),
         unreadable: false,
         bytes_read: 0,
-        last_seq: None,
+        last_line: None,
     };
     let mut last_line = true;
     scan.bytes_read = scan_lines_backward(file, end, floor, |line, terminated| {
@@ -252,8 +322,11 @@ pub(super) fn scan_fold_tail(
             return ControlFlow::Continue(());
         }
         let probe = probe_record(line, session_id);
-        if is_last && terminated {
-            scan.last_seq = probe.as_ref().map(|probe| probe.seq);
+        if is_last {
+            scan.last_line = probe.as_ref().map(|probe| LastLine {
+                seq: probe.seq,
+                terminated,
+            });
         }
         if !candidate {
             return ControlFlow::Continue(());
@@ -275,6 +348,43 @@ pub(super) fn scan_fold_tail(
         }
     })?;
     Ok(scan)
+}
+
+static COMMANDS_UPDATE_NEEDLE: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(b"\"type\":\"commands_update\""));
+
+/// The `availableCommands` of the newest `commands_update` in `path`, the
+/// value `materialize_session_payload` folds from a full replay. One backward
+/// pass that parses only lines naming that type and stops at the first that
+/// is one.
+pub(super) fn newest_command_list(
+    path: &Path,
+    session_id: &str,
+) -> io::Result<Option<CommandList>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let end = file.metadata()?.len();
+    let mut commands = None;
+    scan_lines_backward(&mut file, end, 0, |line, terminated| {
+        if !terminated || COMMANDS_UPDATE_NEEDLE.find(line).is_none() {
+            return ControlFlow::Continue(());
+        }
+        match serde_json::from_slice::<PersistedEventRecord>(line) {
+            Ok(record)
+                if record.schema_version == SESSION_SCHEMA_VERSION
+                    && record.session_id == session_id
+                    && record.type_ == "commands_update" =>
+            {
+                commands = CommandList::of_record(&record);
+                ControlFlow::Break(())
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    })?;
+    Ok(commands)
 }
 
 pub(super) fn jsonl_first_record_is_valid(path: &Path, expected_session_id: &str) -> bool {
@@ -616,11 +726,13 @@ pub(super) fn load_jsonl_tail(
 /// the next append would reuse a seq. The window must deepen because a
 /// single record can exceed a fixed 4 KiB read — payloads pass through
 /// verbatim — and a window holding only a mid-record fragment would
-/// otherwise leave stale-low `last_seq` in place. Missing/empty files and
-/// tails with no complete own-session record inside the cap yield `None`
+/// otherwise leave stale-low `last_seq` in place. A last complete line longer
+/// than the cap is probed alone through [`last_line_seq`], so memory stays
+/// bounded by the cap whatever the line length. Missing/empty files and
+/// tails with no complete own-session record yield `None`
 /// (the caller leaves `last_seq` unchanged); real read errors are
 /// warn-logged here. This is a frontier probe, not a validator — it never
-/// scans past the cap and never fails.
+/// fails.
 pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -693,8 +805,25 @@ pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
                 max_seq = Some(max_seq.unwrap_or(0).max(record.seq));
             }
         }
-        if saw_complete || block == file_size || block >= PROBE_CAP {
+        if saw_complete || block == file_size {
             return max_seq;
+        }
+        if block >= PROBE_CAP {
+            // The last complete line alone is longer than the cap.
+            let seq = rposition(&mut file, file_size, |byte| byte == b'\n').and_then(
+                |newline| match newline {
+                    Some(newline) => last_line_seq(&mut file, newline + 1, session_id),
+                    None => Ok(None),
+                },
+            );
+            return seq.unwrap_or_else(|error| {
+                log::warn!(
+                    "[acp-history] tail seq probe failed path={} session_id={} error={error}",
+                    path.display(),
+                    crate::logging::redact_session_id(session_id)
+                );
+                None
+            });
         }
         block = std::cmp::min(file_size, std::cmp::min(block * 8, PROBE_CAP));
     }
@@ -704,8 +833,7 @@ pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
 /// totals the catalog metadata must agree with after intruders are
 /// removed.
 pub(super) struct SalvageCounts {
-    pub(super) message_count: u64,
-    pub(super) tool_count: u64,
+    pub(super) fold: FoldCounts,
     pub(super) last_seq: u64,
     /// Quarantined lines — for the heal log; the bytes live in the
     /// `.corrupt-*.bak` sidecar.
@@ -868,14 +996,7 @@ pub(super) fn probe_seq_intruders(dir: &Path, session_id: &str) -> Result<Salvag
 /// both cases no file was rewritten.
 pub(super) fn salvage_session_dir(dir: &Path, session_id: &str) -> Result<Option<SalvageCounts>> {
     let mut staged: Vec<(PathBuf, Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut counts = SalvageCounts {
-        message_count: 0,
-        tool_count: 0,
-        last_seq: 0,
-        intruder_lines: 0,
-    };
-    // Issue #844c: fold state for the seq-ordered recount below.
-    let mut fold_state = FoldState::default();
+    let mut intruder_lines = 0;
     // Kept records across BOTH files, collected then sorted by seq (the
     // fold's chunk-run rules depend on global seq order, not per-file order).
     let mut all_records: Vec<PersistedEventRecord> = Vec::new();
@@ -910,33 +1031,20 @@ pub(super) fn salvage_session_dir(dir: &Path, session_id: &str) -> Result<Option
         if !salvageable {
             break;
         }
-        counts.intruder_lines += scan.intruder_lines;
+        intruder_lines += scan.intruder_lines;
         if !scan.intruders.is_empty() {
             staged.push((path, scan.kept, scan.intruders));
         }
     }
-    // Issue #844c: recount under the materializer's fold rules in GLOBAL seq
-    // order (chunk-run coalescing crosses the two JSONL files' boundary).
-    all_records.sort_by_key(|record| record.seq);
-    for record in &all_records {
-        if is_tool_event(&record.type_) {
-            counts.tool_count += 1;
-            // A tool call closes the open chunk run (fold boundary).
-            if record.type_ == "tool_call" {
-                fold_state.open_role = None;
-            }
-        } else {
-            let (next, opens_message) = fold_step(fold_state, &record.type_, &record.payload);
-            fold_state = next;
-            if opens_message {
-                counts.message_count += 1;
-            }
-        }
-        counts.last_seq = counts.last_seq.max(record.seq);
-    }
     if !salvageable || staged.is_empty() {
         return Ok(None);
     }
+    let fold = fold_counts(&mut all_records);
+    let counts = SalvageCounts {
+        fold,
+        last_seq: all_records.last().map_or(0, |record| record.seq),
+        intruder_lines,
+    };
     // Quarantine every intruder BEFORE any rewrite: a backup failure must
     // never leave a partially-rewritten log without its `.corrupt-*.bak`.
     for (path, _, intruders) in &staged {

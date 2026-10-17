@@ -98,6 +98,13 @@ export function useFileWatcher(): void {
     async function closeTabIfFileIsGone(path: string): Promise<void> {
       const info = await filesystemApi.getFileInfo(path)
       if (info.success) return
+      if (useEditorStore.getState().openFiles.get(path)?.isDirty) {
+        toast('File deleted on disk', {
+          id: `file-deleted-${path}`,
+          description: `${path.split(/[\\/]/).pop() || path} (unsaved edits kept)`
+        })
+        return
+      }
       if (useEditorStore.getState().closeFileIfIdle(path)) {
         useWorkspaceStore.getState().removeTab(editorTabId(path))
       }
