@@ -128,6 +128,85 @@ describe('moving an open file with cut and paste', () => {
     expect(editorTabIds()).toEqual([editorTabId('/project/src/a.ts')])
   })
 
+  describe('racing a save', () => {
+    const ok = { success: true, data: undefined }
+    let disk: Map<string, string>
+
+    function held(): { promise: Promise<void>; release: () => void } {
+      let release = (): void => {}
+      const promise = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return { promise, release }
+    }
+
+    function moveOnDisk(from: string, to: string): void {
+      disk.set(to, disk.get(from) ?? '')
+      disk.delete(from)
+    }
+
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+    beforeEach(() => {
+      disk = new Map([['/project/src/a.ts', 'on disk']])
+      mockApi.renameFile.mockImplementation(async (from: string, to: string) => {
+        moveOnDisk(from, to)
+        return ok
+      })
+      mockApi.writeFile.mockImplementation(async (path: string, content: string) => {
+        disk.set(path, content)
+        return ok
+      })
+    })
+
+    it('moves the file after the save in flight lands, leaving one file with the saved content', async () => {
+      const write = held()
+      mockApi.writeFile.mockImplementation(async (path: string, content: string) => {
+        await write.promise
+        disk.set(path, content)
+        return ok
+      })
+      openFile('/project/src/a.ts', 'saved edit', 'on disk')
+
+      const save = useEditorStore.getState().saveFile('/project/src/a.ts')
+      await settle()
+      expect(mockApi.writeFile).toHaveBeenCalledWith('/project/src/a.ts', 'saved edit')
+      const move = cutAndPaste(['/project/src/a.ts'], '/project/lib')
+      await settle()
+      write.release()
+      await Promise.all([save, move])
+
+      expect([...disk]).toEqual([['/project/lib/a.ts', 'saved edit']])
+      expect(useEditorStore.getState().openFiles.get('/project/lib/a.ts')).toMatchObject({
+        content: 'saved edit',
+        isDirty: false
+      })
+    })
+
+    it('saves at the new path when the save is requested while the move is in flight', async () => {
+      const reply = held()
+      mockApi.renameFile.mockImplementation(async (from: string, to: string) => {
+        moveOnDisk(from, to)
+        await reply.promise
+        return ok
+      })
+      openFile('/project/src/a.ts', 'saved edit', 'on disk')
+
+      const move = cutAndPaste(['/project/src/a.ts'], '/project/lib')
+      await settle()
+      expect(mockApi.renameFile).toHaveBeenCalledWith('/project/src/a.ts', '/project/lib/a.ts')
+      const save = useEditorStore.getState().saveFile('/project/src/a.ts')
+      await settle()
+      reply.release()
+
+      await expect(save).resolves.toBe(true)
+      await move
+      expect([...disk]).toEqual([['/project/lib/a.ts', 'saved edit']])
+      expect(mockApi.writeFile).toHaveBeenCalledTimes(1)
+      expect(mockApi.writeFile).toHaveBeenCalledWith('/project/lib/a.ts', 'saved edit')
+    })
+  })
+
   it('keeps the open file where it is when copying', async () => {
     openFile('/project/src/a.ts', 'unsaved edit', 'on disk')
     useFileExplorerStore.setState({ clipboard: { type: 'copy', paths: ['/project/src/a.ts'] } })
