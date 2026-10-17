@@ -976,11 +976,12 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (!head) return
       const origin = spliceOrigin(head.id)
       let older: ChatMessage[] | null
-      // Payload ids, kept only when the head anchored by seq. Only then can a
-      // live bubble's persisted twin sit inside the page under another id.
+      // Payload ids, kept only when the head anchored on its renderer seq. Only
+      // then can a live bubble's persisted twin sit inside the page under
+      // another id: a host-stamped head anchors exactly.
       let persistedIds: Set<string> | null = null
       if (origin) {
-        older = await olderInSourceBand(origin, head, count)
+        older = await olderInSourceBand(origin, head, count, get().agentSwitches[sessionId] ?? [])
       } else {
         // Hidden turns never render — the backfill window must not resurrect the
         // greeting prefix when scrolling to the transcript head.
@@ -1005,7 +1006,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
             source: 'acp.loadOlderMessages',
             message: `Oldest live message id for session ${sessionId} missing from persisted payload; anchored scroll-back by seq at index ${oldestIdx}`
           })
-          persistedIds = new Set(fullMessages.map((m) => m.id))
+          if (head.hostSeq === undefined) persistedIds = new Set(fullMessages.map((m) => m.id))
         }
         older = fullMessages.slice(Math.max(0, oldestIdx - count), oldestIdx)
       }
@@ -1027,11 +1028,11 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         const live = s.messages[sessionId] ?? []
         // A trim during the awaits moved the head: this page no longer abuts it.
         if (live[0]?.id !== head.id) return {}
-        // Under an id anchor, and on every spliced page, each live bubble's
-        // persisted twin sits at or after the head, so a page row folds only
-        // by id. Equal text in the window is a later message, not this one.
-        // A seq-anchored head (a live-only `turn:*`/`msg-*` bubble) can leave
-        // twins inside the page under another id. Those fold by host seq, or
+        // Under an id or host-seq anchor, and on every spliced page, each live
+        // bubble's persisted twin sits at or after the head, so a page row
+        // folds only by id. Equal text in the window is a later message, not
+        // this one. A head anchored on its renderer seq (an unstamped live-only
+        // bubble) can leave twins inside the page under another id. Those fold by host seq, or
         // by content against bubbles with no persisted identity, consumed
         // seam-ward so a repeated prompt deeper in the page keeps its copy.
         const liveIds = new Set(live.map((m) => m.id))

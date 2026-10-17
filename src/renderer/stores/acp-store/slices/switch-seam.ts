@@ -96,12 +96,14 @@ function restampBand(rows: ChatMessage[], prefix: string, seqOffset: number): Ch
 /**
  * The page before a window head that sits inside a spliced band, read from the
  * band's source log. `[]` at the band's first row; `null` when the head cannot
- * be placed in that log.
+ * be placed in that log. `switches` are the window's separators; the one whose
+ * `newSessionId` names the source opens the band, and the page stays above it.
  */
 export async function olderInSourceBand(
   origin: SpliceOrigin,
   head: ChatMessage,
-  count: number
+  count: number,
+  switches: AgentSwitchRecord[]
 ): Promise<ChatMessage[] | null> {
   const locate = (payload: SessionPayload | null) => {
     const rows = payload ? renderableRows(payload) : []
@@ -120,12 +122,21 @@ export async function olderInSourceBand(
     return null
   }
   const anchorSeq = found.rows[found.index].seq
-  const seqOffset = (head.seq ?? 0) - (typeof anchorSeq === 'number' ? anchorSeq : 0)
-  return restampBand(
+  const headSeq = head.seq ?? 0
+  const page = restampBand(
     found.rows.slice(Math.max(0, found.index - count), found.index),
     origin.prefix,
-    seqOffset
+    headSeq - (typeof anchorSeq === 'number' ? anchorSeq : 0)
   )
+  // A live-spliced band keeps the renderer seqs its bubbles had, while the
+  // source log spaces the same rows by host seq, which grows per chunk. That
+  // spacing can sink the page below the separator that opens the band, so the
+  // page then packs right under the head instead.
+  const bandFloor = switches.find(
+    (sw) => sw.newSessionId === origin.sourceId && sw.id.startsWith(SWITCH_SPLICE_ID_PREFIX)
+  )?.seq
+  if (bandFloor === undefined || page.length === 0 || (page[0].seq ?? 0) > bandFloor) return page
+  return page.map((m, i) => ({ ...m, seq: headSeq - (page.length - i) }))
 }
 
 /**
