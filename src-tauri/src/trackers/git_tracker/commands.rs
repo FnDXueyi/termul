@@ -201,20 +201,55 @@ pub(super) fn repo_has_head(cwd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `name` is an existing branch of the requested kind: `refs/heads/<name>`
+/// for a local branch, `refs/remotes/<name>` for a remote-tracking one.
+/// `show-ref --verify` matches the fully-qualified ref only, so revision syntax
+/// (`main~1`, `main@{1}`) and option-shaped or pathspec-shaped names never match.
+fn branch_ref_exists(cwd: &str, name: &str, is_remote: bool) -> Result<bool, String> {
+    if name.trim().is_empty() || name.starts_with('-') {
+        return Ok(false);
+    }
+    let prefix = if is_remote { "refs/remotes" } else { "refs/heads" };
+    let output = GitTracker::run_git_command(
+        cwd,
+        &["show-ref", "--verify", "--quiet", &format!("{prefix}/{name}")],
+    )
+    .ok_or_else(|| "Failed to run git show-ref".to_string())?;
+    Ok(output.status.success())
+}
+
+/// Whether `name` is a branch in the repo at `cwd`, and if so whether it is
+/// remote-tracking: `Some(false)` local, `Some(true)` remote-tracking, `None`
+/// for anything else. Local wins when both exist, as in `git checkout <name>`.
+pub(crate) fn resolve_branch_ref(cwd: &str, name: &str) -> Result<Option<bool>, String> {
+    for is_remote in [false, true] {
+        if branch_ref_exists(cwd, name, is_remote)? {
+            return Ok(Some(is_remote));
+        }
+    }
+    Ok(None)
+}
+
 /// Check out an existing branch. Remote branches use `--track`.
+///
+/// `branch` must name an existing branch of the requested kind. Otherwise git
+/// would read `.` as a pathspec and discard uncommitted edits, or read `-f` as
+/// an option, so the name is refused before any checkout runs.
 pub fn git_checkout_branch(cwd: &str, branch: &str, is_remote: bool) -> Result<(), String> {
-    if branch.trim().is_empty() {
-        return Err("Branch name is required".to_string());
+    if !branch_ref_exists(cwd, branch, is_remote)? {
+        return Err(format!(
+            "'{branch}' is not a branch; refusing checkout (a branch switch must target a branch, not a pathspec)"
+        ));
     }
 
     if is_remote {
         git_command_result_with_long_timeout(
             cwd,
-            &["checkout", "-q", "--track", branch],
+            &["checkout", "-q", "--track", branch, "--"],
             "git checkout --track",
         )
     } else {
-        git_command_result_with_long_timeout(cwd, &["checkout", "-q", branch], "git checkout")
+        git_command_result_with_long_timeout(cwd, &["checkout", "-q", branch, "--"], "git checkout")
     }
 }
 

@@ -39,6 +39,7 @@ use commit_stamp::{repo_lock, with_command_trailer};
 use resolve::backend_command;
 
 // `crate::trackers::git_tracker` public surface preserved via re-export.
+pub(crate) use commands::resolve_branch_ref;
 pub use commands::{
     git_checkout_branch, git_commit_stamped, git_create_branch, git_discard_file,
     git_get_commit_context, git_get_diff, git_get_log, git_get_status_detail, git_push_current,
