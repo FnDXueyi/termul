@@ -13,6 +13,7 @@ import type {
 import type { ProjectSummary } from '@shared/types/web-projects.types'
 import {
   type AddProjectPayload,
+  type ChatReadMark,
   type HistoryMode,
   type PersistedSessionSummary,
   type ProjectBusyDetails,
@@ -433,6 +434,12 @@ export interface AcpTransport {
    * `/ws` over its Channel too.
    */
   readonly watches?: WatchClient
+  /**
+   * Tell the host this surface read `sessionId` up to `seq` (the newest turn
+   * end it showed). Resolves to the shared marker as it stands; every
+   * `chat_reads` watcher hears when it moves. WS: `mark_chat_read`.
+   */
+  markChatRead?(sessionId: SessionId, seq: number): Promise<ChatReadMark>
   historyMode?(): HistoryMode | 'tauri_store'
   listPersistedSessions?(): Promise<PersistedSessionSummary[]>
   openPersistedSession?(sessionId: SessionId, lastSeq?: number): Promise<void>

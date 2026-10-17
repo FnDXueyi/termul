@@ -114,7 +114,7 @@ export default function WorkspaceLayout(): React.JSX.Element {
   const { closeActiveTab, handleCloseTerminalRef } = useCloseActiveTab({
     activeTab,
     isAgentLauncherOpen,
-    setDirtyCloseFilePath: editorTabClose.setDirtyCloseFilePath
+    closeEditorTab: editorTabClose.handleCloseEditorTab
   })
 
   // File watcher hook
