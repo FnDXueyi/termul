@@ -57,7 +57,15 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: {
     getState: () => ({
-      projects: [{ id: 'proj-1', name: 'Test', path: '/test', defaultShell: mockProjectShell.current, envVars: [] }]
+      projects: [
+        {
+          id: 'proj-1',
+          name: 'Test',
+          path: '/test',
+          defaultShell: mockProjectShell.current,
+          envVars: []
+        }
+      ]
     })
   }
 }))
