@@ -43,3 +43,28 @@ pub(crate) async fn serve_registry_routes() -> String {
     });
     base
 }
+
+/// Serves the one-agent registry at `/counted.json`, returning its URL and the
+/// number of requests it has answered.
+pub(crate) async fn serve_counted_registry() -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&requests);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/counted.json", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/counted.json",
+        axum::routing::get(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { ONE_AGENT_REGISTRY }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, requests)
+}

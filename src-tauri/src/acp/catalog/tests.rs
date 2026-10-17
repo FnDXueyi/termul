@@ -1116,6 +1116,38 @@ async fn fetch_registry_snapshot_targets_shared_catalog_cache() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn concurrent_forced_fetches_share_one_registry_request() {
+    use std::sync::atomic::Ordering;
+    let (url, requests) = acp_registry_snapshot::test_server::serve_counted_registry().await;
+    let root = temp_dir("coalesced-forced-fetch");
+    let service = service_with_fetcher(
+        root.join("catalog"),
+        Arc::new(move |_, _| {
+            let url = url.clone();
+            Box::pin(async move {
+                acp_registry_snapshot::fetch_capped_registry_body(&url).await?;
+                Ok(resolved_cdn("cdn-only-test-agent"))
+            })
+        }),
+    );
+
+    let results =
+        futures::future::join_all((0..8).map(|_| service.fetch_registry_snapshot(true))).await;
+    for result in results {
+        assert_eq!(result.unwrap().agents[0].id, "cdn-only-test-agent");
+    }
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+    service.fetch_registry_snapshot(true).await.unwrap();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "a finished fetch is not reused"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 // ---- I/O matrix: opt-in persistence + corrupt-file backup ----
 
 #[tokio::test]
