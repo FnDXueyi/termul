@@ -1,7 +1,7 @@
 use std::path::Path;
 
 #[cfg(target_os = "windows")]
-use super::quiet_command;
+use super::create_junction;
 
 /// Helper struct to hold conflict block sections.
 pub(super) struct ConflictBlock {
@@ -177,24 +177,13 @@ pub(super) fn create_dir_symlink(source: &Path, target: &Path) -> Result<(), Str
             return Ok(());
         }
 
-        // Fallback: create a directory junction using `mklink /J`
-        let source_str = source.to_string_lossy().to_string();
-        let target_str = target.to_string_lossy().to_string();
-        let output = quiet_command("cmd")
-            .args(["/C", "mklink", "/J", &target_str, &source_str])
-            .output()
-            .map_err(|e| format!("Failed to run mklink: {}", e))?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!(
+        create_junction(source, target).map_err(|e| {
+            format!(
                 "Failed to create symlink or junction for {}: {}",
                 target.to_string_lossy(),
-                stderr.trim()
-            ))
-        }
+                e
+            )
+        })
     }
 
     #[cfg(not(target_os = "windows"))]
