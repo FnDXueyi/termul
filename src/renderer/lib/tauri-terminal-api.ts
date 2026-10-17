@@ -23,6 +23,7 @@ import { logFrontendError } from './log-api'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
 import { recoverLostRotation } from './terminal-claim-recovery'
 import { terminalCursorEpoch } from './terminal-cursor'
+import { trackTerminalKill } from './terminal-kill-requests'
 
 /**
  * IPC Event names matching Rust commands in src-tauri/src/commands.rs
@@ -536,10 +537,12 @@ export function createTauriTerminalApi(): TerminalApi {
      */
     async kill(terminalId: string): Promise<IpcResult<void>> {
       terminalProjects.delete(terminalId)
-      return invokeIpcCommand<void>(
-        IPC_COMMANDS.KILL,
-        { terminalId },
-        { kind: 'terminal_kill', entityKey: terminalId }
+      return trackTerminalKill(terminalId, () =>
+        invokeIpcCommand<void>(
+          IPC_COMMANDS.KILL,
+          { terminalId },
+          { kind: 'terminal_kill', entityKey: terminalId }
+        )
       )
     },
 

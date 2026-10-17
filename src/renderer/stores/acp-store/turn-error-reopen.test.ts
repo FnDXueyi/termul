@@ -495,6 +495,54 @@ describe('acp-store: a turn error that leaves the agent unusable retires it from
     )
   })
 
+  it('web: Retry moves the chat to a fresh agent when the retired one cannot close the session', async () => {
+    vi.mocked(isTauriContext).mockReturnValue(false)
+    const transport = fakeWebTransport([ownerSummary()], { [SESSION]: persistedRecord('active') })
+    transport.closeSession.mockRejectedValue(new Error('session/close is not supported'))
+    _setAcpTransportForTests(transport)
+    const SIBLING = 's2'
+    useAcpStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [SIBLING]: {
+          ...s.sessions[SESSION],
+          id: SIBLING,
+          title: 'Sibling',
+          activeTurn: true,
+          openTurnId: 'turn:sibling'
+        }
+      }
+    }))
+
+    useAcpStore.getState()._onAgentError({
+      agentId: OWNER,
+      sessionId: SESSION,
+      message: 'turn idle timeout: no agent activity for 5s'
+    })
+    useAcpStore.getState()._onPromptComplete({
+      agentId: OWNER,
+      sessionId: SESSION,
+      stopReason: 'timeout'
+    })
+    await useAcpStore.getState().retryCrashedSession(SESSION)
+
+    const { sessions } = useAcpStore.getState()
+    expect(transport.closeSession).toHaveBeenCalledWith(OWNER, SESSION, expect.anything())
+    expect(transport.spawnAgent).toHaveBeenCalledTimes(1)
+    expect(sessions[SESSION].status).toBe('active')
+    expect(sessions[SESSION].agentId).toBe(FRESH_AGENT)
+    expect(sessions[SIBLING].status).toBe('active')
+    expect(sessions[SIBLING].agentId).toBe(OWNER)
+    expect(sessions[SIBLING].activeTurn).toBe(true)
+    expect(transport.sendPrompt).toHaveBeenCalledWith(
+      FRESH_AGENT,
+      SESSION,
+      'do the thing',
+      expect.any(String),
+      expect.anything()
+    )
+  })
+
   function retireOnAuthRequired(): void {
     useAcpStore.getState()._onAgentError({
       agentId: OWNER,
