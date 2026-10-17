@@ -227,13 +227,15 @@ Inside the container the server binds `0.0.0.0`, so it always requires the token
 
 Compose publishes the port on `127.0.0.1` only. Changing the mapping to `8080:8080` exposes the server on every host network, over plain HTTP. For remote access, put an HTTPS reverse proxy in front instead.
 
+The token is a full credential. A holder of the token gets a shell and can start agents as the `termul` user, with every SSH key and agent login in `/home/termul` within reach. The holder can also register any path the container can see as a project. Treat the token like an SSH private key. Never expose the port beyond localhost without TLS and a reverse proxy you trust.
+
 ### Know what the container can see
 
 | Path in the container | Source | Contents |
 | --- | --- | --- |
 | `/home/termul` | `termul-home` named volume | The state directory `.local/state/termul` (sessions, `projects.json`, `store.json`, `web-auth-token`), plus the home directory of the shells and agents the server starts: git config, SSH keys, agent logins. |
 | `/workspace` | `./workspace` bind mount, or `TERMUL_WORKSPACE` | Your projects. This is the only host directory the server can see. |
-| `/tmp` | tmpfs | Scratch files. Cleared when the container stops. |
+| `/tmp` | tmpfs, mounted `exec` | Scratch files and helper binaries. Cleared when the container stops. |
 
 The root filesystem is read-only, the container drops every Linux capability, and `no-new-privileges` is set. If a tool you run in Termul must write somewhere else, remove `read_only: true` from `docker-compose.yml`.
 

@@ -57,10 +57,11 @@ services:
         bind:
           create_host_path: false
     # Hardening. If a tool you run in Termul must write outside /home/termul,
-    # /workspace, or /tmp, remove read_only.
+    # /workspace, or /tmp, remove read_only. /tmp is mounted exec so tools can
+    # run helper binaries from it.
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:exec,mode=1777
     cap_drop:
       - ALL
     security_opt:

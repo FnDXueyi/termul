@@ -229,15 +229,13 @@ fn should_ignore(name: &str) -> bool {
 /// same predicate is evaluated once per WebSocket connection at `authenticate`
 /// to decide its capabilities.
 ///
-/// Scope note (ADR-007): `/fs/*` write routes are intentionally NOT confined
-/// to `project_root` — they resolve any absolute path (only `..` traversal is
-/// rejected), so a peer admitted via `allow_remote_writes` can write to ANY
-/// path the server account can access, not just under `project_root`. This is
-/// the same `/fs/*` breadth policy as the read/browse routes (the directory
-/// picker + editor navigate outside the project). Confining remote-peer writes
-/// to `project_root` would be a behavioral hardening over ADR-007; tracked as
-/// a follow-up, not applied here (it changes tested breadth behavior). The
-/// `termul-server` startup warn documents this scope accurately.
+/// Scope note (ADR-007): loopback peers keep the `/fs/*` breadth. They resolve
+/// any absolute path (only `..` traversal is rejected), so the directory picker
+/// and the editor can navigate outside the project. A non-loopback peer admitted
+/// via `allow_remote_writes` is confined on the write routes (`mkdir`, `write`,
+/// `delete`, `rename`, `copy`) to the registered project roots by
+/// `ensure_remote_within_project_root`. The read and browse routes stay
+/// unconfined for every peer.
 pub(super) fn check_local_only<T>(
     peer: SocketAddr,
     allow_remote_writes: bool,

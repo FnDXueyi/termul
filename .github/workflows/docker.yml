@@ -7,6 +7,7 @@ on:
       - Dockerfile
       - .dockerignore
       - docker-compose.yml
+      - src-tauri/tauri.conf.json
       - .github/workflows/docker.yml
 
 permissions:
