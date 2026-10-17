@@ -2,10 +2,14 @@
 //! `rg --files` stdout into capped, ignore-bucketed file hits. Shared by the
 //! desktop `search_file_names_stream` command and the web
 //! `GET /search/file-names` handler, so both transports produce the same hits.
+//!
+//! Hit paths are root-relative with forward slashes (the same contract as the
+//! folder pass in `search_dirs`). rg echoes the absolute root it is given, so
+//! each line is stripped of the root prefix before `path_is_ignored` sees it;
+//! a root under a folder named like an ignored dir never taints its hits.
 
 use super::search::{path_is_ignored, SearchFileHit};
-use super::search_dirs::FileWalkResult;
-use crate::path_validation;
+use super::search_dirs::{relativize_rg_line, FileWalkResult};
 use std::io::BufRead;
 
 /// Maximum file hits per search.
@@ -21,6 +25,8 @@ pub(crate) struct FileHitWalk {
     pub stream_error: Option<String>,
     /// The walk stopped at the cap before EOF: kill rg before reaping.
     pub stopped_early: bool,
+    /// rg lines that were not under the search root and were skipped.
+    pub skipped_lines: usize,
 }
 
 /// Drain rg `--files` lines into file hits. `on_batch` receives the
@@ -30,6 +36,7 @@ pub(crate) struct FileHitWalk {
 /// can no longer survive `rank_search_hits`.
 pub(crate) fn collect_file_hits<R: BufRead>(
     reader: R,
+    root_prefix: &str,
     include_ignored: bool,
     mut on_batch: impl FnMut(&[SearchFileHit]),
 ) -> FileHitWalk {
@@ -40,6 +47,7 @@ pub(crate) fn collect_file_hits<R: BufRead>(
     let mut at_cap = false;
     let mut last_batch_count: usize = 0;
     let mut stream_error: Option<String> = None;
+    let mut skipped_lines: usize = 0;
 
     // A manual loop records the first I/O error that `map_while(Result::ok)`
     // would swallow.
@@ -53,7 +61,10 @@ pub(crate) fn collect_file_hits<R: BufRead>(
             }
             None => break,
         };
-        let path = path_validation::strip_verbatim_prefix(&line).replace('\\', "/");
+        let Some(path) = relativize_rg_line(&line, root_prefix) else {
+            skipped_lines += 1;
+            continue;
+        };
         if include_ignored {
             if non_ignored.len() >= MAX_FILE_HITS {
                 at_cap = true;
@@ -105,5 +116,6 @@ pub(crate) fn collect_file_hits<R: BufRead>(
         },
         stream_error,
         stopped_early: at_cap,
+        skipped_lines,
     }
 }

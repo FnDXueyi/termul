@@ -1,5 +1,5 @@
 use super::search_dirs::{
-    assemble_final_batch, dir_search_registry_key, start_dir_search, DirSearch,
+    assemble_final_batch, dir_search_registry_key, root_prefix_for, start_dir_search, DirSearch,
 };
 use super::search_file_hits::{collect_file_hits, FileHitWalk};
 use super::IpcResult;
@@ -107,7 +107,8 @@ pub struct SearchFileNamesStreamRequest {
 /// picker can dim it. `ignored: false` for every hit when the caller did not
 /// request `include_ignored`. `kind` is `Some("dir")` for a folder hit and is
 /// omitted from the wire for files (absent = file), so file payloads are
-/// unchanged. Dir hit paths are root-relative with no trailing slash.
+/// unchanged. Every `path` is root-relative with forward slashes; dir hit
+/// paths have no trailing slash.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFileHit {
@@ -1001,23 +1002,37 @@ pub async fn search_file_names_stream(
             }
         };
 
+    let root_prefix = root_prefix_for(&validated_root);
+
     tauri::async_runtime::spawn_blocking(move || {
         let FileHitWalk {
             result: walk,
             mut stream_error,
             stopped_early: stdout_stopped_early,
-        } = collect_file_hits(BufReader::new(stdout), include_ignored, |files| {
-            // Mid-stream batch: final truncation is not known yet, so the
-            // field is `None` (serde omits it). The final batch carries it.
-            let _ = app_handle.emit(
-                "search-file-names-batch",
-                SearchFileNamesBatchEvent {
-                    search_id: search_id.clone(),
-                    files: files.to_vec(),
-                    truncated: None,
-                },
+            skipped_lines,
+        } = collect_file_hits(
+            BufReader::new(stdout),
+            &root_prefix,
+            include_ignored,
+            |files| {
+                // Mid-stream batch: final truncation is not known yet, so the
+                // field is `None` (serde omits it). The final batch carries it.
+                let _ = app_handle.emit(
+                    "search-file-names-batch",
+                    SearchFileNamesBatchEvent {
+                        search_id: search_id.clone(),
+                        files: files.to_vec(),
+                        truncated: None,
+                    },
+                );
+            },
+        );
+        if skipped_lines > 0 {
+            log::warn!(
+                "[Search] file name pass skipped {} line(s) outside the search root",
+                skipped_lines
             );
-        });
+        }
 
         // Join the folder pass (it runs concurrently with the file walk) and
         // drop its registry entry. Its failures never fail the file search.
