@@ -419,11 +419,19 @@ export function _resetSessionIndexLoadGenerationForTesting(): void {
 /**
  * Source payloads for a switch re-splice or redirect walk must be current: the
  * desktop cache is never refreshed by live events, so a cached copy can predate
- * the switch marker and the source's latest turns. Server and `live_only` modes
- * have no host re-read (`null`) and fall through to the normal load.
+ * the switch marker and the source's latest turns. A failed or absent host re-read
+ * (`null` in server and `live_only` modes) falls back to the normal load.
  */
 async function loadFreshSourcePayload(id: string): Promise<SessionPayload | null> {
-  return (await reloadSessionPayloadFromHost(id)) ?? (await loadSessionPayload(id))
+  const fresh = await reloadSessionPayloadFromHost(id).catch((error: unknown) => {
+    void logFrontendError({
+      level: 'warn',
+      source: 'acp.switchAgent.splice',
+      message: `Host re-read of switch source ${id} failed; using the cached copy if there is one: ${error instanceof Error ? error.message : String(error)}`
+    })
+    return null
+  })
+  return fresh ?? (await loadSessionPayload(id))
 }
 
 /**
