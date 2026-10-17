@@ -132,6 +132,25 @@ pub(crate) fn fold_step(state: FoldState, type_: &str, payload: &Value) -> (Fold
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct FoldCounts {
+    pub message_count: u64,
+    pub tool_count: u64,
+    pub state: FoldState,
+}
+
+pub(super) fn fold_counts(records: &mut [PersistedEventRecord]) -> FoldCounts {
+    records.sort_by_key(|record| record.seq);
+    let mut counts = FoldCounts::default();
+    for record in records.iter() {
+        counts.tool_count += u64::from(is_tool_event(&record.type_));
+        let (next, opens_message) = fold_step(counts.state, &record.type_, &record.payload);
+        counts.state = next;
+        counts.message_count += u64::from(opens_message);
+    }
+    counts
+}
+
 /// Paths longer than this (in chars) are never persisted in a file-change
 /// summary — the field is omitted instead.
 pub(crate) const MAX_SUMMARY_PATH_CHARS: usize = 4096;
