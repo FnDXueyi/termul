@@ -77,6 +77,23 @@ async function showInFileManager(path: string): Promise<void> {
   }
 }
 
+/** Deleting more than this many entries lists a count instead of their names. */
+const MAX_NAMED_DELETE_TARGETS = 3
+
+function deleteDialogTitle(targets: DirectoryEntry[]): string {
+  if (targets.length > 1) return `Delete ${targets.length} items`
+  return targets[0]?.type === 'directory' ? 'Delete folder' : 'Delete file'
+}
+
+function deleteDialogMessage(targets: DirectoryEntry[]): string {
+  if (targets.length === 0) return ''
+  const subject =
+    targets.length <= MAX_NAMED_DELETE_TARGETS
+      ? targets.map((entry) => `"${entry.name}"`).join(', ')
+      : `${targets.length} items`
+  return `Delete ${subject}? This cannot be undone.`
+}
+
 /**
  * File Explorer. Always fills its host column (the shell Side panel): the
  * column owns the width and the resize handle.
@@ -156,7 +173,7 @@ export function FileExplorer(): React.JSX.Element {
     selectedPaths,
     directoryContents,
     onRename: flows.startRename,
-    onDelete: flows.requestDelete
+    onDelete: flows.requestDeleteSelection
   })
 
   const openFileEntry = useCallback(
@@ -274,7 +291,7 @@ export function FileExplorer(): React.JSX.Element {
 
   const actionsDisabled = !rootPath || !!rootLoadError
   const showTree = !!rootPath && !!rootEntries && !rootLoadError && search.showsTree
-  const { deleteTarget } = flows
+  const { deleteTargets } = flows
 
   return (
     <div
@@ -332,9 +349,9 @@ export function FileExplorer(): React.JSX.Element {
       </ExplorerInlineInputProvider>
 
       <ConfirmDialog
-        isOpen={deleteTarget !== null}
-        title={deleteTarget?.type === 'directory' ? 'Delete folder' : 'Delete file'}
-        message={deleteTarget ? `Delete "${deleteTarget.name}"? This cannot be undone.` : ''}
+        isOpen={deleteTargets.length > 0}
+        title={deleteDialogTitle(deleteTargets)}
+        message={deleteDialogMessage(deleteTargets)}
         confirmLabel="Delete"
         variant="danger"
         isLoading={flows.isDeleting}
