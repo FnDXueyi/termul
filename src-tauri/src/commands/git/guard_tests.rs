@@ -23,7 +23,11 @@ fn head(repo: &Path) -> String {
 }
 
 fn repo(dir: &tempfile::TempDir) -> Option<PathBuf> {
-    let path = dir.path().join("repo");
+    repo_named(dir, "repo")
+}
+
+fn repo_named(dir: &tempfile::TempDir, name: &str) -> Option<PathBuf> {
+    let path = dir.path().join(name);
     std::fs::create_dir_all(&path).unwrap();
     GitTracker::run_git_command(path.to_str().unwrap(), &["--version"])?;
     git(&path, &["init", "-q"]);
@@ -99,6 +103,81 @@ async fn branch_switch_refuses_pathspec_and_option_shaped_names_without_touching
     git(&repo, &["checkout", "--", "a.txt"]);
     branch_switch_guarded(&idle, cwd, "feature".into()).await.expect("a real branch still switches");
     assert_eq!(head(&repo), "feature");
+}
+
+#[tokio::test]
+async fn checkout_branch_refuses_pathspec_option_and_revision_names_without_touching_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(repo) = repo(&dir) else { return };
+    let cwd = repo.to_string_lossy().to_string();
+    std::fs::write(repo.join("a.txt"), "committed\n").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-qm", "add a"]);
+    std::fs::write(repo.join("a.txt"), "precious-local-edit\n").unwrap();
+    let before = head(&repo);
+    let idle = manager_with_session(&repo, false);
+
+    for is_remote in [false, true] {
+        for name in [".", "-f", "a.txt", "", "feature~0", "feature@{0}"] {
+            let error = checkout_branch_guarded(&idle, cwd.clone(), name.into(), is_remote)
+                .await
+                .expect_err(&format!("{name:?} (remote: {is_remote}) is not a branch"));
+            assert!(error.contains("not a branch"), "{name:?}: {error}");
+            assert_eq!(
+                std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+                "precious-local-edit\n",
+                "{name:?} must not discard the local edit"
+            );
+            assert_eq!(head(&repo), before, "{name:?} must not move HEAD");
+        }
+    }
+
+    git(&repo, &["checkout", "--", "a.txt"]);
+    checkout_branch_guarded(&idle, cwd, "feature".into(), false)
+        .await
+        .expect("a real branch still checks out");
+    assert_eq!(head(&repo), "feature");
+}
+
+#[tokio::test]
+async fn checkout_branch_creates_a_tracking_branch_for_a_remote_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(remote) = repo_named(&dir, "remote") else { return };
+    let Some(repo) = repo(&dir) else { return };
+    git(&remote, &["branch", "topic"]);
+    git(&repo, &["remote", "add", "origin", dir.path().join("remote").to_str().unwrap()]);
+    git(&repo, &["fetch", "-q", "origin"]);
+    let idle = manager_with_session(&repo, false);
+
+    checkout_branch_guarded(&idle, repo.to_string_lossy().to_string(), "origin/topic".into(), true)
+        .await
+        .expect("a remote branch checks out with --track");
+
+    assert_eq!(head(&repo), "topic");
+    let upstream = GitTracker::run_git_command(
+        repo.to_str().unwrap(),
+        &["rev-parse", "--abbrev-ref", "topic@{upstream}"],
+    )
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
+    assert_eq!(upstream, "origin/topic");
+}
+
+#[tokio::test]
+async fn checkout_branch_rejects_an_invalid_cwd_before_running_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+
+    let error = checkout_branch_guarded(
+        &AcpManager::new(vec![]),
+        missing.to_string_lossy().to_string(),
+        "feature".into(),
+        false,
+    )
+    .await
+    .expect_err("a cwd that does not resolve is refused");
+
+    assert!(error.starts_with("Invalid or inaccessible path"), "{error}");
 }
 
 #[tokio::test]
