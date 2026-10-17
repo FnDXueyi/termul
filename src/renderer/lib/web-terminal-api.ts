@@ -1522,14 +1522,15 @@ export function createWebTerminalApi(): TerminalApi {
  * IpcResult so the caller falls back to spawn — never a throw.
  */
 export async function listPreservedAndAdoptClaims(
-  projectId: string
+  projectId: string,
+  terminalId?: string
 ): Promise<IpcResult<PreservedTerminalEntry[]>> {
   if (!projectId) {
     return { success: false, error: 'projectId is required', code: 'VALIDATION_ERROR' }
   }
   const result = await client.request<{ projectId: string; terminals: PreservedTerminalEntry[] }>(
     'list_preserved',
-    { projectId }
+    { projectId, terminalId }
   )
   if (!result.success) {
     return result

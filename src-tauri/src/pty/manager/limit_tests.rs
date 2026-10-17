@@ -235,7 +235,7 @@ async fn the_per_project_cap_counts_detached_terminals_and_the_listing_returns_t
     assert!(!manager.get(&one.info.id).unwrap().has_live_attachment());
     assert!(manager.spawn(options("a"), None).await.is_err());
     let mut listed: Vec<String> = manager
-        .list_preserved("a")
+        .list_preserved("a", None)
         .into_iter()
         .map(|terminal| terminal.info.id)
         .collect();
@@ -243,7 +243,7 @@ async fn the_per_project_cap_counts_detached_terminals_and_the_listing_returns_t
     let mut expected = vec![one.info.id.clone(), two.info.id.clone()];
     expected.sort();
     assert_eq!(listed, expected);
-    assert_eq!(manager.list_preserved("b").len(), 1);
+    assert_eq!(manager.list_preserved("b", None).len(), 1);
 
     for id in [&one.info.id, &two.info.id, &other.info.id] {
         manager.force_kill(id).await.unwrap();

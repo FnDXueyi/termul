@@ -313,26 +313,34 @@ pub(crate) fn attach_terminal(
 /// Re-issue replaces the claim record of a terminal no one streams, which
 /// invalidates the credential the dead page held. A terminal with a live
 /// stream (a web client, or a desktop forwarder) gets a shared claim instead.
+/// A `terminalId` lists (and re-issues) only that terminal.
 /// Never ledgered: every call re-issues, so a resend just lists again.
 #[tauri::command]
 pub async fn terminal_list_preserved(
     project_id: String,
+    terminal_id: Option<String>,
     pty_manager: State<'_, Arc<PtyManager>>,
 ) -> Result<IpcResult<Vec<PreservedTerminal>>, String> {
-    Ok(list_preserved_reply(pty_manager.inner(), &project_id))
+    Ok(list_preserved_reply(
+        pty_manager.inner(),
+        &project_id,
+        terminal_id.as_deref(),
+    ))
 }
 
 pub(crate) fn list_preserved_reply(
     pty_manager: &PtyManager,
     project_id: &str,
+    terminal_id: Option<&str>,
 ) -> IpcResult<Vec<PreservedTerminal>> {
     if project_id.is_empty() {
         return IpcResult::error("missing projectId", "VALIDATION_ERROR");
     }
-    let preserved = pty_manager.list_preserved(project_id);
+    let preserved = pty_manager.list_preserved(project_id, terminal_id);
     log::info!(
-        "[terminal-list-preserved] project_id={} count={} live_attachments={}",
+        "[terminal-list-preserved] project_id={} terminal_id={:?} count={} live_attachments={}",
         project_id,
+        terminal_id,
         preserved.len(),
         preserved.iter().filter(|entry| entry.live_attachment).count()
     );

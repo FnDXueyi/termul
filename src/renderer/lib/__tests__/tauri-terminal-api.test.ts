@@ -429,7 +429,10 @@ describe('tauri-terminal-api', () => {
           'terminal_rotate_claim',
           'terminal_list_preserved'
         ])
-        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'p1' })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({
+          projectId: 'p1',
+          terminalId: 'terminal-1752-1'
+        })
       })
 
       it('recovers the fresh claim for a terminal a reloaded page learned from listPreserved', async () => {
@@ -441,7 +444,56 @@ describe('tauri-terminal-api', () => {
         const rotated = await api.rotateClaim('terminal-9', 'reissued-claim')
 
         expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
-        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'project-a' })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({
+          projectId: 'project-a',
+          terminalId: 'terminal-9'
+        })
+      })
+
+      it("leaves a sibling terminal's claim usable after recovering another terminal", async () => {
+        const { api } = await loadApi()
+        const UNAUTHORIZED = { success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' }
+        const claims = new Map<string, string>()
+        let issued = 0
+        const issue = (id: string): string => {
+          const claim = `claim-${id}-${++issued}`
+          claims.set(id, claim)
+          return claim
+        }
+        mockInvoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+          if (command === 'terminal_spawn') {
+            const id = claims.has('a') ? 'b' : 'a'
+            return { success: true, data: { ...SPAWNED, id, claim: issue(id) } }
+          }
+          const terminalId = args.terminalId as string
+          if (command === 'terminal_rotate_claim') {
+            if (claims.get(terminalId) !== args.claim) return UNAUTHORIZED
+            const claim = issue(terminalId)
+            return terminalId === 'a' ? LOST_ROTATE : { success: true, data: { claim } }
+          }
+          if (command === 'terminal_attach') {
+            if (claims.get(terminalId) !== args.claim) return UNAUTHORIZED
+            return { success: true, data: ATTACHED }
+          }
+          if (command === 'terminal_list_preserved') {
+            const listed = [...claims.keys()].filter((id) => !terminalId || id === terminalId)
+            return {
+              success: true,
+              data: listed.map((id) => mockPreservedPty({ id, claim: issue(id) }))
+            }
+          }
+          throw new Error(`unexpected command ${command}`)
+        })
+        await api.spawn({ projectId: 'p1' })
+        await api.spawn({ projectId: 'p1' })
+
+        const recovered = await api.rotateClaim('a', 'claim-a-1')
+        const attachedB = await api.attach('b', 'claim-b-2', 0)
+        const rotatedB = await api.rotateClaim('b', 'claim-b-2')
+
+        expect(recovered).toEqual({ success: true, data: { claim: 'claim-a-4' } })
+        expect(attachedB).toEqual({ success: true, data: ATTACHED })
+        expect(rotatedB).toEqual({ success: true, data: { claim: 'claim-b-5' } })
       })
     })
 

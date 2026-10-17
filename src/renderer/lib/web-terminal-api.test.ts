@@ -2675,7 +2675,10 @@ describe('ledgered terminal commands (AD-5)', () => {
       const rotated = await api.rotateClaim('pty-1', 'first-claim')
 
       expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
-      expect(framesOf('list_preserved')[0].payload).toEqual({ projectId: 'p1' })
+      expect(framesOf('list_preserved')[0].payload).toEqual({
+        projectId: 'p1',
+        terminalId: 'pty-1'
+      })
       // A resend is not made: the host would only answer OUTCOME_UNKNOWN again.
       expect(framesOf('rotate_claim')).toHaveLength(1)
     })
