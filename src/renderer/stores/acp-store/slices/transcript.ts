@@ -648,14 +648,15 @@ function hostSeqOf(message: ChatMessage): number | undefined {
 /**
  * True when `payload` already holds the window's oldest bubble, so paging from
  * it lands right before that bubble. A cached copy left by the trim probe stops
- * at the host seq it was read at, and live events never extend it.
+ * at the host seq it was read at, and live events never extend it. A head
+ * without a host seq (this client's optimistic `turn:*` prompt, whose echo is
+ * deduped) is never proven covered: its `seq` is a renderer counter.
  */
 function payloadReachesHead(payload: SessionPayload, head: ChatMessage): boolean {
   if (head.id.startsWith(SWITCH_SPLICE_ID_PREFIX)) return true
   if (payload.messages.some((m) => m.id === head.id)) return true
-  const seq = hostSeqOf(head)
   const lastSeq = payload.metadata.lastSeq
-  return seq !== undefined && lastSeq !== undefined && seq <= lastSeq
+  return head.hostSeq !== undefined && lastSeq !== undefined && head.hostSeq <= lastSeq
 }
 
 /**
