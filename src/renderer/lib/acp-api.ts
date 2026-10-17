@@ -1,7 +1,7 @@
 /**
  * ACP (Agent Client Protocol) renderer facade.
  *
- * This is the ONLY module in the renderer that talks to the P0 ACP backend
+ * This is the ONLY module in the renderer that talks to the ACP backend
  * (the `/ws` relay protocol, carried over a WebSocket on web and a Tauri IPC
  * Channel on desktop, plus the host-local `acp_*` domain commands). Components
  * and the acp-store go through here.
@@ -46,9 +46,9 @@ export type SessionId = string
 // --- ACP schema mirrors (only the fields the UI needs) ---------------------
 
 /**
- * Tagged content block. Only `text` is fully handled in P1; other block types
- * (image/audio/resource/resource_link/…) carry their protocol fields in the
- * index signature and render as a placeholder.
+ * Tagged content block. `text` is the only block with a typed field; other
+ * block types (image/audio/resource/resource_link/…) carry their protocol
+ * fields in the index signature.
  */
 export interface ContentBlock {
   type: string
@@ -149,7 +149,7 @@ export interface SessionReopenOutcome {
 // file). Re-exported here so existing `@/lib/acp-api` imports keep working.
 export type { AgentCapabilities } from '@shared/types/web-protocol.types'
 
-/** A tool call (P3 renders these). ACP schema, camelCase on the wire. */
+/** A tool call. ACP schema, camelCase on the wire. */
 export type ToolKind =
   | 'read'
   | 'edit'
@@ -757,7 +757,7 @@ export interface BrowserAgentTabEvent {
 }
 
 /**
- * Respond to `acp:browser_consent_request`. Tauri-only in phase 1 — remote
+ * Respond to `acp:browser_consent_request`. Tauri-only — remote
  * (WS-relayed) clients never render the prompt (the consent strip and card
  * surfaces are desktop-only); the host times out and denies (fail-closed).
  * Returns false for unknown/expired requests.
@@ -1024,12 +1024,24 @@ export async function acpLoadSession(
   agentId: AgentId,
   sessionId: SessionId,
   cwd: string,
-  additionalDirectories?: string[]
+  additionalDirectories?: string[],
+  mcpServers?: McpServer[]
 ): Promise<SessionReopenOutcome> {
+  // A reload carries a different server list than a plain reopen. Digest it
+  // so an in-flight history open is not reused as the reload command.
+  const mcpKey = mcpServers ? keyDigest(JSON.stringify(mcpServers)) : ''
   const run = await ledgered(
     'load_session',
-    `${agentId}|${sessionId}|${cwd}`,
-    (call) => getAcpTransport().loadSession(agentId, sessionId, cwd, additionalDirectories, call),
+    `${agentId}|${sessionId}|${cwd}|${mcpKey}`,
+    (call) =>
+      getAcpTransport().loadSession(
+        agentId,
+        sessionId,
+        cwd,
+        additionalDirectories,
+        // Keep command options in the fifth slot. An empty list is still sent.
+        mcpServers === undefined ? call : { ...call, mcpServers }
+      ),
     { acceptedWithoutResult: () => ({}) }
   )
   await untilSessionVisible(sessionId, run.visibleAt)
@@ -1040,12 +1052,21 @@ export async function acpResumeSession(
   agentId: AgentId,
   sessionId: SessionId,
   cwd: string,
-  additionalDirectories?: string[]
+  additionalDirectories?: string[],
+  mcpServers?: McpServer[]
 ): Promise<SessionReopenOutcome> {
+  const mcpKey = mcpServers ? keyDigest(JSON.stringify(mcpServers)) : ''
   const run = await ledgered(
     'resume_session',
-    `${agentId}|${sessionId}|${cwd}`,
-    (call) => getAcpTransport().resumeSession(agentId, sessionId, cwd, additionalDirectories, call),
+    `${agentId}|${sessionId}|${cwd}|${mcpKey}`,
+    (call) =>
+      getAcpTransport().resumeSession(
+        agentId,
+        sessionId,
+        cwd,
+        additionalDirectories,
+        mcpServers === undefined ? call : { ...call, mcpServers }
+      ),
     { acceptedWithoutResult: () => ({}) }
   )
   await untilSessionVisible(sessionId, run.visibleAt)
