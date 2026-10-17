@@ -153,6 +153,7 @@ import {
   prepareChatKey,
   useAcpStore
 } from '@/stores/acp-store'
+import { dropEphemeralSessionState } from './helpers'
 
 describe('warm session pool', () => {
   beforeEach(async () => {
@@ -616,6 +617,20 @@ describe('warm session pool', () => {
     expect(useAcpStore.getState().preparedSessions[key]).toBeUndefined()
     // Content-bearing session is persisted/closed, not deleted outright.
     expect(useAcpStore.getState().sessions['sess-prep']?.status).toBe('closed')
+  })
+
+  it('dropping an ephemeral session also drops its slash-command seq', () => {
+    const init = [{ name: 'init', description: 'Init' }]
+    const state = {
+      ...useAcpStore.getState(),
+      commands: { 'sess-prep': init, other: init },
+      commandsSeq: { 'sess-prep': 4, other: 2 }
+    }
+
+    const next = dropEphemeralSessionState(state, 'sess-prep')
+
+    expect(next.commands).toEqual({ other: init })
+    expect(next.commandsSeq).toEqual({ other: 2 })
   })
 
   describe('warm slot lifecycle', () => {
