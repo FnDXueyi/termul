@@ -15,6 +15,7 @@
 //! desktop binary and the standalone `termul-server` (no `AppHandle`).
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -28,6 +29,10 @@ use crate::acp::host_mcp::{
 };
 use crate::acp::session_persistence::SessionPersistence;
 use crate::web::EventSink;
+
+mod ask;
+pub use ask::IdleSignal;
+use ask::PendingAsk;
 
 /// Per-session auth + routing context, keyed by the random token.
 #[derive(Clone)]
@@ -78,6 +83,15 @@ pub struct HostPlanServer {
     plan_store: PlanStore,
     /// Durable store used by the title tool. Absent in live-only tests/modes.
     persistence: Option<Arc<SessionPersistence>>,
+    /// `ask_user` calls waiting for the user, keyed by their `q-` question id
+    /// (the id the renderer answers with). Removed on answer, cancel or drop.
+    pending_asks: Mutex<HashMap<String, PendingAsk>>,
+    /// Per runtime agent: resets the idle deadline of one of its sessions. A
+    /// pending `ask_user` calls it so a configured idle timeout does not cancel
+    /// the turn while the user is still answering.
+    idle_signals: Mutex<HashMap<String, IdleSignal>>,
+    /// Test seam: replaces the computed `ask_user` heartbeat interval.
+    ask_heartbeat_override: Mutex<Option<std::time::Duration>>,
 }
 
 impl HostPlanServer {
@@ -98,6 +112,9 @@ impl HostPlanServer {
             sinks,
             sessions: Mutex::new(HashMap::new()),
             active_turns: Mutex::new(HashMap::new()),
+            pending_asks: Mutex::new(HashMap::new()),
+            idle_signals: Mutex::new(HashMap::new()),
+            ask_heartbeat_override: Mutex::new(None),
             title_set_for_session: Mutex::new(HashSet::new()),
             branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
@@ -270,6 +287,7 @@ impl HostPlanServer {
             .lock()
             .remove(real_session_id);
         self.plan_store.drop_session(real_session_id);
+        self.cancel_asks_for_session(real_session_id);
         // Close agent-controlled browser tabs + drop the consent grant. The
         // host no-ops when no browser feature was used by this session.
         crate::browser_automation::session_ended(real_session_id);
@@ -319,7 +337,15 @@ impl HostPlanServer {
         }
 
         let reply: FrameReply = match serde_json::from_str::<FrameRequest>(&line) {
-            Ok(req) => self.process_request(req).await,
+            Ok(req) => {
+                // The child sends one frame per connection, so the next read
+                // returns only when it hangs up.
+                let hung_up = async move {
+                    let mut read_half = reader.into_inner().into_inner();
+                    let _ = read_half.read_u8().await;
+                };
+                self.process_request(req, hung_up).await
+            }
             Err(e) => {
                 log::warn!("[host-mcp] malformed frame: {e}");
                 FrameReply::err("malformed request")
@@ -340,7 +366,12 @@ impl HostPlanServer {
     }
 
     /// Authenticate + dispatch a validated frame. Returns the reply (ok/err).
-    async fn process_request(&self, req: FrameRequest) -> FrameReply {
+    /// `hung_up` resolves when the child closes the connection.
+    async fn process_request(
+        &self,
+        req: FrameRequest,
+        hung_up: impl Future<Output = ()>,
+    ) -> FrameReply {
         // Look up the token. Unknown token = reject (don't disclose which
         // sessions exist — constant-time isn't necessary for localhost-only,
         // but we never echo the token back).
@@ -469,6 +500,13 @@ impl HostPlanServer {
                         FrameReply::err_code(e.code, e.message)
                     }
                 }
+            }
+            FrameKind::AskUser => {
+                let Some(input) = req.ask else {
+                    return FrameReply::err("ask_user frame needs a question");
+                };
+                self.ask_user(&auth.agent_id, &real_session_id, input, hung_up)
+                    .await
             }
             FrameKind::Plan => {
                 if req.title.is_some() {

@@ -402,6 +402,8 @@ fn ask_user_question_serializes_camel_case() {
                 cardinality: Some("multi".to_string()),
             },
         ],
+            allow_free_text: None,
+        multi_select: None,
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["agentId"], "a1");

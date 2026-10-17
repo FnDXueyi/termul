@@ -3,24 +3,48 @@ import { toast } from 'sonner'
 import { CHAT_GUTTER_X, CHAT_HIT_MIN_H } from '@/components/chat/chat-layout'
 import { baseName, describeToolCall, toolCallPath } from '@/components/chat/tool-call-summary'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
+import { GitStatusLetter } from '@/components/git/rows'
 import { ChevronDown, ChevronRight, FileDiff } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { DiffStatCounts } from '@/components/ui/diff-stat-counts'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ToolCall } from '@/lib/acp-api'
+import { GIT_STATUS_LABEL, type GitDisplayStatus } from '@/lib/git-status-display'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
 import { useEditorStore } from '@/stores/editor-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useForcedCollapse } from './use-forced-collapse'
 
+type ChangedFileKind = 'edit' | 'delete' | 'move'
+
+const KIND_STATUS: Record<ChangedFileKind, GitDisplayStatus> = {
+  edit: 'modified',
+  delete: 'deleted',
+  move: 'renamed'
+}
+
+function isChangedFileKind(kind: string | undefined): kind is ChangedFileKind {
+  return kind === 'edit' || kind === 'delete' || kind === 'move'
+}
+
+/**
+ * The kind a call settles the file into, or null when it settles nothing: a
+ * failed call changed nothing, and a delete still awaiting approval or running
+ * has not removed the file yet.
+ */
+function settledKind(kind: ChangedFileKind, status: ToolCall['status']): ChangedFileKind | null {
+  if (status === 'failed') return null
+  if (kind === 'delete' && status !== 'completed') return null
+  return kind
+}
+
 /** A file touched by one or more ACP tool calls in this session. */
 interface ChangedFile {
   /** Resolved full path — forward slashes, cwd-joined. Also the dedupe key. */
   path: string
-  /** Kind of the most recent contributing call (edit/delete/move). */
-  kind: string
+  settledKind: ChangedFileKind | null
   added: number
   removed: number
 }
@@ -100,12 +124,14 @@ function dirName(fullPath: string, cwd: string): string {
  * `resolveFilePath`, so `src/foo.ts` and `/work/src/foo.ts` merge under cwd
  * `/work`. Add/remove counts — `describeToolCall().diffStat`, the same
  * battle-tested path used by ToolCallCard — are summed across all contributing
- * calls and `kind` is taken from the last one. First-appearance order kept. */
+ * calls; `settledKind` comes from the last call that took effect (see
+ * `settledKind()`). First-appearance order kept. */
 function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] {
   const files: ChangedFile[] = []
   const byPath = new Map<string, ChangedFile>()
   for (const tc of toolCalls) {
-    if (tc.kind !== 'edit' && tc.kind !== 'delete' && tc.kind !== 'move') continue
+    const kind = tc.kind
+    if (!isChangedFileKind(kind)) continue
     // `locations[].path` arrives untrimmed — a whitespace-only path would
     // otherwise key a garbage row like `<cwd>/   `.
     const rawPath = toolCallPath(tc)?.trim()
@@ -114,16 +140,17 @@ function extractChangedFiles(toolCalls: ToolCall[], cwd: string): ChangedFile[] 
     // A dot-only path ('.', 'a/..') can canonicalize to empty.
     if (!path) continue
     const stat = describeToolCall(tc).diffStat ?? { added: 0, removed: 0 }
+    const settled = settledKind(kind, tc.status)
     const existing = byPath.get(path)
     if (existing) {
       existing.added += stat.added
       existing.removed += stat.removed
-      existing.kind = tc.kind ?? 'edit'
+      existing.settledKind = settled ?? existing.settledKind
       continue
     }
     const file: ChangedFile = {
       path,
-      kind: tc.kind ?? 'edit',
+      settledKind: settled,
       added: stat.added,
       removed: stat.removed
     }
@@ -148,27 +175,13 @@ function FileRow({
   // A separators-only path ('/') has no basename — show the path itself.
   const label = baseName(file.path) || file.path
   const hasCounts = file.added > 0 || file.removed > 0
+  const isDeleted = file.settledKind === 'delete'
+  const status = file.settledKind && KIND_STATUS[file.settledKind]
 
-  return (
-    <button
-      type="button"
-      data-press-feedback="off"
-      title={file.path}
-      // `title` is hover-only; the aria-label carries the resolved path to
-      // touch and screen-reader users.
-      aria-label={file.path}
-      onClick={() => onOpen(file.path)}
-      className={cn(
-        'group/row flex w-full items-center gap-2 rounded-md px-3 text-left',
-        CHAT_HIT_MIN_H,
-        'cursor-pointer select-none transition-[background-color,color] duration-150 ease-out motion-reduce:transition-none',
-        'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-        'active:bg-secondary/80',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring'
-      )}
-    >
+  const content = (
+    <>
       <MaterialFileIcon name={label} isDirectory={false} isExpanded={false} depth={0} size={14} />
-      <span className="min-w-0 flex-1">
+      <span className={cn('min-w-0 flex-1', isDeleted && 'line-through')}>
         <span className="block truncate text-2xs font-medium leading-tight">{label}</span>
         {dir && <span className="block truncate text-4xs leading-tight opacity-50">{dir}</span>}
       </span>
@@ -177,6 +190,47 @@ function FileRow({
           <DiffStatCounts added={file.added} removed={file.removed} />
         </span>
       )}
+      {status && <GitStatusLetter status={status} />}
+    </>
+  )
+  const rowClass = cn(
+    'flex w-full items-center gap-2 rounded-md px-3 text-left text-muted-foreground select-none',
+    CHAT_HIT_MIN_H
+  )
+
+  if (isDeleted) {
+    const deletedLabel = `Deleted: ${file.path}`
+    return (
+      // biome-ignore lint/a11y/useSemanticElements: a fieldset would give a static row form semantics
+      <div
+        role="group"
+        title={deletedLabel}
+        aria-label={deletedLabel}
+        className={cn(rowClass, 'cursor-default')}
+      >
+        {content}
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      data-press-feedback="off"
+      title={file.path}
+      // `title` is hover-only; the aria-label carries the resolved path and the
+      // change kind to touch and screen-reader users.
+      aria-label={status ? `${file.path}, ${GIT_STATUS_LABEL[status]}` : file.path}
+      onClick={() => onOpen(file.path)}
+      className={cn(
+        rowClass,
+        'group/row cursor-pointer transition-[background-color,color] duration-150 ease-out motion-reduce:transition-none',
+        'hover:bg-secondary/60 hover:text-foreground',
+        'active:bg-secondary/80',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring'
+      )}
+    >
+      {content}
     </button>
   )
 }
@@ -204,7 +258,8 @@ interface ChatChangedFilesPanelProps {
  * ChatInputBar. One row per unique file touched by ACP tool calls
  * (edit/delete/move) in the current session — a file edited by several calls
  * appears once with summed +N −N counts — persists across agent replies.
- * Clicking a file row opens it in the editor workspace. View-and-open-only.
+ * Clicking a row opens the file in the editor workspace; a deleted file's
+ * row opens nothing. View-and-open-only.
  *
  * The panel sits behind the chatbox (z-0 vs z-10). A negative bottom margin
  * extends the panel's translucent bg-card/60 behind the chatbox's rounded top

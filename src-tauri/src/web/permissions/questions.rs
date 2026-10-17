@@ -72,6 +72,9 @@ struct QuestionTicket {
     /// `true` when any option declares `cardinality: "multi"` — multi-select
     /// allows several values; single-select enforces at most one.
     multi: bool,
+    /// `true` when the agent offered a free-text answer (issue #784 `ask_user`).
+    /// One value that is not an option label is then a valid answer.
+    allow_free_text: bool,
     /// `Some(client)` once a client has won the ticket (first-response-wins).
     resolved_by: Option<ClientId>,
 }
@@ -152,6 +155,7 @@ impl QuestionRendezvous {
             session_id,
             options,
             multi,
+            allow_free_text: false,
             resolved_by: None,
         };
         self.tickets.lock().insert(question_id, ticket);
@@ -164,6 +168,15 @@ impl QuestionRendezvous {
             QuestionRespondError::AlreadyResolved
         } else {
             QuestionRespondError::NotFound
+        }
+    }
+
+    /// Mark a registered question as accepting one free-text answer (issue #784).
+    /// Called right after [`Self::register`] for an `acp:question_request` whose
+    /// payload sets `allowFreeText`. Unknown ids are ignored.
+    pub fn allow_free_text(&self, question_id: &str) {
+        if let Some(ticket) = self.tickets.lock().get_mut(question_id) {
+            ticket.allow_free_text = true;
         }
     }
 
@@ -198,10 +211,18 @@ impl QuestionRendezvous {
                 if values.is_empty() {
                     return Err(QuestionRespondError::InvalidOption);
                 }
+                // Issue #784: one non-option value is the free-text answer, and
+                // only where the agent offered one. Anything else must be an option.
+                let mut free_texts = 0;
                 for v in values {
-                    if !question_value_is_valid(&ticket.options, v) {
-                        return Err(QuestionRespondError::InvalidOption);
+                    if question_value_is_valid(&ticket.options, v) {
+                        continue;
                     }
+                    if ticket.allow_free_text && free_texts == 0 && !v.trim().is_empty() {
+                        free_texts += 1;
+                        continue;
+                    }
+                    return Err(QuestionRespondError::InvalidOption);
                 }
                 if !ticket.multi && values.len() > 1 {
                     return Err(QuestionRespondError::InvalidOption);

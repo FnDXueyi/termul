@@ -1555,7 +1555,14 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     expect(useAcpStore.getState().sessions['s-load-fails'].lastError).toContain('Resume failed')
   })
 
-  it('resumeLiveSession filters hidden turns and finalizes the resume window', async () => {
+  it('openHistorySession resume filters hidden turns and finalizes the resume window', async () => {
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-1': { id: 'agent-1', capabilities: { sessionCapabilities: { resume: {} } } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+    }))
     seedServerPayload(
       's-resume',
       [
@@ -1584,7 +1591,8 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
       }),
       dispose: vi.fn()
     } as unknown as AcpTransport)
-    await useAcpStore.getState().resumeLiveSession('s-resume', 'agent-1', '/w')
+    await useAcpStore.getState().openHistorySession('s-resume')
+    await flushTurnEnd()
     const state = useAcpStore.getState()
     const messages = state.messages['s-resume']
     expect(messages.map((m) => m.id)).toEqual([

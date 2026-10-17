@@ -10,7 +10,7 @@ interface ExplorerKeyboardOptions {
   selectedPaths: Set<string>
   directoryContents: Map<string, DirectoryEntry[]>
   onRename: (entry: DirectoryEntry) => void
-  onDelete: (entry: DirectoryEntry) => void
+  onDelete: () => void
 }
 
 /** Ctrl+V target: the selected folder, else the selected file's folder, else the root. */
@@ -88,13 +88,9 @@ export function useExplorerKeyboard({
         return
       }
 
-      // Delete asks to confirm the first selected entry.
-      // TODO: Implement batch delete with multi-select
       if (e.key === 'Delete' && selectedPaths.size > 0) {
         e.preventDefault()
-        const [path] = selectedPaths
-        const entry = findTreeEntry(directoryContents, path)
-        if (entry) onDelete(entry)
+        onDelete()
         return
       }
 

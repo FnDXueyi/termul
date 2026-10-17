@@ -36,6 +36,7 @@ import type {
   PlanUpdateEvent,
   ProbeStatus,
   PromptCompleteEvent,
+  QuestionCancelledEvent,
   QuestionOption,
   SessionClosedEvent,
   SessionConfigOption,
@@ -290,6 +291,10 @@ export interface PendingQuestion {
   sessionId: SessionId
   question: string
   options: QuestionOption[]
+  /** `ask_user` (issue #784): show the free-text "Other" row. */
+  allowFreeText?: boolean
+  /** `ask_user` (issue #784): more than one option may be picked. */
+  multiSelect?: boolean
 }
 
 export interface PendingElicitation {
@@ -705,14 +710,6 @@ export interface AcpState {
    */
   applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
   openHistorySession: (id: string, options?: OpenHistoryOptions) => Promise<void>
-  /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
-   * `openHistorySessionInner`'s transcript-install + resume but skips
-   * `ensureLiveAgent` (no cold-spawn): the caller passes the authoritative
-   * live `agentId` still owned by the Rust `AcpManager` across a webview/
-   * phone reload. The backend `gate_resume_session` enforces the capability
-   * (reused, not duplicated); a rejection rejects here so the hook can record
-   * `acp-resume-skipped` and leave the transcript read-only. */
-  resumeLiveSession: (id: string, agentId: AgentId, cwd: string) => Promise<void>
   /** R4: force-flush a non-debounced snapshot of every live session's cached
    * payload on refresh unload so the durable copy is at worst one turn behind
    * (never truncated by a live-window trim). Reuses `persistSession`'s guards
@@ -919,6 +916,7 @@ export interface AcpState {
   _onUsageUpdate: (e: UsageUpdateEvent) => void
   _onPermissionRequest: (e: PermissionRequestEvent, eventSeq?: number) => void
   _onQuestionRequest: (e: AskUserQuestionEvent, eventSeq?: number) => void
+  _onQuestionCancelled: (e: QuestionCancelledEvent) => void
   _onElicitationRequest: (e: ElicitationRequestEvent, eventSeq?: number) => void
   _onPromptComplete: (e: PromptCompleteEvent, eventSeq?: number) => void
   _onAgentError: (e: AgentErrorEvent) => void

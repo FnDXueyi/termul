@@ -1,5 +1,6 @@
 import { toast } from 'sonner'
 import { logFrontendError } from '@/lib/log-api'
+import { basename } from '@/lib/path-basename'
 import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useEditorStore } from '@/stores/editor-store'
 
@@ -32,11 +33,6 @@ function clearTimer(filePath: string): void {
     clearTimeout(timer)
     autoSaveTimers.delete(filePath)
   }
-}
-
-function getBasename(filePath: string): string {
-  const parts = filePath.split(/[\\/]/)
-  return parts[parts.length - 1] || filePath
 }
 
 function resolveDelayMs(): number {
@@ -86,7 +82,7 @@ export function scheduleAutoSave(filePath: string): void {
           // Toast once per failure episode; the retry keeps trying quietly.
           if (!failedAutoSavePaths.has(filePath)) {
             failedAutoSavePaths.add(filePath)
-            toast.error('Auto save failed', { description: getBasename(filePath) })
+            toast.error('Auto save failed', { description: basename(filePath) })
           }
           if (useAppSettingsStore.getState().settings.editorAutoSave) {
             scheduleAutoSave(filePath)
@@ -101,7 +97,7 @@ export function scheduleAutoSave(filePath: string): void {
           if (!stillDirty) return false
           if (!failedAutoSavePaths.has(filePath)) {
             failedAutoSavePaths.add(filePath)
-            toast.error('Auto save failed', { description: getBasename(filePath) })
+            toast.error('Auto save failed', { description: basename(filePath) })
           }
           if (useAppSettingsStore.getState().settings.editorAutoSave) {
             scheduleAutoSave(filePath)
@@ -189,7 +185,7 @@ export async function flushPendingAutoSaves(): Promise<{ saved: string[]; failed
         return
       }
 
-      const name = getBasename(path)
+      const name = basename(path)
       let ok = false
       try {
         ok = await useEditorStore.getState().saveFile(path)

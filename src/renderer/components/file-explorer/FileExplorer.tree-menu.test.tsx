@@ -1,9 +1,13 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { filesystemApi } from '@/lib/api'
 import { useFileExplorerStore } from '@/stores/file-explorer-store'
 import { FileExplorer } from './FileExplorer'
+
+const toastError = vi.hoisted(() => vi.fn())
+vi.mock('sonner', () => ({ toast: { error: toastError, success: vi.fn() } }))
 
 const renders = vi.hoisted(() => ({ rows: [] as string[], menus: 0 }))
 
@@ -50,7 +54,12 @@ function file(path: string): DirectoryEntry {
   return { ...dir(path), type: 'file', extension: '.ts', size: 1 }
 }
 
+const deletePath = vi.spyOn(filesystemApi, 'deletePath')
+
 beforeEach(() => {
+  deletePath.mockReset().mockResolvedValue({ success: true, data: undefined })
+  vi.spyOn(filesystemApi, 'readDirectory').mockResolvedValue({ success: true, data: [] })
+  toastError.mockClear()
   useFileExplorerStore.setState({
     rootPath: '/proj',
     directoryContents: new Map([
@@ -118,5 +127,73 @@ describe('FileExplorer tree context menu', () => {
     fireEvent.contextMenu(row('/proj/b'))
     expect(screen.getByRole('menuitem', { name: 'Paste' })).toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Copy' })).toBeInTheDocument()
+  })
+})
+
+describe('FileExplorer delete', () => {
+  function selectRows(...paths: string[]): void {
+    for (const path of paths) fireEvent.click(row(path), { ctrlKey: true })
+  }
+
+  async function confirmDelete(): Promise<void> {
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull())
+  }
+
+  it('deletes every selected entry from Delete (N) in the context menu', async () => {
+    selectRows('/proj/a/one.ts', '/proj/a/two.ts', '/proj/b/four.ts')
+    fireEvent.contextMenu(row('/proj/b/four.ts'))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete (3)…' }))
+
+    expect(await screen.findByText('Delete 3 items')).toBeInTheDocument()
+    expect(
+      screen.getByText('Delete "one.ts", "two.ts", "four.ts"? This cannot be undone.')
+    ).toBeInTheDocument()
+    await confirmDelete()
+
+    expect(deletePath.mock.calls).toEqual([
+      ['/proj/a/one.ts', { recursive: false }],
+      ['/proj/a/two.ts', { recursive: false }],
+      ['/proj/b/four.ts', { recursive: false }]
+    ])
+    expect(useFileExplorerStore.getState().selectedPaths.size).toBe(0)
+  })
+
+  it('deletes only the right-clicked entry when it is outside the selection', async () => {
+    selectRows('/proj/a/one.ts', '/proj/a/two.ts')
+    fireEvent.contextMenu(row('/proj/b/four.ts'))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete…' }))
+    await confirmDelete()
+
+    expect(deletePath.mock.calls).toEqual([['/proj/b/four.ts', { recursive: false }]])
+  })
+
+  it('deletes the whole selection from the Delete key', async () => {
+    selectRows('/proj/a/one.ts', '/proj/b/four.ts')
+    fireEvent.keyDown(document.body, { key: 'Delete' })
+    expect(await screen.findByText('Delete 2 items')).toBeInTheDocument()
+    await confirmDelete()
+
+    expect(deletePath.mock.calls).toEqual([
+      ['/proj/a/one.ts', { recursive: false }],
+      ['/proj/b/four.ts', { recursive: false }]
+    ])
+  })
+
+  it('keeps the entries that failed in the dialog and reports them', async () => {
+    deletePath.mockImplementation(async (path) =>
+      path.endsWith('two.ts')
+        ? { success: false, error: 'busy' }
+        : { success: true, data: undefined }
+    )
+    selectRows('/proj/a/one.ts', '/proj/a/two.ts', '/proj/b/four.ts')
+    fireEvent.keyDown(document.body, { key: 'Delete' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith('Failed to delete /proj/a/two.ts: busy')
+    )
+    expect(deletePath).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('Delete "two.ts"? This cannot be undone.')).toBeInTheDocument()
   })
 })

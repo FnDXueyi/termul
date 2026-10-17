@@ -438,7 +438,17 @@ describe('acp-store', () => {
     expect(useAcpStore.getState().messages['s-corrupt']).toHaveLength(1)
   })
 
-  it('resumeLiveSession restores persisted tool calls with the transcript', async () => {
+  it('openHistorySession resume rebases the seq counter past restored tool-call seqs', async () => {
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-r': {
+          id: 'agent-r',
+          capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+        }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-r': 'connected' }
+    }))
     setCachedSessionPayload('s-resume', {
       metadata: {
         id: 's-resume',
@@ -472,7 +482,7 @@ describe('acp-store', () => {
       toolCalls: [{ toolCallId: 'tc-9', kind: 'read', status: 'completed', timestamp: 5, seq: 3 }]
     })
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({})
-    await useAcpStore.getState().resumeLiveSession('s-resume', 'agent-r', '/w')
+    await useAcpStore.getState().openHistorySession('s-resume')
     expect(invoke).toHaveBeenCalledWith('acp_resume_session', {
       agentId: 'agent-r',
       sessionId: 's-resume',
@@ -498,7 +508,17 @@ describe('acp-store', () => {
     expect(liveCall.seq!).toBeGreaterThan(3)
   })
 
-  it('resumeLiveSession keeps the restored transcript and tool calls when resume fails', async () => {
+  it('openHistorySession keeps the restored transcript and tool calls when resume fails', async () => {
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-r': {
+          id: 'agent-r',
+          capabilities: { loadSession: false, sessionCapabilities: { resume: {} } }
+        }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-r': 'connected' }
+    }))
     setCachedSessionPayload('s-resume-fail', {
       metadata: {
         id: 's-resume-fail',
@@ -532,9 +552,9 @@ describe('acp-store', () => {
       toolCalls: [{ toolCallId: 'tc-f', kind: 'edit', status: 'completed', timestamp: 5, seq: 2 }]
     })
     ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('agent gone'))
-    await expect(
-      useAcpStore.getState().resumeLiveSession('s-resume-fail', 'agent-r', '/w')
-    ).rejects.toBeDefined()
+    await expect(useAcpStore.getState().openHistorySession('s-resume-fail')).rejects.toThrow(
+      'agent gone'
+    )
     expect(useAcpStore.getState().messages['s-resume-fail']).toHaveLength(2)
     expect(useAcpStore.getState().toolCalls['s-resume-fail']).toEqual([
       expect.objectContaining({ toolCallId: 'tc-f', seq: 2 })

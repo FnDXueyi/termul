@@ -1060,7 +1060,8 @@ async fn run_branch_name_write(
     (StatusCode::OK, Json(body))
 }
 
-/// `git checkout <name>` (branch-switch desktop parity). F-007: the previous
+/// `git checkout <name>` (shared by `POST /git/branch-switch` and the desktop
+/// `git_branch_switch` command). F-007: the previous
 /// local re-implementation built `["checkout", "--", name]`, which makes
 /// `name` a PATHSPEC, not a branch — the switch never happened, and a branch
 /// name colliding with a worktree path silently reverted that file's local
@@ -1068,7 +1069,7 @@ async fn run_branch_name_write(
 /// resolvable branch ref BEFORE running git, so git's pathspec fallback can
 /// never trigger: `checkout <name>` with a non-branch name is an error, not a
 /// file revert.
-fn run_simple_checkout(cwd: &str, name: &str) -> Result<(), String> {
+pub(crate) fn run_simple_checkout(cwd: &str, name: &str) -> Result<(), String> {
     let Some(is_remote) = resolve_branch_ref(cwd, name)? else {
         return Err(format!(
             "'{name}' is not a branch; refusing checkout (a branch switch must target a branch, not a pathspec)"
