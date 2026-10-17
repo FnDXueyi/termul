@@ -98,5 +98,7 @@ jobs:
         with:
           name: e2e-playwright-output
           path: tests/e2e/.playwright-out/
+          # Playwright writes to a dot directory, which upload-artifact skips by default.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
