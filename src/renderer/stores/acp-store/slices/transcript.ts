@@ -976,8 +976,12 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       if (!head) return
       const origin = spliceOrigin(head.id)
       let older: ChatMessage[] | null
+      // Payload ids, kept only when the head anchored on its renderer seq. Only
+      // then can a live bubble's persisted twin sit inside the page under
+      // another id: a host-stamped head anchors exactly.
+      let persistedIds: Set<string> | null = null
       if (origin) {
-        older = await olderInSourceBand(origin, head, count)
+        older = await olderInSourceBand(origin, head, count, get().agentSwitches[sessionId] ?? [])
       } else {
         // Hidden turns never render — the backfill window must not resurrect the
         // greeting prefix when scrolling to the transcript head.
@@ -1002,6 +1006,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
             source: 'acp.loadOlderMessages',
             message: `Oldest live message id for session ${sessionId} missing from persisted payload; anchored scroll-back by seq at index ${oldestIdx}`
           })
+          if (head.hostSeq === undefined) persistedIds = new Set(fullMessages.map((m) => m.id))
         }
         older = fullMessages.slice(Math.max(0, oldestIdx - count), oldestIdx)
       }
@@ -1009,9 +1014,7 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       // At the head of a band: a switched chat continues into the band spliced
       // before it.
       const crossedSeam = older.length === 0
-      // Rows from another session's log never fold as twins of rows outside
-      // their own band: only bubbles under the band's prefix can be the same turn.
-      const twinPrefix = crossedSeam ? null : (origin?.prefix ?? '')
+      const seqAnchoredIds = crossedSeam ? null : persistedIds
       const page = crossedSeam
         ? await newestOfPreviousBand(
             get().agentSwitches[sessionId] ?? [],
@@ -1025,40 +1028,40 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
         const live = s.messages[sessionId] ?? []
         // A trim during the awaits moved the head: this page no longer abuts it.
         if (live[0]?.id !== head.id) return {}
-        // Deduplicate against the live window — by id AND by content. The id
-        // check catches restored bubbles; the content check catches the
-        // live-only id dialects (`turn:*` optimistic prompts, `msg-*`
-        // streams) whose persisted twins carry `user:seq-*`/`snapshot:*`
-        // ids — otherwise a seq-anchored backfill re-renders the in-flight
-        // turn above the live copy. Matches are consumed seam-ward (the end
-        // of the page first) so identical repeated content deeper in history
-        // — e.g. the same prompt sent twice — keeps its own copy, and a
-        // chunk arriving between the payload read and this set can't
-        // double-render.
+        // Under an id or host-seq anchor, and on every spliced page, each live
+        // bubble's persisted twin sits at or after the head, so a page row
+        // folds only by id. Equal text in the window is a later message, not
+        // this one. A head anchored on its renderer seq (an unstamped live-only
+        // bubble) can leave twins inside the page under another id. Those fold by host seq, or
+        // by content against bubbles with no persisted identity, consumed
+        // seam-ward so a repeated prompt deeper in the page keeps its copy.
         const liveIds = new Set(live.map((m) => m.id))
+        const liveHostSeqs = new Set(live.map((m) => m.hostSeq))
         const twinUsed = new Array<boolean>(live.length).fill(false)
         const deduped: ChatMessage[] = []
         for (let i = page.length - 1; i >= 0; i -= 1) {
           const candidate = page[i]
           if (liveIds.has(candidate.id)) continue
-          const candidateDistFromEnd = page.length - 1 - i
-          const twin =
-            twinPrefix === null
-              ? -1
-              : live.findIndex(
-                  (m, index) =>
-                    !twinUsed[index] &&
-                    m.id.startsWith(twinPrefix) &&
-                    isPersistedTwin(
-                      candidate,
-                      m,
-                      live.length - 1 - index - candidateDistFromEnd >= 0 &&
-                        live.length - 1 - index - candidateDistFromEnd <= TWIN_SEAM_SLACK
-                    )
+          if (seqAnchoredIds) {
+            if (candidate.seq !== undefined && liveHostSeqs.has(candidate.seq)) continue
+            const candidateDistFromEnd = page.length - 1 - i
+            const twin = live.findIndex(
+              (m, index) =>
+                !twinUsed[index] &&
+                m.hostSeq === undefined &&
+                !seqAnchoredIds.has(m.id) &&
+                !m.id.startsWith(SWITCH_SPLICE_ID_PREFIX) &&
+                isPersistedTwin(
+                  candidate,
+                  m,
+                  live.length - 1 - index - candidateDistFromEnd >= 0 &&
+                    live.length - 1 - index - candidateDistFromEnd <= TWIN_SEAM_SLACK
                 )
-          if (twin !== -1) {
-            twinUsed[twin] = true
-            continue
+            )
+            if (twin !== -1) {
+              twinUsed[twin] = true
+              continue
+            }
           }
           deduped.push(candidate)
         }

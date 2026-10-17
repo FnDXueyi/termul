@@ -179,6 +179,7 @@ import {
   prepareChatKey,
   useAcpStore
 } from '@/stores/acp-store'
+import { spliceSwitchTranscript } from './helpers'
 import {
   activeWirePromptTurns,
   invalidateSessionReopen,
@@ -195,6 +196,7 @@ import {
   seedOptionsSession,
   seedSession
 } from './testkit'
+import type { ChatMessage } from './types'
 
 // --- Story 3 (spec-in-chat-agent-switch): switchAgent orchestration --------
 
@@ -2518,9 +2520,13 @@ describe('switchAgent (story 3)', () => {
         seq: i + 1
       }))
 
-    async function reopenChainAndScrollBack(aRows: Row[], cRows: Row[]): Promise<void> {
+    async function reopenChainAndScrollBack(
+      aRows: Row[],
+      cRows: Row[],
+      bRows: Row[] = band('b', 'B', 60)
+    ): Promise<void> {
       seedHistory('s-a', 'agent-a', 'cfg-a', aRows, [marker(61, 'cfg-b', 's-b')])
-      seedHistory('s-b', 'agent-b', 'cfg-b', band('b', 'B', 60), [marker(61, 'cfg-c', 's-c')])
+      seedHistory('s-b', 'agent-b', 'cfg-b', bRows, [marker(61, 'cfg-c', 's-c')])
       seedHistory('s-c', 'agent-c', 'cfg-c', cRows)
       useAcpStore.setState({
         agentConfigs: [
@@ -2567,6 +2573,81 @@ describe('switchAgent (story 3)', () => {
 
       expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
       expect(texts('s-c').slice(0, 2)).toEqual(['continue', 'A 2'])
+    })
+
+    it('SCROLL_BACK_REPEATED_IN_BAND: a band row equal to a later row of the same band still pages back', async () => {
+      const bRows = band('b', 'B', 60).map((r) =>
+        r.id === 'b3' || r.id === 'b29' ? { ...r, text: 'continue' } : r
+      )
+
+      await reopenChainAndScrollBack(
+        band('a', 'A', 60),
+        band('c', 'C', MAX_LIVE_WINDOW_MESSAGES),
+        bRows
+      )
+
+      expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
+      expect(texts('s-c').slice(60, 64)).toEqual(['B 1', 'B 2', 'continue', 'B 4'])
+    })
+
+    it('SCROLL_BACK_LIVE_BAND_HEAD: a live-spliced head on a counter seq pages back above its band separator', async () => {
+      seedHistory('s-new', 'agent-new', 'cfg-new', [
+        { id: 'user:seq-10', role: 'user', text: 'B early 1', seq: 10 },
+        { id: 'snapshot:agent:50', role: 'agent', text: 'B early 2', seq: 50 },
+        { id: 'user:seq-100', role: 'user', text: 'B late', seq: 100 }
+      ])
+      seedHistory('s-3', 'agent-3', 'cfg-3', [{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+      const separator = (id: string, seq: number, newSessionId: string): AgentSwitchRecord => ({
+        ...marker(seq, 'cfg-x', newSessionId),
+        id,
+        seq
+      })
+      useAcpStore.setState((s) => ({
+        messages: {
+          ...s.messages,
+          's-3': [
+            {
+              id: 'switch-splice:s-new:turn:b-late',
+              role: 'user',
+              blocks: [{ type: 'text', text: 'B late' }],
+              streaming: false,
+              timestamp: 0,
+              seq: -10,
+              hostSeq: 100
+            },
+            ...rows([{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+          ]
+        },
+        agentSwitches: {
+          ...s.agentSwitches,
+          's-3': [
+            separator('switch-splice:s-new:switch-splice:s-old:switch:fabricated:9', -50, 's-new'),
+            separator('switch-splice:s-new:switch:fabricated:20', -1, 's-3')
+          ]
+        }
+      }))
+
+      await useAcpStore.getState().loadOlderMessages('s-3', 50)
+
+      const state = useAcpStore.getState()
+      const timeline = [
+        ...(state.messages['s-3'] ?? []).map((m) => ({
+          seq: m.seq ?? Number.NaN,
+          label: m.blocks.find((b) => b.type === 'text')?.text
+        })),
+        ...(state.agentSwitches['s-3'] ?? []).map((sw) => ({
+          seq: sw.seq,
+          label: `-> ${sw.newSessionId}`
+        }))
+      ].sort((x, y) => x.seq - y.seq)
+      expect(timeline.map((entry) => entry.label)).toEqual([
+        '-> s-new',
+        'B early 1',
+        'B early 2',
+        'B late',
+        '-> s-3',
+        'C 1'
+      ])
     })
 
     it('MARKER_FAIL_RESPLICE: a reinstall after a failed marker write still renders one separator between the bands', async () => {
@@ -4542,5 +4623,37 @@ describe('composer option fidelity', () => {
       resolveNewSession({ sessionId: 's-new' })
       await switchPromise
     })
+  })
+})
+
+describe('spliceSwitchTranscript', () => {
+  const message = (id: string, seq: number): ChatMessage => ({
+    id,
+    role: 'agent',
+    blocks: [{ type: 'text', text: id }],
+    streaming: false,
+    timestamp: seq,
+    seq
+  })
+
+  it('places a source with more than 1000 seqs wholly before the target', () => {
+    const source = Array.from({ length: 1500 }, (_, i) => message(`a${i + 1}`, i + 1))
+    const target = [message('b1', 1), message('b2', 2)]
+
+    const merged = spliceSwitchTranscript(
+      's-a',
+      { messages: source, toolCalls: [], switches: [] },
+      target,
+      [],
+      []
+    )
+
+    const timeline = [...merged.messages].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))
+    expect(timeline.slice(-4).map((m) => m.id)).toEqual([
+      'switch-splice:s-a:a1499',
+      'switch-splice:s-a:a1500',
+      'b1',
+      'b2'
+    ])
   })
 })
