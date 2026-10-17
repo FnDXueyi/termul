@@ -1494,6 +1494,7 @@ export function dropEphemeralSessionState(
     agentSwitches,
     plans,
     commands,
+    commandsSeq: dropRecordKey(state.commandsSeq, sessionId),
     sessionUsage,
     pendingPermissions: dropPermissionsForSession(state.pendingPermissions, sessionId),
     pendingQuestions: dropQuestionsForSession(state.pendingQuestions, sessionId),

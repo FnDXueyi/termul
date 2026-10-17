@@ -147,6 +147,18 @@ function installableTranscript(
   options: { headAnchored: boolean }
 ): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   noteHistoryWatermark(sessionId, payload)
+  return projectTranscript(payload, options)
+}
+
+/**
+ * The projection half of {@link installableTranscript}. A switch splice reads
+ * its source sessions with this and records their watermarks only once the
+ * splice is known to apply: an abandoned splice must not move them.
+ */
+function projectTranscript(
+  payload: SessionPayload,
+  options: { headAnchored: boolean }
+): { messages: ChatMessage[]; toolCalls: ToolCall[]; switches: AgentSwitchRecord[] } {
   if (!options.headAnchored) {
     return {
       // A tail window can cut through a switch turn — boundary rows only
@@ -436,6 +448,7 @@ async function respliceLiveSwitchTarget(
 ): Promise<void> {
   const hopsNewestFirst: Array<{
     sourceId: SessionId
+    payload: SessionPayload
     band: ReturnType<typeof installableTranscript>
   }> = []
   const visited = new Set<SessionId>([targetId])
@@ -451,9 +464,10 @@ async function respliceLiveSwitchTarget(
       })
       break
     }
-    const installed = installableTranscript(link.sourceId, sourcePayload, { headAnchored: true })
+    const installed = projectTranscript(sourcePayload, { headAnchored: true })
     hopsNewestFirst.push({
       sourceId: link.sourceId,
+      payload: sourcePayload,
       band: withSwitchMarker(installed, link.marker)
     })
     visited.add(link.sourceId)
@@ -461,6 +475,7 @@ async function respliceLiveSwitchTarget(
   }
   if (hopsNewestFirst.length === 0) return
   if (stillCurrent && !stillCurrent()) return
+  for (const hop of hopsNewestFirst) noteHistoryWatermark(hop.sourceId, hop.payload)
   set((s) => {
     let messages = s.messages[targetId] ?? []
     let toolCalls = s.toolCalls[targetId] ?? []
@@ -528,6 +543,7 @@ async function redirectSwitchedReopen(
     toolCalls: ToolCall[]
     switches: AgentSwitchRecord[]
   }> = [{ sessionId: id, ...installed }]
+  const hopPayloads: Array<{ sessionId: SessionId; payload: SessionPayload }> = []
   let finalTarget = redirect.newSessionId
   // Whether the resolved final target's own marker chain could be read.
   // (false when its payload is missing OR the chain points onward into an
@@ -543,8 +559,9 @@ async function redirectSwitchedReopen(
       // joins the splice chain.
       chain.push({
         sessionId: finalTarget,
-        ...installableTranscript(finalTarget, hopPayload, { headAnchored: true })
+        ...projectTranscript(hopPayload, { headAnchored: true })
       })
+      hopPayloads.push({ sessionId: finalTarget, payload: hopPayload })
       finalTarget = next.newSessionId
       continue
     }
@@ -575,6 +592,7 @@ async function redirectSwitchedReopen(
     return false
   }
   if (isOriginalStillCurrent && !isOriginalStillCurrent()) return true
+  for (const hop of hopPayloads) noteHistoryWatermark(hop.sessionId, hop.payload)
   // Splice the whole pre-switch chain under the FINAL id. Folds run NEWEST
   // hop → OLDEST (reverse): each fold prepends its hop before the
   // accumulated target, so the final order is oldest→newest. Idempotent on
