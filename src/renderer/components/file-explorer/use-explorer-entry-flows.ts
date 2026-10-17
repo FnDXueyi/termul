@@ -2,7 +2,7 @@ import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { filesystemApi } from '@/lib/api'
-import { moveOpenEditorTabs } from '@/lib/editor-tab-rename'
+import { renamePathWithOpenEditors } from '@/lib/editor-tab-rename'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileExplorerActions, useFileExplorerStore } from '@/stores/file-explorer-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
@@ -280,7 +280,7 @@ export function useExplorerEntryFlows({
             ? await filesystemApi.createFile(fullPath)
             : await filesystemApi.createDirectory(fullPath)
       } else if (renamedEntry) {
-        result = await filesystemApi.renameFile(renamedEntry.path, fullPath)
+        result = await renamePathWithOpenEditors(renamedEntry.path, fullPath)
       }
 
       if (!result?.success) {
@@ -289,7 +289,6 @@ export function useExplorerEntryFlows({
         return
       }
 
-      if (renamedEntry) await moveOpenEditorTabs(renamedEntry.path, fullPath)
       await refreshDirectory(inlineInput.parentPath)
       if (inlineInput.mode === 'create') {
         // GH-539: newly created entries are selected and revealed in the tree.

@@ -1,4 +1,4 @@
-import { COMMAND_RESULT_CODES } from '@shared/types/ipc.types'
+import { COMMAND_RESULT_CODES, type IpcResult } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
@@ -18,6 +18,42 @@ import { sha256Hex } from '@/lib/sha256-hex'
 
 /** Saves currently in flight, by file path (in-flight guard, QA r2 story 4). */
 const savesInFlight = new Map<string, Promise<boolean>>()
+
+/** Renames in flight, by the old path of each open file they move: settles to where it ends up. */
+const renamesInFlight = new Map<string, Promise<string>>()
+
+/**
+ * Run `rename`, which moves open files on disk and in this store per `moves`
+ * (old path, new path), without racing their saves. It starts once no save to
+ * an old path is in flight, so a write already sent lands before the move. A
+ * save requested while it runs waits, then saves the file wherever it ended up.
+ */
+export async function renameBetweenSaves(
+  moves: ReadonlyArray<readonly [string, string]>,
+  rename: () => Promise<IpcResult<void>>
+): Promise<IpcResult<void>> {
+  const savesUnderway = (): Array<Promise<boolean>> =>
+    moves.flatMap(([from]) => savesInFlight.get(from) ?? [])
+  for (let saves = savesUnderway(); saves.length > 0; saves = savesUnderway()) {
+    await Promise.all(saves)
+  }
+
+  const renamed = rename()
+  for (const [from, to] of moves) {
+    renamesInFlight.set(
+      from,
+      renamed.then(
+        (result) => (result.success ? to : from),
+        () => from
+      )
+    )
+  }
+  try {
+    return await renamed
+  } finally {
+    for (const [from] of moves) renamesInFlight.delete(from)
+  }
+}
 
 /**
  * Boundary log for editor saves. Failures route through logFrontendError
@@ -330,7 +366,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...file,
       filePath: toPath,
       language: detectLanguage(toPath),
-      // The save in flight belongs to the old path and cannot finish for this entry.
+      // A finished save's status reset is keyed to the old path and cannot reach this entry.
       operationStatus: 'idle',
       viewMode: getDefaultViewMode(toPath) === 'markdown' ? file.viewMode : 'code'
     }
@@ -377,6 +413,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   saveFile: async (path: string): Promise<boolean> => {
+    const renaming = renamesInFlight.get(path)
+    if (renaming) return renaming.then((renamedTo) => get().saveFile(renamedTo))
+
     // In-flight guard (QA r2 story 4): serialize concurrent save requests for
     // the same path (autosave debounce + manual button/Ctrl+S can race). The
     // second caller awaits the first write's completion, then re-checks

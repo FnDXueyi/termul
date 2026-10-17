@@ -100,7 +100,9 @@ vi.mock('@/stores/file-explorer-store', () => ({
   })
 }))
 
-vi.mock('@/stores/editor-store', () => ({
+vi.mock('@/stores/editor-store', async (importOriginal) => ({
+  renameBetweenSaves: (await importOriginal<typeof import('@/stores/editor-store')>())
+    .renameBetweenSaves,
   useEditorStore: {
     getState: () => mockEditorStore
   }

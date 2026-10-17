@@ -2,7 +2,7 @@ import type { DirectoryEntry, FileSearchResult } from '@shared/types/filesystem.
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
 import { filesystemApi } from '@/lib/api'
-import { moveOpenEditorTabs } from '@/lib/editor-tab-rename'
+import { renamePathWithOpenEditors } from '@/lib/editor-tab-rename'
 import { logFrontendError } from '@/lib/log-api'
 import { useSidePanelVisible } from '@/stores/shell-layout-store'
 
@@ -696,11 +696,9 @@ export const useFileExplorerStore = create<FileExplorerState>((set, get) => ({
         await copyPath(normalizedSrc, destPath)
       } else {
         // Move file/folder
-        const renameResult = await filesystemApi.renameFile(normalizedSrc, destPath)
+        const renameResult = await renamePathWithOpenEditors(normalizedSrc, destPath)
         if (!renameResult.success) {
           console.error('Failed to move:', renameResult.error)
-        } else {
-          await moveOpenEditorTabs(normalizedSrc, destPath)
         }
       }
     }
