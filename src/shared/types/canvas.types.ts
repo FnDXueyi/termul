@@ -58,6 +58,17 @@ export interface CanvasWriteOutcome {
   markSaved: string | null
 }
 
+/** How a host unmount (AD-31: quiesce, save, verify, unmount) ended. */
+export interface CanvasCloseOutcome {
+  /** False when the project had no mount. */
+  unmounted: boolean
+  /** The version on disk when the mount closed; `null` for a document never
+   * written or a discard. */
+  savedVersion: string | null
+  /** Unsaved changes were dropped on the user's say-so. */
+  discarded: boolean
+}
+
 /** Typed canvas facade and mount failure codes. */
 export const CanvasErrorCodes = {
   PATH_VALIDATION_FAILED: 'PATH_VALIDATION_FAILED',
@@ -67,6 +78,8 @@ export const CanvasErrorCodes = {
   EDITOR_CRASHED: 'EDITOR_CRASHED',
   DOCUMENT_LOAD_FAILED: 'DOCUMENT_LOAD_FAILED',
   CANVAS_CLOSED: 'CANVAS_CLOSED',
+  CANVAS_CLOSING: 'CANVAS_CLOSING',
+  SAVE_FAILED: 'SAVE_FAILED',
   CANVAS_NOT_READY: 'CANVAS_NOT_READY',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   READ_FAILED: 'READ_FAILED',
@@ -108,7 +121,10 @@ export interface CanvasApi {
     projectId: string,
     autosaveMs?: number
   ) => Promise<IpcResult<CanvasOpenInfo>>
-  close: (projectId: string) => Promise<IpcResult<boolean>>
+  /** Unmount through the host's AD-31 sequence. A failed save answers
+   * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit
+   * choice to drop unsaved changes. */
+  close: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
   readDocument: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDocumentBytes>>
   /** `ack` is the `host.openDocument` result text, `null` for a new document. */
   documentLoaded: (

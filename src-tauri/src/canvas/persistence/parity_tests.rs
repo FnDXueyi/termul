@@ -9,9 +9,10 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::canvas::static_server::{close_canvas, open_canvas, same_origin_base};
+use crate::canvas::static_server::{open_canvas, same_origin_base};
 use crate::commands::{
-    canvas_dirty_changed, canvas_document_loaded, canvas_read_document, canvas_write_snapshot,
+    canvas_close, canvas_dirty_changed, canvas_document_loaded, canvas_read_document,
+    canvas_write_snapshot,
 };
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
@@ -182,8 +183,12 @@ async fn desktop_commands_and_web_routes_answer_the_same_sequence_alike() {
 
     let desktop = run_sequence("parity-persist-tauri", tauri_seq, tauri_call).await;
     let web = run_sequence("parity-persist-web", web_seq, web_call).await;
-    close_canvas("parity-persist-tauri");
-    close_canvas("parity-persist-web");
+    tauri(canvas_close("parity-persist-tauri".into(), Some(true)).await);
+    web_call(
+        "close",
+        json!({"projectId": "parity-persist-web", "discard": true}),
+    )
+    .await;
 
     assert_eq!(desktop, web);
     let codes: Vec<Value> = desktop.iter().map(|reply| reply["code"].clone()).collect();
@@ -261,4 +266,71 @@ async fn the_persistence_routes_refuse_a_view_only_peer() {
         assert_eq!(reply["success"], false, "{route} must refuse a remote peer");
         assert_eq!(reply["code"], "FORBIDDEN", "{route}");
     }
+}
+
+/// The AD-31 close through either transport: a dirty mount with no editor to
+/// snapshot it refuses `SAVE_FAILED` and stays, a discard unmounts it, and a
+/// repeat close is a no-op.
+async fn run_close<F, Fut>(project_id: &str, mount_seq: u64, call: F) -> Vec<Value>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let id = json!({"projectId": project_id, "mountSeq": mount_seq});
+    call(
+        "document-loaded",
+        json!({"projectId": project_id, "mountSeq": mount_seq, "ack": "{\"contentVersion\":1}"}),
+    )
+    .await;
+    let mounts = std::sync::Arc::clone(crate::canvas::persistence::canvas_mounts());
+    let project = project_id.to_string();
+    tokio::spawn(async move { mounts.dirty_changed(&project, mount_seq, true, 2).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let mut replies = Vec::new();
+    for discard in [false, true, false] {
+        let mut body = id.clone();
+        body["discard"] = json!(discard);
+        let mut reply = call("close", body).await;
+        blank_mount_seq(&mut reply);
+        replies.push(reply);
+    }
+    replies
+}
+
+async fn tauri_close_call(route: &'static str, body: Value) -> Value {
+    if route == "close" {
+        return tauri(
+            canvas_close(
+                body["projectId"].as_str().unwrap().to_string(),
+                body["discard"].as_bool(),
+            )
+            .await,
+        );
+    }
+    tauri_call(route, body).await
+}
+
+#[tokio::test]
+async fn desktop_and_web_close_a_canvas_alike() {
+    let tauri_dir = tempfile::tempdir().unwrap();
+    let web_dir = tempfile::tempdir().unwrap();
+    let tauri_seq = open("parity-close-tauri", &tauri_dir);
+    let web_seq = open("parity-close-web", &web_dir);
+
+    let desktop = run_close("parity-close-tauri", tauri_seq, tauri_close_call).await;
+    let web = run_close("parity-close-web", web_seq, web_call).await;
+
+    assert_eq!(desktop, web);
+    assert_eq!(
+        desktop[0]["code"], "SAVE_FAILED",
+        "no editor to snapshot it"
+    );
+    assert_eq!(
+        desktop[1]["data"],
+        json!({"unmounted": true, "savedVersion": null, "discarded": true})
+    );
+    assert_eq!(
+        desktop[2]["data"],
+        json!({"unmounted": false, "savedVersion": null, "discarded": false})
+    );
 }

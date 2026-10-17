@@ -182,7 +182,12 @@ pub async fn serve(
         ws_relay,
         registry,
         cfg,
-        shutdown_signal_future(),
+        // Figcraft canvases save through their renderer's socket (AD-31), so
+        // they flush before the sockets are told to close.
+        async {
+            shutdown_signal_future().await;
+            crate::canvas::static_server::close_all_canvases_bounded().await;
+        },
         acp_catalog,
         acp_install,
         store,

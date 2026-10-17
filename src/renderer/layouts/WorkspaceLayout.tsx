@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { CanvasMountLayer } from '@/components/canvas/CanvasMountLayer'
 import { ShellFrame } from '@/components/shell/ShellFrame'
 import { WebTokenGateScreen } from '@/components/WebTokenGateScreen'
 import { useEditorPersistence } from '@/hooks/use-editor-persistence'
@@ -261,47 +262,53 @@ export default function WorkspaceLayout(): React.JSX.Element {
 
   if (isMobileWebShell) {
     return (
-      <MobileWorkspaceShell
-        activeProject={activeProject}
-        activeProjectId={activeProjectId}
-        gitSheetOpen={gitSheetOpen}
-        gitSheetCwd={gitSheetCwd}
-        openGitSheet={openGitSheet}
-        closeGitSheet={closeGitSheet}
-        handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
-        handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
-        handleAddTerminal={tabOpeners.handleAddTerminal}
-        handleCloseTerminal={terminalClose.handleCloseTerminal}
-        handleCloseEditorTab={editorTabClose.handleCloseEditorTab}
-        handleOpenProjectSettings={overlayActions.handleOpenProjectSettings}
-        handleOpenCommandHistory={overlayActions.handleOpenCommandHistory}
-        handleCreateTerminalInPane={tabOpeners.handleCreateTerminalInPane}
-        setIsCommandPaletteOpen={setIsCommandPaletteOpen}
-        setIsNewProjectModalOpen={setIsNewProjectModalOpen}
-        workspaceMain={workspaceMain}
-        appModals={appModals}
-      />
+      <>
+        <MobileWorkspaceShell
+          activeProject={activeProject}
+          activeProjectId={activeProjectId}
+          gitSheetOpen={gitSheetOpen}
+          gitSheetCwd={gitSheetCwd}
+          openGitSheet={openGitSheet}
+          closeGitSheet={closeGitSheet}
+          handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
+          handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
+          handleAddTerminal={tabOpeners.handleAddTerminal}
+          handleCloseTerminal={terminalClose.handleCloseTerminal}
+          handleCloseEditorTab={editorTabClose.handleCloseEditorTab}
+          handleOpenProjectSettings={overlayActions.handleOpenProjectSettings}
+          handleOpenCommandHistory={overlayActions.handleOpenCommandHistory}
+          handleCreateTerminalInPane={tabOpeners.handleCreateTerminalInPane}
+          setIsCommandPaletteOpen={setIsCommandPaletteOpen}
+          setIsNewProjectModalOpen={setIsNewProjectModalOpen}
+          workspaceMain={workspaceMain}
+          appModals={appModals}
+        />
+        <CanvasMountLayer key="canvas-mount-layer" />
+      </>
     )
   }
 
   return (
-    <ShellFrame
-      projects={projects}
-      activeProject={activeProject}
-      activeProjectId={activeProjectId}
-      ssh={ssh}
-      isShortcutMenuOpen={isShortcutMenuOpen}
-      setIsShortcutMenuOpen={setIsShortcutMenuOpen}
-      setIsCommandPaletteOpen={setIsCommandPaletteOpen}
-      setIsNewProjectModalOpen={setIsNewProjectModalOpen}
-      onSelectProject={handleSelectProject}
-      handleAddGitTab={tabOpeners.handleAddGitTab}
-      handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
-      handleToggleThemePicker={handleToggleThemePicker}
-      handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
-      handleOpenCanvas={tabOpeners.handleOpenCanvas}
-      workspaceMain={workspaceMain}
-      appModals={appModals}
-    />
+    <>
+      <ShellFrame
+        projects={projects}
+        activeProject={activeProject}
+        activeProjectId={activeProjectId}
+        ssh={ssh}
+        isShortcutMenuOpen={isShortcutMenuOpen}
+        setIsShortcutMenuOpen={setIsShortcutMenuOpen}
+        setIsCommandPaletteOpen={setIsCommandPaletteOpen}
+        setIsNewProjectModalOpen={setIsNewProjectModalOpen}
+        onSelectProject={handleSelectProject}
+        handleAddGitTab={tabOpeners.handleAddGitTab}
+        handleAddGitHistoryTab={tabOpeners.handleAddGitHistoryTab}
+        handleToggleThemePicker={handleToggleThemePicker}
+        handleOpenAgentChat={tabOpeners.handleOpenAgentChat}
+        handleOpenCanvas={tabOpeners.handleOpenCanvas}
+        workspaceMain={workspaceMain}
+        appModals={appModals}
+      />
+      <CanvasMountLayer key="canvas-mount-layer" />
+    </>
   )
 }

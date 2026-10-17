@@ -2080,6 +2080,11 @@ pub fn run() {
                 .try_state::<Arc<PtyManager>>()
                 .map(|state| state.inner().clone());
             let preserve = async move {
+                // Figcraft canvases save through their renderer (AD-31), so
+                // this runs while the Channel and remote sockets are still up.
+                // The quit dialog already flushed them; this catches an exit
+                // that skipped it.
+                crate::canvas::static_server::close_all_canvases_bounded().await;
                 if let Some(ssh_manager) = ssh_manager {
                     ssh_manager.shutdown().await;
                 }

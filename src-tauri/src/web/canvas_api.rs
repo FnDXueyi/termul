@@ -59,6 +59,7 @@ use axum::Router;
 use serde::Deserialize;
 
 use crate::canvas::mcp_proxy;
+use crate::canvas::persistence::CloseOutcome;
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
     bundle_tokens, close_canvas, open_canvas, query_param, same_origin_base, serve_bundle,
@@ -182,11 +183,13 @@ struct CanvasOpenRequest {
     autosave_ms: Option<u64>,
 }
 
-/// `POST /canvas/close` body: `{ "projectId": "..." }`.
+/// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasCloseRequest {
     project_id: String,
+    #[serde(default)]
+    discard: Option<bool>,
 }
 
 /// `POST /canvas/save` body: `{ "docPath": "..." }`.
@@ -398,22 +401,51 @@ async fn open(
     }
 }
 
-/// `POST /canvas/close` — revoke the project's bundle token. Idempotent.
+/// `POST /canvas/close` — unmount the project's canvas through the AD-31
+/// sequence (`static_server::close_canvas`, shared with `canvas_close`). A
+/// failed save answers `SAVE_FAILED` and keeps the mount; `discard: true` is
+/// the user's explicit choice to drop unsaved changes. Idempotent.
 async fn close(
     State(state): State<CanvasState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<CanvasCloseRequest>,
-) -> Json<IpcBody<bool>> {
+) -> Json<IpcBody<CloseOutcome>> {
     if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/close") {
         return Json(forbidden);
     }
+    let mode = crate::commands::close_mode(req.discard);
+    let project_id = crate::commands::sanitize_log_field(&req.project_id);
     tracing::info!(
         target: "termul::web::canvas",
-        "canvas close (web) project_id={}",
-        crate::commands::sanitize_log_field(&req.project_id)
+        "canvas close (web) project_id={project_id} mode={mode:?}"
     );
-    close_canvas(&req.project_id);
-    Json(IpcBody::ok(true))
+    match close_canvas(&req.project_id, mode).await {
+        Ok(outcome) => {
+            if outcome.discarded {
+                tracing::warn!(
+                    target: "termul::web::canvas",
+                    "canvas closed project_id={project_id}: unsaved changes discarded by the user"
+                );
+            } else {
+                tracing::info!(
+                    target: "termul::web::canvas",
+                    "canvas closed project_id={project_id} unmounted={} saved={}",
+                    outcome.unmounted,
+                    outcome.saved_version.as_deref().unwrap_or("none")
+                );
+            }
+            Json(IpcBody::ok(outcome))
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "termul::web::canvas",
+                "canvas close refused project_id={project_id} code={}: {}",
+                err.code,
+                err.message
+            );
+            Json(IpcBody::err(err.message, err.code))
+        }
+    }
 }
 
 /// `POST /canvas/save` — save through the daemon (`POST /api/file/save`);

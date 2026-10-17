@@ -7,6 +7,7 @@ use axum::response::Response;
 use tower::ServiceExt;
 
 use super::canvas_id_for_project;
+use super::persistence::CloseMode;
 use super::pin::pinned_tag;
 use super::static_server::{
     bundle_router, bundle_tokens, canvas_cookie_name, close_canvas, open_canvas, same_origin_base,
@@ -52,8 +53,8 @@ fn tokens_are_per_canvas_and_reused_until_revoked() {
     );
 }
 
-#[test]
-fn open_canvas_mints_one_token_per_project_until_close() {
+#[tokio::test]
+async fn open_canvas_mints_one_token_per_project_until_close() {
     let base = CanvasBundleBase {
         base_url: "http://127.0.0.1:4567".into(),
         pin_tag: "termul-test".into(),
@@ -95,14 +96,14 @@ fn open_canvas_mints_one_token_per_project_until_close() {
         "every open is a new mount with a new mountSeq"
     );
 
-    close_canvas(project);
+    close_canvas(project, CloseMode::Save).await.unwrap();
     assert!(!authorized(&first.canvas_token), "close revokes the token");
-    close_canvas(project);
+    close_canvas(project, CloseMode::Save).await.unwrap();
 
     let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), None).unwrap();
     assert_ne!(reopened.canvas_token, first.canvas_token);
     assert!(authorized(&reopened.canvas_token));
-    close_canvas(project);
+    close_canvas(project, CloseMode::Save).await.unwrap();
 }
 
 #[test]

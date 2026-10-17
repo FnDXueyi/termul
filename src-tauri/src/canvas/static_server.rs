@@ -29,7 +29,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::persistence::{autosave_delay, canvas_mounts};
+use super::persistence::{autosave_delay, canvas_mounts, CloseMode, CloseOutcome};
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
@@ -237,11 +237,70 @@ pub fn open_canvas(
     })
 }
 
-/// Revoke the project's bundle token so its iframe URL and cookie stop
-/// authorizing, and drop its persistence mount. Idempotent.
-pub fn close_canvas(project_id: &str) {
+/// Unmount the project's canvas through the AD-31 sequence (quiesce, save,
+/// verify, unmount), then revoke its bundle token so the iframe URL and
+/// cookie stop authorizing. Shared by `canvas_close` and `POST /canvas/close`.
+/// Idempotent. A failed save keeps the mount and the token: the caller asks
+/// the user, who retries or closes again with [`CloseMode::Discard`].
+///
+/// # Errors
+/// `SAVE_FAILED` or `CANVAS_CLOSING` from the sequence.
+pub async fn close_canvas(project_id: &str, mode: CloseMode) -> Result<CloseOutcome, CanvasError> {
+    let outcome = canvas_mounts().close(project_id, mode).await?;
     bundle_tokens().revoke(&canvas_id_for_project(project_id));
-    canvas_mounts().unmount(project_id);
+    Ok(outcome)
+}
+
+/// How long app exit waits for the canvases to save before moving on.
+pub const EXIT_FLUSH_BOUND: Duration = Duration::from_secs(5);
+
+/// [`close_all_canvases`] bounded by [`EXIT_FLUSH_BOUND`], so an unresponsive
+/// renderer cannot hold the rest of the exit cleanup.
+pub async fn close_all_canvases_bounded() {
+    if canvas_mounts().mounted_projects().is_empty() {
+        return;
+    }
+    if tokio::time::timeout(EXIT_FLUSH_BOUND, close_all_canvases())
+        .await
+        .is_err()
+    {
+        log::error!(
+            "[canvas] exit: canvases still saving after {}s; exiting without them",
+            EXIT_FLUSH_BOUND.as_secs()
+        );
+    }
+}
+
+/// App exit (desktop quit, termul-server shutdown): save and unmount every
+/// canvas, each through the AD-31 sequence. Nobody is left to ask at this
+/// point, so a failed save is logged by project; the renderer's quit flow
+/// asks the user before it gets here.
+pub async fn close_all_canvases() -> usize {
+    let closed = canvas_mounts().close_all().await;
+    let mut failed = 0;
+    for (project_id, result) in &closed {
+        match result {
+            Ok(outcome) => {
+                bundle_tokens().revoke(&canvas_id_for_project(project_id));
+                log::info!(
+                    "[canvas] exit: closed project_id={} saved={} discarded={}",
+                    crate::commands::sanitize_log_field(project_id),
+                    outcome.saved_version.as_deref().unwrap_or("none"),
+                    outcome.discarded
+                );
+            }
+            Err(error) => {
+                failed += 1;
+                log::error!(
+                    "[canvas] exit: unsaved canvas changes could not be saved project_id={} code={}: {}",
+                    crate::commands::sanitize_log_field(project_id),
+                    error.code,
+                    error.message
+                );
+            }
+        }
+    }
+    failed
 }
 
 /// `/canvas/<id>` is `(id, None)`; `/canvas/<id>/a/b` is `(id, Some("a/b"))`.

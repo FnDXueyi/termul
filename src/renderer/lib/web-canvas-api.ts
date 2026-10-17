@@ -5,7 +5,8 @@
  * auth header):
  * - `POST /canvas/open` body `{ docPath, projectId, autosaveMs }` →
  *   `CanvasOpenInfo` with an empty `baseUrl` (the bundle is same-origin);
- * - `POST /canvas/close` body `{ projectId }` — revokes the `ct` token;
+ * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
+ *   unmount (save, verify, unmount), which also revokes the `ct` token;
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
  *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
@@ -16,6 +17,7 @@
 
 import type {
   CanvasApi,
+  CanvasCloseOutcome,
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
@@ -35,8 +37,8 @@ export const webCanvasApi: CanvasApi = {
     return postJson<CanvasOpenInfo>('/canvas/open', { docPath, projectId, autosaveMs })
   },
 
-  close(projectId: string): Promise<IpcResult<boolean>> {
-    return postJson<boolean>('/canvas/close', { projectId })
+  close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {
+    return postJson<CanvasCloseOutcome>('/canvas/close', { projectId, discard })
   },
 
   readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {

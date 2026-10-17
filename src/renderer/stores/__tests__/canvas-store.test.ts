@@ -199,12 +199,15 @@ function resetStores(): void {
 beforeEach(() => {
   vi.clearAllMocks()
   readCanvasThemeTokens.mockReturnValue(THEME)
-  close.mockResolvedValue({ success: true, data: true })
+  close.mockResolvedValue({
+    success: true,
+    data: { unmounted: true, savedVersion: null, discarded: false }
+  })
   resetStores()
 })
 
 afterEach(async () => {
-  await useCanvasStore.getState().closeCanvas(PROJECT)
+  await useCanvasStore.getState().unmountCanvas(PROJECT)
   vi.unstubAllEnvs()
   resetStores()
 })
@@ -234,7 +237,7 @@ describe('open and close', () => {
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_B)
     expect(session()?.docPath).toBe(DOC_B)
     expect(currentMount().mountSeq).toBe(42)
-    expect(close).not.toHaveBeenCalled()
+    expect(close).toHaveBeenCalledWith(PROJECT, false)
     expect(canvasTabs()).toHaveLength(1)
   })
 
@@ -254,11 +257,11 @@ describe('open and close', () => {
     )
   })
 
-  it('a close that lands while the open is in flight wins', async () => {
+  it('an unmount that lands while the open is in flight wins', async () => {
     let resolveOpen: (value: IpcResult<CanvasOpenInfo>) => void = () => {}
     open.mockReturnValueOnce(new Promise((resolve) => (resolveOpen = resolve)))
     const opening = useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
-    await useCanvasStore.getState().closeCanvas(PROJECT)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
     resolveOpen(openInfo())
 
     await expect(opening).resolves.toBe('superseded')
@@ -266,20 +269,49 @@ describe('open and close', () => {
     expect(canvasTabs()).toHaveLength(0)
   })
 
-  it('close unmounts: pending calls resolve CANVAS_CLOSED and the host mount is dropped', async () => {
+  it('an unmount the host ran drops the session: pending calls resolve CANVAS_CLOSED', async () => {
     open.mockResolvedValueOnce(openInfo())
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
     mountEditor()
     const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
 
-    await useCanvasStore.getState().closeCanvas(PROJECT)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
 
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
-    expect(close).toHaveBeenCalledWith(PROJECT)
+    expect(close).toHaveBeenCalledWith(PROJECT, false)
     expect(session()).toBeUndefined()
     await expect(
       useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
     ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+})
+
+describe('unmount refused by the host', () => {
+  it('a failed save keeps the session and its mount, and a discard then unmounts', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    mountEditor()
+    const mount = currentMount()
+    close.mockResolvedValueOnce({
+      success: false,
+      error: 'could not snapshot the canvas',
+      code: 'SAVE_FAILED'
+    })
+
+    const refused = await useCanvasStore.getState().unmountCanvas(PROJECT)
+
+    expect(refused).toMatchObject({ success: false, code: 'SAVE_FAILED' })
+    expect(currentMount()).toBe(mount)
+    expect(session()?.closing).toBe(false)
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    await expect(Promise.race([pending, Promise.resolve('waiting')])).resolves.toBe('waiting')
+
+    await expect(useCanvasStore.getState().unmountCanvas(PROJECT, true)).resolves.toMatchObject({
+      success: true
+    })
+    expect(close).toHaveBeenLastCalledWith(PROJECT, true)
+    expect(session()).toBeUndefined()
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
   })
 })
 

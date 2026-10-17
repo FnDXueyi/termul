@@ -1,27 +1,30 @@
 //! The canvas call router: the parent-side half of the agent gateway (spine
-//! AD-21, AD-29, AD-30).
+//! AD-19, AD-21, AD-29, AD-30, AD-31).
 //!
 //! A canvas tool call arrives from the `host_mcp` child's `Bridge` as a
 //! `Canvas` frame. The parent resolves the session's project and hands the
 //! call to [`CanvasRouter::call`], which forwards it to the renderer that holds
-//! that project's mount and waits on a oneshot for the reply. The router is the
-//! only place a canvas call times out. It keeps no document or selection
-//! state: params and results pass through as JSON text.
+//! that project's mount and waits for the reply. The gateway is the only
+//! place a canvas call times out. It keeps no document or selection state:
+//! params and results pass through as JSON text.
 //!
-//! Renderers report their mounts (`canvas_mount` / `canvas_unmount` on `/ws`,
-//! the same protocol on the desktop Channel and the web socket). Until the
-//! E2-4 lease exists, the newest report for a project wins. A mount replaced
-//! by another `(holder, mountSeq)`, an unmount, or the holder's connection
-//! closing resolves every call in flight against it with `CANVAS_CLOSED`.
+//! The mounts live in one registry, `canvas::persistence` (AD-19): the host
+//! creates a mount on open and removes it through the AD-31 close sequence.
+//! Renderers report which connection runs each mount (`canvas_mount` /
+//! `canvas_unmount` on `/ws`, the same protocol on the desktop Channel and the
+//! web socket); a report for a mount the host does not hold is refused. Until
+//! the E2-4 lease exists, the newest report wins. A connection replaced, an
+//! unmount report, the connection closing, or the mount closing resolves
+//! every call in flight over it with `CANVAS_CLOSED`; a closing mount
+//! refuses new calls with `CANVAS_CLOSING`.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+
+use crate::canvas::persistence::{CanvasPersistence, ReplyMatch};
 
 /// `canvas.call_timeout_ms` default (AD-29).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_millis(10_000);
@@ -177,56 +180,59 @@ impl CanvasHolder {
             deliver,
         }
     }
-}
 
-struct Mount {
-    mount_seq: u64,
-    holder: CanvasHolder,
-}
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 
-struct Pending {
-    project_id: String,
-    holder_id: String,
-    mount_seq: u64,
-    responder: oneshot::Sender<CanvasOutcome>,
-}
-
-#[derive(Default)]
-struct RouterState {
-    /// projectId → the mount calls for that project go to.
-    mounts: HashMap<String, Mount>,
-    /// callId → the call waiting for its reply.
-    pending: HashMap<u64, Pending>,
-}
-
-impl RouterState {
-    /// Remove the pending calls `doomed` selects.
-    fn take_pending(&mut self, doomed: impl Fn(&Pending) -> bool) -> Vec<Pending> {
-        let ids: Vec<u64> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| doomed(pending))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.iter()
-            .filter_map(|id| self.pending.remove(id))
-            .collect()
+    /// Queue `frame` on the connection; false when it was not queued.
+    #[must_use]
+    pub fn deliver(&self, frame: CanvasCallFrame) -> bool {
+        (self.deliver)(frame)
     }
 }
 
-fn close_all(pending: Vec<Pending>, message: &str) {
-    for call in pending {
-        let _ = call.responder.send(Err(CanvasError::new(
-            CanvasErrorCode::CanvasClosed,
-            message,
-        )));
+impl CanvasCallFrame {
+    #[must_use]
+    pub fn new(
+        call_id: u64,
+        project_id: &str,
+        mount_seq: u64,
+        method: &str,
+        params: String,
+    ) -> Self {
+        Self {
+            type_: CANVAS_CALL_TYPE,
+            call_id,
+            project_id: project_id.to_string(),
+            mount_seq,
+            method: method.to_string(),
+            params,
+        }
     }
 }
 
-/// Routes canvas calls to the renderer holding each project's mount.
+/// The registry this router reads. Production shares the process registry
+/// with the canvas transports; unit tests each get their own so parallel
+/// tests never share a project's mount.
+fn default_mounts() -> Arc<CanvasPersistence> {
+    #[cfg(not(test))]
+    {
+        Arc::clone(crate::canvas::persistence::canvas_mounts())
+    }
+    #[cfg(test)]
+    {
+        Arc::new(CanvasPersistence::default())
+    }
+}
+
+/// Routes canvas calls to the renderer holding each project's mount. The
+/// mounts and the calls waiting on them live in the canvas persistence
+/// registry (AD-19); this is the gateway's front: the call timeout and the
+/// boundary logs.
 pub struct CanvasRouter {
-    state: Mutex<RouterState>,
-    next_call_id: AtomicU64,
+    mounts: Arc<CanvasPersistence>,
     call_timeout_ms: AtomicU64,
 }
 
@@ -239,11 +245,21 @@ impl Default for CanvasRouter {
 impl CanvasRouter {
     #[must_use]
     pub fn new(call_timeout: Duration) -> Self {
+        Self::with_mounts(default_mounts(), call_timeout)
+    }
+
+    #[must_use]
+    pub fn with_mounts(mounts: Arc<CanvasPersistence>, call_timeout: Duration) -> Self {
         Self {
-            state: Mutex::new(RouterState::default()),
-            next_call_id: AtomicU64::new(1),
+            mounts,
             call_timeout_ms: AtomicU64::new(duration_ms(call_timeout)),
         }
+    }
+
+    /// The mount registry calls are routed through.
+    #[must_use]
+    pub fn mounts(&self) -> &Arc<CanvasPersistence> {
+        &self.mounts
     }
 
     /// `canvas.call_timeout_ms`: how long a forwarded call waits for its reply.
@@ -252,76 +268,46 @@ impl CanvasRouter {
             .store(duration_ms(timeout), Ordering::Relaxed);
     }
 
-    /// `holder` now holds `project_id`'s canvas at `mount_seq`. Calls in
-    /// flight against any other `(holder, mountSeq)` of the project resolve
-    /// `CANVAS_CLOSED`.
-    pub fn mount(&self, project_id: &str, mount_seq: u64, holder: CanvasHolder) {
-        let holder_id = holder.id.clone();
-        let superseded = {
-            let mut state = self.state.lock();
-            state
-                .mounts
-                .insert(project_id.to_string(), Mount { mount_seq, holder });
-            state.take_pending(|call| {
-                call.project_id == project_id
-                    && (call.holder_id != holder_id || call.mount_seq != mount_seq)
-            })
-        };
-        log::info!(
-            "[canvas-gateway] project {project_id} mounted at mountSeq={mount_seq} ({} in-flight calls closed)",
-            superseded.len()
-        );
-        close_all(superseded, "the canvas was remounted");
-    }
-
-    /// Drop `project_id`'s mount when `holder_id` still holds it at
-    /// `mount_seq`. Returns whether it did.
-    pub fn unmount(&self, project_id: &str, holder_id: &str, mount_seq: u64) -> bool {
-        let closed = {
-            let mut state = self.state.lock();
-            let current = state
-                .mounts
-                .get(project_id)
-                .is_some_and(|mount| mount.holder.id == holder_id && mount.mount_seq == mount_seq);
-            if !current {
-                return false;
-            }
-            state.mounts.remove(project_id);
-            state.take_pending(|call| call.project_id == project_id)
-        };
-        log::info!("[canvas-gateway] project {project_id} unmounted (mountSeq={mount_seq})");
-        close_all(closed, "the canvas was unmounted");
-        true
-    }
-
-    /// The holder's connection ended: drop its mounts and close its calls.
-    pub fn release_holder(&self, holder_id: &str) {
-        let (projects, closed) = {
-            let mut state = self.state.lock();
-            let projects: Vec<String> = state
-                .mounts
-                .iter()
-                .filter(|(_, mount)| mount.holder.id == holder_id)
-                .map(|(project, _)| project.clone())
-                .collect();
-            for project in &projects {
-                state.mounts.remove(project);
-            }
-            (
-                projects,
-                state.take_pending(|call| call.holder_id == holder_id),
-            )
-        };
-        for project in &projects {
-            log::info!("[canvas-gateway] project {project} unmounted: its renderer disconnected");
+    /// `holder` reports it runs `project_id`'s canvas at `mount_seq`. Calls in
+    /// flight over a previous connection resolve `CANVAS_CLOSED`. False when
+    /// the host has no such mount (a stale or unknown `mountSeq`).
+    pub fn mount(&self, project_id: &str, mount_seq: u64, holder: CanvasHolder) -> bool {
+        let holder_id = holder.id().to_string();
+        let attached = self.mounts.attach(project_id, mount_seq, holder);
+        if attached {
+            log::info!(
+                "[canvas-gateway] project {project_id} mountSeq={mount_seq} runs in connection {holder_id}"
+            );
+        } else {
+            log::warn!(
+                "[canvas-gateway] project {project_id} mountSeq={mount_seq} refused: the host holds no such mount"
+            );
         }
-        close_all(closed, "the canvas renderer disconnected");
+        attached
     }
 
-    /// A renderer answered `call_id`. Only the connection the call went to may
-    /// answer it; a reply stamped with another `mountSeq` means the mount
-    /// changed under the call, which resolves `CANVAS_CLOSED`. Returns whether
-    /// a waiting call was resolved.
+    /// `holder_id` no longer runs `project_id`'s canvas at `mount_seq`.
+    /// Returns whether it did. The mount itself stays until it is closed.
+    pub fn unmount(&self, project_id: &str, holder_id: &str, mount_seq: u64) -> bool {
+        let detached = self.mounts.detach(project_id, holder_id, mount_seq);
+        if detached {
+            log::info!(
+                "[canvas-gateway] project {project_id} mountSeq={mount_seq} left its connection"
+            );
+        }
+        detached
+    }
+
+    /// The holder's connection ended: it runs no canvas any more and its
+    /// calls resolve `CANVAS_CLOSED`.
+    pub fn release_holder(&self, holder_id: &str) {
+        for project in self.mounts.release_holder(holder_id) {
+            log::info!("[canvas-gateway] project {project} has no renderer: its connection closed");
+        }
+    }
+
+    /// A renderer answered `call_id`. Returns whether a waiting call was
+    /// resolved.
     pub fn reply(
         &self,
         holder_id: &str,
@@ -329,104 +315,46 @@ impl CanvasRouter {
         mount_seq: u64,
         outcome: CanvasOutcome,
     ) -> bool {
-        let pending = {
-            let mut state = self.state.lock();
-            match state.pending.get(&call_id) {
-                Some(call) if call.holder_id == holder_id => state.pending.remove(&call_id),
-                _ => None,
+        match self.mounts.reply(holder_id, call_id, mount_seq, outcome) {
+            ReplyMatch::Resolved => true,
+            ReplyMatch::StaleMount { sent_to } => {
+                log::warn!(
+                    "[canvas-gateway] reply came from mountSeq={mount_seq}, call was sent to mountSeq={sent_to}"
+                );
+                true
             }
-        };
-        let Some(call) = pending else {
-            return false;
-        };
-        let outcome = if call.mount_seq == mount_seq {
-            outcome
-        } else {
-            log::warn!(
-                "[canvas-gateway] reply for project {} came from mountSeq={mount_seq}, call was sent to mountSeq={}",
-                call.project_id,
-                call.mount_seq
-            );
-            Err(CanvasError::new(
-                CanvasErrorCode::CanvasClosed,
-                "the canvas was remounted",
-            ))
-        };
-        let _ = call.responder.send(outcome);
-        true
+            ReplyMatch::NotWaiting => false,
+        }
     }
 
     /// Forward `method` with `params` (JSON text) to the renderer holding
     /// `project_id`'s mount and wait for its reply, up to the call timeout.
     pub async fn call(&self, project_id: &str, method: &str, params: String) -> CanvasOutcome {
-        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
-        let (responder, waiting) = oneshot::channel();
-        let routed = {
-            let mut state = self.state.lock();
-            match state.mounts.get(project_id) {
-                Some(mount) => {
-                    let route = (mount.holder.clone(), mount.mount_seq);
-                    state.pending.insert(
-                        call_id,
-                        Pending {
-                            project_id: project_id.to_string(),
-                            holder_id: route.0.id.clone(),
-                            mount_seq: route.1,
-                            responder,
-                        },
-                    );
-                    Some(route)
-                }
-                None => None,
-            }
-        };
-        let Some((holder, mount_seq)) = routed else {
-            log::warn!(
-                "[canvas-gateway] {method} for project {project_id} refused: no canvas is mounted"
-            );
-            return Err(CanvasError::new(
-                CanvasErrorCode::CanvasClosed,
-                "no canvas is open for this project",
-            ));
-        };
-
-        let frame = CanvasCallFrame {
-            type_: CANVAS_CALL_TYPE,
-            call_id,
-            project_id: project_id.to_string(),
-            mount_seq,
-            method: method.to_string(),
-            params,
-        };
-        if !(holder.deliver)(frame) {
-            self.state.lock().pending.remove(&call_id);
-            log::warn!(
-                "[canvas-gateway] {method} for project {project_id} not delivered: the renderer connection is closed or full"
-            );
-            return Err(CanvasError::new(
-                CanvasErrorCode::CanvasClosed,
-                "the canvas renderer is not reachable",
-            ));
-        }
-
         let timeout_ms = self.call_timeout_ms.load(Ordering::Relaxed);
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), waiting).await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => Err(CanvasError::new(
-                CanvasErrorCode::CanvasClosed,
-                "the canvas closed before it answered",
-            )),
-            Err(_) => {
-                self.state.lock().pending.remove(&call_id);
+        let outcome = self
+            .mounts
+            .call(
+                project_id,
+                method,
+                params,
+                Duration::from_millis(timeout_ms),
+            )
+            .await;
+        if let Err(error) = &outcome {
+            if matches!(
+                error.code,
+                CanvasErrorCode::CanvasClosed
+                    | CanvasErrorCode::CanvasClosing
+                    | CanvasErrorCode::CanvasTimeout
+            ) {
                 log::warn!(
-                    "[canvas-gateway] {method} for project {project_id} timed out after {timeout_ms} ms (mountSeq={mount_seq})"
+                    "[canvas-gateway] {method} for project {project_id} refused: {} ({})",
+                    error.code.as_str(),
+                    error.message
                 );
-                Err(CanvasError::new(
-                    CanvasErrorCode::CanvasTimeout,
-                    format!("the canvas did not answer within {timeout_ms} ms"),
-                ))
             }
         }
+        outcome
     }
 }
 

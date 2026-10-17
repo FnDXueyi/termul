@@ -7,6 +7,7 @@
 
 import type {
   CanvasApi,
+  CanvasCloseOutcome,
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
@@ -52,8 +53,8 @@ export function createTauriCanvasApi(): CanvasApi {
       return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs })
     },
 
-    close(projectId: string): Promise<IpcResult<boolean>> {
-      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId })
+    close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId, discard })
     },
 
     readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {
