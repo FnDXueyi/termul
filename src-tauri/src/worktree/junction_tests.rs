@@ -13,9 +13,18 @@ fn junction_resolves_when_source_and_target_names_contain_cmd_metacharacters() {
 
     create_junction(&source, &target).expect("junction is created");
 
-    let attributes = std::fs::symlink_metadata(&target).unwrap().file_attributes();
-    assert_ne!(attributes & FILE_ATTRIBUTE_REPARSE_POINT, 0, "target is a reparse point");
-    assert_eq!(std::fs::read_to_string(target.join("marker.txt")).unwrap(), "hello");
+    let attributes = std::fs::symlink_metadata(&target)
+        .unwrap()
+        .file_attributes();
+    assert_ne!(
+        attributes & FILE_ATTRIBUTE_REPARSE_POINT,
+        0,
+        "target is a reparse point"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("marker.txt")).unwrap(),
+        "hello"
+    );
     assert_eq!(
         std::fs::canonicalize(&target).unwrap(),
         std::fs::canonicalize(&source).unwrap()
