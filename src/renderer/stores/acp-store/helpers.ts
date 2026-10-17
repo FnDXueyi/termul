@@ -5,6 +5,7 @@
  */
 
 import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
+import { flattenConfigOptionValues } from '@/components/chat/chat-input-bar-config'
 import { stripHandoffPreamble } from '@/components/chat/handoff-summary'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import {
@@ -14,6 +15,7 @@ import {
   type McpServer,
   type PlanEntry,
   type SessionConfigOption,
+  type SessionConfigOptionEntry,
   type SessionId,
   type SessionModelState,
   type SessionModeState,
@@ -1182,6 +1184,93 @@ export function creationOptionDefaultsFrom(input: {
   }
 }
 
+function appendUnseen<T>(
+  current: T[],
+  incoming: T[],
+  key: (item: T) => string,
+  enrich?: (item: T, other: T) => T
+): T[] {
+  const incomingByKey = new Map(incoming.map((item) => [key(item), item]))
+  const enriched = enrich
+    ? current.map((item) => {
+        const other = incomingByKey.get(key(item))
+        return other ? enrich(item, other) : item
+      })
+    : current
+  const seen = new Set(current.map(key))
+  const added = incoming.filter((item) => !seen.has(key(item)))
+  const changed = enriched.some((item, index) => item !== current[index])
+  return changed || added.length > 0 ? [...enriched, ...added] : current
+}
+
+const configEntryKey = (entry: SessionConfigOptionEntry): string =>
+  Array.isArray(entry.options) ? `group:${entry.group ?? entry.name}` : `value:${entry.value}`
+
+function appendUnseenGroupValues(
+  entry: SessionConfigOptionEntry,
+  other: SessionConfigOptionEntry
+): SessionConfigOptionEntry {
+  if (!entry.options || !other.options) return entry
+  const options = appendUnseen(entry.options, other.options, (value) => value.value)
+  return options === entry.options ? entry : { ...entry, options }
+}
+
+function appendUnseenConfigValues(
+  option: SessionConfigOption,
+  other: SessionConfigOption
+): SessionConfigOption {
+  if (!option.options || !other.options) return option
+  const options = appendUnseen(
+    option.options,
+    other.options,
+    configEntryKey,
+    appendUnseenGroupValues
+  )
+  return options === option.options ? option : { ...option, options }
+}
+
+export function addAdvertisedOptionsKeepingCurrent(
+  current: Pick<AcpSession, 'modes' | 'models' | 'configOptions'>,
+  payload: {
+    modes?: SessionModeState | null
+    models?: SessionModelState | null
+    configOptions?: SessionConfigOption[] | null
+  }
+): Pick<AcpSession, 'modes' | 'models' | 'configOptions'> {
+  let modes = current.modes ?? payload.modes ?? null
+  if (current.modes && payload.modes) {
+    const availableModes = appendUnseen(
+      current.modes.availableModes,
+      payload.modes.availableModes,
+      (mode) => mode.id
+    )
+    if (availableModes !== current.modes.availableModes) {
+      modes = { ...current.modes, availableModes }
+    }
+  }
+  let models = current.models ?? payload.models ?? null
+  if (current.models && payload.models) {
+    const availableModels = appendUnseen(
+      current.models.availableModels,
+      payload.models.availableModels,
+      (model) => model.modelId
+    )
+    if (availableModels !== current.models.availableModels) {
+      models = { ...current.models, availableModels }
+    }
+  }
+  return {
+    modes,
+    models,
+    configOptions: appendUnseen(
+      current.configOptions,
+      payload.configOptions ?? [],
+      (option) => option.id,
+      appendUnseenConfigValues
+    )
+  }
+}
+
 /**
  * Merge an agent-provided config-option snapshot into the session state
  * without letting a backend-side desync clobber the user's model selection
@@ -1228,9 +1317,7 @@ export function mergeAgentConfigOptions(
       typeof prior.currentValue === 'boolean' || typeof option.currentValue === 'boolean'
     if (
       !booleanOption &&
-      !(option.options ?? []).some(
-        (entry) => typeof entry.value === 'string' && entry.value === priorComparable
-      )
+      !flattenConfigOptionValues(option).some((entry) => entry.value === priorComparable)
     ) {
       return option
     }
@@ -1781,6 +1868,23 @@ export function selectConfigWarmState(state: AcpState, configId: string): Config
     (key) => configIdFromReuseKey(key) === configId
   )
   return { connected, warming, sessionReady, warmingSession }
+}
+
+/**
+ * Server seq of the prompt that opened the trailing turn: the last user bubble
+ * when it is a real prompt (visible content, not a handoff boundary row) with
+ * a positive seq. `null` when the window cuts the turn off from its prompt or
+ * the trailing turn is a hidden one, whose cards never render.
+ */
+export function openTurnPromptSeq(messages: ChatMessage[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user') continue
+    const seq = message.seq
+    const prompt = message.handoffBoundary !== true && hasVisibleContent(message)
+    return prompt && typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? seq : null
+  }
+  return null
 }
 
 /**
