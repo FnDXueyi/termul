@@ -1,5 +1,5 @@
 use super::git_exec::{
-    drain_capped, empty_tree_for, run_git_capture, GitRunError, StdoutCap, EMPTY_TREE,
+    drain_capped, empty_tree_for, run_git_capture, spawn_git, GitRunError, StdoutCap, EMPTY_TREE,
 };
 use super::GitTracker;
 // ---- stdout cap while draining ----
@@ -130,6 +130,38 @@ fn it_git_runners_read_output_larger_than_the_pipe_buffer() {
     .expect("capped cat-file");
     assert!(capped.status.success(), "the rest is drained, not killed");
     assert_eq!(capped.stdout.len(), 1000);
+}
+
+#[test]
+fn wait_returns_once_git_exits_while_its_background_child_holds_the_pipes() {
+    #[cfg(unix)]
+    let (mut command, expected) = {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30 & echo hi"]);
+        (command, b"hi\n".as_slice())
+    };
+    #[cfg(windows)]
+    let (mut command, expected) = {
+        use std::os::windows::process::CommandExt as _;
+        let mut command = super::resolve::backend_command("cmd.exe");
+        command.raw_arg("/d /c \"start /b ping -n 30 127.0.0.1 >nul & echo hi\"");
+        (command, b"hi\r\n".as_slice())
+    };
+    command.stdin(std::process::Stdio::null());
+
+    let started = std::time::Instant::now();
+    let output = spawn_git(&mut command, StdoutCap::Unbounded)
+        .expect("spawn shell")
+        .wait(10_000)
+        .expect("shell exited before the timeout");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "wait blocked {elapsed:?} on pipes the background child still holds"
+    );
+    assert!(output.status.success());
+    assert_eq!(output.stdout, expected);
 }
 
 #[cfg(windows)]
