@@ -515,6 +515,47 @@ describe('ChatInputBar config controls', () => {
     expect(mockSetConfig).not.toHaveBeenCalled()
   })
 
+  it('shows a boolean Fast mode option as the one bolt toggle, not a second switch', () => {
+    const s = session()
+    const configOptions: SessionConfigOption[] = [
+      option('model', 'Model', 'model', 'opus', [
+        { value: 'opus', name: 'Opus 5.5' },
+        { value: 'sonnet', name: 'Sonnet 5.5' }
+      ]),
+      option('effort', 'Effort', 'thought_level', 'high', [
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' }
+      ]),
+      { id: 'fast_mode', name: 'Fast mode', type: 'boolean', currentValue: false }
+    ]
+
+    render(
+      <TooltipProvider>
+        <ChatInputBar
+          session={s}
+          busy={false}
+          disabled={false}
+          onSend={vi.fn()}
+          onSendBlocks={vi.fn()}
+          onCancel={vi.fn()}
+          commands={[]}
+          configOptions={configOptions}
+          modes={s.modes}
+          onSetConfig={mockSetConfig}
+          onSetMode={mockSetMode}
+          onSetModel={mockSetModel}
+        />
+      </TooltipProvider>
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Opus 5\.5/ }))
+
+    expect(screen.getAllByTestId('selector-fast')).toHaveLength(1)
+    expect(screen.getByTestId('selector-fast')).toBeEnabled()
+    expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull()
+    fireEvent.click(screen.getByTestId('selector-fast'))
+    expect(mockSetConfig).toHaveBeenCalledWith('fast_mode', true)
+  })
+
   it('searches and scroll-limits large active-chat model menus', async () => {
     const s = session()
     const configOptions = [
