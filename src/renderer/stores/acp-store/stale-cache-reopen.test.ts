@@ -71,6 +71,7 @@ vi.mock('@/stores/workspace-store', () => ({
   agentChatTabId: (sessionId: string) => `chat-${sessionId}`,
   getAllLeafPanes: () => [],
   findPaneContainingTab: () => null,
+  getAgentChatSessionIdsInAllTrees: () => new Set(['s-background']),
   useWorkspaceStore: {
     getState: () => ({ addAgentChatTab: vi.fn(), root: null })
   }
