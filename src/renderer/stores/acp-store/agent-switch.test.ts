@@ -179,6 +179,7 @@ import {
   prepareChatKey,
   useAcpStore
 } from '@/stores/acp-store'
+import { spliceSwitchTranscript } from './helpers'
 import {
   activeWirePromptTurns,
   invalidateSessionReopen,
@@ -195,6 +196,7 @@ import {
   seedOptionsSession,
   seedSession
 } from './testkit'
+import type { ChatMessage } from './types'
 
 // --- Story 3 (spec-in-chat-agent-switch): switchAgent orchestration --------
 
@@ -4561,5 +4563,37 @@ describe('composer option fidelity', () => {
       resolveNewSession({ sessionId: 's-new' })
       await switchPromise
     })
+  })
+})
+
+describe('spliceSwitchTranscript', () => {
+  const message = (id: string, seq: number): ChatMessage => ({
+    id,
+    role: 'agent',
+    blocks: [{ type: 'text', text: id }],
+    streaming: false,
+    timestamp: seq,
+    seq
+  })
+
+  it('places a source with more than 1000 seqs wholly before the target', () => {
+    const source = Array.from({ length: 1500 }, (_, i) => message(`a${i + 1}`, i + 1))
+    const target = [message('b1', 1), message('b2', 2)]
+
+    const merged = spliceSwitchTranscript(
+      's-a',
+      { messages: source, toolCalls: [], switches: [] },
+      target,
+      [],
+      []
+    )
+
+    const timeline = [...merged.messages].sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0))
+    expect(timeline.slice(-4).map((m) => m.id)).toEqual([
+      'switch-splice:s-a:a1499',
+      'switch-splice:s-a:a1500',
+      'b1',
+      'b2'
+    ])
   })
 })
