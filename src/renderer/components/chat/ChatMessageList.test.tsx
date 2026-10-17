@@ -30,7 +30,21 @@ vi.mock('@tanstack/react-virtual', async (importActual) => {
 })
 
 vi.mock('./ChatMessage', () => ({
-  AgentProse: ({ text }: { text: string }) => <div data-testid="agent-prose">{text}</div>,
+  AgentProse: ({
+    text,
+    filePathContext
+  }: {
+    text: string
+    filePathContext?: { cwd?: string; projectRoot?: string }
+  }) => (
+    <div
+      data-testid="agent-prose"
+      data-cwd={filePathContext?.cwd}
+      data-project-root={filePathContext?.projectRoot}
+    >
+      {text}
+    </div>
+  ),
   ChatMessage: ({
     message
   }: {
@@ -525,6 +539,42 @@ describe('ChatMessageList', () => {
     expect(screen.getByRole('dialog', { name: 'Audit branch' })).toHaveTextContent(
       'No changes needed.'
     )
+  })
+
+  it('passes the chat file-path context to subagent result prose', () => {
+    const delegation: TimelineItem = {
+      kind: 'tool',
+      key: 'task-1',
+      tool: {
+        toolCallId: 'task-1',
+        title: 'Audit branch',
+        kind: 'think',
+        status: 'completed',
+        rawInput: { subagent_type: 'explorer', description: 'Audit branch' },
+        rawOutput: { text: 'Edited src/foo.ts.' },
+        timestamp: 1_500,
+        seq: 2
+      }
+    }
+    render(
+      <ChatMessageList
+        items={[userItem, delegation, finalAgentItem]}
+        sessionId="session-1"
+        showRunningIndicator={false}
+        filePathContext={{ cwd: '/proj/sub', projectRoot: '/proj' }}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Worked for 3s' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ran 1 agent' }))
+    fireEvent.click(screen.getByRole('button', { name: /audit branch/i }))
+
+    const prose = within(screen.getByRole('dialog', { name: 'Audit branch' })).getByTestId(
+      'agent-prose'
+    )
+    expect(prose).toHaveTextContent('Edited src/foo.ts.')
+    expect(prose).toHaveAttribute('data-cwd', '/proj/sub')
+    expect(prose).toHaveAttribute('data-project-root', '/proj')
   })
 
   it('allows keyboard-accessible reopening after completion', () => {
