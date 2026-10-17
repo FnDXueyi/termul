@@ -64,7 +64,9 @@ describe('MCP probe refresh', () => {
       mcpTools: { fs: [] },
       mcpToolsLoaded: { fs: true },
       mcpProbing: {},
-      mcpProbeError: { fs: 'spawn failed' }
+      mcpProbeError: { fs: 'spawn failed' },
+      mcpOAuthConnected: {},
+      mcpOAuthConnecting: {}
     })
   })
 
@@ -250,6 +252,59 @@ describe('MCP probe refresh', () => {
     expect(useAcpStore.getState().mcpProbeStatus.gh).toBe(freshResult.status)
     expect(useAcpStore.getState().mcpTools.gh).toEqual(freshResult.tools)
     expect(probedConfigs()).toHaveLength(2)
+  })
+
+  it('does not show a re-added server as signed in when its predecessor was', async () => {
+    useAcpStore.setState({
+      mcpServers: [OAUTH_SERVER],
+      mcpOAuthConnected: { gh: true },
+      mcpOAuthConnecting: { gh: true }
+    })
+    vi.mocked(invoke).mockResolvedValue(AUTH_REQUIRED)
+
+    await useAcpStore.getState().deleteMcpServer('gh')
+    await useAcpStore.getState().saveMcpServer({ ...OAUTH_SERVER, url: 'https://mcp.test/other' })
+
+    expect(useAcpStore.getState().mcpOAuthConnected).toEqual({})
+    expect(useAcpStore.getState().mcpOAuthConnecting).toEqual({})
+  })
+
+  it.each([
+    [
+      'sign-in',
+      (id: string) => useAcpStore.getState().connectMcpOAuth('p1', id),
+      () => {
+        const flow = deferred<undefined>()
+        vi.spyOn(acpApi, 'startMcpOAuth').mockReturnValue(flow.promise)
+        return () => {
+          flow.resolve(undefined)
+        }
+      }
+    ],
+    [
+      'status check',
+      (id: string) => useAcpStore.getState().checkMcpOAuthStatus('p1', id),
+      () => {
+        const status = deferred<boolean>()
+        vi.spyOn(acpApi, 'hasMcpOAuthToken').mockReturnValue(status.promise)
+        return () => {
+          status.resolve(true)
+        }
+      }
+    ]
+  ])('drops the OAuth %s result that lands after its server was deleted and re-added', async (_, oauthAction, arm) => {
+    useAcpStore.setState({ mcpServers: [OAUTH_SERVER] })
+    vi.mocked(invoke).mockResolvedValue(AUTH_REQUIRED)
+    const land = arm()
+
+    const inFlight = oauthAction('gh')
+    await useAcpStore.getState().deleteMcpServer('gh')
+    await useAcpStore.getState().saveMcpServer({ ...OAUTH_SERVER, url: 'https://mcp.test/other' })
+    land()
+    await inFlight
+
+    expect(useAcpStore.getState().mcpOAuthConnected).toEqual({})
+    expect(useAcpStore.getState().mcpOAuthConnecting).toEqual({})
   })
 
   it('does not carry a queued re-probe over to a server re-added after deletion', async () => {
