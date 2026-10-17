@@ -408,6 +408,10 @@ async fn probe_stdio(server: &McpServerConfig) -> ProbeResult {
         Ok((proc, _stderr)) => proc,
         Err(error) => return ProbeResult::disconnected(format!("spawn failed: {error}")),
     };
+    #[cfg(windows)]
+    let _tree = transport.id().and_then(|pid| {
+        crate::process_util::KillOnCloseJob::new_assigned_pid(pid, "MCP probe", true)
+    });
     let running = match serve_client(ClientConfig::default(), transport).await {
         Ok(service) => service,
         Err(error) => return ProbeResult::disconnected(format!("initialize failed: {error}")),
@@ -581,3 +585,5 @@ async fn drive_running(
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

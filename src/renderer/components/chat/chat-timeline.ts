@@ -210,7 +210,7 @@ function itemTimestamp(item: TimelineItem | undefined): number | null {
   return null
 }
 
-function activityNeedsAttention(items: TimelineItem[]): boolean {
+export function activityNeedsAttention(items: TimelineItem[]): boolean {
   return items.some(
     (item) =>
       item.kind === 'tool' &&
