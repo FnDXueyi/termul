@@ -315,6 +315,42 @@ describe('CommandPalette', () => {
     }
   })
 
+  it('lists one New Terminal entry per profile on desktop and web, and opens that profile', async () => {
+    const node = {
+      id: 'p1',
+      name: 'Node dev',
+      shell: '/bin/zsh',
+      args: ['-l'],
+      cwd: '/work/app',
+      env: { NODE_ENV: 'development' }
+    }
+    const plain = { id: 'p2', name: 'Plain', shell: '', args: [], cwd: '', env: {} }
+    const prev = tauriRef.current
+    try {
+      for (const tauri of [true, false]) {
+        tauriRef.current = tauri
+        saveRecentCommand.mockClear()
+        const { props, unmount } = renderPalette({
+          terminalProfiles: [node, plain],
+          onOpenTerminalProfile: vi.fn()
+        })
+
+        expect(screen.getByText('/bin/zsh -l')).toBeInTheDocument()
+        expect(screen.getByText('Default shell')).toBeInTheDocument()
+        fireEvent.click(screen.getByText('New Terminal: Node dev'))
+
+        await waitFor(() => {
+          expect(saveRecentCommand).toHaveBeenCalledWith('terminal-profile-p1')
+          expect(props.onClose).toHaveBeenCalled()
+          expect(props.onOpenTerminalProfile).toHaveBeenCalledWith(node)
+        })
+        unmount()
+      }
+    } finally {
+      tauriRef.current = prev
+    }
+  })
+
   it('lists Open Shortcut Menu and omits New Project on the desktop palette', async () => {
     mobileRef.current = false
     const { props } = renderPalette()
