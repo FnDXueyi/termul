@@ -269,8 +269,7 @@ export class WsAcpTransport implements AcpTransport {
   private readonly seenTurnIds = new Map<string, Set<string>>()
   private recoveryHandler?: (
     recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-    reopenGeneration?: number,
-    logEpochChanged?: boolean
+    reopenGeneration?: number
   ) => Promise<void>
   /**
    * Serializes `handleEvent` dispatch across WebSocket frames. Each frame's
@@ -394,8 +393,7 @@ export class WsAcpTransport implements AcpTransport {
   setRecoveryHandler(
     handler: (
       recovery: SessionSnapshotEvent | { sessionId: string; degraded: true },
-      reopenGeneration?: number,
-      logEpochChanged?: boolean
+      reopenGeneration?: number
     ) => Promise<void>
   ): void {
     this.recoveryHandler = handler
@@ -592,7 +590,7 @@ export class WsAcpTransport implements AcpTransport {
         message: `Session ${sessionId} log epoch changed under the cursor; installing a snapshot`
       })
       this.clearCursor(sessionId)
-      await this.recoverSession(sessionId, timeoutMs, epoch)
+      await this.recoverSession(sessionId, timeoutMs)
       return
     }
     this.logEpochs.set(sessionId, replyEpoch)
@@ -608,11 +606,7 @@ export class WsAcpTransport implements AcpTransport {
    * live stream and by the per-session retry once cursor resubscribes keep
    * failing.
    */
-  private async recoverSession(
-    sessionId: SessionId,
-    timeoutMs?: number,
-    priorEpoch: string | undefined = this.logEpochs.get(sessionId)
-  ): Promise<void> {
+  private async recoverSession(sessionId: SessionId, timeoutMs?: number): Promise<void> {
     // First statement, before any await: events that arrive from here on wait
     // for the snapshot instead of racing it.
     this.beginSync(sessionId)
@@ -636,11 +630,7 @@ export class WsAcpTransport implements AcpTransport {
         if (recovery.logEpoch) this.logEpochs.set(sessionId, recovery.logEpoch)
         else this.logEpochs.delete(sessionId)
         this.seenTurnIds.delete(sessionId)
-        await this.recoveryHandler?.(
-          recovery,
-          reopenGeneration,
-          priorEpoch !== undefined && !!recovery.logEpoch && priorEpoch !== recovery.logEpoch
-        )
+        await this.recoveryHandler?.(recovery, reopenGeneration)
         // handle_recover_session_snapshot server-side re-registers the
         // subscription for continued live delivery — no separate subscribe
         // call needed here.

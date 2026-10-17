@@ -60,6 +60,7 @@ import type { TurnEndNotice } from '@/lib/agent-chat-notify'
 import type { RegistryAgent } from '@/lib/agents/acp-registry'
 import type { PrepareChatError } from '@/lib/agents/acp-spawn-errors'
 import type { CommandState } from '@/lib/command-engine'
+import type { LogPoint } from '@/stores/agent-chat-unread-store'
 import type { QueuedPrompt } from '../prompt-queue-orchestration'
 
 /** A prompt command's state while the chat waits to confirm it (AD-6). */
@@ -483,8 +484,8 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
-  /** Seq of the `commands_update` record behind each `commands` entry. */
-  commandsSeq: Record<SessionId, number>
+  /** Log point of the `commands_update` record behind each `commands` entry. */
+  commandsSeq: Record<SessionId, LogPoint>
   pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
@@ -915,7 +916,7 @@ export interface AcpState {
   /** CAP-2: live `acp:agent_switch` marker → append to `agentSwitches`. */
   _onAgentSwitch: (e: AgentSwitchEvent, eventSeq?: number) => void
   _onPlanUpdate: (e: PlanUpdateEvent) => void
-  _onCommandsUpdate: (e: CommandsUpdateEvent, eventSeq?: number) => void
+  _onCommandsUpdate: (e: CommandsUpdateEvent, point?: LogPoint) => void
   _onModeUpdate: (e: ModeUpdateEvent) => void
   _onConfigOptionsUpdate: (e: ConfigOptionsUpdateEvent) => void
   _onSessionInfoUpdate: (e: SessionInfoUpdateEvent) => void

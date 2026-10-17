@@ -1505,10 +1505,10 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       return { plans: { ...s.plans, [e.sessionId]: entries } }
     }),
 
-  _onCommandsUpdate: (e, eventSeq) =>
+  _onCommandsUpdate: (e, point) =>
     set((s) => {
       if (!acceptsSessionTranscriptEvents(s.sessions[e.sessionId])) return {}
-      return withCommands(s, e.sessionId, e.availableCommands ?? [], eventSeq)
+      return withCommands(s, e.sessionId, e.availableCommands ?? [], point)
     }),
 
   _onModeUpdate: (e) => {

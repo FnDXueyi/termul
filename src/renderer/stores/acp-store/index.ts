@@ -215,8 +215,7 @@ let teardown: Array<() => void> = []
  */
 async function installTransportRecovery(
   recovery: AcpRecovery,
-  reopenGeneration?: number,
-  logEpochChanged = false
+  reopenGeneration?: number
 ): Promise<void> {
   // Round-2 review: the WS transport captures the session's reopen generation
   // before the recovery round-trip; a close, delete, or reopen in that window
@@ -429,14 +428,6 @@ async function installTransportRecovery(
     if (!recoveryIsCurrent()) return {}
     const session = current.sessions[recovery.sessionId]
     const replacing = normalizedMessages.length > 0
-    // A held list seq belongs to the old host log; against the new log it
-    // would reject the lists the new log sends with lower seqs.
-    const held = logEpochChanged
-      ? {
-          commands: current.commands,
-          commandsSeq: dropRecordKey(current.commandsSeq, recovery.sessionId)
-        }
-      : current
     const splicedMessages = (current.messages[recovery.sessionId] ?? []).filter((m) =>
       m.id.startsWith(SWITCH_SPLICE_ID_PREFIX)
     )
@@ -460,8 +451,11 @@ async function installTransportRecovery(
           }
         : current.toolCalls,
       ...(recoveredCommands
-        ? withCommands(held, recovery.sessionId, recoveredCommands.list, recoveredCommands.seq)
-        : { commandsSeq: held.commandsSeq }),
+        ? withCommands(current, recovery.sessionId, recoveredCommands.list, {
+            logEpoch: recovery.logEpoch ?? null,
+            seq: recoveredCommands.seq
+          })
+        : {}),
       degradedRecoverySessions: dropRecordKey(current.degradedRecoverySessions, recovery.sessionId),
       sessions: session
         ? {
@@ -590,9 +584,12 @@ export function initAcpEventListeners(): () => void {
     acpApi.onEvent<PlanUpdateEvent>(ACP_EVENTS.planUpdate, (e) =>
       useAcpStore.getState()._onPlanUpdate(e)
     ),
-    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e, eventSeq) =>
-      useAcpStore.getState()._onCommandsUpdate(e, eventSeq)
-    ),
+    acpApi.onEvent<CommandsUpdateEvent>(ACP_EVENTS.commandsUpdate, (e, eventSeq) => {
+      const logEpoch = getAcpTransport().getSessionCursor?.(e.sessionId)?.logEpoch ?? null
+      useAcpStore
+        .getState()
+        ._onCommandsUpdate(e, eventSeq === undefined ? undefined : { logEpoch, seq: eventSeq })
+    }),
     acpApi.onEvent<ModeUpdateEvent>(ACP_EVENTS.modeUpdate, (e) =>
       useAcpStore.getState()._onModeUpdate(e)
     ),
