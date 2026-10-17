@@ -320,12 +320,31 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
    */
   function streamLiveChat(messages = hostMessages): void {
     seedLiveChat([])
+    let sendCounter = 0
     for (const m of messages) {
       const content = { type: 'text', text: textOf(m) } as const
       if (m.role === 'user') {
+        // A `turn:<id>` record was sent from this client: the composer appends
+        // the optimistic bubble (counter seq, no host seq) before the echo.
+        const turnId = m.id.startsWith('turn:') ? m.id.slice('turn:'.length) : undefined
+        if (turnId) {
+          sendCounter += 1
+          useAcpStore.setState((s) => ({
+            messages: {
+              ...s.messages,
+              [SESSION]: [
+                ...(s.messages[SESSION] ?? []),
+                { ...message(m.id, 'user', textOf(m), 0), seq: sendCounter }
+              ]
+            }
+          }))
+        }
         useAcpStore
           .getState()
-          ._onUserPrompt({ agentId: OLD_AGENT, sessionId: SESSION, content: [content] }, m.seq)
+          ._onUserPrompt(
+            { agentId: OLD_AGENT, sessionId: SESSION, content: [content], turnId },
+            m.seq
+          )
       } else {
         useAcpStore
           .getState()
@@ -424,6 +443,30 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
       'user:seq-4090',
       'snapshot:thought:4100'
     ])
+  })
+
+  it('desktop history: the page is right when the oldest loaded bubble is a prompt this client sent', async () => {
+    const sentPrompts = hostMessages.map((m, i) =>
+      m.role === 'user' ? { ...m, id: `turn:t${i + 1}` } : m
+    )
+    setCachedSessionPayload(SESSION, hostPayload(sentPrompts.slice(0, 310), 3100))
+    historyApi.get.mockResolvedValue(hostPayload(sentPrompts, 7100))
+    _setAcpTransportForTests(
+      fakeTransport('tauri_store', hostPayload([], 0)) as unknown as AcpTransport
+    )
+    streamLiveChat(sentPrompts)
+    expect(liveWindow()[0]?.id).toBe('turn:t411')
+
+    await useAcpStore.getState().loadOlderMessages(SESSION, 4)
+
+    expect(liveWindow().slice(0, 5).map(textOf)).toEqual([
+      'message 407',
+      'message 408',
+      'message 409',
+      'message 410',
+      'message 411'
+    ])
+    expect(historyApi.get).toHaveBeenCalledTimes(1)
   })
 
   it('desktop history: a cached copy that already holds the oldest loaded message pages without a host read', async () => {
