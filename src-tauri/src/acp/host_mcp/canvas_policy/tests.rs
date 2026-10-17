@@ -220,6 +220,53 @@ fn absolute_traversal_and_empty_paths_are_refused() {
     }
 }
 
+#[test]
+fn alternate_stream_and_device_names_are_refused_on_every_platform() {
+    let project = Project::new();
+    for requested in [
+        "a.png:hidden",
+        "assets/a.png:x:$DATA",
+        "assets:x/a.png",
+        "CON",
+        "con.png",
+        "assets/NUL",
+        "assets/nul.tar.gz",
+        "Aux.svg",
+        "prn",
+        "COM1.png",
+        "lpt9",
+        "COM\u{b9}.png",
+        "CON .png",
+        "CONIN$",
+        "conout$.pdf",
+    ] {
+        let error = resolve_project_file(&project.root(), requested).unwrap_err();
+        assert_eq!(
+            error.code,
+            CanvasErrorCode::UnsupportedInKiosk,
+            "{requested:?}"
+        );
+    }
+}
+
+#[test]
+fn names_that_only_resemble_device_names_resolve() {
+    let project = Project::new();
+    for requested in [
+        "console.png",
+        "assets/nul-free.png",
+        "COM10.png",
+        "lpt.png",
+        "aux_icons/a.png",
+        "my.con.png",
+    ] {
+        assert!(
+            resolve_project_file(&project.root(), requested).is_ok(),
+            "{requested}"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn drive_relative_and_rooted_windows_paths_are_refused() {

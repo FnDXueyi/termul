@@ -182,8 +182,38 @@ pub struct ProjectFile {
     pub relative: String,
 }
 
-/// Check `requested` names a file inside `root`: relative, no `..`, and no
-/// existing part of it a link that resolves outside the root.
+/// A path part Windows would not treat as a plain file: an alternate data
+/// stream (`a.png:x`) or a reserved device name (`CON`, `nul.txt`, `COM1`),
+/// which Windows matches on the part before the first dot, ignoring case and
+/// trailing spaces. Refused on every platform so a project behaves the same
+/// wherever its host runs.
+fn names_a_stream_or_device(part: &str) -> bool {
+    if part.contains(':') {
+        return true;
+    }
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    };
+    numbered("COM") || numbered("LPT")
+}
+
+/// Check `requested` names a file inside `root`: relative, no `..`, no
+/// stream or device name, and no existing part of it a link that resolves
+/// outside the root.
 pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile, CanvasError> {
     let outside = || {
         CanvasError::new(
@@ -196,7 +226,18 @@ pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile,
     let mut parts = Vec::new();
     for component in Path::new(requested).components() {
         match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::Normal(part) => {
+                let part = part.to_string_lossy().into_owned();
+                if names_a_stream_or_device(&part) {
+                    return Err(CanvasError::new(
+                        CanvasErrorCode::UnsupportedInKiosk,
+                        format!(
+                            "export does not write to `{requested}`: `{part}` names a Windows stream or device"
+                        ),
+                    ));
+                }
+                parts.push(part);
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(outside())
