@@ -66,11 +66,32 @@ pub(super) fn emit_turn_outcome(
             );
             (
                 detail.turn_stop().into(),
-                Some(events::TurnErrorSummary::from(&event)),
+                Some(turn_error_summary(detail, event.provider_code)),
             )
         }
     };
     emit_turn_terminator(sinks, agent_id, session_id, turn_id, stop_reason, error);
+}
+
+/// Most characters of an error message a failed turn's terminator keeps.
+const TURN_ERROR_MESSAGE_MAX_CHARS: usize = 1_000;
+
+/// The durable copy of a failed turn's error. The session log replays it on
+/// every reopen, so it keeps the RPC error's own message, never the `data`
+/// that `Display` appends (it can carry request headers), masked and capped.
+fn turn_error_summary(
+    detail: &events::AcpErrorDetail,
+    provider_code: Option<&'static str>,
+) -> events::TurnErrorSummary {
+    let message = detail.rpc_message.as_deref().unwrap_or(&detail.message);
+    events::TurnErrorSummary {
+        message: super::stderr_ring::redact_line(message)
+            .chars()
+            .take(TURN_ERROR_MESSAGE_MAX_CHARS)
+            .collect(),
+        code: detail.code,
+        provider_code,
+    }
 }
 
 /// A turn whose reply failed because the agent transport closed while the

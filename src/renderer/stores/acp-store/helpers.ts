@@ -519,7 +519,8 @@ export function withSessionActive(
  * The banner fields for the last turn's failure recorded in a session
  * payload. Mirrors what the live `agent_error` handler writes: the provider
  * wording when the host classified one, else the message, falling back to the
- * stop-reason note when the host kept no detail.
+ * stop-reason note when the host kept no detail. The host persists no error
+ * `data`, so a restored banner has none.
  */
 export function lastErrorFromPersistedTurn(turn: PersistedTurnError | undefined): LastErrorFields {
   if (!turn) return plainLastError(null)
@@ -531,7 +532,7 @@ export function lastErrorFromPersistedTurn(turn: PersistedTurnError | undefined)
       ? describeProviderFailure(detail.providerCode, message)
       : message,
     lastErrorCode: detail.code ?? null,
-    lastErrorData: detail.data
+    lastErrorData: undefined
   }
 }
 

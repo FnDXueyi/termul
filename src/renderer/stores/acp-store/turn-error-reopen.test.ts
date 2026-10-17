@@ -674,11 +674,10 @@ describe('acp-store: a reload restores the error of a chat whose last turn faile
   const agentError = {
     stopReason: 'error',
     message: 'Internal error',
-    code: -32603,
-    data: { detail: 'boom' }
+    code: -32603
   }
 
-  it('web: the reopen shows the error with its code and data, and the chat is idle', async () => {
+  it('web: the reopen shows the error with its code, and the chat is idle', async () => {
     const transport = fakeWebTransport([ownerSummary()], {
       [SESSION]: failedTurnPayload(agentError)
     })
@@ -689,13 +688,13 @@ describe('acp-store: a reload restores the error of a chat whose last turn faile
     const session = useAcpStore.getState().sessions[SESSION]
     expect(session.lastError).toBe('Internal error')
     expect(session.lastErrorCode).toBe(-32603)
-    expect(session.lastErrorData).toEqual({ detail: 'boom' })
+    expect(session.lastErrorData).toBeUndefined()
     expect(session.activeTurn).toBe(false)
     expect(session.openTurnId).toBeNull()
     expect(session.status).toBe('active')
   })
 
-  it('desktop: the reopen shows the error with its code and data, and the chat is idle', async () => {
+  it('desktop: the reopen shows the error with its code, and the chat is idle', async () => {
     vi.mocked(isTauriContext).mockReturnValue(true)
     const transport = fakeWebTransport([], { [SESSION]: failedTurnPayload(agentError) })
     _setAcpTransportForTests(transport)
@@ -705,7 +704,7 @@ describe('acp-store: a reload restores the error of a chat whose last turn faile
     const session = useAcpStore.getState().sessions[SESSION]
     expect(session.lastError).toBe('Internal error')
     expect(session.lastErrorCode).toBe(-32603)
-    expect(session.lastErrorData).toEqual({ detail: 'boom' })
+    expect(session.lastErrorData).toBeUndefined()
     expect(session.activeTurn).toBe(false)
     expect(session.status).toBe('active')
   })

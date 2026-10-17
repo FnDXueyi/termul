@@ -105,7 +105,6 @@ export interface PersistedTurnError {
   /** Absent when the host recorded no detail (a `crashed` terminator). */
   message?: string
   code?: number
-  data?: unknown
   providerCode?: string
 }
 

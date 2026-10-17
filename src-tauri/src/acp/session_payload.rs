@@ -110,8 +110,6 @@ pub struct LastTurnError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_code: Option<String>,
 }
 
@@ -494,7 +492,6 @@ fn last_turn_error(records: &[PersistedEventRecord]) -> Option<LastTurnError> {
         code: error
             .and_then(|error| error.get("code"))
             .and_then(Value::as_i64),
-        data: error.and_then(|error| error.get("data")).cloned(),
         provider_code: text("providerCode"),
     })
 }

@@ -191,6 +191,7 @@ impl From<TurnTimeout> for events::AcpErrorDetail {
             message: timeout.message,
             code: None,
             data: None,
+            rpc_message: None,
             timed_out: true,
             connection_closed: false,
         }

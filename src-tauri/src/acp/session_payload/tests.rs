@@ -989,7 +989,6 @@ fn a_failed_last_turn_carries_its_error_detail() {
             Some(json!({
                 "message": "Internal error",
                 "code": -32603,
-                "data": {"detail": "boom"},
                 "providerCode": "provider_quota_exceeded",
             })),
         ),
@@ -1000,7 +999,6 @@ fn a_failed_last_turn_carries_its_error_detail() {
             "stopReason": "error",
             "message": "Internal error",
             "code": -32603,
-            "data": {"detail": "boom"},
             "providerCode": "provider_quota_exceeded",
         }))
     );
