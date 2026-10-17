@@ -48,3 +48,10 @@ fn auth_and_untagged_errors_keep_their_codes() {
         "not_implemented"
     );
 }
+
+#[test]
+fn a_session_the_agent_no_longer_has_answers_not_found() {
+    let err = err_of("ACP_RESOURCE_NOT_FOUND: Resource not found: {\"uri\": \"s1\"}");
+    assert_eq!(err.code, "not_found");
+    assert_eq!(err.message, "Resource not found: {\"uri\": \"s1\"}");
+}
