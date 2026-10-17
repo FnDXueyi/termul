@@ -78,10 +78,10 @@ describe('formatAcpSpawnError', () => {
       'Could not start "node". Check that the binary exists and is on your PATH.'
     )
     expect(
-      formatAcpSpawnError('program not found or not executable: C:\tools\node.exe', {
-        command: 'C:\tools\node.exe'
+      formatAcpSpawnError('program not found or not executable: C:\\tools\\node.exe', {
+        command: 'C:\\tools\\node.exe'
       })
-    ).toBe('Could not start "C:\tools\node.exe". Check that the binary exists and is on your PATH.')
+    ).toBe('Could not start "C:\\tools\\node.exe". Check that the binary exists and is on your PATH.')
   })
 })
 
