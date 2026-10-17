@@ -368,12 +368,11 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
       'message 410',
       'message 411'
     ])
-    expect(liveWindow().slice(0, 4).map((m) => m.id)).toEqual([
-      'user:seq-4070',
-      'snapshot:agent:4080',
-      'user:seq-4090',
-      'snapshot:agent:4100'
-    ])
+    expect(
+      liveWindow()
+        .slice(0, 4)
+        .map((m) => m.id)
+    ).toEqual(['user:seq-4070', 'snapshot:agent:4080', 'user:seq-4090', 'snapshot:agent:4100'])
     expect(liveWindow()).toHaveLength(304)
     expect(historyApi.get).toHaveBeenCalledTimes(1)
     expect(getCachedSessionPayload(SESSION)?.messages).toHaveLength(710)
@@ -381,7 +380,11 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
 
     await useAcpStore.getState().loadOlderMessages(SESSION, 4)
 
-    expect(liveWindow().slice(0, 5).map((m) => m.id)).toEqual([
+    expect(
+      liveWindow()
+        .slice(0, 5)
+        .map((m) => m.id)
+    ).toEqual([
       'user:seq-4030',
       'snapshot:agent:4040',
       'user:seq-4050',
@@ -411,7 +414,11 @@ describe('acp-store: scroll-up in a long live chat never skips past a stale cach
       'message 410',
       'message 411'
     ])
-    expect(liveWindow().slice(0, 4).map((m) => m.id)).toEqual([
+    expect(
+      liveWindow()
+        .slice(0, 4)
+        .map((m) => m.id)
+    ).toEqual([
       'snapshot:thought:4070',
       'snapshot:agent:4080',
       'user:seq-4090',
