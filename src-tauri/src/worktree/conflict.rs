@@ -3,15 +3,6 @@ use std::path::Path;
 #[cfg(target_os = "windows")]
 use super::create_junction;
 
-/// Helper struct to hold conflict block sections.
-pub(super) struct ConflictBlock {
-    pub(super) ours: String,
-    pub(super) theirs: String,
-    /// Diff3 common-ancestor section when present; reserved for future suggestions.
-    #[allow(dead_code)]
-    pub(super) base: String,
-}
-
 /// Convert a `.worktree-include` glob into a `Regex` for matching file paths
 /// relative to the project root (forward slashes). Supports:
 /// - `**` matches anything including `/`
