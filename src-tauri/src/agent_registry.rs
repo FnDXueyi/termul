@@ -13,14 +13,11 @@
 //! Rust side (never the webview), caches results on disk, and is a plain read-only
 //! GET of public JSON. It never transmits project data outbound.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const CACHE_FILE: &str = "acp-registry-cache.json";
-const FETCH_TIMEOUT_SECS: u64 = 15;
 
 /// A single agent identity entry distilled from the ACP Registry. Only the
 /// identity fields are surfaced — `distribution` is intentionally omitted so it
@@ -132,27 +129,10 @@ fn write_cache(app: &AppHandle, entries: &[AcpRegistryEntry], fetched_at: &str) 
 }
 
 async fn fetch_registry_entries(url: &str) -> Result<Vec<AcpRegistryEntry>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("ACP registry request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!("ACP registry returned HTTP {}", response.status()));
-    }
-
-    let body = response
-        .text()
-        .await
+    let body = crate::acp_registry_snapshot::fetch_capped_registry_body(url).await?;
+    let text = std::str::from_utf8(&body)
         .map_err(|e| format!("Failed to read ACP registry body: {}", e))?;
-
-    parse_registry(&body)
+    parse_registry(text)
 }
 
 /// Fetch the ACP Registry catalog (identity/discovery only).

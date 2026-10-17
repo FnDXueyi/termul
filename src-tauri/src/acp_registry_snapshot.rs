@@ -190,7 +190,10 @@ fn cache_is_fresh(fetched_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool 
         && skewed <= chrono::Duration::from_std(MAX_CLOCK_SKEW).unwrap_or(chrono::Duration::MAX)
 }
 
-async fn fetch_registry_agents(url: &str) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
+/// Fetches the registry document with the https-only redirect policy and the
+/// [`MAX_REGISTRY_BODY_BYTES`] cap. Shared by the snapshot fetch and the
+/// desktop identity fetch in `agent_registry`, so both refuse the same things.
+pub(crate) async fn fetch_capped_registry_body(url: &str) -> Result<Vec<u8>, String> {
     use futures_util::StreamExt;
 
     let client = reqwest::Client::builder()
@@ -228,7 +231,11 @@ async fn fetch_registry_agents(url: &str) -> Result<Vec<AcpRegistrySnapshotAgent
         }
         body.extend_from_slice(&chunk);
     }
-    parse_snapshot(&body)
+    Ok(body)
+}
+
+async fn fetch_registry_agents(url: &str) -> Result<Vec<AcpRegistrySnapshotAgent>, String> {
+    parse_snapshot(&fetch_capped_registry_body(url).await?)
 }
 
 /// Cache-policy core, parameterized by the network fetch so the I/O matrix
