@@ -262,27 +262,39 @@ fn expand_env_with(value: &str, lookup: impl Fn(&str) -> Option<String>) -> Stri
 
 type SharedProbe = Shared<BoxFuture<'static, ProbeResult>>;
 
-static IN_FLIGHT_PROBES: LazyLock<Mutex<HashMap<McpServerConfig, SharedProbe>>> =
+/// The config plus its server's OAuth token generation when the probe started,
+/// so a sign-in or sign-out from any client starts a fresh probe instead of
+/// joining one that read the old token.
+type ProbeKey = (McpServerConfig, u64);
+
+static IN_FLIGHT_PROBES: LazyLock<Mutex<HashMap<ProbeKey, SharedProbe>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// One-shot probe that joins an identical probe already in flight. A finished
-/// probe is never reused. Never panics, never logs secrets.
+/// One-shot probe that joins an identical probe already in flight under the
+/// same stored OAuth token. A finished probe is never reused. Never panics,
+/// never logs secrets.
 pub async fn probe(server: McpServerConfig) -> ProbeResult {
     join_or_start_probe(server).await
 }
 
 fn join_or_start_probe(server: McpServerConfig) -> SharedProbe {
+    let token_generation = server
+        .url
+        .as_deref()
+        .map_or(0, crate::acp::mcp_oauth::token_generation);
+    let key = (server, token_generation);
     let mut in_flight = IN_FLIGHT_PROBES.lock();
-    if let Some(running) = in_flight.get(&server) {
+    if let Some(running) = in_flight.get(&key) {
         tracing::info!(
-            server = %server.name,
+            server = %key.0.name,
             "MCP probe joined an identical in-flight probe"
         );
         return running.clone();
     }
-    let key = server.clone();
+    let server = key.0.clone();
+    let entry = key.clone();
     let task = tokio::spawn(async move {
-        let _entry = InFlightEntry(server.clone());
+        let _entry = InFlightEntry(entry);
         probe_once(server).await
     });
     let shared = task
@@ -299,7 +311,7 @@ fn join_or_start_probe(server: McpServerConfig) -> SharedProbe {
 
 /// Removes a probe's in-flight entry when its task ends, panics included, so a
 /// failed probe is never served to later callers.
-struct InFlightEntry(McpServerConfig);
+struct InFlightEntry(ProbeKey);
 
 impl Drop for InFlightEntry {
     fn drop(&mut self) {

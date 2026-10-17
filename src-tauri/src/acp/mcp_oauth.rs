@@ -6,6 +6,10 @@
 //! as JSON files in the app data directory (the Windows Credential Manager
 //! has a 2560-char limit that OAuth JWTs routinely exceed).
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 use rmcp::transport::auth::{
     AuthorizationCallback, AuthorizationManager, AuthorizationRequest, AuthorizationSession,
     CredentialStore, OAuthState, StoredCredentials,
@@ -73,6 +77,27 @@ fn keychain_key(server_url: &str) -> String {
     format!("mcp:{}", server_url.trim_end_matches('/'))
 }
 
+/// Per-server count of stored-token writes and deletes, keyed like the token
+/// file. The MCP probe dedupe reads it so a probe that read the old token is
+/// never joined after a sign-in or sign-out.
+static TOKEN_GENERATIONS: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn token_generation(server_url: &str) -> u64 {
+    TOKEN_GENERATIONS
+        .lock()
+        .get(server_url.trim_end_matches('/'))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn bump_token_generation(server_url: &str) {
+    *TOKEN_GENERATIONS
+        .lock()
+        .entry(server_url.trim_end_matches('/').to_string())
+        .or_default() += 1;
+}
+
 pub fn load_stored_token(server_url: &str) -> Result<Option<StoredToken>, McpOAuthError> {
     let path = token_file_path(server_url)?;
     match std::fs::read_to_string(&path) {
@@ -110,21 +135,25 @@ pub fn store_token(server_url: &str, token: &StoredToken) -> Result<(), McpOAuth
             .open(&path)
             .map_err(|e| McpOAuthError::Keychain(format!("open: {e}")))?;
         file.write_all(json.as_bytes())
-            .map_err(|e| McpOAuthError::Keychain(format!("write: {e}")))
+            .map_err(|e| McpOAuthError::Keychain(format!("write: {e}")))?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, json).map_err(|e| McpOAuthError::Keychain(format!("write: {e}")))
+        std::fs::write(&path, json).map_err(|e| McpOAuthError::Keychain(format!("write: {e}")))?;
     }
+    bump_token_generation(server_url);
+    Ok(())
 }
 
 pub fn delete_stored_token(server_url: &str) -> Result<(), McpOAuthError> {
     let path = token_file_path(server_url)?;
     match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(McpOAuthError::Keychain(format!("delete: {e}"))),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(McpOAuthError::Keychain(format!("delete: {e}"))),
     }
+    bump_token_generation(server_url);
+    Ok(())
 }
 
 /// Resolve the file path for storing an OAuth token. Tokens are stored as
