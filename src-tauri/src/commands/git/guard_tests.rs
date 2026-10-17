@@ -96,6 +96,7 @@ async fn branch_switch_refuses_pathspec_and_option_shaped_names_without_touching
         assert_eq!(head(&repo), before);
     }
 
+    git(&repo, &["checkout", "--", "a.txt"]);
     branch_switch_guarded(&idle, cwd, "feature".into()).await.expect("a real branch still switches");
     assert_eq!(head(&repo), "feature");
 }
