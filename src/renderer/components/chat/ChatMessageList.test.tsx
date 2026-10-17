@@ -566,6 +566,7 @@ describe('ChatMessageList', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Worked for 3s' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ran 1 agent' }))
     fireEvent.click(screen.getByRole('button', { name: /audit branch/i }))
 
     const prose = within(screen.getByRole('dialog', { name: 'Audit branch' })).getByTestId(
