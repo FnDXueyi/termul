@@ -27,7 +27,12 @@ export const useAppSettingsStore = create<AppSettingsState>((set) => ({
       settings: { ...state.settings, ...updates }
     })),
 
-  resetToDefaults: () => set({ settings: DEFAULT_APP_SETTINGS })
+  // Terminal profiles are the user's own launch entries, not preferences: a
+  // reset keeps them, as it keeps MCP servers and custom agents.
+  resetToDefaults: () =>
+    set((state) => ({
+      settings: { ...DEFAULT_APP_SETTINGS, terminalProfiles: state.settings.terminalProfiles }
+    }))
 }))
 
 // Selectors

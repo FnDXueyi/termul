@@ -232,6 +232,7 @@ export default function WorkspaceLayout(): React.JSX.Element {
       paletteData={paletteData}
       shortcutLabels={shortcutLabels}
       handleAddTerminal={tabOpeners.handleAddTerminal}
+      handleOpenTerminalProfile={tabOpeners.handleOpenTerminalProfile}
       handleLaunchAgent={tabOpeners.handleLaunchAgent}
       handleNewBrowserTab={handleNewBrowserTab}
       handleOpenCanvas={tabOpeners.handleOpenCanvas}

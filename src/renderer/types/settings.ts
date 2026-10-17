@@ -42,6 +42,22 @@ export type TerminalUrlOpenMode = 'system' | 'termul'
 /** Which interface the remote terminal HTTP server binds to when started. */
 export type RemoteBindMode = 'localhost' | 'all'
 
+/**
+ * A saved way to open a terminal. `shell` is a path or a PATH name; empty
+ * means the project or app default shell. `args` go to `shell` as separate
+ * argv entries, so a profile with args always names a shell. An empty `cwd`
+ * opens in the active project or worktree folder. Parse stored or typed
+ * profiles with `lib/terminal-profiles.ts`, which rejects bad env keys.
+ */
+export interface TerminalProfile {
+  id: string
+  name: string
+  shell: string
+  args: string[]
+  cwd: string
+  env: Record<string, string>
+}
+
 // Application-wide settings
 export interface AppSettings {
   /** Persisted for old profiles. The terminal ignores this and uses Paper Mono. */
@@ -94,6 +110,8 @@ export interface AppSettings {
   notifyOnAgentChatTurnFinished: boolean
   /** OS/web notification when an Agent Chat waits for approval or a question. */
   notifyOnAgentChatNeedsYou: boolean
+  /** Saved shell + args + folder + env combinations, opened from the command palette. */
+  terminalProfiles: TerminalProfile[]
 }
 
 /** Whole-UI zoom bounds â€” match the native View menu semantics (0.5xâ€“3.0x, 10% steps). */
@@ -261,7 +279,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   agentIdleWindowSecs: null,
   notifyOnTerminalIdle: true,
   notifyOnAgentChatTurnFinished: true,
-  notifyOnAgentChatNeedsYou: true
+  notifyOnAgentChatNeedsYou: true,
+  terminalProfiles: []
 }
 
 // Keyboard shortcut definition

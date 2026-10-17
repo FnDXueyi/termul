@@ -59,6 +59,7 @@ import { ResetSection } from './app-preferences/reset-section'
 import { ShellSection } from './app-preferences/shell-section'
 import { ShortcutsSection } from './app-preferences/shortcuts-section'
 import { SkillsSection } from './app-preferences/skills-section'
+import { TerminalProfilesSection } from './app-preferences/terminal-profiles-section'
 import { UpdatesSection } from './app-preferences/updates-section'
 
 export function AppPreferencesModal(): React.JSX.Element {
@@ -302,6 +303,7 @@ export function AppPreferencesModal(): React.JSX.Element {
             availableShells={availableShells}
             handleDefaultShellChange={handleDefaultShellChange}
           />
+          <TerminalProfilesSection availableShells={availableShells} />
           {/* Terminal Behavior Section */}
           <BehaviorSection
             terminalUrlOpenMode={terminalUrlOpenMode}
@@ -372,7 +374,7 @@ export function AppPreferencesModal(): React.JSX.Element {
       <ConfirmDialog
         isOpen={isResetDialogOpen}
         title="Reset Settings"
-        message="Are you sure you want to reset all application settings to their default values? This cannot be undone."
+        message="Reset all application settings to their default values? Terminal profiles are kept; delete them under Terminal Profiles. This cannot be undone."
         confirmLabel="Reset"
         cancelLabel="Cancel"
         variant="danger"

@@ -7,13 +7,14 @@ import { getActiveWorkingCopy, reportUnresolvedWorkingCopy } from '@/lib/active-
 import { launchAgentInPane } from '@/lib/agent-launch'
 import { BUILT_IN_AGENTS } from '@/lib/agents/agent-registry'
 import { openProjectCanvas } from '@/lib/open-project-canvas'
-import { openTerminalAtCwd, spawnTerminalInPane } from '@/lib/terminal-spawn'
+import { openTerminalFromProfile, spawnTerminalInPane } from '@/lib/terminal-spawn'
 import { randomUUID } from '@/lib/uuid'
 import { getDefaultCwdForProject } from '@/lib/worktree-context'
 import { useDefaultShell } from '@/stores/app-settings-store'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import type { Project } from '@/types/project'
+import type { TerminalProfile } from '@/types/settings'
 
 interface UseTabOpenersOptions {
   activeProject: Project | undefined
@@ -125,6 +126,26 @@ export function useTabOpeners({
     [handleCreateTerminalInPane]
   )
 
+  const handleOpenTerminalProfile = useCallback(
+    async (profile: TerminalProfile) => {
+      if (!activeProjectId) return
+      const cwd = profile.cwd || resolveWorkingCopyCwd(activeProjectId, 'Opening a terminal')
+      if (cwd === null) return
+      const outcome = await openTerminalFromProfile(activeProjectId, profile, {
+        cwd,
+        shell: activeProject?.defaultShell || appDefaultShell || undefined
+      })
+      if (outcome.status === 'no-pane') {
+        toast.error('No active pane', {
+          description: 'Cannot open terminal without an active workspace pane.'
+        })
+      } else if (outcome.status === 'spawn-failed') {
+        toast.error(`Could not open ${profile.name}`, { description: outcome.error })
+      }
+    },
+    [activeProjectId, activeProject?.defaultShell, appDefaultShell]
+  )
+
   const handleNewBrowserTab = useCallback((paneId?: string) => {
     const resolvedPaneId = paneId ?? useWorkspaceStore.getState().activePaneId
     if (resolvedPaneId) {
@@ -216,6 +237,7 @@ export function useTabOpeners({
     handleCreateTerminalInPane,
     handleLaunchAgent,
     handleAddTerminal,
+    handleOpenTerminalProfile,
     handleNewBrowserTab,
     handleOpenAgentChat,
     handleAddGitTab,
