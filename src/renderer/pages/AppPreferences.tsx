@@ -374,7 +374,7 @@ export function AppPreferencesModal(): React.JSX.Element {
       <ConfirmDialog
         isOpen={isResetDialogOpen}
         title="Reset Settings"
-        message="Are you sure you want to reset all application settings to their default values? This cannot be undone."
+        message="Reset all application settings to their default values? Terminal profiles are kept; delete them under Terminal Profiles. This cannot be undone."
         confirmLabel="Reset"
         cancelLabel="Cancel"
         variant="danger"

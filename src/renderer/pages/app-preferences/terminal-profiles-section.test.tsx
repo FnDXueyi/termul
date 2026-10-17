@@ -53,6 +53,28 @@ describe('TerminalProfilesSection', () => {
     expect(screen.getByText('Node dev')).toBeInTheDocument()
   })
 
+  it('edits a shell that shell detection does not list as a typed path', async () => {
+    useAppSettingsStore.setState({
+      settings: {
+        ...DEFAULT_APP_SETTINGS,
+        terminalProfiles: [{ id: 'p1', name: 'Nu', shell: 'nu', args: [], cwd: '', env: {} }]
+      },
+      isLoaded: true
+    })
+    render(<TerminalProfilesSection availableShells={shells} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Nu' }))
+    fireEvent.change(screen.getByLabelText('Shell path or name'), {
+      target: { value: 'C:\\tools\\nu.exe' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(useAppSettingsStore.getState().settings.terminalProfiles).toEqual([
+      { id: 'p1', name: 'Nu', shell: 'C:\\tools\\nu.exe', args: [], cwd: '', env: {} }
+    ])
+  })
+
   it('deletes a profile from the list', () => {
     useAppSettingsStore.setState({
       settings: {

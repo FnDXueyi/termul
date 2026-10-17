@@ -35,6 +35,7 @@ import type { TerminalProfile } from '@/types/settings'
 
 // Radix Select reserves the empty string, so the default shell needs a value of its own.
 const DEFAULT_SHELL_VALUE = '__default__'
+const OTHER_SHELL_VALUE = '__other__'
 
 type EditorState = { mode: 'add' } | { mode: 'edit'; profile: TerminalProfile }
 
@@ -166,7 +167,9 @@ function TerminalProfileDialog({
   const [saving, setSaving] = useState(false)
 
   const shells = availableShells?.available ?? []
-  const shellIsListed = shells.some((shell) => shell.path === draft.shell)
+  const [otherShell, setOtherShell] = useState(
+    () => draft.shell !== '' && !shells.some((shell) => shell.path === draft.shell)
+  )
 
   const update = (field: keyof TerminalProfileDraft, value: string): void => {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -229,8 +232,13 @@ function TerminalProfileDialog({
               Shell
             </Label>
             <Select
-              value={draft.shell || DEFAULT_SHELL_VALUE}
-              onValueChange={(value) => update('shell', value === DEFAULT_SHELL_VALUE ? '' : value)}
+              value={otherShell ? OTHER_SHELL_VALUE : draft.shell || DEFAULT_SHELL_VALUE}
+              onValueChange={(value) => {
+                setOtherShell(value === OTHER_SHELL_VALUE)
+                if (value !== OTHER_SHELL_VALUE) {
+                  update('shell', value === DEFAULT_SHELL_VALUE ? '' : value)
+                }
+              }}
             >
               <SelectTrigger id={fieldId('shell')} className="h-9">
                 <SelectValue />
@@ -242,12 +250,24 @@ function TerminalProfileDialog({
                     {shell.displayName}
                   </SelectItem>
                 ))}
-                {draft.shell && !shellIsListed && (
-                  <SelectItem value={draft.shell}>{draft.shell}</SelectItem>
-                )}
+                <SelectItem value={OTHER_SHELL_VALUE}>Other path or name</SelectItem>
               </SelectContent>
             </Select>
           </div>
+          {otherShell && (
+            <div className="space-y-1.5">
+              <Label htmlFor={`${fieldId('shell')}-path`} className="text-xs">
+                Shell path or name
+              </Label>
+              <Input
+                id={`${fieldId('shell')}-path`}
+                value={draft.shell}
+                onChange={(event) => update('shell', event.target.value)}
+                placeholder="e.g. nu or C:\tools\nu.exe"
+                className="h-9 font-mono"
+              />
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label htmlFor={fieldId('args')} className="text-xs">
               Arguments
