@@ -2518,9 +2518,13 @@ describe('switchAgent (story 3)', () => {
         seq: i + 1
       }))
 
-    async function reopenChainAndScrollBack(aRows: Row[], cRows: Row[]): Promise<void> {
+    async function reopenChainAndScrollBack(
+      aRows: Row[],
+      cRows: Row[],
+      bRows: Row[] = band('b', 'B', 60)
+    ): Promise<void> {
       seedHistory('s-a', 'agent-a', 'cfg-a', aRows, [marker(61, 'cfg-b', 's-b')])
-      seedHistory('s-b', 'agent-b', 'cfg-b', band('b', 'B', 60), [marker(61, 'cfg-c', 's-c')])
+      seedHistory('s-b', 'agent-b', 'cfg-b', bRows, [marker(61, 'cfg-c', 's-c')])
       seedHistory('s-c', 'agent-c', 'cfg-c', cRows)
       useAcpStore.setState({
         agentConfigs: [
@@ -2567,6 +2571,21 @@ describe('switchAgent (story 3)', () => {
 
       expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
       expect(texts('s-c').slice(0, 2)).toEqual(['continue', 'A 2'])
+    })
+
+    it('SCROLL_BACK_REPEATED_IN_BAND: a band row equal to a later row of the same band still pages back', async () => {
+      const bRows = band('b', 'B', 60).map((r) =>
+        r.id === 'b3' || r.id === 'b29' ? { ...r, text: 'continue' } : r
+      )
+
+      await reopenChainAndScrollBack(
+        band('a', 'A', 60),
+        band('c', 'C', MAX_LIVE_WINDOW_MESSAGES),
+        bRows
+      )
+
+      expect(texts('s-c')).toHaveLength(60 + 60 + MAX_LIVE_WINDOW_MESSAGES)
+      expect(texts('s-c').slice(60, 64)).toEqual(['B 1', 'B 2', 'continue', 'B 4'])
     })
 
     it('MARKER_FAIL_RESPLICE: a reinstall after a failed marker write still renders one separator between the bands', async () => {
