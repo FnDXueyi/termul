@@ -145,8 +145,7 @@ second theirs
 
 #[test]
 fn test_analyze_lockfile_conflict() {
-    let suggestions =
-        WorktreeManager::analyze_conflict_and_suggest("/test/worktree", "package-lock.json", true);
+    let suggestions = WorktreeManager::analyze_conflict_and_suggest("", true);
 
     assert!(!suggestions.is_empty());
     assert!(suggestions.iter().any(|s| s.strategy == "accept-theirs"));
