@@ -422,6 +422,13 @@ pub(crate) async fn create_branch_ledgered(
         print,
         no_entity(),
         async move {
+            let cwd = match validate_project_path(&cwd) {
+                Ok(validated) => match validated.to_str() {
+                    Some(validated) => validated.to_string(),
+                    None => return DomainRan::Released("Path contains invalid UTF-8".to_string()),
+                },
+                Err(invalid) => return DomainRan::Released(invalid),
+            };
             // The guard runs INSIDE the ledgered effect: a settled outcome
             // replays before it, and a refusal is released (not recorded) so a
             // retry after the turn ends runs.
@@ -709,16 +716,7 @@ pub(crate) async fn branch_switch_guarded(
         .to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let output = crate::trackers::git_tracker::GitTracker::run_git_command(
-            &validated_str,
-            &["checkout", &name],
-        )
-        .ok_or_else(|| "Failed to run git checkout".to_string())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-        }
+        crate::web::git_api::run_simple_checkout(&validated_str, &name)
     })
     .await
     .map_err(|e| format!("git branch switch task failed: {e}"))?

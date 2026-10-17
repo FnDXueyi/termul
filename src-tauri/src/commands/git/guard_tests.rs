@@ -69,6 +69,39 @@ async fn checkout_and_switch_are_refused_mid_turn_and_allowed_when_idle() {
 }
 
 #[tokio::test]
+async fn branch_switch_refuses_pathspec_and_option_shaped_names_without_touching_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(repo) = repo(&dir) else { return };
+    let cwd = repo.to_string_lossy().to_string();
+    std::fs::write(repo.join("a.txt"), "committed
+").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-qm", "add a"]);
+    std::fs::write(repo.join("a.txt"), "precious-local-edit
+").unwrap();
+    let before = head(&repo);
+    let idle = manager_with_session(&repo, false);
+
+    for name in [".", "-f", "a.txt", ""] {
+        let error = branch_switch_guarded(&idle, cwd.clone(), name.into())
+            .await
+            .expect_err(&format!("{name:?} is not a branch"));
+        assert!(error.contains("not a branch"), "{name:?}: {error}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "precious-local-edit
+",
+            "{name:?} must not discard the local edit"
+        );
+        assert_eq!(head(&repo), before);
+    }
+
+    git(&repo, &["checkout", "--", "a.txt"]);
+    branch_switch_guarded(&idle, cwd, "feature".into()).await.expect("a real branch still switches");
+    assert_eq!(head(&repo), "feature");
+}
+
+#[tokio::test]
 async fn create_branch_guards_only_a_start_ref_other_than_head() {
     let dir = tempfile::tempdir().unwrap();
     let Some(repo) = repo(&dir) else { return };
@@ -96,6 +129,29 @@ async fn create_branch_guards_only_a_start_ref_other_than_head() {
             .await
             .expect("branching from HEAD leaves the tree alone");
     }
+}
+
+#[tokio::test]
+async fn create_branch_rejects_an_invalid_cwd_before_running_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+    let ledger = Arc::new(crate::web::command_ledger::CommandLedger::new(
+        std::time::Duration::from_secs(600),
+    ));
+
+    let error = create_branch_ledgered(
+        &ledger,
+        Arc::new(AcpManager::new(vec![])),
+        missing.to_string_lossy().to_string(),
+        "topic".into(),
+        None,
+        Some("cmd-invalid-cwd".into()),
+    )
+    .await
+    .expect_err("a cwd that does not resolve is refused");
+
+    assert!(error.starts_with("Invalid or inaccessible path"), "{error}");
+    assert_eq!(ledger.counts(), (0, 0, 0), "a refusal must not be recorded");
 }
 
 /// A refusal is released, not recorded: the same `commandId` runs once the turn
