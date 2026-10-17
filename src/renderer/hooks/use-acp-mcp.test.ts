@@ -180,6 +180,22 @@ describe('useAcpMcp — auto-probe pass', () => {
     expect(mocks.probeMcpServer).toHaveBeenCalledTimes(2)
   })
 
+  it('probes a server re-added under a deleted server\x27s id', async () => {
+    state.mcpServers = [stdioServer('a'), stdioServer('b')]
+    state.mcpServersLoaded = true
+    const { rerender } = renderHook(() => useAcpMcp())
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(mocks.probeMcpServer.mock.calls).toEqual([['a'], ['b']])
+
+    state.mcpServers = [stdioServer('b')]
+    rerender()
+    state.mcpServers = [stdioServer('a'), stdioServer('b')]
+    rerender()
+    await vi.advanceTimersByTimeAsync(2_000)
+
+    expect(mocks.probeMcpServer.mock.calls).toEqual([['a'], ['b'], ['a']])
+  })
+
   it('logs the boundary line when the pass runs and stays silent when idle', async () => {
     state.mcpServers = [stdioServer('a')]
     state.mcpServersLoaded = true
