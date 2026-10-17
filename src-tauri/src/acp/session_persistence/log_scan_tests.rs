@@ -264,3 +264,80 @@ impl SeqAuthority for NextSeq {
         floor + 1
     }
 }
+
+fn tool_call(seq: u64, output_len: usize) -> PersistedEventRecord {
+    event(
+        seq,
+        "tool_call",
+        json!({"sessionId": "session-1", "toolCallId": "call-1", "rawOutput": "x".repeat(output_len)}),
+    )
+}
+
+fn append_line(path: &Path, record: &PersistedEventRecord, terminated: bool) {
+    let mut bytes = serde_json::to_vec(record).unwrap();
+    if terminated {
+        bytes.push(b'\n');
+    }
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn recover_marker_follows_a_tool_call_line_longer_than_the_tail_probe_cap() {
+    let root = temp_dir("marker-huge-tool-call");
+    let persistence = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let messages = session_file(&persistence, MESSAGES_FILE);
+    let tool_calls = session_file(&persistence, TOOL_CALLS_FILE);
+    let metadata_path = session_file(&persistence, METADATA_FILE);
+    drop(persistence);
+    append_line(&messages, &prompt(1, "turn-1"), true);
+    append_line(&tool_calls, &tool_call(2, 5 * 1024 * 1024), true);
+    edit_metadata(&metadata_path, |fields| {
+        fields.insert("lastSeq".to_string(), json!(1));
+    });
+
+    let reopened = SessionPersistence::open(root.join("store")).await.unwrap();
+    assert_eq!(
+        (
+            log_records(&messages),
+            reopened.last_seq("session-1").unwrap()
+        ),
+        (
+            vec![
+                (1, "user_prompt".to_string()),
+                (3, "prompt_complete".to_string()),
+            ],
+            3
+        )
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn shutdown_marker_follows_a_tool_call_the_bookkeeping_missed() {
+    let root = temp_dir("marker-tool-call-floor");
+    let persistence = registered(&root).await;
+    persistence.shutdown().await.unwrap();
+    let store = root.join("store");
+    let messages = session_file(&persistence, MESSAGES_FILE);
+    let tool_calls = session_file(&persistence, TOOL_CALLS_FILE);
+    let shared = Arc::new(Mutex::new(persistence.metadata("session-1").unwrap()));
+    let mut tails = TailState::default();
+    append_record(&store, &shared, &mut tails, prompt(1, "turn-1")).unwrap();
+    append_line(&tool_calls, &tool_call(2, 16), false);
+
+    writer::append_interrupted_marker_if_open(&store, &shared, &mut tails, Some(&NextSeq));
+    assert_eq!(
+        log_records(&messages),
+        vec![
+            (1, "user_prompt".to_string()),
+            (3, "prompt_complete".to_string()),
+        ]
+    );
+    let _ = fs::remove_dir_all(root);
+}
