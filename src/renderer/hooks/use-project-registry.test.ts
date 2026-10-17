@@ -392,12 +392,10 @@ describe('useProjectRegistry', () => {
       h.heldWrites = []
       act(() =>
         useProjectStore.setState({
-          projects: useProjectStore
-            .getState()
-            .projects.map((p) => ({
-              ...p,
-              envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
-            }))
+          projects: useProjectStore.getState().projects.map((p) => ({
+            ...p,
+            envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+          }))
         })
       )
       await vi.waitFor(() => expect(persistenceApi.writeDebounced).toHaveBeenCalledTimes(2))
