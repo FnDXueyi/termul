@@ -594,6 +594,7 @@ impl AcpCatalogService {
             snapshot_fetch: fetcher,
             snapshot_fetch_gate: Mutex::new(None),
             opencode_probe: Mutex::new(None),
+            forced_snapshot_fetch: ForcedSnapshotFetch::default(),
         })
     }
 }
