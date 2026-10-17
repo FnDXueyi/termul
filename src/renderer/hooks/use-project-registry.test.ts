@@ -69,6 +69,7 @@ import { persistenceApi, secureStorageApi } from '@/lib/api'
 import { _resetProjectPrefsForTests } from '@/lib/project-prefs'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
+import { CLOSE_WRITE_TIMEOUT_MS, runCloseWriters } from '@/lib/close-flush'
 import { PREFS_SAVE_RETRY_MS, useProjectRegistry } from './use-project-registry'
 
 function summary(id: string, extra: Partial<ProjectSummary> = {}): ProjectSummary {
@@ -414,6 +415,99 @@ describe('useProjectRegistry', () => {
 
       await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
       expect(savedGroupNames()).toEqual(['Created while the older save was in flight'])
+    })
+
+    function failNextWrites(count: number): void {
+      for (let i = 0; i < count; i++) {
+        vi.mocked(persistenceApi.writeDebounced).mockResolvedValueOnce({
+          success: false,
+          code: 'WS_ERROR',
+          error: 'WebSocket closed'
+        })
+      }
+    }
+
+    it('retries a newer failed save within the first ladder step while a 30 s retry is pending', async () => {
+      await mountWithOneProjectSaved()
+      vi.useFakeTimers()
+      failNextWrites(4)
+      act(() => useProjectStore.getState().addGroup('Pending'))
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[1])
+      act(() => useProjectStore.getState().addGroup('Newer'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(PREFS_SAVE_RETRY_MS[0])
+      expect(savedGroupNames()).toEqual(['Pending', 'Newer'])
+    })
+
+    it('writes a pending retry at once when the page hides', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on pagehide'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(savedGroupNames()).toEqual(['Saved on pagehide'])
+    })
+
+    it('writes a pending retry at once when the tab turns hidden', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on hide'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      visibility.mockRestore()
+      expect(savedGroupNames()).toEqual(['Saved on hide'])
+    })
+
+    it('writes a save that gave up retrying when the page hides', async () => {
+      await mountWithOneProjectSaved()
+      vi.useFakeTimers()
+      failNextWrites(4)
+      act(() => useProjectStore.getState().addGroup('Gave up'))
+      for (const delay of PREFS_SAVE_RETRY_MS) await vi.advanceTimersByTimeAsync(delay)
+      expect(savedGroupNames()).toEqual([])
+
+      window.dispatchEvent(new Event('pagehide'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(savedGroupNames()).toEqual(['Gave up'])
+    })
+
+    it('writes a pending retry before the window closes', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Saved on quit'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+
+      await runCloseWriters()
+      expect(savedGroupNames()).toEqual(['Saved on quit'])
+    })
+
+    it('closes after the time limit when the close-time prefs write hangs', async () => {
+      await mountWithOneProjectSaved()
+      await addGroupsOverHeldWrites(['Never lands'])
+      vi.useFakeTimers()
+      await failHeldWritesTogether()
+      vi.mocked(persistenceApi.write).mockImplementationOnce(() => new Promise(() => {}))
+      const closed = vi.fn()
+
+      void runCloseWriters().then(closed)
+      await vi.advanceTimersByTimeAsync(CLOSE_WRITE_TIMEOUT_MS - 1)
+      expect(closed).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(closed).toHaveBeenCalledOnce()
+    })
+
+    it('writes nothing at close when no save is pending', async () => {
+      await mountWithOneProjectSaved()
+
+      await runCloseWriters()
+      expect(persistenceApi.write).not.toHaveBeenCalled()
     })
 
     it('stops retrying a failed save once the hook is unmounted', async () => {
