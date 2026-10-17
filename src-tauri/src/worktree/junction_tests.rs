@@ -1,5 +1,6 @@
-use super::junction::create_junction;
+use super::junction::{create_junction, nt_path};
 use std::os::windows::fs::MetadataExt as _;
+use std::path::Path;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -40,4 +41,13 @@ fn junction_to_a_missing_source_leaves_no_target_behind() {
 
     assert!(!target.exists());
     assert!(std::fs::symlink_metadata(&target).is_err());
+}
+
+#[test]
+fn nt_path_maps_a_local_verbatim_path_and_refuses_a_network_path() {
+    let local = nt_path(Path::new(r"\\?\C:\work\dir")).unwrap();
+    assert_eq!(String::from_utf16(&local).unwrap(), r"\??\C:\work\dir");
+
+    let error = nt_path(Path::new(r"\\?\UNC\server\share\dir")).unwrap_err();
+    assert!(error.contains("network share"), "{error}");
 }

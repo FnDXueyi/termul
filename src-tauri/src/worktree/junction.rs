@@ -47,10 +47,18 @@ pub(super) fn create_junction(source: &Path, target: &Path) -> Result<(), String
     Ok(())
 }
 
-/// The NT object-manager form of a canonical path: `\\?\C:\dir` becomes
-/// `\??\C:\dir`, and `\\?\UNC\host\share` becomes `\??\UNC\host\share`.
-fn nt_path(canonical: &Path) -> Result<Vec<u16>, String> {
+/// The NT object-manager form of a canonical local path: `\\?\C:\dir` becomes
+/// `\??\C:\dir`. A junction cannot point at a network path, so a UNC path,
+/// which is also what a mapped network drive canonicalizes to, is refused.
+pub(super) fn nt_path(canonical: &Path) -> Result<Vec<u16>, String> {
     let wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+    let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+    if wide.starts_with(&unc) {
+        return Err(format!(
+            "{} is on a network share, and a junction can only point to a local volume",
+            canonical.display()
+        ));
+    }
     let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
     let rest = wide
         .strip_prefix(verbatim.as_slice())
