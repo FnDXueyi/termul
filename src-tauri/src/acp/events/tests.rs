@@ -129,6 +129,7 @@ fn prompt_complete_serializes_stop_reason_snake_case() {
         session_id: SessionId::new("s"),
         stop_reason: StopReason::EndTurn.into(),
         turn_id: None,
+        error: None,
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["stopReason"], "end_turn");
@@ -204,6 +205,7 @@ fn prompt_complete_serializes_turn_id_when_set() {
         session_id: SessionId::new("s"),
         stop_reason: StopReason::EndTurn.into(),
         turn_id: Some("turn-123".to_string()),
+        error: None,
     };
     let value = serde_json::to_value(&event).unwrap();
     assert_eq!(value["turnId"], "turn-123");

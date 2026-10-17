@@ -15,6 +15,7 @@ import {
   type ContentBlock,
   type McpServer,
   type PlanEntry,
+  parseAcpErrorDetail,
   type SessionConfigOption,
   type SessionConfigOptionEntry,
   type SessionId,
@@ -26,12 +27,17 @@ import {
 import {
   type AgentSwitchRecord,
   maxPayloadSeq,
+  type PersistedTurnError,
   type SessionIndexEntry
 } from '@/lib/acp-history-persistence'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { agentConfigIdentityKey } from '@/lib/agents/acp-config-identity'
 import { type AgentAuthPolicy, agentPolicyForConfigId } from '@/lib/agents/acp-registry'
-import { classifySetupError, isAgentAuthRequiredError } from '@/lib/agents/acp-spawn-errors'
+import {
+  classifySetupError,
+  describeProviderFailure,
+  isAgentAuthRequiredError
+} from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import {
   isFolderTokenPath,
@@ -487,14 +493,46 @@ export function finalizeStreaming(
   }
 }
 
-/** Mark a reopened history session live after a successful load/resume IPC call. */
+/**
+ * Mark a reopened history session live after a successful load/resume IPC
+ * call. `keepLastError` keeps the failed-turn error the reopen restored from
+ * the payload instead of clearing it.
+ */
 export function withSessionActive(
   sessions: Record<SessionId, AcpSession>,
-  sessionId: SessionId
+  sessionId: SessionId,
+  keepLastError = false
 ): Record<SessionId, AcpSession> {
   const session = sessions[sessionId]
   if (!session) return sessions
-  return { ...sessions, [sessionId]: { ...session, status: 'active', ...plainLastError(null) } }
+  return {
+    ...sessions,
+    [sessionId]: {
+      ...session,
+      status: 'active',
+      ...(keepLastError ? {} : plainLastError(null))
+    }
+  }
+}
+
+/**
+ * The banner fields for the last turn's failure recorded in a session
+ * payload. Mirrors what the live `agent_error` handler writes: the provider
+ * wording when the host classified one, else the message, falling back to the
+ * stop-reason note when the host kept no detail.
+ */
+export function lastErrorFromPersistedTurn(turn: PersistedTurnError | undefined): LastErrorFields {
+  if (!turn) return plainLastError(null)
+  const message = turn.message || noteForStopReason(turn.stopReason)
+  if (message === null) return plainLastError(null)
+  const detail = parseAcpErrorDetail(turn)
+  return {
+    lastError: detail.providerCode
+      ? describeProviderFailure(detail.providerCode, message)
+      : message,
+    lastErrorCode: detail.code ?? null,
+    lastErrorData: detail.data
+  }
 }
 
 export function plainLastError(message: string | null): LastErrorFields {

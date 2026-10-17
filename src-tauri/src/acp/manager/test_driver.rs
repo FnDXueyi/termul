@@ -189,6 +189,7 @@ impl FakeDriver {
                     &session_id,
                     turn_id,
                     events::TurnFailureStop::Error.into(),
+                    None,
                 );
             }
             let _ = accepted.send(Err(error.clone()));

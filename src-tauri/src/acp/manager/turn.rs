@@ -23,12 +23,14 @@ pub(super) fn emit_turn_terminator(
     session_id: &SessionId,
     turn_id: Option<String>,
     stop_reason: events::PromptStopReason,
+    error: Option<events::TurnErrorSummary>,
 ) {
     let event = PromptCompleteEvent {
         agent_id: agent_id.clone(),
         session_id: session_id.clone(),
         stop_reason,
         turn_id,
+        error,
     };
     events::fan_out(
         sinks,
@@ -50,8 +52,8 @@ pub(super) fn emit_turn_outcome(
     turn_id: Option<String>,
     outcome: &Result<StopReason, events::AcpErrorDetail>,
 ) {
-    let stop_reason = match outcome {
-        Ok(stop_reason) => events::PromptStopReason::from(*stop_reason),
+    let (stop_reason, error) = match outcome {
+        Ok(stop_reason) => (events::PromptStopReason::from(*stop_reason), None),
         Err(detail) => {
             let event = detail
                 .clone()
@@ -62,10 +64,13 @@ pub(super) fn emit_turn_outcome(
                 events::EVENT_AGENT_ERROR,
                 &event,
             );
-            detail.turn_stop().into()
+            (
+                detail.turn_stop().into(),
+                Some(events::TurnErrorSummary::from(&event)),
+            )
         }
     };
-    emit_turn_terminator(sinks, agent_id, session_id, turn_id, stop_reason);
+    emit_turn_terminator(sinks, agent_id, session_id, turn_id, stop_reason, error);
 }
 
 /// A turn whose reply failed because the agent transport closed while the
@@ -104,6 +109,7 @@ pub(super) fn emit_crash_terminators(
             &SessionId::new(session.clone()),
             turn_id.clone(),
             events::TurnFailureStop::Crashed.into(),
+            None,
         );
     }
     active.len()

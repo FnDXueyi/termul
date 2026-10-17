@@ -66,6 +66,7 @@ import {
   extractTermulPlanFenceJson,
   finalizeStreaming,
   isResumeFailureError,
+  lastErrorFromPersistedTurn,
   mergeSessionIndexEntries,
   normalizeUserMessages,
   openTurnPromptSeq,
@@ -773,6 +774,10 @@ async function openHistorySessionInner(
   // bubble marks a DEAD turn — no agent will ever send its `prompt_complete`,
   // so installing it as live would strand the spinner forever.
   const turnLive = persistedTurnIsLive(meta) || (meta.status === 'active' && openTurn !== null)
+  // The last turn's failure outlives a reload: the error banner explains why
+  // the chat ends on an unanswered prompt.
+  const restoredTurnError = lastErrorFromPersistedTurn(meta.lastTurnError)
+  const keepRestoredError = restoredTurnError.lastError !== null
   set((s) => ({
     sessions: {
       ...s.sessions,
@@ -791,7 +796,7 @@ async function openHistorySessionInner(
         modes: existingControls?.modes ?? null,
         models: existingControls?.models ?? null,
         configOptions: existingControls?.configOptions ?? [],
-        lastError: null,
+        ...restoredTurnError,
         createdAt: meta.createdAt,
         replaying: null,
         worktreePath: meta.worktreePath,
@@ -1147,7 +1152,8 @@ async function openHistorySessionInner(
               ...s.sessions,
               [id]: clearingPending ? { ...session, replaying: null } : session
             },
-            id
+            id,
+            keepRestoredError
           )
         }
       })
@@ -1189,7 +1195,7 @@ async function openHistorySessionInner(
         return
       }
       mergeReopenOutcomeIfUnchanged(set, id, reopenGeneration, reopenBaseline, outcome)
-      set((s) => ({ sessions: withSessionActive(s.sessions, id) }))
+      set((s) => ({ sessions: withSessionActive(s.sessions, id, keepRestoredError) }))
       scheduleReplayEnd(set, id, reopenGeneration)
       return
     } catch (err) {
@@ -1241,7 +1247,8 @@ async function openHistorySessionInner(
               ...s.sessions,
               [id]: clearingPending ? { ...session, replaying: null } : session
             },
-            id
+            id,
+            keepRestoredError
           )
         }
       })

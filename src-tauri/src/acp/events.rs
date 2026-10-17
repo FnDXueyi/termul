@@ -701,6 +701,35 @@ pub struct PromptCompleteEvent {
     /// desktop payloads when unset).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// The failure behind an `error` or `timeout` terminator, so the durable
+    /// record can rebuild the error banner after a reload. Absent for every
+    /// terminator that has no error detail of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnErrorSummary>,
+}
+
+/// The `acp:agent_error` fields a failed turn's terminator keeps.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnErrorSummary {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<&'static str>,
+}
+
+impl From<&AgentErrorEvent> for TurnErrorSummary {
+    fn from(event: &AgentErrorEvent) -> Self {
+        Self {
+            message: event.message.clone(),
+            code: event.code,
+            data: event.data.clone(),
+            provider_code: event.provider_code,
+        }
+    }
 }
 
 /// An error flattened for the manager's `Err(String)` / event boundaries while

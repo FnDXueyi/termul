@@ -2630,6 +2630,11 @@ fn failed_turn_emits_agent_error_then_one_terminator() {
     assert_eq!(done[0].1["turnId"], "t1");
     assert_eq!(done[1].1["stopReason"], "error");
     assert!(done[1].1.get("turnId").is_none());
+    assert_eq!(
+        done[0].1["error"]["message"],
+        "turn idle timeout: no agent activity for 5s"
+    );
+    assert_eq!(done[1].1["error"]["message"], "rpc failed");
 }
 
 /// Connection teardown with active turns: one `crashed` terminator per
