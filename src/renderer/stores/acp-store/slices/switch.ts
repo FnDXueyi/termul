@@ -260,7 +260,9 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
         })
         return
       }
-      if (toConfigId === oldConfigId) {
+      // A stopped chat has no owner: a same-config switch continues it in a new
+      // session (a Claude account that cannot resume the old one, #1303).
+      if (toConfigId === oldConfigId && oldSession.status !== 'closed') {
         setSwitchRejection(set, sessionId, 'that agent already owns this chat')
         clearSwitching()
         return
@@ -571,8 +573,9 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
         }
 
         // 6. Detach the old agent's canonical reuse key (kill stays the idle
-        //    reaper's decision — a live old session keeps its process).
-        if (oldConfigId) {
+        //    reaper's decision — a live old session keeps its process). A
+        //    same-config switch can land on the old session's own agent.
+        if (oldConfigId && oldSession.agentId !== newAgentId) {
           detachOldAgentForSwitch(set, oldConfigId, cwd, oldSession.agentId)
         }
 
@@ -621,7 +624,7 @@ export const createSwitchSlice: StateCreator<AcpState, [], [], SwitchSliceState>
               }
             }
           })
-          if (oldConfigId) {
+          if (oldConfigId && oldSession.agentId !== newAgentId) {
             detachOldAgentForSwitch(set, oldConfigId, cwd, oldSession.agentId)
           }
           set((s) => ({

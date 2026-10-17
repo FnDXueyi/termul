@@ -4,12 +4,20 @@
  * agent process (which the host starts with the new Account) and resumes the
  * same session. Idle chats restart at once; busy chats after their turn ends.
  * A chat stopped by a usage limit can cancel its held turn and send the last
- * prompt again on the new Account.
+ * prompt again on the new Account. When the new Account cannot resume the
+ * session, the chat continues in a new session with a summary handoff.
  */
 
+import { toast } from 'sonner'
+import { resumeMissesSession } from '@/lib/acp-resume-policy'
 import { claudeAccountsApi } from '@/lib/claude-accounts-api'
 import { logFrontendError } from '@/lib/log-api'
-import { type AcpState, switchBlockedReason, useAcpStore } from '@/stores/acp-store'
+import {
+  type AcpState,
+  lastOwnUserPromptBlocks,
+  switchBlockedReason,
+  useAcpStore
+} from '@/stores/acp-store'
 import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import { getAgentChatSessionIdsInAllTrees, useWorkspaceStore } from '@/stores/workspace-store'
 
@@ -80,6 +88,29 @@ function waitUntilIdle(sessionId: string): Promise<boolean> {
   })
 }
 
+/**
+ * The new Account has no copy of the session (on Windows its config directory
+ * may not share `projects`): continue the chat in a new session that starts
+ * from a summary, the same handoff as an agent switch (ADR-0004 fallback).
+ */
+async function continueInNewSession(sessionId: string, resend: boolean): Promise<void> {
+  void logFrontendError({
+    level: 'warn',
+    source: 'claudeAccountSwitch.handoff',
+    message: `The account cannot resume chat ${sessionId}; continuing in a new session (resend=${resend})`
+  })
+  toast.info('This account could not resume the chat', {
+    description: 'The chat continues in a new session that starts from a summary.'
+  })
+  const store = useAcpStore.getState()
+  const blocks = resend ? lastOwnUserPromptBlocks(store.messages[sessionId] ?? []) : null
+  await store.switchAgent(
+    sessionId,
+    CLAUDE_AGENT_CONFIG_ID,
+    blocks ? { wireBlocks: blocks, displayBlocks: blocks } : undefined
+  )
+}
+
 /** Chats with a restart already running or waiting, so a second switch does not stack. */
 const restarting = new Set<string>()
 
@@ -118,7 +149,14 @@ export async function restartClaudeSession(
         .getState()
         .killAgent(oldAgentId)
         .catch(() => undefined)
-    await useAcpStore.getState().retryCrashedSession(sessionId, { resend: options.resend ?? false })
+    const resend = options.resend ?? false
+    try {
+      await useAcpStore.getState().retryCrashedSession(sessionId, { resend })
+    } catch (error) {
+      const stopped = useAcpStore.getState().sessions[sessionId]?.status === 'closed'
+      if (!stopped || !resumeMissesSession(error)) throw error
+      await continueInNewSession(sessionId, resend)
+    }
     useAcpStore.setState((s) => {
       const usage = s.sessionUsage[sessionId]
       if (!usage?.rateLimit) return {}

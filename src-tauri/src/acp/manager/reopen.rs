@@ -76,16 +76,28 @@ impl IntoSessionReopenOutcome for WithLegacyModels<ResumeSessionResponse> {
 /// generic failure. The renderer prefix-matches this string (stories 5/6).
 pub const ACP_AUTH_REQUIRED_PREFIX: &str = "ACP_AUTH_REQUIRED";
 
+/// Stable prefix tagging an agent-side `ErrorCode::ResourceNotFound` (-32002)
+/// failure, the agent's answer to a reopen of a session it does not have
+/// (issue #1303: a Claude account that never saw the transcript).
+pub const ACP_RESOURCE_NOT_FOUND_PREFIX: &str = "ACP_RESOURCE_NOT_FOUND";
+
 /// Wire-string for an agent error crossing the manager's `Err(String)`
 /// boundary: `ErrorCode::AuthRequired` gets the [`ACP_AUTH_REQUIRED_PREFIX`]
+/// tag, `ErrorCode::ResourceNotFound` the [`ACP_RESOURCE_NOT_FOUND_PREFIX`]
 /// tag, a recognized provider failure gets its `ACP_PROVIDER_*` tag
 /// ([`tag_provider_error`](crate::acp::provider_errors::tag_provider_error));
 /// every other error stringifies verbatim.
 pub(super) fn acp_err_wire_string(error: agent_client_protocol::Error) -> String {
-    if error.code == agent_client_protocol::ErrorCode::AuthRequired {
-        format!("{ACP_AUTH_REQUIRED_PREFIX}: {error}")
-    } else {
-        crate::acp::provider_errors::tag_provider_error(&events::AcpErrorDetail::from(&error))
+    match error.code {
+        agent_client_protocol::ErrorCode::AuthRequired => {
+            format!("{ACP_AUTH_REQUIRED_PREFIX}: {error}")
+        }
+        agent_client_protocol::ErrorCode::ResourceNotFound => {
+            format!("{ACP_RESOURCE_NOT_FOUND_PREFIX}: {error}")
+        }
+        _ => {
+            crate::acp::provider_errors::tag_provider_error(&events::AcpErrorDetail::from(&error))
+        }
     }
 }
 

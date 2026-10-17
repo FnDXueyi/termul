@@ -1743,6 +1743,20 @@ export function resolveSwitchRedirect(
 export const SWITCH_SPLICE_ID_PREFIX = 'switch-splice:'
 
 /**
+ * The display blocks of the chat's last own user prompt, for a re-send.
+ * `switch-splice:` records are projected pre-switch history: re-sending one
+ * would send the OLD agent's prompt to the new session.
+ */
+export function lastOwnUserPromptBlocks(messages: ChatMessage[]): ContentBlock[] | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && !messages[i].id.startsWith(SWITCH_SPLICE_ID_PREFIX)) {
+      return messages[i].blocks
+    }
+  }
+  return null
+}
+
+/**
  * Story 3 (CAP-7): splice a session's installed pre-switch transcript into the
  * redirect target's transcript under ONE consistent namespace.
  * Seq/id collision fix: the old session's durable records carry per-session

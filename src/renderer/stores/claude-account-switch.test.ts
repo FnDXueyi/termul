@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { acpApi } from '@/lib/acp-api'
+import { AcpTransportError } from '@/lib/acp-transport'
 import { logFrontendError } from '@/lib/log-api'
 import { agentReuseKey } from '@/stores/acp-reuse-keys'
 import {
@@ -12,6 +13,7 @@ import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
 import {
   buildProjectWorkspace,
   createProjectWorkspace,
+  getAgentChatSessionIdsInAllTrees,
   useWorkspaceStore
 } from '@/stores/workspace-store'
 import {
@@ -25,6 +27,10 @@ import {
 const { api } = vi.hoisted(() => ({ api: { setProjectAccount: vi.fn() } }))
 vi.mock('@/lib/claude-accounts-api', () => ({ claudeAccountsApi: api }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
+vi.mock('@/lib/acp-api', async (importActual) => ({
+  ...(await importActual<typeof import('@/lib/acp-api')>()),
+  acpRecordAgentSwitch: vi.fn(async () => undefined)
+}))
 
 const realKillAgent = useAcpStore.getState().killAgent
 const killAgent = vi.fn()
@@ -274,5 +280,104 @@ describe('claude account switch with chats that have no open tab', () => {
     useAgentChatLifetimeStore.getState().retainProjectChats('office', ['bg'])
     await applyProjectClaudeAccount('office')
     expect(retryCrashedSession).toHaveBeenCalledWith('bg', { resend: false })
+  })
+})
+
+describe('claude account switch when the new account cannot resume the session', () => {
+  const liveKey = agentReuseKey(CLAUDE_AGENT_CONFIG_ID, '/work', 'office')
+
+  function failReopenWith(error: Error): void {
+    retryCrashedSession.mockImplementation(async (id: string) => {
+      useAcpStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          [id]: {
+            ...s.sessions[id],
+            agentId: 'agent-new',
+            status: 'closed',
+            lastError: `Resume failed: ${String(error)}`
+          }
+        }
+      }))
+      throw error
+    })
+  }
+
+  beforeEach(() => {
+    vi.spyOn(acpApi, 'newSession').mockResolvedValue({ sessionId: 's-new' } as never)
+    vi.spyOn(acpApi, 'sendPrompt').mockResolvedValue('end_turn' as never)
+    vi.spyOn(acpApi, 'sendPromptBlocks').mockResolvedValue('end_turn' as never)
+    useAcpStore.setState({
+      agentConfigs: [
+        { id: CLAUDE_AGENT_CONFIG_ID, name: 'Claude Agent', command: 'claude', args: [], env: {} }
+      ],
+      configToLiveAgent: { [liveKey]: 'agent-new' },
+      agents: { 'agent-new': { id: 'agent-new', capabilities: {} } as never },
+      agentStatus: { 'agent-new': 'connected' },
+      messages: {
+        c1: [
+          {
+            id: 'm1',
+            role: 'user',
+            blocks: [{ type: 'text', text: 'fix the login bug' }],
+            streaming: false,
+            timestamp: 1,
+            seq: 1
+          },
+          {
+            id: 'm2',
+            role: 'agent',
+            blocks: [{ type: 'text', text: 'Fixed in auth.ts' }],
+            streaming: false,
+            timestamp: 2,
+            seq: 2
+          }
+        ]
+      } as never
+    })
+    openChatTabs(['c1'])
+  })
+
+  it('continues the chat in a new session that keeps the transcript and gets a summary', async () => {
+    failReopenWith(new AcpTransportError('not_found', 'Resource not found: {"uri": "c1"}'))
+
+    await restartClaudeSession('c1')
+
+    const state = useAcpStore.getState()
+    expect([...getAgentChatSessionIdsInAllTrees(useWorkspaceStore.getState())]).toEqual(['s-new'])
+    expect(state.messages['s-new']?.map((m) => m.id)).toEqual([
+      'switch-splice:c1:m1',
+      'switch-splice:c1:m2'
+    ])
+    expect(acpApi.sendPrompt).toHaveBeenCalledTimes(1)
+    const [agentId, sessionId, wire] = vi.mocked(acpApi.sendPrompt).mock.calls[0]
+    expect([agentId, sessionId]).toEqual(['agent-new', 's-new'])
+    expect(wire).toContain('fix the login bug')
+    expect(wire).toContain('Fixed in auth.ts')
+    expect(state.configToLiveAgent[liveKey]).toBe('agent-new')
+  })
+
+  it('sends the held prompt again in the new session when continuing after a limit', async () => {
+    failReopenWith(new AcpTransportError('not_found', 'Resource not found: {"uri": "c1"}'))
+
+    await restartClaudeSession('c1', { resend: true })
+
+    expect(retryCrashedSession).toHaveBeenCalledWith('c1', { resend: true })
+    const [, sessionId, wire, , display] = vi.mocked(acpApi.sendPromptBlocks).mock.calls[0]
+    expect(sessionId).toBe('s-new')
+    expect(wire.slice(1)).toEqual([{ type: 'text', text: 'fix the login bug' }])
+    expect(display).toEqual([{ type: 'text', text: 'fix the login bug' }])
+  })
+
+  it('keeps the chat stopped when the reopen fails for another reason', async () => {
+    failReopenWith(new AcpTransportError('timeout', 'session/load timed out after 30s'))
+
+    await restartClaudeSession('c1')
+
+    expect([...getAgentChatSessionIdsInAllTrees(useWorkspaceStore.getState())]).toEqual(['c1'])
+    expect(acpApi.newSession).not.toHaveBeenCalled()
+    expect(useAcpStore.getState().sessions.c1?.lastError).toBe(
+      'Resume failed: AcpTransportError: session/load timed out after 30s'
+    )
   })
 })

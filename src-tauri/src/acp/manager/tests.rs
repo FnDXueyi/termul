@@ -403,6 +403,23 @@ async fn session_reopen_auth_required_is_prefixed() {
     assert_eq!(state.lock().session_root("sess-auth"), None);
 }
 
+/// Issue #1303: an agent that no longer has the session (another Claude
+/// account) answers `session/resume` with `ResourceNotFound` (-32002).
+#[tokio::test]
+async fn session_reopen_resource_not_found_is_prefixed() {
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/resume", "sess-gone", "/work", &state, async {
+        Err::<ResumeSessionResponse, _>(agent_client_protocol::Error::resource_not_found(Some(
+            "sess-gone".to_string(),
+        )))
+    })
+    .await;
+    assert_eq!(
+        outcome.unwrap_err(),
+        "ACP_RESOURCE_NOT_FOUND: Resource not found: {\n  \"uri\": \"sess-gone\"\n}"
+    );
+}
+
 #[tokio::test]
 async fn session_resume_reopen_preserves_omitted_fields() {
     let state = Mutex::new(DriverState::new());
