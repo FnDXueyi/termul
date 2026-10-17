@@ -79,21 +79,26 @@ export function SkillsSection(): React.JSX.Element {
           </p>
         </div>
         <div className="flex w-full flex-col gap-5 md:w-2/3">
-          {loading ? <p className="text-sm text-muted-foreground">Loading skills…</p> : null}
-          <div className="flex flex-col gap-2">
-            <h3 className="text-sm font-medium text-foreground">Global</h3>
-            <SkillRows skills={globalSkills} />
-          </div>
-          <div className="flex flex-col gap-2">
-            <h3 className="text-sm font-medium text-foreground">
-              Project{project ? ` · ${project.name}` : ''}
-            </h3>
-            {project ? (
-              <SkillRows skills={projectSkills} />
-            ) : (
-              <p className="text-sm text-muted-foreground">Open a project to see its skills.</p>
-            )}
-          </div>
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Loading skills…</p>
+          ) : (
+            <>
+              <div className="flex flex-col gap-2">
+                <h3 className="text-sm font-medium text-foreground">Global</h3>
+                <SkillRows skills={globalSkills} />
+              </div>
+              <div className="flex flex-col gap-2">
+                <h3 className="text-sm font-medium text-foreground">
+                  Project{project ? ` · ${project.name}` : ''}
+                </h3>
+                {project ? (
+                  <SkillRows skills={projectSkills} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">Open a project to see its skills.</p>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </SettingsSection>
