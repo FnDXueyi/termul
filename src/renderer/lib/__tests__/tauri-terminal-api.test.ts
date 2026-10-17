@@ -429,7 +429,10 @@ describe('tauri-terminal-api', () => {
           'terminal_rotate_claim',
           'terminal_list_preserved'
         ])
-        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'p1' })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({
+          projectId: 'p1',
+          terminalId: 'terminal-1752-1'
+        })
       })
 
       it('recovers the fresh claim for a terminal a reloaded page learned from listPreserved', async () => {
@@ -441,7 +444,10 @@ describe('tauri-terminal-api', () => {
         const rotated = await api.rotateClaim('terminal-9', 'reissued-claim')
 
         expect(rotated).toEqual({ success: true, data: { claim: 'recovered-claim' } })
-        expect(mockInvoke.mock.calls[2][1]).toEqual({ projectId: 'project-a' })
+        expect(mockInvoke.mock.calls[2][1]).toEqual({
+          projectId: 'project-a',
+          terminalId: 'terminal-9'
+        })
       })
 
       it("leaves a sibling terminal's claim usable after recovering another terminal", async () => {
