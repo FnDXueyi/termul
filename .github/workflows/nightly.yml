@@ -506,3 +506,16 @@ jobs:
           done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
           assets+=(latest-nightly.json)
           gh release upload nightly --repo "$GITHUB_REPOSITORY" "${assets[@]}" --clobber
+
+  # The image downloads and verifies the `nightly` release assets, so it runs
+  # after publish.
+  container_image:
+    name: Publish nightly container image
+    needs: publish
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-container-image.yml
+    with:
+      release_tag: nightly
+      image_tags: nightly
