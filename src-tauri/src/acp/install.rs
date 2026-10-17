@@ -223,36 +223,14 @@ impl Downloader for HttpDownloader {
                 "archive URL must be https",
             ));
         }
-        // Redirects: follow HTTPS→HTTPS redirects (GitHub releases 302 to
-        // `objects.githubusercontent.com`, still HTTPS — a no-redirect policy
-        // breaks every CDN-fronted archive), but REFUSE an https→http
-        // downgrade (would download over plaintext, leaking the URL
-        // path/query). The custom policy follows only https redirect
-        // targets; an http target stops → the 3xx surfaces below as
-        // "redirected — refused".
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(crate::acp::archive::FETCH_TIMEOUT_SECS))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                let is_https = attempt.url().scheme() == "https";
-                if is_https {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }))
+            .redirect(crate::acp::https_only::redirect_policy())
             .build()
             .map_err(|e| InstallError::new(code::DOWNLOAD_FAILED, format!("http client: {e}")))?;
         let response = client.get(url).send().await.map_err(|e| {
             InstallError::new(code::DOWNLOAD_FAILED, format!("download failed: {e}"))
         })?;
-        if response.status().is_redirection() {
-            // An https→http downgrade was refused by the redirect policy
-            // (it stopped following). Surface it as a download failure.
-            return Err(InstallError::new(
-                code::DOWNLOAD_FAILED,
-                format!("download redirected (HTTP {}) — refused", response.status()),
-            ));
-        }
         if !response.status().is_success() {
             return Err(InstallError::new(
                 code::DOWNLOAD_FAILED,
