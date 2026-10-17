@@ -470,6 +470,12 @@ function historyMode(): 'server' | 'live_only' | 'tauri_store' | undefined {
   return getAcpTransport().historyMode?.()
 }
 
+/**
+ * The title both host readers (desktop `acp_history` list, web summary
+ * conversion) give a session the host has not titled yet.
+ */
+export const UNTITLED_HOST_TITLE = 'Untitled Chat'
+
 export function fromPersistedSessionSummary(entry: PersistedSessionSummary): SessionIndexEntry {
   return {
     id: entry.sessionId,
@@ -477,7 +483,7 @@ export function fromPersistedSessionSummary(entry: PersistedSessionSummary): Ses
     agentConfigId: entry.stableAgentNamespace?.startsWith('config:')
       ? entry.stableAgentNamespace.slice('config:'.length)
       : undefined,
-    title: entry.title ?? 'Untitled Chat',
+    title: entry.title ?? UNTITLED_HOST_TITLE,
     cwd: entry.cwd,
     projectId: entry.projectId ?? '',
     createdAt: entry.createdAt,
