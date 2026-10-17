@@ -350,4 +350,6 @@ pub async fn acp_fetch_registry_snapshot(
 }
 
 #[cfg(test)]
+pub(crate) mod test_server;
+#[cfg(test)]
 mod tests;

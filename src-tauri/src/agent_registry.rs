@@ -131,6 +131,30 @@ fn write_cache(app: &AppHandle, entries: &[AcpRegistryEntry], fetched_at: &str) 
     }
 }
 
+async fn fetch_registry_entries(url: &str) -> Result<Vec<AcpRegistryEntry>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("ACP registry request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("ACP registry returned HTTP {}", response.status()));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read ACP registry body: {}", e))?;
+
+    parse_registry(&body)
+}
+
 /// Fetch the ACP Registry catalog (identity/discovery only).
 ///
 /// - `force_refresh = false`: serve the on-disk cache if present, else fetch.
@@ -153,30 +177,7 @@ pub async fn fetch_acp_registry(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-
-    let fetch_result: Result<Vec<AcpRegistryEntry>, String> = async {
-        let response = client
-            .get(REGISTRY_URL)
-            .send()
-            .await
-            .map_err(|e| format!("ACP registry request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!("ACP registry returned HTTP {}", response.status()));
-        }
-
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read ACP registry body: {}", e))?;
-
-        parse_registry(&body)
-    }
-    .await;
+    let fetch_result = fetch_registry_entries(REGISTRY_URL).await;
 
     match fetch_result {
         Ok(entries) => {
