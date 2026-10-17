@@ -59,6 +59,7 @@ import { ProviderSection } from './app-preferences/provider-section'
 import { ResetSection } from './app-preferences/reset-section'
 import { ShellSection } from './app-preferences/shell-section'
 import { ShortcutsSection } from './app-preferences/shortcuts-section'
+import { SkillsSection } from './app-preferences/skills-section'
 import { UpdatesSection } from './app-preferences/updates-section'
 
 export function AppPreferencesModal(): React.JSX.Element {
@@ -342,6 +343,7 @@ export function AppPreferencesModal(): React.JSX.Element {
             handleAcpSessionReopenTimeoutChange={handleAcpSessionReopenTimeoutChange}
             handleAgentIdleWindowChange={handleAgentIdleWindowChange}
           />
+          <SkillsSection />
           <ProviderSection />
           <McpServersSection />
           {/* Keyboard Shortcuts Section */}
