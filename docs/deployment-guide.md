@@ -58,7 +58,7 @@ The workflow order is:
 6. In one publish job, download every workflow artifact, reject conflicting asset names, deeply validate each updater `{url, signature}` record, reject conflicting duplicate platform records, require every supported updater key (desktop and both server keys), and authoritatively create `latest.json`.
 7. Upload all release assets and `latest.json` once, then publish the draft.
 8. Invoke the reusable Homebrew workflow for every release channel. It always generates `SHA256SUMS.txt`; only stable releases update the tap.
-9. Build the `linux/amd64` and `linux/arm64` container image from the published server assets and push it to `ghcr.io/gnoviawan/termul-server` with BuildKit provenance and an SBOM. Every release gets a version tag. Only a stable release moves `latest`. See [Run in Docker](#run-in-docker).
+9. Build the `linux/amd64` and `linux/arm64` container image from the published server assets and push it to `ghcr.io/gnoviawan/termul-server` with BuildKit provenance and an SBOM. Every release gets a version tag. Only a stable release moves `latest`. The nightly workflow pushes the `nightly` tag the same way, and the Insider-to-Stable `promote` dispatch retags `latest` from the stable version tag without a rebuild. See [Run in Docker](#run-in-docker).
 
 No matrix/platform build job or standalone-server job is permitted to upload GitHub Release assets or write a shared `latest.json`.
 
@@ -208,7 +208,7 @@ The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket
 
 ## Run in Docker
 
-`Dockerfile` and `docker-compose.yml` at the repository root run `termul-server` in a container as the non-root user `termul`. The image holds the published release binary for `linux/amd64` or `linux/arm64`, plus `bash`, `git`, `ssh`, and `curl`. The build checks the binary's minisign signature against the updater public key in `src-tauri/tauri.conf.json`. Release tags publish the image to `ghcr.io/gnoviawan/termul-server`.
+`Dockerfile` and `docker-compose.yml` at the repository root run `termul-server` in a container as the non-root user `termul`. The image holds the published release binary for `linux/amd64` or `linux/arm64`, plus `bash`, `git`, `ssh`, and `curl`. The build checks the binary's minisign signature against the updater public key in `src-tauri/tauri.conf.json`. Release tags publish the image to `ghcr.io/gnoviawan/termul-server`, and the nightly workflow publishes the `nightly` tag.
 
 ### Start the server
 
@@ -280,7 +280,7 @@ docker compose pull
 docker compose up -d
 ```
 
-State stays in the `termul-home` volume. The image sets `TERMUL_SERVER_UPDATE_ENABLED=false`, and the server cannot replace its root-owned binary, so a new image is the only update path. To pin a version, set `TERMUL_IMAGE=ghcr.io/gnoviawan/termul-server:<version>` in `.env`.
+State stays in the `termul-home` volume. The image sets `TERMUL_SERVER_UPDATE_ENABLED=false`, and the server cannot replace its root-owned binary, so a new image is the only update path. To pin a version, set `TERMUL_IMAGE=ghcr.io/gnoviawan/termul-server:<version>` in `.env`. Use `:nightly` to follow the nightly channel.
 
 To build the image yourself, set `TERMUL_RELEASE` to a release tag such as `v0.5.0` or `nightly`, then run `docker compose up -d --build`. The default, `latest`, is the newest stable release. An `arm64` build needs a release that publishes `termul-server-linux-aarch64`. v0.4.21 does not.
 
@@ -300,7 +300,7 @@ Recommended release checks:
 5. Confirm both macOS portability/signing/notarization gates pass and that both `standalone-server` matrix entries (x64 and arm64) succeed.
 6. Confirm the centralized publish job reports every required updater platform and uploads installers, updater archives, `.sig` files, `termul-server`, `termul-server-linux-aarch64`, and `latest.json` exactly once.
 7. Confirm `SHA256SUMS.txt` exists; for stable releases, confirm the Homebrew cask update succeeds.
-8. Confirm the `Publish container image` job pushed `ghcr.io/gnoviawan/termul-server:<version>`, and `latest` for a stable release. After the first publish, confirm that the package page on GitHub shows the package as public.
+8. Confirm the `Publish container image` job pushed `ghcr.io/gnoviawan/termul-server:<version>`, and `latest` for a stable release. Nightly runs push `:nightly`, and a `promote` dispatch retags `:latest` from the stable version tag. After the first publish, confirm that the package page on GitHub shows the package as public.
 
 ## Local Validation
 
