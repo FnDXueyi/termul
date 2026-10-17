@@ -221,6 +221,17 @@ describe('ChangesPanel', () => {
     expect(screen.queryByText('No changes detected')).toBeNull()
   })
 
+  it('says a folder outside git is not a repository, without an error alert', () => {
+    gitState.statuses['/plain'] = []
+    gitState.errors['/plain'] = {
+      status: 'fatal: not a git repository (or any of the parent directories): .git\n'
+    }
+    render(<ChangesPanel cwd="/plain" isVisible />)
+
+    expect(screen.getByText('This folder is not a git repository.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('shows the empty state when git status succeeded with no changes', () => {
     gitState.statuses['/clean'] = []
     render(<ChangesPanel cwd="/clean" isVisible />)
