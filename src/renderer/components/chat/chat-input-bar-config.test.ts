@@ -202,6 +202,26 @@ describe('fast mode helpers', () => {
     ).toBe(false)
   })
 
+  it('treats a boolean option named Fast as a binary switch', () => {
+    const booleanFast: SessionConfigOption = {
+      id: 'fast_mode',
+      name: 'Fast mode',
+      type: 'boolean',
+      currentValue: false
+    }
+    const custom = opt('custom', 'other')
+    expect(isFastModeOption(booleanFast)).toBe(true)
+    expect(isFastModeOption({ ...booleanFast, id: 'web_search', name: 'Web search' })).toBe(false)
+    expect(isFastModeEnabled(booleanFast)).toBe(false)
+    expect(isFastModeEnabled({ ...booleanFast, currentValue: true })).toBe(true)
+    expect(oppositeFastModeValue(booleanFast)).toBe('true')
+    expect(oppositeFastModeValue({ ...booleanFast, currentValue: true })).toBe('false')
+    expect(extractFastModeOption([custom, booleanFast])).toEqual({
+      fastMode: booleanFast,
+      rest: [custom]
+    })
+  })
+
   it('resolves enabled state and opposite value', () => {
     expect(isFastModeEnabled(fastMode('off'))).toBe(false)
     expect(isFastModeEnabled(fastMode('on'))).toBe(true)
