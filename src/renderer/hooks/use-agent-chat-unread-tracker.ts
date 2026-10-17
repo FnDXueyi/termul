@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/shallow'
 import { isEphemeralAcpSession, useAcpStore } from '@/stores/acp-store'
-import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
+import { type LogPoint, useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { sessionTurnBusy } from '@/stores/prompt-queue-orchestration'
 
 /**
@@ -35,7 +35,7 @@ export function useAgentChatUnreadTracker(activeSessionIds: readonly string[]): 
     })
   )
   const previousBusy = useRef<Record<string, boolean>>({})
-  const seenAtTurnStart = useRef<Record<string, number>>({})
+  const seenAtTurnStart = useRef<Record<string, LogPoint | null>>({})
 
   // Callers pass a fresh array every render; a joined key keeps the effect from
   // re-running unless the set of ids actually changed.
@@ -48,10 +48,10 @@ export function useAgentChatUnreadTracker(activeSessionIds: readonly string[]): 
   useLayoutEffect(() => {
     const previous = previousBusy.current
     previousBusy.current = busyBySession
-    const { markUnread, clearUnread, seenTurnEndSeq } = useAgentChatUnreadStore.getState()
+    const { markUnread, clearUnread, seenTurnEnd } = useAgentChatUnreadStore.getState()
     for (const [sessionId, busy] of Object.entries(busyBySession)) {
       if (busy && previous[sessionId] !== true) {
-        seenAtTurnStart.current[sessionId] = seenTurnEndSeq[sessionId] ?? 0
+        seenAtTurnStart.current[sessionId] = seenTurnEnd[sessionId] ?? null
       }
       const turnFinished = previous[sessionId] === true && !busy
       if (turnFinished && !activeSet.has(sessionId)) {

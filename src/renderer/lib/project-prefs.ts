@@ -309,8 +309,14 @@ async function prepareRecord(
   }
 }
 
-async function writeRecord(signature: string, record: ProjectPrefsRecord): Promise<void> {
-  const written = await persistenceApi.writeDebounced(PersistenceKeys.projectPrefs, record)
+async function writeRecord(
+  signature: string,
+  record: ProjectPrefsRecord,
+  immediate: boolean
+): Promise<void> {
+  const written = immediate
+    ? await persistenceApi.write(PersistenceKeys.projectPrefs, record)
+    : await persistenceApi.writeDebounced(PersistenceKeys.projectPrefs, record)
   if (!written.success) {
     releaseSignature(signature)
     throw new Error(`project prefs write failed: ${written.error ?? 'unknown error'}`)
@@ -327,15 +333,33 @@ let preparing: Promise<unknown> = Promise.resolve()
  * desktop, and a later save that overtook an earlier one there would have its
  * newer layout replaced by the older one at the debounced write. The write
  * itself is not serialized, so a burst of saves still collapses into one.
+ * `immediate` skips the debounce, for a save that must land before the app or
+ * page goes away.
  */
 export function persistProjectPrefs(
   projects: Project[],
   groups: ProjectGroup[],
-  previousProjects: Project[]
+  previousProjects: Project[],
+  options?: { immediate?: boolean }
 ): Promise<void> {
   const prepared = preparing.then(() => prepareRecord(projects, groups, previousProjects))
-  preparing = prepared.catch(() => undefined)
-  return prepared.then((save) => (save ? writeRecord(save.signature, save.record) : undefined))
+  let written: Promise<void> | undefined
+  const issued = prepared.then((save) => {
+    if (save) written = writeRecord(save.signature, save.record, options?.immediate ?? false)
+  })
+  preparing = issued.catch(() => undefined)
+  return issued.then(() => written)
+}
+
+/**
+ * Wait until every save started so far has prepared its record and handed the
+ * write to the persistence layer, then land the debounced writes. A save still
+ * preparing (awaiting secure storage on the desktop) has nothing for
+ * `flushPendingWrites` to flush yet.
+ */
+export async function flushProjectPrefsWrites(): Promise<void> {
+  await preparing
+  await persistenceApi.flushPendingWrites()
 }
 
 /**

@@ -282,6 +282,37 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     ])
   })
 
+  it('installs a recovery snapshot list from a new log epoch even when its seq is below the held one', async () => {
+    seedSession('s-epoch-cmds', 'agent-1', false)
+    useAcpStore.setState({
+      commands: { 's-epoch-cmds': [{ name: 'init', description: 'Init' }] },
+      commandsSeq: { 's-epoch-cmds': 9 }
+    })
+    const snapshot = {
+      sessionId: 's-epoch-cmds',
+      watermark: 2,
+      events: [
+        {
+          sid: 's-epoch-cmds',
+          seq: 1,
+          type: 'commands_update',
+          payload: { availableCommands: [{ name: 'review', description: 'Review' }] }
+        }
+      ]
+    } as never
+
+    await _installTransportRecoveryForTesting(snapshot, undefined, false)
+    expect(useAcpStore.getState().commands['s-epoch-cmds']).toEqual([
+      { name: 'init', description: 'Init' }
+    ])
+
+    await _installTransportRecoveryForTesting(snapshot, undefined, true)
+    expect(useAcpStore.getState().commands['s-epoch-cmds']).toEqual([
+      { name: 'review', description: 'Review' }
+    ])
+    expect(useAcpStore.getState().commandsSeq['s-epoch-cmds']).toBe(1)
+  })
+
   function seedWiredTransport(): Map<string, (payload: unknown, eventSeq?: number) => void> {
     const listeners = new Map<string, (payload: unknown, eventSeq?: number) => void>()
     _setAcpTransportForTests({
@@ -912,6 +943,7 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     await _installTransportRecoveryForTesting({
       sessionId: 's-rec-end',
       watermark: 20,
+      logEpoch: 'epoch-rec',
       events: [
         {
           sid: 's-rec-end',
@@ -922,7 +954,10 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
       ]
     })
 
-    expect(useAgentChatUnreadStore.getState().seenTurnEndSeq['s-rec-end']).toBe(14)
+    expect(useAgentChatUnreadStore.getState().seenTurnEnd['s-rec-end']).toEqual({
+      logEpoch: 'epoch-rec',
+      seq: 14
+    })
   })
 
   it('normalizes wire user_prompt + user-role chunks in the recovery fold (chip parity)', async () => {

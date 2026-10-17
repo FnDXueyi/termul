@@ -218,10 +218,8 @@ async fn managed_claude_install_uses_pinned_package_and_validated_entrypoint() {
     let expected_entrypoint = service
         .root()
         .join("claude-acp/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js");
-    assert_eq!(
-        outcome.args,
-        vec![expected_entrypoint.to_string_lossy().to_string()]
-    );
+    assert_eq!(outcome.args.len(), 1);
+    assert_eq!(PathBuf::from(&outcome.args[0]), expected_entrypoint);
     assert_eq!(service.installed_agents()[0].version, "0.78.0");
     let _ = fs::remove_dir_all(root);
 }
