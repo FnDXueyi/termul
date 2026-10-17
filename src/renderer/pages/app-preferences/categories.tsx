@@ -10,7 +10,8 @@ import {
   RotateCcw,
   Sliders,
   Sparkles,
-  Terminal
+  Terminal,
+  TerminalSquare
 } from '@/components/icons'
 import type { SettingsCategory } from '@/components/settings/SettingsLayout'
 import type { SettingsSearchEntry } from '@/lib/settings-search'
@@ -21,6 +22,7 @@ import { isTauriContext } from '@/lib/tauri-runtime'
 const ALL_APP_PREF_CATEGORIES: SettingsCategory[] = [
   { id: 'appearance', label: 'Terminal Appearance', icon: <Palette size={16} /> },
   { id: 'shell', label: 'Default Shell', icon: <Terminal size={16} /> },
+  { id: 'terminal-profiles', label: 'Terminal Profiles', icon: <TerminalSquare size={16} /> },
   { id: 'behavior', label: 'Behavior', icon: <Sliders size={16} /> },
   { id: 'project-defaults', label: 'New Project Defaults', icon: <Monitor size={16} /> },
   { id: 'ai-agents', label: 'AI Agents', icon: <Bot size={16} /> },
@@ -75,6 +77,12 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     label: 'Default Shell',
     description: 'Set the default shell for new terminals.',
     keywords: ['bash', 'zsh', 'powershell', 'fish']
+  },
+  {
+    categoryId: 'terminal-profiles',
+    label: 'Terminal Profiles',
+    description: 'Save a shell with arguments, start folder and environment variables.',
+    keywords: ['profile', 'preset', 'shell', 'env', 'environment', 'cwd', 'folder', 'arguments']
   },
   {
     categoryId: 'behavior',
