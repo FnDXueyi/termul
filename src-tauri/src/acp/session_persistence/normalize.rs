@@ -293,7 +293,7 @@ pub(super) fn normalize_durable_payload(type_: &str, payload: &Value) -> Value {
     }
 }
 
-pub(super) fn sanitize_value(key: Option<&str>, value: &Value) -> Value {
+pub(crate) fn sanitize_value(key: Option<&str>, value: &Value) -> Value {
     if key.is_some_and(is_secret_key) {
         return Value::String("[REDACTED]".to_string());
     }

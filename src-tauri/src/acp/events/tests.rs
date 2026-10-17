@@ -1038,7 +1038,7 @@ fn agent_error_and_crashed_serialize_code_and_data() {
 }
 
 /// gh-821: the event builders carry the RPC code/data into both events with
-/// the `Display` message unchanged (the turn-error + teardown wiring).
+/// the RPC error's own message (the turn-error + teardown wiring).
 #[test]
 fn error_detail_builds_events_with_code_and_data() {
     let rpc = agent_client_protocol::Error::new(-32000, "auth")
@@ -1049,7 +1049,7 @@ fn error_detail_builds_events_with_code_and_data() {
         .clone()
         .into_agent_error(AgentId("a1".to_string()), Some(SessionId::new("s1")));
     let value = serde_json::to_value(&error).unwrap();
-    assert_eq!(value["message"], rpc.to_string());
+    assert_eq!(value["message"], "auth");
     assert_eq!(value["code"], -32000);
     assert_eq!(value["data"]["reason"], "login");
     assert_eq!(value["sessionId"], "s1");
