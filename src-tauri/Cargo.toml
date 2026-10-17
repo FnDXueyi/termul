@@ -259,6 +259,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Authorization",
     # CreateFileW: the token file gets its owner-only DACL at creation time.
     "Win32_Storage_FileSystem",
+    # Native junction creation (worktree::junction): DeviceIoControl with
+    # FSCTL_SET_REPARSE_POINT replaces `cmd /C mklink /J`.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemServices",
 ] }
 winapi = { version = "0.3", features = [
     "jobapi2",
