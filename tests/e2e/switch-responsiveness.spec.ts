@@ -35,7 +35,11 @@ test('project switch round-trips the streaming chat tab while a turn runs', asyn
   // through proj-b — switching back to the ALREADY-ACTIVE proj-a would be a
   // no-op click (its "(active)" wait passes instantly).
   await selectProject(page, 'proj-b')
-  await page.locator('[aria-label^="Project: proj-a"]').first().click()
+  await page
+    .locator('[aria-label^="Project: proj-a"]')
+    .first()
+    .locator('[data-rail-icon-column]')
+    .click()
   await page
     .locator('[aria-label^="Project: proj-a (active)"]')
     .first()
