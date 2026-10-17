@@ -405,9 +405,44 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
   return task
 }
 
+type RetriableAuthOp =
+  | 'session/new'
+  | 'session/load'
+  | 'session/resume'
+  | 'session/list'
+  | 'session/set_mode'
+  | 'session/set_model'
+  | 'session/set_config_option'
+
+type AuthGatedOp = RetriableAuthOp | 'session/prompt'
+
+export async function reauthenticateOnDemand(
+  get: () => AcpState,
+  agentId: AgentId,
+  op: AuthGatedOp,
+  surface: 'picker' | 'text'
+): Promise<boolean> {
+  void logFrontendError({
+    level: 'info',
+    source: 'acp-store.withAuthRetry',
+    message: `${op} reported auth required; authenticating on demand`
+  })
+  // The failed call just proved the process is NOT authenticated — a stale
+  // `authenticatedAgents` flag (e.g. a token that expired server-side
+  // mid-process) must not make authenticateBeforeSession early-return.
+  authenticatedAgents.delete(agentId)
+  try {
+    return await authenticateBeforeSession(get, agentId)
+  } catch (err) {
+    // A text-only surface has no method picker — translate the "pick one of
+    // the methods below" error into guidance the user can act on there.
+    throw surface === 'text' && isAmbiguousAuthError(err) ? authPickerUnavailableError() : err
+  }
+}
+
 /**
- * Authenticate-on-demand wrapper for agent session calls (`session/new`,
- * `session/load`, `session/resume`) — spec-acp-persistent-auth-reuse. The call
+ * Authenticate-on-demand wrapper for auth-gated agent calls
+ * ({@link RetriableAuthOp}) — spec-acp-persistent-auth-reuse. The call
  * runs FIRST with no preemptive auth: a globally logged-in agent (or a reused
  * process) goes straight through. Only when the call reports an auth failure
  * ({@link isAuthRetriableSessionError}) does it run
@@ -422,7 +457,8 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
  *
  * `surface` is how auth failures are presented: 'picker' (session/new — the
  * launcher renders the method picker for AmbiguousAuthError) or 'text'
- * (history reopen / resume — text-only `lastError` + Retry, where the
+ * (history reopen / resume, option setters, session/list — text-only
+ * `lastError` + Retry or a toast, where the
  * ambiguous-methods error is translated into actionable guidance).
  * `op` is a static label for the redacted boundary logs — never raw errors or
  * method payloads.
@@ -436,7 +472,7 @@ async function authenticateBeforeSession(get: () => AcpState, agentId: AgentId):
 export async function withAuthRetry<T>(
   get: () => AcpState,
   agentId: AgentId,
-  op: 'session/new' | 'session/load' | 'session/resume',
+  op: RetriableAuthOp,
   surface: 'picker' | 'text',
   fn: () => Promise<T>
 ): Promise<T> {
@@ -444,26 +480,9 @@ export async function withAuthRetry<T>(
     return await fn()
   } catch (firstErr) {
     if (!isAuthRetriableSessionError(firstErr)) throw firstErr
-    void logFrontendError({
-      level: 'info',
-      source: 'acp-store.withAuthRetry',
-      message: `${op} reported auth required; authenticating on demand`
-    })
-    // The failed call just proved the process is NOT authenticated — a stale
-    // `authenticatedAgents` flag (e.g. a token that expired server-side
-    // mid-process) must not make authenticateBeforeSession early-return.
-    authenticatedAgents.delete(agentId)
-    let didAuthenticate: boolean
-    try {
-      didAuthenticate = await authenticateBeforeSession(get, agentId)
-    } catch (err) {
-      // A text-only surface has no method picker — translate the "pick one of
-      // the methods below" error into guidance the user can act on there.
-      throw surface === 'text' && isAmbiguousAuthError(err) ? authPickerUnavailableError() : err
-    }
     // Nothing was sent (zero valid methods / only non-agent methods): the
     // retry would fail identically — surface the ORIGINAL error instead.
-    if (!didAuthenticate) throw firstErr
+    if (!(await reauthenticateOnDemand(get, agentId, op, surface))) throw firstErr
     try {
       const outcome = await fn()
       void logFrontendError({
