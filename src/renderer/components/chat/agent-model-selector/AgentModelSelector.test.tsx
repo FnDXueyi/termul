@@ -250,6 +250,82 @@ beforeEach(() => {
 
 afterEach(() => cleanup())
 
+describe('AgentModelSelector agent capabilities', () => {
+  const advertised = {
+    promptCapabilities: { image: true, embeddedContext: true },
+    mcpCapabilities: { http: true }
+  }
+
+  function seedAgent(capabilities: unknown): void {
+    acpStateRef.current = {
+      ...acpStateRef.current,
+      agents: { 'agent-1': { id: 'agent-1', capabilities } }
+    }
+  }
+
+  it('shows what the chat agent advertises under its options', () => {
+    seedAgent(advertised)
+    renderSelector()
+    open()
+
+    const summary = screen.getByTestId('agent-capabilities')
+    expect(
+      within(summary)
+        .getAllByRole('definition')
+        .map((item) => item.textContent)
+    ).toEqual(['Text · Images · Embedded context', 'stdio · HTTP'])
+  })
+
+  it('shows nothing for an agent that advertised no capabilities', () => {
+    seedAgent(null)
+    renderSelector()
+    open()
+
+    expect(screen.getByTestId('agent-model-selector-panel')).toBeInTheDocument()
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+  })
+
+  it('never shows the chat agent profile under another agent tab', () => {
+    seed([readyEntry(CLAUDE)])
+    seedAgent(advertised)
+    renderSelector()
+    open()
+    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Claude Agent' }))
+
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+  })
+
+  it('with a switch armed, shows the profile only on the chat agent tab', () => {
+    seed([readyEntry(CLAUDE)], { switching: { toConfigId: CLAUDE.id } })
+    seedAgent(advertised)
+    renderSelector()
+    open()
+
+    expect(screen.getByRole('tab', { name: 'Claude Agent' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Cursor' }))
+
+    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
+  })
+
+  it('hides the summary while the search results are showing', () => {
+    seedAgent(advertised)
+    renderSelector()
+    open()
+    fireEvent.change(screen.getByLabelText('Search models and agents'), {
+      target: { value: 'opus' }
+    })
+
+    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+  })
+})
+
 describe('AgentModelSelector panel', () => {
   it('opens to the model list with search focused; a model pick keeps the panel open', () => {
     const onSetConfig = vi.fn()

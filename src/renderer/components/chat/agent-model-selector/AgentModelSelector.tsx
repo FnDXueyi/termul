@@ -122,6 +122,9 @@ export function AgentModelSelector({
   const isMobile = useMobileWebShell()
   const sessionAgent = useComposerAgentLabel(sessionId)
   const sessionSource = useSessionSelectorSource(sessionId)
+  const capabilities = useAcpStore((s) =>
+    draft ? null : (s.agents?.[s.sessions?.[sessionId]?.agentId ?? '']?.capabilities ?? null)
+  )
   const source = draft?.source ?? sessionSource
   const agent = draft
     ? {
@@ -250,6 +253,7 @@ export function AgentModelSelector({
       }
       usage={usage}
       messages={messages}
+      capabilities={capabilities}
       onClose={close}
       escapeRef={escapeRef}
     />
