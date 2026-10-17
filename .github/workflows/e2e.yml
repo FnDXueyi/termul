@@ -9,7 +9,7 @@ name: E2E
 # switch-responsiveness, web-reopen-live-turn-tool-cards) on pull requests that
 # change ACP, relay or e2e files, and daily for every other change. Dispatch it by
 # hand with a `specs` input to run other specs. The mobile layout specs fail on
-# CI today and stay out of the default list until someone triages them.
+# CI today and stay out of the default list (issue #1343).
 
 on:
   pull_request:
@@ -24,6 +24,9 @@ on:
       - 'src/renderer/lib/acp-*'
       - 'src/renderer/lib/acp-transport/**'
       - 'src/renderer/stores/acp-store/**'
+      - 'src/renderer/stores/acp-store.ts'
+      - 'src/renderer/components/chat/**'
+      - 'src-tauri/src/server_main.rs'
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch:
@@ -99,7 +102,8 @@ jobs:
           # These six tests fail on dev for reasons outside the harness. In four of
           # them a project switch opens the Project Settings dialog, which then
           # covers the New chat button. The other two fail on chat tab and tool
-          # card assertions. Remove a title from this list when its test is fixed.
+          # card assertions. Tracked in https://github.com/gnoviawan/termul/issues/1343.
+          # Remove a title from this list when its test is fixed.
           E2E_KNOWN_RED: 'closing a chat mid-turn only detaches it|project switching mid-run|three projects run concurrently|browser reload with a crashed chat open|project switch round-trips the streaming chat tab|reload mid-turn: the reopened chat shows the tool cards'
         # Playwright reads each word of E2E_SPECS as a file filter.
         run: bun run test:e2e $E2E_SPECS --grep-invert "$E2E_KNOWN_RED"
