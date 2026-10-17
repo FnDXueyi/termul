@@ -13,7 +13,8 @@ const {
   mockTerminals,
   mockSetWorktreePick,
   mockActivePaneId,
-  mockLogFrontendError
+  mockLogFrontendError,
+  mockProjectEnv
 } = vi.hoisted(() => ({
   mockAddTerminal: vi.fn(),
   mockSetTerminalPtyId: vi.fn(),
@@ -25,7 +26,8 @@ const {
   // Mutable so the no-pane branch can be exercised without re-registering the
   // workspace-store mock. Defaults to an active pane so existing tests pass.
   mockActivePaneId: { current: 'pane-1' as string | null },
-  mockLogFrontendError: vi.fn()
+  mockLogFrontendError: vi.fn(),
+  mockProjectEnv: { current: {} as Record<string, string> }
 }))
 
 vi.mock('@/stores/terminal-store', () => ({
@@ -74,10 +76,17 @@ vi.mock('@/lib/api', () => ({
 }))
 
 vi.mock('@/lib/env-parser', () => ({
-  resolveEnvForSpawn: () => ({ env: {}, hasProjectEnv: false })
+  resolveEnvForSpawn: () => ({
+    env: { ...mockProjectEnv.current },
+    hasProjectEnv: Object.keys(mockProjectEnv.current).length > 0
+  })
 }))
 
-import { openTerminalAtCwd, spawnTerminalInPane } from '@/lib/terminal-spawn'
+import {
+  openTerminalAtCwd,
+  openTerminalFromProfile,
+  spawnTerminalInPane
+} from '@/lib/terminal-spawn'
 import { mockSpawnedTerminal } from '@/lib/test-utils/terminal'
 
 describe('spawnTerminalInPane', () => {
@@ -265,5 +274,61 @@ describe('openTerminalAtCwd', () => {
         message: expect.stringContaining('Shell not found')
       })
     )
+  })
+})
+
+describe('openTerminalFromProfile', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockTerminals.length = 0
+    mockActivePaneId.current = 'pane-1'
+    mockProjectEnv.current = {}
+    mockAddTerminal.mockReturnValue({ id: 'term-new-1' })
+    mockTerminalApiSpawn.mockResolvedValue({
+      success: true,
+      data: mockSpawnedTerminal({ cwd: '/work/app' })
+    })
+  })
+
+  it('runs the profile shell with its args, folder and env over the project env', async () => {
+    mockProjectEnv.current = { PROJECT_ONLY: 'p', NODE_ENV: 'production' }
+
+    const result = await openTerminalFromProfile(
+      'proj-1',
+      {
+        id: 'p1',
+        name: 'Node dev',
+        shell: '/bin/zsh',
+        args: ['-l', '-i'],
+        cwd: '/work/app',
+        env: { NODE_ENV: 'development' }
+      },
+      { cwd: '/active/wc', shell: 'pwsh' }
+    )
+
+    expect(result).toEqual({ status: 'opened', terminalId: 'term-new-1' })
+    expect(mockTerminalApiSpawn).toHaveBeenCalledWith({
+      program: '/bin/zsh',
+      args: ['-l', '-i'],
+      cwd: '/work/app',
+      projectId: 'proj-1',
+      env: { PROJECT_ONLY: 'p', NODE_ENV: 'development' }
+    })
+    expect(mockAddTerminal).toHaveBeenCalledWith('Node dev', 'proj-1', '/bin/zsh', '/work/app')
+  })
+
+  it('opens an argument-free profile in shell mode with the New Terminal defaults', async () => {
+    await openTerminalFromProfile(
+      'proj-1',
+      { id: 'p2', name: 'Plain', shell: '', args: [], cwd: '', env: {} },
+      { cwd: '/active/wc', shell: 'pwsh' }
+    )
+
+    expect(mockTerminalApiSpawn).toHaveBeenCalledWith({
+      shell: 'pwsh',
+      cwd: '/active/wc',
+      projectId: 'proj-1'
+    })
+    expect(mockAddTerminal).toHaveBeenCalledWith('Plain', 'proj-1', 'pwsh', '/active/wc')
   })
 })
