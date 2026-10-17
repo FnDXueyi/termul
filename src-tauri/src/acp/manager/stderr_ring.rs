@@ -12,7 +12,7 @@ use std::fmt::Display;
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
-use regex::Regex;
+use regex::{Captures, Regex};
 
 use crate::acp::config::AgentConfig;
 
@@ -33,12 +33,18 @@ static BEARER: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// `name=value`, `name: value` and `"name": "value"` pairs whose name says the
-/// value is a secret.
+/// value is a secret. Groups: the prefix to keep, the name, the value.
 static NAMED_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)(["']?[A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|passw(?:or)?d|authorization|credential)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)"#,
+        r#"(?i)(["']?([A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|passw(?:or)?d|authorization|credential)[A-Za-z0-9_.-]*)["']?\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
     )
     .expect("valid named secret pattern")
+});
+
+/// The password in a URL's `user:password@` credentials.
+static URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s/@]+@")
+        .expect("valid URL credentials pattern")
 });
 
 /// `Cookie:` / `Set-Cookie:` header values, masked to the end of the line
@@ -50,18 +56,34 @@ static COOKIE: LazyLock<Regex> = LazyLock::new(|| {
 /// Well-known credential shapes that appear without a name in front of them.
 static TOKEN_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})",
+        r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,}|AKIA[A-Z0-9]{16}|[rs]k_(?:live|test)_[A-Za-z0-9]{16,}|ya29\.[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})",
     )
     .expect("valid token shape pattern")
 });
 
 /// Mask everything in `line` that looks like a key, token, cookie or bearer
 /// value.
-pub(super) fn redact_line(line: &str) -> String {
+pub(crate) fn redact_line(line: &str) -> String {
     let masked = BEARER.replace_all(line, format!("$1 {MASK}"));
     let masked = COOKIE.replace_all(&masked, format!("${{1}}{MASK}"));
-    let masked = NAMED_SECRET.replace_all(&masked, format!("${{1}}{MASK}"));
+    let masked = URL_PASSWORD.replace_all(&masked, format!("${{1}}{MASK}@"));
+    let masked = NAMED_SECRET.replace_all(&masked, |caps: &Captures| {
+        if is_token_count(&caps[2], &caps[3]) {
+            caps[0].to_string()
+        } else {
+            format!("{}{MASK}", &caps[1])
+        }
+    });
     TOKEN_SHAPE.replace_all(&masked, MASK).into_owned()
+}
+
+/// `max_tokens=4096` names a count of tokens, not a token.
+fn is_token_count(name: &str, value: &str) -> bool {
+    name.to_ascii_lowercase().contains("tokens")
+        && value
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
 }
 
 /// Cut `text` to at most `max` bytes on a character boundary.

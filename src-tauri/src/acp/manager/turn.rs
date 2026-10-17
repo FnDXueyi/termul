@@ -73,9 +73,6 @@ pub(super) fn emit_turn_outcome(
     emit_turn_terminator(sinks, agent_id, session_id, turn_id, stop_reason, error);
 }
 
-/// Most characters of an error message a failed turn's terminator keeps.
-const TURN_ERROR_MESSAGE_MAX_CHARS: usize = 1_000;
-
 /// The durable copy of a failed turn's error. The session log replays it on
 /// every reopen, so it keeps the RPC error's own message, never the `data`
 /// that `Display` appends (it can carry request headers), masked and capped.
@@ -84,10 +81,7 @@ fn turn_error_summary(
     provider_code: Option<&'static str>,
 ) -> events::TurnErrorSummary {
     events::TurnErrorSummary {
-        message: super::stderr_ring::redact_line(detail.rpc_message())
-            .chars()
-            .take(TURN_ERROR_MESSAGE_MAX_CHARS)
-            .collect(),
+        message: detail.client_message(),
         code: detail.code,
         provider_code,
     }

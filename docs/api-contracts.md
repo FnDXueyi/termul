@@ -510,7 +510,7 @@ A session log event has one of three delivery tiers (`tier_of` in `src-tauri/src
 | `acp:agent_spawned` | agent | `agents` watch delta. Emitted when `initialize` completes. Carries the advertised `authMethods`. |
 | `acp:agent_crashed` | agent | `agents` watch delta. Emitted before `acp:agent_disconnected` and `acp:agent_error` when the subprocess crashes. |
 | `acp:agent_disconnected` | agent | `agents` watch delta. Emitted when an agent ends, with a `reason`. |
-| `acp:agent_error` | agent or session | Session log event (reliable) when a turn fails. `agents` watch delta for an agent-level error. |
+| `acp:agent_error` | agent or session | Session log event (reliable) when a turn fails. `agents` watch delta for an agent-level error. `message` is the agent's own error message, masked and capped. `data` is the agent's error data with secret-named keys dropped, secret-looking text masked, and a truncated JSON string in place of data over 4,000 characters. `acp:agent_crashed` carries the same `message` and `data`. |
 | `acp:session_created` | session | Session log event (reliable). |
 | `acp:session_closed` | session | Session log event (reliable). `reason` is `killed`, `reaped`, `crashed` or `closed`. |
 | `acp:session_info_update` | session | Session log event (reliable). Carries the agent-supplied title and metadata. |

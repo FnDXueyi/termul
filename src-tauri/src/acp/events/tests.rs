@@ -1038,7 +1038,7 @@ fn agent_error_and_crashed_serialize_code_and_data() {
 }
 
 /// gh-821: the event builders carry the RPC code/data into both events with
-/// the `Display` message unchanged (the turn-error + teardown wiring).
+/// the RPC error's own message (the turn-error + teardown wiring).
 #[test]
 fn error_detail_builds_events_with_code_and_data() {
     let rpc = agent_client_protocol::Error::new(-32000, "auth")
@@ -1049,7 +1049,7 @@ fn error_detail_builds_events_with_code_and_data() {
         .clone()
         .into_agent_error(AgentId("a1".to_string()), Some(SessionId::new("s1")));
     let value = serde_json::to_value(&error).unwrap();
-    assert_eq!(value["message"], rpc.to_string());
+    assert_eq!(value["message"], "auth");
     assert_eq!(value["code"], -32000);
     assert_eq!(value["data"]["reason"], "login");
     assert_eq!(value["sessionId"], "s1");
@@ -1145,5 +1145,45 @@ fn mcp_capabilities_acp_is_dropped_without_the_schema_feature() {
     assert!(
         mcp.get("acp").is_none(),
         "acp must not reach the renderer while the schema feature is off: {mcp}"
+    );
+}
+
+/// Issue #1335: the live error events reach every client of the session, so a
+/// secret in the RPC error's `data` must appear in neither the message nor the
+/// data they carry.
+#[test]
+fn error_events_keep_no_secret_from_the_error_data() {
+    let rpc = agent_client_protocol::Error::new(-32603, "Internal error").data(serde_json::json!({
+        "headers": { "authorization": "Bearer sk-test" },
+        "status": 500,
+    }));
+    let detail = AcpErrorDetail::from(&rpc);
+    let error = detail
+        .clone()
+        .into_agent_error(AgentId("a1".to_string()), Some(SessionId::new("s1")));
+    let crashed = detail.into_agent_crashed(AgentId("a1".to_string()), None);
+
+    for event in [
+        serde_json::to_value(&error).unwrap(),
+        serde_json::to_value(&crashed).unwrap(),
+    ] {
+        assert_eq!(event["message"], "Internal error");
+        assert_eq!(event["code"], -32603);
+        assert_eq!(event["data"], serde_json::json!({ "status": 500 }));
+        assert!(!event.to_string().contains("sk-test"), "{event}");
+    }
+}
+
+/// Issue #1335: agent-authored `data` is unbounded; the live event carries a
+/// truncated JSON string instead of a huge value.
+#[test]
+fn agent_error_caps_huge_error_data() {
+    let rpc = agent_client_protocol::Error::new(-32603, "Internal error")
+        .data(serde_json::json!({ "detail": "x".repeat(100_000) }));
+    let error = AcpErrorDetail::from(&rpc).into_agent_error(AgentId("a1".to_string()), None);
+    let value = serde_json::to_value(&error).unwrap();
+    assert_eq!(
+        value["data"],
+        format!("{{\"detail\":\"{}…", "x".repeat(3_989))
     );
 }

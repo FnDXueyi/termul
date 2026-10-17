@@ -724,8 +724,9 @@ pub struct TurnErrorSummary {
 /// An error flattened for the manager's `Err(String)` / event boundaries while
 /// keeping the JSON-RPC `code` and `data` of an `agent_client_protocol::Error`.
 ///
-/// `message` is exactly the prior `Error::to_string()` (`Display`, which already
-/// appends pretty `data`), so user-visible text is unchanged. `code` / `data`
+/// `message` is exactly the prior `Error::to_string()` (`Display`, which
+/// appends pretty `data`) and stays on the host; the events that reach clients
+/// carry [`Self::client_message`] and redacted `data` instead. `code` / `data`
 /// are `None` for non-RPC failures (timeouts, flush failures, plain strings).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcpErrorDetail {
@@ -809,6 +810,16 @@ impl AcpErrorDetail {
             .unwrap_or(&self.message)
     }
 
+    /// The RPC error's own message as clients see it: secret-looking text
+    /// masked and the length capped.
+    #[must_use]
+    pub fn client_message(&self) -> String {
+        crate::acp::manager::stderr_ring::redact_line(self.rpc_message())
+            .chars()
+            .take(CLIENT_ERROR_MESSAGE_MAX_CHARS)
+            .collect()
+    }
+
     /// The host terminator for a turn that ended with this error.
     #[must_use]
     pub fn turn_stop(&self) -> TurnFailureStop {
@@ -833,9 +844,9 @@ impl AcpErrorDetail {
         AgentErrorEvent {
             agent_id,
             session_id,
-            message: self.message,
+            message: self.client_message(),
             code: self.code,
-            data: self.data,
+            data: self.data.as_ref().map(client_error_data),
             provider_code,
         }
     }
@@ -850,11 +861,46 @@ impl AcpErrorDetail {
         AgentCrashedEvent {
             agent_id,
             session_id,
-            message: self.message,
+            message: self.client_message(),
             code: self.code,
-            data: self.data,
+            data: self.data.as_ref().map(client_error_data),
         }
     }
+}
+
+/// Most characters of an agent error message that leave the host.
+const CLIENT_ERROR_MESSAGE_MAX_CHARS: usize = 1_000;
+
+/// Most characters of serialized agent error `data` that leave the host.
+const CLIENT_ERROR_DATA_MAX_CHARS: usize = 4_000;
+
+/// Agent error `data` as clients see it: secret-named keys dropped (the
+/// session log's redaction), secret-looking text masked, and data larger than
+/// the cap sent as a truncated JSON string.
+fn client_error_data(data: &serde_json::Value) -> serde_json::Value {
+    fn mask_strings(value: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::String(text) => {
+                Value::String(crate::acp::manager::stderr_ring::redact_line(&text))
+            }
+            Value::Array(values) => Value::Array(values.into_iter().map(mask_strings).collect()),
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, mask_strings(value)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    let redacted = mask_strings(crate::acp::session_persistence::sanitize_value(None, data));
+    let text = redacted.to_string();
+    if text.chars().count() <= CLIENT_ERROR_DATA_MAX_CHARS {
+        return redacted;
+    }
+    let mut truncated: String = text.chars().take(CLIENT_ERROR_DATA_MAX_CHARS).collect();
+    truncated.push('…');
+    serde_json::Value::String(truncated)
 }
 
 impl std::fmt::Display for AcpErrorDetail {
@@ -875,8 +921,8 @@ pub struct AgentErrorEvent {
     /// on the wire for non-RPC failures (timeouts, flush failures, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
-    /// JSON-RPC error `data` (already part of `message` via `Display`, kept
-    /// structured here); absent on the wire when the error carried none.
+    /// JSON-RPC error `data`, redacted and capped; absent on the wire when the
+    /// error carried none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     /// Stable provider failure code (`provider_quota_exceeded`,
