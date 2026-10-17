@@ -1007,9 +1007,11 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
       }
       if (older === null) return
       // At the head of a band: a switched chat continues into the band spliced
-      // before it. Rows from another session never fold as twins of this
-      // window's bubbles.
+      // before it.
       const crossedSeam = older.length === 0
+      // Rows from another session's log never fold as twins of rows outside
+      // their own band: only bubbles under the band's prefix can be the same turn.
+      const twinPrefix = crossedSeam ? null : (origin?.prefix ?? '')
       const page = crossedSeam
         ? await newestOfPreviousBand(
             get().agentSwitches[sessionId] ?? [],
@@ -1040,18 +1042,20 @@ export const createTranscriptSlice: StateCreator<AcpState, [], [], TranscriptSli
           const candidate = page[i]
           if (liveIds.has(candidate.id)) continue
           const candidateDistFromEnd = page.length - 1 - i
-          const twin = crossedSeam
-            ? -1
-            : live.findIndex(
-                (m, index) =>
-                  !twinUsed[index] &&
-                  isPersistedTwin(
-                    candidate,
-                    m,
-                    live.length - 1 - index - candidateDistFromEnd >= 0 &&
-                      live.length - 1 - index - candidateDistFromEnd <= TWIN_SEAM_SLACK
-                  )
-              )
+          const twin =
+            twinPrefix === null
+              ? -1
+              : live.findIndex(
+                  (m, index) =>
+                    !twinUsed[index] &&
+                    m.id.startsWith(twinPrefix) &&
+                    isPersistedTwin(
+                      candidate,
+                      m,
+                      live.length - 1 - index - candidateDistFromEnd >= 0 &&
+                        live.length - 1 - index - candidateDistFromEnd <= TWIN_SEAM_SLACK
+                    )
+                )
           if (twin !== -1) {
             twinUsed[twin] = true
             continue
