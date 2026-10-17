@@ -1411,8 +1411,13 @@ describe('acp-store live window + lazy-load + coalescing', () => {
         }
       ]
     })
-    // resumeLiveSession: tail-first install, then resume; chunks that
-    // streamed during the fetch window must APPEND via gap replay.
+    useAcpStore.setState((s) => ({
+      agents: {
+        ...s.agents,
+        'agent-1': { id: 'agent-1', capabilities: { sessionCapabilities: { resume: {} } } }
+      },
+      agentStatus: { ...s.agentStatus, 'agent-1': 'connected' }
+    }))
     ;(invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd !== 'acp_resume_session') {
         throw new Error(`unexpected invoke command in reopen-streaming test: ${cmd}`)
@@ -1433,7 +1438,8 @@ describe('acp-store live window + lazy-load + coalescing', () => {
       })
       return undefined
     })
-    await useAcpStore.getState().resumeLiveSession(sid, 'agent-1', '/work')
+    await useAcpStore.getState().openHistorySession(sid)
+    await flushTurnEnd()
     _flushCoalescedForTesting()
     const msgs = useAcpStore.getState().messages[sid]
     // No blank, no truncation: the tail-first install kept both restored
