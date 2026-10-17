@@ -521,6 +521,21 @@ export interface AskUserQuestionEvent {
   questionId: string
   question: string
   options: QuestionOption[]
+  /** `ask_user` (issue #784): show the free-text "Other" row. */
+  allowFreeText?: boolean
+  /** `ask_user` (issue #784): more than one option may be picked. */
+  multiSelect?: boolean
+}
+
+/**
+ * `acp:question_cancelled` payload (issue #784) — a pending question that can
+ * no longer be answered while its turn goes on (the agent hung up its
+ * `ask_user` call).
+ */
+export interface QuestionCancelledEvent {
+  agentId: AgentId
+  sessionId: SessionId
+  questionId: string
 }
 
 /**
@@ -720,6 +735,7 @@ export const ACP_EVENTS = {
   configOptionsUpdate: 'acp:config_options_update',
   permissionRequest: 'acp:permission_request',
   questionRequest: 'acp:question_request',
+  questionCancelled: 'acp:question_cancelled',
   elicitationRequest: 'acp:elicitation_request',
   promptComplete: 'acp:prompt_complete',
   agentError: 'acp:agent_error',

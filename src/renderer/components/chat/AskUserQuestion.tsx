@@ -15,9 +15,9 @@ interface AskUserQuestionProps {
   autoFocusFirstOption?: boolean
 }
 
-/** True when any option declares `cardinality: "multi"` (multi-select). */
+/** True when the question allows several picks (`ask_user` flag or option cardinality). */
 function isMulti(question: PendingQuestion): boolean {
-  return question.options.some((o) => o.cardinality === 'multi')
+  return question.multiSelect === true || question.options.some((o) => o.cardinality === 'multi')
 }
 
 /**
@@ -40,6 +40,10 @@ export function AskUserQuestion({
   const answer = useAcpStore((s) => s.answerQuestion)
   const multi = useMemo(() => isMulti(question), [question])
   const [selected, setSelected] = useState<string[]>([])
+  // Free-text "Other" answer (issue #784 `ask_user`; the `_session/question`
+  // path leaves `allowFreeText` unset, so the row stays hidden there).
+  const [otherText, setOtherText] = useState('')
+  const allowOther = question.allowFreeText === true
   const firstOptionRef = useRef<HTMLButtonElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
 
@@ -51,12 +55,23 @@ export function AskUserQuestion({
 
   const toggle = useCallback(
     (value: string) => {
+      // Picking a real option on a single-choice question replaces a typed answer.
+      if (!multi) setOtherText('')
       setSelected((prev) => {
         if (multi) {
           return prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]
         }
         return [value]
       })
+    },
+    [multi]
+  )
+
+  const changeOther = useCallback(
+    (text: string) => {
+      setOtherText(text)
+      // Typing an answer on a single-choice question deselects the option.
+      if (!multi && text.trim() !== '') setSelected([])
     },
     [multi]
   )
@@ -74,8 +89,10 @@ export function AskUserQuestion({
   const cancel = useCallback(() => submit(undefined), [submit])
 
   const sendAnswer = useCallback(() => {
-    if (selected.length > 0) submit(selected)
-  }, [selected, submit])
+    const typed = otherText.trim()
+    const values = typed === '' ? selected : [...selected, typed]
+    if (values.length > 0) submit(values)
+  }, [otherText, selected, submit])
 
   const selectedSet = useMemo(() => new Set(selected), [selected])
 
@@ -109,6 +126,10 @@ export function AskUserQuestion({
           multi={multi}
           selected={selectedSet}
           onToggle={toggle}
+          allowOther={allowOther}
+          otherText={otherText}
+          otherLabel="Your own answer"
+          onOtherChange={changeOther}
           isLast
           onPrimary={sendAnswer}
           onClose={cancel}

@@ -669,6 +669,7 @@ type PromptSliceState = Pick<
   | 'respondElicitation'
   | '_onPermissionRequest'
   | '_onQuestionRequest'
+  | '_onQuestionCancelled'
   | '_onElicitationRequest'
   | '_onPromptComplete'
 >
@@ -1134,10 +1135,21 @@ export const createPromptSlice: StateCreator<AcpState, [], [], PromptSliceState>
             agentId: e.agentId,
             sessionId: e.sessionId,
             question: e.question,
-            options: e.options
+            options: e.options,
+            allowFreeText: e.allowFreeText,
+            multiSelect: e.multiSelect
           }
         }
       }
+    })
+  },
+
+  _onQuestionCancelled: (e) => {
+    set((s) => {
+      if (!s.pendingQuestions[e.questionId]) return {}
+      const pendingQuestions = { ...s.pendingQuestions }
+      delete pendingQuestions[e.questionId]
+      return { pendingQuestions }
     })
   },
 

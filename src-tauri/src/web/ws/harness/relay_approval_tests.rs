@@ -253,3 +253,29 @@ async fn a_turn_cancel_and_a_kill_release_their_tickets() {
     let late_other = respond(&mut conn, "r3", "perm-other").await;
     assert_eq!(late_other["err"]["code"], "already_resolved", "{late_other}");
 }
+
+/// An `ask_user` call whose agent hung up withdraws its one question
+/// (`question_cancelled`): subscribers see it, a later answer reads
+/// `already_resolved`, and the session's other question stays answerable.
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_question_releases_only_its_own_ticket() {
+    let host = host();
+    let mut conn = host.connect();
+    conn.authenticate().await;
+    conn.subscribe("sub").await;
+    question_request(&host, "q-1", TICKET_AGENT, SESSION);
+    question_request(&host, "q-2", TICKET_AGENT, SESSION);
+
+    host.relay.emit(&AcpEvent {
+        sid: Some(SESSION.to_string()),
+        type_: "acp:question_cancelled",
+        payload: json!({"agentId": TICKET_AGENT, "sessionId": SESSION, "questionId": "q-1"}),
+    });
+
+    let event = conn.peer.wait_event("question_cancelled").await;
+    assert_eq!(event["payload"]["questionId"], "q-1", "{event}");
+    assert!(!question_outstanding(&host, "q-1"));
+    let late = answer_question(&mut conn, "late-q", "q-1").await;
+    assert_eq!(late["err"]["code"], "already_resolved", "{late}");
+    assert!(question_outstanding(&host, "q-2"), "another question of the session survives");
+}
