@@ -101,18 +101,17 @@ function promotedSkillName(name: string): string | null {
   return suffix || null
 }
 
-/** Names an ACP command already covers, so the matching injected skill is hidden.
- * A bare command name and a `skill:<name>` suffix both count. Comparison is
- * case-insensitive. */
-function coveredSkillNames(commands: AvailableCommand[]): Set<string> {
-  const covered = new Set<string>()
-  for (const command of commands) {
-    const bare = command.name.trim().toLowerCase()
-    if (bare) covered.add(bare)
-    const promoted = promotedSkillName(command.name)
-    if (promoted) covered.add(promoted)
-  }
-  return covered
+function skillKey(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+/** True when this ACP command names an installed skill. A bare name and a
+ * `skill:<name>` suffix both count. Comparison is case-insensitive. */
+function commandNamesInstalledSkill(commandName: string, skillNames: Set<string>): boolean {
+  const bare = skillKey(commandName)
+  if (bare && skillNames.has(bare)) return true
+  const promoted = promotedSkillName(commandName)
+  return promoted !== null && skillNames.has(promoted)
 }
 
 /**
@@ -132,39 +131,36 @@ export function buildSlashSections(input: SlashMenuInput): SlashSection[] {
   // "Model" section next to the promoted chip's section.
   const dedupedConfigOptions = dropDuplicateSingletonConfigOptions(configOptions)
 
-  // Dedupes below run against the post-filter lists so a row hidden by the
-  // text filter can never suppress the only visible row for a name.
-  const visibleCommands = commands.filter((c) => matches(filter, c.name, c.description))
+  // The text filter runs after the skill/command dedupe. An installed skill
+  // hides its harness command even when the current filter hides the skill
+  // row, so the same skill cannot come back as a command.
+  const installedSkillNames = new Set(
+    skills.map((skill) => skillKey(skill.name)).filter((name) => name.length > 0)
+  )
   const visibleSkills = skills.filter((s) => matches(filter, s.name, s.description))
-
-  // Command is the source of truth. Hide an injected skill when a visible
-  // ACP command already represents it: the same name, or a harness
-  // re-promotion `skill:<name>`. Comparison is case-insensitive. Skills the
-  // harness does not publish stay listed. Dedupe uses the post-filter lists
-  // so a row hidden by the text filter cannot suppress the only visible row.
-  const covered = coveredSkillNames(visibleCommands)
-  const skillItems: SlashItem[] = visibleSkills
-    .filter((s) => !covered.has(s.name.trim().toLowerCase()))
-    .map((s) => ({
-      kind: 'skill',
-      name: s.name,
-      description: s.description || null,
-      scope: s.scope,
-      path: s.path
-    }))
+  const skillItems: SlashItem[] = visibleSkills.map((s) => ({
+    kind: 'skill',
+    name: s.name,
+    description: s.description || null,
+    scope: s.scope,
+    path: s.path
+  }))
   if (skillItems.length > 0) {
     sections.push({ id: 'skills', heading: 'Skills', items: skillItems })
   }
 
-  // Commands are not filtered against skills. A `skill:<name>` command stays
-  // even when it covered an injected skill, and an agent-only `skill:` command
-  // stays when termul never discovered that name.
-  const commandItems: SlashItem[] = visibleCommands.map((c) => ({
-    kind: 'command',
-    name: c.name,
-    description: c.description ?? null,
-    hint: c.input?.hint?.trim() || null
-  }))
+  // Disk skills are the skill rows. Hide a harness command that repeats one:
+  // the same name, or a re-promotion `skill:<name>`. A `skill:` command whose
+  // suffix termul did not discover stays listed.
+  const commandItems: SlashItem[] = commands
+    .filter((c) => !commandNamesInstalledSkill(c.name, installedSkillNames))
+    .filter((c) => matches(filter, c.name, c.description))
+    .map((c) => ({
+      kind: 'command',
+      name: c.name,
+      description: c.description ?? null,
+      hint: c.input?.hint?.trim() || null
+    }))
   if (commandItems.length > 0) {
     sections.push({ id: 'commands', heading: 'Commands', items: commandItems })
   }

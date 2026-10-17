@@ -208,9 +208,9 @@ describe('buildSlashSections', () => {
     expect(sections[0].items).toHaveLength(2)
   })
 
-  it('dedupes a skill whose name collides with an ACP command (command wins)', () => {
-    // A skill named `compact` collides with the `compact` command — the skill
-    // is dropped so the name appears once (Commands), not twice.
+  it('hides an ACP command whose name matches an installed skill (skill wins)', () => {
+    // A skill named `compact` collides with the `compact` command. The skill
+    // stays and the command is dropped, so the name appears once (Skills).
     const overlapping: AgentSkillSummary[] = [
       {
         name: 'compact',
@@ -232,19 +232,20 @@ describe('buildSlashSections', () => {
       skills: overlapping,
       filter: ''
     })
-    expect(sections[0].id).toBe('skills')
-    const skillNames = sections[0].items.map((i) => (i.kind === 'skill' ? i.name : ''))
-    expect(skillNames).toEqual(['investigate'])
-    const commandSection = sections.find((s) => s.id === 'commands')!
-    expect(commandSection.items.map((i) => (i.kind === 'command' ? i.name : ''))).toContain(
-      'compact'
-    )
+    const skillNames = sections
+      .find((s) => s.id === 'skills')!
+      .items.map((i) => (i.kind === 'skill' ? i.name : ''))
+    expect(skillNames).toEqual(['compact', 'investigate'])
+    const commandNames = sections
+      .find((s) => s.id === 'commands')!
+      .items.map((i) => (i.kind === 'command' ? i.name : ''))
+    expect(commandNames).toEqual(['research'])
   })
 
-  it('hides an injected skill when the harness already published `skill:<name>` (command wins)', () => {
+  it('hides a harness `skill:<name>` command when that skill is installed', () => {
     // Agents like Devin re-promote discovered skills as `skill:<name>`
-    // commands. The command is the source of truth, so the injected skill is
-    // dropped and the name appears once (Commands), not twice.
+    // commands. The disk skill is the row the user picks, so the mirrored
+    // command is dropped.
     const promoted: AvailableCommand[] = [
       { name: 'skill:investigate', description: 'Run an investigation' },
       { name: 'compact', description: 'Compact the conversation' }
@@ -259,17 +260,14 @@ describe('buildSlashSections', () => {
     const skillNames = sections
       .find((s) => s.id === 'skills')!
       .items.map((i) => (i.kind === 'skill' ? i.name : ''))
-    expect(skillNames).toEqual(['review'])
+    expect(skillNames).toEqual(['investigate', 'review'])
     const commandNames = sections
       .find((s) => s.id === 'commands')!
       .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['skill:investigate', 'compact'])
+    expect(commandNames).toEqual(['compact'])
   })
 
   it('keeps `skill:` commands for skills termul did not discover', () => {
-    // A `skill:` command whose suffix names no injected skill may be an
-    // agent-only skill — it must stay listed. A command that does match an
-    // injected skill also stays; only the skill row is removed.
     const promoted: AvailableCommand[] = [
       { name: 'skill:agent-only', description: 'Agent builtin skill' },
       { name: 'skill:investigate', description: 'Run an investigation' }
@@ -284,14 +282,14 @@ describe('buildSlashSections', () => {
     const skillNames = sections
       .find((s) => s.id === 'skills')!
       .items.map((i) => (i.kind === 'skill' ? i.name : ''))
-    expect(skillNames).toEqual(['review'])
+    expect(skillNames).toEqual(['investigate', 'review'])
     const commandNames = sections
       .find((s) => s.id === 'commands')!
       .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['skill:agent-only', 'skill:investigate'])
+    expect(commandNames).toEqual(['skill:agent-only'])
   })
 
-  it('hides injected skills when a `skill:` command matches case-insensitively', () => {
+  it('hides `skill:` mirrors case-insensitively and keeps the installed skills', () => {
     const promoted: AvailableCommand[] = [
       { name: 'Skill:Investigate', description: null },
       { name: 'SKILL:REVIEW', description: null }
@@ -303,14 +301,11 @@ describe('buildSlashSections', () => {
       skills,
       filter: ''
     })
-    expect(sections.find((s) => s.id === 'skills')).toBeUndefined()
-    const commandNames = sections
-      .find((s) => s.id === 'commands')!
-      .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['Skill:Investigate', 'SKILL:REVIEW'])
+    expect(sections.find((s) => s.id === 'commands')).toBeUndefined()
+    expect(sections.find((s) => s.id === 'skills')!.items).toHaveLength(2)
   })
 
-  it('dedupes a skill against an ACP command case-insensitively (command wins)', () => {
+  it('hides a same-named command case-insensitively (skill wins)', () => {
     const sections = buildSlashSections({
       commands: [{ name: 'Investigate', description: 'Run an investigation' }],
       configOptions: [],
@@ -321,19 +316,16 @@ describe('buildSlashSections', () => {
     const skillNames = sections
       .find((s) => s.id === 'skills')!
       .items.map((i) => (i.kind === 'skill' ? i.name : ''))
-    expect(skillNames).toEqual(['review'])
-    const commandNames = sections
-      .find((s) => s.id === 'commands')!
-      .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['Investigate'])
+    expect(skillNames).toEqual(['investigate', 'review'])
+    expect(sections.find((s) => s.id === 'commands')).toBeUndefined()
   })
 
-  it('shows a promoted `skill:` command when the skill itself is filtered out', () => {
-    // Dedupe runs against the post-filter lists. Typing `/skill:` hides the
-    // skill row (its name does not contain the filter) and still lists the
-    // harness command.
+  it('keeps a `skill:` command hidden when the text filter hides the skill row', () => {
+    // The installed skill hides its mirror even if the filter does not show
+    // the skill. Typing `/skill:` must not bring the duplicate command back.
     const promoted: AvailableCommand[] = [
-      { name: 'skill:investigate', description: 'Run an investigation' }
+      { name: 'skill:investigate', description: 'Run an investigation' },
+      { name: 'skill:agent-only', description: 'Agent builtin skill' }
     ]
     const sections = buildSlashSections({
       commands: promoted,
@@ -342,15 +334,14 @@ describe('buildSlashSections', () => {
       skills,
       filter: 'skill:'
     })
+    expect(sections.find((s) => s.id === 'skills')).toBeUndefined()
     const commandNames = sections
       .find((s) => s.id === 'commands')!
       .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['skill:investigate'])
+    expect(commandNames).toEqual(['skill:agent-only'])
   })
 
-  it('keeps a filtered-out command from suppressing the same-named skill', () => {
-    // Forward dedupe also runs post-filter: a command that fails the text
-    // filter must not hide the only visible row for the name.
+  it('keeps a skill visible when the same-named command fails the text filter', () => {
     const colliding: AgentSkillSummary[] = [
       {
         name: 'compact',
@@ -370,12 +361,10 @@ describe('buildSlashSections', () => {
       .find((s) => s.id === 'skills')!
       .items.map((i) => (i.kind === 'skill' ? i.name : ''))
     expect(skillNames).toEqual(['compact'])
+    expect(sections.find((s) => s.id === 'commands')).toBeUndefined()
   })
 
-  it('three-way collision: suppressed skill keeps its `skill:` mirror listed', () => {
-    // A same-named command and a `skill:` mirror both cover the injected
-    // skill, so the skill row is dropped. Both harness commands stay: termul
-    // does not merge commands with each other.
+  it('hides both a same-named command and its `skill:` mirror', () => {
     const colliding: AgentSkillSummary[] = [
       {
         name: 'compact',
@@ -395,11 +384,11 @@ describe('buildSlashSections', () => {
       skills: colliding,
       filter: ''
     })
-    expect(sections.find((s) => s.id === 'skills')).toBeUndefined()
-    const commandNames = sections
-      .find((s) => s.id === 'commands')!
-      .items.map((i) => (i.kind === 'command' ? i.name : ''))
-    expect(commandNames).toEqual(['compact', 'skill:compact'])
+    const skillNames = sections
+      .find((s) => s.id === 'skills')!
+      .items.map((i) => (i.kind === 'skill' ? i.name : ''))
+    expect(skillNames).toEqual(['compact'])
+    expect(sections.find((s) => s.id === 'commands')).toBeUndefined()
   })
 
   it('keeps `skill:` commands when no skills are injected', () => {
