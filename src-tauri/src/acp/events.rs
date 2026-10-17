@@ -732,9 +732,11 @@ pub struct AcpErrorDetail {
     pub message: String,
     pub code: Option<i32>,
     pub data: Option<serde_json::Value>,
-    /// The RPC error's own `message` (its code when empty), without the
-    /// `data` that `message` appends. `None` for non-RPC failures.
-    pub rpc_message: Option<String>,
+    /// Byte length of the RPC error's own message (its code when empty) at
+    /// the start of `message`, which `Display` follows with any `data`.
+    /// `None` for non-RPC failures. A length, not a copy, keeps the type
+    /// under clippy's `result_large_err` size.
+    pub rpc_message_len: Option<u32>,
     /// Typed marker for an idle/hard turn deadline (set only by
     /// `From<TurnTimeout>`); the turn terminator is `timeout` instead of
     /// `error`. Never derived from the message text.
@@ -752,11 +754,12 @@ impl From<&agent_client_protocol::Error> for AcpErrorDetail {
             message: error.to_string(),
             code: Some(i32::from(error.code)),
             data: error.data.clone(),
-            rpc_message: Some(if error.message.is_empty() {
-                i32::from(error.code).to_string()
+            rpc_message_len: u32::try_from(if error.message.is_empty() {
+                i32::from(error.code).to_string().len()
             } else {
-                error.message.clone()
-            }),
+                error.message.len()
+            })
+            .ok(),
             timed_out: false,
             connection_closed: agent_client_protocol::is_incoming_transport_closed(error),
         }
@@ -775,7 +778,7 @@ impl From<String> for AcpErrorDetail {
             message,
             code: None,
             data: None,
-            rpc_message: None,
+            rpc_message_len: None,
             timed_out: false,
             connection_closed: false,
         }
@@ -791,10 +794,19 @@ impl AcpErrorDetail {
             message: generic_message.to_string(),
             code: None,
             data: None,
-            rpc_message: None,
+            rpc_message_len: None,
             timed_out: self.timed_out,
             connection_closed: self.connection_closed,
         }
+    }
+
+    /// The RPC error's own message without the `data` that `message`
+    /// appends, else the whole message.
+    #[must_use]
+    pub fn rpc_message(&self) -> &str {
+        self.rpc_message_len
+            .and_then(|len| self.message.get(..len as usize))
+            .unwrap_or(&self.message)
     }
 
     /// The host terminator for a turn that ended with this error.

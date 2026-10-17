@@ -83,9 +83,8 @@ fn turn_error_summary(
     detail: &events::AcpErrorDetail,
     provider_code: Option<&'static str>,
 ) -> events::TurnErrorSummary {
-    let message = detail.rpc_message.as_deref().unwrap_or(&detail.message);
     events::TurnErrorSummary {
-        message: super::stderr_ring::redact_line(message)
+        message: super::stderr_ring::redact_line(detail.rpc_message())
             .chars()
             .take(TURN_ERROR_MESSAGE_MAX_CHARS)
             .collect(),
