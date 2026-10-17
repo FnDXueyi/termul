@@ -2432,6 +2432,126 @@ describe('switchAgent (story 3)', () => {
       ])
     })
 
+    it('SCROLL_BACK_ACROSS_HOPS: scrolling up a trimmed A→B→C chat pages both earlier agents back in order', async () => {
+      const band = (idPrefix: string, label: string, count: number): Row[] =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${idPrefix}${i + 1}`,
+          role: i % 2 === 0 ? 'user' : 'agent',
+          text: `${label} ${i + 1}`,
+          seq: i + 1
+        }))
+      const aRows = band('a', 'A', 60)
+      const bRows = band('b', 'B', 60)
+      const cRows = band('c', 'C', MAX_LIVE_WINDOW_MESSAGES)
+      useAcpStore.setState({ messages: { 's-old': rows(aRows) } })
+      await liveSwitch('s-old', 'cfg-new', 'agent-new', 's-new')
+      useAcpStore.setState((s) => ({
+        messages: { ...s.messages, 's-new': [...(s.messages['s-new'] ?? []), ...rows(bRows)] }
+      }))
+      useAcpStore.setState({
+        agentConfigs: [
+          { id: 'cfg-old', name: 'Gemini', command: 'gemini', args: [], env: {} },
+          { id: 'cfg-new', name: 'Claude', command: 'claude', args: [], env: {} },
+          { id: 'cfg-3', name: 'Droid', command: 'droid', args: [], env: {} }
+        ],
+        configToLiveAgent: {
+          [agentReuseKey('cfg-new', '/work')]: 'agent-new',
+          [detachedReuseKey(agentReuseKey('cfg-old', '/work'), 'agent-old')]: 'agent-old'
+        }
+      })
+      workspaceStateRef.current.root = {
+        type: 'leaf',
+        id: 'pane-1',
+        activeTabId: 'chat-s-new',
+        tabs: [{ type: 'agent-chat', id: 'chat-s-new', sessionId: 's-new' }]
+      }
+      await liveSwitch('s-new', 'cfg-3', 'agent-3', 's-3')
+      seedHistory('s-old', 'agent-old', 'cfg-old', aRows, [marker(61, 'cfg-new', 's-new')])
+      // The desktop cache of A predates A's last two turns; only the host has them.
+      const hostA = getCachedSessionPayload('s-old')
+      seedHistory('s-old', 'agent-old', 'cfg-old', aRows.slice(0, 58))
+      vi.mocked(reloadSessionPayloadFromHost).mockImplementation(async (id) =>
+        id === 's-old' ? (hostA ?? null) : (getCachedSessionPayload(id) ?? null)
+      )
+      seedHistory('s-new', 'agent-new', 'cfg-new', bRows, [marker(61, 'cfg-3', 's-3')])
+      seedHistory('s-3', 'agent-3', 'cfg-3', cRows)
+      useAcpStore.setState((s) => ({
+        messages: { ...s.messages, 's-3': [...(s.messages['s-3'] ?? []), ...rows(cRows)] }
+      }))
+      useAcpStore.getState().clearSessionBackfill('s-3')
+      expect(texts('s-3')[0]).toBe('C 1')
+
+      for (let page = 0; page < 10; page++) {
+        await useAcpStore.getState().loadOlderMessages('s-3', 50)
+      }
+
+      const label = (name: string, count: number): string[] =>
+        Array.from({ length: count }, (_, i) => `${name} ${i + 1}`)
+      expect(texts('s-3')).toEqual([
+        ...label('A', 60),
+        ...label('B', 60),
+        ...label('C', MAX_LIVE_WINDOW_MESSAGES)
+      ])
+      const window = useAcpStore.getState().messages['s-3'] ?? []
+      expect(new Set(window.map((m) => m.id)).size).toBe(window.length)
+      const seqs = window.map((m) => m.seq ?? Number.NaN)
+      expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1])).toBe(true)
+      const separatorSeq = (newSessionId: string): number =>
+        useAcpStore.getState().agentSwitches['s-3']?.find((sw) => sw.newSessionId === newSessionId)
+          ?.seq ?? Number.NaN
+      const seqOf = (text: string): number =>
+        window.find((m) => m.blocks.find((b) => b.type === 'text')?.text === text)?.seq ??
+        Number.NaN
+      expect(seqOf('A 60')).toBeLessThan(separatorSeq('s-new'))
+      expect(separatorSeq('s-new')).toBeLessThan(seqOf('B 1'))
+      expect(seqOf('B 60')).toBeLessThan(separatorSeq('s-3'))
+      expect(separatorSeq('s-3')).toBeLessThan(seqOf('C 1'))
+    })
+
+    it('SCROLL_BACK_REOPENED_CHAIN: a reopened A→B→C chain pages both earlier agents back without live switch links', async () => {
+      const band = (idPrefix: string, label: string, count: number): Row[] =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${idPrefix}${i + 1}`,
+          role: i % 2 === 0 ? 'user' : 'agent',
+          text: `${label} ${i + 1}`,
+          seq: i + 1
+        }))
+      seedHistory('s-a', 'agent-a', 'cfg-a', band('a', 'A', 60), [marker(61, 'cfg-b', 's-b')])
+      seedHistory('s-b', 'agent-b', 'cfg-b', band('b', 'B', 60), [marker(61, 'cfg-c', 's-c')])
+      seedHistory('s-c', 'agent-c', 'cfg-c', band('c', 'C', MAX_LIVE_WINDOW_MESSAGES))
+      useAcpStore.setState({
+        agentConfigs: [
+          { id: 'cfg-b', name: 'Bee', command: 'bee', args: [], env: {} },
+          { id: 'cfg-c', name: 'Cee', command: 'cee', args: [], env: {} }
+        ]
+      })
+      connectForReopen('agent-c')
+
+      await useAcpStore.getState().openHistorySession('s-a')
+      await flushTurnEnd()
+      expect(liveSwitchSources.size).toBe(0)
+      expect(texts('s-c')[0]).toBe('C 1')
+
+      for (let page = 0; page < 10; page++) {
+        await useAcpStore.getState().loadOlderMessages('s-c', 50)
+      }
+
+      const label = (name: string, count: number): string[] =>
+        Array.from({ length: count }, (_, i) => `${name} ${i + 1}`)
+      expect(texts('s-c')).toEqual([
+        ...label('A', 60),
+        ...label('B', 60),
+        ...label('C', MAX_LIVE_WINDOW_MESSAGES)
+      ])
+      const window = useAcpStore.getState().messages['s-c'] ?? []
+      expect(window.slice(0, 2).map((m) => m.id)).toEqual([
+        'switch-splice:s-a:a1',
+        'switch-splice:s-a:a2'
+      ])
+      const seqs = window.map((m) => m.seq ?? Number.NaN)
+      expect(seqs.every((seq, i) => i === 0 || seq > seqs[i - 1])).toBe(true)
+    })
+
     it('MARKER_FAIL_RESPLICE: a reinstall after a failed marker write still renders one separator between the bands', async () => {
       useAcpStore.setState({
         messages: { 's-old': rows([{ id: 'm1', role: 'user', text: 'earlier work', seq: 1 }]) }
