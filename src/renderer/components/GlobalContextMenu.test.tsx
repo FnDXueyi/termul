@@ -8,9 +8,12 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 
-// Stub text-edit-ops so the test asserts menu logic (disabled flags + click
-// wiring), not clipboard plumbing. The real module's Tauri imports never load.
+// Stub text-edit-ops so the test asserts menu logic (disabled flags), not
+// clipboard plumbing. GlobalContextMenu.focus.test.tsx covers the real ops.
+// The real module's Tauri imports never load.
 const textEditOps = vi.hoisted(() => ({
+  captureSelectionSnapshot: vi.fn(() => null),
+  restoreSelectionSnapshot: vi.fn(),
   copySelection: vi.fn(() => Promise.resolve(true)),
   cutSelection: vi.fn(() => Promise.resolve(true)),
   pasteIntoFocused: vi.fn(() => Promise.resolve(true)),
@@ -148,36 +151,6 @@ describe('GlobalContextMenu', () => {
     expect(isDisabled('Paste')).toBe(true)
     // P9: Select All disabled when no mutable editable is focused.
     expect(isDisabled('Select All')).toBe(true)
-  })
-
-  it('wires Copy/Cut/Paste/Select All clicks to text-edit-ops', () => {
-    render(
-      <GlobalContextMenu>
-        <input data-testid="surface-input" defaultValue="hello world" />
-      </GlobalContextMenu>
-    )
-    focusInput(true)
-    const input = screen.getByTestId('surface-input') as HTMLInputElement
-    input.setSelectionRange(0, 5)
-
-    fireEvent.contextMenu(input)
-    fireEvent.click(itemByLabel('Copy'))
-    expect(textEditOps.copySelection).toHaveBeenCalledTimes(1)
-
-    input.focus()
-    fireEvent.contextMenu(input)
-    fireEvent.click(itemByLabel('Cut'))
-    expect(textEditOps.cutSelection).toHaveBeenCalledTimes(1)
-
-    input.focus()
-    fireEvent.contextMenu(input)
-    fireEvent.click(itemByLabel('Paste'))
-    expect(textEditOps.pasteIntoFocused).toHaveBeenCalledTimes(1)
-
-    input.focus()
-    fireEvent.contextMenu(input)
-    fireEvent.click(itemByLabel('Select All'))
-    expect(textEditOps.selectAllFocused).toHaveBeenCalledTimes(1)
   })
 })
 

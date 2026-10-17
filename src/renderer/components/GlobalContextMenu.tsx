@@ -9,12 +9,16 @@
  * FileExplorer / ProjectSidebar custom menus (their handlers call
  * `stopPropagation` so the global trigger never fires for those regions).
  *
- * P3: the disabled flags + the focused element are snapshotted synchronously
- * on the capture-phase `contextmenu` event (BEFORE Radix moves focus to the
- * first menu item). `onOpenChange(true)` reads that snapshot. The saved
- * element is re-focused in each item's `onSelect` so `execCommand` + the
- * `text-edit-ops` helpers operate on the element that was actually right-
- * clicked, not the menu item Radix focused for accessibility.
+ * P3: the disabled flags, the focused element and its selection are
+ * snapshotted synchronously on the capture-phase `contextmenu` event (BEFORE
+ * Radix moves focus into the menu). `onOpenChange(true)` reads that snapshot.
+ * The open modal menu traps focus, so an item's `onSelect` cannot move focus
+ * back to the right-clicked element: it only records the action. The action
+ * runs in `onCloseAutoFocus`, once the trap is gone, after the saved element is
+ * re-focused and its selection restored, so `execCommand` + the `text-edit-ops`
+ * helpers operate on the element that was actually right-clicked. Running the
+ * action there also replaces Radix's own focus restore, which would `select()`
+ * the whole input and make Cut delete all of its text.
  *
  * P8: Copy works on any selection (including readonly inputs); Cut/Paste/
  * Select All are gated on a MUTABLE editable (not readOnly, not disabled).
@@ -33,9 +37,12 @@ import {
 } from '@/components/ui/context-menu'
 import { isMac } from '@/lib/platform'
 import {
+  captureSelectionSnapshot,
   copySelection,
   cutSelection,
   pasteIntoFocused,
+  restoreSelectionSnapshot,
+  type SelectionSnapshot,
   selectAllFocused
 } from '@/lib/text-edit-ops'
 
@@ -46,12 +53,14 @@ interface GlobalContextMenuState {
   hasSelection: boolean
   isMutableEditableFocused: boolean
   focusedEditable: HTMLElement | null
+  selection: SelectionSnapshot
 }
 
 const CLOSED_STATE: GlobalContextMenuState = {
   hasSelection: false,
   isMutableEditableFocused: false,
-  focusedEditable: null
+  focusedEditable: null,
+  selection: null
 }
 
 function isMutableEditableElement(el: Element | null): boolean {
@@ -70,6 +79,7 @@ function isMutableEditableElement(el: Element | null): boolean {
 function readState(): GlobalContextMenuState {
   if (typeof window === 'undefined' || typeof document === 'undefined') return CLOSED_STATE
   const activeEl = document.activeElement
+  const focusedEditable = activeEl instanceof HTMLElement ? activeEl : null
 
   let hasSelection = false
   if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) {
@@ -87,7 +97,8 @@ function readState(): GlobalContextMenuState {
   return {
     hasSelection,
     isMutableEditableFocused: isMutableEditableElement(activeEl),
-    focusedEditable: activeEl instanceof HTMLElement ? activeEl : null
+    focusedEditable,
+    selection: focusedEditable ? captureSelectionSnapshot(focusedEditable) : null
   }
 }
 
@@ -97,6 +108,7 @@ interface GlobalContextMenuProps {
 
 export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.JSX.Element {
   const snapshotRef = useRef<GlobalContextMenuState>(CLOSED_STATE)
+  const pendingActionRef = useRef<(() => unknown) | null>(null)
   const [state, setState] = useState<GlobalContextMenuState>(CLOSED_STATE)
 
   // P3: capture the state synchronously on the capture-phase `contextmenu`
@@ -114,17 +126,29 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.J
 
   const handleOpenChange = useCallback((open: boolean) => {
     if (open) {
+      pendingActionRef.current = null
       setState(snapshotRef.current)
     }
   }, [])
 
-  // P3: re-focus the saved element before running the action so
-  // `execCommand` + `getSelectionText()` operate on the right input.
-  const refocusEditable = useCallback(() => {
-    const el = snapshotRef.current.focusedEditable
-    if (el && el.isConnected) {
+  const chooseAction = useCallback((action: () => unknown) => {
+    pendingActionRef.current = action
+  }, [])
+
+  // P3: the focus trap is gone here. Re-focus the saved element and restore its
+  // selection before the action so `execCommand` + `getSelectionText()` operate
+  // on the right input.
+  const handleCloseAutoFocus = useCallback((event: Event) => {
+    const action = pendingActionRef.current
+    pendingActionRef.current = null
+    if (!action) return
+    event.preventDefault()
+    const { focusedEditable: el, selection } = snapshotRef.current
+    if (el?.isConnected) {
       el.focus()
+      restoreSelectionSnapshot(el, selection)
     }
+    void action()
   }, [])
 
   const { hasSelection, isMutableEditableFocused } = state
@@ -134,41 +158,26 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.J
       <ContextMenuTrigger asChild>
         <div className="contents">{children}</div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-48">
-        <ContextMenuItem
-          disabled={!hasSelection}
-          onSelect={() => {
-            refocusEditable()
-            void copySelection()
-          }}
-        >
+      <ContextMenuContent className="w-48" onCloseAutoFocus={handleCloseAutoFocus}>
+        <ContextMenuItem disabled={!hasSelection} onSelect={() => chooseAction(copySelection)}>
           Copy <ContextMenuShortcut>{SHORTCUT_MOD}+C</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
           disabled={!hasSelection || !isMutableEditableFocused}
-          onSelect={() => {
-            refocusEditable()
-            void cutSelection()
-          }}
+          onSelect={() => chooseAction(cutSelection)}
         >
           Cut <ContextMenuShortcut>{SHORTCUT_MOD}+X</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           disabled={!isMutableEditableFocused}
-          onSelect={() => {
-            refocusEditable()
-            void pasteIntoFocused()
-          }}
+          onSelect={() => chooseAction(pasteIntoFocused)}
         >
           Paste <ContextMenuShortcut>{SHORTCUT_MOD}+V</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
           disabled={!isMutableEditableFocused}
-          onSelect={() => {
-            refocusEditable()
-            selectAllFocused()
-          }}
+          onSelect={() => chooseAction(selectAllFocused)}
         >
           Select All <ContextMenuShortcut>{SHORTCUT_MOD}+A</ContextMenuShortcut>
         </ContextMenuItem>
