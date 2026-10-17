@@ -312,6 +312,7 @@ vi.mock('@/stores/acp-store', () => ({
 }))
 const { gitState } = vi.hoisted(() => ({
   gitState: {
+    errors: {},
     statuses: {} as Record<string, unknown[]>,
     diffs: {},
     selectedFile: null,

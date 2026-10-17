@@ -15,6 +15,9 @@ interface GitChangeListProps {
   variant: 'desktop' | 'mobile' | 'column'
   stagedFiles: GitStatusDetail[]
   unstagedFiles: GitStatusDetail[]
+  /** Why the last `git status` failed; replaces the empty state, which would
+      otherwise read as a clean tree. */
+  statusError?: string
   stashes: GitStashInfo[]
   selectedFile: string | null
   selectedStaged: boolean
@@ -44,6 +47,7 @@ export function GitChangeList({
   variant,
   stagedFiles,
   unstagedFiles,
+  statusError,
   stashes,
   selectedFile,
   selectedStaged,
@@ -141,7 +145,13 @@ export function GitChangeList({
         </SectionHeader>
         {unstagedFiles.length === 0 ? (
           <div className="px-4 py-8 text-center">
-            <p className="text-xs text-muted-foreground">No changes detected</p>
+            {statusError ? (
+              <p role="alert" className="whitespace-pre-wrap break-words text-xs text-destructive">
+                Couldn't read changes: {statusError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">No changes detected</p>
+            )}
           </div>
         ) : (
           unstagedFiles.map((file: GitStatusDetail) => {

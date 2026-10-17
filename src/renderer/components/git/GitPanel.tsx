@@ -32,7 +32,8 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
     searchQuery,
     setSearchQuery,
     stagedFiles,
-    unstagedFiles
+    unstagedFiles,
+    statusError
   } = useGitPanelModel({ cwd, isVisible })
 
   // Multi-selection model (selected rows, section scope, anchor, and which side
@@ -139,6 +140,7 @@ export function GitPanel({ cwd, isVisible }: GitPanelProps) {
             variant={variant}
             stagedFiles={stagedFiles}
             unstagedFiles={unstagedFiles}
+            statusError={statusError}
             stashes={stashes}
             selectedFile={selectedFile}
             selectedStaged={selectedStaged}
