@@ -34,6 +34,7 @@ import {
 import { entityKeyOf, runIpcCommand } from './ipc/http'
 import { logFrontendError } from './log-api'
 import { terminalCursorEpoch } from './terminal-cursor'
+import { trackTerminalKill } from './terminal-kill-requests'
 import { randomUUID } from './uuid'
 import { getWebAuthToken } from './web-auth-token'
 import { buildAuthenticatePayload } from './web-client-identity'
@@ -1502,7 +1503,7 @@ export function createWebTerminalApi(): TerminalApi {
     write: (terminalId, data) => client.write(terminalId, data),
     resize: (terminalId, cols, rows) => client.request('resize', { terminalId, cols, rows }),
     async kill(terminalId): Promise<IpcResult<void>> {
-      const result = await killTerminal(terminalId)
+      const result = await trackTerminalKill(terminalId, () => killTerminal(terminalId))
       // The server authorizes kill BEFORE any existence check: an unknown or
       // foreign id returns the generic UNAUTHORIZED (an already-dead terminal
       // this connection still owns is idempotent success).
