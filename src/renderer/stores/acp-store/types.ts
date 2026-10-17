@@ -113,6 +113,16 @@ export interface ChatMessage {
   messageId?: string
 }
 
+/**
+ * Options for one history open. A reload passes the current MCP list and
+ * asks for a new agent process. A normal history open omits both.
+ */
+export interface OpenHistoryOptions {
+  mcpServers?: McpServer[]
+  /** Skip adopting the process that already owns this session. */
+  forceNewAgent?: boolean
+}
+
 export interface AcpSession {
   id: SessionId
   agentId: AgentId
@@ -141,6 +151,12 @@ export interface AcpSession {
    * are not dropped.
    */
   openTurnId: string | null
+  /**
+   * Wire turn id of the newest prompt turn this renderer opened. Unlike
+   * `openTurnId` it survives the turn's end, so a late result of an older turn
+   * can tell a newer one superseded it.
+   */
+  latestPromptTurnId?: string
   modes: SessionModeState | null
   models?: SessionModelState | null
   configOptions: SessionConfigOption[]
@@ -343,6 +359,16 @@ export interface AcpState {
    * `createSession` after spawn would otherwise hide Restart.
    */
   pendingRestartVersions: Record<string, string>
+  /**
+   * Chats with a reload in progress. The Reload control stays disabled and
+   * reads "Reloading…".
+   */
+  reloadingChatIds: Record<SessionId, true>
+  /**
+   * In-memory "Agent reloaded" mark. `afterMessageId` is the last message at
+   * the moment of reload, so later messages stay below the line. Not persisted.
+   */
+  agentReloadMarks: Record<SessionId, { afterMessageId: string | null }>
 
   // User-configured agents (persisted, distinct from the live `agents` map)
   agentConfigs: StoredAgentConfig[]
@@ -448,7 +474,7 @@ export interface AcpState {
   /** ACP agent-plan entries per session (`session/update` plan, full replace). */
   plans: Record<SessionId, PlanEntry[]>
   commands: Record<SessionId, AvailableCommand[]>
-  pendingPermissions: Record<string, PendingPermission> // P3 renders, keyed by requestId
+  pendingPermissions: Record<string, PendingPermission> // keyed by requestId
   pendingQuestions: Record<string, PendingQuestion> // issue #411, keyed by questionId
   pendingElicitations: Record<string, PendingElicitation>
   /** Pending user prompts keyed by session (sent FIFO when the turn ends). */
@@ -538,7 +564,7 @@ export interface AcpState {
   closeSession: (sessionId: SessionId) => Promise<void>
   setActiveSession: (sessionId: SessionId | null) => void
 
-  // Actions — configured agents (P4)
+  // Actions — configured agents
   loadAgentConfigs: () => Promise<void>
   saveAgentConfig: (config: StoredAgentConfig) => Promise<void>
   /**
@@ -671,14 +697,14 @@ export interface AcpState {
     exitCode: number | null
   ) => Promise<string>
 
-  // Actions — chat history (P5)
+  // Actions — chat history
   loadSessionIndex: () => Promise<void>
   /**
    * Merge a host-pushed full index (the `chat_history` watch state) into the
    * local projection, with the same stale-response guard as `loadSessionIndex`.
    */
   applySessionIndexSnapshot: (entries: SessionIndexEntry[]) => Promise<void>
-  openHistorySession: (id: string) => Promise<void>
+  openHistorySession: (id: string, options?: OpenHistoryOptions) => Promise<void>
   /** R1: Proactively reattach a still-running ACP session on refresh. Mirrors
    * `openHistorySessionInner`'s transcript-install + resume but skips
    * `ensureLiveAgent` (no cold-spawn): the caller passes the authoritative
@@ -730,7 +756,7 @@ export interface AcpState {
     projectId: string
   ) => Promise<void>
 
-  // Actions — MCP server registry (P6)
+  // Actions — MCP server registry
   loadMcpServers: () => Promise<void>
   saveMcpServer: (server: StoredMcpServer) => Promise<void>
   /**
@@ -854,7 +880,7 @@ export interface AcpState {
     }
   ) => Promise<void>
 
-  // Actions — config (P2 drives the UI; method available now)
+  // Actions — config
   setConfigOption: (
     sessionId: SessionId,
     configId: string,
@@ -863,7 +889,7 @@ export interface AcpState {
   setMode: (sessionId: SessionId, modeId: string) => Promise<void>
   setModel: (sessionId: SessionId, modelId: string) => Promise<void>
 
-  // Actions — permission (P3 drives the UI; method available now)
+  // Actions — permission
   respondPermission: (requestId: string, optionId?: string) => Promise<void>
 
   // Actions — structured questions (issue #411)
