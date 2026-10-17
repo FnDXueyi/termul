@@ -2,122 +2,13 @@
 //! listener → session → project resolution → the canvas router → a fake
 //! renderer → back.
 
-use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use figcraft_mcp::Backend;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::acp::host_mcp::canvas::{CanvasCallFrame, CanvasHolder, CanvasRouter};
-use crate::acp::host_mcp::parent::HostPlanServer;
-use crate::acp::session_persistence::SessionPersistence;
-
-struct Harness {
-    runtime: tokio::runtime::Runtime,
-    root: std::path::PathBuf,
-    persistence: Arc<SessionPersistence>,
-    server: Arc<HostPlanServer>,
-}
-
-impl Harness {
-    /// A parent with `sessions` (`(session id, project id)`) registered,
-    /// bound and in an active turn.
-    fn new(sessions: &[(&str, Option<&str>)]) -> (Self, Vec<ChildConfig>) {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let root =
-            std::env::temp_dir().join(format!("termul-canvas-bridge-{}", uuid::Uuid::new_v4()));
-        let cwd = root.join("cwd");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let persistence = runtime.block_on(async {
-            let persistence = SessionPersistence::open(root.join("store")).await.unwrap();
-            for (session_id, project_id) in sessions {
-                persistence
-                    .register_session(crate::acp::SessionRegistration {
-                        session_id: (*session_id).into(),
-                        stable_agent_namespace: Some("config:test".into()),
-                        runtime_agent_id: Some("agent-1".into()),
-                        project_id: project_id.map(str::to_string),
-                        cwd: cwd.clone(),
-                        ..Default::default()
-                    })
-                    .await
-                    .unwrap();
-            }
-            persistence
-        });
-        let server = HostPlanServer::start(vec![], Some(Arc::clone(&persistence)));
-        let configs = sessions
-            .iter()
-            .enumerate()
-            .map(|(index, (session_id, _))| {
-                let agent_id = format!("agent-{index}");
-                let (port, token, provisional) = server.register_session(&agent_id);
-                server.bind_session(&token, session_id);
-                server.begin_turn(&agent_id, session_id);
-                ChildConfig {
-                    port,
-                    token,
-                    session_id: provisional,
-                    agent_id,
-                }
-            })
-            .collect();
-        (
-            Self {
-                runtime,
-                root,
-                persistence,
-                server,
-            },
-            configs,
-        )
-    }
-
-    fn router(&self) -> Arc<CanvasRouter> {
-        self.server.canvas_router()
-    }
-}
-
-impl Drop for Harness {
-    fn drop(&mut self) {
-        let persistence = Arc::clone(&self.persistence);
-        let _ = self.runtime.block_on(persistence.shutdown());
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-/// A renderer that answers each call with `answer(frame)` (`None` = never).
-fn mount_renderer(
-    router: &Arc<CanvasRouter>,
-    holder_id: &'static str,
-    project_id: &str,
-    mount_seq: u64,
-    answer: impl Fn(&CanvasCallFrame) -> Option<Result<String, CanvasError>> + Send + 'static,
-) -> mpsc::Receiver<CanvasCallFrame> {
-    let (frames_tx, frames_rx) = mpsc::channel::<CanvasCallFrame>();
-    let (seen_tx, seen_rx) = mpsc::channel::<CanvasCallFrame>();
-    router.mount(
-        project_id,
-        mount_seq,
-        CanvasHolder::new(
-            holder_id,
-            Arc::new(move |frame| frames_tx.send(frame).is_ok()),
-        ),
-    );
-    let router = Arc::downgrade(router);
-    std::thread::spawn(move || {
-        for frame in frames_rx {
-            let reply = answer(&frame);
-            let _ = seen_tx.send(frame.clone());
-            if let (Some(outcome), Some(router)) = (reply, router.upgrade()) {
-                router.reply(holder_id, frame.call_id, frame.mount_seq, outcome);
-            }
-        }
-    });
-    seen_rx
-}
+use crate::acp::host_mcp::gateway_harness::{mount_renderer, Harness};
 
 fn error_of(result: Result<Value, String>) -> Value {
     serde_json::from_str(&result.expect_err("the call must fail")).expect("Err(String) is JSON")
@@ -260,4 +151,180 @@ fn render_png_asks_host_render_png_and_decodes_its_base64() {
     assert_eq!(frame.method, "host.renderPng");
     let params: Value = serde_json::from_str(&frame.params).unwrap();
     assert_eq!(params, json!({"scale": 2.0, "ids": [7]}));
+}
+
+fn tool_error(result: &figcraft_mcp::ToolResult) -> Value {
+    assert!(result.is_error, "{:?}", result.content);
+    serde_json::from_str(result.first_text()).expect("a canvas error is JSON")
+}
+
+fn tool_json(result: &figcraft_mcp::ToolResult) -> Value {
+    assert!(!result.is_error, "{:?}", result.content);
+    serde_json::from_str(result.first_text()).expect("a JSON tool result")
+}
+
+#[test]
+fn save_file_runs_the_host_save_and_ignores_the_path() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, |_| {
+        Some(Ok(r#"{"path":"design.figcraft"}"#.into()))
+    });
+    let mut bridge = Bridge::new(configs[0].clone()).with_tool("save_file");
+    let result = figcraft_mcp::call_tool(
+        &mut bridge,
+        "save_file",
+        &json!({"path": "C:/Windows/evil.figcraft"}),
+    );
+    assert_eq!(tool_json(&result), json!({"path": "design.figcraft"}));
+    let frame = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        (frame.method.as_str(), frame.params.as_str()),
+        ("host.save", "{}")
+    );
+    assert!(!harness.cwd.join("evil.figcraft").exists());
+}
+
+#[test]
+fn export_with_a_project_path_writes_the_inline_bytes_there() {
+    let png = b"\x89PNG\r\n\x1a\nnot really";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, move |_| {
+        Some(Ok(json!({"format": "png", "data": encoded}).to_string()))
+    });
+    let mut bridge = Bridge::new(configs[0].clone()).with_tool("export");
+    let result = figcraft_mcp::call_tool(
+        &mut bridge,
+        "export",
+        &json!({"ids": [18_446_744_073_709_551_615u64], "scale": 2, "path": "out/hero.png"}),
+    );
+    assert_eq!(
+        tool_json(&result),
+        json!({"path": "out/hero.png", "bytes": png.len(), "format": "png"})
+    );
+    assert_eq!(
+        std::fs::read(harness.cwd.join("out/hero.png")).unwrap(),
+        png
+    );
+    let frame = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(frame.method, "engine.execute");
+    let sent: Value = serde_json::from_str(&frame.params).unwrap();
+    assert_eq!(
+        sent,
+        json!({"command": "file.export", "params": {"ids": [18_446_744_073_709_551_615u64], "scale": 2.0}})
+    );
+}
+
+#[test]
+fn export_outside_the_project_is_refused_before_the_editor_runs() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, |_| {
+        Some(Ok(r#"{"format":"png","data":""}"#.into()))
+    });
+    let absolute = harness.cwd.join("abs.png");
+    for path in [
+        "../escape.png",
+        "out/../../escape.png",
+        absolute.to_str().unwrap(),
+    ] {
+        let mut bridge = Bridge::new(configs[0].clone()).with_tool("export");
+        let result = figcraft_mcp::call_tool(&mut bridge, "export", &json!({"path": path}));
+        assert_eq!(
+            tool_error(&result)["code"],
+            "UNSUPPORTED_IN_KIOSK",
+            "{path}"
+        );
+    }
+    assert!(
+        seen.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no call reached the editor"
+    );
+    assert!(!harness.cwd.parent().unwrap().join("escape.png").exists());
+    assert!(!absolute.exists());
+}
+
+#[test]
+fn export_without_a_path_returns_the_bytes_inline() {
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x03";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let _seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, move |_| {
+        Some(Ok(json!({"format": "png", "data": encoded}).to_string()))
+    });
+    let mut bridge = Bridge::new(configs[0].clone()).with_tool("export");
+    let result = figcraft_mcp::call_tool(&mut bridge, "export", &json!({}));
+    assert!(!result.is_error, "{:?}", result.content);
+    assert_eq!(result.content[0]["type"], "image");
+    assert_eq!(result.content[0]["mimeType"], "image/png");
+}
+
+#[test]
+fn open_file_and_file_commands_are_unsupported_in_kiosk() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, |_| {
+        Some(Ok("{}".into()))
+    });
+    let calls = [
+        ("open_file", json!({"path": "C:/a.figcraft"})),
+        (
+            "run_command",
+            json!({"command": "file.import", "params": {"path": "a.svg"}}),
+        ),
+        (
+            "batch",
+            json!({"commands": [{"command": "node.create", "params": {}}, {"command": "file.save"}]}),
+        ),
+    ];
+    for (tool, args) in calls {
+        let mut bridge = Bridge::new(configs[0].clone()).with_tool(tool);
+        let result = figcraft_mcp::call_tool(&mut bridge, tool, &args);
+        assert_eq!(
+            tool_error(&result)["code"],
+            "UNSUPPORTED_IN_KIOSK",
+            "{tool}"
+        );
+    }
+    assert!(
+        seen.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no call reached the editor"
+    );
+}
+
+#[test]
+fn canvas_tools_answer_canvas_closed_with_nothing_mounted() {
+    let (_harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    for (tool, args) in [
+        ("create_node", json!({"type": "frame"})),
+        ("save_file", json!({})),
+        ("inspect_document", json!({})),
+        ("pointer", json!({"x": 1, "y": 1})),
+    ] {
+        let mut bridge = Bridge::new(configs[0].clone()).with_tool(tool);
+        let result = figcraft_mcp::call_tool(&mut bridge, tool, &args);
+        assert_eq!(tool_error(&result)["code"], "CANVAS_CLOSED", "{tool}");
+    }
+}
+
+#[test]
+fn ui_tools_pass_through_and_report_canvas_hidden() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, |_| {
+        Some(Err(CanvasError::new(
+            CanvasErrorCode::CanvasHidden,
+            "the canvas tab is hidden",
+        )))
+    });
+    for (tool, args, method) in [
+        ("pointer", json!({"x": 10, "y": 20}), "ui.pointer"),
+        ("key", json!({"key": "Escape"}), "ui.key"),
+        ("type_text", json!({"text": "hi"}), "ui.type"),
+        ("inspect_ui", json!({}), "ui.inspect"),
+        ("screenshot", json!({"window": true}), "ui.screenshot"),
+    ] {
+        let mut bridge = Bridge::new(configs[0].clone()).with_tool(tool);
+        let result = figcraft_mcp::call_tool(&mut bridge, tool, &args);
+        assert_eq!(tool_error(&result)["code"], "CANVAS_HIDDEN", "{tool}");
+        let frame = seen.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(frame.method, method, "{tool}");
+    }
 }

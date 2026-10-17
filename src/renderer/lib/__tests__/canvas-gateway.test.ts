@@ -13,7 +13,7 @@ import type { AcpTransport } from '@/lib/acp-transport'
 import { CanvasGatewayClient } from '@/lib/acp-transport/canvas-gateway-client'
 import { asJsonText, type CanvasBridge } from '@/lib/canvas-bridge'
 import { type CanvasPhase, useCanvasStore } from '@/stores/canvas-store'
-import { startCanvasGateway } from '../canvas-gateway'
+import { type CanvasGatewayOptions, startCanvasGateway } from '../canvas-gateway'
 
 const INFO: CanvasOpenInfo = {
   canvasId: 'cv1',
@@ -44,7 +44,7 @@ function setPhase(projectId: string, phase: CanvasPhase | null): void {
   })
 }
 
-function harness() {
+function harness(options?: CanvasGatewayOptions) {
   const sent: Array<[string, unknown]> = []
   const canvas = new CanvasGatewayClient({
     request: (type, payload) => {
@@ -53,7 +53,7 @@ function harness() {
     },
     isLive: () => true
   })
-  const stop = startCanvasGateway({ canvas } as unknown as AcpTransport)
+  const stop = startCanvasGateway({ canvas } as unknown as AcpTransport, options)
   return { canvas, sent, stop }
 }
 
@@ -127,6 +127,56 @@ describe('startCanvasGateway', () => {
       'canvas_reply',
       expect.objectContaining({
         callId: 2,
+        ok: false,
+        error: expect.objectContaining({ code: 'CANVAS_CLOSED' })
+      })
+    ])
+  })
+
+  it('answers host.save with the host save, never the editor', async () => {
+    const onHostSave = vi.fn(async () => ({ ok: true as const, path: 'design/app.figcraft' }))
+    const { canvas, sent, stop } = harness({ onHostSave })
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    const bridge: CanvasBridge = { call: vi.fn(), dispose: vi.fn() }
+    useCanvasStore.getState().attachBridge('proj-1', 4, bridge)
+
+    canvas.handleFrame({
+      type: 'canvas_call',
+      callId: 3,
+      projectId: 'proj-1',
+      mountSeq: 4,
+      method: 'host.save',
+      params: '{}'
+    })
+    await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
+    expect(onHostSave).toHaveBeenCalledWith('proj-1')
+    expect(bridge.call).not.toHaveBeenCalled()
+    expect(sent.at(-1)).toEqual([
+      'canvas_reply',
+      { callId: 3, mountSeq: 4, ok: true, result: '{"path":"design/app.figcraft"}' }
+    ])
+    useCanvasStore.getState().detachBridge('proj-1', bridge)
+  })
+
+  it('answers host.save with CANVAS_CLOSED until a host save is wired', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+
+    canvas.handleFrame({
+      type: 'canvas_call',
+      callId: 5,
+      projectId: 'proj-1',
+      mountSeq: 4,
+      method: 'host.save',
+      params: '{}'
+    })
+    await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
+    expect(sent.at(-1)).toEqual([
+      'canvas_reply',
+      expect.objectContaining({
+        callId: 5,
         ok: false,
         error: expect.objectContaining({ code: 'CANVAS_CLOSED' })
       })
