@@ -154,3 +154,41 @@ fn credential_straddling_the_line_cut_is_masked_whole() {
     let tail = ring.tail();
     assert!(!tail.contains("Bearer a"), "bearer prefix kept in the tail");
 }
+
+#[test]
+fn url_credentials_are_masked() {
+    assert_eq!(
+        redact_line("fetch https://alice:hunter2pass@api.example.com/v1 failed"),
+        "fetch https://alice:[redacted]@api.example.com/v1 failed"
+    );
+}
+
+#[test]
+fn stripe_keys_are_masked() {
+    assert_eq!(
+        redact_line("key sk_live_51H8abcdefghijklmnop rejected"),
+        "key [redacted] rejected"
+    );
+    assert_eq!(
+        redact_line("restricted rk_live_51H8abcdefghijklmnop rejected"),
+        "restricted [redacted] rejected"
+    );
+}
+
+#[test]
+fn google_access_tokens_are_masked() {
+    assert_eq!(
+        redact_line("google ya29.a0AfH6SMBxyzxyzxyzxyzxyz12345 expired"),
+        "google [redacted] expired"
+    );
+}
+
+#[test]
+fn token_counts_are_not_secrets() {
+    assert_eq!(
+        redact_line(r#"{"max_tokens": 4096, "access_token": "abc123def"}"#),
+        r#"{"max_tokens": 4096, "access_token": [redacted]}"#
+    );
+    assert_eq!(redact_line("maxTokens=4096"), "maxTokens=4096");
+    assert_eq!(redact_line("auth_tokens=abc123def"), "auth_tokens=[redacted]");
+}
