@@ -1279,8 +1279,8 @@ describe('Parity Checklist Automation', () => {
       // Same ripgrep walk as the desktop command (shared helpers, not a
       // second implementation).
       expect(content).toMatch(/build_file_name_search_args/)
-      expect(content).toMatch(/rank_search_hits/)
-      expect(content).toMatch(/path_is_ignored/)
+      expect(content).toMatch(/collect_file_hits\(/)
+      expect(content).toMatch(/assemble_final_batch\(/)
       // IpcBody contract + spawn_blocking + tracing boundary logs.
       expect(content).toMatch(/IpcBody/)
       expect(content).toMatch(/spawn_blocking/)
@@ -1292,6 +1292,7 @@ describe('Parity Checklist Automation', () => {
     it('commands/search.rs keeps the desktop search_file_names_stream command', () => {
       const content = readFileSync(CommandsRust, 'utf-8')
       expect(content).toMatch(/pub async fn search_file_names_stream/)
+      expect(content).toMatch(/collect_file_hits\(/)
     })
   })
 
