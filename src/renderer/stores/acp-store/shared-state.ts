@@ -116,6 +116,36 @@ export function isHistoryCoveredEvent(sessionId: SessionId, eventSeq?: number): 
   return eventSeq <= (historySeqWatermarks.get(sessionId) ?? 0)
 }
 
+/**
+ * Per session, the subscribe cursor `attachLiveTurn` lowered to just before the
+ * open turn's prompt. The payload only summarizes that turn's tool calls, while
+ * the relay replays the turn in full: a covered tool_call/tool_call_update
+ * above the floor restores its card. Prompts and chunks stay covered.
+ */
+const liveTurnReplayFloors = new Map<SessionId, number>()
+
+export function noteLiveTurnReplayFloor(sessionId: SessionId, floor: number): void {
+  liveTurnReplayFloors.set(sessionId, floor)
+}
+
+export function forgetLiveTurnReplayFloor(sessionId: SessionId): void {
+  liveTurnReplayFloors.delete(sessionId)
+}
+
+/** The server seq of a covered tool event the attach replay re-delivers, else null. */
+export function liveTurnReplaySeq(sessionId: SessionId, eventSeq?: number): number | null {
+  const floor = liveTurnReplayFloors.get(sessionId)
+  if (floor === undefined || typeof eventSeq !== 'number' || eventSeq <= floor) return null
+  return isHistoryCoveredEvent(sessionId, eventSeq) ? eventSeq : null
+}
+
+/** A covered tool event, unless the attach replay re-delivers it in full. */
+export function isHistoryCoveredToolEvent(sessionId: SessionId, eventSeq?: number): boolean {
+  return (
+    isHistoryCoveredEvent(sessionId, eventSeq) && liveTurnReplaySeq(sessionId, eventSeq) === null
+  )
+}
+
 /** Record the authoritative history watermark for an installed payload. */
 export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPayload): void {
   // `metadata.lastSeq` is the persisted-log cursor and can legitimately exceed
@@ -123,6 +153,7 @@ export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPaylo
   // stale-low value must never under-cover the payload's own messages.
   const watermark = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
   if (watermark > 0) historySeqWatermarks.set(sessionId, watermark)
+  liveTurnReplayFloors.delete(sessionId)
   // Keep the local seq counter above the server watermark (the recovery path
   // rebases the same way) so post-install live messages never receive local
   // stamps below the envelope seqs they arrived with.
@@ -132,6 +163,7 @@ export function noteHistoryWatermark(sessionId: SessionId, payload: SessionPaylo
 /** Test-only: clear per-session history watermarks between tests. */
 export function _resetHistorySeqWatermarksForTesting(): void {
   historySeqWatermarks.clear()
+  liveTurnReplayFloors.clear()
 }
 
 /**

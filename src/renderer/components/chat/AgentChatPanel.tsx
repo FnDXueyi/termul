@@ -21,10 +21,9 @@ import type { AgentSwitchRecord } from '@/lib/acp-history-persistence'
 import { CODEX_CLI_SIGNED_OUT_MESSAGE } from '@/lib/agents/codex-cli-auth'
 import { logFrontendError } from '@/lib/log-api'
 import {
-  extractCommandNames,
   extractSkillNames,
-  replaceFileTokensInline,
-  stripAllCommandTokens
+  replaceCommandTokensInline,
+  replaceFileTokensInline
 } from '@/lib/skill-tokens'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { getProjectRootPath } from '@/lib/worktree-context'
@@ -139,15 +138,40 @@ export function AgentChatPanel({
   // — not session.cwd which may be a worktree path with no .agents/skills/.
   const skillsProjectRoot = session ? getProjectRootPath(session.projectId) : undefined
   const { skills: availableSkills } = useAgentSkills(skillsProjectRoot)
-  const imageCapable = useAcpStore((s) =>
-    session ? Boolean(s.agents[session.agentId]?.capabilities?.promptCapabilities?.image) : false
+  const switching = session?.switching ?? null
+  const switchToConfigId = switching?.toConfigId ?? null
+  const switchPreparedSessionId = useAcpStore((s) =>
+    switchToConfigId && session
+      ? (s.preparedSessions[prepareChatKey(switchToConfigId, session.cwd, undefined)] ?? null)
+      : null
   )
-  const embedCapable = useAcpStore((s) =>
-    session
-      ? Boolean(s.agents[session.agentId]?.capabilities?.promptCapabilities?.embeddedContext)
+  const switchPreparedSession = useAcpStore(
+    useShallow((s) => {
+      const prepared = switchPreparedSessionId ? s.sessions[switchPreparedSessionId] : undefined
+      return {
+        agentId: prepared?.agentId ?? null,
+        models: prepared?.models,
+        modes: prepared?.modes,
+        configOptions: prepared?.configOptions,
+        mcpServerCount: prepared?.mcpServerCount
+      }
+    })
+  )
+  const promptAgentId = switching ? switchPreparedSession.agentId : (session?.agentId ?? null)
+  const promptSessionId = switching ? switchPreparedSessionId : sessionId
+  const imageCapable = useAcpStore((s) =>
+    promptAgentId
+      ? Boolean(s.agents[promptAgentId]?.capabilities?.promptCapabilities?.image)
       : false
   )
-  const commands = useAcpStore((s) => s.commands[sessionId] ?? EMPTY_COMMANDS)
+  const embedCapable = useAcpStore((s) =>
+    promptAgentId
+      ? Boolean(s.agents[promptAgentId]?.capabilities?.promptCapabilities?.embeddedContext)
+      : false
+  )
+  const commands = useAcpStore((s) =>
+    promptSessionId ? (s.commands[promptSessionId] ?? EMPTY_COMMANDS) : EMPTY_COMMANDS
+  )
   const hasFileChanges = useMemo(
     () => toolCalls.some((t) => t.kind === 'edit' || t.kind === 'delete' || t.kind === 'move'),
     [toolCalls]
@@ -403,20 +427,6 @@ export function AgentChatPanel({
     })
   }, [cancelPrompt, sessionId])
 
-  // Armed-switch option scoping (spec-acp-composer-option-fidelity): while a
-  // switch is armed the composer is a launcher for the TARGET config — its
-  // chips render the target's advertised options (prepared session →
-  // `agentOptionsCache` → empty) with `switching.pendingOptions` overlaid, and
-  // picks route into `setSwitchPendingOption` instead of the live session's
-  // setters (the old session's wire + persisted cache stay untouched).
-  const switching = session?.switching ?? null
-  const switchToConfigId = switching?.toConfigId ?? null
-  const switchPreparedSessionId = useAcpStore((s) =>
-    switchToConfigId && session
-      ? (s.preparedSessions[prepareChatKey(switchToConfigId, session.cwd, undefined)] ?? null)
-      : null
-  )
-  const switchPreparedSession = useAcpSession(switchPreparedSessionId)
   const switchOptionsCache = useAcpStore((s) =>
     switchToConfigId ? (s.agentOptionsCache[switchToConfigId] ?? null) : null
   )
@@ -425,26 +435,25 @@ export function AgentChatPanel({
       switching == null
         ? null
         : overlayPendingLauncherOptions({
-            models: switchPreparedSession?.models ?? switchOptionsCache?.models ?? null,
-            modes: switchPreparedSession?.modes ?? switchOptionsCache?.modes ?? null,
+            models: switchPreparedSession.models ?? switchOptionsCache?.models ?? null,
+            modes: switchPreparedSession.modes ?? switchOptionsCache?.modes ?? null,
             configOptions:
-              switchPreparedSession?.configOptions ?? switchOptionsCache?.configOptions ?? [],
+              switchPreparedSession.configOptions ?? switchOptionsCache?.configOptions ?? [],
             pending: switching.pendingOptions ?? emptyPendingLauncherOptions()
           }),
     [switching, switchPreparedSession, switchOptionsCache]
   )
-  // ChatInputBar reads `session.models` / `session.modes` internally for the
-  // model and Agent chips — pass a memoized session carrying the TARGET's
-  // option state while armed.
+  const switchMcpServerCount = switchPreparedSession.mcpServerCount
   const composerSession = useMemo(() => {
     if (!session || !armedOptions) return session
     return {
       ...session,
       models: armedOptions.models,
       modes: armedOptions.modes,
-      configOptions: armedOptions.configOptions
+      configOptions: armedOptions.configOptions,
+      mcpServerCount: switchMcpServerCount
     }
-  }, [session, armedOptions])
+  }, [session, armedOptions, switchMcpServerCount])
 
   const handleSetConfig = useCallback(
     async (configId: string, valueId: string | boolean) => {
@@ -568,14 +577,11 @@ export function AgentChatPanel({
     // The display (token) blocks are passed through unchanged so the timeline
     // keeps rendering inline chips. If a skill name no longer resolves to a
     // path (e.g. the skill was uninstalled), surface a clear error and abort.
-    // Mirrors `buildPromptParts` exactly: strip the command tokens before the
-    // skill/file framer, then prefix `/<name> ` back so a retried command turn
-    // stays byte-identical to a fresh send (no sentinel leaks to the agent).
+    // Mirrors `buildPromptParts`: command tokens become `/<name>` where the
+    // user typed them. They are not moved to the front of the prompt.
     const tokenText = lastUserText
-    const commandNames = extractCommandNames(tokenText)
-    const commandName = commandNames[0] ?? null
-    const valueDecommanded = commandNames.length > 0 ? stripAllCommandTokens(tokenText) : tokenText
-    const skillNames = extractSkillNames(valueDecommanded)
+    const valueWithCommandText = replaceCommandTokensInline(tokenText)
+    const skillNames = extractSkillNames(tokenText)
     const skills = skillNames.map((name) => ({
       name,
       path: availableSkills.find((s) => s.name === name)?.path ?? ''
@@ -587,10 +593,10 @@ export function AgentChatPanel({
     }
     // File tokens → `(display)` before the skill framer (buildPromptParts'
     // `valueDefiled`) so file-mention sentinels never leak to the wire either.
-    const valueDefiled = replaceFileTokensInline(valueDecommanded)
+    const valueDefiled = replaceFileTokensInline(valueWithCommandText)
     const wireText =
       skills.length > 0 ? buildPromptWithLoadedSkills(skills, valueDefiled) : valueDefiled
-    const wireWithCommand = commandName ? `/${commandName} ${wireText}` : wireText
+    const wireWithCommand = wireText
     // Build wire blocks: replace the text payload with the re-framed wire text,
     // preserving non-text (image/resource) blocks from the original message.
     const wireBlocks: ContentBlock[] = []
