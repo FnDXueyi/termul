@@ -1,43 +1,67 @@
 import { create } from 'zustand'
 
+/**
+ * A position in one incarnation of a chat's host session log. `seq` counts
+ * within the incarnation `logEpoch` names (`null` when the transport has none):
+ * a host restart can start a new epoch whose seqs restart.
+ */
+export interface LogPoint {
+  logEpoch: string | null
+  seq: number
+}
+
+/**
+ * Whether `point` comes after `earlier` (`null`: nothing seen yet). A point in
+ * another epoch counts as after: a renderer only meets a new epoch once the
+ * host moved to it, and the old epoch's seqs mean nothing in the new log.
+ */
+export function isAfter(point: LogPoint, earlier: LogPoint | null | undefined): boolean {
+  return !earlier || point.logEpoch !== earlier.logEpoch || point.seq > earlier.seq
+}
+
 interface AgentChatUnreadState {
   /** Sessions whose turn finished while they were not the active chat ("New activity"). */
   unread: Record<string, true>
   /**
-   * Per dot, the `seenTurnEndSeq` when its newest turn started. A read elsewhere
-   * can clear the dot only once a turn end newer than this was seen here.
+   * Per dot, the `seenTurnEnd` when its newest turn started (`null`: none
+   * seen). A read elsewhere can clear the dot only once a turn end after this
+   * was seen here.
    */
-  unreadSince: Record<string, number>
-  /** Host-stamped session-log seq of the newest turn end this renderer has seen. */
-  seenTurnEndSeq: Record<string, number>
+  unreadSince: Record<string, LogPoint | null>
+  /** Host-stamped session-log point of the newest turn end this renderer has seen. */
+  seenTurnEnd: Record<string, LogPoint>
   /**
-   * The host's shared last-read marker: the newest seq any surface (this one,
-   * a shared-live phone, another browser) has read. Mirrors the `chat_reads` watch.
+   * The host's shared last-read marker: the newest point any surface (this
+   * one, a shared-live phone, another browser) has read. Mirrors the
+   * `chat_reads` watch.
    */
-  sharedReadSeq: Record<string, number>
-  /** `sinceSeq` defaults to the newest turn end seen now. */
-  markUnread: (sessionId: string, sinceSeq?: number) => void
+  sharedRead: Record<string, LogPoint>
+  /** `since` defaults to the newest turn end seen now. */
+  markUnread: (sessionId: string, since?: LogPoint | null) => void
   clearUnread: (sessionId: string) => void
-  noteTurnEnd: (sessionId: string, seq: number) => void
-  setReadMarks: (marks: Record<string, number>) => void
-  setReadMark: (sessionId: string, seq: number) => void
+  noteTurnEnd: (sessionId: string, point: LogPoint) => void
+  setReadMarks: (marks: Record<string, LogPoint>) => void
+  setReadMark: (sessionId: string, point: LogPoint) => void
 }
 
-type DotMaps = Pick<
-  AgentChatUnreadState,
-  'unread' | 'unreadSince' | 'seenTurnEndSeq' | 'sharedReadSeq'
->
+type DotMaps = Pick<AgentChatUnreadState, 'unread' | 'unreadSince' | 'seenTurnEnd' | 'sharedRead'>
 
-function readElsewhere(state: DotMaps, sessionId: string, since: number): boolean {
-  const turnEnd = state.seenTurnEndSeq[sessionId]
-  const read = state.sharedReadSeq[sessionId]
-  return turnEnd !== undefined && turnEnd > since && read !== undefined && read >= turnEnd
+function readElsewhere(state: DotMaps, sessionId: string, since: LogPoint | null): boolean {
+  const turnEnd = state.seenTurnEnd[sessionId]
+  const read = state.sharedRead[sessionId]
+  return (
+    turnEnd !== undefined &&
+    isAfter(turnEnd, since) &&
+    read !== undefined &&
+    read.logEpoch === turnEnd.logEpoch &&
+    read.seq >= turnEnd.seq
+  )
 }
 
 function withoutReadDots(state: DotMaps): Pick<DotMaps, 'unread' | 'unreadSince'> {
   let { unread, unreadSince } = state
   for (const sessionId of Object.keys(state.unread)) {
-    if (!readElsewhere(state, sessionId, state.unreadSince[sessionId] ?? 0)) continue
+    if (!readElsewhere(state, sessionId, state.unreadSince[sessionId] ?? null)) continue
     if (unread === state.unread) {
       unread = { ...state.unread }
       unreadSince = { ...state.unreadSince }
@@ -65,14 +89,15 @@ function withoutReadDots(state: DotMaps): Pick<DotMaps, 'unread' | 'unreadSince'
 export const useAgentChatUnreadStore = create<AgentChatUnreadState>((set) => ({
   unread: {},
   unreadSince: {},
-  seenTurnEndSeq: {},
-  sharedReadSeq: {},
-  markUnread: (sessionId, sinceSeq) => {
+  seenTurnEnd: {},
+  sharedRead: {},
+  markUnread: (sessionId, sinceArg) => {
     if (!sessionId) return
     set((state) => {
-      const since = sinceSeq ?? state.seenTurnEndSeq[sessionId] ?? 0
+      const since = sinceArg === undefined ? (state.seenTurnEnd[sessionId] ?? null) : sinceArg
       if (state.unread[sessionId]) {
-        if ((state.unreadSince[sessionId] ?? 0) >= since) return state
+        const current = state.unreadSince[sessionId] ?? null
+        if (!since || !isAfter(since, current)) return state
         return { unreadSince: { ...state.unreadSince, [sessionId]: since } }
       }
       if (readElsewhere(state, sessionId, since)) return state
@@ -92,24 +117,25 @@ export const useAgentChatUnreadStore = create<AgentChatUnreadState>((set) => ({
       return { unread, unreadSince }
     })
   },
-  noteTurnEnd: (sessionId, seq) => {
+  noteTurnEnd: (sessionId, point) => {
     set((state) => {
-      if ((state.seenTurnEndSeq[sessionId] ?? 0) >= seq) return state
-      const seenTurnEndSeq = { ...state.seenTurnEndSeq, [sessionId]: seq }
-      return { seenTurnEndSeq, ...withoutReadDots({ ...state, seenTurnEndSeq }) }
+      if (!isAfter(point, state.seenTurnEnd[sessionId])) return state
+      const seenTurnEnd = { ...state.seenTurnEnd, [sessionId]: point }
+      return { seenTurnEnd, ...withoutReadDots({ ...state, seenTurnEnd }) }
     })
   },
   setReadMarks: (marks) => {
     set((state) => {
-      const sharedReadSeq = { ...marks }
-      return { sharedReadSeq, ...withoutReadDots({ ...state, sharedReadSeq }) }
+      const sharedRead = { ...marks }
+      return { sharedRead, ...withoutReadDots({ ...state, sharedRead }) }
     })
   },
-  setReadMark: (sessionId, seq) => {
+  setReadMark: (sessionId, point) => {
     set((state) => {
-      if (state.sharedReadSeq[sessionId] === seq) return state
-      const sharedReadSeq = { ...state.sharedReadSeq, [sessionId]: seq }
-      return { sharedReadSeq, ...withoutReadDots({ ...state, sharedReadSeq }) }
+      const current = state.sharedRead[sessionId]
+      if (current?.logEpoch === point.logEpoch && current.seq === point.seq) return state
+      const sharedRead = { ...state.sharedRead, [sessionId]: point }
+      return { sharedRead, ...withoutReadDots({ ...state, sharedRead }) }
     })
   }
 }))

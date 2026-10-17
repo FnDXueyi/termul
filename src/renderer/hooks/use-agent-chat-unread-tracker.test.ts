@@ -53,17 +53,17 @@ beforeEach(() => {
   useAgentChatUnreadStore.setState({
     unread: {},
     unreadSince: {},
-    seenTurnEndSeq: {},
-    sharedReadSeq: {}
+    seenTurnEnd: {},
+    sharedRead: {}
   })
 })
 
 function turnEnd(sessionId: string, seq: number): void {
-  act(() => useAgentChatUnreadStore.getState().noteTurnEnd(sessionId, seq))
+  act(() => useAgentChatUnreadStore.getState().noteTurnEnd(sessionId, { logEpoch: 'e1', seq }))
 }
 
 function readElsewhere(sessionId: string, seq: number): void {
-  act(() => useAgentChatUnreadStore.getState().setReadMark(sessionId, seq))
+  act(() => useAgentChatUnreadStore.getState().setReadMark(sessionId, { logEpoch: 'e1', seq }))
 }
 
 describe('useAgentChatUnreadTracker', () => {
@@ -286,7 +286,7 @@ describe('useAgentChatUnreadTracker', () => {
     expect(unreadIds()).toEqual(['b'])
 
     turnEnd('a', 11)
-    act(() => useAgentChatUnreadStore.getState().setReadMarks({ b: 10 }))
+    act(() => useAgentChatUnreadStore.getState().setReadMarks({ b: { logEpoch: 'e1', seq: 10 } }))
 
     expect(unreadIds()).toEqual(['b'])
   })

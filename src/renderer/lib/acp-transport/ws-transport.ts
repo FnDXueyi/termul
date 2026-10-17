@@ -1204,8 +1204,16 @@ export class WsAcpTransport implements AcpTransport {
     await this.request('record_agent_switch', { sessionId, ...record }, undefined, options)
   }
 
-  async markChatRead(sessionId: SessionId, seq: number): Promise<ChatReadMark> {
-    return this.request<ChatReadMark>('mark_chat_read', { sessionId, seq })
+  async markChatRead(
+    sessionId: SessionId,
+    seq: number,
+    logEpoch: string | null
+  ): Promise<ChatReadMark> {
+    return this.request<ChatReadMark>('mark_chat_read', {
+      sessionId,
+      seq,
+      ...(logEpoch ? { logEpoch } : {})
+    })
   }
 
   async sendPrompt(

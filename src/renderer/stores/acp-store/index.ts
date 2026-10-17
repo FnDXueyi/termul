@@ -462,7 +462,9 @@ async function installTransportRecovery(
     }
   })
   for (const event of recovery.events) {
-    if (event.type === 'prompt_complete') noteTurnEndSeq(recovery.sessionId, event.seq)
+    if (event.type === 'prompt_complete') {
+      noteTurnEndSeq(recovery.sessionId, event.seq, recovery.logEpoch ?? null)
+    }
   }
   // AD-6: a prompt that lost its reply resolves from the recovered log.
   reconcilePromptAfterRecovery(recovery.sessionId, recovery.events)
@@ -606,7 +608,8 @@ export function initAcpEventListeners(): () => void {
       useAcpStore.getState()._onElicitationRequest(e, eventSeq)
     ),
     acpApi.onEvent<PromptCompleteEvent>(ACP_EVENTS.promptComplete, (e, eventSeq) => {
-      noteTurnEndSeq(e.sessionId, eventSeq)
+      const logEpoch = getAcpTransport().getSessionCursor?.(e.sessionId)?.logEpoch ?? null
+      noteTurnEndSeq(e.sessionId, eventSeq, logEpoch)
       useAcpStore.getState()._onPromptComplete(e, eventSeq)
     }),
     acpApi.onEvent<AgentCrashedEvent>(ACP_EVENTS.agentCrashed, (e) => {
