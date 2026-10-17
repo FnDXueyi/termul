@@ -147,7 +147,9 @@ import {
   _clearPayloadCacheForTesting,
   type AgentSwitchRecord,
   getCachedSessionPayload,
+  loadSessionPayload,
   reloadSessionPayloadFromHost,
+  type SessionPayload,
   setCachedSessionPayload
 } from '@/lib/acp-history-persistence'
 import {
@@ -176,8 +178,14 @@ import {
   prepareChatKey,
   useAcpStore
 } from '@/stores/acp-store'
-import { activeWirePromptTurns } from './shared-state'
 import {
+  activeWirePromptTurns,
+  invalidateSessionReopen,
+  isHistoryCoveredEvent,
+  liveSwitchSources
+} from './shared-state'
+import {
+  deferred,
   FRESH,
   flushTurnEnd,
   makeConfigOption,
@@ -3411,6 +3419,121 @@ describe('switchAgent CAP-7 reopen (story 3)', () => {
       (m) => m.blocks.find((b) => b.type === 'text')?.text
     )
     expect(texts).toEqual(['turn on A', 'turn on B', 'turn on C'])
+  })
+
+  describe('splice-source watermark', () => {
+    const hopPayload = (id: string, lastSeq: number, newSessionId?: string) => ({
+      metadata: {
+        id,
+        agentId: `agent-${id}`,
+        agentConfigId: `cfg-${id}`,
+        title: id,
+        cwd: '/work',
+        projectId: 'p1',
+        createdAt: 1,
+        lastActivityAt: 2,
+        messageCount: 1,
+        lastSeq,
+        status: 'closed' as const
+      },
+      messages: [
+        {
+          id: 'user:seq-1',
+          role: 'user',
+          blocks: [{ type: 'text', text: `turn on ${id}` }],
+          streaming: false,
+          timestamp: 1,
+          seq: 1
+        }
+      ] as never,
+      ...(newSessionId
+        ? {
+            switches: [
+              {
+                id: `switch:seq-${lastSeq}`,
+                fromConfigId: `cfg-${id}`,
+                toConfigId: `cfg-${newSessionId}`,
+                newSessionId,
+                summaryText: 'handoff',
+                timestamp: 2,
+                seq: lastSeq
+              }
+            ]
+          }
+        : {})
+    })
+
+    it.each([
+      ['abandoned', true, false],
+      ['completed', false, true]
+    ])('%s switch redirect, intermediate hop watermark', async (_, abandon, covered) => {
+      setCachedSessionPayload('s-a', hopPayload('s-a', 2, 's-b'))
+      setCachedSessionPayload('s-b', hopPayload('s-b', 7, 's-c'))
+      setCachedSessionPayload('s-c', hopPayload('s-c', 1))
+      _setAcpTransportForTests({
+        historyMode: () => 'server',
+        loadSession: vi.fn(async () => {
+          if (abandon) invalidateSessionReopen('s-a')
+          return {}
+        }),
+        dispose: vi.fn()
+      } as unknown as AcpTransport)
+      useAcpStore.setState({
+        agentConfigs: [{ id: 'cfg-s-c', name: 'Cee', command: 'cee', args: [], env: {} }],
+        agents: { 'agent-s-c': { id: 'agent-s-c', capabilities: { loadSession: true } } },
+        agentStatus: { 'agent-s-c': 'connected' }
+      })
+
+      await useAcpStore.getState().openHistorySession('s-a')
+      await flushTurnEnd()
+
+      expect(isHistoryCoveredEvent('s-b', 7)).toBe(covered)
+    })
+
+    it.each([
+      ['abandoned', true, false],
+      ['completed', false, true]
+    ])('%s live-switch re-splice, source watermark', async (_, abandon, covered) => {
+      const source = deferred<SessionPayload>()
+      const loadPayload = vi.mocked(loadSessionPayload)
+      const cacheBacked = loadPayload.getMockImplementation()
+      loadPayload.mockImplementation(async (id: string) =>
+        id === 's-old' ? source.promise : (cacheBacked?.(id) ?? null)
+      )
+      try {
+        setCachedSessionPayload('s-new', hopPayload('s-new', 1))
+        _setAcpTransportForTests({
+          historyMode: () => 'server',
+          loadSession: vi.fn(async () => ({})),
+          dispose: vi.fn()
+        } as unknown as AcpTransport)
+        liveSwitchSources.set('s-new', {
+          sourceId: 's-old',
+          marker: {
+            fromConfigId: 'cfg-s-old',
+            toConfigId: 'cfg-s-new',
+            newSessionId: 's-new',
+            summaryText: 'handoff',
+            timestamp: 2
+          }
+        })
+        useAcpStore.setState({
+          agents: { 'agent-s-new': { id: 'agent-s-new', capabilities: { loadSession: true } } },
+          agentStatus: { 'agent-s-new': 'connected' }
+        })
+
+        const opening = useAcpStore.getState().openHistorySession('s-new')
+        await vi.waitFor(() => expect(loadPayload).toHaveBeenCalledWith('s-old'))
+        if (abandon) invalidateSessionReopen('s-new')
+        source.resolve(hopPayload('s-old', 5))
+        await opening
+        await flushTurnEnd()
+
+        expect(isHistoryCoveredEvent('s-old', 5)).toBe(covered)
+      } finally {
+        loadPayload.mockImplementation(cacheBacked ?? (async () => null))
+      }
+    })
   })
 
   it('HOP_HEAD_ANCHOR: an intermediate hop of 50+ messages still hides its greeting turn', async () => {

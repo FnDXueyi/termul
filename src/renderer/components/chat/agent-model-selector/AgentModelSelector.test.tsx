@@ -322,6 +322,42 @@ describe('AgentModelSelector panel', () => {
     expect(fast.querySelector('svg')).toHaveAttribute('fill', 'none')
   })
 
+  describe('a boolean Fast mode option', () => {
+    const booleanFast = (currentValue: boolean): SessionConfigOption => ({
+      id: 'fast_mode',
+      name: 'Fast mode',
+      category: 'other',
+      type: 'boolean',
+      currentValue
+    })
+
+    it('turns Fast on with the one bolt toggle and sends a boolean', () => {
+      const onSetConfig = vi.fn()
+      renderSelector({ onSetConfig, fastMode: booleanFast(false) })
+      open()
+
+      const fast = screen.getByTestId('selector-fast')
+      expect(screen.getAllByTestId('selector-fast')).toHaveLength(1)
+      expect(screen.queryByRole('switch')).toBeNull()
+      expect(fast).toBeEnabled()
+      expect(fast).toHaveAttribute('aria-pressed', 'false')
+      fireEvent.click(fast)
+      expect(onSetConfig).toHaveBeenCalledWith('fast_mode', true)
+    })
+
+    it('turns Fast off and shows the filled bolt while it is on', () => {
+      const onSetConfig = vi.fn()
+      renderSelector({ onSetConfig, fastMode: booleanFast(true) })
+      open()
+
+      const fast = screen.getByTestId('selector-fast')
+      expect(fast).toHaveAttribute('aria-pressed', 'true')
+      expect(fast).toHaveClass('text-warning')
+      fireEvent.click(fast)
+      expect(onSetConfig).toHaveBeenCalledWith('fast_mode', false)
+    })
+  })
+
   it('keeps the Fast slot (disabled) when the model has no Fast mode', () => {
     renderSelector({ fastMode: null })
     open()
@@ -560,6 +596,23 @@ describe('AgentModelSelector panel', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('agent-model-selector-panel')).not.toBeInTheDocument()
     })
+  })
+
+  it('caps the popover to the room the browser leaves above the pill', () => {
+    renderSelector()
+    open()
+
+    const surface = screen.getByTestId('agent-model-selector-panel').parentElement
+    expect(surface).toHaveClass('max-h-[var(--radix-popper-available-height,70vh)]')
+    expect(surface).toHaveClass('overflow-y-auto')
+  })
+
+  it('caps the mobile sheet to the dynamic viewport', () => {
+    mockIsMobile.current = true
+    renderSelector()
+    open()
+
+    expect(screen.getByRole('dialog')).toHaveClass('max-h-[85dvh]')
   })
 
   it('renders in a bottom sheet on mobile web', () => {

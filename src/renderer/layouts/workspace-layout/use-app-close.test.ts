@@ -1,7 +1,8 @@
 import { PersistenceKeys } from '@shared/types/persistence.types'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useWindowState, WINDOW_STATE_CLOSE_TIMEOUT_MS } from '@/hooks/use-window-state'
+import { useWindowState } from '@/hooks/use-window-state'
+import { CLOSE_WRITE_TIMEOUT_MS } from '@/lib/close-flush'
 import { useAppClose } from './use-app-close'
 
 const { windowMock, persistenceMock, windowApiMock, runtimeMock, logMock, tauriEventHandlers } =
@@ -155,7 +156,7 @@ describe('useAppClose window geometry flush', () => {
 
     await act(async () => {
       requestAppClose()
-      await vi.advanceTimersByTimeAsync(WINDOW_STATE_CLOSE_TIMEOUT_MS - 1)
+      await vi.advanceTimersByTimeAsync(CLOSE_WRITE_TIMEOUT_MS - 1)
     })
     expect(persistenceMock.write).toHaveBeenCalledWith(PersistenceKeys.windowState, geometry)
     expect(windowApiMock.respondToClose).not.toHaveBeenCalled()
@@ -167,7 +168,7 @@ describe('useAppClose window geometry flush', () => {
     expect(logMock).toHaveBeenCalledWith({
       level: 'warn',
       source: 'use-window-state',
-      message: `Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms; closing anyway`
+      message: `Close-time window state write timed out after ${CLOSE_WRITE_TIMEOUT_MS}ms; closing anyway`
     })
   })
 

@@ -1065,47 +1065,16 @@ async fn run_branch_name_write(
 /// local re-implementation built `["checkout", "--", name]`, which makes
 /// `name` a PATHSPEC, not a branch — the switch never happened, and a branch
 /// name colliding with a worktree path silently reverted that file's local
-/// changes and returned success. The fix refuses any `name` that is not a
-/// resolvable branch ref BEFORE running git, so git's pathspec fallback can
-/// never trigger: `checkout <name>` with a non-branch name is an error, not a
-/// file revert.
+/// changes and returned success. `git_checkout_branch` refuses any `name` that
+/// is not an existing branch ref BEFORE running git, so git's pathspec
+/// fallback can never trigger. A name that resolves to no branch takes the
+/// local path and is refused there.
 pub(crate) fn run_simple_checkout(cwd: &str, name: &str) -> Result<(), String> {
-    let Some(is_remote) = resolve_branch_ref(cwd, name)? else {
-        return Err(format!(
-            "'{name}' is not a branch; refusing checkout (a branch switch must target a branch, not a pathspec)"
-        ));
-    };
     // Remote-tracking refs (e.g. `origin/feature`) must go through
     // `--track` so git creates a local tracking branch — a plain
     // `checkout <remote-ref>` lands in detached HEAD instead.
+    let is_remote = git_tracker::resolve_branch_ref(cwd, name)?.unwrap_or(false);
     git_tracker::git_checkout_branch(cwd, name, is_remote)
-}
-
-/// Whether `name` resolves as a branch ref in the repo at `cwd`, and if so
-/// whether it is remote-tracking. Returns `Some(false)` for a local branch
-/// (`refs/heads/<name>`), `Some(true)` for a remote-tracking branch
-/// (`refs/remotes/<name>`), `None` for anything else. Local wins when both
-/// exist (mirrors `git checkout <name>` ambiguity resolution). Refuses
-/// option-shaped names and anything git would treat as a pathspec instead of
-/// a ref. Uses `--verify` + `--quiet` with the fully-qualified ref so no
-/// ambiguity with worktree files is possible and no ref-name can be parsed
-/// as an option.
-fn resolve_branch_ref(cwd: &str, name: &str) -> Result<Option<bool>, String> {
-    if name.trim().is_empty() || name.starts_with('-') {
-        return Ok(None);
-    }
-    for (ref_name, is_remote) in [
-        (format!("refs/heads/{name}"), false),
-        (format!("refs/remotes/{name}"), true),
-    ] {
-        let output =
-            GitTracker::run_git_command(cwd, &["rev-parse", "--verify", "--quiet", &ref_name])
-                .ok_or_else(|| "Failed to run git rev-parse".to_string())?;
-        if output.status.success() {
-            return Ok(Some(is_remote));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

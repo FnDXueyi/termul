@@ -123,9 +123,66 @@ impl<'de> Deserialize<'de> for PayloadProbe {
 pub(super) fn probe_record(line: &[u8], session_id: &str) -> Option<RecordProbe> {
     serde_json::from_slice::<RecordProbe>(line)
         .ok()
-        .filter(|probe| {
-            probe.schema_version == SESSION_SCHEMA_VERSION && probe.session_id == session_id
-        })
+        .filter(|probe| probe.belongs_to(session_id))
+}
+
+impl RecordProbe {
+    fn belongs_to(&self, session_id: &str) -> bool {
+        self.schema_version == SESSION_SCHEMA_VERSION && self.session_id == session_id
+    }
+}
+
+/// Read size of [`rposition`], which is all the memory it holds.
+const RPOSITION_BLOCK: u64 = 64 * 1024;
+
+/// Offset of the last byte of `file[..end)` that satisfies `matches`, read
+/// backward in fixed blocks.
+fn rposition(
+    file: &mut fs::File,
+    end: u64,
+    matches: impl Fn(u8) -> bool,
+) -> io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut buf = vec![0u8; RPOSITION_BLOCK.min(end) as usize];
+    let mut block_end = end;
+    while block_end > 0 {
+        let start = block_end.saturating_sub(RPOSITION_BLOCK);
+        let block = &mut buf[..(block_end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(block)?;
+        if let Some(index) = block.iter().rposition(|byte| matches(*byte)) {
+            return Ok(Some(start + index as u64));
+        }
+        block_end = start;
+    }
+    Ok(None)
+}
+
+/// Seq of the last non-empty line of `file[..end)`, terminated or not, when
+/// it is a whole record of `session_id` (the [`probe_record`] rule). The line
+/// is streamed, never held: a multi-MiB tool output costs one sequential
+/// read, and the probe skips its payload without buffering it.
+pub(super) fn last_line_seq(
+    file: &mut fs::File,
+    end: u64,
+    session_id: &str,
+) -> io::Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Some(last_byte) = rposition(file, end, |byte| byte != b'\n')? else {
+        return Ok(None);
+    };
+    let line_end = last_byte + 1;
+    let line_start =
+        rposition(file, line_end, |byte| byte == b'\n')?.map_or(0, |newline| newline + 1);
+    file.seek(SeekFrom::Start(line_start))?;
+    let line = io::BufReader::new(Read::take(&mut *file, line_end - line_start));
+    match serde_json::from_reader::<_, RecordProbe>(line) {
+        Ok(probe) => Ok(probe.belongs_to(session_id).then_some(probe.seq)),
+        Err(error) if error.is_io() => Err(error.into()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Read sizes of [`scan_lines_backward`]: the first read is small so probing
@@ -669,11 +726,13 @@ pub(super) fn load_jsonl_tail(
 /// the next append would reuse a seq. The window must deepen because a
 /// single record can exceed a fixed 4 KiB read — payloads pass through
 /// verbatim — and a window holding only a mid-record fragment would
-/// otherwise leave stale-low `last_seq` in place. Missing/empty files and
-/// tails with no complete own-session record inside the cap yield `None`
+/// otherwise leave stale-low `last_seq` in place. A last complete line longer
+/// than the cap is probed alone through [`last_line_seq`], so memory stays
+/// bounded by the cap whatever the line length. Missing/empty files and
+/// tails with no complete own-session record yield `None`
 /// (the caller leaves `last_seq` unchanged); real read errors are
 /// warn-logged here. This is a frontier probe, not a validator — it never
-/// scans past the cap and never fails.
+/// fails.
 pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -746,8 +805,25 @@ pub(super) fn jsonl_tail_seq(path: &Path, session_id: &str) -> Option<u64> {
                 max_seq = Some(max_seq.unwrap_or(0).max(record.seq));
             }
         }
-        if saw_complete || block == file_size || block >= PROBE_CAP {
+        if saw_complete || block == file_size {
             return max_seq;
+        }
+        if block >= PROBE_CAP {
+            // The last complete line alone is longer than the cap.
+            let seq = rposition(&mut file, file_size, |byte| byte == b'\n').and_then(
+                |newline| match newline {
+                    Some(newline) => last_line_seq(&mut file, newline + 1, session_id),
+                    None => Ok(None),
+                },
+            );
+            return seq.unwrap_or_else(|error| {
+                log::warn!(
+                    "[acp-history] tail seq probe failed path={} session_id={} error={error}",
+                    path.display(),
+                    crate::logging::redact_session_id(session_id)
+                );
+                None
+            });
         }
         block = std::cmp::min(file_size, std::cmp::min(block * 8, PROBE_CAP));
     }

@@ -128,3 +128,6 @@ mod forwarder_teardown_tests;
 
 #[cfg(test)]
 mod terminal_tests;
+
+#[cfg(test)]
+mod worktree_tests;

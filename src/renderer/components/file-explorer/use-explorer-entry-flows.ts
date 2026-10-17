@@ -2,6 +2,7 @@ import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { filesystemApi } from '@/lib/api'
+import { moveOpenEditorTabs } from '@/lib/editor-tab-rename'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileExplorerActions, useFileExplorerStore } from '@/stores/file-explorer-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
@@ -288,14 +289,7 @@ export function useExplorerEntryFlows({
         return
       }
 
-      // If the renamed file was open in the editor, close its old tab.
-      if (renamedEntry) {
-        const editorState = useEditorStore.getState()
-        if (editorState.openFiles.has(renamedEntry.path)) {
-          editorState.closeFile(renamedEntry.path)
-          useWorkspaceStore.getState().removeTab(editorTabId(renamedEntry.path))
-        }
-      }
+      if (renamedEntry) await moveOpenEditorTabs(renamedEntry.path, fullPath)
       await refreshDirectory(inlineInput.parentPath)
       if (inlineInput.mode === 'create') {
         // GH-539: newly created entries are selected and revealed in the tree.

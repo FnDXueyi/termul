@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { terminalApi } from '@/lib/api'
 import { isSSHTerminalProjectId } from '@/lib/ssh-terminal-id'
 import { sendDesktopNotification } from '@/lib/tauri-notification-api'
+import { consumeTerminalKillRequest } from '@/lib/terminal-kill-requests'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 
@@ -38,6 +39,9 @@ export function sanitizeNotificationText(
 export function useTerminalExitNotification(): void {
   useEffect(() => {
     const cleanup = terminalApi.onExit((ptyId: string, exitCode: number) => {
+      // A terminal the user closed exits with a synthetic -1; that is not a failure.
+      if (consumeTerminalKillRequest(ptyId)) return
+
       const terminalState = useTerminalStore.getState()
       const terminal = terminalState.findTerminalByPtyId(ptyId)
       // SSH session terminals end on close, disconnect and network loss; the SSH

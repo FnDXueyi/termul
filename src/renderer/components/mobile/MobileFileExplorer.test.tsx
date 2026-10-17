@@ -55,6 +55,8 @@ const mockCollapseAll = vi.fn()
 
 const mockOpenFile = vi.fn()
 const mockCloseFile = vi.fn()
+const mockRenameOpenFile = vi.fn()
+const mockRenameEditorTab = vi.fn()
 const mockAddEditorTab = vi.fn()
 const mockRemoveTab = vi.fn()
 
@@ -63,7 +65,8 @@ const mockRemoveTab = vi.fn()
 const mockEditorStore = {
   openFile: mockOpenFile,
   openFiles: new Map<string, unknown>(),
-  closeFile: mockCloseFile
+  closeFile: mockCloseFile,
+  renameOpenFile: mockRenameOpenFile
 }
 
 const mockCreateFile = vi.fn()
@@ -107,7 +110,8 @@ vi.mock('@/stores/workspace-store', () => ({
   useWorkspaceStore: {
     getState: vi.fn(() => ({
       addEditorTab: mockAddEditorTab,
-      removeTab: mockRemoveTab
+      removeTab: mockRemoveTab,
+      renameEditorTab: mockRenameEditorTab
     }))
   },
   editorTabId: (path: string) => `edit-${path}`
@@ -754,10 +758,10 @@ describe('MobileFileExplorer', () => {
     await waitFor(() => expect(mockRefreshDirectory).toHaveBeenCalledWith('/proj'))
   })
 
-  it('renames a file via Enter using the parentOf-derived target and reconciles the open tab', async () => {
+  it('renames a file via Enter using the parentOf-derived target and moves the open tab with its edits', async () => {
     const file = entry('old.txt', 'file')
     setRoot([file])
-    mockEditorStore.openFiles.set('/proj/old.txt', { isDirty: false })
+    mockEditorStore.openFiles.set('/proj/old.txt', { isDirty: true })
 
     render(<MobileFileExplorer open onOpenChange={vi.fn()} />)
 
@@ -773,8 +777,12 @@ describe('MobileFileExplorer', () => {
     )
     // Clearing rename state before the await prevents a double submit.
     expect(mockRenameFile).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(mockCloseFile).toHaveBeenCalledWith('/proj/old.txt'))
-    await waitFor(() => expect(mockRemoveTab).toHaveBeenCalledWith('edit-/proj/old.txt'))
+    await waitFor(() =>
+      expect(mockRenameOpenFile).toHaveBeenCalledWith('/proj/old.txt', '/proj/new.txt')
+    )
+    expect(mockRenameEditorTab).toHaveBeenCalledWith('/proj/old.txt', '/proj/new.txt')
+    expect(mockCloseFile).not.toHaveBeenCalled()
+    expect(mockRemoveTab).not.toHaveBeenCalled()
     await waitFor(() => expect(mockRefreshDirectory).toHaveBeenCalledWith('/proj'))
   })
 

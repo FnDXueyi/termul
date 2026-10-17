@@ -287,8 +287,9 @@ function isOnOffToken(value: string): boolean {
   return ON_TOKEN.test(value) || OFF_TOKEN.test(value)
 }
 
-/** True when an option is a two-value On/Off (or true/false) switch. */
+/** True when an option is a `boolean`, or a two-value On/Off (or true/false) select. */
 export function isBinaryOnOffOption(option: SessionConfigOption): boolean {
+  if (option.type === 'boolean') return true
   const values = flattenConfigOptionValues(option)
   if (values.length !== 2) return false
   return values.every((entry) => isOnOffToken(entry.value) || isOnOffToken(entry.name))
@@ -307,11 +308,15 @@ function entryIsOn(entry: FlatConfigValue): boolean {
   return ON_TOKEN.test(entry.value) || ON_TOKEN.test(entry.name)
 }
 
-/** Whether the option's current value is the On side of a Fast Mode switch. */
+/**
+ * Whether the option's current value is the On side of a Fast Mode switch.
+ * Values are text, so a `boolean` option reads as "true" / "false".
+ */
 export function isFastModeEnabled(
   option: SessionConfigOption,
-  currentValue: string = typeof option.currentValue === 'string' ? option.currentValue : ''
+  currentValue: string = storedConfigValue(option) ?? ''
 ): boolean {
+  if (option.type === 'boolean') return currentValue === 'true'
   const current = flattenConfigOptionValues(option).find((entry) => entry.value === currentValue)
   if (!current) return false
   return entryIsOn(current)
@@ -320,8 +325,9 @@ export function isFastModeEnabled(
 /** Opposite value for a Fast Mode toggle click. */
 export function oppositeFastModeValue(
   option: SessionConfigOption,
-  currentValue: string = typeof option.currentValue === 'string' ? option.currentValue : ''
+  currentValue: string = storedConfigValue(option) ?? ''
 ): string | null {
+  if (option.type === 'boolean') return currentValue === 'true' ? 'false' : 'true'
   const other = flattenConfigOptionValues(option).find((entry) => entry.value !== currentValue)
   return other?.value ?? null
 }

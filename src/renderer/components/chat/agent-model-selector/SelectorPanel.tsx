@@ -504,7 +504,10 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
       : null
 
   return (
-    <div data-testid="agent-model-selector-panel" className={cn('flex flex-col', !touch && 'w-80')}>
+    <div
+      data-testid="agent-model-selector-panel"
+      className={cn('flex min-h-0 flex-col', !touch && 'w-80')}
+    >
       <div className={cn('peer flex items-center gap-2', touch ? 'h-12 px-5' : 'h-10 px-3')}>
         <Search
           size={touch ? 16 : 14}

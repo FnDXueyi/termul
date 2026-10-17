@@ -371,11 +371,16 @@ pub(crate) async fn checkout_branch_guarded(
     branch: String,
     is_remote: bool,
 ) -> Result<(), String> {
-    ensure_no_active_turn_in_checkout(acp, std::path::Path::new(&cwd))
+    let validated = validate_project_path(&cwd)?;
+    ensure_no_active_turn_in_checkout(acp, &validated)
         .await
         .map_err(|blocked| blocked.to_string())?;
+    let validated_str = validated
+        .to_str()
+        .ok_or_else(|| "Path contains invalid UTF-8".to_string())?
+        .to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::trackers::git_tracker::git_checkout_branch(&cwd, &branch, is_remote)
+        crate::trackers::git_tracker::git_checkout_branch(&validated_str, &branch, is_remote)
     })
     .await
     .map_err(|e| format!("git checkout task failed: {e}"))?

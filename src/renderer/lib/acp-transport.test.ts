@@ -1804,6 +1804,29 @@ describe('WsAcpTransport', () => {
     transport.dispose()
   })
 
+  it('tells the recovery handler whether the snapshot comes from a new log epoch', async () => {
+    const transport = new WsAcpTransport({
+      url: 'ws://test/ws',
+      WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket
+    })
+    const epochChanged: Array<boolean | undefined> = []
+    transport.setRecoveryHandler(async (_recovery, _generation, logEpochChanged) => {
+      epochChanged.push(logEpochChanged)
+    })
+    await transport.connect()
+    const sock = (transport as unknown as { socket: FakeWebSocket }).socket
+    sock.hostHeadSeq = 10
+    transport.seedSessionCursor('s1', { lastSeq: 30, logEpoch: 'epoch-A' })
+    await transport.subscribeSession('s1', undefined, true)
+
+    sock.logEpoch = 'epoch-B'
+    transport.seedSessionCursor('s1', { lastSeq: 30, logEpoch: 'epoch-A' })
+    await transport.subscribeSession('s1', undefined, true)
+
+    expect(epochChanged).toEqual([false, true])
+    transport.dispose()
+  })
+
   it('a cursor from an old host epoch gets stale, installs a snapshot and keeps delivering new events', async () => {
     const transport = new WsAcpTransport({
       url: 'ws://test/ws',

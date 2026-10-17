@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { markChatRead } from '@/lib/chat-read-sync'
-import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
+import { isAfter, useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 
 function subscribeAttention(onChange: () => void): () => void {
   document.addEventListener('visibilitychange', onChange)
@@ -27,14 +27,14 @@ function pageAttended(): boolean {
  */
 export function useChatReadMarker(activeSessionIds: readonly string[]): void {
   const attended = useSyncExternalStore(subscribeAttention, pageAttended)
-  const seenTurnEndSeq = useAgentChatUnreadStore((state) => state.seenTurnEndSeq)
-  const sharedReadSeq = useAgentChatUnreadStore((state) => state.sharedReadSeq)
+  const seenTurnEnd = useAgentChatUnreadStore((state) => state.seenTurnEnd)
+  const sharedRead = useAgentChatUnreadStore((state) => state.sharedRead)
 
   useEffect(() => {
     if (!attended) return
     for (const sessionId of activeSessionIds) {
-      const seq = seenTurnEndSeq[sessionId]
-      if (seq !== undefined && seq > (sharedReadSeq[sessionId] ?? 0)) markChatRead(sessionId, seq)
+      const seen = seenTurnEnd[sessionId]
+      if (seen && isAfter(seen, sharedRead[sessionId])) markChatRead(sessionId, seen)
     }
-  }, [activeSessionIds, attended, seenTurnEndSeq, sharedReadSeq])
+  }, [activeSessionIds, attended, seenTurnEnd, sharedRead])
 }

@@ -41,6 +41,7 @@ type TabsSliceState = Pick<
   | 'addCanvasTab'
   | 'remapAgentChatSession'
   | 'removeTab'
+  | 'renameEditorTab'
 >
 
 interface TabsStoreAccess {
@@ -452,6 +453,26 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSliceStat
       agentLauncherPaneId: agentLauncherPaneId === pane.id ? null : agentLauncherPaneId
     })
     navigateToChatSession(toSessionId)
+  },
+
+  renameEditorTab: (fromPath: string, toPath: string): void => {
+    const fromId = editorTabId(fromPath)
+    const toId = editorTabId(toPath)
+    const pane = findPaneContainingTab(get().root, fromId)
+    if (!pane || fromId === toId) return
+    // A tab already open at the destination shows the file this rename overwrote.
+    if (findPaneContainingTab(get().root, toId)) get().removeTab(toId)
+    set({
+      root: updateLeaf(get().root, pane.id, (leaf) => ({
+        ...leaf,
+        tabs: leaf.tabs.map((tab) =>
+          tab.id === fromId && tab.type === 'editor'
+            ? { type: 'editor' as const, id: toId, filePath: toPath }
+            : tab
+        ),
+        activeTabId: leaf.activeTabId === fromId ? toId : leaf.activeTabId
+      }))
+    })
   },
 
   removeTab: (tabId: string): void => {
