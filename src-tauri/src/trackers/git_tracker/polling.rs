@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::HashSet;
+use tokio::sync::watch;
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone)]
@@ -31,28 +31,58 @@ impl Drop for PollingGuard {
     }
 }
 
-/// Cwds whose git snapshot still runs on a blocking thread. The snapshot
-/// timeout stops the wait, not the thread, and git through `wsl.exe` can run
-/// for 15s, so polls would otherwise stack threads for one slow repository.
-static SNAPSHOTS_IN_FLIGHT: std::sync::LazyLock<parking_lot::Mutex<HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
+pub(super) type GitSnapshot = (Option<GitStatus>, Option<String>);
+type SnapshotReceiver = watch::Receiver<Option<GitSnapshot>>;
 
-/// Marks a cwd's snapshot as running until dropped.
-pub(super) struct SnapshotInFlight(String);
+/// The snapshot of each cwd whose git work still runs on a blocking thread.
+/// The snapshot timeout stops the wait, not the thread, and git through
+/// `wsl.exe` can run for 15s, so a second request for the cwd joins the
+/// running one instead of stacking another thread.
+static SNAPSHOTS_IN_FLIGHT: std::sync::LazyLock<
+    parking_lot::Mutex<HashMap<String, SnapshotReceiver>>,
+> = std::sync::LazyLock::new(Default::default);
 
-impl SnapshotInFlight {
-    /// `None` while another snapshot of `cwd` still runs.
-    pub(super) fn begin(cwd: &str) -> Option<Self> {
-        SNAPSHOTS_IN_FLIGHT
-            .lock()
-            .insert(cwd.to_string())
-            .then(|| Self(cwd.to_string()))
+pub(super) enum SnapshotRun {
+    /// No snapshot of the cwd is running: this caller runs git.
+    Lead(SnapshotLead),
+    /// One is running: this caller gets its result.
+    Join(SnapshotReceiver),
+}
+
+/// The running snapshot of a cwd, until dropped.
+pub(super) struct SnapshotLead {
+    cwd: String,
+    sender: watch::Sender<Option<GitSnapshot>>,
+}
+
+impl SnapshotRun {
+    pub(super) fn start(cwd: &str) -> Self {
+        let mut in_flight = SNAPSHOTS_IN_FLIGHT.lock();
+        if let Some(running) = in_flight.get(cwd) {
+            return Self::Join(running.clone());
+        }
+        let (sender, receiver) = watch::channel(None);
+        in_flight.insert(cwd.to_string(), receiver);
+        Self::Lead(SnapshotLead {
+            cwd: cwd.to_string(),
+            sender,
+        })
     }
 }
 
-impl Drop for SnapshotInFlight {
+impl SnapshotLead {
+    pub(super) fn subscribe(&self) -> SnapshotReceiver {
+        self.sender.subscribe()
+    }
+
+    pub(super) fn publish(&self, snapshot: GitSnapshot) {
+        self.sender.send_replace(Some(snapshot));
+    }
+}
+
+impl Drop for SnapshotLead {
     fn drop(&mut self) {
-        SNAPSHOTS_IN_FLIGHT.lock().remove(&self.0);
+        SNAPSHOTS_IN_FLIGHT.lock().remove(&self.cwd);
     }
 }
 
@@ -181,11 +211,8 @@ impl GitTracker {
                     };
 
                     for target in poll_targets {
-                        let Some((new_status, new_branch)) =
-                            Self::poll_git_snapshot(target.cwd.clone()).await
-                        else {
-                            continue;
-                        };
+                        let (new_status, new_branch) =
+                            Self::poll_git_snapshot(target.cwd.clone()).await;
 
                         {
                             let mut cwd_poll_states_write = cwd_poll_states.write();
@@ -224,10 +251,7 @@ impl GitTracker {
                         .collect();
 
                     for (terminal_id, cwd) in terminals {
-                        let Some((new_status, new_branch)) = Self::poll_git_snapshot(cwd).await
-                        else {
-                            continue;
-                        };
+                        let (new_status, new_branch) = Self::poll_git_snapshot(cwd).await;
                         let terminal_ids = vec![terminal_id.clone()];
                         let (branch_emits, status_emits) =
                             Self::apply_git_results(&states, &terminal_ids, new_branch, new_status);

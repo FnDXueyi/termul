@@ -37,7 +37,7 @@ pub use commit_stamp::{
     find_stamped_commit, head_sha, is_valid_expected_head, CommitFailure, CommitStamp,
 };
 use commit_stamp::{repo_lock, with_command_trailer};
-use polling::SnapshotInFlight;
+use polling::{GitSnapshot, SnapshotRun};
 use resolve::backend_command;
 
 // `crate::trackers::git_tracker` public surface preserved via re-export.
@@ -188,9 +188,7 @@ impl GitTracker {
         let cwd_owned = cwd.to_string();
 
         tokio::spawn(async move {
-            let Some((status, branch)) = Self::poll_git_snapshot(cwd_owned.clone()).await else {
-                return;
-            };
+            let (status, branch) = Self::poll_git_snapshot(cwd_owned.clone()).await;
             let terminal_ids = vec![terminal_id_owned.clone()];
             let (branch_emits, status_emits) =
                 Self::apply_git_results(&states, &terminal_ids, branch, status);
@@ -473,24 +471,31 @@ impl GitTracker {
         (branch_emits, status_emits)
     }
 
-    /// `None` while an earlier snapshot of `cwd` still runs.
-    async fn poll_git_snapshot(cwd: String) -> Option<(Option<GitStatus>, Option<String>)> {
-        let in_flight = SnapshotInFlight::begin(&cwd)?;
-        let snapshot = tokio::time::timeout(
+    /// The status and branch of `cwd`, from the snapshot already running for
+    /// it if there is one.
+    async fn poll_git_snapshot(cwd: String) -> GitSnapshot {
+        let mut snapshot = match SnapshotRun::start(&cwd) {
+            SnapshotRun::Join(running) => running,
+            SnapshotRun::Lead(lead) => {
+                let snapshot = lead.subscribe();
+                tokio::task::spawn_blocking(move || {
+                    lead.publish((
+                        Self::check_status_internal(&cwd),
+                        Self::check_branch_internal(&cwd),
+                    ));
+                });
+                snapshot
+            }
+        };
+        let published = tokio::time::timeout(
             Duration::from_millis(GIT_COMMAND_TIMEOUT_MS),
-            tokio::task::spawn_blocking(move || {
-                let _in_flight = in_flight;
-                (
-                    Self::check_status_internal(&cwd),
-                    Self::check_branch_internal(&cwd),
-                )
-            }),
+            snapshot.wait_for(Option::is_some),
         )
-        .await
-        .ok()
-        .and_then(|result| result.ok())
-        .unwrap_or((None, None));
-        Some(snapshot)
+        .await;
+        published
+            .ok()
+            .and_then(|published| published.ok().and_then(|value| (*value).clone()))
+            .unwrap_or((None, None))
     }
 
     pub fn run_git_command(cwd: &str, args: &[&str]) -> Option<std::process::Output> {

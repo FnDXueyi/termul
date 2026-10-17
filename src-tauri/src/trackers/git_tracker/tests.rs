@@ -1418,13 +1418,21 @@ fn it_commit_context_reports_fields() {
 }
 
 #[tokio::test]
-async fn a_cwd_snapshot_is_skipped_while_its_previous_one_still_runs() {
+async fn a_cwd_snapshot_requested_while_one_runs_gets_that_result() {
     let dir = tempfile::tempdir().expect("temp dir");
     let cwd = dir.path().to_string_lossy().into_owned();
+    let SnapshotRun::Lead(running) = SnapshotRun::start(&cwd) else {
+        panic!("no snapshot runs for a fresh cwd");
+    };
+    running.publish((None, Some("from-running-snapshot".to_string())));
 
-    let running = SnapshotInFlight::begin(&cwd).expect("first snapshot");
-    assert_eq!(GitTracker::poll_git_snapshot(cwd.clone()).await, None);
+    let (first, second) = tokio::join!(
+        GitTracker::poll_git_snapshot(cwd.clone()),
+        GitTracker::poll_git_snapshot(cwd.clone())
+    );
+    assert_eq!(first, (None, Some("from-running-snapshot".to_string())));
+    assert_eq!(second, first);
 
     drop(running);
-    assert_eq!(GitTracker::poll_git_snapshot(cwd).await, Some((None, None)));
+    assert_eq!(GitTracker::poll_git_snapshot(cwd).await, (None, None));
 }
