@@ -330,6 +330,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ...file,
       filePath: toPath,
       language: detectLanguage(toPath),
+      // The save in flight belongs to the old path and cannot finish for this entry.
+      operationStatus: 'idle',
       viewMode: getDefaultViewMode(toPath) === 'markdown' ? file.viewMode : 'code'
     }
     const newFiles = new Map<string, EditorFileState>()
