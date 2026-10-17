@@ -567,6 +567,10 @@ pub async fn terminal_set_visibility(
 ) -> Result<IpcResult<()>, String> {
     pty_manager.set_hidden(!request.is_visible);
     cwd_tracker.set_visibility(request.is_visible);
-    git_tracker.set_visibility(request.is_visible);
+    let git_tracker = Arc::clone(&git_tracker);
+    let is_visible = request.is_visible;
+    tokio::task::spawn_blocking(move || git_tracker.set_visibility(is_visible))
+        .await
+        .map_err(|e| format!("git tracker visibility update failed: {e}"))?;
     Ok(IpcResult::success(()))
 }

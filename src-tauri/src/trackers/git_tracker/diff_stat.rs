@@ -112,7 +112,7 @@ fn compute_diff_stat(cwd: &str) -> Result<GitDiffStat, DiffStatError> {
             ":/",
         ],
     )?;
-    let untracked_added = count_untracked_lines(Path::new(&toplevel), &untracked);
+    let untracked_added = count_untracked_lines(&git_path_on_host(cwd, &toplevel), &untracked);
 
     Ok(GitDiffStat {
         added: added.saturating_add(untracked_added),

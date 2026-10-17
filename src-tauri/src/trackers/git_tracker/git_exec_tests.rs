@@ -158,7 +158,7 @@ fn timeout_kills_the_process_the_git_launcher_started() {
     let waiter = {
         let cwd = dir.path().to_string_lossy().into_owned();
         std::thread::spawn(move || {
-            GitTracker::spawn_and_wait(command, &["status"], &cwd, 5_000).is_none()
+            GitTracker::spawn_and_wait(command.into(), &["status"], &cwd, 5_000).is_none()
         })
     };
     let grandchild = read_pid_file(&pid_file);

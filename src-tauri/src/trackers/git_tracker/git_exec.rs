@@ -76,15 +76,15 @@ pub(super) fn run_git_capture(
     args: &[&str],
     timeout_ms: u64,
 ) -> Result<std::process::Output, GitRunError> {
-    let mut command = backend_command(resolve_git_binary());
-    command
+    let mut git = git_command(cwd);
+    git.command
         .args(args)
-        .current_dir(cwd)
         // Read-only: never take the index lock for an opportunistic refresh.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null());
-    let child =
-        spawn_git(&mut command, cap).map_err(|e| GitRunError::GitUnavailable(e.to_string()))?;
+    let child = git
+        .spawn(cap)
+        .map_err(|e| GitRunError::GitUnavailable(e.to_string()))?;
     child.wait(timeout_ms).map_err(|error| match error {
         GitWaitError::TimedOut => GitRunError::GitUnavailable(format!(
             "git {} timed out",
@@ -100,8 +100,46 @@ pub(super) fn run_git_capture(
 /// background job) inherited the pipes and keeps them open.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
+/// A git invocation for one working directory; every git runner starts from
+/// [`git_command`], so a project inside WSL runs the distro's git.
+pub(super) struct GitCommand {
+    pub(super) command: Command,
+    min_wait_ms: u64,
+}
+
+impl From<Command> for GitCommand {
+    fn from(command: Command) -> Self {
+        Self {
+            command,
+            min_wait_ms: 0,
+        }
+    }
+}
+
+impl GitCommand {
+    pub(super) fn spawn(mut self, cap: StdoutCap) -> std::io::Result<GitChild> {
+        let mut child = spawn_git(&mut self.command, cap)?;
+        child.min_wait_ms = self.min_wait_ms;
+        Ok(child)
+    }
+}
+
+/// git, ready for its arguments, running in `cwd`.
+pub(super) fn git_command(cwd: &str) -> GitCommand {
+    if let Some(target) = wsl::wsl_target(cwd) {
+        return GitCommand {
+            command: target.git_command(),
+            min_wait_ms: wsl::WSL_START_TIMEOUT_MS,
+        };
+    }
+    let mut command = backend_command(resolve_git_binary());
+    command.current_dir(cwd);
+    command.into()
+}
+
 pub(super) struct GitChild {
     child: std::process::Child,
+    min_wait_ms: u64,
     #[cfg(windows)]
     job: Option<crate::process_util::KillOnCloseJob>,
     stdout: Drain,
@@ -133,6 +171,7 @@ pub(super) fn spawn_git(command: &mut Command, cap: StdoutCap) -> std::io::Resul
     let stderr = drain_capped(child.stderr.take(), StdoutCap::Unbounded);
     Ok(GitChild {
         child,
+        min_wait_ms: 0,
         #[cfg(windows)]
         job,
         stdout,
@@ -146,7 +185,7 @@ impl GitChild {
     }
 
     pub(super) fn wait(mut self, timeout_ms: u64) -> Result<std::process::Output, GitWaitError> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(self.min_wait_ms));
         let status = loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => break status,

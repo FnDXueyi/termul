@@ -25,6 +25,7 @@ const {
       generateCommitMessage
     },
     gitState: {
+      errors: {},
       statuses: {
         '/work': [
           { path: 'a.ts', staged: false, status: 'modified' },

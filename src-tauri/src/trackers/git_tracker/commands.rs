@@ -1,4 +1,4 @@
-use super::git_exec::{run_git_capture, spawn_git, GitWaitError, StdoutCap, GIT_READ_TIMEOUT_MS};
+use super::git_exec::{git_command, run_git_capture, GitWaitError, StdoutCap, GIT_READ_TIMEOUT_MS};
 use super::*;
 
 pub fn git_get_status_detail(cwd: &str) -> Result<Vec<GitStatusDetail>, String> {
@@ -409,35 +409,40 @@ fn strip_first_path_component(s: &str) -> &str {
     }
 }
 
+/// Run git with `input` on stdin. `args[0]` names the command in errors.
+fn run_git_with_input(
+    cwd: &str,
+    args: &[&str],
+    input: &[u8],
+    timeout_ms: u64,
+) -> Result<std::process::Output, String> {
+    use std::io::Write;
+
+    let name = args.first().copied().unwrap_or("");
+    let mut git = git_command(cwd);
+    git.command.args(args).stdin(Stdio::piped());
+    let mut child = git
+        .spawn(StdoutCap::Unbounded)
+        .map_err(|e| format!("Failed to spawn git {name}: {e}"))?;
+
+    if let Some(mut stdin) = child.take_stdin() {
+        // Ignore broken pipe: git may finish reading and exit before we
+        // finish writing (e.g. it rejects a patch early). The exit status is
+        // the source of truth.
+        let _ = stdin.write_all(input);
+    }
+
+    child.wait(timeout_ms).map_err(|error| match error {
+        GitWaitError::TimedOut => format!("git {name} timed out after {timeout_ms}ms"),
+        GitWaitError::Io(e) => format!("git {name} wait error: {e}"),
+    })
+}
+
 /// Run `git apply` with a patch supplied on stdin. Used for per-hunk
 /// stage/unstage where the patch is a single-hunk fragment built by the
 /// renderer from the displayed diff.
 fn run_git_apply(cwd: &str, args: &[&str], patch: &str) -> Result<(), String> {
-    use std::io::Write;
-
-    let git = resolve_git_binary();
-    let mut command = backend_command(git);
-    command.current_dir(cwd).args(args.iter());
-    command.stdin(Stdio::piped());
-
-    let mut child = spawn_git(&mut command, StdoutCap::Unbounded)
-        .map_err(|e| format!("Failed to spawn git apply: {e}"))?;
-
-    if let Some(mut stdin) = child.take_stdin() {
-        // Ignore broken pipe: git may finish reading the patch and exit
-        // before we finish writing (e.g. it rejects the patch early). The
-        // exit status below is the source of truth.
-        let _ = stdin.write_all(patch.as_bytes());
-    }
-
-    let output = child
-        .wait(GIT_COMMAND_TIMEOUT_MS)
-        .map_err(|error| match error {
-            GitWaitError::TimedOut => {
-                format!("git apply timed out after {GIT_COMMAND_TIMEOUT_MS}ms")
-            }
-            GitWaitError::Io(e) => format!("git apply wait error: {e}"),
-        })?;
+    let output = run_git_with_input(cwd, args, patch.as_bytes(), GIT_COMMAND_TIMEOUT_MS)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -731,62 +736,20 @@ pub fn git_commit_stamped(
     if let Some(id) = stamp.command_id {
         message = with_command_trailer(&message, id);
     }
-    let msg_path =
-        create_commit_message_file(message.as_bytes()).map_err(CommitFailure::Failed)?;
-
-    // Pass the real OS path (not a lossy String) so a non-UTF-8 temp dir still
-    // resolves to the file we actually wrote.
-    use std::ffi::OsStr;
-    let mut args: Vec<&OsStr> = vec![OsStr::new("commit"), OsStr::new("-F"), msg_path.as_os_str()];
+    // On stdin, not a temp file: git inside WSL cannot open a Windows path.
+    let mut args = vec!["commit", "-F", "-"];
     if amend {
-        args.push(OsStr::new("--amend"));
+        args.push("--amend");
     }
-
-    let result = match GitTracker::run_git_command_with_timeout(cwd, &args, GIT_NETWORK_TIMEOUT_MS)
-    {
-        Some(output) if output.status.success() => Ok(()),
-        Some(output) => Err(CommitFailure::Failed(
+    let output = run_git_with_input(cwd, &args, message.as_bytes(), GIT_NETWORK_TIMEOUT_MS)
+        .map_err(CommitFailure::Failed)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CommitFailure::Failed(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        )),
-        None => Err(CommitFailure::Failed(
-            "git commit timed out or failed to start".to_string(),
-        )),
-    };
-    // Always clean up the temp message file, regardless of commit outcome.
-    let _ = std::fs::remove_file(&msg_path);
-    result
-}
-
-/// Write `bytes` to a freshly-created, uniquely-named temp file using an
-/// exclusive create (`create_new`), which fails rather than following a symlink
-/// or truncating an existing file (CWE-59/CWE-377). Returns the path on success.
-fn create_commit_message_file(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
-    use std::io::Write;
-    let pid = std::process::id();
-    for attempt in 0..8u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("termul-commitmsg-{pid}-{nanos}-{attempt}.txt"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true) // O_EXCL: fail if the path already exists
-            .open(&path)
-        {
-            Ok(mut f) => {
-                f.write_all(bytes).and_then(|_| f.flush()).map_err(|e| {
-                    let _ = std::fs::remove_file(&path);
-                    format!("Failed to write commit message: {e}")
-                })?;
-                return Ok(path);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("Failed to create commit message file: {e}")),
-        }
+        ))
     }
-    Err("Failed to create a unique commit message file".to_string())
 }
 
 /// Push the current branch to `origin`. When the branch has no upstream, it is
