@@ -95,16 +95,6 @@ pub struct ConflictFile {
     pub severity: String,
     pub conflict_count: usize,
     pub is_lock_file: bool,
-    pub suggestions: Vec<ConflictSuggestion>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConflictSuggestion {
-    pub strategy: String,
-    pub confidence: String,
-    pub reason: String,
-    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,7 +107,6 @@ pub struct MergePreview {
     pub changed_files: Vec<String>,
     pub total_changes: usize,
     pub detection_mode: String,
-    pub has_auto_resolvable: bool,
 }
 
 // ============================================================================

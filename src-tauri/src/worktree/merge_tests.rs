@@ -126,7 +126,6 @@ fn merge_preview_of_a_clean_merge_lists_the_incoming_changes_and_touches_nothing
     assert_eq!(preview.source_branch, "main");
     assert_eq!(preview.target_branch, "topic");
     assert_eq!(preview.detection_mode, "accurate");
-    assert!(!preview.has_auto_resolvable);
     assert_eq!(head(p), before);
     assert_eq!(porcelain_status(p), "");
     assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "a\n");
@@ -153,9 +152,6 @@ fn merge_preview_of_a_conflicting_merge_lists_the_conflicted_file_and_touches_no
     assert_eq!(conflict.severity, "high");
     assert_eq!(conflict.conflict_count, 1);
     assert!(!conflict.is_lock_file);
-    assert_eq!(conflict.suggestions.len(), 1);
-    assert_eq!(conflict.suggestions[0].strategy, "manual");
-    assert!(!preview.has_auto_resolvable);
     assert!(preview.changed_files.contains(&"b.txt".to_string()));
     assert_eq!(preview.detection_mode, "accurate");
     assert_eq!(head(p), before);

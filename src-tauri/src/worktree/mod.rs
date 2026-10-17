@@ -14,17 +14,15 @@ mod util;
 pub use launch_registry::{take_launch_created, worktree_path_key};
 pub use manager::WorktreeManager;
 pub use types::{
-    ArchiveEntry, ArchiveManifest, BaseBranchInfo, BranchEntry, ConflictFile, ConflictSuggestion,
-    DirtyStatus, GitWorktreeEntry, GitignoreDir, IncludeCopyResult, IncludeSkipReason, MergePreview,
+    ArchiveEntry, ArchiveManifest, BaseBranchInfo, BranchEntry, ConflictFile, DirtyStatus,
+    GitWorktreeEntry, GitignoreDir, IncludeCopyResult, IncludeSkipReason, MergePreview,
     RemoveResult, SymlinkResult, WorktreeError,
 };
 
 // Helpers shared by the sibling submodules. These stay private `use`s so
 // `crate::worktree::<helper>` does not resolve outside this module tree — the
 // test files still reach them through `use super::*`.
-use conflict::{
-    chrono_timestamp, create_dir_symlink, glob_to_regex, thirty_days_from_now, ConflictBlock,
-};
+use conflict::{chrono_timestamp, create_dir_symlink, glob_to_regex, thirty_days_from_now};
 use git::{ensure_valid_branch_name, run_git, run_git_output, run_git_streaming, worktree_add_args};
 #[cfg(windows)]
 use junction::create_junction;
