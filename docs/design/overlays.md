@@ -17,6 +17,8 @@ New preference groups mount in `SettingsSection` inside `SettingsModal` (`AppPre
 
 Hand-rolled `fixed inset-0` scrims must use `bg-overlay/{40–90}`, never `bg-black`. Command palette / shortcut overlay uses `/40`. Default new centered modal: `Dialog`, not a custom motion card.
 
+A hand-rolled `fixed inset-0` overlay registers with `useOverlayRegistration(id, open, ownerClose, { mobileShellOnly: true })` so system back closes it on the phone shell; pass the owner's own close (its in-flight and unsaved-changes guards), never a bypass.
+
 ```
 Is it a confirm (yes/no, hard to undo)?
  ├── Desktop settings / sidebar / SSH → ConfirmDialog (danger if destructive)
@@ -37,7 +39,7 @@ Default → Dialog
 - Highlight (pointer or keyboard): `bg-foreground/[0.06]`. Never `bg-secondary` — in Termul Dark it equals `bg-popover`, so the highlight disappears.
 - Selected or checked: a `Check` icon. No fill. Radio items also use `Check`.
 - Group label: 11px, semibold, uppercase, tracked, `text-muted-foreground`.
-- Destructive item: last, after a separator, `variant="destructive"`.
+- Destructive item: last, after a separator. `ContextMenuItem` accepts `variant="destructive"`. `DropdownMenuItem` does not.
 
 ## Correct
 

@@ -2,11 +2,12 @@ import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { filesystemApi } from '@/lib/api'
+import { renamePathWithOpenEditors } from '@/lib/editor-tab-rename'
 import { useEditorStore } from '@/stores/editor-store'
 import { useFileExplorerActions, useFileExplorerStore } from '@/stores/file-explorer-store'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
 import type { ExplorerInlineInputContextValue, InlineInputState } from './explorer-inline-input'
-import { findTreeEntry, joinTreePath, parentTreePath } from './tree-paths'
+import { findTreeEntry, joinTreePath, parentTreePath, resolveDeleteTargets } from './tree-paths'
 
 /** Outcome of expanding the create-target chain (GH-539). */
 type ExpandChainResult =
@@ -25,8 +26,8 @@ interface ExplorerEntryFlowsOptions {
 export interface ExplorerEntryFlows {
   inlineInput: InlineInputState | null
   inlineInputContext: ExplorerInlineInputContextValue
-  /** Entry waiting for delete confirmation. */
-  deleteTarget: DirectoryEntry | null
+  /** Entries waiting for delete confirmation; empty when no confirmation is open. */
+  deleteTargets: DirectoryEntry[]
   /** True while that delete is in flight. The dialog stays open until it finishes. */
   isDeleting: boolean
   /** Header New File / New Folder: the target follows the selection. */
@@ -34,7 +35,10 @@ export interface ExplorerEntryFlows {
   /** Context-menu New File / New Folder in `dirPath`. */
   startCreateIn: (dirPath: string, type: 'file' | 'folder') => Promise<void>
   startRename: (entry: DirectoryEntry) => void
+  /** Context-menu Delete on `entry`: the whole selection when `entry` is part of it. */
   requestDelete: (entry: DirectoryEntry) => void
+  /** Delete key: the whole selection. */
+  requestDeleteSelection: () => void
   confirmDelete: () => Promise<void>
   cancelDelete: () => void
 }
@@ -43,6 +47,45 @@ function toastExpandFailed(): void {
   toast.error('Could not open the target directory', {
     description: 'The folder could not be expanded. Try again once the tree is loaded.'
   })
+}
+
+/**
+ * Drop a deleted entry from the editor and the explorer caches: close its
+ * open tab (every tab under it for a folder), and forget the folder's cached
+ * contents and watchers.
+ */
+function forgetDeletedEntry(entry: DirectoryEntry): void {
+  const deletedPath = entry.path.replace(/\\/g, '/')
+  const editorState = useEditorStore.getState()
+  const workspaceState = useWorkspaceStore.getState()
+
+  if (entry.type !== 'directory') {
+    if (editorState.openFiles.has(entry.path)) {
+      editorState.closeFile(entry.path)
+      workspaceState.removeTab(editorTabId(entry.path))
+    }
+    return
+  }
+
+  for (const [openFilePath] of editorState.openFiles) {
+    const normalizedOpenPath = openFilePath.replace(/\\/g, '/')
+    if (normalizedOpenPath === deletedPath || normalizedOpenPath.startsWith(`${deletedPath}/`)) {
+      editorState.closeFile(openFilePath)
+      workspaceState.removeTab(editorTabId(openFilePath))
+    }
+  }
+
+  const store = useFileExplorerStore.getState()
+  const newExpanded = new Set(store.expandedDirs)
+  const newContents = new Map(store.directoryContents)
+  for (const key of newContents.keys()) {
+    if (key.startsWith(`${deletedPath}/`) || key === deletedPath) {
+      newExpanded.delete(key)
+      newContents.delete(key)
+      void filesystemApi.unwatchDirectory(key)
+    }
+  }
+  useFileExplorerStore.setState({ expandedDirs: newExpanded, directoryContents: newContents })
 }
 
 /**
@@ -58,7 +101,7 @@ export function useExplorerEntryFlows({
   const { toggleDirectory, selectPath, refreshDirectory } = useFileExplorerActions()
   const [inlineInput, setInlineInput] = useState<InlineInputState | null>(null)
   const [inputValue, setInputValue] = useState('')
-  const [deleteTarget, setDeleteTarget] = useState<DirectoryEntry | null>(null)
+  const [deleteTargets, setDeleteTargets] = useState<DirectoryEntry[]>([])
   const [isDeleting, setIsDeleting] = useState(false)
   const deleteInFlightRef = useRef(false)
   // Mirrors of component state so async header-create handlers can re-check
@@ -237,7 +280,7 @@ export function useExplorerEntryFlows({
             ? await filesystemApi.createFile(fullPath)
             : await filesystemApi.createDirectory(fullPath)
       } else if (renamedEntry) {
-        result = await filesystemApi.renameFile(renamedEntry.path, fullPath)
+        result = await renamePathWithOpenEditors(renamedEntry.path, fullPath)
       }
 
       if (!result?.success) {
@@ -246,14 +289,6 @@ export function useExplorerEntryFlows({
         return
       }
 
-      // If the renamed file was open in the editor, close its old tab.
-      if (renamedEntry) {
-        const editorState = useEditorStore.getState()
-        if (editorState.openFiles.has(renamedEntry.path)) {
-          editorState.closeFile(renamedEntry.path)
-          useWorkspaceStore.getState().removeTab(editorTabId(renamedEntry.path))
-        }
-      }
       await refreshDirectory(inlineInput.parentPath)
       if (inlineInput.mode === 'create') {
         // GH-539: newly created entries are selected and revealed in the tree.
@@ -293,89 +328,77 @@ export function useExplorerEntryFlows({
     [inlineInput, inputValue, submitInlineInput, cancelInlineInput]
   )
 
+  // Read from the store, not render props: the context-menu callbacks must keep
+  // a stable identity or every tree row re-renders on each selection change.
+  const requestDelete = useCallback((entry: DirectoryEntry) => {
+    const { directoryContents, selectedPaths } = useFileExplorerStore.getState()
+    setDeleteTargets(resolveDeleteTargets(directoryContents, selectedPaths, entry))
+  }, [])
+
+  const requestDeleteSelection = useCallback(() => {
+    const { directoryContents, selectedPaths } = useFileExplorerStore.getState()
+    const targets = resolveDeleteTargets(directoryContents, selectedPaths)
+    if (targets.length > 0) setDeleteTargets(targets)
+  }, [])
+
   const confirmDelete = useCallback(async () => {
-    if (!deleteTarget || deleteInFlightRef.current) return
+    if (deleteTargets.length === 0 || deleteInFlightRef.current) return
     deleteInFlightRef.current = true
     setIsDeleting(true)
 
     try {
-      const isDir = deleteTarget.type === 'directory'
-      const result = await filesystemApi.deletePath(deleteTarget.path, {
-        recursive: isDir
-      })
+      const failed: { entry: DirectoryEntry; error: string }[] = []
+      const parentPaths = new Set<string>()
+      for (const entry of deleteTargets) {
+        let result: { success: boolean; error?: string }
+        try {
+          result = await filesystemApi.deletePath(entry.path, {
+            recursive: entry.type === 'directory'
+          })
+        } catch (err) {
+          result = { success: false, error: err instanceof Error ? err.message : 'Unknown error' }
+        }
+        if (!result.success) {
+          failed.push({ entry, error: result.error ?? 'Unknown error' })
+          continue
+        }
+        forgetDeletedEntry(entry)
+        parentPaths.add(parentTreePath(entry.path))
+      }
 
-      if (!result.success) {
-        toast.error(`Failed to delete ${deleteTarget.path}: ${result.error}`)
+      if (parentPaths.size > 0) {
+        useFileExplorerStore.getState().clearSelection()
+        for (const parentPath of parentPaths) await refreshDirectory(parentPath)
+      }
+      if (failed.length === 0) {
+        setDeleteTargets([])
         return
       }
-
-      const normalizedDeletePath = deleteTarget.path.replace(/\\/g, '/')
-
-      // If deleting a directory, clean up expanded dirs, cached contents,
-      // and any open editor tabs for files inside the deleted directory
-      if (isDir) {
-        const store = useFileExplorerStore.getState()
-        const newExpanded = new Set(store.expandedDirs)
-        const newContents = new Map(store.directoryContents)
-
-        // Close editor tabs for files inside the deleted directory
-        const editorState = useEditorStore.getState()
-        const workspaceState = useWorkspaceStore.getState()
-        for (const [openFilePath] of editorState.openFiles) {
-          const normalizedOpenPath = openFilePath.replace(/\\/g, '/')
-          if (
-            normalizedOpenPath === normalizedDeletePath ||
-            normalizedOpenPath.startsWith(`${normalizedDeletePath}/`)
-          ) {
-            editorState.closeFile(openFilePath)
-            workspaceState.removeTab(editorTabId(openFilePath))
-          }
-        }
-
-        // Remove all cached directories and expanded dirs that are children of the deleted dir
-        for (const key of newContents.keys()) {
-          if (key.startsWith(`${normalizedDeletePath}/`) || key === normalizedDeletePath) {
-            newExpanded.delete(key)
-            newContents.delete(key)
-            void filesystemApi.unwatchDirectory(key)
-          }
-        }
-
-        useFileExplorerStore.setState({
-          expandedDirs: newExpanded,
-          directoryContents: newContents
-        })
-      } else {
-        // Close editor tab if file was open
-        const editorState = useEditorStore.getState()
-        if (editorState.openFiles.has(deleteTarget.path)) {
-          editorState.closeFile(deleteTarget.path)
-          useWorkspaceStore.getState().removeTab(editorTabId(deleteTarget.path))
-        }
-      }
-
-      const parentPath = normalizedDeletePath.substring(0, normalizedDeletePath.lastIndexOf('/'))
-      // Clear selection if the deleted item was selected
-      useFileExplorerStore.getState().clearSelection()
-      await refreshDirectory(parentPath)
-      setDeleteTarget(null)
+      // Keep only what failed so the dialog can retry it.
+      setDeleteTargets(failed.map(({ entry }) => entry))
+      toast.error(
+        failed.length === 1
+          ? `Failed to delete ${failed[0].entry.path}: ${failed[0].error}`
+          : `Failed to delete ${failed.length} of ${deleteTargets.length} items. First error: ${failed[0].entry.path}: ${failed[0].error}`
+      )
     } finally {
       deleteInFlightRef.current = false
       setIsDeleting(false)
     }
-  }, [deleteTarget, refreshDirectory])
+  }, [deleteTargets, refreshDirectory])
 
-  const cancelDelete = useCallback(() => setDeleteTarget(null), [])
+  const cancelDelete = useCallback(() => setDeleteTargets([]), [])
 
   return {
     inlineInput,
     inlineInputContext,
-    deleteTarget,
+    deleteTargets,
     isDeleting,
     startHeaderCreate,
     startCreateIn,
     startRename,
-    requestDelete: setDeleteTarget,
+    requestDelete,
+    requestDeleteSelection,
     confirmDelete,
     cancelDelete
   }

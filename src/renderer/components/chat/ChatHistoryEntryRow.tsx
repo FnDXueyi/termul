@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Trash2 } from '@/components/icons'
-import { formatRelativeTimeFromMs } from '@/lib/git-time'
+import { MarqueeText } from '@/components/ui/marquee-text'
+import { formatRelativeTimeFromMs } from '@/lib/relative-time'
 import { cn } from '@/lib/utils'
 import { useAgentIcon, useAgentTemplateId } from '@/stores/acp-store'
 import { AgentGlyph } from './AgentGlyph'
@@ -158,6 +159,7 @@ export function ChatHistoryEntryRow({
   const dimmed = entry.status === 'closed' || (entry.discovered && !entry.canOpen)
   return (
     <div
+      data-history-entry-id={entry.id}
       className={cn(
         'group flex w-full items-center gap-2 rounded-md pr-2 transition-colors duration-150 ease-out hover:bg-foreground/[0.03]',
         dimmed && 'text-disabled-foreground'
@@ -165,6 +167,7 @@ export function ChatHistoryEntryRow({
     >
       <button
         type="button"
+        data-history-open=""
         disabled={entry.discovered && !entry.canOpen}
         onClick={() => onOpen(entry)}
         title={
@@ -181,17 +184,15 @@ export function ChatHistoryEntryRow({
           agentConfigId={entry.agentConfigId}
           agents={entry.agents}
         />
-        <span
-          className={cn(
-            'flex-1 truncate',
-            dimmed ? 'text-disabled-foreground' : 'text-sidebar-foreground'
-          )}
-        >
-          {entry.title}
-        </span>
+        <MarqueeText
+          text={entry.title}
+          className={dimmed ? 'text-disabled-foreground' : 'text-sidebar-foreground'}
+        />
         {entry.status === 'error' && (
-          <span className="shrink-0 rounded-sm bg-destructive/15 px-1 py-px text-3xs font-medium text-destructive">
-            Failed
+          <span data-slot="history-status" className="inline-flex shrink-0">
+            <span className="shrink-0 rounded-sm bg-destructive/15 px-1 py-px text-3xs font-medium text-destructive">
+              Failed
+            </span>
           </span>
         )}
         {entry.discovered ? (
@@ -212,7 +213,8 @@ export function ChatHistoryEntryRow({
       {!entry.discovered && (
         <button
           type="button"
-          aria-label="Delete chat"
+          data-history-delete=""
+          aria-label={`Delete ${entry.title}`}
           title="Delete chat"
           onClick={() => onDelete(entry.id)}
           className={cn(

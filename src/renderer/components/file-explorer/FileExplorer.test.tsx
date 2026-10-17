@@ -821,6 +821,27 @@ describe('FileExplorer', () => {
   })
 })
 
+describe('FileExplorer host column', () => {
+  it('fills the host column without its own width, fill or resize handle', () => {
+    mockExplorerState.rootPath = '/project'
+    const { container } = render(<FileExplorer />)
+    const panel = container.querySelector<HTMLElement>('#file-explorer-panel')
+    expect(panel).toHaveClass('flex-1')
+    expect(panel).not.toHaveClass('rounded-xl')
+    expect(panel).not.toHaveClass('bg-background')
+    expect(panel?.style.width).toBe('')
+    expect(screen.queryByRole('separator', { name: 'Resize file explorer' })).toBeNull()
+  })
+
+  it('never writes the legacy explorer width key', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    mockExplorerState.rootPath = '/project'
+    render(<FileExplorer />)
+    expect(setItem).not.toHaveBeenCalledWith('termul:file-explorer-width', expect.anything())
+    setItem.mockRestore()
+  })
+})
+
 describe('FileExplorer header toolbar (GH-540)', () => {
   function setExpandedDirs(expandedDirs: Set<string>): void {
     mockStoreGetState.expandedDirs = expandedDirs
@@ -856,7 +877,7 @@ describe('FileExplorer header toolbar (GH-540)', () => {
     // the menu also holds the file-explorer hide action.
     expect(screen.getByRole('button', { name: 'More explorer actions' })).toBeEnabled()
     expect(screen.getByRole('menuitem', { name: 'Refresh' })).toBeEnabled()
-    expect(screen.getByRole('menuitem', { name: 'Hide file explorer' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Hide side panel' })).toBeInTheDocument()
   })
 
   it('disables every action when no project is open', () => {

@@ -1,5 +1,6 @@
 import type { Highlighter, Tag } from '@lezer/highlight'
 import { highlightTree, tags } from '@lezer/highlight'
+import { logFrontendError } from '@/lib/log-api'
 import { getLastAppliedColorThemeId } from '@/lib/themes/apply-color-theme'
 import { getColorThemeDefinition } from '@/lib/themes/bundled-themes'
 import { resolveSyntaxColors } from '@/lib/themes/resolve-syntax'
@@ -119,6 +120,11 @@ async function loadParser(language: string): Promise<ParserEntry | null> {
           parser = mod.htmlLanguage.parser
           break
         }
+        case 'astro': {
+          const { astro } = await import('@/lib/codemirror-lang-astro')
+          parser = astro().language.parser
+          break
+        }
         case 'markdown': {
           const mod = await import('@codemirror/lang-markdown')
           parser = mod.markdownLanguage.parser
@@ -152,8 +158,13 @@ async function loadParser(language: string): Promise<ParserEntry | null> {
         parserCache.set(language, entry)
         return entry
       }
-    } catch {
-      // Parser load failed — fall back to plain text
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      void logFrontendError({
+        level: 'warn',
+        source: 'diff-syntax-highlight.loadParser',
+        message: `diff syntax parser failed to load lang=${language} (${message})`
+      })
     }
 
     parserCache.set(language, null)

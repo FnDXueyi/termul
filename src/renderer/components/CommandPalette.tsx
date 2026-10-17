@@ -31,8 +31,10 @@ import { usePinnedCommandIds, useTogglePinnedCommand } from '@/hooks/use-pinned-
 import { useRecentCommandIds, useSaveRecentCommand } from '@/hooks/use-recent-commands'
 import { getColorClasses } from '@/lib/colors'
 import { isTauriContext } from '@/lib/tauri-runtime'
+import { terminalProfileCommandLine } from '@/lib/terminal-profiles'
 import { cn } from '@/lib/utils'
 import type { Project, ProjectColor } from '@/types/project'
+import type { TerminalProfile } from '@/types/settings'
 
 type CommandShortcutId = 'newTerminal' | 'newBrowserTab' | 'commandHistory' | 'colorThemePicker'
 
@@ -42,6 +44,8 @@ interface CommandPaletteProps {
   projects: Project[]
   onSwitchProject: (id: string) => void
   onAddTerminal?: () => void
+  terminalProfiles?: TerminalProfile[]
+  onOpenTerminalProfile?: (profile: TerminalProfile) => void
   onShowAgentLauncher?: () => void
   onLaunchAgent?: () => void
   onSaveSnapshot?: () => void
@@ -103,6 +107,8 @@ export function CommandPalette({
   projects,
   onSwitchProject,
   onAddTerminal,
+  terminalProfiles,
+  onOpenTerminalProfile,
   onShowAgentLauncher,
   onLaunchAgent,
   onSaveSnapshot,
@@ -143,6 +149,17 @@ export function CommandPalette({
               execute: onAddTerminal
             }
           ]
+        : []),
+      ...(onOpenTerminalProfile && terminalProfiles
+        ? terminalProfiles.map((profile) => ({
+            id: `terminal-profile-${profile.id}`,
+            category: 'workspace' as const,
+            icon: <Terminal aria-hidden="true" size={16} />,
+            label: `New Terminal: ${profile.name}`,
+            description: terminalProfileCommandLine(profile),
+            keywords: ['profile', 'shell', 'terminal', profile.name, profile.shell],
+            execute: () => onOpenTerminalProfile(profile)
+          }))
         : []),
       ...(onNewProject
         ? [
@@ -294,7 +311,10 @@ export function CommandPalette({
             }
           ]
         : []),
-      ...(onOpenShortcutMenu
+      // No shortcut menu is mounted on the mobile web shell (it lives in the
+      // desktop Rail footer only), so the command is hidden there as
+      // open-canvas is. Pinned and Recent derive from this list.
+      ...(onOpenShortcutMenu && !isMobile
         ? [
             {
               id: 'open-shortcut-menu',
@@ -323,6 +343,8 @@ export function CommandPalette({
       projects,
       onSwitchProject,
       onAddTerminal,
+      terminalProfiles,
+      onOpenTerminalProfile,
       onShowAgentLauncher,
       onLaunchAgent,
       onSaveSnapshot,

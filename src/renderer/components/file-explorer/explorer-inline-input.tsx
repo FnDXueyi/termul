@@ -1,5 +1,6 @@
 import type { DirectoryEntry } from '@shared/types/filesystem.types'
 import { createContext, useContext, useEffect, useRef } from 'react'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { cn } from '@/lib/utils'
 import { MaterialFileIcon } from './MaterialFileIcon'
 import { normalizeTreePath } from './tree-paths'
@@ -113,7 +114,7 @@ export function InlineNameInput({ className }: { className?: string }): React.JS
         event.stopPropagation()
       }}
       className={cn(
-        'h-6 min-w-0 flex-1 rounded border border-ring bg-card px-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground/70',
+        `h-6 min-w-0 flex-1 rounded border border-border bg-card px-1.5 text-xs text-foreground placeholder:text-muted-foreground/70 ${FIELD_FOCUS_CLASS}`,
         className
       )}
       aria-label={
@@ -155,7 +156,6 @@ export function InlineCreateRow({
       <span className="mr-0.5 size-3.5 shrink-0" />
       <MaterialFileIcon
         name={inlineInput.type === 'folder' ? 'folder' : 'file'}
-        extension={null}
         isDirectory={inlineInput.type === 'folder'}
         isExpanded={false}
         depth={depth}

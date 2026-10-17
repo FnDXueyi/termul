@@ -49,6 +49,7 @@ describe('ContextBarSettingsPopover', () => {
     expect(screen.getByText('Show in Context Bar')).toBeInTheDocument()
 
     const toggleCases: Array<[string, string]> = [
+      ['Project Name', 'showProjectName'],
       ['Git Branch', 'showGitBranch'],
       ['Git Status', 'showGitStatus'],
       ['Working Directory', 'showWorkingDirectory'],

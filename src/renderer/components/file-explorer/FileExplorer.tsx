@@ -5,7 +5,6 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { clipboardApi, openerApi } from '@/lib/api'
 import { isTauriContext } from '@/lib/tauri-runtime'
-import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/stores/canvas-store'
 import { useConnectionStatusStore } from '@/stores/connection-status-store'
 import { useEditorStore } from '@/stores/editor-store'
@@ -33,12 +32,7 @@ import { FileTreeContextMenuContent } from './FileTreeContextMenu'
 import { FileTreeNodeWrapper } from './FileTreeNode'
 import { useExplorerEntryFlows } from './use-explorer-entry-flows'
 import { useExplorerKeyboard } from './use-explorer-keyboard'
-import { EXPLORER_MAX_WIDTH, EXPLORER_MIN_WIDTH, useExplorerResize } from './use-explorer-resize'
 import { useExplorerSearch } from './use-explorer-search'
-
-interface FileExplorerProps {
-  side?: 'left' | 'right'
-}
 
 /**
  * Pure gate for the `.op` open branch (OpenPencil canvas mode): desktop-width
@@ -83,7 +77,28 @@ async function showInFileManager(path: string): Promise<void> {
   }
 }
 
-export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.Element {
+/** Deleting more than this many entries lists a count instead of their names. */
+const MAX_NAMED_DELETE_TARGETS = 3
+
+function deleteDialogTitle(targets: DirectoryEntry[]): string {
+  if (targets.length > 1) return `Delete ${targets.length} items`
+  return targets[0]?.type === 'directory' ? 'Delete folder' : 'Delete file'
+}
+
+function deleteDialogMessage(targets: DirectoryEntry[]): string {
+  if (targets.length === 0) return ''
+  const subject =
+    targets.length <= MAX_NAMED_DELETE_TARGETS
+      ? targets.map((entry) => `"${entry.name}"`).join(', ')
+      : `${targets.length} items`
+  return `Delete ${subject}? This cannot be undone.`
+}
+
+/**
+ * File Explorer. Always fills its host column (the shell Side panel): the
+ * column owns the width and the resize handle.
+ */
+export function FileExplorer(): React.JSX.Element {
   const {
     rootPath,
     directoryContents,
@@ -93,8 +108,7 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
     rootLoadError,
     // (loadingDirs intentionally not subscribed — the recovery effect reads
     // it imperatively via getState() to dodge the auto-expand race.)
-    selectedPaths,
-    clipboard
+    selectedPaths
   } = useFileExplorer()
   const {
     toggleDirectory,
@@ -110,7 +124,6 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
     retryRootLoad
   } = useFileExplorerActions()
 
-  const { width: explorerWidth, onResizeMouseDown, onResizeKeyDown } = useExplorerResize(side)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const rootEntries = rootPath ? directoryContents.get(rootPath) : undefined
@@ -160,7 +173,7 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
     selectedPaths,
     directoryContents,
     onRename: flows.startRename,
-    onDelete: flows.requestDelete
+    onDelete: flows.requestDeleteSelection
   })
 
   const openFileEntry = useCallback(
@@ -204,11 +217,11 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
       // If right-clicking on a selected item, keep the current selection.
       // Stopping propagation also keeps the global `GlobalContextMenu` trigger
       // from firing over the file tree.
-      if (!selectedPaths.has(entry.path)) {
+      if (!useFileExplorerStore.getState().selectedPaths.has(entry.path)) {
         selectPath(entry.path)
       }
     },
-    [selectPath, selectedPaths]
+    [selectPath]
   )
 
   // Ctrl/Cmd+Click toggles, Shift+Click selects a range, a plain click
@@ -245,8 +258,7 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
   // `<ContextMenu><ContextMenuTrigger asChild>{row}</ContextMenuTrigger>{...}</ContextMenu>`;
   // this callback supplies the declarative `<ContextMenuContent>` for a given
   // entry (icons on every item, desktop-only reveal/external-open gated by
-  // `isTauriContext()`). The selection count + clipboard presence are captured
-  // fresh on every render so the menu reflects the current multi-select state.
+  // `isTauriContext()`).
   const renderFileTreeContextMenu = useCallback(
     (entry: DirectoryEntry) => (
       <FileTreeContextMenuContent
@@ -263,8 +275,6 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
         onOpenInTerminal={openInTerminal}
         onOpenWithExternal={openWithExternal}
         onShowInFileManager={showInFileManager}
-        selectedCount={selectedPaths.size}
-        hasClipboardContent={clipboard !== null}
       />
     ),
     [
@@ -275,22 +285,19 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
       copySelected,
       cutSelected,
       paste,
-      duplicateSelected,
-      selectedPaths,
-      clipboard
+      duplicateSelected
     ]
   )
 
   const actionsDisabled = !rootPath || !!rootLoadError
   const showTree = !!rootPath && !!rootEntries && !rootLoadError && search.showsTree
-  const { deleteTarget } = flows
+  const { deleteTargets } = flows
 
   return (
     <div
       id="file-explorer-panel"
       ref={containerRef}
-      className="relative flex h-full min-w-0 flex-shrink-0 flex-col overflow-hidden rounded-xl bg-background text-foreground"
-      style={{ width: explorerWidth }}
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden text-foreground"
     >
       <ExplorerHeader
         actionsDisabled={actionsDisabled}
@@ -341,27 +348,10 @@ export function FileExplorer({ side = 'right' }: FileExplorerProps): React.JSX.E
         </div>
       </ExplorerInlineInputProvider>
 
-      <button
-        type="button"
-        onMouseDown={onResizeMouseDown}
-        onKeyDown={onResizeKeyDown}
-        className={cn(
-          'absolute top-0 h-full w-1 cursor-col-resize bg-transparent transition-colors duration-150 ease-out hover:bg-border focus-visible:bg-muted-foreground/40 focus-visible:outline-none active:bg-muted-foreground/40',
-          side === 'right' ? 'left-0' : 'right-0'
-        )}
-        title="Drag to resize explorer"
-        aria-label="Resize file explorer"
-        role="separator"
-        aria-controls="file-explorer-panel"
-        aria-valuenow={explorerWidth}
-        aria-valuemin={EXPLORER_MIN_WIDTH}
-        aria-valuemax={EXPLORER_MAX_WIDTH}
-      />
-
       <ConfirmDialog
-        isOpen={deleteTarget !== null}
-        title={deleteTarget?.type === 'directory' ? 'Delete folder' : 'Delete file'}
-        message={deleteTarget ? `Delete "${deleteTarget.name}"? This cannot be undone.` : ''}
+        isOpen={deleteTargets.length > 0}
+        title={deleteDialogTitle(deleteTargets)}
+        message={deleteDialogMessage(deleteTargets)}
         confirmLabel="Delete"
         variant="danger"
         isLoading={flows.isDeleting}

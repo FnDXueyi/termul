@@ -2,6 +2,7 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import type { Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
+import { MONO_STACK } from '@/lib/font-stacks'
 import { BUNDLED_COLOR_THEMES } from '@/lib/themes/bundled-themes'
 import { resolveSyntaxColors } from '@/lib/themes/resolve-syntax'
 import type { ResolvedSyntaxColors } from '@/lib/themes/types'
@@ -62,10 +63,12 @@ export function createTermulTheme(
         '.cm-content': {
           caretColor: 'oklch(var(--primary))',
           /* Own feature set so Inter's cv/ss tags on body do not restyle this face. */
-          fontFamily:
-            '"Ioskeley Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          fontFeatureSettings: '"calt"',
-          fontSize: '13px',
+          fontFamily: MONO_STACK,
+          fontFeatureSettings: 'normal',
+          fontVariantLigatures: 'common-ligatures',
+          fontVariantNumeric: 'slashed-zero',
+          fontSynthesisStyle: 'none',
+          fontSize: '0.8125rem',
           lineHeight: '1.6'
         },
         '.cm-cursor, .cm-dropCursor': {

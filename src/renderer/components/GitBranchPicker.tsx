@@ -1,6 +1,7 @@
-import type { BranchInfo } from '@shared/types/ipc.types'
+import type { BranchInfo } from '@shared/types/worktree.types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { STRIP_TRIGGER_CLASS } from '@/components/agents/launcher/launcher-classes'
 import {
   AlertCircle,
   Check,
@@ -21,6 +22,8 @@ import { FOCUS_RING_CLASS, PANEL_FIELD_CLASS } from '@/components/ui/panel-style
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { PopoverSearchBand } from '@/components/ui/popover-search-band'
 import { Spinner } from '@/components/ui/spinner'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { gitApi } from '@/lib/git-api'
 import { cn } from '@/lib/utils'
 import { worktreeApi } from '@/lib/worktree-api'
@@ -62,6 +65,19 @@ interface GitBranchPickerProps {
   projectId: string
   ahead?: number
   behind?: number
+  /**
+   * Called with the new branch after a successful checkout/create. When given,
+   * it replaces the default bookkeeping (`project.gitBranch` + active terminal
+   * branch), so a caller on a worktree can refresh its own cache instead.
+   */
+  onBranchChanged?: (branch: string) => void
+  /**
+   * Trigger look. `status-bar` (default) is the quiet status-bar item with
+   * ahead/behind; `strip` is the composer context strip's trigger (14px
+   * glyph, truncating branch, chevron, no ahead/behind). The popover is the
+   * same in both.
+   */
+  variant?: 'status-bar' | 'strip'
 }
 
 export function GitBranchPicker({
@@ -69,8 +85,11 @@ export function GitBranchPicker({
   currentBranch,
   projectId,
   ahead = 0,
-  behind = 0
+  behind = 0,
+  onBranchChanged,
+  variant = 'status-bar'
 }: GitBranchPickerProps): React.JSX.Element {
+  const admitted = useServerAdmitsRemoteWrites()
   const [open, setOpen] = useState(false)
   const [branches, setBranches] = useState<BranchInfo[]>([])
   const [branchesLoading, setBranchesLoading] = useState(false)
@@ -185,7 +204,7 @@ export function GitBranchPicker({
     return null
   }, [branchSearch, branchesLoading, loadError, visibleBranches.length, filteredBranches.length])
 
-  const canCreateBranch = !branchesLoading && !loadError
+  const canCreateBranch = admitted && !branchesLoading && !loadError
 
   const localBranches = useMemo(
     () => filteredBranches.filter((branch) => !branch.isRemote),
@@ -203,6 +222,10 @@ export function GitBranchPicker({
   }
 
   const handleBranchChanged = (branchName: string): void => {
+    if (onBranchChanged) {
+      onBranchChanged(branchName)
+      return
+    }
     updateProject(projectId, { gitBranch: branchName })
     if (activeTerminalId) {
       updateTerminalGitBranch(activeTerminalId, branchName)
@@ -210,7 +233,7 @@ export function GitBranchPicker({
   }
 
   const handleCheckout = async (branch: BranchInfo): Promise<void> => {
-    if (branch.isCurrent || branch.hasOtherWorktree || isSwitching) return
+    if (!admitted || branch.isCurrent || branch.hasOtherWorktree || isSwitching) return
 
     setIsSwitching(true)
     try {
@@ -227,6 +250,7 @@ export function GitBranchPicker({
   }
 
   const handleCreateBranch = async (): Promise<void> => {
+    if (!admitted) return
     if (branchesLoading) {
       toast.error('Wait for branches to finish loading')
       return
@@ -255,31 +279,40 @@ export function GitBranchPicker({
     }
   }
 
-  const displayLabel = currentBranch ?? 'detached'
+  const isStrip = variant === 'strip'
+  const displayLabel = currentBranch ?? (isStrip ? 'Detached HEAD' : 'detached')
 
   const renderBranchRow = (branch: BranchInfo): React.JSX.Element => {
     const BranchIcon = branch.isRemote ? Globe : GitBranch
+    // Only rows that could otherwise switch are write-gated; the current and
+    // other-worktree rows already carry their own disabled state.
+    const writeGated = !admitted && !branch.isCurrent && !branch.hasOtherWorktree
     return (
-      <button
-        key={branch.name}
-        type="button"
-        onClick={() => void handleCheckout(branch)}
-        disabled={branch.isCurrent || branch.hasOtherWorktree || isSwitching}
-        className={cn(branchRowClass, branch.hasOtherWorktree && 'opacity-50 cursor-not-allowed')}
-        title={
-          branch.hasOtherWorktree ? 'This branch is checked out in another worktree' : undefined
-        }
-        aria-current={branch.isCurrent ? 'true' : undefined}
-      >
-        <BranchIcon size={13} className="shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate">{branch.name}</span>
-        {branch.hasOtherWorktree && (
-          <span className="text-3xs text-muted-foreground">worktree</span>
-        )}
-        {branch.isCurrent && (
-          <Check size={13} className="shrink-0 text-foreground" aria-label="Current branch" />
-        )}
-      </button>
+      <WriteGate key={branch.name} gated={writeGated} className="flex w-full">
+        <button
+          type="button"
+          onClick={() => void handleCheckout(branch)}
+          disabled={branch.isCurrent || branch.hasOtherWorktree || isSwitching || writeGated}
+          className={cn(
+            branchRowClass,
+            branch.hasOtherWorktree && 'opacity-50 cursor-not-allowed',
+            writeGated && 'opacity-40 cursor-not-allowed'
+          )}
+          title={
+            branch.hasOtherWorktree ? 'This branch is checked out in another worktree' : undefined
+          }
+          aria-current={branch.isCurrent ? 'true' : undefined}
+        >
+          <BranchIcon size={13} className="shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate">{branch.name}</span>
+          {branch.hasOtherWorktree && (
+            <span className="text-3xs text-muted-foreground">worktree</span>
+          )}
+          {branch.isCurrent && (
+            <Check size={13} className="shrink-0 text-foreground" aria-label="Current branch" />
+          )}
+        </button>
+      </WriteGate>
     )
   }
 
@@ -288,15 +321,23 @@ export function GitBranchPicker({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className={statusBarTriggerClass}
+          className={
+            isStrip ? cn(STRIP_TRIGGER_CLASS, 'inline-flex items-center') : statusBarTriggerClass
+          }
           aria-label="Switch git branch"
           disabled={isSwitching}
         >
-          <GitBranch size={12} className="shrink-0" />
-          <span className="min-w-0 max-w-32 truncate leading-none text-secondary-foreground">
+          <GitBranch size={isStrip ? 14 : 12} className="shrink-0" />
+          <span
+            className={
+              isStrip
+                ? 'min-w-0 max-w-48 truncate leading-none'
+                : 'min-w-0 max-w-32 truncate leading-none text-secondary-foreground'
+            }
+          >
             {displayLabel}
           </span>
-          {(ahead > 0 || behind > 0) && (
+          {!isStrip && (ahead > 0 || behind > 0) && (
             <span className="flex shrink-0 items-center gap-1 tabular-nums text-muted-foreground/70">
               {ahead > 0 && <span className="leading-none">↑{ahead}</span>}
               {behind > 0 && <span className="leading-none">↓{behind}</span>}
@@ -396,18 +437,24 @@ export function GitBranchPicker({
               </Button>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={() => setIsCreatingMode(true)}
-              disabled={isSwitching || !canCreateBranch}
-              className={cn(branchRowClass, 'text-muted-foreground hover:text-foreground')}
-            >
-              <Plus size={13} className="shrink-0" />
-              <span className="min-w-0 flex-1 truncate">
-                Create branch from{' '}
-                <span className="text-foreground">{currentBranch ?? 'HEAD'}</span>
-              </span>
-            </button>
+            <WriteGate gated={!admitted} className="flex w-full">
+              <button
+                type="button"
+                onClick={() => setIsCreatingMode(true)}
+                disabled={isSwitching || !canCreateBranch}
+                className={cn(
+                  branchRowClass,
+                  'text-muted-foreground hover:text-foreground',
+                  !admitted && 'opacity-40 cursor-not-allowed'
+                )}
+              >
+                <Plus size={13} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  Create branch from{' '}
+                  <span className="text-foreground">{currentBranch ?? 'HEAD'}</span>
+                </span>
+              </button>
+            </WriteGate>
           )}
         </div>
       </PopoverContent>

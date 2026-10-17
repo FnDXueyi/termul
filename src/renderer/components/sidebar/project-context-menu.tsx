@@ -21,6 +21,9 @@ import {
   ContextMenuSubContent,
   ContextMenuSubTrigger
 } from '@/components/ui/context-menu'
+import { WriteGate, WriteGateReason } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
+import type { ProjectUpdates } from '@/stores/project-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import type { Project, ProjectGroup } from '@/types/project'
 
@@ -32,7 +35,7 @@ export interface ProjectContextMenuContentProps {
   onStartRename: (project: Project) => void
   onOpenSettings: (projectId: string) => void
   onOpenColorPicker: (targetId: string, targetType: 'project' | 'group') => void
-  onUpdateProject: (id: string, updates: Partial<Project>) => void
+  onUpdateProject: (id: string, updates: ProjectUpdates) => void
   moveProjectToGroup: (projectId: string, targetGroupId: string | null) => void
   onCreateGroupForProject: (projectId: string) => void
   onNewWorktree: (projectId: string) => void
@@ -57,6 +60,8 @@ export function ProjectContextMenuContent({
   onConfirmDelete
 }: ProjectContextMenuContentProps): React.JSX.Element {
   const isGitRepo = project.isGitRepo ?? false
+  const admitted = useServerAdmitsRemoteWrites()
+  const worktreeGated = isGitRepo && !admitted
   const currentGroup = groups.find((g) => g.projectIds.includes(project.id))
   const currentShellPath = availableShells?.available.find((s) => {
     const projectShell = project.defaultShell
@@ -134,15 +139,18 @@ export function ProjectContextMenuContent({
       </ContextMenuSub>
 
       <ContextMenuSeparator />
-      <ContextMenuItem
-        disabled={!isGitRepo}
-        onSelect={() => {
-          if (isGitRepo) onNewWorktree(project.id)
-        }}
-      >
-        <GitBranch className="mr-2 h-4 w-4" />{' '}
-        {isGitRepo ? 'New Worktree' : 'New Worktree (no git repo)'}
-      </ContextMenuItem>
+      <WriteGate gated={worktreeGated} focusable={false} className="flex w-full">
+        <ContextMenuItem
+          disabled={!isGitRepo || !admitted}
+          onSelect={() => {
+            if (isGitRepo && admitted) onNewWorktree(project.id)
+          }}
+        >
+          <GitBranch className="mr-2 h-4 w-4" />{' '}
+          {isGitRepo ? 'New Worktree' : 'New Worktree (no git repo)'}
+          {worktreeGated && <WriteGateReason />}
+        </ContextMenuItem>
+      </WriteGate>
       <ContextMenuItem onSelect={() => onArchiveProject(project.id)}>
         <Archive className="mr-2 h-4 w-4" /> Archive
       </ContextMenuItem>

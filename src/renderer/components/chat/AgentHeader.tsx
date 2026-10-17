@@ -14,6 +14,7 @@ import {
   menuOptionRowClass,
   pickerSearchTextClass
 } from '@/components/ui/menu-styles'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 import { Popover, PopoverTrigger } from '@/components/ui/popover'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { SessionConfigOption } from '@/lib/acp-api'
@@ -78,9 +79,12 @@ function getLabelForConfigChip(option: SessionConfigOption, promoted: boolean): 
  * Centered modal shell for a selector's option list on mobile web. Mirrors the
  * `CommandPalette` centered-overlay feel: `w-[calc(100%-2rem)]` leaves a 1rem
  * horizontal margin so the panel never bleeds edge-to-edge, `max-w-md` caps the
- * panel larger than the desktop `w-56` popover, and `max-h-[80vh]` keeps it on
- * screen when the OSK is open. A Radix `DialogTitle` + visually-hidden
- * `DialogDescription` (a11y-required by Dialog) carry the section label. The
+ * panel larger than the desktop `w-56` popover, and `max-h-[80dvh]` caps its
+ * height to the dynamic viewport, so it tracks the browser toolbar collapsing
+ * (the static `vh` does not). `dvh` does not shrink for the on-screen keyboard
+ * on iOS Safari or Chrome Android's default mode, so the keyboard is a separate
+ * concern. A Radix `DialogTitle` + visually-hidden `DialogDescription` (a11y-required by
+ * Dialog) carry the section label. The
  * `disabled` prop forwards to `DialogTrigger` so the mobile trigger gates
  * opening identically to the desktop `PopoverTrigger`. The search input +
  * option rows are passed as children (the children own their own scroll
@@ -111,7 +115,7 @@ export function SelectorModal({
       </DialogTrigger>
       <DialogContent
         onEscapeKeyDown={onEscapeKeyDown}
-        className="mx-auto max-h-[80vh] w-[calc(100%-2rem)] max-w-md gap-0 overflow-y-auto rounded-2xl p-0"
+        className="mx-auto max-h-[80dvh] w-[calc(100%-2rem)] max-w-md gap-0 overflow-y-auto rounded-2xl p-0"
       >
         <DialogHeader className={cn(MENU_LABEL_CLASS, 'px-3 pb-1 pt-3 pr-9')}>
           <DialogTitle className="text-muted-foreground">{title}</DialogTitle>
@@ -201,7 +205,7 @@ export function ConfigChip({
           placeholder="Search models…"
           aria-label="Search models"
           className={cn(
-            'mb-1 h-8 w-full border-b border-border bg-transparent px-2 text-foreground outline-none placeholder:text-muted-foreground',
+            `mb-1 h-8 w-full border-b border-border bg-transparent px-2 text-foreground placeholder:text-muted-foreground ${FIELD_FOCUS_CLASS}`,
             pickerSearchTextClass(isMobile)
           )}
         />
@@ -287,7 +291,9 @@ export function ModeChip({
   disabled,
   onSelect,
   label = 'Mode',
-  agentName
+  agentName,
+  className,
+  labelClassName
 }: {
   session: AcpSession
   disabled: boolean
@@ -295,6 +301,10 @@ export function ModeChip({
   label?: string
   /** Names the "Let <agent> act" group. */
   agentName?: string
+  /** Merged onto the `ComposerPill` trigger. */
+  className?: string
+  /** When set, the visible label renders in a `<span>` carrying these classes (e.g. sr-only). */
+  labelClassName?: string
 }): React.JSX.Element | null {
   const modes = session.modes
   const [open, setOpen] = useState(false)
@@ -312,10 +322,11 @@ export function ModeChip({
     select(modeId)
   }
 
+  const modeLabel = current?.name ?? label
   const trigger = (
-    <ComposerPill disabled={disabled} chevron pending={pending}>
+    <ComposerPill disabled={disabled} chevron pending={pending} className={className}>
       <ModeIcon modeId={current?.id} />
-      {current?.name ?? label}
+      {labelClassName ? <span className={labelClassName}>{modeLabel}</span> : modeLabel}
     </ComposerPill>
   )
 
