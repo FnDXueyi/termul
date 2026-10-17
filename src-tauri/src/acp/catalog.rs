@@ -43,6 +43,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
@@ -276,6 +277,22 @@ fn snapshot_fetcher(delegate: SnapshotFetchDelegate) -> SnapshotFetcher {
     Arc::new(move |path, force_refresh| delegate(path, force_refresh))
 }
 
+type SharedSnapshotFetch = Shared<BoxFuture<'static, Result<ResolvedSnapshot, String>>>;
+
+/// The forced CDN fetch in flight, if any. Every concurrent forced caller
+/// joins it, so a peer looping forced refreshes costs one registry request
+/// at a time.
+type ForcedSnapshotFetch = Arc<Mutex<Option<SharedSnapshotFetch>>>;
+
+/// Clears the forced-fetch slot when the fetch task ends, panics included.
+struct ForcedFetchSlot(ForcedSnapshotFetch);
+
+impl Drop for ForcedFetchSlot {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
+}
+
 /// Host-owned ACP catalog service. One instance per host runtime (desktop OR
 /// standalone `termul-server`, never shared across processes). Constructed via
 /// [`AcpCatalogService::open`], which creates the root directory + idempotent
@@ -309,6 +326,7 @@ pub struct AcpCatalogService {
     /// catalog probe cache so a catalog list does not spawn `--version` on
     /// every call.
     opencode_probe: Mutex<Option<(Instant, Option<PathBuf>)>>,
+    forced_snapshot_fetch: ForcedSnapshotFetch,
 }
 
 impl AcpCatalogService {
@@ -353,6 +371,7 @@ impl AcpCatalogService {
             snapshot_fetch: snapshot_fetcher(production_snapshot_delegate),
             snapshot_fetch_gate: Mutex::new(None),
             opencode_probe: Mutex::new(None),
+            forced_snapshot_fetch: ForcedSnapshotFetch::default(),
         }))
     }
 
@@ -451,7 +470,7 @@ impl AcpCatalogService {
         &self,
         force_refresh: bool,
     ) -> Result<AcpRegistrySnapshot, String> {
-        let result = (self.snapshot_fetch)(self.snapshot_cache_path(), force_refresh).await;
+        let result = self.fetch_snapshot(force_refresh).await;
         match &result {
             Ok(resolved) => log::info!(
                 "[acp-catalog] registry check force_refresh={force_refresh} outcome={:?} agents={}",
@@ -485,6 +504,42 @@ impl AcpCatalogService {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Run the CDN snapshot fetch. A forced fetch joins the forced fetch
+    /// already in flight. It runs on its own task, so a caller that goes away
+    /// does not stall the callers that joined it.
+    async fn fetch_snapshot(&self, force_refresh: bool) -> Result<ResolvedSnapshot, String> {
+        if !force_refresh {
+            return (self.snapshot_fetch)(self.snapshot_cache_path(), false).await;
+        }
+        let in_flight = {
+            let mut slot = self.forced_snapshot_fetch.lock();
+            match slot.as_ref() {
+                Some(in_flight) => {
+                    log::debug!("[acp-catalog] forced registry fetch joined the one in flight");
+                    in_flight.clone()
+                }
+                None => {
+                    let fetch = (self.snapshot_fetch)(self.snapshot_cache_path(), true);
+                    let owner = Arc::clone(&self.forced_snapshot_fetch);
+                    let shared = tokio::spawn(async move {
+                        let _slot = ForcedFetchSlot(owner);
+                        fetch.await
+                    })
+                    .map(|joined| {
+                        joined.unwrap_or_else(|error| {
+                            Err(format!("registry fetch task failed: {error}"))
+                        })
+                    })
+                    .boxed()
+                    .shared();
+                    *slot = Some(shared.clone());
+                    shared
+                }
+            }
+        };
+        in_flight.await
     }
 
     /// Whether a non-forced snapshot fetch is gated: a previous non-forced
@@ -674,8 +729,7 @@ impl AcpCatalogService {
                         "snapshot fetch gated after recent failure and no cache present".to_string()
                     })
             } else {
-                let result =
-                    (self.snapshot_fetch)(self.snapshot_cache_path(), force_snapshot_refresh).await;
+                let result = self.fetch_snapshot(force_snapshot_refresh).await;
                 self.apply_snapshot_fetch_outcome(&result, force_snapshot_refresh);
                 result
             };

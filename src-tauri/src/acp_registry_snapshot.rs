@@ -51,7 +51,7 @@ pub enum SnapshotFetchOutcome {
 /// and whether on-disk cache persistence is confirmed. `persisted` is `true`
 /// for cache-served outcomes (the cache demonstrably exists — it was just
 /// read); for `NetworkFresh` it is the result of the cache write.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedSnapshot {
     pub snapshot: AcpRegistrySnapshot,
     pub outcome: SnapshotFetchOutcome,
