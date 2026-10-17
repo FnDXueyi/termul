@@ -40,7 +40,8 @@ vi.mock('@/lib/api', () => ({
       if (h.heldWrites) return new Promise((resolve) => h.heldWrites?.push(resolve))
       h.store.set(key, data)
       return { success: true, data: undefined }
-    })
+    }),
+    flushPendingWrites: vi.fn(async () => ({ success: true, data: undefined }))
   },
   secureStorageApi: { getSecret: vi.fn(), setSecret: vi.fn(), deleteSecret: vi.fn() },
   filesystemApi: { grantFsScope: h.grantFsScope }
@@ -501,6 +502,40 @@ describe('useProjectRegistry', () => {
       expect(closed).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
       expect(closed).toHaveBeenCalledOnce()
+    })
+
+    it('waits for a save still preparing its record before the window closes', async () => {
+      h.tauri.value = true
+      await mountWithOneProjectSaved()
+      let releaseSecret: () => void = () => {}
+      vi.mocked(secureStorageApi.setSecret).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecret = () => resolve({ success: true, data: undefined })
+          })
+      )
+      act(() =>
+        useProjectStore.setState({
+          projects: useProjectStore.getState().projects.map((p) => ({
+            ...p,
+            envVars: [{ key: 'TOKEN', value: 'hunter2', isSecret: true }]
+          }))
+        })
+      )
+      const closed = vi.fn()
+
+      void runCloseWriters().then(closed)
+      await act(async () => {})
+      expect(closed).not.toHaveBeenCalled()
+      expect(persistenceApi.flushPendingWrites).not.toHaveBeenCalled()
+
+      releaseSecret()
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce())
+      const lastWrite =
+        vi.mocked(persistenceApi.writeDebounced).mock.invocationCallOrder.at(-1) ?? 0
+      expect(
+        vi.mocked(persistenceApi.flushPendingWrites).mock.invocationCallOrder[0]
+      ).toBeGreaterThan(lastWrite)
     })
 
     it('writes nothing at close when no save is pending', async () => {

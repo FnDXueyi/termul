@@ -343,10 +343,23 @@ export function persistProjectPrefs(
   options?: { immediate?: boolean }
 ): Promise<void> {
   const prepared = preparing.then(() => prepareRecord(projects, groups, previousProjects))
-  preparing = prepared.catch(() => undefined)
-  return prepared.then((save) =>
-    save ? writeRecord(save.signature, save.record, options?.immediate ?? false) : undefined
-  )
+  let written: Promise<void> | undefined
+  const issued = prepared.then((save) => {
+    if (save) written = writeRecord(save.signature, save.record, options?.immediate ?? false)
+  })
+  preparing = issued.catch(() => undefined)
+  return issued.then(() => written)
+}
+
+/**
+ * Wait until every save started so far has prepared its record and handed the
+ * write to the persistence layer, then land the debounced writes. A save still
+ * preparing (awaiting secure storage on the desktop) has nothing for
+ * `flushPendingWrites` to flush yet.
+ */
+export async function flushProjectPrefsWrites(): Promise<void> {
+  await preparing
+  await persistenceApi.flushPendingWrites()
 }
 
 /**

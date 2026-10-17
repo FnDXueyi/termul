@@ -7,6 +7,7 @@ import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { importLegacyProjects } from '@/lib/legacy-project-import'
 import { logFrontendError } from '@/lib/log-api'
 import {
+  flushProjectPrefsWrites,
   getProjectLayout,
   getProjectPrefs,
   loadProjectPrefs,
@@ -127,6 +128,7 @@ function createPrefsSaver(isCancelled: () => boolean): {
   let retryDueAt = 0
   let failures = 0
   let gaveUp = false
+  let inFlight = 0
 
   function cancel(): void {
     if (retryTimer) clearTimeout(retryTimer)
@@ -174,9 +176,14 @@ function createPrefsSaver(isCancelled: () => boolean): {
     // A success must not cancel the timer: it may belong to a newer save that
     // failed while this one was in flight. A retry for state that already
     // landed finds the same signature and writes nothing.
-    return persistProjectPrefs(projects, groups, previousProjects, { immediate }).then(() => {
-      failures = 0
-    }, scheduleRetry)
+    inFlight++
+    return persistProjectPrefs(projects, groups, previousProjects, { immediate })
+      .then(() => {
+        failures = 0
+      }, scheduleRetry)
+      .finally(() => {
+        inFlight--
+      })
   }
 
   return {
@@ -186,13 +193,17 @@ function createPrefsSaver(isCancelled: () => boolean): {
       void attempt(projects, groups, previousProjects)
     },
     // A quit or a hidden page cannot wait for the backoff: write the state a
-    // failed save left unsaved now.
+    // failed save left unsaved now, and let a save still preparing issue its
+    // write.
     flush: async () => {
-      if (isCancelled() || !(retryTimer || gaveUp)) return
-      cancel()
-      gaveUp = false
-      const state = useProjectStore.getState()
-      await attempt(state.projects, state.groups, [], true)
+      if (isCancelled()) return
+      if (retryTimer || gaveUp) {
+        cancel()
+        gaveUp = false
+        const state = useProjectStore.getState()
+        await attempt(state.projects, state.groups, [], true)
+      }
+      if (inFlight > 0) await flushProjectPrefsWrites()
     },
     cancel
   }
