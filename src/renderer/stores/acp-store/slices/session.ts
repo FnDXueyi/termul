@@ -89,7 +89,7 @@ import {
   selectLaunchRecoverySessions,
   takeDroppedLaunchPlaceholders
 } from '../live-turn'
-import { reloadInFlight } from '../reload-guard'
+import { liveSiblingCount, reloadInFlight } from '../reload-guard'
 import {
   adoptHostOwnedAgent,
   beginSessionReopen,
@@ -2020,9 +2020,11 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       const session = get().sessions[sessionId]
       if (!session) throw new Error(`unknown session ${sessionId}`)
       // A turn error retired this chat's agent, but the process still runs
-      // and owns the session, so a web reopen would adopt it again. Stop it
-      // first. Its close can land while the reopen still names it, so the
-      // reload guard keeps that close from cancelling the reopen.
+      // and owns the session, so a web reopen would adopt it again. Release
+      // it first. Stop the process, or close only this session when other
+      // chats still run on it. Its close can land while the reopen still
+      // names it, so the reload guard keeps that close from cancelling the
+      // reopen.
       if (
         session.status !== 'error' &&
         session.status !== 'closed' &&
@@ -2031,9 +2033,13 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       ) {
         releasing = true
         reloadInFlight.add(sessionId)
-        await get()
-          .killAgent(session.agentId)
-          .catch(() => undefined)
+        if (liveSiblingCount(get().sessions, sessionId, session.agentId) === 0) {
+          await get()
+            .killAgent(session.agentId)
+            .catch(() => undefined)
+        } else {
+          await acpApi.closeSession(session.agentId, sessionId).catch(() => undefined)
+        }
       }
       // Force the reopen path: mark closed so `openHistorySession` re-runs its
       // reopen (re-launch a fresh agent via `ensureLiveAgent`, replay persisted
