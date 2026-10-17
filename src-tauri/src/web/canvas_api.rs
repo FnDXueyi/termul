@@ -30,14 +30,14 @@
 //!   scoped to its own daemon, so opening canvas B never contaminates
 //!   canvas A's requests and cross-canvas pairing is rejected.
 //!
-//! The same `/canvas/<id>/*` routes serve the embedded figcraft bundle
-//! (`canvas::static_server`) for any canvas id that holds a bundle token and
-//! has no legacy daemon; the `ct` query token or the per-canvas cookie it
-//! sets authorizes those requests, and `GET /canvas/bundle-base` reports the
-//! (same-origin) base plus the pinned bundle tag.
-//!
-//! Closing/evicting the canvas drops the pool entry, so stale `ct` params
-//! and cookies stop authenticating. Remote clients reach the canvas only
+//! `POST /canvas/open` mounts the figcraft editor: it mints the project's
+//! bundle token (`static_server::open_canvas`) and the same `/canvas/<id>/*`
+//! routes then serve the embedded bundle (`canvas::static_server`) for any
+//! canvas id that holds a bundle token and has no legacy daemon; the `ct`
+//! query token or the per-canvas cookie it sets authorizes those requests.
+//! `POST /canvas/close` revokes the token, so stale `ct` params and cookies
+//! stop authenticating. `GET /canvas/bundle-base` reports the (same-origin)
+//! base plus the pinned bundle tag. Remote clients reach the canvas only
 //! through these same-origin routes (AD-8); the daemon's loopback port is
 //! never exposed.
 //!
@@ -61,9 +61,9 @@ use serde::Deserialize;
 use crate::canvas::mcp_proxy;
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
-    bundle_tokens, query_param, same_origin_base, serve_bundle, CookiePolicy,
+    bundle_tokens, close_canvas, open_canvas, query_param, same_origin_base, serve_bundle,
+    CanvasOpenInfo, CookiePolicy,
 };
-use crate::canvas::{canvas_id_for_project, CanvasOpenInfo};
 use crate::web::auth::WebAuth;
 use crate::web::capabilities::WriteFlags;
 use crate::web::fs_api::{check_local_only, IpcBody};
@@ -138,9 +138,7 @@ fn validate_doc_path(
         )));
     }
     // Tool-friendly string form (verbatim-stripped), like `git_api::cwd_string`.
-    Ok(
-        crate::path_validation::strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned(),
-    )
+    Ok(crate::path_validation::strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned())
 }
 
 /// Cookie-name prefix for the per-canvas canvas session cookies. The
@@ -176,7 +174,14 @@ struct CanvasOpenRequest {
     project_id: String,
 }
 
-/// `POST /canvas/close` / `POST /canvas/save` body: `{ "docPath": "..." }`.
+/// `POST /canvas/close` body: `{ "projectId": "..." }`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CanvasCloseRequest {
+    project_id: String,
+}
+
+/// `POST /canvas/save` body: `{ "docPath": "..." }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasDocRequest {
@@ -224,14 +229,6 @@ pub fn canvas_router<S>(state: CanvasState) -> Router<S> {
             canvas_token_gate,
         ))
         .with_state(state)
-}
-
-/// Generate a fresh 32-hex-char canvas session token from the OS CSPRNG
-/// (same primitive + shape convention as `web::auth`'s bearer tokens, at
-/// half the entropy budget — the token authorizes one embed URL, not the
-/// whole server). Never logged.
-fn generate_canvas_token() -> Result<String, &'static str> {
-    crate::canvas::static_server::generate_token()
 }
 
 /// Extract a named cookie's value from a `Cookie` header. Cookie values are
@@ -342,137 +339,63 @@ async fn canvas_token_gate(
     next.run(request).await
 }
 
-/// The `--allow-origin` value for web-spawned daemons: the requesting
-/// client's own HTTP origin (from the Host header). Proxied daemon traffic
-/// carries no `Origin` header (the proxy strips it), so the daemon's
-/// native-client path applies; this value only honors the allowlist
-/// contract. Never `*`.
-fn request_origin(headers: &HeaderMap) -> String {
-    headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(|host| format!("http://{host}"))
-        .unwrap_or_else(|| "http://127.0.0.1".to_string())
-}
-
-/// `POST /canvas/open` — validate the doc path, spawn (or reuse) the doc's
-/// daemon, and return the same-origin embed path + the
-/// project's canvas id and session token (the renderer sets it as the
-/// per-canvas `op_canvas_ct_<canvasId>` cookie). Idempotent for a live
-/// entry: a repeat open of the same doc returns the SAME embed URL + token
-/// (no iframe rebuild, no live editor state loss); the token is minted only
-/// on a fresh entry.
+/// `POST /canvas/open` — validate the doc path against the project boundary,
+/// then return the same-origin bundle base plus the project's minted `ct`
+/// token (the twin of the `canvas_open` Tauri command).
 async fn open(
     State(state): State<CanvasState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Json(req): Json<CanvasOpenRequest>,
 ) -> Json<IpcBody<CanvasOpenInfo>> {
     if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/open") {
         return Json(forbidden);
     }
-    tracing::info!(
-        target: "termul::web::canvas",
-        "canvas open (web) project_id={}",
-        crate::commands::sanitize_log_field(&req.project_id)
-    );
-    let Some(pool) = state.pool else {
-        return Json(IpcBody::err(
-            "canvas daemon pool is unavailable on this server",
-            "DAEMON_DOWN",
-        ));
-    };
-    // Project-root containment FIRST: a web client may only open a doc the
-    // fs/git routes could also touch (the daemon receives `--file <path>`).
-    let doc_path = match validate_doc_path(state.boundary.as_ref(), &req.doc_path) {
+    let log_project_id = crate::commands::sanitize_log_field(&req.project_id);
+    let doc_key = match validate_doc_path(state.boundary.as_ref(), &req.doc_path) {
         Ok(path) => path,
         Err((message, code)) => {
             tracing::warn!(
                 target: "termul::web::canvas",
-                "canvas open rejected: {message}"
+                "canvas open rejected project_id={log_project_id}: {message}"
             );
             return Json(IpcBody::err(message, code));
         }
     };
-    let allow_origin = request_origin(&headers);
-    match pool.acquire(&doc_path, &allow_origin, &req.project_id).await {
-        Ok(daemon) => {
-            let canvas_id = canvas_id_for_project(&req.project_id);
-            // Idempotent repeat open: a live entry with a live token keeps
-            // the SAME embed URL + token (no iframe rebuild — the live
-            // editor state survives). Rotation happens only when no token
-            // is set (fresh spawn / fresh entry after close or evict).
-            let canvas_token = match pool.canvas_token_for_doc(&daemon.doc_key) {
-                Some(existing) => existing,
-                None => {
-                    let token = match generate_canvas_token() {
-                        Ok(token) => token,
-                        Err(message) => {
-                            tracing::error!(
-                                target: "termul::web::canvas",
-                                "failed to generate canvas session token"
-                            );
-                            // No orphaned live daemon with an unusable
-                            // token — evict what acquire just installed.
-                            pool.release(&daemon.doc_key).await;
-                            return Json(IpcBody::err(
-                                format!("failed to generate canvas session token: {message}"),
-                                crate::canvas::CODE_TOKEN_GENERATION_FAILED,
-                            ));
-                        }
-                    };
-                    if !pool.set_canvas_token(&daemon.doc_key, token.clone()) {
-                        // The entry vanished (release/shutdown raced the
-                        // open) — the daemon has no owner from this
-                        // caller's view; release it.
-                        tracing::warn!(
-                            target: "termul::web::canvas",
-                            "canvas entry closed while opening — releasing daemon"
-                        );
-                        pool.release(&daemon.doc_key).await;
-                        return Json(IpcBody::err(
-                            "canvas closed while the daemon was starting",
-                            crate::canvas::CODE_CANVAS_CLOSED,
-                        ));
-                    }
-                    token
-                }
-            };
-            // Embed URL shape (raw query text — the editor refuses
-            // URL-encoded params): `/canvas/<id>/?embed=vscode&ct=<32-hex>`.
-            // The `ct` token authenticates the iframe's subsequent
-            // `/canvas/<id>/*` requests; the same token is returned as
-            // `canvas_token` for the renderer's per-canvas
-            // `op_canvas_ct_<canvasId>` cookie (the root canvas routes).
-            Json(IpcBody::ok(CanvasOpenInfo {
-                embed_url: format!("/canvas/{canvas_id}/?embed=vscode&ct={canvas_token}"),
-                mcp_url: None,
-                doc_key: daemon.doc_key.clone(),
-                canvas_id: Some(canvas_id),
-                canvas_token: Some(canvas_token),
-            }))
+    match open_canvas(same_origin_base(), &req.project_id, doc_key) {
+        Ok(info) => {
+            tracing::info!(
+                target: "termul::web::canvas",
+                "canvas open (web) project_id={log_project_id} canvas_id={}",
+                info.canvas_id
+            );
+            Json(IpcBody::ok(info))
         }
-        Err(err) => Json(IpcBody::err(err.message, err.code)),
+        Err(err) => {
+            tracing::warn!(
+                target: "termul::web::canvas",
+                "canvas open failed project_id={log_project_id} code={}",
+                err.code
+            );
+            Json(IpcBody::err(err.message, err.code))
+        }
     }
 }
 
-/// `POST /canvas/close` — evict the doc's daemon (stdin EOF → kill).
+/// `POST /canvas/close` — revoke the project's bundle token. Idempotent.
 async fn close(
     State(state): State<CanvasState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(req): Json<CanvasDocRequest>,
+    Json(req): Json<CanvasCloseRequest>,
 ) -> Json<IpcBody<bool>> {
     if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/close") {
         return Json(forbidden);
     }
-    let Some(pool) = state.pool else {
-        return Json(IpcBody::err(
-            "canvas daemon pool is unavailable on this server",
-            "DAEMON_DOWN",
-        ));
-    };
-    tracing::info!(target: "termul::web::canvas", "canvas close (web)");
-    pool.release(&req.doc_path).await;
+    tracing::info!(
+        target: "termul::web::canvas",
+        "canvas close (web) project_id={}",
+        crate::commands::sanitize_log_field(&req.project_id)
+    );
+    close_canvas(&req.project_id);
     Json(IpcBody::ok(true))
 }
 
@@ -495,10 +418,7 @@ async fn save(
     };
     let Some(daemon) = pool.daemon_for_doc(&req.doc_path) else {
         tracing::warn!(target: "termul::web::canvas", "canvas save with no live daemon");
-        return Json(IpcBody::err(
-            "canvas daemon is not running",
-            "DAEMON_DOWN",
-        ));
+        return Json(IpcBody::err("canvas daemon is not running", "DAEMON_DOWN"));
     };
     match mcp_proxy::daemon_save(daemon.as_ref()).await {
         Ok(value) => Json(IpcBody::ok(value)),
@@ -545,8 +465,8 @@ async fn root_proxy(State(state): State<CanvasState>, request: Request) -> Respo
         );
         return daemon_down("canvas daemon is not running");
     };
-    let presented = cookie_value(request.headers(), &canvas_cookie_name(&canvas_id))
-        .unwrap_or_default();
+    let presented =
+        cookie_value(request.headers(), &canvas_cookie_name(&canvas_id)).unwrap_or_default();
     if !pool.verify_canvas_token(&canvas_id, presented) {
         tracing::warn!(
             target: "termul::web::canvas",

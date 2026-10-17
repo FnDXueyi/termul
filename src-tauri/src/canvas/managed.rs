@@ -338,12 +338,6 @@ impl CanvasDaemon {
         self.core.exited.borrow().is_none()
     }
 
-    /// The daemon's managed (handshake) token. Never logged. The desktop
-    /// `canvas_open` result exposes it as the canvas bridge token.
-    pub(crate) fn managed_token(&self) -> &str {
-        &self.token
-    }
-
     /// `true` once the pool initiated a dispose (expected exit).
     pub(crate) fn is_disposed(&self) -> bool {
         self.core.disposed.load(Ordering::SeqCst)

@@ -1,108 +1,72 @@
-//! Canvas Tauri commands (OpenPencil canvas mode). Mirrors the web routes in
-//! `web/canvas_api.rs` — same `IpcResult` envelope, same typed codes.
-//!
-//! All lifecycle goes through the shared [`CanvasDaemonPool`] (managed in
-//! `lib.rs`); `AppHandle` is used ONLY here (main-window URL origin for
-//! `--allow-origin`) — the pool
-//! itself stays Tauri-free so `termul-server` composes it too. The pure
-//! assembly helpers ([`window_origin_from_url`], [`open_info_for_daemon`],
-//! [`open_failure`]) are extracted so they are
-//! unit-testable without an `AppHandle`/pool.
+//! Canvas Tauri commands. `canvas_open` / `canvas_close` mount and unmount the
+//! figcraft editor served by the loopback bundle listener; they mirror
+//! `POST /canvas/open|close` in `web/canvas_api.rs` (same `IpcResult`
+//! envelope, same typed codes) and share `canvas::static_server::open_canvas`.
+//! `canvas_save` / `canvas_status` still drive the OpenPencil daemon pool until
+//! it is removed.
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
 use super::{sanitize_log_field, validate_project_path, IpcResult};
 use crate::canvas::mcp_proxy;
 use crate::canvas::pool::CanvasDaemonPool;
-use crate::canvas::static_server::{CanvasBundleBase, StaticServer, CODE_BUNDLE_LISTENER_DOWN};
-use crate::canvas::{CanvasOpenInfo, CanvasStatus, CanvasError, CODE_DAEMON_DOWN};
+use crate::canvas::static_server::{
+    close_canvas, open_canvas, CanvasBundleBase, CanvasOpenInfo, StaticServer,
+    CODE_BUNDLE_LISTENER_DOWN,
+};
+use crate::canvas::{CanvasStatus, CODE_DAEMON_DOWN};
 
-/// Serialize a webview URL's origin manually (`scheme://host[:port]`) so
-/// opaque custom schemes (`tauri://localhost`) still produce a usable
-/// string — `url::Origin::ascii_serialization` would render them as the
-/// literal "null". Carried to the daemon as the exact-string
-/// `--allow-origin` value.
-fn window_origin_from_url(url: &tauri::Url) -> String {
-    let scheme = url.scheme();
-    let host = url.host_str().unwrap_or("localhost");
-    match url.port() {
-        Some(port) => format!("{scheme}://{host}:{port}"),
-        None => format!("{scheme}://{host}"),
-    }
-}
+const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The main webview's origin, carried to the daemon as `--allow-origin`
-/// (exact string). Falls back to the production Windows/Linux webview
-/// origin when the window/URL is unavailable.
-fn main_window_origin(app: &AppHandle) -> String {
-    app.get_webview_window("main")
-        .and_then(|window| window.url().ok())
-        .map(|url| window_origin_from_url(&url))
-        .unwrap_or_else(|| "http://tauri.localhost".to_string())
-}
-
-/// Pure: assemble the desktop `CanvasOpenInfo` for a live daemon (loopback
-/// embed URL with raw-concat `?embed=vscode` — never URL-encoded). The
-/// desktop canvas token IS the daemon's managed (handshake) token.
-fn open_info_for_daemon(daemon: &crate::canvas::managed::CanvasDaemon) -> CanvasOpenInfo {
-    CanvasOpenInfo {
-        embed_url: format!("http://127.0.0.1:{}/?embed=vscode", daemon.port),
-        mcp_url: None,
-        doc_key: daemon.doc_key.clone(),
-        canvas_id: None,
-        canvas_token: Some(daemon.managed_token().to_string()),
-    }
-}
-
-/// Pure: map a typed pool error onto the command's `IpcResult` failure
-/// envelope (stable code preserved verbatim — the renderer switches on it).
-fn open_failure(err: &CanvasError) -> IpcResult<CanvasOpenInfo> {
-    IpcResult::error(err.message.clone(), err.code.clone())
-}
-
-/// `canvas_open { docPath, projectId }` — spawn (or reuse) the doc's managed
-/// daemon and return the loopback embed URL.
+/// `canvas_open { docPath, projectId }` — the loopback bundle base plus a
+/// minted `ct` token for the project's canvas. Typed `BUNDLE_LISTENER_DOWN`
+/// while the listener is not bound.
 #[tauri::command]
 pub async fn canvas_open(
-    app: AppHandle,
     doc_path: String,
     project_id: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
+    server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
-    let validated = validate_and_stringify!(&doc_path);
+    let doc_key = validate_and_stringify!(&doc_path);
     let log_project_id = sanitize_log_field(&project_id);
-    log::info!("[canvas] open start project_id={log_project_id}");
-    let allow_origin = main_window_origin(&app);
-    match pool.acquire(&validated, &allow_origin, &project_id).await {
-        Ok(daemon) => {
+    let Some(base) = server.wait_for_base(LISTENER_WAIT).await else {
+        log::warn!(
+            "[canvas] open failed project_id={log_project_id} code={CODE_BUNDLE_LISTENER_DOWN}"
+        );
+        return Ok(IpcResult::error(
+            "canvas bundle listener is not running",
+            CODE_BUNDLE_LISTENER_DOWN,
+        ));
+    };
+    match open_canvas(base, &project_id, doc_key) {
+        Ok(info) => {
             log::info!(
-                "[canvas] open success project_id={log_project_id} port={}",
-                daemon.port
+                "[canvas] open project_id={log_project_id} canvas_id={}",
+                info.canvas_id
             );
-            Ok(IpcResult::success(open_info_for_daemon(&daemon)))
+            Ok(IpcResult::success(info))
         }
         Err(err) => {
             log::warn!(
                 "[canvas] open failed project_id={log_project_id} code={}",
                 err.code
             );
-            Ok(open_failure(&err))
+            Ok(IpcResult::error(err.message, err.code))
         }
     }
 }
 
-/// `canvas_close { docPath }` — evict the doc's daemon (stdin EOF → kill).
-/// Idempotent: closing an unopened canvas is a success.
+/// `canvas_close { projectId }` — revoke the project's bundle token.
+/// Idempotent.
 #[tauri::command]
-pub async fn canvas_close(
-    doc_path: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<bool>, String> {
-    let validated = validate_and_stringify!(&doc_path);
-    log::info!("[canvas] close start");
-    pool.release(&validated).await;
+pub async fn canvas_close(project_id: String) -> Result<IpcResult<bool>, String> {
+    log::info!(
+        "[canvas] close project_id={}",
+        sanitize_log_field(&project_id)
+    );
+    close_canvas(&project_id);
     Ok(IpcResult::success(true))
 }
 
@@ -162,65 +126,6 @@ pub async fn canvas_bundle_base(
                 "canvas bundle listener is not running",
                 CODE_BUNDLE_LISTENER_DOWN,
             ))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn window_origin_serializes_http_with_port() {
-        let url = tauri::Url::parse("http://localhost:5180/tauri-index.html").unwrap();
-        assert_eq!(window_origin_from_url(&url), "http://localhost:5180");
-    }
-
-    #[test]
-    fn window_origin_serializes_scheme_without_port() {
-        let url = tauri::Url::parse("https://example.com/some/path").unwrap();
-        assert_eq!(window_origin_from_url(&url), "https://example.com");
-    }
-
-    #[test]
-    fn window_origin_handles_opaque_custom_schemes() {
-        // macOS webviews run on `tauri://localhost` — `url::Origin` would
-        // serialize opaque schemes as "null"; the manual form must not.
-        let url = tauri::Url::parse("tauri://localhost/index.html").unwrap();
-        assert_eq!(window_origin_from_url(&url), "tauri://localhost");
-    }
-
-    #[test]
-    fn open_info_builds_loopback_embed_url_with_managed_token() {
-        let daemon =
-            crate::canvas::managed::synthetic_daemon("doc", 45111, "http://tauri.localhost");
-        let info = open_info_for_daemon(&daemon);
-        assert_eq!(info.embed_url, "http://127.0.0.1:45111/?embed=vscode");
-        assert_eq!(info.mcp_url, None);
-        assert_eq!(info.doc_key, "doc");
-        // Desktop embeds the daemon URL directly: no proxy id. The canvas
-        // token IS the daemon managed token.
-        assert_eq!(info.canvas_id, None);
-        assert_eq!(
-            info.canvas_token.as_deref(),
-            Some(daemon.managed_token()),
-            "canvasToken carries the managed token"
-        );
-    }
-
-    #[test]
-    fn open_failure_maps_typed_codes_verbatim() {
-        for (code, message) in [
-            ("BINARY_NOT_FOUND", "op-host-web-server binary not found"),
-            ("HANDSHAKE_TIMEOUT", "daemon handshake not received"),
-            ("PATH_VALIDATION_FAILED", "doc path outside the boundary"),
-        ] {
-            let err = CanvasError::new(code, message);
-            let result = open_failure(&err);
-            assert!(!result.success);
-            assert_eq!(result.code.as_deref(), Some(code), "code {code}");
-            assert_eq!(result.error.as_deref(), Some(message));
-            assert!(result.data.is_none());
         }
     }
 }

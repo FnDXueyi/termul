@@ -96,49 +96,6 @@ pub struct CanvasDaemonInfo {
     pub version: String,
 }
 
-/// Result of opening a canvas. Desktop returns the loopback embed URL (the
-/// renderer iframes it directly — no proxy); web returns the same-origin
-/// proxy path plus the `canvasId` the proxy routes on. The `canvas_token`
-/// value differs per surface — see the field doc.
-///
-/// Embed URL shapes (both append params as raw query text — the editor
-/// refuses URL-encoded `embed%3Dvscode`):
-/// - desktop: `http://127.0.0.1:<port>/?embed=vscode`
-/// - web: `/canvas/<canvasId>/?embed=vscode&ct=<32-hex>` — the `ct` canvas
-///   session token authenticates the iframe's `/canvas/<id>/*` requests
-///   through the canvas-token gate (`web::canvas_api::canvas_token_gate`).
-///
-/// On web the same token is ALSO returned as `canvas_token` so the
-/// renderer can set it as the same-origin PER-CANVAS cookie
-/// `op_canvas_ct_<canvasId>`: the cookie authenticates the editor's
-/// root-relative traffic — the root canvas routes `/pkg/*`, `/canvaskit/*`,
-/// `/api/*` (the editor wasm derives its daemon base from
-/// `window.location.origin` and uses absolute paths, so a
-/// `/canvas/<id>/` iframe still requests those at the server root) — and
-/// The per-canvas name keeps sibling
-/// canvases isolated (canvas B's cookie never authenticates canvas A's
-/// traffic). It is dropped with the pool entry on close/evict, so a stale
-/// token yields 401.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasOpenInfo {
-    pub embed_url: String,
-    /// Always `None`: no surface serves a canvas MCP endpoint any more. The
-    /// field leaves with the daemon handshake it was handed to.
-    pub mcp_url: Option<String>,
-    /// Canonicalized absolute doc path (the pool's daemon key).
-    pub doc_key: String,
-    /// Web-only: the project-derived id the `/canvas/<id>/*` proxy routes on.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canvas_id: Option<String>,
-    /// The canvas credential. **Desktop:** the daemon's managed (handshake)
-    /// token. **Web:** the canvas session token — the `ct` embed param and
-    /// the value the renderer sets as the same-origin per-canvas
-    /// `op_canvas_ct_<canvasId>` cookie (root canvas routes). Never logged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub canvas_token: Option<String>,
-}
-
 /// Pool status for `canvas_status` / `POST /canvas/status`-style queries.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

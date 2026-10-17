@@ -29,6 +29,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::pin::pinned_tag;
+use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
 
 /// Cookie-name prefix for the per-canvas session cookie: `op_canvas_ct_<id>`.
@@ -185,6 +186,48 @@ pub fn same_origin_base() -> CanvasBundleBase {
         base_url: String::new(),
         pin_tag: pinned_tag().to_string(),
     }
+}
+
+/// What the renderer needs to mount a project's canvas: it builds the iframe
+/// URL `<baseUrl>/canvas/<canvasId>/?embed=kiosk&ct=<canvasToken>&ho=..&ms=..`
+/// itself. No `Debug`: the token must never reach a log line.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasOpenInfo {
+    pub canvas_id: String,
+    pub base_url: String,
+    pub canvas_token: String,
+    pub pin_tag: String,
+    pub doc_key: String,
+}
+
+/// Mint (or reuse) the project's bundle token. Shared by `canvas_open` and
+/// `POST /canvas/open`, which differ only in the base they pass.
+pub fn open_canvas(
+    base: CanvasBundleBase,
+    project_id: &str,
+    doc_key: String,
+) -> Result<CanvasOpenInfo, CanvasError> {
+    let canvas_id = canvas_id_for_project(project_id);
+    let canvas_token = bundle_tokens().issue(&canvas_id).map_err(|reason| {
+        CanvasError::new(
+            CODE_TOKEN_GENERATION_FAILED,
+            format!("failed to mint the canvas session token: {reason}"),
+        )
+    })?;
+    Ok(CanvasOpenInfo {
+        canvas_id,
+        base_url: base.base_url,
+        canvas_token,
+        pin_tag: base.pin_tag,
+        doc_key,
+    })
+}
+
+/// Revoke the project's bundle token so its iframe URL and cookie stop
+/// authorizing. Idempotent.
+pub fn close_canvas(project_id: &str) {
+    bundle_tokens().revoke(&canvas_id_for_project(project_id));
 }
 
 /// `/canvas/<id>` is `(id, None)`; `/canvas/<id>/a/b` is `(id, Some("a/b"))`.
