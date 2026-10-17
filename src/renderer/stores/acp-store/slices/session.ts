@@ -222,21 +222,21 @@ async function attachLiveTurn(
   set: TurnEndSetter,
   id: SessionId,
   agentId: AgentId,
-  payload: SessionPayload,
+  payload: SessionPayload | null,
   reopenGeneration: number
 ): Promise<void> {
-  const watermark = Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload))
+  const watermark = payload ? Math.max(payload.metadata.lastSeq ?? 0, maxPayloadSeq(payload)) : 0
   // The payload only summarizes the open turn's tool calls, while the relay
   // still holds that turn's events in full. Subscribe from just before its
   // prompt so the replay restores the cards; the history watermark keeps the
   // replayed prompt and chunks from rendering twice.
-  const promptSeq = openTurnPromptSeq(payload.messages)
+  const promptSeq = payload ? openTurnPromptSeq(payload.messages) : null
   const cursor = promptSeq === null ? watermark : promptSeq - 1
   if (promptSeq !== null) noteLiveTurnReplayFloor(id, cursor)
   const transport = getAcpTransport()
   transport.seedSessionCursor?.(id, {
     lastSeq: cursor,
-    logEpoch: payload.metadata.logEpoch ?? null
+    logEpoch: payload?.metadata.logEpoch ?? null
   })
   let missing = false
   set((s) => {
@@ -2209,6 +2209,22 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
 
       const reopenBaseline = captureReopenControlBaseline(get().sessions, sessionId)
 
+      const attachIfTurnActive = async (err: unknown): Promise<boolean> => {
+        if (!isReopenTurnActiveError(err)) return false
+        void logFrontendError({
+          level: 'info',
+          source: 'acp.openDiscoveredSession',
+          message: `Discovered session ${sessionId} has a turn in flight; attaching instead of failing the reopen`
+        })
+        await attachLiveTurn(set, sessionId, agentId, null, reopenGeneration)
+        if (isCurrentSessionReopen(sessionId, reopenGeneration)) {
+          set((s) => ({
+            discoveredReopenContexts: dropRecordKey(s.discoveredReopenContexts, sessionId)
+          }))
+        }
+        return true
+      }
+
       if (strategy === 'load') {
         // Agent replays history via session/update into the empty transcript.
         try {
@@ -2254,6 +2270,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           scheduleReplayEnd(set, sessionId, reopenGeneration)
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           // Drop any partially replayed content so the pane doesn't show a
           // half-loaded transcript under the error (there is no local mirror to
           // restore for a discovered session).
@@ -2290,6 +2307,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           return
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           if (capabilities?.loadSession === true && resumeMissesSession(err)) {
             void logFrontendError({
               level: 'warn',
@@ -2353,6 +2371,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
           scheduleReplayEnd(set, sessionId, reopenGeneration)
         } catch (err) {
           if (!isCurrentSessionReopen(sessionId, reopenGeneration)) return
+          if (await attachIfTurnActive(err)) return
           set((s) => ({
             messages: { ...s.messages, [sessionId]: [] },
             sessions: withSessionResumeError(s.sessions, sessionId, err)
