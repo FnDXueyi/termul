@@ -51,6 +51,7 @@ import type {
   NewSessionOutcome,
   ProbeResult,
   PromptDispatchResult,
+  RegistryCheckReason,
   SessionConfigOption,
   SessionId,
   SessionReopenOutcome,
@@ -875,38 +876,9 @@ export class WsAcpTransport implements AcpTransport {
     return res.data
   }
 
-  /**
-   * CAP-6 / Story 8: fetchRegistrySnapshot is replaced by the host-resolved
-   * catalog. The web client calls `acpCatalogApi.listCatalog()` (the facade)
-   * which returns the host's resolved catalog including CDN entries (when
-   * the opt-in is set). This method now delegates to the WS
-   * `list_acp_catalog` request; the fake `{agents:[]}` hardcoded stub is
-   * removed. Callers that need the full catalog (the registry-catalog hook)
-   * switch to `acpCatalogApi.listCatalog()` instead.
-   */
-  async fetchRegistrySnapshot(forceRefresh = false): Promise<AcpRegistrySnapshot> {
-    // Delegate to the host-resolved catalog. The host embeds the trusted
-    // bundled `agents.json` + optionally augments with the CDN snapshot
-    // (gated on the host-persisted opt-in). This replaces the fake
-    // `{agents:[], source:'empty'}` hardcoded stub.
-    //
-    // The WS `list_acp_catalog` payload field is `refresh` (camelCase, matching
-    // the Rust `ListAcpCatalogPayload.refresh` + the HTTP `?refresh=true` query).
-    // Propagate `forceRefresh` so an explicit user refresh bypasses the host's
-    // 60s TTL — the previous `{}` left `refresh` defaulted to `false`, so a
-    // "check for updates" action could serve a stale cached catalog.
-    try {
-      const catalog = await this.request<AcpCatalogFromHost>('list_acp_catalog', {
-        refresh: forceRefresh
-      })
-      return {
-        agents: catalog.agents,
-        source: 'network',
-        fetchedAt: null
-      }
-    } catch {
-      return { agents: [], source: 'empty', fetchedAt: null }
-    }
+  /** `fetch_acp_registry_snapshot`: the host's registry check (desktop: `acp_fetch_registry_snapshot`). */
+  fetchRegistrySnapshot(reason: RegistryCheckReason): Promise<AcpRegistrySnapshot> {
+    return this.request<AcpRegistrySnapshot>('fetch_acp_registry_snapshot', { reason })
   }
 
   // --- Agent lifecycle (desktop parity over WS) ----------------------------

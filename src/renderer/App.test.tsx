@@ -36,6 +36,7 @@ vi.mock('./hooks/use-visibility-state', () => ({
 
 // CAP-3: resilience hooks + ErrorBoundary/WhatsNewModal wiring assertions.
 const {
+  mockUseAcpUpdateChecks,
   mockUseCrashRecovery,
   mockUseTerminalExitNotification,
   mockUseTerminalIdleNotification,
@@ -45,6 +46,7 @@ const {
   mockUsePersistenceErrorToasts,
   mockInitNotificationPermissions
 } = vi.hoisted(() => ({
+  mockUseAcpUpdateChecks: vi.fn(() => undefined),
   mockUsePersistenceErrorToasts: vi.fn(() => undefined),
   mockUseCrashRecovery: vi.fn(() => undefined),
   mockUseTerminalExitNotification: vi.fn(() => undefined),
@@ -59,6 +61,10 @@ const {
     close: vi.fn()
   })),
   mockInitNotificationPermissions: vi.fn(() => Promise.resolve())
+}))
+
+vi.mock('./hooks/use-acp-update-checks', () => ({
+  useAcpUpdateChecks: mockUseAcpUpdateChecks
 }))
 
 vi.mock('./hooks/use-crash-recovery', () => ({
@@ -324,6 +330,12 @@ describe('App CAP-3 resilience wiring (web entry)', () => {
     render(<App />)
 
     expect(mockUseWhatsNew).toHaveBeenCalledTimes(1)
+  })
+
+  it('mounts useAcpUpdateChecks in AppEffects', () => {
+    render(<App />)
+
+    expect(mockUseAcpUpdateChecks).toHaveBeenCalledTimes(1)
   })
 
   it('mounts useCrashRecovery in AppEffects', () => {

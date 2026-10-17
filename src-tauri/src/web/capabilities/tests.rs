@@ -83,6 +83,7 @@ fn view_only_may_read_but_not_mutate() {
         "list_sessions",
         "list_agents",
         "list_acp_catalog",
+        "fetch_acp_registry_snapshot",
         "list_claude_accounts",
         "list_claude_usage",
         "store_read",

@@ -584,15 +584,22 @@ fn overlay_installed_no_op_when_empty() {
 
 // ---- I/O matrix: CDN augmentation (injected fetcher — no network) ----
 
+impl AcpCatalogService {
+    /// A service whose CDN fetch is `fetcher`; the `/ws` handler tests use it too.
+    pub(crate) fn with_snapshot_fetcher(root: PathBuf, fetcher: SnapshotFetcher) -> Arc<Self> {
+        fs::create_dir_all(&root).unwrap();
+        Arc::new(Self {
+            root,
+            cache: RwLock::new(None),
+            snapshot_fetch: fetcher,
+            snapshot_fetch_gate: Mutex::new(None),
+            opencode_probe: Mutex::new(None),
+        })
+    }
+}
+
 fn service_with_fetcher(root: PathBuf, fetcher: SnapshotFetcher) -> Arc<AcpCatalogService> {
-    fs::create_dir_all(&root).unwrap();
-    Arc::new(AcpCatalogService {
-        root,
-        cache: RwLock::new(None),
-        snapshot_fetch: fetcher,
-        snapshot_fetch_gate: Mutex::new(None),
-        opencode_probe: Mutex::new(None),
-    })
+    AcpCatalogService::with_snapshot_fetcher(root, fetcher)
 }
 
 fn cdn_snapshot(id: &str) -> AcpRegistrySnapshot {
