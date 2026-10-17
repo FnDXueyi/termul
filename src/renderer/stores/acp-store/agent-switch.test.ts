@@ -2590,6 +2590,66 @@ describe('switchAgent (story 3)', () => {
       expect(texts('s-c').slice(60, 64)).toEqual(['B 1', 'B 2', 'continue', 'B 4'])
     })
 
+    it('SCROLL_BACK_LIVE_BAND_HEAD: a live-spliced head on a counter seq pages back above its band separator', async () => {
+      seedHistory('s-new', 'agent-new', 'cfg-new', [
+        { id: 'user:seq-10', role: 'user', text: 'B early 1', seq: 10 },
+        { id: 'snapshot:agent:50', role: 'agent', text: 'B early 2', seq: 50 },
+        { id: 'user:seq-100', role: 'user', text: 'B late', seq: 100 }
+      ])
+      seedHistory('s-3', 'agent-3', 'cfg-3', [{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+      const separator = (id: string, seq: number, newSessionId: string): AgentSwitchRecord => ({
+        ...marker(seq, 'cfg-x', newSessionId),
+        id,
+        seq
+      })
+      useAcpStore.setState((s) => ({
+        messages: {
+          ...s.messages,
+          's-3': [
+            {
+              id: 'switch-splice:s-new:turn:b-late',
+              role: 'user',
+              blocks: [{ type: 'text', text: 'B late' }],
+              streaming: false,
+              timestamp: 0,
+              seq: -10,
+              hostSeq: 100
+            },
+            ...rows([{ id: 'c1', role: 'user', text: 'C 1', seq: 1 }])
+          ]
+        },
+        agentSwitches: {
+          ...s.agentSwitches,
+          's-3': [
+            separator('switch-splice:s-new:switch-splice:s-old:switch:fabricated:9', -50, 's-new'),
+            separator('switch-splice:s-new:switch:fabricated:20', -1, 's-3')
+          ]
+        }
+      }))
+
+      await useAcpStore.getState().loadOlderMessages('s-3', 50)
+
+      const state = useAcpStore.getState()
+      const timeline = [
+        ...(state.messages['s-3'] ?? []).map((m) => ({
+          seq: m.seq ?? Number.NaN,
+          label: m.blocks.find((b) => b.type === 'text')?.text
+        })),
+        ...(state.agentSwitches['s-3'] ?? []).map((sw) => ({
+          seq: sw.seq,
+          label: `-> ${sw.newSessionId}`
+        }))
+      ].sort((x, y) => x.seq - y.seq)
+      expect(timeline.map((entry) => entry.label)).toEqual([
+        '-> s-new',
+        'B early 1',
+        'B early 2',
+        'B late',
+        '-> s-3',
+        'C 1'
+      ])
+    })
+
     it('MARKER_FAIL_RESPLICE: a reinstall after a failed marker write still renders one separator between the bands', async () => {
       useAcpStore.setState({
         messages: { 's-old': rows([{ id: 'm1', role: 'user', text: 'earlier work', seq: 1 }]) }

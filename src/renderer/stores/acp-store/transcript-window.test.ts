@@ -1255,6 +1255,47 @@ describe('acp-store live window + lazy-load + coalescing', () => {
     ])
   })
 
+  it('(c9) a host-stamped head anchors exactly: an equal older prompt is not folded into a later optimistic one', async () => {
+    const sid = 's-twin-host-head'
+    seedSession(sid, 'agent-1', false)
+    const row = (id: string, role: 'user' | 'agent', text: string, seq: number): ChatMessage => ({
+      id,
+      role,
+      blocks: [{ type: 'text', text }],
+      streaming: false,
+      timestamp: seq,
+      seq
+    })
+    const persisted: ChatMessage[] = [
+      row('m0', 'user', 'msg 0', 1),
+      row('turn:t3', 'user', 'continue', 5),
+      row('snapshot:agent:6', 'agent', 'first answer', 6),
+      row('snapshot:agent:15', 'agent', 'second answer', 15)
+    ]
+    setCachedSessionPayload(sid, {
+      metadata: { ...fakeMetadata(sid, 4), lastSeq: 20 },
+      messages: persisted
+    })
+    useAcpStore.setState({
+      messages: {
+        [sid]: [
+          { ...row('msg-h', 'agent', 'second answer', 950), hostSeq: 15 },
+          row('turn:t9', 'user', 'continue', 960)
+        ]
+      }
+    })
+
+    await useAcpStore.getState().loadOlderMessages(sid, 50)
+
+    expect(useAcpStore.getState().messages[sid].map((m) => m.id)).toEqual([
+      'm0',
+      'turn:t3',
+      'snapshot:agent:6',
+      'msg-h',
+      'turn:t9'
+    ])
+  })
+
   it('(d) coalescing collapses a burst of chunks into a single set() per frame', () => {
     const sid = 's-coalesce'
     seedSession(sid, 'agent-1', true)
