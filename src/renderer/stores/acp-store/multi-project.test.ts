@@ -281,14 +281,16 @@ describe('acp-store multi-project isolation', () => {
     expect(identity).toEqual({ name: 'Cursor', templateId: 'cursor', icon: null })
   })
 
-  it('agent_error with session_id sets lastError on that session', () => {
+  it('agent_error with session_id sets lastError on that session and keeps the agent live', () => {
     seedSession('s1', 'agent-1')
+    useAcpStore.setState((s) => ({ agentStatus: { ...s.agentStatus, 'agent-1': 'connected' } }))
     useAcpStore.getState()._onAgentError({
       agentId: 'agent-1',
       sessionId: 's1',
       message: 'credit limit exceeded'
     })
-    expect(useAcpStore.getState().agentStatus['agent-1']).toBe('error')
+    expect(useAcpStore.getState().agentStatus['agent-1']).toBe('connected')
+    expect(useAcpStore.getState().sessions['s1'].status).toBe('active')
     expect(useAcpStore.getState().sessions['s1'].lastError).toBe('credit limit exceeded')
     expect(useAcpStore.getState().sessions['s1'].activeTurn).toBe(false)
   })
@@ -425,16 +427,16 @@ describe('acp-store multi-project isolation', () => {
     expect(useAcpStore.getState().agentStatus['agent-1']).toBe('error')
   })
 
-  // Story 1.9 review: a turn-scoped agent_error (e.g. the bounded turn
-  // timeout) sets status='error' (NFR7 — the wedged turn → Error state).
-  it('agent_error with session_id sets status error (turn-timeout path)', () => {
+  it('agent_error with session_id ends the turn with the error and keeps the chat active (turn-timeout path)', () => {
     seedSession('s1', 'agent-1')
+    useAcpStore.setState((s) => ({ agentStatus: { ...s.agentStatus, 'agent-1': 'connected' } }))
     useAcpStore.getState()._onAgentError({
       agentId: 'agent-1',
       sessionId: 's1',
       message: 'turn timeout: session s1 exceeded 600s'
     })
-    expect(useAcpStore.getState().sessions['s1'].status).toBe('error')
+    expect(useAcpStore.getState().sessions['s1'].status).toBe('active')
+    expect(useAcpStore.getState().agentStatus['agent-1']).toBe('connected')
     expect(useAcpStore.getState().sessions['s1'].lastError).toBe(
       'turn timeout: session s1 exceeded 600s'
     )
@@ -475,12 +477,11 @@ describe('acp-store multi-project isolation', () => {
     expect(state.messages['s1'].map((m) => m.id)).toEqual(['m1', 'm2', 'm3'])
   })
 
-  // The host's stable providerCode decides without `data.errorKind`.
   it.each([
-    ['provider_quota_exceeded', true],
-    ['provider_session_limit', true],
-    ['provider_request_rejected', false]
-  ] as const)('agent_error with providerCode %s keeps the agent live=%s', (providerCode, live) => {
+    'provider_quota_exceeded',
+    'provider_session_limit',
+    'provider_request_rejected'
+  ] as const)('agent_error with providerCode %s describes the failure and keeps the agent live', (providerCode) => {
     seedSession('s1', 'agent-1')
     useAcpStore.setState((s) => ({ agentStatus: { ...s.agentStatus, 'agent-1': 'connected' } }))
     useAcpStore.getState()._onAgentError({
@@ -491,8 +492,8 @@ describe('acp-store multi-project isolation', () => {
       providerCode
     })
     const state = useAcpStore.getState()
-    expect(state.agentStatus['agent-1']).toBe(live ? 'connected' : 'error')
-    expect(state.sessions['s1'].status).toBe(live ? 'active' : 'error')
+    expect(state.agentStatus['agent-1']).toBe('connected')
+    expect(state.sessions['s1'].status).toBe('active')
     expect(state.sessions['s1'].lastError).toContain(PROVIDER_ERROR_MESSAGES[providerCode])
     expect(state.sessions['s1'].lastError).toContain('Internal error')
   })
