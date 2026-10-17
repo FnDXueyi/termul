@@ -235,7 +235,7 @@ The file explorer and editor support live file watching through the filesystem A
 - `cargo clippy --all-targets -- -D warnings`
 - frontend Tauri build verification
 
-`.github/workflows/e2e.yml` builds `dist-web/` and a release `termul-server`, then runs the Playwright suite. It runs the ACP lifecycle specs on a pull request that changes ACP, relay or e2e files, and daily. A manual dispatch takes a `specs` input to run other specs. The job uploads Playwright traces when it fails.
+`.github/workflows/e2e.yml` builds `dist-web/` and a release `termul-server`, then runs the Playwright suite. It runs the ACP lifecycle specs on a pull request that changes ACP, relay, protocol or e2e files, and daily. A manual dispatch takes a `specs` input to run other specs. The job uploads Playwright traces when it fails.
 
 ### Releases
 

@@ -105,8 +105,11 @@ jobs:
           # card assertions. Tracked in https://github.com/gnoviawan/termul/issues/1343.
           # Remove a title from this list when its test is fixed.
           E2E_KNOWN_RED: 'closing a chat mid-turn only detaches it|project switching mid-run|three projects run concurrently|browser reload with a crashed chat open|project switch round-trips the streaming chat tab|reload mid-turn: the reopened chat shows the tool cards'
-        # Playwright reads each word of E2E_SPECS as a file filter.
-        run: bun run test:e2e $E2E_SPECS --grep-invert "$E2E_KNOWN_RED"
+        # Playwright reads each word of E2E_SPECS as a file filter. `set -f` stops the
+        # shell from expanding a glob in a manual filter.
+        run: |
+          set -f
+          bun run test:e2e $E2E_SPECS --grep-invert "$E2E_KNOWN_RED"
 
       - name: Upload Playwright traces
         if: failure()
