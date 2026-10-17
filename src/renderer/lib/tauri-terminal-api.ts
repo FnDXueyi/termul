@@ -21,6 +21,7 @@ import { entityKeyOf } from './ipc/http'
 import { invokeIpc } from './ipc/tauri'
 import { logFrontendError } from './log-api'
 import { cleanupTauriListener, isTauriContext } from './tauri-runtime'
+import { recoverLostRotation } from './terminal-claim-recovery'
 import { terminalCursorEpoch } from './terminal-cursor'
 import { trackTerminalKill } from './terminal-kill-requests'
 
@@ -213,6 +214,8 @@ function captureStackTrace(): string {
 export function createTauriTerminalApi(): TerminalApi {
   // Per-terminal data callback stored between onData registration and spawn
   const dataCallbacks = new Set<TerminalDataCallback>()
+  /** Project each terminal was spawned or listed for (recovers a rotated claim via `list_preserved`). */
+  const terminalProjects = new Map<string, string>()
   const _registerListener = <T>(
     eventName: string,
     callback: (payload: T) => void,
@@ -301,6 +304,22 @@ export function createTauriTerminalApi(): TerminalApi {
     const replay = held
     held = null
     for (const bytes of replay) deliver(bytes)
+    return result
+  }
+
+  async function listPreserved(projectId: string): Promise<IpcResult<PreservedTerminalEntry[]>> {
+    const result = await invokeIpc<PreservedTerminalEntry[]>(IPC_COMMANDS.LIST_PRESERVED, {
+      projectId
+    })
+    if (!result.success) {
+      void logFrontendError({
+        level: 'warn',
+        source: 'TauriTerminalAPI.listPreserved',
+        message: `list preserved terminals failed (${result.code ?? 'UNKNOWN'})`
+      })
+      return result
+    }
+    for (const entry of result.data) terminalProjects.set(entry.id, projectId)
     return result
   }
 
@@ -458,34 +477,31 @@ export function createTauriTerminalApi(): TerminalApi {
         on_data.onmessage = () => {}
       }
 
+      if (result.success && options?.projectId) {
+        terminalProjects.set(result.data.id, options.projectId)
+      }
       return result
     },
 
     attach,
 
-    async listPreserved(projectId: string): Promise<IpcResult<PreservedTerminalEntry[]>> {
-      const result = await invokeIpc<PreservedTerminalEntry[]>(IPC_COMMANDS.LIST_PRESERVED, {
-        projectId
-      })
-      if (!result.success) {
-        void logFrontendError({
-          level: 'warn',
-          source: 'TauriTerminalAPI.listPreserved',
-          message: `list preserved terminals failed (${result.code ?? 'UNKNOWN'})`
-        })
-      }
-      return result
-    },
+    listPreserved,
 
     /**
      * CAP-3: possession-based rotation — the returned credential replaces the
      * presented one atomically.
      */
     async rotateClaim(terminalId: string, claim: string): Promise<IpcResult<RotatedClaim>> {
-      return invokeIpcCommand<RotatedClaim>(
+      const result = await invokeIpcCommand<RotatedClaim>(
         IPC_COMMANDS.ROTATE_CLAIM,
         { terminalId, claim },
         { kind: 'terminal_rotate_claim', entityKey: terminalId }
+      )
+      return recoverLostRotation(
+        result,
+        terminalId,
+        terminalProjects.get(terminalId),
+        listPreserved
       )
     },
 
@@ -520,6 +536,7 @@ export function createTauriTerminalApi(): TerminalApi {
      * Kill terminal PTY
      */
     async kill(terminalId: string): Promise<IpcResult<void>> {
+      terminalProjects.delete(terminalId)
       return trackTerminalKill(terminalId, () =>
         invokeIpcCommand<void>(
           IPC_COMMANDS.KILL,
