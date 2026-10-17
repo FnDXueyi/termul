@@ -135,6 +135,41 @@ function parseEvent(method: string, params: unknown): CanvasBridgeEvent | null {
   }
 }
 
+/** One agent canvas call the host gateway forwarded (spine AD-29). */
+export interface GatewayCall {
+  callId: number
+  mountSeq: number
+  method: string
+  /** JSON text, forwarded unparsed. */
+  params: string
+}
+
+export type GatewayReply =
+  | { callId: number; mountSeq: number; ok: true; result: string }
+  | { callId: number; mountSeq: number; ok: false; error: CanvasBridgeError }
+
+/**
+ * Run one gateway call in the editor mounted at `mountedSeq`. The gateway's
+ * `callId` stays here, paired with the bridge request `run` allocates its own
+ * id for, and the reply carries it back with the result as opaque text. A
+ * call for another mount (the canvas was remounted or closed under it) is
+ * `CANVAS_CLOSED` without reaching the editor. The host owns the timeout.
+ */
+export async function answerGatewayCall(
+  call: GatewayCall,
+  mountedSeq: number | null,
+  run: (method: string, params: JsonText) => Promise<CanvasBridgeReply>
+): Promise<GatewayReply> {
+  const reply =
+    mountedSeq === call.mountSeq
+      ? await run(call.method, asJsonText(call.params))
+      : bridgeFailure('CANVAS_CLOSED', 'the canvas this call was sent to is no longer mounted')
+  const { callId, mountSeq } = call
+  return reply.ok
+    ? { callId, mountSeq, ok: true, result: reply.result }
+    : { callId, mountSeq, ok: false, error: reply.error }
+}
+
 /** `''` (the web client's same-origin base) resolves to the page origin. */
 export function canvasOriginOf(baseUrl: string): string {
   return baseUrl === '' ? window.location.origin : new URL(baseUrl).origin
