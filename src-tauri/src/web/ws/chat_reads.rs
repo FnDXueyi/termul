@@ -12,10 +12,12 @@ use crate::web::watch::publish_chat_read;
 struct MarkChatReadPayload {
     session_id: String,
     seq: u64,
+    log_epoch: Option<String>,
 }
 
-/// `mark_chat_read{sessionId, seq}` → `{sessionId, seq}`, the marker as it
-/// stands. Idempotent and monotonic: an older or repeated seq is a no-op that
+/// `mark_chat_read{sessionId, seq, logEpoch?}` → `{sessionId, seq, logEpoch}`,
+/// the marker as it stands. Idempotent and monotonic: an older or repeated
+/// seq, or a seq from another log epoch than the session's, is a no-op that
 /// still replies with the current marker. Unknown session → `not_found`.
 pub(super) fn handle_mark_chat_read(id: String, payload: &Value, relay: &WsRelaySink) -> WsReply {
     let parsed: MarkChatReadPayload = match serde_json::from_value(payload.clone()) {
@@ -41,27 +43,42 @@ pub(super) fn handle_mark_chat_read(id: String, payload: &Value, relay: &WsRelay
         );
         return WsReply::err(id, WsErrorCode::NotFound, "session not found");
     };
-    let seq = match relay.chat_reads().mark(&parsed.session_id, &head, parsed.seq) {
-        MarkOutcome::Moved(seq) => {
+    let outcome = relay.chat_reads().mark(
+        &parsed.session_id,
+        &head,
+        parsed.log_epoch.as_deref(),
+        parsed.seq,
+    );
+    let mark = match outcome {
+        MarkOutcome::Moved(mark) => {
             info!(
                 target: "termul::web::ws",
                 session = %session,
-                seq,
+                seq = mark.seq,
                 "chat read marker moved"
             );
             publish_chat_read(relay, &parsed.session_id);
-            seq
+            mark
         }
-        MarkOutcome::Unchanged(seq) => {
+        MarkOutcome::Unchanged(mark) => {
             debug!(
                 target: "termul::web::ws",
                 session = %session,
-                seq,
+                seq = mark.seq,
                 requested = parsed.seq,
                 "chat read marker already covers the seq"
             );
-            seq
+            mark
+        }
+        MarkOutcome::OtherEpoch(mark) => {
+            info!(
+                target: "termul::web::ws",
+                session = %session,
+                requested = parsed.seq,
+                "chat read ignored: it was against another log epoch than the session's"
+            );
+            mark
         }
     };
-    WsReply::ok(id, Some(json!({ "sessionId": parsed.session_id, "seq": seq })))
+    WsReply::ok(id, Some(mark.to_wire(&parsed.session_id)))
 }

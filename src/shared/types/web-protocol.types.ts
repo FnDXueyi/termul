@@ -226,11 +226,12 @@ export const WS_REQUEST_TYPES = [
   // `acp:agent_switch` event to live clients under the same seq. Reply `{}`;
   // unknown session → `not_found`; live-only mode → `unsupported`.
   'record_agent_switch',
-  // A surface read a chat: `{ sessionId, seq }` (the session-log seq of the
-  // newest turn end it showed) → `{ sessionId, seq }`, the host's shared
-  // last-read marker as it stands. Idempotent and monotonic: an older seq is a
-  // no-op. Every `chat_reads` watcher hears when the marker moves. Unknown
-  // session → `not_found`.
+  // A surface read a chat: `{ sessionId, seq, logEpoch? }` (the session-log
+  // seq of the newest turn end it showed, and the log epoch it belongs to) →
+  // `{ sessionId, seq, logEpoch }`, the host's shared last-read marker as it
+  // stands. Idempotent and monotonic: an older seq, or one from another log
+  // epoch, is a no-op. Every `chat_reads` watcher hears when the marker moves.
+  // Unknown session → `not_found`.
   'mark_chat_read',
   // Watches `{ watch, scope? }` (`projects`, `chat_history`, `agents`; `fs`
   // and `terminals` scoped to a project id; `store` scoped to a key): `watch`
@@ -1002,15 +1003,25 @@ export interface AgentsWatchDelta {
   payload: unknown
 }
 
-/** `mark_chat_read` request payload and reply: a chat's shared last-read marker. */
+/**
+ * `mark_chat_read` request payload and reply: a chat's shared last-read
+ * marker. `seq` counts within the host log incarnation `logEpoch` names; a
+ * host ignores a read sent against another epoch than the session's.
+ * `logEpoch` is absent only from a peer that predates it.
+ */
 export interface ChatReadMark {
   sessionId: string
   seq: number
+  logEpoch?: string
 }
 
-/** `chat_reads` watch state: the last-read marker of every chat a surface has read. */
+/**
+ * `chat_reads` watch state: the last-read marker of every chat a surface has
+ * read, and the log epoch of each (absent from a host that predates it).
+ */
 export interface ChatReadsWatchState {
   marks: Record<string, number>
+  logEpochs?: Record<string, string>
 }
 
 /** A `chat_reads` delta: one session's marker as it stands after it moved. */

@@ -1898,7 +1898,9 @@ describe('Shared chat read marker parity (cross-surface unread)', () => {
 
   it('one host service owns the marker and the relay serves it to every carrier', () => {
     const service = readFileSync(join(SRC_TAURI, 'web', 'chat_reads.rs'), 'utf-8')
-    expect(service).toMatch(/pub fn mark\(&self, session_id: &str, head: &LogHead, seq: u64\)/)
+    expect(service).toMatch(
+      /pub fn mark\(\s*&self,\s*session_id: &str,\s*head: &LogHead,\s*log_epoch: Option<&str>,\s*seq: u64,?\s*\)/
+    )
     const dispatch = readFileSync(join(SRC_TAURI, 'web', 'ws', 'dispatch.rs'), 'utf-8')
     expect(dispatch).toMatch(/"mark_chat_read" => handle_mark_chat_read/)
     const sources = readFileSync(join(SRC_TAURI, 'web', 'watch', 'sources.rs'), 'utf-8')
@@ -1913,7 +1915,9 @@ describe('Shared chat read marker parity (cross-surface unread)', () => {
 
   it('the transport facade and the shell tracker carry it on both renderer roots', () => {
     const transport = readTsModule(join(LIB_DIR, 'acp-transport'))
-    expect(transport).toMatch(/markChatRead\(sessionId: SessionId, seq: number\)/)
+    expect(transport).toMatch(
+      /markChatRead\(\s*sessionId: SessionId,\s*seq: number,\s*logEpoch: string \| null\s*\)/
+    )
     expect(transport).toMatch(/'mark_chat_read'/)
     const shell = readFileSync(join(LIB_DIR, '..', 'hooks', 'use-shell-unread-tracker.ts'), 'utf-8')
     expect(shell).toMatch(/startChatReadSync\(\)/)

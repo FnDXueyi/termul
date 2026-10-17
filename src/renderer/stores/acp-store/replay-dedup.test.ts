@@ -912,6 +912,7 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
     await _installTransportRecoveryForTesting({
       sessionId: 's-rec-end',
       watermark: 20,
+      logEpoch: 'epoch-rec',
       events: [
         {
           sid: 's-rec-end',
@@ -922,7 +923,10 @@ describe('replay render dedup on reconnect (story 11 / CAP-3 client half)', () =
       ]
     })
 
-    expect(useAgentChatUnreadStore.getState().seenTurnEndSeq['s-rec-end']).toBe(14)
+    expect(useAgentChatUnreadStore.getState().seenTurnEnd['s-rec-end']).toEqual({
+      logEpoch: 'epoch-rec',
+      seq: 14
+    })
   })
 
   it('normalizes wire user_prompt + user-role chunks in the recovery fold (chip parity)', async () => {

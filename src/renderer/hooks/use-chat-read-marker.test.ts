@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const sync = vi.hoisted(() => ({ markChatRead: vi.fn() }))
 vi.mock('@/lib/chat-read-sync', () => sync)
 
-import { useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
+import { type LogPoint, useAgentChatUnreadStore } from '@/stores/agent-chat-unread-store'
 import { useChatReadMarker } from './use-chat-read-marker'
 
 let visibility: DocumentVisibilityState = 'visible'
@@ -17,8 +17,12 @@ function setVisibility(next: DocumentVisibilityState): void {
   })
 }
 
-function turnEnd(sessionId: string, seq: number): void {
-  act(() => useAgentChatUnreadStore.getState().noteTurnEnd(sessionId, seq))
+function at(seq: number, logEpoch = 'e1'): LogPoint {
+  return { logEpoch, seq }
+}
+
+function turnEnd(sessionId: string, seq: number, logEpoch = 'e1'): void {
+  act(() => useAgentChatUnreadStore.getState().noteTurnEnd(sessionId, at(seq, logEpoch)))
 }
 
 beforeEach(() => {
@@ -27,14 +31,14 @@ beforeEach(() => {
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
   vi.spyOn(document, 'hasFocus').mockImplementation(() => focused)
   sync.markChatRead.mockReset()
-  sync.markChatRead.mockImplementation((sessionId: string, seq: number) =>
-    useAgentChatUnreadStore.getState().setReadMark(sessionId, seq)
+  sync.markChatRead.mockImplementation((sessionId: string, read: LogPoint) =>
+    useAgentChatUnreadStore.getState().setReadMark(sessionId, read)
   )
   useAgentChatUnreadStore.setState({
     unread: {},
     unreadSince: {},
-    seenTurnEndSeq: {},
-    sharedReadSeq: {}
+    seenTurnEnd: {},
+    sharedRead: {}
   })
 })
 
@@ -47,24 +51,36 @@ describe('useChatReadMarker', () => {
     turnEnd('a', 4)
     turnEnd('b', 6)
     renderHook(() => useChatReadMarker(['a']))
-    expect(sync.markChatRead.mock.calls).toEqual([['a', 4]])
+    expect(sync.markChatRead.mock.calls).toEqual([['a', at(4)]])
 
     turnEnd('a', 11)
     turnEnd('b', 12)
 
     expect(sync.markChatRead.mock.calls).toEqual([
-      ['a', 4],
-      ['a', 11]
+      ['a', at(4)],
+      ['a', at(11)]
     ])
   })
 
   it('reports nothing the host marker already covers', () => {
-    act(() => useAgentChatUnreadStore.getState().setReadMarks({ a: 9 }))
+    act(() => useAgentChatUnreadStore.getState().setReadMarks({ a: at(9) }))
     turnEnd('a', 9)
 
     renderHook(() => useChatReadMarker(['a']))
 
     expect(sync.markChatRead).not.toHaveBeenCalled()
+  })
+
+  it('reports the newest turn end of a restarted host log below the old marker', () => {
+    turnEnd('a', 40)
+    renderHook(() => useChatReadMarker(['a']))
+
+    turnEnd('a', 3, 'e2')
+
+    expect(sync.markChatRead.mock.calls).toEqual([
+      ['a', at(40)],
+      ['a', at(3, 'e2')]
+    ])
   })
 
   it('reads nothing while the page is hidden, and catches up when it is shown', () => {
@@ -76,7 +92,7 @@ describe('useChatReadMarker', () => {
 
     setVisibility('visible')
 
-    expect(sync.markChatRead.mock.calls).toEqual([['a', 8]])
+    expect(sync.markChatRead.mock.calls).toEqual([['a', at(8)]])
   })
 
   it('reads nothing while the window is unfocused, and catches up on focus', () => {
@@ -90,6 +106,6 @@ describe('useChatReadMarker', () => {
       window.dispatchEvent(new Event('focus'))
     })
 
-    expect(sync.markChatRead.mock.calls).toEqual([['a', 4]])
+    expect(sync.markChatRead.mock.calls).toEqual([['a', at(4)]])
   })
 })

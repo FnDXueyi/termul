@@ -389,10 +389,13 @@ describe.each([webCarrier(), channelCarrier()])('/ws contract over $name', (carr
   it('reports a chat read as mark_chat_read and resolves the host marker', async () => {
     await transport.connect()
 
-    await expect(transport.markChatRead?.('s1', 4)).resolves.toEqual({ sessionId: 's1', seq: 9 })
+    await expect(transport.markChatRead?.('s1', 4, 'e1')).resolves.toEqual({
+      sessionId: 's1',
+      seq: 9
+    })
 
     expect(host.framesOf('mark_chat_read').map((frame) => frame.payload)).toEqual([
-      { sessionId: 's1', seq: 4 }
+      { sessionId: 's1', seq: 4, logEpoch: 'e1' }
     ])
   })
 
