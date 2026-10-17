@@ -22,7 +22,6 @@ import {
   loadSessionPayloadTail,
   maxPayloadSeq,
   queueSessionPayloadDelete,
-  reloadSessionPayloadFromHost,
   restoredSwitches,
   restoredToolCalls,
   type SessionIndexEntry,
@@ -123,6 +122,7 @@ import {
 } from '../types'
 import { authenticatedAgents, evictAgentForTransport, withAuthRetry } from './agent'
 import { flushNextQueuedPrompt, runPromptTurn } from './prompt'
+import { loadFreshSourcePayload } from './switch-seam'
 import {
   dropSessionBookkeeping,
   dropSessionTranscriptState,
@@ -426,24 +426,6 @@ export function _resetInFlightHistoryOpensForTesting(): void {
 export function _resetSessionIndexLoadGenerationForTesting(): void {
   sessionIndexLoadGeneration = 0
   sessionIndexAppliedGeneration = 0
-}
-
-/**
- * Source payloads for a switch re-splice or redirect walk must be current: the
- * desktop cache is never refreshed by live events, so a cached copy can predate
- * the switch marker and the source's latest turns. A failed or absent host re-read
- * (`null` in server and `live_only` modes) falls back to the normal load.
- */
-async function loadFreshSourcePayload(id: string): Promise<SessionPayload | null> {
-  const fresh = await reloadSessionPayloadFromHost(id).catch((error: unknown) => {
-    void logFrontendError({
-      level: 'warn',
-      source: 'acp.switchAgent.splice',
-      message: `Host re-read of switch source ${id} failed; using the cached copy if there is one: ${error instanceof Error ? error.message : String(error)}`
-    })
-    return null
-  })
-  return fresh ?? (await loadSessionPayload(id))
 }
 
 /**
