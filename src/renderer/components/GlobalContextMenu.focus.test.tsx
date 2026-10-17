@@ -145,5 +145,25 @@ describe.each([
       expect(clipboard.writeText).toHaveBeenCalledWith('hello')
       expect(el.value).toBe(' world')
     })
+
+    it.each([
+      ['Copy', 'hello world', [0, 5]],
+      ['Cut', ' world', [0, 0]]
+    ])('keeps the field focused when the pointer moves over the closing menu after %s', async (label, value, selection) => {
+      const el = openMenuOnSelection([0, 5])
+
+      choose(label)
+      await waitFor(() => expect(el.value).toBe(value))
+      const paste = screen.getByRole('menuitem', { name: /^Paste\b/ })
+      fireEvent.pointerMove(paste, { pointerType: 'mouse' })
+      fireEvent(
+        screen.getByRole('menu'),
+        Object.assign(new Event('animationend', { bubbles: true }), { animationName: 'leave' })
+      )
+
+      await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
+      await waitFor(() => expect(document.activeElement).toBe(el))
+      expect([el.selectionStart, el.selectionEnd]).toEqual(selection)
+    })
   })
 })

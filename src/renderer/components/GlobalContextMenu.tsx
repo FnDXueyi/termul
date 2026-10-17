@@ -21,7 +21,9 @@
  * and the `text-edit-ops` helpers then operate on the element that was actually
  * right-clicked. `onCloseAutoFocus` is prevented after an action because
  * Radix's own focus restore would `select()` the whole input and make Cut
- * delete all of its text.
+ * delete all of its text. The closing menu ignores pointer input, and if focus
+ * still ended up on the body or in the menu, the saved element is re-focused
+ * (selection restored only when the action left it alone).
  *
  * P8: Copy works on any selection (including readonly inputs); Cut/Paste/
  * Select All are gated on a MUTABLE editable (not readOnly, not disabled).
@@ -106,6 +108,18 @@ function readState(): GlobalContextMenuState {
   }
 }
 
+function sameSelection(a: SelectionSnapshot, b: SelectionSnapshot): boolean {
+  if (!a || !b) return a === b
+  if (a.kind === 'input' && b.kind === 'input') return a.start === b.start && a.end === b.end
+  if (a.kind === 'range' && b.kind === 'range') {
+    return (
+      a.range.compareBoundaryPoints(Range.START_TO_START, b.range) === 0 &&
+      a.range.compareBoundaryPoints(Range.END_TO_END, b.range) === 0
+    )
+  }
+  return false
+}
+
 interface GlobalContextMenuProps {
   children: ReactNode
 }
@@ -113,6 +127,8 @@ interface GlobalContextMenuProps {
 export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.JSX.Element {
   const snapshotRef = useRef<GlobalContextMenuState>(CLOSED_STATE)
   const actionRanRef = useRef(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const selectionAtActionRef = useRef<SelectionSnapshot>(null)
   const [open, setOpen] = useState(false)
   const [state, setState] = useState<GlobalContextMenuState>(CLOSED_STATE)
 
@@ -144,6 +160,7 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.J
     if (el?.isConnected) {
       el.focus()
       restoreSelectionSnapshot(el, selection)
+      selectionAtActionRef.current = captureSelectionSnapshot(el)
     }
     void action()
   }, [])
@@ -152,6 +169,14 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.J
     if (!actionRanRef.current) return
     actionRanRef.current = false
     event.preventDefault()
+    const { focusedEditable: el, selection } = snapshotRef.current
+    const active = document.activeElement
+    const focusLost = !active || active === document.body || !!menuRef.current?.contains(active)
+    if (!el?.isConnected || !focusLost) return
+    el.focus()
+    if (sameSelection(captureSelectionSnapshot(el), selectionAtActionRef.current)) {
+      restoreSelectionSnapshot(el, selection)
+    }
   }, [])
 
   const { hasSelection, isMutableEditableFocused } = state
@@ -161,7 +186,11 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps): React.J
       <ContextMenuTrigger asChild>
         <div className="contents">{children}</div>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-48" onCloseAutoFocus={handleCloseAutoFocus}>
+      <ContextMenuContent
+        ref={menuRef}
+        className="w-48 data-[state=closed]:pointer-events-none"
+        onCloseAutoFocus={handleCloseAutoFocus}
+      >
         <ContextMenuItem disabled={!hasSelection} onSelect={() => runAction(copySelection)}>
           Copy <ContextMenuShortcut>{SHORTCUT_MOD}+C</ContextMenuShortcut>
         </ContextMenuItem>
