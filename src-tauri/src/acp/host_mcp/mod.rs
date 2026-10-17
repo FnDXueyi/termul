@@ -20,6 +20,8 @@
 //! Desktop + standalone parity: no `tauri-plugin-mcp-bridge` / `AppHandle` —
 //! pure `rmcp` + tokio, works on both binaries.
 
+pub mod bridge;
+pub mod canvas;
 pub mod child;
 pub mod parent;
 
@@ -129,6 +131,9 @@ pub enum FrameKind {
     /// `ask_user` tool call (issue #784): the parent shows the question panel
     /// and holds the reply until the user answers or the call is cancelled.
     AskUser,
+    /// A figcraft control-protocol call from the canvas `Bridge` backend,
+    /// routed to the renderer that holds the session's project canvas.
+    Canvas,
 }
 
 /// One option the agent offers in an `ask_user` question.
@@ -356,6 +361,12 @@ pub struct FrameRequest {
     /// The question of an `AskUser` frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<TermulAskUserInput>,
+    /// figcraft method of a `Canvas` frame (`engine.execute`, `node.get`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_method: Option<String>,
+    /// JSON text of a `Canvas` frame's params, forwarded unparsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_params: Option<String>,
 }
 
 /// Parent reply frame (one per connection). `result` carries the browser

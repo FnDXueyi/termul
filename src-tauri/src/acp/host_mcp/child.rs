@@ -130,6 +130,8 @@ impl TermulPlanServer {
             browser_args: None,
             browser_element: None,
             ask: None,
+            canvas_method: None,
+            canvas_params: None,
         };
         match forward_to_parent(&self.config, request, "plan updated").await {
             Ok(msg) => msg,
@@ -153,6 +155,8 @@ impl TermulPlanServer {
             browser_args: Some(input.args),
             browser_element: input.element,
             ask: None,
+            canvas_method: None,
+            canvas_params: None,
         };
         match forward_to_parent_raw(&self.config, request).await {
             Ok(reply) if reply.ok => reply
@@ -192,6 +196,8 @@ impl TermulPlanServer {
             browser_args: None,
             browser_element: None,
             ask: None,
+            canvas_method: None,
+            canvas_params: None,
         };
         match forward_to_parent(&self.config, request, "title updated").await {
             Ok(msg) => msg,
@@ -219,6 +225,8 @@ impl TermulPlanServer {
             browser_args: None,
             browser_element: None,
             ask: Some(input),
+            canvas_method: None,
+            canvas_params: None,
         };
         // No client-side timeout: the user decides when to answer, and the
         // parent always resolves the call (answer, cancel, or session end).

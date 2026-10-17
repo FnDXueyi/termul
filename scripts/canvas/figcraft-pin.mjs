@@ -28,12 +28,19 @@ export function readPin(path) {
   return parsePin(readFileSync(path, 'utf8'))
 }
 
-export function cargoFigcraftMcpTag(cargoToml) {
+/**
+ * The git ref the `figcraft-mcp` dependency pins, `{ kind: 'tag' | 'rev', value }`,
+ * or `null` when Cargo.toml has no such dependency. A dependency pinned by
+ * neither (a branch, a path) is an error: it is not reproducible.
+ */
+export function cargoFigcraftMcpRef(cargoToml) {
   for (const line of cargoToml.split(/\r?\n/)) {
     if (!/^\s*figcraft-mcp\s*=/.test(line)) continue
     const tag = /\btag\s*=\s*"([^"]+)"/.exec(line)
-    if (!tag) throw new Error('Cargo.toml: figcraft-mcp dependency has no tag')
-    return tag[1]
+    if (tag) return { kind: 'tag', value: tag[1] }
+    const rev = /\brev\s*=\s*"([^"]+)"/.exec(line)
+    if (rev) return { kind: 'rev', value: rev[1] }
+    throw new Error('Cargo.toml: figcraft-mcp dependency has no tag or rev')
   }
   return null
 }
