@@ -18,6 +18,7 @@ import {
   type AcpAuthenticateReply,
   type AcpRuntimePolicy,
   type AddProjectPayload,
+  type ChatReadMark,
   type DeleteSessionPayload,
   type HistoryMode,
   type PersistedSessionSummary,
@@ -1229,6 +1230,10 @@ export class WsAcpTransport implements AcpTransport {
     options?: CommandCallOptions
   ): Promise<void> {
     await this.request('record_agent_switch', { sessionId, ...record }, undefined, options)
+  }
+
+  async markChatRead(sessionId: SessionId, seq: number): Promise<ChatReadMark> {
+    return this.request<ChatReadMark>('mark_chat_read', { sessionId, seq })
   }
 
   async sendPrompt(
