@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FileTreeContextMenuContent } from '@/components/file-explorer/FileTreeContextMenu'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
+import { useFileExplorerStore } from '@/stores/file-explorer-store'
 
 const mockIsTauriContext = vi.hoisted(() => vi.fn())
 
@@ -29,6 +30,10 @@ const dirEntry: DirectoryEntry = {
 }
 
 function renderMenu(entry: DirectoryEntry, hasClipboardContent = false): void {
+  useFileExplorerStore.setState({
+    selectedPaths: new Set([entry.path]),
+    clipboard: hasClipboardContent ? { type: 'copy', paths: ['/proj/other.txt'] } : null
+  })
   render(
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -48,7 +53,6 @@ function renderMenu(entry: DirectoryEntry, hasClipboardContent = false): void {
         onOpenInTerminal={vi.fn()}
         onOpenWithExternal={vi.fn()}
         onShowInFileManager={vi.fn()}
-        hasClipboardContent={hasClipboardContent}
       />
     </ContextMenu>
   )

@@ -1,22 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project } from '@/types/project'
 
-const { projectStoreMock } = vi.hoisted(() => ({
-  projectStoreMock: { getState: vi.fn() }
+const { projectStoreMock, ensureSymlinks, admitsWrites } = vi.hoisted(() => ({
+  projectStoreMock: { getState: vi.fn() },
+  ensureSymlinks: vi.fn(),
+  admitsWrites: { value: true }
 }))
 
-// worktree-context.ts imports worktreeApi at module load; the mock prevents
-// the real API from firing during tests. The tested functions don't call it,
-// but the import binding must resolve.
 vi.mock('@/lib/api', () => ({
   worktreeApi: {
     list: vi.fn(),
     create: vi.fn(),
     remove: vi.fn(),
     branches: vi.fn(),
-    ensureSymlinks: vi.fn(),
+    ensureSymlinks,
     copyIncludeFiles: vi.fn()
   }
+}))
+
+vi.mock('@/lib/tauri-runtime', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/tauri-runtime')>()),
+  serverAdmitsRemoteWrites: () => admitsWrites.value
 }))
 
 vi.mock('@/stores/project-store', () => ({
@@ -25,6 +29,7 @@ vi.mock('@/stores/project-store', () => ({
 
 import { useShellLayoutStore } from '@/stores/shell-layout-store'
 import {
+  ensureWorktreeSymlinks,
   getActiveWorktreeForProject,
   getDefaultCwdForProject,
   getProjectRootPath
@@ -61,6 +66,28 @@ describe('worktree-context', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     setPick(null)
+    admitsWrites.value = true
+  })
+
+  describe('ensureWorktreeSymlinks', () => {
+    beforeEach(() => {
+      setState([
+        makeProject({ isGitRepo: true, symlinkDirs: ['node_modules'], worktrees: [WORKTREE] })
+      ])
+      setPick(WT_PATH)
+      ensureSymlinks.mockResolvedValue({ success: true, data: [] })
+    })
+
+    it('ensures the configured dirs in the active worktree', async () => {
+      await ensureWorktreeSymlinks('p1')
+      expect(ensureSymlinks).toHaveBeenCalledWith('/projects/main', WT_PATH, ['node_modules'])
+    })
+
+    it('sends nothing when the server refuses this client writes', async () => {
+      admitsWrites.value = false
+      await ensureWorktreeSymlinks('p1')
+      expect(ensureSymlinks).not.toHaveBeenCalled()
+    })
   })
 
   describe('getDefaultCwdForProject', () => {
