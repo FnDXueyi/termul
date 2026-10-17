@@ -183,29 +183,11 @@ Runs rollback logic for a migration.
 
 ## Desktop ACP Chat History Commands
 
-Desktop renderer chat history is stored under the Tauri app-data directory by a
-Rust-owned, versioned file store. The commands preserve the existing renderer
-`SessionIndexEntry` / `SessionPayload` JSON shape. `SessionPayload` carries
-`{ metadata, messages, toolCalls? }`: `toolCalls` is an optional mirror of the
-session's ACP tool calls so history reopens and post-reload resumes restore the
-tool cards in the timeline. Persisted tool calls drop `rawOutput` and unknown
-fields, normalize mid-flight statuses to `failed`, keep only the most recent
-calls, and are bounded per call by a serialized byte budget
-(`sanitizeToolCallsForPersistence`); payloads written before the field existed
-omit it.
+The host owns durable chat history. The desktop and `termul-server` both write every non-ephemeral session to `SessionPersistence` (`src-tauri/src/acp/session_persistence/`), and the desktop keeps it under `<app data dir>/acp-sessions`. `acp_history_list`, `acp_history_get`, `acp_history_get_tail` and `acp_history_delete` read and change that store. `SessionPayload` is `{ metadata, messages, toolCalls? }`. `toolCalls` mirrors the session's ACP tool calls so a reopened or resumed chat restores its tool cards. Persisted tool calls drop `rawOutput` and unknown fields, normalize mid-flight statuses to `failed`, keep only the most recent calls, and stay within a per-call serialized byte budget (`sanitizeToolCallsForPersistence`).
 
-- `acp_history_list` returns `{ sessions, legacyImportComplete }`.
-- `acp_history_get` returns one full payload or `null` when absent.
-- `acp_history_save` atomically replaces one payload and its lightweight index entry.
-- `acp_history_delete` removes the payload and index entry with serialized ordering.
-- `acp_history_flush` is the close-path durability barrier.
-- `acp_history_mark_legacy_import_complete` records verified legacy import completion.
+The renderer-authored store under `<app data dir>/acp-chat-history` (`ChatHistoryStore`) is legacy. The one-shot renderer wipe migration is the only caller of `acp_history_save`, `acp_history_flush`, `acp_history_mark_legacy_import_complete`, `acp_history_list_legacy` and `acp_history_get_legacy`. Each of them is listed in the command table above. After every legacy write the host imports the new entries into `SessionPersistence` (`import_chat_history`), so a following `acp_history_list` returns what the migration saved. The migration deletes the old Tauri Store ACP keys only after `acp_history_list_legacy` and `acp_history_get_legacy` return what it wrote. Unrelated preferences stay.
 
-The legacy Tauri Store is read only by the one-shot renderer migration. ACP keys
-are deleted only after Rust list/get verification; unrelated preferences remain.
-Desktop-hosted browser `list_persisted_sessions` and `get_session_payload` read
-this durable provider directly, while the standalone server keeps its existing
-persistence path and wire format.
+The `/ws` requests `list_persisted_sessions`, `get_session_payload` and `get_session_payload_tail` read `SessionPersistence` directly, on the desktop-hosted browser and on the standalone server alike.
 
 ## Web Terminal WebSocket
 
@@ -251,8 +233,8 @@ The app also emits menu/updater-related events such as the updater check trigger
 ### ACP Agent Setup & Authentication Flow
 
 ACP provider setup follows the stable ACP handshake ordering. The renderer facade
-(`src/renderer/lib/acp-api.ts`) → Tauri command → ACP manager
-(`src-tauri/src/acp/manager.rs`) boundary is preserved end to end.
+(`src/renderer/lib/acp-api.ts`) → `/ws` request over the carrier → ACP manager
+(`src-tauri/src/acp/manager/`) boundary is preserved end to end.
 
 **1. Initialize → auth-method propagation.** When an agent completes `initialize`,
 the manager forwards **every** advertised authentication method to the renderer on
@@ -399,9 +381,186 @@ Representative error codes include:
 - `MIGRATION_*`
 - `ROLLBACK_FAILED`
 
+## ACP command and event reference
+
+ACP agent chat reaches the host over three paths. The renderer facade `src/renderer/lib/acp-api.ts` picks the path, so no component names a command or request directly. The section "ACP agent chat" in `docs/architecture.md` explains why the paths exist.
+
+1. **`/ws` requests.** Agent, session, prompt, permission, catalog, install, project, store and watch operations. A browser or phone sends them over the `/ws` WebSocket. The desktop sends the same frames over a Tauri `ipc::Channel` (`ws_channel_*`).
+2. **Host-local Tauri commands.** Operations that only make sense on the desktop host: settings overrides, credentials, MCP probes and OAuth, Claude Account management, and legacy history.
+3. **HTTP routes.** The few `/acp/*` and `/host/*` routes a browser calls outside `/ws`. Each one mirrors a `/ws` request or a Tauri command.
+
+The tables below are checked against the code. `scripts/acp-reference.ts` reads the lists from the source, and `scripts/acp-reference.test.ts` fails when a table and the source disagree. To print the current names, run `bun run scripts/acp-reference.ts`. The `<!-- acp-reference:... -->` comment above each table is the marker the test reads, so keep it directly above its table.
+
+### Host-local Tauri commands
+
+These are the `acp_*`, `claude_accounts_*`, `ws_channel_*` and `codex_cli_auth_status` entries of `tauri::generate_handler!` in `src-tauri/src/lib.rs`. The `acp_history_*` commands return `IpcResult<T>`. The other commands return their value or reject the `invoke` with an error string.
+
+<!-- acp-reference:tauri-commands -->
+| Command | Purpose |
+| --- | --- |
+| `ws_channel_open` | Opens one `/ws` relay connection over a Tauri `ipc::Channel` and returns its connection id. The channel receives one string per `/ws` frame, starting with `auth_required`. |
+| `ws_channel_send` | Queues one inbound frame for a connection. The reply only acknowledges the queue. The answer to the request arrives on the channel. |
+| `ws_channel_close` | Closes one connection. Unknown ids are ignored. |
+| `acp_factory_key_status` | Returns whether the OS keychain holds a Factory Droid API key. |
+| `acp_factory_key_save` | Validates a candidate key through a temporary Factory Droid process, then stores it in the keychain. Browser equivalent: `POST /acp/factory-key`. |
+| `codex_cli_auth_status` | Runs `codex login status` and returns `{state}` with `signed-in`, `signed-out` or `unavailable`. Never returns credential text. |
+| `acp_probe_runtime` | Reports whether the registry launchers `npx` and `uvx` are on `PATH`. |
+| `acp_probe_mcp_server` | Opens a fresh MCP client connection to the given server config, calls `initialize` and `tools/list`, closes the connection, and returns the status and the tool list. |
+| `acp_mcp_oauth_start` | Starts the MCP OAuth flow for a server URL. Discovers the endpoints, registers a PKCE client, opens the authorization URL in the system browser, waits for the redirect on a local HTTP server, and stores the token. Desktop only. |
+| `acp_mcp_oauth_has_token` | Returns whether a stored OAuth token exists for a server URL. Does not check the token's validity. |
+| `acp_mcp_oauth_disconnect` | Deletes the stored OAuth token for a server URL. |
+| `acp_set_turn_timeout` | Sets or clears (`null`) the hard turn timeout override, in seconds. `TERMUL_ACP_TURN_TIMEOUT_SECS` takes precedence. |
+| `acp_set_turn_idle_timeout` | Sets or clears the turn idle timeout override. `0` is rejected. `TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS` takes precedence. |
+| `acp_set_session_new_timeout` | Sets or clears the `session/new` timeout override. `0` is rejected. `TERMUL_ACP_SESSION_NEW_TIMEOUT_SECS` takes precedence. |
+| `acp_set_session_reopen_timeout` | Sets or clears the `session/load` and `session/resume` timeout override. `0` is rejected. `TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS` takes precedence. |
+| `acp_set_agent_idle_window` | Sets or clears the App Preferences override of how long an idle agent stays alive. `0` is rejected. `TERMUL_AGENT_IDLE_REAP_SECS` and a locked server window take precedence. Browser equivalent: `POST /host/agent-idle-window`. |
+| `acp_get_agent_idle_window` | Returns the idle window in use as `{secs, source}`, with `source` one of `env`, `operator`, `setting` or `default`. Browser equivalent: `GET /host/agent-idle-window`. |
+| `acp_fetch_registry_snapshot` | The registry check behind "Check for updates". Takes `forceRefresh?`, shares the catalog's snapshot cache, and fails when the host has no catalog store. `/ws` equivalent: `fetch_acp_registry_snapshot`. |
+| `acp_install_registry_binary` | Legacy desktop-only install of a registry release archive (`agentId`, `archiveUrl`, `cmd`, `args?`) into `<app data dir>/acp-registry-binaries/<agentId>`. The archive URL must be `https`. The verified install is `install_acp_agent`. |
+| `claude_accounts_list` | Returns the Claude Accounts snapshot. `/ws` equivalent: `list_claude_accounts`. |
+| `claude_accounts_usage` | Returns the usage windows of every Account. `force` refreshes reads older than 60 seconds. `/ws` equivalent: `list_claude_usage`. |
+| `claude_accounts_add` | Adds an Account with the given name. Desktop only. |
+| `claude_accounts_login` | Runs the Claude browser login for one Account and resolves when it finishes. Desktop only. |
+| `claude_accounts_login_cancel` | Stops a running login. Returns `false` when none was running. Desktop only. |
+| `claude_accounts_rename` | Renames an Account. Desktop only. |
+| `claude_accounts_remove` | Removes an Account and returns the ids of the Projects that moved to the Default Account. Desktop only. |
+| `claude_accounts_set_default` | Chooses the Default Account. `/ws` equivalent: `set_default_claude_account`. |
+| `claude_accounts_set_project` | Chooses a Project's Account, or clears it with `null`. `/ws` equivalent: `set_project_claude_account`. |
+| `acp_history_list` | Returns `{sessions, legacyImportComplete}`. The sessions come from the host's durable session index (`SessionPersistence`) and are empty when the host opened no persistence. |
+| `acp_history_get` | Returns one session's `{metadata, messages, toolCalls?}` payload from the host store, or `null` when absent. |
+| `acp_history_get_tail` | Same as `acp_history_get` for the last `limit` messages (default 50, clamped to 1-500) and their tool calls. |
+| `acp_history_delete` | Deletes a persisted session and notifies `chat_history` watchers. Returns `true` when it deleted and `false` when the session was already absent. |
+| `acp_history_save` | Legacy write path for the renderer's one-shot wipe migration. Writes the legacy store, then imports it into the host store. |
+| `acp_history_flush` | Flushes the legacy chat-history store. |
+| `acp_history_mark_legacy_import_complete` | Marks the legacy store as imported and converges the host store. |
+| `acp_history_list_legacy` | Lists the legacy store so the wipe migration can verify what it wrote. |
+| `acp_history_get_legacy` | Reads one legacy payload for the same verification. |
+
+### `/ws` requests
+
+A request frame is `{id, type, payload, command_id?}`. The reply is `{id, ok: true, payload?}` or `{id, ok: false, err: {code, message, details?}}`. Payloads use camelCase. The shared contract is `src/shared/types/web-protocol.types.ts` (`WS_REQUEST_TYPES`, `WS_COMMAND_CLASSES`, `WS_ERROR_CODES`). The Rust dispatcher is `src-tauri/src/web/ws/dispatch.rs`.
+
+The class column is the request's command class, defined in `src-tauri/src/web/command_ledger/class.rs`. A `create` or `command` request carries a client-minted `command_id`, and a resend of the same id returns the first outcome without running the request again. An `idempotent` or `read` request carries no id.
+
+<!-- acp-reference:ws-requests -->
+| Request | Class | Purpose |
+| --- | --- | --- |
+| `authenticate` | read | Connection handshake, not agent sign-in. Checks `protocolVersion` and the `deviceId` and `clientInstanceId` identity, then the web token when the host has a gate. |
+| `ping` | read | Keeps the host's silent-peer watchdog fed and returns an ok reply. |
+| `spawn_agent` | create | Starts an agent subprocess, completes `initialize`, and returns the spawn metadata and the agent's capabilities. |
+| `kill_agent` | idempotent | Stops an agent. Every live session of the agent ends with `session_closed`. |
+| `list_agents` | read | Returns the live agents as identity-and-capability summaries. |
+| `authenticate_agent` | command | Runs one of the agent's advertised ACP auth methods (`{agentId, methodId}`). Stores no reply. |
+| `logout_agent` | idempotent | Calls the agent's ACP `logout`. |
+| `acp_deliver_auth_redirect` | command | Replays a pasted loopback OAuth redirect URL to the agent's callback listener on the host and returns `{status}`. Stores no reply. |
+| `create_session` | create | Creates a session (ACP `session/new`) in a registered project. |
+| `load_session` | command | Reopens an agent session with ACP `session/load`. |
+| `resume_session` | command | Reopens an agent session with ACP `session/resume`. The reply carries `replaySnapshot: null`, because history comes from `get_session_payload` and `recover_session_snapshot`. |
+| `close_session` | command | Closes a session and leaves the agent running. A running turn is cancelled first. |
+| `list_sessions` | read | Lists the sessions the agent reports (`session/list`), with optional `cwd` and `cursor`. |
+| `register_discovered_session` | command | Persists metadata for an agent-owned session that `list_sessions` returned. |
+| `delete_agent_session` | idempotent | Asks the agent to delete one of its sessions. |
+| `dispose_ephemeral_session` | command | Disposes a backend-ephemeral session, such as a warm-pool or utility session. |
+| `promote_session` | command | Turns an ephemeral session into a durable one, so its first real prompt persists. |
+| `send_prompt` | command | Starts a prompt turn. `turnId` is the `command_id`. The reply is the stop reason or a receipt. |
+| `cancel_prompt` | idempotent | Cancels the running turn of a session. |
+| `set_config_option` | idempotent | Sets one session config option. |
+| `set_mode` | idempotent | Sets the session mode. |
+| `set_model` | idempotent | Sets the session model. |
+| `respond_permission` | command | Answers a `permission_request`. The first answer wins and a later one is `already_resolved`. |
+| `answer_question` | command | Answers a `question_request`. The first answer wins. |
+| `respond_elicitation` | command | Answers an `elicitation_request`. Stores no reply. |
+| `subscribe` | read | Binds the connection to a session log. Takes an optional `lastSeq` and `logEpoch` cursor and replies `{sessionId, replayed, logEpoch, headSeq}`. |
+| `recover_session_snapshot` | read | Returns `{sessionId, watermark, headSeq, logEpoch, events}` so a client can rebuild a session after a `gap` or a `stale` cursor. |
+| `get_session_cursor` | read | Returns the durable `{sessionId, watermark}` and, for a known session, `logEpoch` and `headSeq`. |
+| `list_persisted_sessions` | read | Returns the durable session index. Empty without durable history. |
+| `open_persisted_session` | read | Subscribes to a persisted session like `subscribe`. `unsupported` when the host keeps no durable history. |
+| `get_session_payload` | read | Returns a session's full payload from the durable log. `not_found` for an unknown id. |
+| `get_session_payload_tail` | read | Returns the last `limit` messages of a session and their tool calls. |
+| `delete_session` | idempotent | Deletes a persisted session. Replies `true` when it deleted and `false` when it was already absent. |
+| `record_agent_switch` | command | Appends a durable `agent_switch` record to a session and delivers it live under the same seq. |
+| `mark_chat_read` | idempotent | Moves the host's shared last-read marker of a chat forward. An older seq is a no-op. |
+| `list_acp_catalog` | read | Returns the host's agent catalog with per-agent availability. Takes an optional `refresh`. |
+| `set_catalog_opt_in` | idempotent | Sets the host-persisted opt-in for registry augmentation of the catalog. |
+| `fetch_acp_registry_snapshot` | read | The registry check behind "Check for updates". Every check bypasses the cache TTL. |
+| `install_acp_agent` | command | Installs a catalog agent. The host downloads, verifies the sha256, extracts and activates it atomically. The request is `{agentId}` only. |
+| `list_claude_accounts` | read | Returns the Claude Accounts snapshot. |
+| `list_claude_usage` | read | Returns Account usage windows. The host caches reads for 5 minutes. |
+| `set_default_claude_account` | idempotent | Chooses the Default Account. |
+| `set_project_claude_account` | idempotent | Chooses a Project's Account, or clears it with `null`. |
+| `add_project` | idempotent | Adds a project to the host registry. See "Project registry commands". |
+| `update_project` | idempotent | Changes a project's name, color, archive flag or root. See "Project registry commands". |
+| `remove_project` | idempotent | Removes a project. See "Project registry commands". |
+| `set_default_project` | idempotent | Sets the host's default project. |
+| `store_read` | read | Reads a key of the host store. See "Store keys by surface". |
+| `store_write` | idempotent | Writes a key of the host store. |
+| `store_delete` | idempotent | Deletes a key of the host store. |
+| `watch` | read | Subscribes to a state watch and queues its full state. See "State watches". |
+| `unwatch` | read | Drops a state watch. Idempotent. |
+
+### Events
+
+Every ACP event has a name in the `acp:` namespace, and the `/ws` wire drops the prefix. An event with a session id is a session log event. The host gives it a per-session `seq`, a client receives it in `seq` order, and a client reconnects by `(logEpoch, lastSeq)`. An event without a session id never travels as a `seq = 0` event. It reaches clients as a delta of a state watch.
+
+A session log event has one of three delivery tiers (`tier_of` in `src-tauri/src/web/ws/mod.rs`). A **lossy** event is dropped for a client that cannot keep up and is followed by a `gap` frame. An **idempotent** event is deduplicated by turn id. Every other event is **reliable**.
+
+<!-- acp-reference:acp-events -->
+| Event | Scope | Reaches clients as |
+| --- | --- | --- |
+| `acp:agent_spawned` | agent | `agents` watch delta. Emitted when `initialize` completes. Carries the advertised `authMethods`. |
+| `acp:agent_crashed` | agent | `agents` watch delta. Emitted before `acp:agent_disconnected` and `acp:agent_error` when the subprocess crashes. |
+| `acp:agent_disconnected` | agent | `agents` watch delta. Emitted when an agent ends, with a `reason`. |
+| `acp:agent_error` | agent or session | Session log event (reliable) when a turn fails. `agents` watch delta for an agent-level error. |
+| `acp:session_created` | session | Session log event (reliable). |
+| `acp:session_closed` | session | Session log event (reliable). `reason` is `killed`, `reaped`, `crashed` or `closed`. |
+| `acp:session_info_update` | session | Session log event (reliable). Carries the agent-supplied title and metadata. |
+| `acp:user_prompt` | session | Session log event (reliable). Host-authored record of an accepted prompt, `{agentId, sessionId, turnId, content}`. |
+| `acp:message_chunk` | session | Session log event (lossy). One streamed message or thought chunk. |
+| `acp:tool_call` | session | Session log event (reliable). A tool call the agent started. |
+| `acp:tool_call_update` | session | Session log event (lossy). An update to an in-flight tool call. |
+| `acp:plan_update` | session | Session log event (lossy). Replaces the session plan. The host `plan` MCP tool emits it too. |
+| `acp:commands_update` | session | Session log event (lossy). The available slash commands changed. |
+| `acp:mode_update` | session | Session log event (reliable). |
+| `acp:config_options_update` | session | Session log event (reliable). |
+| `acp:usage_update` | session | Session log event (reliable). Context-window use and optional cost. |
+| `acp:permission_request` | session | Session log event (reliable). Live only: never written to the durable log. |
+| `acp:question_request` | session | Session log event (reliable). A structured question from the agent, including one from the host `ask_user` tool. |
+| `acp:question_cancelled` | session | Session log event (reliable). A pending question can no longer be answered. |
+| `acp:elicitation_request` | session | Session log event (reliable). The agent asks for structured user input. |
+| `acp:prompt_complete` | session | Session log event (idempotent). Exactly one per accepted turn, with a `stopReason`. |
+| `acp:agent_switch` | session | Session log event (reliable). Durable agent-switch marker. |
+| `acp:local_title_generated` | session | Session log event (reliable). Durable record of a host-generated background title. Clients have no handler for it: the title reaches the UI through the `acp:session_info_update` that follows. |
+| `acp:browser_consent_request` | session | Session log event (reliable). The host asks the user to allow browser automation for the session. Only the desktop renders it. Answer with the Tauri command `browser_consent_respond`. The host denies on timeout. |
+| `acp:browser_agent_tab` | session | Session log event (reliable). The agent's browser tab opened or closed. |
+| `acp:browser_open_request` | agent | `agents` watch delta. A POSIX host captured a URL the agent tried to open, `{agentId, url}`. A delta lost to a gap is lost. |
+| `acp:worktree_branch_renamed` | agent | `chat_history` watch delta. The host renamed a worktree's branch. |
+| `acp:worktree_progress` | none | Plain Tauri event on the desktop only, `{progressId, line}`. The `worktree_create` command emits it while `git worktree add` runs. It never travels the relay. |
+
+The relay also sends three frames that are not `acp:*` events. They appear in `WS_EVENT_TYPES`.
+
+<!-- acp-reference:relay-frames -->
+| Frame | Purpose |
+| --- | --- |
+| `auth_required` | First frame of every connection, with `seq = 0`. Asks the client to send `authenticate`. |
+| `gap` | `{type: "gap", sid}` with no `seq`. Lossy events of `sid` were dropped for this connection. The client answers with `recover_session_snapshot`. |
+| `heartbeat` | `{type: "heartbeat"}` with no `seq`. The host writes one every 10 seconds. |
+
+### HTTP routes
+
+Each route is behind the web token gate when the host has one (`GATED_PREFIXES` in `src-tauri/src/web/router.rs`).
+
+<!-- acp-reference:http-routes -->
+| Route | Methods | Mirrors |
+| --- | --- | --- |
+| `/acp/catalog` | `GET` | `list_acp_catalog` |
+| `/acp/catalog/opt-in` | `POST` | `set_catalog_opt_in` |
+| `/acp/factory-key` | `GET`, `POST` | `acp_factory_key_status`, `acp_factory_key_save` |
+| `/acp/install` | `POST` | `install_acp_agent` |
+| `/host/agent-idle-window` | `GET`, `POST` | `acp_get_agent_idle_window`, `acp_set_agent_idle_window` |
+
 ## ACP Agent Chat Events
 
-ACP agent chat uses Tauri events under the `acp:` namespace (see `src-tauri/src/acp/events.rs` and `src/renderer/lib/acp-api.ts`).
+The event names live in `src-tauri/src/acp/events.rs` and `ACP_EVENTS` in `src/renderer/lib/acp-api.ts`. The relay delivers them to every client (see the reference above). The subsections below describe the payloads and semantics that need more than a table row.
 
 ### `acp:plan_update`
 
