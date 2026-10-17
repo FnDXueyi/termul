@@ -211,5 +211,7 @@ export interface WorkspaceState extends ProjectWorkspace {
    */
   remapAgentChatSession: (fromSessionId: string, toSessionId: string, targetPaneId?: string) => void
   removeTab: (tabId: string) => void
+  /** Re-key an open editor tab to the path its file was renamed to, in place. */
+  renameEditorTab: (fromPath: string, toPath: string) => void
   getNextTabId: (direction: 1 | -1) => string | null
 }

@@ -3,8 +3,8 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cancelAllAutoSaves } from '@/lib/editor-auto-save'
 import { type EditorFileState, useEditorStore } from '@/stores/editor-store'
-import { getAllLeafPanes } from '@/stores/workspace-store/tree'
 import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
+import { getAllLeafPanes } from '@/stores/workspace-store/tree'
 import { useExplorerEntryFlows } from './use-explorer-entry-flows'
 
 const { mockRenameFile, mockWriteFile } = vi.hoisted(() => ({
@@ -98,10 +98,7 @@ describe('renaming an open file in the explorer', () => {
   it('keeps unsaved edits at the new path and saves them there', async () => {
     openFile('/project/src/a.ts', 'unsaved edit', 'on disk')
 
-    await renameInExplorer(
-      { path: '/project/src/a.ts', name: 'a.ts', type: 'file' },
-      'renamed.ts'
-    )
+    await renameInExplorer({ path: '/project/src/a.ts', name: 'a.ts', type: 'file' }, 'renamed.ts')
 
     expect(mockRenameFile).toHaveBeenCalledWith('/project/src/a.ts', '/project/src/renamed.ts')
     const { openFiles, activeFilePath } = useEditorStore.getState()

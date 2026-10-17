@@ -183,6 +183,8 @@ export interface EditorState {
   openFile: (path: string) => Promise<void>
   closeFile: (path: string) => void
   closeFileIfIdle: (path: string) => boolean
+  /** Re-key an open file to the path it was renamed to, keeping its buffer and dirty state. */
+  renameOpenFile: (fromPath: string, toPath: string) => void
   updateContent: (path: string, content: string) => void
   saveFile: (path: string) => Promise<boolean>
   saveAllDirty: () => Promise<void>
@@ -316,6 +318,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     set({ openFiles: newFiles, activeFilePath: newActive })
     return true
+  },
+
+  renameOpenFile: (fromPath: string, toPath: string): void => {
+    const { openFiles, activeFilePath } = get()
+    const file = openFiles.get(fromPath)
+    if (!file || fromPath === toPath) return
+
+    cancelAutoSave(fromPath)
+    const renamed: EditorFileState = {
+      ...file,
+      filePath: toPath,
+      language: detectLanguage(toPath),
+      viewMode: getDefaultViewMode(toPath) === 'markdown' ? file.viewMode : 'code'
+    }
+    const newFiles = new Map<string, EditorFileState>()
+    for (const [path, state] of openFiles) {
+      if (path === fromPath) newFiles.set(toPath, renamed)
+      else if (path !== toPath) newFiles.set(path, state)
+    }
+    set({
+      openFiles: newFiles,
+      activeFilePath: activeFilePath === fromPath ? toPath : activeFilePath
+    })
+    if (renamed.isDirty) scheduleAutoSave(toPath)
   },
 
   updateContent: (path: string, content: string): void => {
