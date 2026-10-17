@@ -1700,8 +1700,9 @@ export const SWITCH_SPLICE_ID_PREFIX = 'switch-splice:'
  * target's own records interleaves the merged timeline wrongly (buildTimeline
  * sorts seq-first) and collides ids (duplicate React keys, wrong
  * `_onUserPrompt` dedup matches). Every spliced record is re-stamped:
- * `seq = (floor - 1000) + original seq` (a NEGATIVE band below the target's
- * whole seq space — spliced records sort before every target record) and
+ * `seq = original seq + floor - (source's highest seq) - 1` (a NEGATIVE band
+ * whose top sits just below the target's whole seq space — spliced records
+ * sort before every target record, however long the source ran) and
  * `id = switch-splice:<source session>:<original id>` — so the merged
  * timeline orders old-before-new with ids unique across hops.
  *
@@ -1729,7 +1730,7 @@ export function spliceSwitchTranscript(
     ...targetToolCalls.map((t) => (typeof t.seq === 'number' ? t.seq : 0)),
     ...targetSwitches.map((sw) => (typeof sw.seq === 'number' ? sw.seq : 0))
   )
-  const offset = floor - 1000
+  const offset = floor - maxPayloadSeq(installed) - 1
   // Namespaced ids: two hops may share original ids (each session's log
   // restarts its seq space), so the source session id keeps the React keys
   // unique.
