@@ -6,7 +6,7 @@ import {
   hasPathEvidence,
   openFilePathFromTerminal,
   resolveFilePathCandidate,
-  stripLineColumnSuffix,
+  stripLinePosition,
   trimWrappedPath
 } from './file-path-links'
 
@@ -64,14 +64,28 @@ describe('file-path-links parsing', () => {
   })
 
   it('strips line and column suffixes', () => {
-    expect(stripLineColumnSuffix('src/foo.ts:12')).toBe('src/foo.ts')
-    expect(stripLineColumnSuffix('src/foo.ts:12:3')).toBe('src/foo.ts')
-    expect(stripLineColumnSuffix('C:/repo/src/foo.ts:4:9')).toBe('C:/repo/src/foo.ts')
+    expect(stripLinePosition('src/foo.ts:12')).toBe('src/foo.ts')
+    expect(stripLinePosition('src/foo.ts:12:3')).toBe('src/foo.ts')
+    expect(stripLinePosition('C:/repo/src/foo.ts:4:9')).toBe('C:/repo/src/foo.ts')
   })
 
   it('extracts wrapped paths with line and column suffixes', () => {
     expect(extractPathCandidate('(src/renderer/App.tsx:42:7)')).toBe('src/renderer/App.tsx')
     expect(extractPathCandidate('`./src/main.ts:3`')).toBe('./src/main.ts')
+  })
+
+  it('keeps a bare #L line fragment in the matched token and strips it from the candidate', () => {
+    expect(findFilePathMatches('see src/x.ts#L10 for the bug')).toEqual([
+      { text: 'src/x.ts#L10', start: 4 }
+    ])
+    expect(findFilePathMatches('see src/x.ts#L10-L20.')).toEqual([
+      { text: 'src/x.ts#L10-L20', start: 4 }
+    ])
+    expect(extractPathCandidate('src/x.ts#L10')).toBe('src/x.ts')
+    expect(extractPathCandidate('src/x.ts#L10-L20')).toBe('src/x.ts')
+    expect(extractPathCandidate('`src/x.ts#L10C4`')).toBe('src/x.ts')
+    expect(hasPathEvidence('owner/repo#L10')).toBe(false)
+    expect(findFilePathMatches('see owner/repo#L10 upstream')).toEqual([])
   })
 
   it('keeps plain file paths unchanged', () => {
@@ -703,6 +717,43 @@ describe('file-path-links resolution', () => {
 
     expect(opened).toEqual({ ok: true })
     expect(mocks.updateCursorPosition).toHaveBeenCalledWith('/repo/src/App.tsx', 9, 1)
+  })
+
+  it.each([
+    ['src/x.ts#L10', 10, 1],
+    ['src/x.ts#L10-L20', 10, 1],
+    ['src/x.ts#L7C5', 7, 5]
+  ])('opens %s at line %i column %i', async (token, line, column) => {
+    mocks.getFileInfo.mockResolvedValue({
+      success: true,
+      data: {
+        path: '/repo/src/x.ts',
+        size: 100,
+        modifiedAt: 1,
+        type: 'file',
+        isReadOnly: false,
+        isBinary: false
+      }
+    })
+
+    const opened = await openFilePathFromTerminal(token, { cwd: '/repo' })
+
+    expect(opened).toEqual({ ok: true })
+    expect(mocks.getFileInfo).toHaveBeenCalledWith('/repo/src/x.ts')
+    expect(mocks.openFile).toHaveBeenCalledWith('/repo/src/x.ts')
+    expect(mocks.updateCursorPosition).toHaveBeenCalledWith('/repo/src/x.ts', line, column)
+  })
+
+  it('names the fragment-free path when a #L target is missing', async () => {
+    mocks.getFileInfo.mockResolvedValue({
+      success: false,
+      error: 'No such file',
+      code: 'NOT_FOUND'
+    })
+
+    const opened = await openFilePathFromTerminal('src/x.ts#L10', { cwd: '/repo' })
+
+    expect(opened).toEqual({ ok: false, reason: 'not-found', message: 'File not found: src/x.ts' })
   })
 
   it('reveals the line in an editor that is already open', async () => {
