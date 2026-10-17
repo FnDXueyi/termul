@@ -14,7 +14,9 @@ const {
   mockSetWorktreePick,
   mockActivePaneId,
   mockLogFrontendError,
-  mockProjectEnv
+  mockProjectEnv,
+  mockProjectShell,
+  mockAppShell
 } = vi.hoisted(() => ({
   mockAddTerminal: vi.fn(),
   mockSetTerminalPtyId: vi.fn(),
@@ -27,7 +29,9 @@ const {
   // workspace-store mock. Defaults to an active pane so existing tests pass.
   mockActivePaneId: { current: 'pane-1' as string | null },
   mockLogFrontendError: vi.fn(),
-  mockProjectEnv: { current: {} as Record<string, string> }
+  mockProjectEnv: { current: {} as Record<string, string> },
+  mockProjectShell: { current: 'bash' as string | undefined },
+  mockAppShell: { current: '' }
 }))
 
 vi.mock('@/stores/terminal-store', () => ({
@@ -53,8 +57,14 @@ vi.mock('@/stores/workspace-store', () => ({
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: {
     getState: () => ({
-      projects: [{ id: 'proj-1', name: 'Test', path: '/test', defaultShell: 'bash', envVars: [] }]
+      projects: [{ id: 'proj-1', name: 'Test', path: '/test', defaultShell: mockProjectShell.current, envVars: [] }]
     })
+  }
+}))
+
+vi.mock('@/stores/app-settings-store', () => ({
+  useAppSettingsStore: {
+    getState: () => ({ settings: { defaultShell: mockAppShell.current } })
   }
 }))
 
@@ -223,6 +233,36 @@ describe('openTerminalAtCwd', () => {
       data: mockSpawnedTerminal({ cwd: '/chat/cwd' })
     })
     mockLogFrontendError.mockReset()
+    mockProjectShell.current = 'bash'
+    mockAppShell.current = ''
+  })
+
+  it('spawns with the App Preferences default shell when the project sets none', async () => {
+    mockProjectShell.current = undefined
+    mockAppShell.current = 'pwsh'
+
+    await openTerminalAtCwd('proj-1', '/chat/cwd')
+
+    expect(mockTerminalApiSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({ shell: 'pwsh', cwd: '/chat/cwd' })
+    )
+    expect(mockAddTerminal).toHaveBeenCalledWith('Terminal 1', 'proj-1', 'pwsh', '/chat/cwd')
+  })
+
+  it('lets the project shell win over the App Preferences default', async () => {
+    mockAppShell.current = 'pwsh'
+
+    await openTerminalAtCwd('proj-1', '/chat/cwd')
+
+    expect(mockTerminalApiSpawn).toHaveBeenCalledWith(expect.objectContaining({ shell: 'bash' }))
+  })
+
+  it('leaves the shell unset when neither project nor app sets one', async () => {
+    mockProjectShell.current = undefined
+
+    await openTerminalAtCwd('proj-1', '/chat/cwd')
+
+    expect(mockTerminalApiSpawn.mock.calls[0][0].shell).toBeUndefined()
   })
 
   it('opens a terminal at the given cwd without touching the switcher pick', async () => {

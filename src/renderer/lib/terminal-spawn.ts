@@ -10,6 +10,7 @@ import { terminalApi } from '@/lib/api'
 import { resolveEnvForSpawn } from '@/lib/env-parser'
 import { logFrontendError } from '@/lib/log-api'
 import { ensureWorktreeSymlinks } from '@/lib/worktree-context'
+import { useAppSettingsStore } from '@/stores/app-settings-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
@@ -51,7 +52,11 @@ export async function spawnTerminalInPane(
 
   // Resolve shell: explicit → project default → app default → undefined (backend picks)
   const project = useProjectStore.getState().projects.find((p) => p.id === projectId)
-  const shell = options?.shell ?? project?.defaultShell ?? undefined
+  const shell =
+    options?.shell ||
+    project?.defaultShell ||
+    useAppSettingsStore.getState().settings.defaultShell ||
+    undefined
 
   try {
     // Ensure worktree symlinks are present when spawning into a worktree path
