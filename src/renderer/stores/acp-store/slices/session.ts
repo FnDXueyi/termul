@@ -1846,7 +1846,9 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
         }
       })
       try {
-        await get().openHistorySession(sessionId)
+        // An agent without session/close rejects the release above, and a web
+        // reopen would then adopt it again.
+        await get().openHistorySession(sessionId, { forceNewAgent: true })
       } finally {
         if (releasing) reloadInFlight.delete(sessionId)
       }
