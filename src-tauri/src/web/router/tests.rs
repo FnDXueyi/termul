@@ -635,7 +635,6 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
     // …but the canvas-credential surface is exempt from the bearer gate
     // (browser iframes cannot send Authorization headers):
     // - `/canvas/<id>/*` embed/proxy paths (the `?ct=` canvas token),
-    // - `/canvas/mcp` (bearer OR `op_canvas_ct` cookie, canvas layer),
     // - the ROOT canvas routes `/pkg|/canvaskit|/api` (not under any gated
     //   prefix; the `op_canvas_ct` cookie middleware owns them).
     for canvas_credentialed in [
@@ -643,7 +642,6 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/canvas/cv0123456789abcdef/",
         "/canvas/cv0123456789abcdef/pkg/op_host_web.js",
         "/canvas/cv0123456789abcdef/api/mcp/events",
-        "/canvas/mcp",
         "/pkg",
         "/pkg/",
         "/pkg/op_host_web.js",
@@ -892,35 +890,6 @@ async fn canvas_routes_require_auth_when_gated() {
         "/canvas/open rejected by the outer bearer gate"
     );
 
-    // `/canvas/mcp` is EXEMPT from the bearer gate — its rejection comes
-    // from the canvas MCP layer itself (bearer OR per-canvas cookie).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(SocketAddr::from((
-                    [127, 0, 0, 1],
-                    54321,
-                ))))
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "UNAUTHORIZED");
-    assert_eq!(
-        parsed["error"], "canvas mcp requires a web auth bearer token or canvas cookie",
-        "rejected by the canvas MCP layer, not the bearer gate"
-    );
-
     // The embed/proxy paths are exempt too — they pass straight through to
     // the canvas-token middleware (`ct` rejection).
     let resp = app
@@ -949,39 +918,12 @@ async fn canvas_routes_require_auth_when_gated() {
     // this fixture → typed 502 DAEMON_DOWN (proving routing reached the
     // canvas handler, not a 401 from the outer gate).
     let resp = app
-        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/pkg/op_host_web.js")
                 .header("cookie", "op_canvas_ct_cv0123456789abcdef=whatever")
                 .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("router response");
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
-
-    // With the bearer token the /canvas/mcp request reaches the canvas
-    // handler, which (no pool on this fixture) reports the typed 502
-    // DAEMON_DOWN.
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(SocketAddr::from((
-                    [127, 0, 0, 1],
-                    54321,
-                ))))
-                .header("authorization", "Bearer t0ken")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
                 .expect("build request"),
         )
         .await

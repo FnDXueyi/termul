@@ -3,10 +3,10 @@
 //!
 //! All lifecycle goes through the shared [`CanvasDaemonPool`] (managed in
 //! `lib.rs`); `AppHandle` is used ONLY here (main-window URL origin for
-//! `--allow-origin`, agentation port for the stable MCP URL) — the pool
+//! `--allow-origin`) — the pool
 //! itself stays Tauri-free so `termul-server` composes it too. The pure
-//! assembly helpers ([`window_origin_from_url`], [`agentation_scoped_mcp_url`],
-//! [`open_info_for_daemon`], [`open_failure`]) are extracted so they are
+//! assembly helpers ([`window_origin_from_url`], [`open_info_for_daemon`],
+//! [`open_failure`]) are extracted so they are
 //! unit-testable without an `AppHandle`/pool.
 
 use std::sync::Arc;
@@ -43,37 +43,13 @@ fn main_window_origin(app: &AppHandle) -> String {
         .unwrap_or_else(|| "http://tauri.localhost".to_string())
 }
 
-/// Pure: the per-project stable MCP URL on the desktop agentation server —
-/// `http://127.0.0.1:<port>/canvas/<canvasId>/mcp`. Id-scoped so agents of
-/// project A never route to project B's canvas; the canvas id is
-/// deterministic per project, so the URL stays stable across re-opens.
-fn agentation_scoped_mcp_url(port: u16, project_id: &str) -> String {
-    format!(
-        "http://127.0.0.1:{port}/canvas/{}/mcp",
-        crate::canvas::canvas_id_for_project(project_id)
-    )
-}
-
-/// Stable Termul-proxied MCP URL from the desktop agentation server's
-/// dynamic port; `None` when the agentation service failed to start (the
-/// renderer skips the MCP entry upsert then).
-fn agentation_mcp_url(app: &AppHandle, project_id: &str) -> Option<String> {
-    app.try_state::<crate::agentation::AgentationService>()
-        .map(|service| agentation_scoped_mcp_url(service.http_port(), project_id))
-}
-
 /// Pure: assemble the desktop `CanvasOpenInfo` for a live daemon (loopback
 /// embed URL with raw-concat `?embed=vscode` — never URL-encoded). The
-/// desktop canvas token IS the daemon's managed (handshake) token: the
-/// renderer/agents present it as the `Authorization: Bearer` credential on
-/// the agentation `/canvas(/<canvasId>)/mcp` mounts.
-fn open_info_for_daemon(
-    daemon: &crate::canvas::managed::CanvasDaemon,
-    mcp_url: Option<String>,
-) -> CanvasOpenInfo {
+/// desktop canvas token IS the daemon's managed (handshake) token.
+fn open_info_for_daemon(daemon: &crate::canvas::managed::CanvasDaemon) -> CanvasOpenInfo {
     CanvasOpenInfo {
         embed_url: format!("http://127.0.0.1:{}/?embed=vscode", daemon.port),
-        mcp_url,
+        mcp_url: None,
         doc_key: daemon.doc_key.clone(),
         canvas_id: None,
         canvas_token: Some(daemon.managed_token().to_string()),
@@ -87,8 +63,7 @@ fn open_failure(err: &CanvasError) -> IpcResult<CanvasOpenInfo> {
 }
 
 /// `canvas_open { docPath, projectId }` — spawn (or reuse) the doc's managed
-/// daemon and return the loopback embed URL plus the id-scoped stable MCP
-/// URL.
+/// daemon and return the loopback embed URL.
 #[tauri::command]
 pub async fn canvas_open(
     app: AppHandle,
@@ -106,10 +81,7 @@ pub async fn canvas_open(
                 "[canvas] open success project_id={log_project_id} port={}",
                 daemon.port
             );
-            Ok(IpcResult::success(open_info_for_daemon(
-                &daemon,
-                agentation_mcp_url(&app, &project_id),
-            )))
+            Ok(IpcResult::success(open_info_for_daemon(&daemon)))
         }
         Err(err) => {
             log::warn!(
@@ -219,33 +191,20 @@ mod tests {
     }
 
     #[test]
-    fn agentation_mcp_url_is_id_scoped_and_stable() {
-        let url = agentation_scoped_mcp_url(43123, "proj-7");
-        let expected_id = crate::canvas::canvas_id_for_project("proj-7");
-        assert_eq!(
-            url,
-            format!("http://127.0.0.1:43123/canvas/{expected_id}/mcp")
-        );
-        // Deterministic per project → stable across re-opens.
-        assert_eq!(url, agentation_scoped_mcp_url(43123, "proj-7"));
-        assert_ne!(url, agentation_scoped_mcp_url(43123, "proj-8"));
-    }
-
-    #[test]
     fn open_info_builds_loopback_embed_url_with_managed_token() {
         let daemon =
             crate::canvas::managed::synthetic_daemon("doc", 45111, "http://tauri.localhost");
-        let info = open_info_for_daemon(&daemon, Some("http://127.0.0.1:1/canvas/cvx/mcp".into()));
+        let info = open_info_for_daemon(&daemon);
         assert_eq!(info.embed_url, "http://127.0.0.1:45111/?embed=vscode");
-        assert_eq!(info.mcp_url.as_deref(), Some("http://127.0.0.1:1/canvas/cvx/mcp"));
+        assert_eq!(info.mcp_url, None);
         assert_eq!(info.doc_key, "doc");
         // Desktop embeds the daemon URL directly: no proxy id. The canvas
-        // token IS the daemon managed token (the MCP bearer credential).
+        // token IS the daemon managed token.
         assert_eq!(info.canvas_id, None);
         assert_eq!(
             info.canvas_token.as_deref(),
             Some(daemon.managed_token()),
-            "canvasToken carries the managed token for the MCP bearer"
+            "canvasToken carries the managed token"
         );
     }
 

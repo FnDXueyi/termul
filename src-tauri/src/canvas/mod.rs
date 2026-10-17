@@ -19,8 +19,8 @@
 //! - [`managed`] — binary resolution, argv, spawn + handshake, dispose.
 //! - [`pool`] — `CanvasDaemonPool`: doc-keyed map, coalesced acquires,
 //!   respawn-once-then-evict crash policy.
-//! - [`mcp_proxy`] — shared HTTP proxy to the active daemon (`/mcp` + path
-//!   proxy, streaming via reqwest).
+//! - [`mcp_proxy`] — shared HTTP path proxy to the active daemon (streaming
+//!   via reqwest).
 
 pub mod managed;
 pub mod mcp_proxy;
@@ -115,7 +115,7 @@ pub struct CanvasDaemonInfo {
 /// `/api/*` (the editor wasm derives its daemon base from
 /// `window.location.origin` and uses absolute paths, so a
 /// `/canvas/<id>/` iframe still requests those at the server root) — and
-/// the cookie path of `/canvas/mcp`. The per-canvas name keeps sibling
+/// The per-canvas name keeps sibling
 /// canvases isolated (canvas B's cookie never authenticates canvas A's
 /// traffic). It is dropped with the pool entry on close/evict, so a stale
 /// token yields 401.
@@ -123,12 +123,8 @@ pub struct CanvasDaemonInfo {
 #[serde(rename_all = "camelCase")]
 pub struct CanvasOpenInfo {
     pub embed_url: String,
-    /// Stable Termul-proxied MCP endpoint. Desktop: the id-scoped agentation
-    /// route `http://127.0.0.1:<port>/canvas/<canvasId>/mcp` (agents of
-    /// project A never reach project B's canvas; the id is deterministic so
-    /// the URL is stable across re-opens). Web: the global `/canvas/mcp`
-    /// (bearer-or-cookie authed, routes to the active canvas). `None` when
-    /// the desktop agentation server is unavailable.
+    /// Always `None`: no surface serves a canvas MCP endpoint any more. The
+    /// field leaves with the daemon handshake it was handed to.
     pub mcp_url: Option<String>,
     /// Canonicalized absolute doc path (the pool's daemon key).
     pub doc_key: String,
@@ -136,12 +132,9 @@ pub struct CanvasOpenInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas_id: Option<String>,
     /// The canvas credential. **Desktop:** the daemon's managed (handshake)
-    /// token — the renderer/agents present it as the `Authorization: Bearer`
-    /// value on the agentation `/canvas(/<canvasId>)/mcp` mounts. **Web:**
-    /// the canvas session token — the `ct` embed param and the value the
-    /// renderer sets as the same-origin per-canvas `op_canvas_ct_<canvasId>`
-    /// cookie (root canvas routes + the `/canvas/mcp` cookie path). Never
-    /// logged.
+    /// token. **Web:** the canvas session token — the `ct` embed param and
+    /// the value the renderer sets as the same-origin per-canvas
+    /// `op_canvas_ct_<canvasId>` cookie (root canvas routes). Never logged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canvas_token: Option<String>,
 }

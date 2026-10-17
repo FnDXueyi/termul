@@ -1,8 +1,7 @@
 //! Canvas web routes (OpenPencil canvas mode, CAP-5): `POST /canvas/open` /
 //! `/canvas/close` / `/canvas/save` (`IpcBody` envelope, HTTP 200 for
-//! app-level failures like their Tauri command twins), the stable
-//! `POST|GET /canvas/mcp` proxy, the same-origin `/canvas/<id>/*` embed
-//! proxy, and the ROOT canvas routes (`/pkg/*`, `/canvaskit/*`, `/api/*`)
+//! app-level failures like their Tauri command twins), the same-origin
+//! `/canvas/<id>/*` embed proxy, and the ROOT canvas routes (`/pkg/*`, `/canvaskit/*`, `/api/*`)
 //! that carry the editor's absolute-path traffic (the editor wasm derives
 //! its daemon base from `window.location.origin` only and the host page
 //! imports `/pkg/op_host_web.js` root-relative, so a web iframe served at
@@ -29,11 +28,7 @@
 //!   `/canvas/<id>/…` (the browser sends it automatically for the editor's
 //!   iframe traffic), else the ACTIVE canvas. A canvas's own cookie is
 //!   scoped to its own daemon, so opening canvas B never contaminates
-//!   canvas A's requests and cross-canvas pairing is rejected;
-//! - `/canvas/mcp` is EXEMPT from the bearer gate and accepts EITHER the
-//!   web auth bearer token (agent clients → active daemon) OR the
-//!   Referer-scoped per-canvas canvas cookie (the embedded editor's own
-//!   MCP settings → that canvas's daemon).
+//!   canvas A's requests and cross-canvas pairing is rejected.
 //!
 //! The same `/canvas/<id>/*` routes serve the embedded figcraft bundle
 //! (`canvas::static_server`) for any canvas id that holds a bundle token and
@@ -164,13 +159,12 @@ pub fn canvas_cookie_name(canvas_id: &str) -> String {
 }
 
 /// Routes exempt from the `ct` query-param gate: the API routes carry their
-/// own auth (`open|close|save` — the outer bearer gate; `mcp` — bearer OR
-/// the canvas cookie, enforced in the handler).
+/// own auth (`open|close|save` — the outer bearer gate; `bundle-base` — the
+/// bearer check in the handler).
 const CT_GATE_EXEMPT_PATHS: &[&str] = &[
     "/canvas/open",
     "/canvas/close",
     "/canvas/save",
-    "/canvas/mcp",
     "/canvas/bundle-base",
 ];
 
@@ -198,7 +192,6 @@ pub fn canvas_router<S>(state: CanvasState) -> Router<S> {
         .route("/canvas/open", post(open))
         .route("/canvas/close", post(close))
         .route("/canvas/save", post(save))
-        .route("/canvas/mcp", post(mcp).get(mcp))
         .route("/canvas/bundle-base", get(bundle_base))
         // Same-origin embed surface: `/canvas/<id>/` (the iframe src — the
         // trailing slash keeps the editor's relative asset URLs inside the
@@ -296,35 +289,6 @@ fn canvas_unauthorized(message: &str) -> Response {
         .into_response()
 }
 
-/// Typed 403 for a bearer/ungated `/canvas/mcp` caller that may not write.
-fn canvas_forbidden(message: String) -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(serde_json::json!({
-            "success": false,
-            "error": message,
-            "code": "FORBIDDEN",
-        })),
-    )
-        .into_response()
-}
-
-/// Shared write predicate for the `/canvas/mcp` callers that are NOT holding a
-/// canvas cookie (agent clients on the bearer token, or an ungated server):
-/// MCP tools edit the open document, so they need the same write posture as
-/// `/canvas/open|close|save`. A request without a peer address (only possible
-/// outside the production server) is refused. The canvas-cookie path needs no
-/// check: that credential is only minted by the guarded `/canvas/open`.
-fn mcp_write_refusal(state: &CanvasState, request: &Request) -> Option<Response> {
-    let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
-        return Some(canvas_forbidden(
-            "canvas mcp write access could not be determined (no peer address)".to_string(),
-        ));
-    };
-    check_canvas_write::<()>(state, *peer, "/canvas/mcp")
-        .map(|refused| canvas_forbidden(refused.error.unwrap_or_default()))
-}
-
 /// Typed 502 in the IpcBody failure shape (no live daemon — the "canvas
 /// closed" signal).
 fn daemon_down(message: &str) -> Response {
@@ -392,7 +356,7 @@ fn request_origin(headers: &HeaderMap) -> String {
 }
 
 /// `POST /canvas/open` — validate the doc path, spawn (or reuse) the doc's
-/// daemon, and return the same-origin embed path + stable MCP path + the
+/// daemon, and return the same-origin embed path + the
 /// project's canvas id and session token (the renderer sets it as the
 /// per-canvas `op_canvas_ct_<canvasId>` cookie). Idempotent for a live
 /// entry: a repeat open of the same doc returns the SAME embed URL + token
@@ -479,11 +443,10 @@ async fn open(
             // The `ct` token authenticates the iframe's subsequent
             // `/canvas/<id>/*` requests; the same token is returned as
             // `canvas_token` for the renderer's per-canvas
-            // `op_canvas_ct_<canvasId>` cookie (the root canvas routes +
-            // the `/canvas/mcp` cookie path).
+            // `op_canvas_ct_<canvasId>` cookie (the root canvas routes).
             Json(IpcBody::ok(CanvasOpenInfo {
                 embed_url: format!("/canvas/{canvas_id}/?embed=vscode&ct={canvas_token}"),
-                mcp_url: Some("/canvas/mcp".to_string()),
+                mcp_url: None,
                 doc_key: daemon.doc_key.clone(),
                 canvas_id: Some(canvas_id),
                 canvas_token: Some(canvas_token),
@@ -540,69 +503,6 @@ async fn save(
     match mcp_proxy::daemon_save(daemon.as_ref()).await {
         Ok(value) => Json(IpcBody::ok(value)),
         Err(err) => Json(IpcBody::err(err.message, err.code)),
-    }
-}
-
-/// `POST|GET /canvas/mcp` — the stable Termul-proxied MCP endpoint. The
-/// route is exempt from the outer bearer gate; credentials resolve the
-/// TARGET daemon (never a canvas the credential does not belong to):
-/// - the per-canvas canvas cookie (the embedded editor's MCP settings
-///   card): Referer-scoped when the request's `Referer` names a canvas —
-///   THAT canvas's cookie validates against THAT canvas's daemon; without
-///   a Referer, the ACTIVE canvas's cookie validates against the active
-///   daemon;
-/// - the web auth bearer token (agent clients) → the active daemon;
-/// - an ungated server (no `WebAuth`) stays open → the active daemon
-///   (legacy posture).
-///
-/// 401 otherwise.
-async fn mcp(State(state): State<CanvasState>, request: Request) -> Response {
-    // (b) the canvas cookie path — Referer-scoped target resolution.
-    if let Some(pool) = state.pool.as_ref() {
-        let (canvas_id, daemon) = match canvas_id_from_referer(request.headers()) {
-            Some(referer_id) => {
-                let daemon = pool.daemon_for_canvas_id(&referer_id);
-                (referer_id, daemon)
-            }
-            None => (
-                pool.active_canvas_id().unwrap_or_default(),
-                pool.active_daemon(),
-            ),
-        };
-        if daemon.is_some() {
-            let presented =
-                cookie_value(request.headers(), &canvas_cookie_name(&canvas_id))
-                    .unwrap_or_default();
-            if pool.verify_canvas_token(&canvas_id, presented) {
-                return mcp_proxy::proxy_mcp_request(daemon.as_ref(), request).await;
-            }
-        }
-    }
-    // (a) the web auth bearer (agent clients) → active daemon; an ungated
-    // server stays open (legacy posture). Both edit the open document, so
-    // they take the write predicate (a cookie holder was already admitted by
-    // the guarded `/canvas/open`).
-    if let Some(refused) = mcp_write_refusal(&state, &request) {
-        return refused;
-    }
-    let daemon = state.pool.as_ref().and_then(|pool| pool.active_daemon());
-    match state.web_auth.as_ref() {
-        Some(auth) => {
-            if mcp_proxy::presented_bearer(request.headers())
-                .is_some_and(|token| auth.accepts(&token))
-            {
-                mcp_proxy::proxy_mcp_request(daemon.as_ref(), request).await
-            } else {
-                tracing::warn!(
-                    target: "termul::web::canvas",
-                    "canvas mcp request rejected: no bearer token or canvas cookie"
-                );
-                canvas_unauthorized(
-                    "canvas mcp requires a web auth bearer token or canvas cookie",
-                )
-            }
-        }
-        None => mcp_proxy::proxy_mcp_request(daemon.as_ref(), request).await,
     }
 }
 

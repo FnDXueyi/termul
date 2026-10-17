@@ -651,57 +651,6 @@ pub(crate) async fn spawn_echo_server_marked(
     (addr, handle)
 }
 
-fn post_mcp_request(body: &'static str) -> Request {
-    Request::builder()
-        .method(Method::POST)
-        .uri("/canvas/mcp")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .expect("build MCP request")
-}
-
-#[tokio::test]
-async fn proxy_mcp_rejects_get_with_405() {
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/canvas/mcp")
-        .body(Body::empty())
-        .expect("build GET");
-    let resp = mcp_proxy::proxy_mcp_request(None, request).await;
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
-}
-
-#[tokio::test]
-async fn proxy_mcp_without_daemon_is_typed_502() {
-    let request = post_mcp_request(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
-    let resp = mcp_proxy::proxy_mcp_request(None, request).await;
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
-}
-
-#[tokio::test]
-async fn proxy_mcp_forwards_post_body_status_and_headers() {
-    let (addr, server) = spawn_echo_server().await;
-    let daemon = super::managed::synthetic_daemon("doc", addr.port(), TEST_ORIGIN);
-    let request = post_mcp_request(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
-    let resp = mcp_proxy::proxy_mcp_request(Some(&daemon), request).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        resp.headers().get("x-echo").and_then(|v| v.to_str().ok()),
-        Some("mcp")
-    );
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["proxied"], true);
-    server.abort();
-}
-
 #[tokio::test]
 async fn proxy_canvas_path_forwards_method_path_query_and_content_type() {
     let (addr, server) = spawn_echo_server().await;
@@ -826,22 +775,6 @@ fn web_canvas_app_with_boundary(
     })
 }
 
-/// Sub-router app with an explicit web auth gate (for the bearer-OR-cookie
-/// MCP tests).
-fn web_canvas_app_gated(
-    pool: Option<Arc<CanvasDaemonPool>>,
-    token: &str,
-) -> Router {
-    crate::web::canvas_api::canvas_router(crate::web::canvas_api::CanvasState {
-        pool,
-        web_auth: Some(Arc::new(crate::web::auth::WebAuth::new(
-            crate::web::auth::WebAuthToken::new(token).expect("non-empty"),
-        ))),
-        boundary: None,
-        write_flags: loopback_write_flags(),
-    })
-}
-
 /// POST /canvas/open helper returning the parsed IpcBody JSON.
 async fn web_open(
     app: Router,
@@ -889,7 +822,7 @@ async fn web_open_returns_embed_path_with_canvas_session_token() {
     // The same token is returned for the renderer's op_canvas_ct cookie.
     assert_eq!(parsed["data"]["canvasToken"], *token);
     assert_eq!(parsed["data"]["canvasId"], expected_id);
-    assert_eq!(parsed["data"]["mcpUrl"], "/canvas/mcp");
+    assert!(parsed["data"]["mcpUrl"].is_null(), "no canvas MCP endpoint is advertised");
     assert!(parsed["data"]["docKey"].as_str().is_some_and(|k| k.ends_with("design.op")));
     drop(dir);
 }
@@ -1114,20 +1047,16 @@ async fn web_canvas_routes_trailing_slash_and_catch_all_reach_the_token_gate() {
 
 #[tokio::test]
 async fn web_canvas_api_routes_bypass_the_canvas_token_gate() {
-    // open/close/save/mcp pass through the canvas-token middleware — the
-    // API routes are authenticated by the OUTER bearer gate instead (they
-    // never mint or check a ct). A GET /canvas/mcp without any ct still
-    // reaches the handler and 405s (the daemon's method contract).
-    let pool = Arc::new(CanvasDaemonPool::new(FakeSpawner::new(
-        FakeKind::HandshakeThenSleep,
-    )));
-    let app = web_canvas_app(Some(pool));
+    // open/close/save/bundle-base pass through the canvas-token middleware —
+    // they carry their own auth (the outer bearer gate or the handler's own
+    // bearer check) and never mint or check a ct. A GET /canvas/bundle-base
+    // without any ct still reaches its handler.
+    let app = web_canvas_app(None);
     let resp = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(web_test_peer()))
+                .uri("/canvas/bundle-base")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -1135,9 +1064,29 @@ async fn web_canvas_api_routes_bypass_the_canvas_token_gate() {
         .expect("router responds");
     assert_eq!(
         resp.status(),
-        StatusCode::METHOD_NOT_ALLOWED,
+        StatusCode::OK,
         "exempt route reaches the handler (no canvas-token 401)"
     );
+}
+
+#[tokio::test]
+async fn web_canvas_mcp_route_is_gone() {
+    // /canvas/mcp is no longer a route: it reads as a canvas id with no
+    // token, so the canvas-token gate rejects it instead of proxying.
+    let app = web_canvas_app(None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/canvas/mcp")
+                .extension(axum::extract::ConnectInfo(web_test_peer()))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("router responds");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -1450,104 +1399,6 @@ async fn web_root_canvas_routes_without_active_daemon_are_502() {
 }
 
 #[tokio::test]
-async fn web_canvas_mcp_accepts_bearer_or_cookie() {
-    let (addr, server) = spawn_echo_server().await;
-    let (dir, doc) = temp_doc();
-    let spawner = FakeSpawner::with_port(FakeKind::HandshakeThenSleep, addr.port());
-    let pool = Arc::new(CanvasDaemonPool::new(spawner));
-    let app = web_canvas_app_gated(Some(pool), "t0ken");
-    let (_embed_path, token) = web_open_for_cookie(app.clone(), &doc).await;
-
-    let mcp_request = |headers: &[(&'static str, String)]| {
-        let mut builder = Request::builder()
-            .method(Method::POST)
-            .uri("/canvas/mcp")
-            .extension(axum::extract::ConnectInfo(web_test_peer()))
-            .header("content-type", "application/json");
-        for (name, value) in headers {
-            builder = builder.header(*name, value);
-        }
-        builder.body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
-    };
-
-    // (a) the web auth bearer token (agent clients) authenticates and
-    // proxies to the echo daemon.
-    let resp = app
-        .clone()
-        .oneshot(mcp_request(&[("authorization", "Bearer t0ken".to_string())]).expect("build"))
-        .await
-        .expect("router responds");
-    assert_eq!(resp.status(), StatusCode::OK, "bearer authenticates");
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["proxied"], true);
-
-    // (b) the per-canvas canvas cookie (the embedded editor's MCP path)
-    // authenticates — WITH a Referer naming the editor's canvas page (the
-    // browser sends it from the iframe) and WITHOUT (active-canvas
-    // fallback).
-    let canvas_id = canvas_id_for_project("proj-7");
-    let cookie = format!(
-        "{}={token}",
-        crate::web::canvas_api::canvas_cookie_name(&canvas_id)
-    );
-    let referer = format!("http://127.0.0.1:1/canvas/{canvas_id}/?embed=vscode");
-    for headers in [
-        vec![("cookie", cookie.clone())],
-        vec![("cookie", cookie.clone()), ("referer", referer.clone())],
-    ] {
-        let headers: Vec<(&'static str, String)> = headers;
-        let resp = app
-            .clone()
-            .oneshot(mcp_request(&headers).expect("build"))
-            .await
-            .expect("router responds");
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "canvas cookie authenticates (headers: {headers:?})"
-        );
-    }
-
-    // Neither credential → 401 (the route is exempt from the outer bearer
-    // gate, so this 401 comes from the canvas MCP layer itself).
-    let resp = app
-        .clone()
-        .oneshot(mcp_request(&[]).expect("build"))
-        .await
-        .expect("router responds");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("read body");
-    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
-    assert_eq!(parsed["code"], "UNAUTHORIZED");
-    assert_eq!(
-        parsed["error"], "canvas mcp requires a web auth bearer token or canvas cookie"
-    );
-
-    // A WRONG bearer is not accepted even when the cookie layer is also
-    // wrong (both constant-time, neither matches); the old shared bare
-    // cookie name is gone too.
-    let resp = app
-        .oneshot(
-            mcp_request(&[
-                ("authorization", "Bearer wrong".to_string()),
-                ("cookie", "op_canvas_ct=wrong".to_string()),
-            ])
-            .expect("build"),
-        )
-        .await
-        .expect("router responds");
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "no fallback open");
-
-    drop(dir);
-    server.abort();
-}
-
-#[tokio::test]
 async fn web_root_routes_are_referer_scoped_per_canvas() {
     // CodeRabbit cross-canvas isolation (PR #834): canvas A's iframe must
     // keep working after canvas B opens, and no credential may execute in
@@ -1720,30 +1571,6 @@ async fn web_root_routes_are_referer_scoped_per_canvas() {
         resp.status(),
         StatusCode::UNAUTHORIZED,
         "a non-active canvas cookie without a Referer is rejected, not re-routed"
-    );
-
-    // Global /canvas/mcp cookie path: Referer-scoped the same way (A's
-    // cookie + A's Referer → A's daemon, not the active one).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/canvas/mcp")
-                .extension(axum::extract::ConnectInfo(web_test_peer()))
-                .header("content-type", "application/json")
-                .header("cookie", &cookie_a)
-                .header("referer", &referer_a)
-                .body(Body::from(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#))
-                .expect("build request"),
-        )
-        .await
-        .expect("router responds");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let parsed = post_json(resp).await;
-    assert_eq!(
-        parsed["echo"], "echo-a",
-        "the global MCP cookie path is Referer-scoped to A's daemon"
     );
 
     drop(dir);
