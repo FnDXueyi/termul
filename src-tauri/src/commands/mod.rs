@@ -118,6 +118,9 @@ mod tests;
 mod search_dirs_tests;
 
 #[cfg(test)]
+mod search_file_hits_tests;
+
+#[cfg(test)]
 mod remote_sync_mcp_registry_tests;
 
 #[cfg(test)]

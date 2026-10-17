@@ -637,7 +637,31 @@ describe('file-explorer-store', () => {
         })
       }
 
-      expect(useFileExplorerStore.getState().searchFileNameMatches).toEqual(['src/components.ts'])
+      expect(useFileExplorerStore.getState().searchFileNameMatches).toEqual([
+        '/project/src/components.ts'
+      ])
+    })
+
+    it('resolves root-relative hits against the explorer root so a picked hit opens', async () => {
+      mockApi.filesystem.searchContentStreamStart.mockReset().mockResolvedValue({ success: true })
+      mockApi.filesystem.searchFileNamesStreamStart.mockReset().mockResolvedValue({ success: true })
+      useFileExplorerStore.setState({ rootPath: 'C:/work/proj', scopeRoot: 'C:/work/proj' })
+
+      await useFileExplorerStore.getState().searchInRoot('a.ts', 8)
+      for (const cb of fileNameBatchCbs) {
+        cb({
+          searchId: 'search-8',
+          files: [
+            { path: 'a.ts', ignored: false },
+            { path: 'src/deep/a.ts', ignored: false }
+          ]
+        })
+      }
+
+      expect(useFileExplorerStore.getState().searchFileNameMatches).toEqual([
+        'C:/work/proj/a.ts',
+        'C:/work/proj/src/deep/a.ts'
+      ])
     })
   })
 
