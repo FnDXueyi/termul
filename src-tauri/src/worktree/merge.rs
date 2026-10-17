@@ -1,9 +1,17 @@
 use super::*;
 
+/// `git merge-tree` prints its usage and exits 129 when it does not know `--write-tree`.
+const MERGE_TREE_USAGE_EXIT_CODE: i32 = 129;
+
+fn is_object_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl WorktreeManager {
-    /// Generate a merge preview by running `git merge --no-commit --no-ff --dry-run`.
-    /// Parses output to identify conflicting and changed files.
-    /// Analyzes conflicts and provides resolution suggestions.
+    /// Preview merging `target_branch` into the worktree's current branch with
+    /// `git merge-tree --write-tree`, which needs Git 2.38 or newer. It computes the
+    /// merge in the object database, so the working tree, the index and `HEAD`
+    /// stay untouched. Conflicted files are analyzed for resolution suggestions.
     pub fn merge_preview(
         worktree_path: &str,
         target_branch: &str,
@@ -11,66 +19,65 @@ impl WorktreeManager {
         ensure_valid_branch_name(target_branch, worktree_path)?;
         let current_branch = Self::get_current_branch(worktree_path)?;
 
-        // Try accurate detection first
-        match run_git(
+        let output = run_git_output(
             &[
-                "merge",
-                "--no-commit",
-                "--no-ff",
-                "--dry-run",
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
                 "--",
+                "HEAD",
                 target_branch,
             ],
             Some(worktree_path),
-        ) {
-            Ok((stdout, _stderr)) => {
-                // Parse git diff-tree --stat style output for changed files
-                let changed = stdout
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
-                    .collect::<Vec<_>>();
-
-                Ok(MergePreview {
-                    direction: format!("{} → {}", current_branch, target_branch),
-                    source_branch: current_branch,
-                    target_branch: target_branch.to_string(),
-                    conflict_files: Vec::new(),
-                    changed_files: changed.clone(),
-                    total_changes: changed.len(),
-                    detection_mode: "accurate".to_string(),
-                    has_auto_resolvable: false,
-                })
-            }
-            Err(e) => {
-                // Check if the error is due to conflicts
-                let err_str = e.to_string();
-                if err_str.contains("conflict") || err_str.contains("merge failed") {
-                    // Fast detection fallback: check `git status --porcelain`
-                    let conflict_files = Self::detect_conflict_files(worktree_path)?;
-
-                    // Check if any conflicts have high-confidence auto-resolution suggestions
-                    let has_auto_resolvable = conflict_files.iter().any(|cf| {
-                        cf.suggestions
-                            .iter()
-                            .any(|s| s.confidence == "high" && s.strategy != "manual")
-                    });
-
-                    Ok(MergePreview {
-                        direction: format!("{} → {}", current_branch, target_branch),
-                        source_branch: current_branch,
-                        target_branch: target_branch.to_string(),
-                        conflict_files,
-                        changed_files: Vec::new(),
-                        total_changes: 0,
-                        detection_mode: "fast".to_string(),
-                        has_auto_resolvable,
-                    })
-                } else {
-                    Err(WorktreeError::MergeFailed)
-                }
-            }
+        )?;
+        if output.code == Some(MERGE_TREE_USAGE_EXIT_CODE) {
+            return Err(WorktreeError::GitError(
+                "Merge preview needs Git 2.38 or newer. Update Git to preview a merge.".to_string(),
+            ));
         }
+        let mut fields = output.stdout.split('\0');
+        let tree = fields.next().unwrap_or_default();
+        let merged = matches!(output.code, Some(0..=1)) && is_object_id(tree);
+        if !merged {
+            return Err(parse_git_stderr(&output.stderr));
+        }
+        let conflict_paths: Vec<&str> = if output.code == Some(1) {
+            fields.take_while(|path| !path.is_empty()).collect()
+        } else {
+            Vec::new()
+        };
+
+        let (changed, _) = run_git(
+            &["diff", "--name-only", "-z", "HEAD", tree, "--"],
+            Some(worktree_path),
+        )?;
+        let changed_files: Vec<String> = changed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let conflict_files: Vec<ConflictFile> = conflict_paths
+            .into_iter()
+            .map(|path| Self::conflict_file_from_merged_tree(worktree_path, tree, path))
+            .collect();
+        let has_auto_resolvable = conflict_files.iter().any(|cf| {
+            cf.suggestions
+                .iter()
+                .any(|s| s.confidence == "high" && s.strategy != "manual")
+        });
+
+        Ok(MergePreview {
+            direction: format!("{} → {}", current_branch, target_branch),
+            source_branch: current_branch,
+            target_branch: target_branch.to_string(),
+            conflict_files,
+            total_changes: changed_files.len(),
+            changed_files,
+            detection_mode: "accurate".to_string(),
+            has_auto_resolvable,
+        })
     }
 
     /// Execute a merge from the worktree's current branch to target_branch.
@@ -101,52 +108,37 @@ impl WorktreeManager {
         }
     }
 
-    /// Detect conflict files by parsing `git status --porcelain` for conflicted entries.
-    /// Also analyzes conflict content and generates resolution suggestions.
-    fn detect_conflict_files(worktree_path: &str) -> Result<Vec<ConflictFile>, WorktreeError> {
-        let (stdout, _) = run_git(&["status", "--porcelain"], Some(worktree_path))?;
-        let mut conflict_files = Vec::new();
+    /// Describe one conflicted path using the content `merge-tree` wrote for it,
+    /// conflict markers included. A path with no such blob (modify/delete) gets no
+    /// suggestions.
+    fn conflict_file_from_merged_tree(worktree_path: &str, tree: &str, path: &str) -> ConflictFile {
+        let is_lock =
+            path.ends_with(".lock") || path.contains("package-lock") || path.contains("yarn.lock");
+        let content = run_git(
+            &["cat-file", "blob", &format!("{tree}:{path}")],
+            Some(worktree_path),
+        )
+        .map(|(stdout, _)| stdout)
+        .unwrap_or_default();
+        let conflict_count = Self::extract_conflict_blocks(&content).len().max(1);
 
-        // Porcelain format: XY filename
-        // Conflicted entries have status codes: DD, AU, UD, UA, DU, AA, UU
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.len() >= 2 {
-                let code = &trimmed[..2];
-                let path = trimmed[3..].trim();
-
-                // Unmerged/conflicted paths start with U or have DD/AA
-                let is_conflict = code.contains('U') || code == "DD" || code == "AA";
-                if is_conflict && !path.is_empty() {
-                    let is_lock = path.ends_with(".lock")
-                        || path.contains("package-lock")
-                        || path.contains("yarn.lock");
-                    let suggestions =
-                        Self::analyze_conflict_and_suggest(worktree_path, path, is_lock);
-
-                    conflict_files.push(ConflictFile {
-                        path: path.to_string(),
-                        severity: if is_lock {
-                            "low".to_string()
-                        } else {
-                            "high".to_string()
-                        },
-                        conflict_count: 1,
-                        is_lock_file: is_lock,
-                        suggestions,
-                    });
-                }
-            }
+        ConflictFile {
+            path: path.to_string(),
+            severity: if is_lock {
+                "low".to_string()
+            } else {
+                "high".to_string()
+            },
+            conflict_count,
+            is_lock_file: is_lock,
+            suggestions: Self::analyze_conflict_and_suggest(&content, is_lock),
         }
-
-        Ok(conflict_files)
     }
 
-    /// Analyze a conflict file and generate resolution suggestions.
+    /// Analyze a conflicted file's content and generate resolution suggestions.
     /// Detects patterns like whitespace-only, import reordering, lockfile version bumps, etc.
     pub(super) fn analyze_conflict_and_suggest(
-        worktree_path: &str,
-        file_path: &str,
+        content: &str,
         is_lock_file: bool,
     ) -> Vec<ConflictSuggestion> {
         let mut suggestions = Vec::new();
@@ -169,20 +161,13 @@ impl WorktreeManager {
             return suggestions;
         }
 
-        // Try to read the conflicted file content
-        let full_path = std::path::Path::new(worktree_path).join(file_path);
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(_) => return suggestions, // Can't read, return empty suggestions
-        };
-
         // Check if file has conflict markers
         if !content.contains("<<<<<<<") || !content.contains(">>>>>>>") {
             return suggestions;
         }
 
         // Analyze conflict patterns
-        let conflict_blocks = Self::extract_conflict_blocks(&content);
+        let conflict_blocks = Self::extract_conflict_blocks(content);
 
         for block in &conflict_blocks {
             // Check for whitespace-only differences
