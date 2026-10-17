@@ -21,9 +21,12 @@
 //!   respawn-once-then-evict crash policy.
 //! - [`mcp_proxy`] — shared HTTP path proxy to the active daemon (streaming
 //!   via reqwest).
+//! - [`persistence`] — the figcraft mount registry: load floor, autosave
+//!   debounce, saved version and the atomic document write (AD-23, AD-31).
 
 pub mod managed;
 pub mod mcp_proxy;
+pub mod persistence;
 pub mod pin;
 pub mod pool;
 pub mod static_server;

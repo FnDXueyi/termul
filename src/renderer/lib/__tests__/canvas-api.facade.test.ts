@@ -43,7 +43,8 @@ const WEB_INFO: CanvasOpenInfo = {
   baseUrl: '',
   canvasToken: 'cafebabecafebabecafebabecafebabe',
   pinTag: 'termul-v1',
-  docKey: DOC
+  docKey: DOC,
+  mountSeq: 1
 }
 
 describe('canvasApi (web vs desktop branch)', () => {
@@ -159,4 +160,54 @@ describe('canvasApi (web vs desktop branch)', () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: true }))
     await expect(canvasApi.close(PROJECT)).resolves.toEqual({ success: true, data: true })
   })
+
+  const PERSISTENCE_CASES = [
+    {
+      name: 'readDocument',
+      call: () => canvasApi.readDocument(PROJECT, 3),
+      command: 'canvas_read_document',
+      route: '/canvas/read-document',
+      args: { projectId: PROJECT, mountSeq: 3 }
+    },
+    {
+      name: 'documentLoaded',
+      call: () => canvasApi.documentLoaded(PROJECT, 3, '{"contentVersion":7}'),
+      command: 'canvas_document_loaded',
+      route: '/canvas/document-loaded',
+      args: { projectId: PROJECT, mountSeq: 3, ack: '{"contentVersion":7}' }
+    },
+    {
+      name: 'dirtyChanged',
+      call: () => canvasApi.dirtyChanged(PROJECT, 3, true, '9007199254740993'),
+      command: 'canvas_dirty_changed',
+      route: '/canvas/dirty-changed',
+      args: { projectId: PROJECT, mountSeq: 3, dirty: true, contentVersion: '9007199254740993' }
+    },
+    {
+      name: 'writeSnapshot',
+      call: () => canvasApi.writeSnapshot(PROJECT, 3, '{"contentVersion":8,"bytes":"AA=="}'),
+      command: 'canvas_write_snapshot',
+      route: '/canvas/write-snapshot',
+      args: { projectId: PROJECT, mountSeq: 3, snapshot: '{"contentVersion":8,"bytes":"AA=="}' }
+    }
+  ] as const
+
+  for (const { name, call, command, route, args } of PERSISTENCE_CASES) {
+    it(`${name}: web posts ${route} and desktop invokes ${command} with the same body`, async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: { ok: 1 } }))
+      await expect(call()).resolves.toEqual({ success: true, data: { ok: 1 } })
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${window.location.origin}${route}`,
+        expect.objectContaining({ method: 'POST', body: JSON.stringify(args) })
+      )
+      expect(mockInvoke).not.toHaveBeenCalled()
+
+      mockFetch.mockClear()
+      mockIsTauriContext.mockReturnValue(true)
+      mockInvoke.mockResolvedValueOnce({ success: true, data: { ok: 1 } })
+      await expect(call()).resolves.toEqual({ success: true, data: { ok: 1 } })
+      expect(mockInvoke).toHaveBeenCalledWith(command, args)
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+  }
 })

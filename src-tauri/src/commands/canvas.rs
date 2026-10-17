@@ -2,34 +2,84 @@
 //! figcraft editor served by the loopback bundle listener; they mirror
 //! `POST /canvas/open|close` in `web/canvas_api.rs` (same `IpcResult`
 //! envelope, same typed codes) and share `canvas::static_server::open_canvas`.
-//! `canvas_save` / `canvas_status` still drive the OpenPencil daemon pool until
-//! it is removed.
+//! The `canvas_*document*` / `canvas_dirty_changed` / `canvas_write_snapshot`
+//! commands are the desktop transport of `canvas::persistence` and mirror the
+//! web routes of the same names. `canvas_save` / `canvas_status` still drive
+//! the OpenPencil daemon pool until it is removed.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use tauri::State;
 
 use super::{sanitize_log_field, validate_project_path, IpcResult};
 use crate::canvas::mcp_proxy;
+use crate::canvas::persistence::{
+    self, canvas_mounts, DirtyOutcome, DocumentBytes, PersistenceView, WriteOutcome,
+};
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
     close_canvas, open_canvas, CanvasBundleBase, CanvasOpenInfo, StaticServer,
     CODE_BUNDLE_LISTENER_DOWN,
 };
-use crate::canvas::{CanvasStatus, CODE_DAEMON_DOWN};
+use crate::canvas::{CanvasError, CanvasStatus, CODE_DAEMON_DOWN};
 
 const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// `canvas_open { docPath, projectId }` — the loopback bundle base plus a
-/// minted `ct` token for the project's canvas. Typed `BUNDLE_LISTENER_DOWN`
-/// while the listener is not bound.
+/// The canonical doc path. A document that does not exist yet (the first
+/// open of a project's `design.figcraft`) is validated through its parent
+/// directory; the first save creates it.
+fn validate_canvas_doc_path(doc_path: &str) -> Result<String, String> {
+    let path = Path::new(doc_path);
+    let validated = if path.exists() {
+        validate_project_path(doc_path)?
+    } else {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(format!("Invalid canvas document path: {doc_path}"));
+        };
+        let parent = parent
+            .to_str()
+            .ok_or_else(|| "Path contains invalid UTF-8".to_string())?;
+        validate_project_path(parent)?.join(name)
+    };
+    validated
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "Path contains invalid UTF-8".to_string())
+}
+
+fn persistence_result<T>(
+    operation: &str,
+    project_id: &str,
+    result: Result<T, CanvasError>,
+) -> IpcResult<T> {
+    match result {
+        Ok(value) => IpcResult::success(value),
+        Err(err) => {
+            log::warn!(
+                "[canvas] {operation} failed project_id={} code={}",
+                sanitize_log_field(project_id),
+                err.code
+            );
+            IpcResult::error(err.message, err.code)
+        }
+    }
+}
+
+/// `canvas_open { docPath, projectId, autosaveMs? }` — the loopback bundle
+/// base plus a minted `ct` token and a new `mountSeq` for the project's
+/// canvas. Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound.
 #[tauri::command]
 pub async fn canvas_open(
     doc_path: String,
     project_id: String,
+    autosave_ms: Option<u64>,
     server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
-    let doc_key = validate_and_stringify!(&doc_path);
+    let doc_key = match validate_canvas_doc_path(&doc_path) {
+        Ok(doc_key) => doc_key,
+        Err(message) => return Ok(IpcResult::error(message, "PATH_VALIDATION_FAILED")),
+    };
     let log_project_id = sanitize_log_field(&project_id);
     let Some(base) = server.wait_for_base(LISTENER_WAIT).await else {
         log::warn!(
@@ -40,11 +90,12 @@ pub async fn canvas_open(
             CODE_BUNDLE_LISTENER_DOWN,
         ));
     };
-    match open_canvas(base, &project_id, doc_key) {
+    match open_canvas(base, &project_id, doc_key, autosave_ms) {
         Ok(info) => {
             log::info!(
-                "[canvas] open project_id={log_project_id} canvas_id={}",
-                info.canvas_id
+                "[canvas] open project_id={log_project_id} canvas_id={} mount_seq={}",
+                info.canvas_id,
+                info.mount_seq
             );
             Ok(IpcResult::success(info))
         }
@@ -58,8 +109,8 @@ pub async fn canvas_open(
     }
 }
 
-/// `canvas_close { projectId }` — revoke the project's bundle token.
-/// Idempotent.
+/// `canvas_close { projectId }` — revoke the project's bundle token and drop
+/// its persistence mount. Idempotent.
 #[tauri::command]
 pub async fn canvas_close(project_id: String) -> Result<IpcResult<bool>, String> {
     log::info!(
@@ -68,6 +119,81 @@ pub async fn canvas_close(project_id: String) -> Result<IpcResult<bool>, String>
     );
     close_canvas(&project_id);
     Ok(IpcResult::success(true))
+}
+
+/// `canvas_read_document { projectId, mountSeq }` — the mounted document's
+/// bytes as base64, `null` when the file does not exist yet.
+#[tauri::command]
+pub async fn canvas_read_document(
+    project_id: String,
+    mount_seq: u64,
+) -> Result<IpcResult<DocumentBytes>, String> {
+    let result = persistence::read_document(canvas_mounts(), &project_id, mount_seq).await;
+    Ok(persistence_result("read document", &project_id, result))
+}
+
+/// `canvas_document_loaded { projectId, mountSeq, ack }` — the editor holds
+/// the document; `ack` is the `host.openDocument` result text or `null` for
+/// a new document.
+#[tauri::command]
+pub async fn canvas_document_loaded(
+    project_id: String,
+    mount_seq: u64,
+    ack: Option<String>,
+) -> Result<IpcResult<PersistenceView>, String> {
+    let result =
+        persistence::document_loaded(canvas_mounts(), &project_id, mount_seq, ack.as_deref());
+    Ok(persistence_result("document loaded", &project_id, result))
+}
+
+/// `canvas_dirty_changed { projectId, mountSeq, dirty, contentVersion }` —
+/// answers once the autosave debounce settles: `saveDue`, `idle`, or
+/// `superseded` by a later notification.
+#[tauri::command]
+pub async fn canvas_dirty_changed(
+    project_id: String,
+    mount_seq: u64,
+    dirty: bool,
+    content_version: String,
+) -> Result<IpcResult<DirtyOutcome>, String> {
+    let result = persistence::dirty_changed(
+        canvas_mounts(),
+        &project_id,
+        mount_seq,
+        dirty,
+        &content_version,
+    )
+    .await;
+    Ok(persistence_result("dirty changed", &project_id, result))
+}
+
+/// `canvas_write_snapshot { projectId, mountSeq, snapshot }` — write the
+/// `host.snapshot` result text to the project's document atomically.
+#[tauri::command]
+pub async fn canvas_write_snapshot(
+    project_id: String,
+    mount_seq: u64,
+    snapshot: String,
+) -> Result<IpcResult<WriteOutcome>, String> {
+    let result =
+        persistence::write_snapshot(canvas_mounts(), &project_id, mount_seq, &snapshot).await;
+    if let Ok(outcome) = &result {
+        log_write_outcome(&project_id, outcome);
+    }
+    Ok(persistence_result("write snapshot", &project_id, result))
+}
+
+fn log_write_outcome(project_id: &str, outcome: &WriteOutcome) {
+    let project_id = sanitize_log_field(project_id);
+    match (&outcome.mark_saved, &outcome.view.save_error) {
+        (Some(version), _) => {
+            log::info!("[canvas] saved project_id={project_id} content_version={version}");
+        }
+        (None, Some(error)) => {
+            log::warn!("[canvas] save failed project_id={project_id}: {error}");
+        }
+        (None, None) => {}
+    }
 }
 
 /// `canvas_save { docPath }` — save through the daemon (`POST

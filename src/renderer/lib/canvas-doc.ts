@@ -7,6 +7,9 @@ import type { DirectoryEntry } from '@shared/types/filesystem.types'
 
 export const CANVAS_DOC_EXTENSION = '.figcraft'
 
+/** What a project without a canvas document gets on its first open. */
+export const NEW_CANVAS_DOC_NAME = 'design.figcraft'
+
 export function isCanvasDocPath(path: string): boolean {
   return path.toLowerCase().endsWith(CANVAS_DOC_EXTENSION)
 }

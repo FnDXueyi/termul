@@ -65,6 +65,7 @@ use crate::canvas::static_server::{
     CanvasOpenInfo, CookiePolicy,
 };
 use crate::web::auth::WebAuth;
+use crate::web::canvas_persistence_api::PERSISTENCE_ROUTES;
 use crate::web::capabilities::WriteFlags;
 use crate::web::fs_api::{check_local_only, IpcBody};
 use crate::web::project_registry::ProjectRegistry;
@@ -93,7 +94,11 @@ pub struct CanvasProjectBoundary {
 }
 
 /// The shared write predicate for the canvas open/close/save routes.
-fn check_canvas_write<T>(state: &CanvasState, peer: SocketAddr, route: &str) -> Option<IpcBody<T>> {
+pub(crate) fn check_canvas_write<T>(
+    state: &CanvasState,
+    peer: SocketAddr,
+    route: &str,
+) -> Option<IpcBody<T>> {
     check_local_only::<T>(
         peer,
         state.write_flags.allow_remote_writes,
@@ -166,12 +171,15 @@ const CT_GATE_EXEMPT_PATHS: &[&str] = &[
     "/canvas/bundle-base",
 ];
 
-/// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "..." }`.
+/// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
+/// "autosaveMs"?: n }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasOpenRequest {
     doc_path: String,
     project_id: String,
+    #[serde(default)]
+    autosave_ms: Option<u64>,
 }
 
 /// `POST /canvas/close` body: `{ "projectId": "..." }`.
@@ -198,6 +206,7 @@ pub fn canvas_router<S>(state: CanvasState) -> Router<S> {
         .route("/canvas/close", post(close))
         .route("/canvas/save", post(save))
         .route("/canvas/bundle-base", get(bundle_base))
+        .merge(crate::web::canvas_persistence_api::persistence_routes())
         // Same-origin embed surface: `/canvas/<id>/` (the iframe src — the
         // trailing slash keeps the editor's relative asset URLs inside the
         // proxy prefix) plus the catch-all. The bare and trailing-slash
@@ -313,7 +322,10 @@ async fn canvas_token_gate(
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if !path.starts_with("/canvas/") || CT_GATE_EXEMPT_PATHS.contains(&path) {
+    if !path.starts_with("/canvas/")
+        || CT_GATE_EXEMPT_PATHS.contains(&path)
+        || PERSISTENCE_ROUTES.contains(&path)
+    {
         return next.run(request).await;
     }
     let canvas_id = path
@@ -361,7 +373,12 @@ async fn open(
             return Json(IpcBody::err(message, code));
         }
     };
-    match open_canvas(same_origin_base(), &req.project_id, doc_key) {
+    match open_canvas(
+        same_origin_base(),
+        &req.project_id,
+        doc_key,
+        req.autosave_ms,
+    ) {
         Ok(info) => {
             tracing::info!(
                 target: "termul::web::canvas",

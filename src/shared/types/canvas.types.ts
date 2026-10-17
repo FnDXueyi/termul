@@ -5,7 +5,9 @@
  * `canvas::static_server::CanvasOpenInfo`, returned by both the desktop
  * `canvas_open` command and the web `POST /canvas/open` route. The renderer
  * builds the iframe URL from it; the Rust side never hands out a full URL so
- * the host origin and mount sequence stay renderer-owned.
+ * the host origin stays renderer-owned. The persistence shapes mirror
+ * `canvas::persistence` (spine AD-23): engine content versions are u64 and
+ * always travel as decimal text, never as a JS number.
  */
 
 import type { IpcResult } from './ipc.types'
@@ -22,6 +24,38 @@ export interface CanvasOpenInfo {
   pinTag: string
   /** Canonicalized absolute doc path. */
   docKey: string
+  /** Host-allocated, never reused: stamps every bridge envelope and
+   * persistence call of this mount. */
+  mountSeq: number
+}
+
+/** The host's persistence projection of one mount. */
+export interface CanvasPersistenceView {
+  mountSeq: number
+  /** The document is loaded; dirty state and saves are possible. */
+  ready: boolean
+  dirty: boolean
+  contentVersion: string | null
+  /** `null` until the document exists on disk. */
+  savedVersion: string | null
+  saveError: string | null
+}
+
+/** The mounted document as base64, `null` when the file does not exist yet. */
+export interface CanvasDocumentBytes {
+  bytes: string | null
+}
+
+/** How a forwarded `event.dirtyChanged` settled after the autosave debounce. */
+export type CanvasDirtyOutcome =
+  | { kind: 'superseded' }
+  | { kind: 'idle'; view: CanvasPersistenceView }
+  | { kind: 'saveDue'; view: CanvasPersistenceView }
+
+export interface CanvasWriteOutcome {
+  view: CanvasPersistenceView
+  /** The version to send in `host.markSaved`; `null` when nothing was saved. */
+  markSaved: string | null
 }
 
 /** Typed canvas facade and mount failure codes. */
@@ -31,6 +65,11 @@ export const CanvasErrorCodes = {
   BUNDLE_LISTENER_DOWN: 'BUNDLE_LISTENER_DOWN',
   BUNDLE_PIN_MISMATCH: 'BUNDLE_PIN_MISMATCH',
   EDITOR_CRASHED: 'EDITOR_CRASHED',
+  DOCUMENT_LOAD_FAILED: 'DOCUMENT_LOAD_FAILED',
+  CANVAS_CLOSED: 'CANVAS_CLOSED',
+  CANVAS_NOT_READY: 'CANVAS_NOT_READY',
+  INVALID_PAYLOAD: 'INVALID_PAYLOAD',
+  READ_FAILED: 'READ_FAILED',
   UNSUPPORTED_SURFACE: 'UNSUPPORTED_SURFACE',
   NETWORK_ERROR: 'NETWORK_ERROR',
   INVOKE_ERROR: 'INVOKE_ERROR'
@@ -57,11 +96,37 @@ export const CANVAS_BRIDGE_ERROR_CODES = [
 export type CanvasBridgeErrorCode = (typeof CANVAS_BRIDGE_ERROR_CODES)[number]
 
 /**
- * Transport-neutral canvas facade: desktop resolves to the `canvas_open` /
- * `canvas_close` Tauri commands, web to `POST /canvas/open|close`. `open` is
+ * Transport-neutral canvas facade: desktop resolves to the `canvas_*` Tauri
+ * commands, web to the `POST /canvas/*` routes of the same names. `open` is
  * gated off on phone-width viewports with a typed `UNSUPPORTED_SURFACE`.
+ * The persistence methods are the renderer's half of AD-23: it forwards what
+ * the editor reports and does what the host decides.
  */
 export interface CanvasApi {
-  open: (docPath: string, projectId: string) => Promise<IpcResult<CanvasOpenInfo>>
+  open: (
+    docPath: string,
+    projectId: string,
+    autosaveMs?: number
+  ) => Promise<IpcResult<CanvasOpenInfo>>
   close: (projectId: string) => Promise<IpcResult<boolean>>
+  readDocument: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDocumentBytes>>
+  /** `ack` is the `host.openDocument` result text, `null` for a new document. */
+  documentLoaded: (
+    projectId: string,
+    mountSeq: number,
+    ack: string | null
+  ) => Promise<IpcResult<CanvasPersistenceView>>
+  /** Resolves once the host's autosave debounce settles. */
+  dirtyChanged: (
+    projectId: string,
+    mountSeq: number,
+    dirty: boolean,
+    contentVersion: string
+  ) => Promise<IpcResult<CanvasDirtyOutcome>>
+  /** `snapshot` is the `host.snapshot` result text, forwarded unparsed. */
+  writeSnapshot: (
+    projectId: string,
+    mountSeq: number,
+    snapshot: string
+  ) => Promise<IpcResult<CanvasWriteOutcome>>
 }

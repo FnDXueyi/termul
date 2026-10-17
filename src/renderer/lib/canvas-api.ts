@@ -9,8 +9,7 @@
  * web shell).
  */
 
-import type { CanvasApi, CanvasOpenInfo } from '@shared/types/canvas.types'
-import type { IpcResult } from '@shared/types/ipc.types'
+import type { CanvasApi } from '@shared/types/canvas.types'
 
 import { isMobileWebShellViewport } from '@/hooks/use-mobile-web-shell'
 import { createTauriCanvasApi } from './tauri-canvas-api'
@@ -19,8 +18,12 @@ import { webCanvasApi } from './web-canvas-api'
 
 const tauriCanvasApi = createTauriCanvasApi()
 
+function transport(): CanvasApi {
+  return isTauriContext() ? tauriCanvasApi : webCanvasApi
+}
+
 export const canvasApi: CanvasApi = {
-  open(docPath: string, projectId: string): Promise<IpcResult<CanvasOpenInfo>> {
+  open(docPath, projectId, autosaveMs) {
     if (isMobileWebShellViewport()) {
       return Promise.resolve({
         success: false,
@@ -28,14 +31,16 @@ export const canvasApi: CanvasApi = {
         code: 'UNSUPPORTED_SURFACE'
       })
     }
-    return isTauriContext()
-      ? tauriCanvasApi.open(docPath, projectId)
-      : webCanvasApi.open(docPath, projectId)
+    return transport().open(docPath, projectId, autosaveMs)
   },
-
-  close(projectId: string): Promise<IpcResult<boolean>> {
-    return isTauriContext() ? tauriCanvasApi.close(projectId) : webCanvasApi.close(projectId)
-  }
+  close: (projectId) => transport().close(projectId),
+  readDocument: (projectId, mountSeq) => transport().readDocument(projectId, mountSeq),
+  documentLoaded: (projectId, mountSeq, ack) =>
+    transport().documentLoaded(projectId, mountSeq, ack),
+  dirtyChanged: (projectId, mountSeq, dirty, contentVersion) =>
+    transport().dirtyChanged(projectId, mountSeq, dirty, contentVersion),
+  writeSnapshot: (projectId, mountSeq, snapshot) =>
+    transport().writeSnapshot(projectId, mountSeq, snapshot)
 }
 
 export { createTauriCanvasApi } from './tauri-canvas-api'

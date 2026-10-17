@@ -1,12 +1,14 @@
 /**
- * The `canvas` tab's pane: a header (doc name, unsaved marker, mount status)
- * over the figcraft iframe. The mount itself is driven by the canvas store's
- * phase; this panel re-sends `host.theme` / `host.locale` when Termul's theme
- * or the browser language changes, without reloading the editor.
+ * The `canvas` tab's pane: a header (doc name, unsaved marker, mount status,
+ * save error, Save) over the figcraft iframe. The mount itself is driven by
+ * the canvas store's phase; this panel re-sends `host.theme` / `host.locale`
+ * when Termul's theme or the browser language changes, without reloading the
+ * editor.
  */
 
 import { useEffect } from 'react'
-import { Edit2 } from '@/components/icons'
+import { Edit2, Loader2, Save } from '@/components/icons'
+import { Button } from '@/components/ui/button'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { basename } from '@/lib/path-basename'
 import { COLOR_THEME_CHANGED_EVENT } from '@/lib/themes'
@@ -93,6 +95,36 @@ export function CanvasPanel({
           />
         )}
         <span className="shrink-0 text-3xs text-muted-foreground">{statusLabel(phase)}</span>
+        {session.saveError && (
+          <span
+            className="min-w-0 truncate text-3xs text-destructive"
+            title={session.saveError}
+            data-testid="canvas-save-error"
+          >
+            Save failed
+          </span>
+        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Button
+            size="xs"
+            variant="secondary"
+            disabled={phase.kind !== 'ready' || session.saving}
+            onClick={() => void useCanvasStore.getState().saveCanvas(projectId)}
+            aria-label="Save canvas"
+            title="Save canvas"
+          >
+            {session.saving ? (
+              <Loader2
+                size={12}
+                className="animate-spin motion-reduce:animate-none"
+                aria-hidden="true"
+              />
+            ) : (
+              <Save size={12} aria-hidden="true" />
+            )}
+            Save
+          </Button>
+        </div>
       </div>
       <div className="relative min-h-0 flex-1">
         {mount ? (

@@ -1,9 +1,10 @@
 /**
  * CanvasPanel against the real canvas store: what each mount phase renders,
- * the iframe URL, the phone-width gate, and theme/locale re-sends.
+ * the iframe URL, the phone-width gate, theme/locale re-sends, and the
+ * unsaved dot, Save button and save error.
  */
 
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { phoneWidth } = vi.hoisted(() => ({ phoneWidth: { value: false } }))
@@ -16,7 +17,7 @@ vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 
 import type { CanvasOpenInfo } from '@shared/types/canvas.types'
 import { COLOR_THEME_CHANGED_EVENT } from '@/lib/themes'
-import { type CanvasPhase, useCanvasStore } from '@/stores/canvas-store'
+import { type CanvasPhase, type CanvasSession, useCanvasStore } from '@/stores/canvas-store'
 import { CanvasPanel } from './CanvasPanel'
 
 const PROJECT = 'proj-1'
@@ -26,13 +27,24 @@ const INFO: CanvasOpenInfo = {
   baseUrl: 'http://127.0.0.1:5199',
   canvasToken: 'cafe',
   pinTag: 'termul-v1',
-  docKey: DOC
+  docKey: DOC,
+  mountSeq: 4
 }
 
-function setPhase(phase: CanvasPhase): void {
+function setPhase(phase: CanvasPhase, projection: Partial<CanvasSession> = {}): void {
   useCanvasStore.setState({
     sessions: {
-      [PROJECT]: { projectId: PROJECT, docPath: DOC, phase, dirty: false, contentVersion: null }
+      [PROJECT]: {
+        projectId: PROJECT,
+        docPath: DOC,
+        phase,
+        dirty: false,
+        contentVersion: null,
+        savedVersion: null,
+        saving: false,
+        saveError: null,
+        ...projection
+      }
     }
   })
 }
@@ -108,5 +120,32 @@ describe('CanvasPanel', () => {
     expect(pushTheme).toHaveBeenCalledWith(PROJECT)
     expect(pushLocale).toHaveBeenCalledWith(PROJECT)
     expect(screen.getByTitle('Canvas — design.figcraft')).toBe(iframe)
+  })
+
+  it('shows the unsaved dot while dirty and saves on the Save button', () => {
+    const saveCanvas = vi.fn().mockResolvedValue(true)
+    setPhase({ kind: 'ready', mount: { mountSeq: 4, info: INFO } }, { dirty: true })
+    useCanvasStore.setState({ saveCanvas })
+    renderPanel()
+
+    expect(screen.getByLabelText('Unsaved changes')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Save canvas' }))
+    expect(saveCanvas).toHaveBeenCalledWith(PROJECT)
+  })
+
+  it('clears the dot when saved, disables Save while loading or saving, shows a save error', () => {
+    setPhase({ kind: 'loading', mount: { mountSeq: 4, info: INFO } })
+    const view = renderPanel()
+    expect(screen.queryByLabelText('Unsaved changes')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save canvas' }).hasAttribute('disabled')).toBe(true)
+    view.unmount()
+
+    setPhase(
+      { kind: 'ready', mount: { mountSeq: 4, info: INFO } },
+      { saving: true, saveError: 'could not write the canvas document: disk full' }
+    )
+    renderPanel()
+    expect(screen.getByRole('button', { name: 'Save canvas' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByTestId('canvas-save-error').getAttribute('title')).toContain('disk full')
   })
 })

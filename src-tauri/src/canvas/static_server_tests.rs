@@ -67,7 +67,7 @@ fn open_canvas_mints_one_token_per_project_until_close() {
             .granted()
     };
 
-    let first = open_canvas(base.clone(), project, "C:/p/design.figcraft".into()).unwrap();
+    let first = open_canvas(base.clone(), project, "C:/p/design.figcraft".into(), None).unwrap();
     let wire = serde_json::to_value(&first).unwrap();
     assert_eq!(
         wire,
@@ -77,6 +77,7 @@ fn open_canvas_mints_one_token_per_project_until_close() {
             "canvasToken": first.canvas_token,
             "pinTag": "termul-test",
             "docKey": "C:/p/design.figcraft",
+            "mountSeq": first.mount_seq,
         })
     );
     assert!(
@@ -84,17 +85,21 @@ fn open_canvas_mints_one_token_per_project_until_close() {
         "the minted ct opens the bundle"
     );
 
-    let again = open_canvas(base.clone(), project, "C:/p/other.figcraft".into()).unwrap();
+    let again = open_canvas(base.clone(), project, "C:/p/other.figcraft".into(), None).unwrap();
     assert_eq!(
         again.canvas_token, first.canvas_token,
         "a repeat open keeps the mounted iframe's URL valid"
+    );
+    assert!(
+        again.mount_seq > first.mount_seq,
+        "every open is a new mount with a new mountSeq"
     );
 
     close_canvas(project);
     assert!(!authorized(&first.canvas_token), "close revokes the token");
     close_canvas(project);
 
-    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into()).unwrap();
+    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), None).unwrap();
     assert_ne!(reopened.canvas_token, first.canvas_token);
     assert!(authorized(&reopened.canvas_token));
     close_canvas(project);

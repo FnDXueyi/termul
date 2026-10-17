@@ -1464,7 +1464,8 @@ describe('Parity Checklist Automation', () => {
 
   // Canvas mode (figcraft embed): one facade over two transports (Tauri
   // commands `canvas_*` and `POST /canvas/*`, both backed by
-  // `canvas::static_server::{open_canvas, close_canvas}`), the phone-width
+  // `canvas::static_server::{open_canvas, close_canvas}` and
+  // `canvas::persistence` through `canvas_mounts()`), the phone-width
   // shell gated by a typed UNSUPPORTED_SURFACE, and a renderer that never
   // branches on surface. The Rust suite covers the route behaviour.
   describe('Canvas parity (figcraft canvas mode)', () => {
@@ -1477,7 +1478,11 @@ describe('Parity Checklist Automation', () => {
     /** Every facade method, its Tauri command and its web route. */
     const CANVAS_FACADE = {
       open: { command: 'canvas_open', route: '/canvas/open' },
-      close: { command: 'canvas_close', route: '/canvas/close' }
+      close: { command: 'canvas_close', route: '/canvas/close' },
+      readDocument: { command: 'canvas_read_document', route: '/canvas/read-document' },
+      documentLoaded: { command: 'canvas_document_loaded', route: '/canvas/document-loaded' },
+      dirtyChanged: { command: 'canvas_dirty_changed', route: '/canvas/dirty-changed' },
+      writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' }
     } as const
 
     it('the adapters exist and export the factory and the singleton', () => {
@@ -1506,13 +1511,18 @@ describe('Parity Checklist Automation', () => {
         'utf-8'
       )
       const apiBody = types.match(/export interface CanvasApi \{([\s\S]*?)\n\}/)?.[1] ?? ''
-      const declared = [...apiBody.matchAll(/^\s+(\w+):/gm)].map((m) => m[1]).sort()
+      const declared = [...apiBody.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]).sort()
       expect(declared).toEqual(Object.keys(CANVAS_FACADE).sort())
 
       const tauri = readFileSync(TauriAdapter, 'utf-8')
       const web = readFileSync(WebAdapter, 'utf-8')
       const commands = readFileSync(join(RustRoot, 'commands', 'canvas.rs'), 'utf-8')
       const routes = readFileSync(join(RustRoot, 'web', 'canvas_api.rs'), 'utf-8')
+      const persistenceRoutes = readFileSync(
+        join(RustRoot, 'web', 'canvas_persistence_api.rs'),
+        'utf-8'
+      )
+      const router = readFileSync(join(RustRoot, 'web', 'router.rs'), 'utf-8')
       const lib = readFileSync(join(RustRoot, 'lib.rs'), 'utf-8')
       for (const [method, { command, route }] of Object.entries(CANVAS_FACADE)) {
         expect(tauri, `tauri adapter ${method}`).toMatch(new RegExp(`\\b${method}\\s*\\(`))
@@ -1523,7 +1533,16 @@ describe('Parity Checklist Automation', () => {
           new RegExp(`pub async fn ${command}\\(`)
         )
         expect(lib, `${command} is registered`).toContain(`commands::${command},`)
-        expect(routes, `web route ${route}`).toContain(`.route("${route}"`)
+        expect(routes + persistenceRoutes, `web route ${route}`).toMatch(
+          new RegExp(`\\.route\\(\\s*"${route}"`)
+        )
+        expect(router, `${route} stays behind the bearer gate`).toContain(
+          `"${route.slice('/canvas/'.length)}"`
+        )
+      }
+      expect(routes).toContain('.merge(crate::web::canvas_persistence_api::persistence_routes())')
+      for (const rust of [commands, persistenceRoutes]) {
+        expect(rust).toContain('canvas_mounts()')
       }
       for (const rust of [commands, routes]) {
         expect(rust).toMatch(/open_canvas\(/)
