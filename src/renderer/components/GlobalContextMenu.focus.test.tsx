@@ -94,4 +94,56 @@ describe.each([
       expect([el.selectionStart, el.selectionEnd]).toEqual([0, 'hello world'.length])
     })
   })
+
+  it('starts the clipboard write inside the select event, on the restored field', () => {
+    const el = openMenuOnSelection([0, 5])
+    const writeContext: Array<[boolean, string]> = []
+    clipboard.writeText.mockImplementation(() => {
+      writeContext.push([
+        document.activeElement === el,
+        el.value.slice(el.selectionStart ?? 0, el.selectionEnd ?? 0)
+      ])
+      return Promise.resolve({ success: true })
+    })
+
+    choose('Copy')
+
+    expect(writeContext).toEqual([[true, 'hello']])
+  })
+
+  it('starts the clipboard read inside the select event, on the restored field', () => {
+    const el = openMenuOnSelection([0, 5])
+    const readContext: boolean[] = []
+    clipboard.readText.mockImplementation(() => {
+      readContext.push(document.activeElement === el)
+      return Promise.resolve({ success: true, data: 'PASTED' })
+    })
+
+    choose('Paste')
+
+    expect(readContext).toEqual([true])
+  })
+
+  describe('while the menu is still playing its exit animation', () => {
+    beforeEach(() => {
+      const style = document.createElement('style')
+      style.textContent = '[data-state="closed"] { animation-name: leave; animation-duration: 1s; }'
+      document.head.appendChild(style)
+      return () => style.remove()
+    })
+
+    it('applies the chosen action instead of dropping it when the menu is reopened', async () => {
+      const el = openMenuOnSelection([0, 5])
+
+      choose('Cut')
+      await waitFor(() => expect(el.value).toBe(' world'))
+      expect(document.querySelector('[role="menu"]')).not.toBeNull()
+
+      fireEvent.contextMenu(el)
+
+      expect(clipboard.writeText).toHaveBeenCalledTimes(1)
+      expect(clipboard.writeText).toHaveBeenCalledWith('hello')
+      expect(el.value).toBe(' world')
+    })
+  })
 })
