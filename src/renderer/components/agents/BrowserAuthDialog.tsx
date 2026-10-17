@@ -13,6 +13,8 @@
  * web client keeps the paste-back copy: the callback listener is on the
  * server, not on the user's device. Factory Droid still auto-opens on that
  * web client, because its name is known before the registry config is saved.
+ * Auto-open applies only to the URL captured while the user's own sign-in is
+ * in flight (`autoOpenBrowserUrl`); any other capture waits for a click.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -231,6 +233,7 @@ export function BrowserAuthDialogHost(): React.JSX.Element {
   const pendingBrowserOpen = useAcpStore((s) => s.pendingBrowserOpen)
   const configToLiveAgent = useAcpStore((s) => s.configToLiveAgent)
   const agentConfigs = useAcpStore((s) => s.agentConfigs)
+  const autoOpenBrowserUrl = useAcpStore((s) => s.autoOpenBrowserUrl)
   const clearPendingBrowserOpen = useAcpStore((s) => s.clearPendingBrowserOpen)
   // Desktop can finish the localhost callback in the system browser. The
   // web client cannot: that callback lands on the host, so paste-back stays.
@@ -259,7 +262,10 @@ export function BrowserAuthDialogHost(): React.JSX.Element {
           agentId={agentId}
           agentName={agentNames[agentId] ?? 'Agent'}
           url={url}
-          autoOpen={desktopCanOpenBrowser || agentNames[agentId] === 'Factory Droid'}
+          autoOpen={
+            autoOpenBrowserUrl[agentId] === url &&
+            (desktopCanOpenBrowser || agentNames[agentId] === 'Factory Droid')
+          }
           onDismiss={() => clearPendingBrowserOpen(agentId)}
         />
       ))}

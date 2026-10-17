@@ -93,6 +93,13 @@ export function isAnyAgentAuthInFlight(): boolean {
   return inFlightAuth.size > 0
 }
 
+function isAgentAuthInFlight(agentId: AgentId): boolean {
+  for (const key of inFlightAuth.keys()) {
+    if (key.startsWith(`${agentId}\0`)) return true
+  }
+  return false
+}
+
 /** Drop every in-flight authenticate for a torn-down agent (any method). */
 function dropInFlightAuthForAgent(agentId: AgentId): void {
   for (const key of inFlightAuth.keys()) {
@@ -519,6 +526,7 @@ type AgentSliceState = Pick<
   | 'agents'
   | 'agentStatus'
   | 'pendingBrowserOpen'
+  | 'autoOpenBrowserUrl'
   | 'pendingBrowserConsents'
   | 'pendingRestartVersions'
   | 'spawnAgent'
@@ -567,6 +575,7 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   agents: {},
   agentStatus: {},
   pendingBrowserOpen: {},
+  autoOpenBrowserUrl: {},
   pendingBrowserConsents: {},
 
   pendingRestartVersions: {},
@@ -678,10 +687,12 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
   clearPendingBrowserOpen: (agentId) => {
     earlyBrowserOpen.delete(agentId)
     set((s) => {
-      if (!(agentId in s.pendingBrowserOpen)) return {}
+      if (!(agentId in s.pendingBrowserOpen) && !(agentId in s.autoOpenBrowserUrl)) return {}
       const pendingBrowserOpen = { ...s.pendingBrowserOpen }
+      const autoOpenBrowserUrl = { ...s.autoOpenBrowserUrl }
       delete pendingBrowserOpen[agentId]
-      return { pendingBrowserOpen }
+      delete autoOpenBrowserUrl[agentId]
+      return { pendingBrowserOpen, autoOpenBrowserUrl }
     })
   },
 
@@ -1193,7 +1204,19 @@ export const createAgentSlice: StateCreator<AcpState, [], [], AgentSliceState> =
       })
       return
     }
-    set((s) => ({ pendingBrowserOpen: { ...s.pendingBrowserOpen, [e.agentId]: e.url } }))
+    // Only a capture that lands while this agent's own sign-in is waiting may
+    // auto-open. Anything else (including a buffered pre-registration
+    // capture, which predates any authenticate dispatch) waits for a click.
+    const signInRequested = isAgentAuthInFlight(e.agentId)
+    set((s) => {
+      const autoOpenBrowserUrl = { ...s.autoOpenBrowserUrl }
+      if (signInRequested) autoOpenBrowserUrl[e.agentId] = e.url
+      else delete autoOpenBrowserUrl[e.agentId]
+      return {
+        pendingBrowserOpen: { ...s.pendingBrowserOpen, [e.agentId]: e.url },
+        autoOpenBrowserUrl
+      }
+    })
   },
 
   _onBrowserAgentTab: (e) => {

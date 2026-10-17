@@ -347,6 +347,15 @@ export interface AcpState {
    */
   pendingBrowserOpen: Record<AgentId, string>
   /**
+   * The `pendingBrowserOpen` URL the user's own sign-in asked for: the host
+   * may open the system browser for it without a click. Set only for a
+   * capture that arrives while an `authenticate` call is in flight for that
+   * agent. The shim shadows `open`/`xdg-open` for the agent and its children,
+   * so any other capture (a prompt-injected `open https://evil`) stays
+   * show-and-click. Cleared with `pendingBrowserOpen`.
+   */
+  autoOpenBrowserUrl: Record<AgentId, string>
+  /**
    * Agent browser automation consent prompts keyed by `requestId`
    * (`acp:browser_consent_request`). Once-per-session grant; the dialog
    * resolves each entry via `respondBrowserConsent`. Entries are host-side
