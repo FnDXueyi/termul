@@ -284,11 +284,12 @@ fn repo_with_worktree(dir: &tempfile::TempDir, name: &str) -> Option<(PathBuf, P
         git(&repo, &[ "config", kv[0], kv[1]]);
     }
     git(&repo, &["commit", "--allow-empty", "-qm", "init"]);
-    let repo = std::fs::canonicalize(repo).unwrap();
+    // git rejects the `\\?\` verbatim paths `canonicalize` yields on Windows,
+    // so it gets the plain path and the canonical forms are taken afterwards.
     let worktree = repo.join(".termul/worktrees").join(name);
     std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
     git(&repo, &["worktree", "add", "-q", "-b", name, worktree.to_str().unwrap()]);
-    Some((repo, std::fs::canonicalize(worktree).unwrap()))
+    Some((std::fs::canonicalize(repo).unwrap(), std::fs::canonicalize(worktree).unwrap()))
 }
 
 fn code_of<T>(result: &Result<IpcResult<T>, String>) -> Option<String> {
