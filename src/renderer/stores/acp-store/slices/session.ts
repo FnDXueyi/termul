@@ -67,6 +67,7 @@ import {
   finalizeStreaming,
   isResumeFailureError,
   lastErrorFromPersistedTurn,
+  lastOwnUserPromptBlocks,
   mergeSessionIndexEntries,
   normalizeUserMessages,
   openTurnPromptSeq,
@@ -1887,16 +1888,7 @@ export const createSessionSlice: StateCreator<AcpState, [], [], SessionSliceStat
       if (!reopened || reopened.status === 'closed') return
       if (options?.resend === false) return
       // Re-send the last user prompt to produce a fresh assistant turn (retry).
-      // `switch-splice:` records are projected pre-switch history — retrying
-      // one would re-send the OLD agent's prompt to the new session.
-      const msgs = get().messages[sessionId] ?? []
-      let lastUserBlocks: ContentBlock[] | null = null
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user' && !msgs[i].id.startsWith(SWITCH_SPLICE_ID_PREFIX)) {
-          lastUserBlocks = msgs[i].blocks
-          break
-        }
-      }
+      const lastUserBlocks = lastOwnUserPromptBlocks(get().messages[sessionId] ?? [])
       if (!lastUserBlocks || lastUserBlocks.length === 0) return
       // Sanitized WIRE blocks: the stored display text carries private-use
       // pill sentinels (command/skill/file tokens); map each text block to

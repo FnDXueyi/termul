@@ -712,7 +712,8 @@ pub(super) fn elapsed_ms(epoch: tokio::time::Instant) -> u64 {
 /// `AuthRequired` (-32000) failures — tagged `"ACP_AUTH_REQUIRED: …"` at the
 /// manager boundary, or the bare default `"Authentication required"` message
 /// (exact match) for pre-collapsed paths — → `AgentAuthRequired` (Story 7);
-/// `"unknown agent: …"` / `"unknown permission request: …"` → `NotFound`;
+/// `"unknown agent: …"` / `"unknown permission request: …"` and agent-side
+/// `ResourceNotFound` (-32002, tagged `"ACP_RESOURCE_NOT_FOUND: …"`) → `NotFound`;
 /// capability-gate failures (`"agent does not support …"`) → `Unsupported`;
 /// `"ACP_PROVIDER_*: …"` provider failures → `provider_quota_exceeded` /
 /// `provider_session_limit` / `provider_request_rejected`.
@@ -748,6 +749,12 @@ pub(super) fn acp_err_to_reply(id: String, err: String) -> WsReply {
     // live agent mid-turn.
     if err.starts_with(crate::acp::manager::ACP_SESSION_OWNED_BY_OTHER) {
         return WsReply::err(id, WsErrorCode::SessionOwnedByOther, err);
+    }
+    if let Some(message) = err
+        .strip_prefix(crate::acp::manager::ACP_RESOURCE_NOT_FOUND_PREFIX)
+        .and_then(|rest| rest.strip_prefix(": "))
+    {
+        return WsReply::err(id, WsErrorCode::NotFound, message.to_string());
     }
     let code = if err
         .strip_prefix(crate::acp::manager::ACP_AUTH_REQUIRED_PREFIX)
