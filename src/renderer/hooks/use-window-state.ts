@@ -1,6 +1,7 @@
 import { PersistenceKeys, type WindowState } from '@shared/types/persistence.types'
 import { useEffect, useRef, useState } from 'react'
 import { persistenceApi } from '@/lib/api'
+import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { logFrontendError } from '@/lib/log-api'
 import { cleanupTauriListener, isTauriContext } from '@/lib/tauri-runtime'
 import { isWaylandSession } from '@/lib/tauri-wayland'
@@ -13,7 +14,6 @@ import {
   primaryMonitor
 } from '@/lib/tauri-window'
 import { hasAppCloseOwner } from '@/lib/tauri-window-api'
-import { registerWindowStateCloseWriter } from '@/lib/window-state-close-flush'
 
 const DEFAULT_WIDTH = 1200
 const DEFAULT_HEIGHT = 800
@@ -25,26 +25,6 @@ const MIN_VISIBLE_PIXELS = 100
  * still flips so `TauriApp` can show the window.
  */
 export const WINDOW_RESTORE_TIMEOUT_MS = 1500
-
-export const WINDOW_STATE_CLOSE_TIMEOUT_MS = 1000
-
-async function persistWithinCloseTimeout(write: () => Promise<void>): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), WINDOW_STATE_CLOSE_TIMEOUT_MS)
-  })
-  const outcome = await Promise.race([write().then(() => 'done' as const), timeout]).finally(() =>
-    clearTimeout(timer)
-  )
-  if (outcome === 'timeout') {
-    console.warn(`Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms`)
-    void logFrontendError({
-      level: 'warn',
-      source: 'use-window-state',
-      message: `Close-time window state write timed out after ${WINDOW_STATE_CLOSE_TIMEOUT_MS}ms; closing anyway`
-    })
-  }
-}
 
 interface LogicalRect {
   x: number
@@ -330,8 +310,8 @@ export function useWindowState(): boolean {
 
       if (disposed) return
       cleanups = registerListeners()
-      unregisterCloseWriter = registerWindowStateCloseWriter(() =>
-        persistWithinCloseTimeout(persistImmediateShared)
+      unregisterCloseWriter = registerCloseWriter(() =>
+        withinCloseTimeout('use-window-state', 'window state', persistImmediateShared)
       )
     }
 
