@@ -28,12 +28,20 @@ const MAX_REPLY_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct Bridge {
     config: ChildConfig,
+    /// The agent tool this bridge serves, named in the gateway's logs.
+    tool: Option<String>,
 }
 
 impl Bridge {
     #[must_use]
     pub fn new(config: ChildConfig) -> Self {
-        Self { config }
+        Self { config, tool: None }
+    }
+
+    #[must_use]
+    pub fn with_tool(mut self, tool: &str) -> Self {
+        self.tool = Some(tool.to_string());
+        self
     }
 
     fn request(&self, method: &str, params: &Value) -> Result<Value, CanvasError> {
@@ -50,6 +58,7 @@ impl Bridge {
             ask: None,
             canvas_method: Some(method.to_string()),
             canvas_params: Some(params.to_string()),
+            canvas_tool: self.tool.clone(),
         };
         let reply = exchange(self.config.port, &frame).map_err(|error| {
             CanvasError::new(
