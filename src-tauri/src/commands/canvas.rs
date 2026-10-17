@@ -16,6 +16,7 @@ use tauri::{AppHandle, Manager, State};
 use super::{sanitize_log_field, validate_project_path, IpcResult};
 use crate::canvas::mcp_proxy;
 use crate::canvas::pool::CanvasDaemonPool;
+use crate::canvas::static_server::{CanvasBundleBase, StaticServer, CODE_BUNDLE_LISTENER_DOWN};
 use crate::canvas::{CanvasOpenInfo, CanvasStatus, CanvasError, CODE_DAEMON_DOWN};
 
 /// Serialize a webview URL's origin manually (`scheme://host[:port]`) so
@@ -167,6 +168,30 @@ pub async fn canvas_status(
     pool: State<'_, Arc<CanvasDaemonPool>>,
 ) -> Result<IpcResult<CanvasStatus>, String> {
     Ok(IpcResult::success(pool.status()))
+}
+
+/// `canvas_bundle_base` — the loopback base URL the figcraft bundle loads
+/// from plus the bundle tag this build pins. Waits briefly for the listener,
+/// which binds asynchronously at startup; typed `BUNDLE_LISTENER_DOWN` when
+/// it is down. The web twin is `GET /canvas/bundle-base` (same shape, empty
+/// same-origin base).
+#[tauri::command]
+pub async fn canvas_bundle_base(
+    server: State<'_, Arc<StaticServer>>,
+) -> Result<IpcResult<CanvasBundleBase>, String> {
+    match server
+        .wait_for_base(std::time::Duration::from_secs(5))
+        .await
+    {
+        Some(base) => Ok(IpcResult::success(base)),
+        None => {
+            log::warn!("[canvas] bundle base requested while the listener is down");
+            Ok(IpcResult::error(
+                "canvas bundle listener is not running",
+                CODE_BUNDLE_LISTENER_DOWN,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

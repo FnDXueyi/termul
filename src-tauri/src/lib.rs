@@ -1341,6 +1341,13 @@ pub fn run() {
             let canvas_pool = Arc::new(crate::canvas::pool::CanvasDaemonPool::real());
             app.manage(canvas_pool.clone());
 
+            // figcraft canvas bundle: the 127.0.0.1:0 static listener the
+            // canvas iframe loads from (restarted if it dies).
+            crate::canvas::static_server::log_bundle_status();
+            let canvas_static_server = crate::canvas::static_server::StaticServer::new();
+            app.manage(canvas_static_server.clone());
+            tauri::async_runtime::spawn(canvas_static_server.run());
+
             // Load persisted agentation enabled preference (issue #451 CodeRabbit).
             // Falls back to true (enabled by default) when no stored value exists.
             if let Ok(store) = handle.store("settings.json") {
@@ -2011,6 +2018,7 @@ pub fn run() {
             commands::canvas_close,
             commands::canvas_save,
             commands::canvas_status,
+            commands::canvas_bundle_base,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
