@@ -1,6 +1,7 @@
 import { PersistenceKeys, type WindowState } from '@shared/types/persistence.types'
 import { useEffect, useRef, useState } from 'react'
 import { persistenceApi } from '@/lib/api'
+import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { logFrontendError } from '@/lib/log-api'
 import { cleanupTauriListener, isTauriContext } from '@/lib/tauri-runtime'
 import { isWaylandSession } from '@/lib/tauri-wayland'
@@ -13,7 +14,6 @@ import {
   primaryMonitor
 } from '@/lib/tauri-window'
 import { hasAppCloseOwner } from '@/lib/tauri-window-api'
-import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 
 const DEFAULT_WIDTH = 1200
 const DEFAULT_HEIGHT = 800

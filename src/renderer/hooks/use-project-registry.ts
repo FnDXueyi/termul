@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { getAcpTransport } from '@/lib/acp-transport'
 import { readActiveProject } from '@/lib/active-project'
 import { filesystemApi } from '@/lib/api'
+import { registerCloseWriter, withinCloseTimeout } from '@/lib/close-flush'
 import { importLegacyProjects } from '@/lib/legacy-project-import'
 import { logFrontendError } from '@/lib/log-api'
 import {
@@ -119,10 +120,13 @@ export const PREFS_SAVE_RETRY_MS = [1000, 5000, 30000]
  */
 function createPrefsSaver(isCancelled: () => boolean): {
   save: (projects: Project[], groups: ProjectGroup[], previousProjects: Project[]) => void
+  flush: () => Promise<void>
   cancel: () => void
 } {
   let retryTimer: ReturnType<typeof setTimeout> | undefined
+  let retryDueAt = 0
   let failures = 0
+  let gaveUp = false
 
   function cancel(): void {
     if (retryTimer) clearTimeout(retryTimer)
@@ -130,9 +134,11 @@ function createPrefsSaver(isCancelled: () => boolean): {
   }
 
   function scheduleRetry(error: unknown): void {
-    if (isCancelled() || retryTimer) return
+    if (isCancelled()) return
     const delay = PREFS_SAVE_RETRY_MS[failures]
     if (delay === undefined) {
+      if (retryTimer) return
+      gaveUp = true
       logFailure(
         'persistProjectPrefs',
         `saving the project prefs failed ${failures + 1} times, giving up until the next change`,
@@ -141,12 +147,17 @@ function createPrefsSaver(isCancelled: () => boolean): {
       )
       return
     }
+    // A newer failed save restarts the ladder, so its retry may be due sooner
+    // than the long one an older failure armed.
+    if (retryTimer && retryDueAt <= Date.now() + delay) return
+    cancel()
     failures++
     logFailure(
       'persistProjectPrefs',
       `saving the project prefs failed, retrying in ${delay} ms`,
       error
     )
+    retryDueAt = Date.now() + delay
     retryTimer = setTimeout(() => {
       retryTimer = undefined
       const state = useProjectStore.getState()
@@ -154,11 +165,16 @@ function createPrefsSaver(isCancelled: () => boolean): {
     }, delay)
   }
 
-  function attempt(projects: Project[], groups: ProjectGroup[], previousProjects: Project[]): void {
+  function attempt(
+    projects: Project[],
+    groups: ProjectGroup[],
+    previousProjects: Project[],
+    immediate = false
+  ): Promise<void> {
     // A success must not cancel the timer: it may belong to a newer save that
     // failed while this one was in flight. A retry for state that already
     // landed finds the same signature and writes nothing.
-    persistProjectPrefs(projects, groups, previousProjects).then(() => {
+    return persistProjectPrefs(projects, groups, previousProjects, { immediate }).then(() => {
       failures = 0
     }, scheduleRetry)
   }
@@ -166,7 +182,17 @@ function createPrefsSaver(isCancelled: () => boolean): {
   return {
     save: (projects, groups, previousProjects) => {
       failures = 0
-      attempt(projects, groups, previousProjects)
+      gaveUp = false
+      void attempt(projects, groups, previousProjects)
+    },
+    // A quit or a hidden page cannot wait for the backoff: write the state a
+    // failed save left unsaved now.
+    flush: async () => {
+      if (isCancelled() || !(retryTimer || gaveUp)) return
+      cancel()
+      gaveUp = false
+      const state = useProjectStore.getState()
+      await attempt(state.projects, state.groups, [], true)
     },
     cancel
   }
@@ -223,6 +249,15 @@ export function useProjectRegistry(): void {
     let unwatch: (() => void) | undefined
     let unsubscribeStore: (() => void) | undefined
     const saver = createPrefsSaver(() => cancelled)
+    const flushOnHide = (): void => {
+      if (document.visibilityState === 'hidden') void saver.flush()
+    }
+    const flushOnPageHide = (): void => void saver.flush()
+    document.addEventListener('visibilitychange', flushOnHide)
+    window.addEventListener('pagehide', flushOnPageHide)
+    const unregisterCloseWriter = registerCloseWriter(() =>
+      withinCloseTimeout('use-project-registry', 'project prefs', saver.flush)
+    )
 
     async function start(): Promise<void> {
       if (isTauriContext()) {
@@ -326,6 +361,9 @@ export function useProjectRegistry(): void {
       unwatch?.()
       unsubscribeStore?.()
       saver.cancel()
+      document.removeEventListener('visibilitychange', flushOnHide)
+      window.removeEventListener('pagehide', flushOnPageHide)
+      unregisterCloseWriter()
     }
   }, [webAuthGateOk])
 }

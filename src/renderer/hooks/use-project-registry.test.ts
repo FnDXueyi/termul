@@ -66,10 +66,10 @@ vi.mock('@/stores/shell-layout-store', () => ({
 }))
 
 import { persistenceApi, secureStorageApi } from '@/lib/api'
+import { CLOSE_WRITE_TIMEOUT_MS, runCloseWriters } from '@/lib/close-flush'
 import { _resetProjectPrefsForTests } from '@/lib/project-prefs'
 import { useProjectStore } from '@/stores/project-store'
 import { useRemoteStatusStore } from '@/stores/remote-status-store'
-import { CLOSE_WRITE_TIMEOUT_MS, runCloseWriters } from '@/lib/close-flush'
 import { PREFS_SAVE_RETRY_MS, useProjectRegistry } from './use-project-registry'
 
 function summary(id: string, extra: Partial<ProjectSummary> = {}): ProjectSummary {

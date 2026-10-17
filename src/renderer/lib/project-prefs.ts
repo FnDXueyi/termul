@@ -309,8 +309,14 @@ async function prepareRecord(
   }
 }
 
-async function writeRecord(signature: string, record: ProjectPrefsRecord): Promise<void> {
-  const written = await persistenceApi.writeDebounced(PersistenceKeys.projectPrefs, record)
+async function writeRecord(
+  signature: string,
+  record: ProjectPrefsRecord,
+  immediate: boolean
+): Promise<void> {
+  const written = immediate
+    ? await persistenceApi.write(PersistenceKeys.projectPrefs, record)
+    : await persistenceApi.writeDebounced(PersistenceKeys.projectPrefs, record)
   if (!written.success) {
     releaseSignature(signature)
     throw new Error(`project prefs write failed: ${written.error ?? 'unknown error'}`)
@@ -327,15 +333,20 @@ let preparing: Promise<unknown> = Promise.resolve()
  * desktop, and a later save that overtook an earlier one there would have its
  * newer layout replaced by the older one at the debounced write. The write
  * itself is not serialized, so a burst of saves still collapses into one.
+ * `immediate` skips the debounce, for a save that must land before the app or
+ * page goes away.
  */
 export function persistProjectPrefs(
   projects: Project[],
   groups: ProjectGroup[],
-  previousProjects: Project[]
+  previousProjects: Project[],
+  options?: { immediate?: boolean }
 ): Promise<void> {
   const prepared = preparing.then(() => prepareRecord(projects, groups, previousProjects))
   preparing = prepared.catch(() => undefined)
-  return prepared.then((save) => (save ? writeRecord(save.signature, save.record) : undefined))
+  return prepared.then((save) =>
+    save ? writeRecord(save.signature, save.record, options?.immediate ?? false) : undefined
+  )
 }
 
 /**
