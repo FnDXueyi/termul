@@ -90,7 +90,7 @@ fn expired_token_with_refresh_is_treatable_as_expired() {
 /// An MCP server that publishes no OAuth metadata, so a client falls back to
 /// its legacy `/token` endpoint. Answers every token request with `body` and
 /// records the form bodies it received.
-async fn serve_token_endpoint(
+pub(crate) async fn serve_token_endpoint(
     body: serde_json::Value,
 ) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -114,7 +114,7 @@ async fn serve_token_endpoint(
     (url, requests)
 }
 
-fn expired_token_with_refresh(url: &str) -> StoredToken {
+pub(crate) fn expired_token_with_refresh(url: &str) -> StoredToken {
     StoredToken {
         access_token: "stale-access".into(),
         refresh_token: Some("stored-refresh".into()),

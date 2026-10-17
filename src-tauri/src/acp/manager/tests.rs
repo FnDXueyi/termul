@@ -2803,3 +2803,38 @@ async fn close_waits_for_the_turn_terminator_and_gives_up_after_the_bound() {
     let error = await_turn_terminator(Some(never_rx)).await.unwrap_err();
     assert!(error.contains("timed out"), "{error}");
 }
+
+/// Issue #1345: a new chat refreshes an expired MCP OAuth token and attaches
+/// the fresh bearer instead of deleting the stored refresh token.
+#[tokio::test]
+async fn new_session_injects_a_refreshed_oauth_token() {
+    use crate::acp::mcp_oauth;
+    let (url, _requests) = mcp_oauth::tests::serve_token_endpoint(serde_json::json!({
+        "access_token": "fresh-access",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }))
+    .await;
+    mcp_oauth::store_token(&url, &mcp_oauth::tests::expired_token_with_refresh(&url)).unwrap();
+
+    let servers = inject_oauth_tokens(vec![McpServer::Http(
+        agent_client_protocol::schema::v1::McpServerHttp::new("oauth-server", url.clone()),
+    )])
+    .await;
+    let stored = mcp_oauth::load_stored_token(&url).unwrap();
+    mcp_oauth::delete_stored_token(&url).unwrap();
+
+    let McpServer::Http(http) = &servers[0] else {
+        panic!("the HTTP server stays an HTTP server");
+    };
+    let headers: Vec<(&str, &str)> = http
+        .headers
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect();
+    assert_eq!(headers, vec![("Authorization", "Bearer fresh-access")]);
+    assert_eq!(
+        stored.and_then(|token| token.refresh_token).as_deref(),
+        Some("stored-refresh")
+    );
+}
