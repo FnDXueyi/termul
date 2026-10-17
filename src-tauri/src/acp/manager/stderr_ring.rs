@@ -41,6 +41,12 @@ static NAMED_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid named secret pattern")
 });
 
+/// `Cookie:` / `Set-Cookie:` header values, masked to the end of the line
+/// because one header carries several `name=value` pairs.
+static COOKIE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b((?:set-)?cookie["']?\s*[:=]\s*)[^\r\n]+"#).expect("valid cookie pattern")
+});
+
 /// Well-known credential shapes that appear without a name in front of them.
 static TOKEN_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -49,9 +55,11 @@ static TOKEN_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid token shape pattern")
 });
 
-/// Mask everything in `line` that looks like a key, token or bearer value.
+/// Mask everything in `line` that looks like a key, token, cookie or bearer
+/// value.
 pub(super) fn redact_line(line: &str) -> String {
     let masked = BEARER.replace_all(line, format!("$1 {MASK}"));
+    let masked = COOKIE.replace_all(&masked, format!("${{1}}{MASK}"));
     let masked = NAMED_SECRET.replace_all(&masked, format!("${{1}}{MASK}"));
     TOKEN_SHAPE.replace_all(&masked, MASK).into_owned()
 }

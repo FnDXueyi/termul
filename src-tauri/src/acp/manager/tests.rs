@@ -2679,6 +2679,19 @@ fn a_failed_turn_terminator_masks_a_secret_in_the_error_message() {
 }
 
 #[test]
+fn a_failed_turn_terminator_masks_a_cookie_in_the_error_message() {
+    let error = agent_client_protocol::Error::new(
+        -32603,
+        "upstream 401, sent Cookie: sid=9f82b5e7c4a69130; theme=dark",
+    );
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream 401, sent Cookie: [redacted]"
+    );
+}
+
+#[test]
 fn a_failed_turn_terminator_caps_a_huge_error_message() {
     let error = agent_client_protocol::Error::new(-32603, "x".repeat(100 * 1024));
     let terminator = failed_turn_terminator(error);

@@ -62,6 +62,7 @@ fn secret_looking_text_is_masked_before_storage() {
         r#"{"access_token": "abc.def.ghi-123456"}"#,
         "password = hunter2hunter2",
         "using ghp_0123456789abcdefghij0123456789abcdef now",
+        "Set-Cookie: session=7c1e0a9b2d4f; HttpOnly",
         "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     ] {
         ring.push(line);
@@ -73,6 +74,7 @@ fn secret_looking_text_is_masked_before_storage() {
         "abc.def.ghi-123456",
         "hunter2hunter2",
         "ghp_0123456789",
+        "7c1e0a9b2d4f",
         "eyJhbGciOi",
     ] {
         assert!(!tail.contains(fragment), "masked text kept {fragment}");
