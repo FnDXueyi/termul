@@ -184466,6 +184466,651 @@
           ]
         }
       ]
+    },
+    {
+      "type": "frame",
+      "id": "UdQQj",
+      "x": 15008,
+      "y": 25562,
+      "name": "Prefs v2 · App · Updates — update toast (bug and fix)",
+      "width": 1088,
+      "fill": "$bg",
+      "layout": "vertical",
+      "gap": 24,
+      "padding": 32,
+      "children": [
+        {
+          "type": "frame",
+          "id": "pperN",
+          "name": "Caption",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": 4,
+          "children": [
+            {
+              "type": "text",
+              "id": "jYeHR",
+              "name": "Kicker",
+              "fill": "$fg-dim",
+              "content": "PREFERENCES · REDESIGN · APP · UPDATES · UPDATE TOAST",
+              "fontFamily": "Inter",
+              "fontSize": 11,
+              "fontWeight": "600",
+              "letterSpacing": 0.6
+            },
+            {
+              "type": "text",
+              "id": "fJu0e",
+              "name": "Title",
+              "fill": "$fg",
+              "content": "Update available toast — text column collapses",
+              "fontFamily": "Inter",
+              "fontSize": 15,
+              "fontWeight": "600"
+            },
+            {
+              "type": "text",
+              "id": "XrpxL",
+              "name": "Note",
+              "fill": "$fg-muted",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "Sonner puts the icon, text, cancel button and action button in one row. Two buttons with icons leave the text about 30px, so the title and the long nightly version wrap one word per line. Fix: the text takes the full width, the buttons move to their own row on the right without icons (both fit in the 356px toast), and the version can break anywhere.",
+              "lineHeight": 1.45,
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "dNQZV",
+          "name": "Compare",
+          "width": "fill_container",
+          "gap": 40,
+          "children": [
+            {
+              "type": "frame",
+              "id": "j5ru8",
+              "name": "Before",
+              "layout": "vertical",
+              "gap": 10,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "UdqAI",
+                  "name": "Label",
+                  "fill": "$fg-muted",
+                  "content": "Before (as built)",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "frame",
+                  "id": "unTwU",
+                  "name": "Toast · before",
+                  "clip": true,
+                  "width": 356,
+                  "height": 300,
+                  "fill": "$card",
+                  "cornerRadius": 8,
+                  "stroke": "$ui-border",
+                  "strokeWidth": 1,
+                  "gap": 6,
+                  "padding": 16,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "Yabu1",
+                      "name": "Icon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "circle-check",
+                      "library": "lucide",
+                      "fill": "$t-green"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "f8ARH",
+                      "name": "Text (collapsed)",
+                      "width": 30,
+                      "layout": "vertical",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "WGXwm",
+                          "name": "Title",
+                          "fill": "$fg",
+                          "textGrowth": "fixed-width",
+                          "width": 30,
+                          "content": "Nightly Update available: version 0.5.0-nightly.20261018.ef9296d",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "p4N7Fu",
+                      "name": "Remind Me",
+                      "height": 24,
+                      "fill": "$popover",
+                      "cornerRadius": 4,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        8
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "JYGcO",
+                          "name": "Icon",
+                          "width": 14,
+                          "height": 14,
+                          "icon": "clock-3",
+                          "library": "lucide",
+                          "fill": "$fg-secondary"
+                        },
+                        {
+                          "type": "text",
+                          "id": "GLkcs",
+                          "name": "Label",
+                          "fill": "$fg-secondary",
+                          "content": "Remind Me",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "aanpl",
+                      "name": "Open Download Page",
+                      "height": 24,
+                      "fill": "$primary-fill",
+                      "cornerRadius": 4,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        8
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "CS7e7",
+                          "name": "Icon",
+                          "width": 14,
+                          "height": 14,
+                          "icon": "download",
+                          "library": "lucide",
+                          "fill": "#f8fafc"
+                        },
+                        {
+                          "type": "text",
+                          "id": "MBYMC",
+                          "name": "Label",
+                          "fill": "#f8fafc",
+                          "content": "Open Download Page",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "LenGy",
+              "name": "After",
+              "layout": "vertical",
+              "gap": 10,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "T7DAEo",
+                  "name": "Label",
+                  "fill": "$fg-muted",
+                  "content": "After (fix)",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "frame",
+                  "id": "GJAOw",
+                  "name": "Toast · Nightly update available",
+                  "width": 356,
+                  "fill": "$card",
+                  "cornerRadius": 8,
+                  "stroke": "$ui-border",
+                  "strokeWidth": 1,
+                  "effect": {
+                    "type": "shadow",
+                    "shadowType": "outer",
+                    "color": "#00000066",
+                    "offset": {
+                      "x": 0,
+                      "y": 8
+                    },
+                    "blur": 24
+                  },
+                  "layout": "vertical",
+                  "gap": 12,
+                  "padding": 16,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "bKJ3w",
+                      "name": "Content",
+                      "width": "fill_container",
+                      "gap": 10,
+                      "children": [
+                        {
+                          "type": "icon",
+                          "id": "w0cru",
+                          "name": "Icon",
+                          "width": 16,
+                          "height": 16,
+                          "icon": "circle-check",
+                          "library": "lucide",
+                          "fill": "$t-green"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "z2OTL",
+                          "name": "Text",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 2,
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "eLQOi",
+                              "name": "Title",
+                              "fill": "$fg",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Nightly update available",
+                              "lineHeight": 1.35,
+                              "fontFamily": "Inter",
+                              "fontSize": 13,
+                              "fontWeight": "500"
+                            },
+                            {
+                              "type": "text",
+                              "id": "zTnTK",
+                              "name": "Description",
+                              "fill": "$fg-muted",
+                              "textGrowth": "fixed-width",
+                              "width": "fill_container",
+                              "content": "Version 0.5.0-nightly.20261018.ef9296d. Open the download page to install it manually.",
+                              "lineHeight": 1.45,
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "VgVfO",
+                      "name": "Actions",
+                      "width": "fill_container",
+                      "gap": 8,
+                      "justifyContent": "end",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "lQgmW",
+                          "name": "Button · Remind me tomorrow",
+                          "height": 28,
+                          "fill": "$popover",
+                          "cornerRadius": 6,
+                          "gap": 6,
+                          "padding": [
+                            0,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "LFSc9",
+                              "name": "Label",
+                              "fill": "$fg-secondary",
+                              "content": "Remind me tomorrow",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "qBmEv",
+                          "name": "Button · Open download page",
+                          "height": 28,
+                          "fill": "$primary-fill",
+                          "cornerRadius": 6,
+                          "gap": 6,
+                          "padding": [
+                            0,
+                            10
+                          ],
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "ARy1O",
+                              "name": "Label",
+                              "fill": "#f8fafc",
+                              "content": "Open download page",
+                              "fontFamily": "Inter",
+                              "fontSize": 12,
+                              "fontWeight": "500"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "s0ue5N",
+          "name": "Variants label",
+          "fill": "$fg-muted",
+          "content": "Same layout for every update toast",
+          "fontFamily": "Inter",
+          "fontSize": 12,
+          "fontWeight": "600"
+        },
+        {
+          "type": "frame",
+          "id": "Je9mj",
+          "name": "Other variants",
+          "gap": 24,
+          "children": [
+            {
+              "type": "frame",
+              "id": "gYdZJ",
+              "name": "Toast · Update available",
+              "width": 356,
+              "fill": "$card",
+              "cornerRadius": 8,
+              "stroke": "$ui-border",
+              "strokeWidth": 1,
+              "effect": {
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#00000066",
+                "offset": {
+                  "x": 0,
+                  "y": 8
+                },
+                "blur": 24
+              },
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "eSbqI",
+                  "name": "Content",
+                  "width": "fill_container",
+                  "gap": 10,
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "w5be70",
+                      "name": "Icon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "circle-check",
+                      "library": "lucide",
+                      "fill": "$t-green"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "BrCa2",
+                      "name": "Text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "AzGmj",
+                          "name": "Title",
+                          "fill": "$fg",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Update available",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "text",
+                          "id": "oIit0",
+                          "name": "Description",
+                          "fill": "$fg-muted",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Version 0.4.22 is ready to download.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "n0hPOB",
+                  "name": "Actions",
+                  "width": "fill_container",
+                  "gap": 8,
+                  "justifyContent": "end",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "F1EYe",
+                      "name": "Button · Remind me tomorrow",
+                      "height": 28,
+                      "fill": "$popover",
+                      "cornerRadius": 6,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        10
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "gCvyD",
+                          "name": "Label",
+                          "fill": "$fg-secondary",
+                          "content": "Remind me tomorrow",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Befpy",
+                      "name": "Button · Download",
+                      "height": 28,
+                      "fill": "$primary-fill",
+                      "cornerRadius": 6,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        10
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "gZ8o6",
+                          "name": "Label",
+                          "fill": "#f8fafc",
+                          "content": "Download",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "P1elFS",
+              "name": "Toast · Update ready to install",
+              "width": 356,
+              "fill": "$card",
+              "cornerRadius": 8,
+              "stroke": "$ui-border",
+              "strokeWidth": 1,
+              "effect": {
+                "type": "shadow",
+                "shadowType": "outer",
+                "color": "#00000066",
+                "offset": {
+                  "x": 0,
+                  "y": 8
+                },
+                "blur": 24
+              },
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "Rh8yg",
+                  "name": "Content",
+                  "width": "fill_container",
+                  "gap": 10,
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "aomfv",
+                      "name": "Icon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "circle-check",
+                      "library": "lucide",
+                      "fill": "$t-green"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "k1gXT4",
+                      "name": "Text",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "gap": 2,
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "BppXj",
+                          "name": "Title",
+                          "fill": "$fg",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Update ready to install",
+                          "lineHeight": 1.35,
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        },
+                        {
+                          "type": "text",
+                          "id": "vkuEA",
+                          "name": "Description",
+                          "fill": "$fg-muted",
+                          "textGrowth": "fixed-width",
+                          "width": "fill_container",
+                          "content": "Version 0.4.22 is downloaded. Termul restarts to install it, and running terminal sessions close.",
+                          "lineHeight": 1.45,
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "j0zU4Q",
+                  "name": "Actions",
+                  "width": "fill_container",
+                  "gap": 8,
+                  "justifyContent": "end",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "u74Qo",
+                      "name": "Button · Install and restart",
+                      "height": 28,
+                      "fill": "$primary-fill",
+                      "cornerRadius": 6,
+                      "gap": 6,
+                      "padding": [
+                        0,
+                        10
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "qzZWo",
+                          "name": "Label",
+                          "fill": "#f8fafc",
+                          "content": "Install and restart",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
     }
   ],
   "variables": {
