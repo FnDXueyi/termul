@@ -9,9 +9,11 @@ import { getTrafficLightInset } from '@/components/shell/traffic-light-inset'
 import { useNativeWebviewOcclusion } from '@/hooks/use-native-webview-occlusion'
 import { PaneDndProvider } from '@/hooks/use-pane-dnd'
 import { ExplorerColumn } from '@/layouts/workspace-layout/ExplorerColumn'
+import { getExplorerColumnBlocks } from '@/layouts/workspace-layout/explorer-column-blocks'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
 import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
+import { useFileExplorerVisible } from '@/stores/file-explorer-store'
 import { useSidebarVisible } from '@/stores/sidebar-store'
 import { useThemePickerOpen } from '@/stores/theme-picker-store'
 import { useFullscreenPaneId, usePaneRoot } from '@/stores/workspace-store'
@@ -90,6 +92,18 @@ export function ShellFrame({
   )
   const platform = useMemo(() => getTopRowPlatform(), [])
   const trafficLightInset = getTrafficLightInset(platform, railExpanded)
+  // Same condition as `ExplorerColumn`: with no Side panel column the main
+  // card sits next to the collapsed Rail, under the traffic lights.
+  const explorerColumn = getExplorerColumnBlocks({
+    isExplorerVisible: useFileExplorerVisible(),
+    activeProject,
+    ssh,
+    hasSidePanel: Boolean(activeProject)
+  })
+  const mainStartInsetPx =
+    trafficLightInset && !explorerColumn.showFileColumn && !explorerColumn.sftpSession
+      ? trafficLightInset.panelHeaderStartPx
+      : 0
 
   // Native browser webviews paint above the DOM: hide them while a shell
   // popover is open so it is never drawn underneath.
@@ -97,7 +111,7 @@ export function ShellFrame({
   useNativeWebviewOcclusion(isThemePickerOpen)
 
   return (
-    <TopRowProvider roles={roles} platform={platform}>
+    <TopRowProvider roles={roles} platform={platform} mainStartInsetPx={mainStartInsetPx}>
       <div className="h-screen flex flex-col overflow-hidden bg-background">
         <ResizeEdges />
         {/* Rail (full height) | right column: gutter, then Side panel and main
@@ -145,15 +159,10 @@ export function ShellFrame({
                     }
                   />
 
-                  <main
-                    className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip"
-                    // Rail collapsed on macOS: start below the traffic lights in
-                    // both Side panel states, so hiding the panel only moves the
-                    // main card sideways, never down.
-                    style={
-                      trafficLightInset ? { marginTop: trafficLightInset.mainTopPx } : undefined
-                    }
-                  >
+                  {/* Same top in every Rail and Side panel state. Under the
+                      macOS traffic lights the top row pads its start instead
+                      (`mainStartInsetPx`, see `ShowSidePanelSlot`). */}
+                  <main className="flex-1 flex flex-col min-w-0 rounded-xl border border-border bg-card overflow-clip">
                     {roles.controlsOwner === 'fallback-bar' && <TopRowFallbackBar />}
                     {workspaceMain}
                   </main>
