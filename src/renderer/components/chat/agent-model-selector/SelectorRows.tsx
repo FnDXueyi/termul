@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { EntryGlyph } from '@/components/agents/launcher/pickers'
 import { ArrowRightLeft, Check, Download } from '@/components/icons'
 import { Spinner } from '@/components/ui/spinner'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { SessionUsage } from '@/lib/acp-api'
 import { cn } from '@/lib/utils'
 import {
@@ -31,10 +32,13 @@ export function TabGlyph({ tab }: { tab: AgentTab }): React.JSX.Element {
   )
 }
 
-/** One model. Selected = a check only, no fill (the fill means hover or focus). */
+/**
+ * One model. Selected = a check only, no fill (the fill means hover or focus).
+ * `tooltip` opens on hover and on keyboard focus.
+ */
 export function ModelRow({
   name,
-  title,
+  tooltip,
   selected,
   glyph,
   meta,
@@ -43,7 +47,7 @@ export function ModelRow({
   onPick
 }: {
   name: string
-  title?: string
+  tooltip?: string
   selected: boolean
   glyph?: ReactNode
   meta?: string
@@ -51,12 +55,11 @@ export function ModelRow({
   touch: boolean
   onPick: () => void
 }): React.JSX.Element {
-  return (
+  const button = (
     <button
       type="button"
       data-selector-row=""
       aria-pressed={selected}
-      title={title}
       disabled={disabled}
       data-press-feedback="off"
       onClick={onPick}
@@ -71,6 +74,15 @@ export function ModelRow({
         className={cn('shrink-0', selected ? 'opacity-100' : 'opacity-0')}
       />
     </button>
+  )
+  if (!tooltip || touch) return button
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right" className="max-w-64 whitespace-pre-line text-xs">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -134,7 +146,9 @@ export function ListMessage({
         {loading ? <Spinner size={12} decorative /> : null}
         {title}
       </p>
-      {detail ? <p className="text-xs text-muted-foreground">{detail}</p> : null}
+      {detail ? (
+        <p className="whitespace-pre-line text-xs text-muted-foreground">{detail}</p>
+      ) : null}
     </div>
   )
 }

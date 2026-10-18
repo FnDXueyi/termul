@@ -214,7 +214,7 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
     setView(tab.configId)
   }
 
-  // Capabilities belong to the chat's agent, so only its model rows carry them.
+  // Capabilities belong to the chat's agent, so only its rows carry them.
   const capabilities = capabilitySummary(props.capabilities)
   const rows = (
     configId: string | null,
@@ -228,7 +228,7 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
       <ModelRow
         key={`${configId}\0${model.value}`}
         name={model.name}
-        title={
+        tooltip={
           [model.description, configId === sw.currentConfigId ? capabilities : null]
             .filter(Boolean)
             .join('\n\n') || undefined
@@ -345,7 +345,12 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
         />
       )
     } else {
-      body = <ListMessage title="This agent gives no model choice." />
+      body = (
+        <ListMessage
+          title="This agent gives no model choice."
+          detail={effectiveId === sw.currentConfigId ? (capabilities ?? undefined) : undefined}
+        />
+      )
     }
   } else if (viewKind === 'current') {
     body = (
@@ -353,7 +358,10 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
         {liveCatalog ? (
           rows(viewId, liveCatalog, liveCatalog.options, undefined, viewTab, false)
         ) : (
-          <ListMessage title={`${nameOf(viewId)} gives no model choice.`} />
+          <ListMessage
+            title={`${nameOf(viewId)} gives no model choice.`}
+            detail={capabilities ?? undefined}
+          />
         )}
         <Hint>{`Keeps ${nameOf(viewId)} and cancels the switch to ${nameOf(sw.armedConfigId)}.`}</Hint>
       </>

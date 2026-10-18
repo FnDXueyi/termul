@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type { SessionConfigOption } from '@/lib/acp-api'
 import type { SupportedAcpAgentEntry } from '@/lib/agents/supported-acp-agents'
@@ -233,7 +234,8 @@ function renderSelector(
       onSetConfig={vi.fn()}
       onSetModel={vi.fn()}
       {...overrides}
-    />
+    />,
+    { wrapper: TooltipProvider }
   )
 }
 
@@ -263,19 +265,24 @@ describe('AgentModelSelector agent capabilities', () => {
     }
   }
 
-  it('puts what the chat agent advertises in its model tooltips, not under its options', () => {
+  async function tooltipOnFocus(row: HTMLElement): Promise<string | null> {
+    act(() => row.focus())
+    const tip = await screen.findByRole('tooltip').catch(() => null)
+    return tip?.textContent ?? null
+  }
+
+  it('puts what the chat agent advertises in its model tooltips, not under its options', async () => {
     seedAgent(advertised)
     renderSelector()
     open()
 
-    expect(screen.getByRole('button', { name: 'Opus 5.5' })).toHaveAttribute(
-      'title',
+    expect(screen.queryByText(/Accepts/)).toBeNull()
+    expect(await tooltipOnFocus(screen.getByRole('button', { name: 'Opus 5.5' }))).toBe(
       'Accepts: Text · Images · Embedded context\nMCP servers: stdio · HTTP'
     )
-    expect(screen.queryByText(/Accepts/)).toBeNull()
   })
 
-  it('keeps the model description above the capabilities', () => {
+  it('keeps the model description above the capabilities', async () => {
     seedAgent({ mcpCapabilities: { sse: true } })
     renderSelector({
       modelOption: {
@@ -285,21 +292,31 @@ describe('AgentModelSelector agent capabilities', () => {
     })
     open()
 
-    expect(screen.getByRole('button', { name: 'Opus 5.5' })).toHaveAttribute(
-      'title',
+    expect(await tooltipOnFocus(screen.getByRole('button', { name: 'Opus 5.5' }))).toBe(
       'Most capable\n\nMCP servers: stdio · SSE'
     )
   })
 
-  it('leaves the tooltip off for an agent that advertised no capabilities', () => {
+  it('leaves the tooltip off for an agent that advertised no capabilities', async () => {
     seedAgent(null)
     renderSelector()
     open()
 
-    expect(screen.getByRole('button', { name: 'Opus 5.5' })).not.toHaveAttribute('title')
+    expect(await tooltipOnFocus(screen.getByRole('button', { name: 'Opus 5.5' }))).toBeNull()
   })
 
-  it("never puts the chat agent profile on another agent's models", () => {
+  it('shows the capabilities under the message when the chat agent gives no model choice', () => {
+    seedAgent(advertised)
+    renderSelector({ modelOption: null })
+    open()
+
+    const message = screen.getByText('This agent gives no model choice.').closest('[role="status"]')
+    expect(message).toHaveTextContent(
+      'This agent gives no model choice.Accepts: Text · Images · Embedded context MCP servers: stdio · HTTP'
+    )
+  })
+
+  it("never puts the chat agent profile on another agent's models", async () => {
     seed([readyEntry(CLAUDE)])
     acpStateRef.current.agentOptionsCache = { [CLAUDE.id]: CLAUDE_MODELS }
     seedAgent(advertised)
@@ -308,10 +325,10 @@ describe('AgentModelSelector agent capabilities', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Claude Agent' }))
 
-    expect(screen.getByRole('button', { name: 'Claude Haiku' })).not.toHaveAttribute('title')
+    expect(await tooltipOnFocus(screen.getByRole('button', { name: 'Claude Haiku' }))).toBeNull()
   })
 
-  it('with a switch armed, leaves the profile off the armed agent models', () => {
+  it('with a switch armed, leaves the profile off the armed agent models', async () => {
     seed([readyEntry(CLAUDE)], { switching: { toConfigId: CLAUDE.id } })
     seedAgent(advertised)
     renderSelector()
@@ -321,10 +338,10 @@ describe('AgentModelSelector agent capabilities', () => {
       'aria-selected',
       'true'
     )
-    expect(screen.getByRole('button', { name: 'Opus 5.5' })).not.toHaveAttribute('title')
+    expect(await tooltipOnFocus(screen.getByRole('button', { name: 'Opus 5.5' }))).toBeNull()
   })
 
-  it('keeps the tooltip on the chat agent models in search results', () => {
+  it('keeps the tooltip on the chat agent models in search results', async () => {
     seedAgent(advertised)
     renderSelector()
     open()
@@ -333,8 +350,7 @@ describe('AgentModelSelector agent capabilities', () => {
     })
 
     const results = screen.getByTestId('selector-list')
-    expect(within(results).getByRole('button', { name: /Opus 5\.5/ })).toHaveAttribute(
-      'title',
+    expect(await tooltipOnFocus(within(results).getByRole('button', { name: /Opus 5\.5/ }))).toBe(
       'Accepts: Text · Images · Embedded context\nMCP servers: stdio · HTTP'
     )
   })
