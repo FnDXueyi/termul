@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Admitted, CanvasPersistence, CloseMode, Mount, PersistenceView};
+use super::{Admitted, CanvasPersistence, CloseMode, CloseOutcome, Mount, PersistenceView};
+use crate::acp::host_mcp::canvas::LeaseLostReason;
 use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE};
 
 /// `canvas.lease_grace_ms` when the renderer sends none.
@@ -185,24 +186,37 @@ impl CanvasPersistence {
         }
     }
 
-    async fn take_over(
+    /// Close `mount` through AD-31 with a save, then tell the renderer running
+    /// it why it lost the canvas. A takeover and an eviction both unmount
+    /// another renderer's canvas this way.
+    pub(super) async fn save_and_unmount(
         &self,
         project_id: &str,
-        holder: &Arc<Mount>,
-    ) -> Result<LeaseChange, CanvasError> {
-        let loser = holder
+        mount: &Arc<Mount>,
+        reason: LeaseLostReason,
+    ) -> Result<CloseOutcome, CanvasError> {
+        let connected = mount
             .state
             .lock()
             .link
             .connection()
             .map(|connection| connection.holder().clone());
+        let closed = self.close(project_id, CloseMode::Save).await?;
+        if let Some(renderer) = connected.filter(|_| closed.unmounted) {
+            renderer.tell_lease_lost(project_id, mount.mount_seq, reason);
+        }
+        Ok(closed)
+    }
+
+    async fn take_over(
+        &self,
+        project_id: &str,
+        holder: &Arc<Mount>,
+    ) -> Result<LeaseChange, CanvasError> {
         let closed = self
-            .close(project_id, CloseMode::Save)
+            .save_and_unmount(project_id, holder, LeaseLostReason::TakenOver)
             .await
             .map_err(|error| refused_takeover(&error))?;
-        if let Some(loser) = loser {
-            loser.tell_lease_lost(project_id, holder.mount_seq);
-        }
         Ok(LeaseChange::TakenOver {
             previous: holder.mount_seq,
             saved_version: closed.saved_version,

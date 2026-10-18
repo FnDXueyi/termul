@@ -63,11 +63,7 @@ export function createTauriCanvasApi(): CanvasApi {
       return invokeCanvas(IPC_COMMANDS.OPEN, {
         docPath,
         projectId,
-        clientInstanceId: getClientInstanceId(),
-        autosaveMs: options.autosaveMs,
-        leaseGraceMs: options.leaseGraceMs,
-        maxMounted: options.maxMounted,
-        crashTimeouts: options.crashTimeouts
+        request: { clientInstanceId: getClientInstanceId(), ...options }
       })
     },
 

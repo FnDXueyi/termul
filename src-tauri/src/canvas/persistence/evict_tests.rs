@@ -360,3 +360,32 @@ fn answer(registry: &Registry, frame: &CanvasCallFrame, result: &str) {
         super::ReplyMatch::Resolved
     );
 }
+
+#[tokio::test]
+async fn the_renderer_running_an_evicted_canvas_is_told_it_was_unloaded() {
+    let registry = Registry::new();
+    std::fs::write(registry.doc("a"), b"saved").unwrap();
+    let seq_a = registry.mounts.mount("a", registry.doc("a"), AUTOSAVE);
+    registry
+        .mounts
+        .document_loaded("a", seq_a, Some(1))
+        .unwrap();
+    let (notices_tx, mut notices) = mpsc::unbounded_channel();
+    let holder = CanvasHolder::new("a", test_renderer(), Arc::new(|_| true))
+        .with_lease_notice(Arc::new(move |frame| notices_tx.send(frame).is_ok()));
+    assert!(registry.mounts.attach("a", seq_a, holder));
+    registry.mount("b");
+
+    let admitted = registry.admit("c", 2).await;
+    assert_eq!(evicted(&admitted), ["a"]);
+    let notice = notices.try_recv().expect("the evicted renderer is told");
+    assert_eq!(
+        serde_json::to_value(&notice).unwrap(),
+        serde_json::json!({
+            "type": "canvas_lease_lost",
+            "projectId": "a",
+            "mountSeq": seq_a,
+            "reason": "evicted"
+        })
+    );
+}

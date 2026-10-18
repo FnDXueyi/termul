@@ -125,8 +125,9 @@ export interface CanvasState {
    * changes after a failed save. */
   unmountCanvas: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
   /** This window no longer holds the project's mount: another window took
-   * it (`elsewhere`), or the host dropped it after the connection was gone
-   * longer than the lease grace (`expired`). */
+   * it (`elsewhere`), the mount cap unloaded it (`evicted`), or the host
+   * dropped it after the connection was gone longer than the lease grace
+   * (`expired`). */
   leaseLost: (projectId: string, mountSeq: number, loss: CanvasLeaseLoss) => void
   /** The host no longer holds this project's mount: drop the editor and show
    * the unloaded state. */
@@ -182,6 +183,18 @@ function nextLifecycleGeneration(projectId: string): number {
 
 function isStaleLifecycle(projectId: string, generation: number): boolean {
   return lifecycleGenerations.get(projectId) !== generation
+}
+
+/** The phase a session moves to when this window loses its mount. */
+const LEASE_LOSS_PHASE: Record<CanvasLeaseLoss, CanvasPhase> = {
+  elsewhere: { kind: 'elsewhere' },
+  evicted: { kind: 'unloaded', reason: 'evicted', message: null },
+  expired: {
+    kind: 'failed',
+    code: 'CANVAS_CLOSED',
+    message:
+      'The canvas closed after this window was disconnected for too long. Open it again to continue from its last save.'
+  }
 }
 
 function mountOf(phase: CanvasPhase): CanvasMount | null {
@@ -597,18 +610,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     leaseLost: (projectId, mountSeq, loss) => {
       if (phaseMountSeq(projectId) !== mountSeq) return
       releaseMount(projectId)
-      const phase: CanvasPhase =
-        loss === 'elsewhere'
-          ? { kind: 'elsewhere' }
-          : {
-              kind: 'failed',
-              code: 'CANVAS_CLOSED',
-              message:
-                'The canvas closed after this window was disconnected for too long. Open it again to continue from its last save.'
-            }
-      patchSession(projectId, { phase, ...CLEAN_PROJECTION })
+      patchSession(projectId, { phase: LEASE_LOSS_PHASE[loss], ...CLEAN_PROJECTION })
       logCanvas(
-        loss === 'elsewhere' ? 'info' : 'warn',
+        loss === 'expired' ? 'warn' : 'info',
         'leaseLost',
         `canvas for project ${projectId} mountSeq=${mountSeq} lost its lease: ${loss}`
       )

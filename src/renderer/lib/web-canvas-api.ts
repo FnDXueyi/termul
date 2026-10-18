@@ -4,10 +4,9 @@
  * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
  * auth header):
  * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
- *   autosaveMs, leaseGraceMs, maxMounted, crashTimeouts }` → `CanvasOpenInfo`
- *   with an empty `baseUrl` (the bundle is same-origin); this tab takes the
- *   mount lease,
- *   after the least recently active canvases beyond `maxMounted` unloaded;
+ *   ...CanvasOpenOptions }` → `CanvasOpenInfo` with an empty `baseUrl` (the
+ *   bundle is same-origin); this tab takes the mount lease, after the least
+ *   recently active canvases beyond `maxMounted` unloaded;
  * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
  *   unmount (save, verify, unmount), which also revokes the `ct` token;
  * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
@@ -49,10 +48,7 @@ export const webCanvasApi: CanvasApi = {
       docPath,
       projectId,
       clientInstanceId: getClientInstanceId(),
-      autosaveMs: options.autosaveMs,
-      leaseGraceMs: options.leaseGraceMs,
-      maxMounted: options.maxMounted,
-      crashTimeouts: options.crashTimeouts
+      ...options
     })
   },
 

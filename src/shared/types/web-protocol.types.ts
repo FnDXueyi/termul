@@ -920,18 +920,20 @@ export interface WsHeartbeatFrame {
 /** `type` of the top-level frame that forwards an agent canvas call (no `seq`). */
 export const WS_CANVAS_CALL_FRAME_TYPE = 'canvas_call'
 
-/** `type` of the top-level frame that says another renderer took a canvas lease. */
+/** `type` of the top-level frame that says a renderer lost its canvas mount. */
 export const WS_CANVAS_LEASE_LOST_FRAME_TYPE = 'canvas_lease_lost'
 
 /**
- * Host → the connection that held `projectId`'s canvas at `mountSeq`: another
- * window or tab opened the canvas, and this mount was saved and unmounted
- * for it (spine AD-30).
+ * Host → the connection that held `projectId`'s canvas at `mountSeq`: this
+ * mount was saved and unmounted because another window or tab opened the
+ * canvas (`takenOver`, spine AD-30) or the mount cap unloaded it (`evicted`,
+ * AD-26).
  */
 export interface WsCanvasLeaseLostFrame {
   type: typeof WS_CANVAS_LEASE_LOST_FRAME_TYPE
   projectId: string
   mountSeq: number
+  reason: 'takenOver' | 'evicted'
 }
 
 /**

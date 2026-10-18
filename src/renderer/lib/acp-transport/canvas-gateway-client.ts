@@ -11,8 +11,8 @@
  *
  * A mount this renderer no longer holds the lease of (spine AD-30) goes to the
  * lease-lost handler: the host says so with a `canvas_lease_lost` frame when
- * another window takes the canvas, or refuses the re-report after a reconnect
- * that came too late.
+ * another window takes the canvas or the mount cap evicts it, or refuses the
+ * re-report after a reconnect that came too late.
  */
 
 import type { CanvasLeaseLoss } from '@shared/types/canvas.types'
@@ -89,7 +89,7 @@ export class CanvasGatewayClient {
   }
 
   handleLeaseLost(frame: WsCanvasLeaseLostFrame): void {
-    this.lose(frame.projectId, frame.mountSeq, 'elsewhere')
+    this.lose(frame.projectId, frame.mountSeq, frame.reason === 'evicted' ? 'evicted' : 'elsewhere')
   }
 
   private report(projectId: string, mountSeq: number): void {

@@ -376,6 +376,19 @@ describe('lease lost to another window', () => {
     expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'CANVAS_CLOSED' })
   })
 
+  it("a mount the cap evicted for another window's open shows as unloaded", async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await mountReady()
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'evicted')
+
+    expect(session()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+    expect(session()?.docPath).toBe(DOC_A)
+    await expect(
+      useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+
   it('take back opens the canvas again here with a new mount', async () => {
     open.mockResolvedValueOnce(openInfo())
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)

@@ -130,28 +130,31 @@ describe('canvasApi (web vs desktop branch)', () => {
     expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
       docPath: DOC,
       projectId: PROJECT,
-      clientInstanceId: getClientInstanceId()
+      request: { clientInstanceId: getClientInstanceId() }
     })
     expect(mockFetch).not.toHaveBeenCalled()
     expect(result).toEqual({ success: true, data: desktopInfo })
   })
 
-  it('open: both transports send every canvas setting alike', async () => {
+  it('open: both transports send one open request with every canvas setting', async () => {
     const options = { autosaveMs: 1500, leaseGraceMs: 5000, maxMounted: 3, crashTimeouts: 4 }
-    const expected = {
-      docPath: DOC,
-      projectId: PROJECT,
-      clientInstanceId: getClientInstanceId(),
-      ...options
-    }
+    const request = { clientInstanceId: getClientInstanceId(), ...options }
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: WEB_INFO }))
     await canvasApi.open(DOC, PROJECT, options)
-    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual(expected)
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual({
+      docPath: DOC,
+      projectId: PROJECT,
+      ...request
+    })
 
     mockIsTauriContext.mockReturnValue(true)
     mockInvoke.mockResolvedValueOnce({ success: true, data: WEB_INFO })
     await canvasApi.open(DOC, PROJECT, options)
-    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', expected)
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
+      docPath: DOC,
+      projectId: PROJECT,
+      request
+    })
   })
 
   it('open: a refused lease takeover keeps its typed code on both transports', async () => {

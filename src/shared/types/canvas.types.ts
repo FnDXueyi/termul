@@ -167,10 +167,11 @@ export type CanvasBridgeErrorCode = (typeof CANVAS_BRIDGE_ERROR_CODES)[number]
  * The persistence methods are the renderer's half of AD-23: it forwards what
  * the editor reports and does what the host decides.
  */
-/** Why a window no longer holds a canvas mount (spine AD-30): another window
- * took the lease, or the host dropped the mount after the window's
- * connection was gone longer than the lease grace. */
-export type CanvasLeaseLoss = 'elsewhere' | 'expired'
+/** Why a window no longer holds a canvas mount: another window took the
+ * lease (spine AD-30), the mount cap unloaded it (AD-26), or the host dropped
+ * the mount after the window's connection was gone longer than the lease
+ * grace. */
+export type CanvasLeaseLoss = 'elsewhere' | 'evicted' | 'expired'
 
 /** Settings sent with each open; the host clamps each. */
 export interface CanvasOpenOptions {

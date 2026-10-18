@@ -180,16 +180,8 @@ const CT_GATE_EXEMPT_PATHS: &[&str] = &[
 struct CanvasOpenRequest {
     doc_path: String,
     project_id: String,
-    /// The opening tab; it gets the mount lease (AD-30).
-    client_instance_id: String,
-    #[serde(default)]
-    autosave_ms: Option<u64>,
-    #[serde(default)]
-    lease_grace_ms: Option<u64>,
-    #[serde(default)]
-    max_mounted: Option<u64>,
-    #[serde(default)]
-    crash_timeouts: Option<u32>,
+    #[serde(flatten)]
+    request: OpenRequest,
 }
 
 /// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
@@ -385,14 +377,7 @@ async fn open(
             return Json(IpcBody::err(message, code));
         }
     };
-    let request = OpenRequest {
-        client_instance_id: req.client_instance_id,
-        autosave_ms: req.autosave_ms,
-        lease_grace_ms: req.lease_grace_ms,
-        max_mounted: req.max_mounted,
-        crash_timeouts: req.crash_timeouts,
-    };
-    match open_canvas(same_origin_base(), &req.project_id, doc_key, request).await {
+    match open_canvas(same_origin_base(), &req.project_id, doc_key, req.request).await {
         Ok(info) => {
             tracing::info!(
                 target: "termul::web::canvas",

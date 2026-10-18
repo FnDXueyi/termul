@@ -9,7 +9,10 @@
 
 use serde::Serialize;
 
-use super::{CanvasPersistence, CloseMode, Lifecycle, Opened};
+use std::sync::Arc;
+
+use super::{CanvasPersistence, Lifecycle, Mount, Opened};
+use crate::acp::host_mcp::canvas::LeaseLostReason;
 use crate::canvas::CanvasError;
 
 /// `canvas.max_mounted` when the renderer sends none.
@@ -64,8 +67,11 @@ impl CanvasPersistence {
         cap: usize,
         evicted: &mut Vec<Eviction>,
     ) -> Result<(), CanvasError> {
-        while let Some(victim) = self.victim(project_id, cap)? {
-            match self.close(&victim, CloseMode::Save).await {
+        while let Some((victim, mount)) = self.victim(project_id, cap)? {
+            match self
+                .save_and_unmount(&victim, &mount, LeaseLostReason::Evicted)
+                .await
+            {
                 Ok(outcome) if outcome.unmounted => evicted.push(Eviction {
                     project_id: victim,
                     reason: REASON_CAP_REACHED,
@@ -86,7 +92,11 @@ impl CanvasPersistence {
     /// The project to unload so one more canvas fits under `cap`: `None` when
     /// there is room. Only open mounts are candidates; if every other mount
     /// is already closing, nothing can be freed right now.
-    fn victim(&self, project_id: &str, cap: usize) -> Result<Option<String>, CanvasError> {
+    fn victim(
+        &self,
+        project_id: &str,
+        cap: usize,
+    ) -> Result<Option<(String, Arc<Mount>)>, CanvasError> {
         let others: Vec<_> = self
             .mounts
             .lock()
@@ -101,10 +111,11 @@ impl CanvasPersistence {
             .iter()
             .filter_map(|(project, mount)| {
                 let state = mount.state.lock();
-                (state.lifecycle == Lifecycle::Open).then(|| (state.activity.rank(), project))
+                (state.lifecycle == Lifecycle::Open)
+                    .then(|| (state.activity.rank(), project, mount))
             })
-            .min()
-            .map(|(_, project)| Some(project.clone()))
+            .min_by_key(|(rank, _, _)| *rank)
+            .map(|(_, project, mount)| Some((project.clone(), Arc::clone(mount))))
             .ok_or_else(|| blocked("every other canvas is closing; try again".to_string()))
     }
 }

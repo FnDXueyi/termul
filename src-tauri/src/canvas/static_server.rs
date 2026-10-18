@@ -212,8 +212,11 @@ pub struct CanvasOpenInfo {
     pub evicted: Vec<Eviction>,
 }
 
-/// What a renderer's open carries besides the document.
-#[derive(Debug, Clone)]
+/// What a renderer's open carries besides the document: the one shape both
+/// transports accept, `canvas_open`'s `request` argument and the rest of
+/// `POST /canvas/open`'s body. Every setting is optional; the host clamps it.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenRequest {
     /// The opening window or tab; it gets the lease.
     pub client_instance_id: String,

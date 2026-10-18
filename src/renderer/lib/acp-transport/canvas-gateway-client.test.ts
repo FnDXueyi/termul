@@ -109,12 +109,36 @@ describe('CanvasGatewayClient', () => {
     const lost = vi.fn()
     client.setLeaseLostHandler(lost)
     client.setMount('proj-1', 3)
-    client.handleLeaseLost({ type: 'canvas_lease_lost', projectId: 'proj-1', mountSeq: 2 })
+    client.handleLeaseLost({
+      type: 'canvas_lease_lost',
+      projectId: 'proj-1',
+      mountSeq: 2,
+      reason: 'takenOver'
+    })
     expect(lost).not.toHaveBeenCalled()
-    client.handleLeaseLost({ type: 'canvas_lease_lost', projectId: 'proj-1', mountSeq: 3 })
+    client.handleLeaseLost({
+      type: 'canvas_lease_lost',
+      projectId: 'proj-1',
+      mountSeq: 3,
+      reason: 'takenOver'
+    })
     expect(lost).toHaveBeenCalledWith('proj-1', 3, 'elsewhere')
     client.setMount('proj-1', null)
     expect(sent).toEqual([['canvas_mount', { projectId: 'proj-1', mountSeq: 3 }]])
+  })
+
+  it('an eviction notice reaches the handler as evicted', () => {
+    const { client } = harness()
+    const lost = vi.fn()
+    client.setLeaseLostHandler(lost)
+    client.setMount('proj-1', 3)
+    client.handleLeaseLost({
+      type: 'canvas_lease_lost',
+      projectId: 'proj-1',
+      mountSeq: 3,
+      reason: 'evicted'
+    })
+    expect(lost).toHaveBeenCalledWith('proj-1', 3, 'evicted')
   })
 
   it('treats a refused re-report as a lost lease: elsewhere when another window holds it, else expired', async () => {

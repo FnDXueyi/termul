@@ -333,7 +333,12 @@ async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
     };
     assert_eq!(
         serde_json::to_value(&notice).unwrap(),
-        json!({ "type": "canvas_lease_lost", "projectId": "proj-lease", "mountSeq": first.mount_seq })
+        json!({
+            "type": "canvas_lease_lost",
+            "projectId": "proj-lease",
+            "mountSeq": first.mount_seq,
+            "reason": "takenOver"
+        })
     );
     let attached = route(&mount(second.mount_seq), &tab_b).await;
     assert_eq!(attached.payload, Some(json!({ "attached": true })));
