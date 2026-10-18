@@ -36,7 +36,8 @@ fn main() {
         && !Path::new("../canvas/bundle/index.html").is_file()
     {
         println!(
-            "cargo:warning=canvas/bundle/index.html is missing: this release build will not embed \n             the figcraft canvas bundle (run scripts/canvas/fetch-figcraft-bundle.mjs first)"
+            "cargo:warning=canvas/bundle/index.html is missing: this release build will not embed \
+             the figcraft canvas bundle (run scripts/canvas/fetch-figcraft-bundle.mjs first)"
         );
     }
 
