@@ -24,7 +24,7 @@ use crate::acp::host_mcp::{FrameKind, FrameReply, FrameRequest, MAX_REQUEST_FRAM
 
 /// Replies carry rendered PNGs and exports as base64, so the cap is far above
 /// the other host tools' 1 MiB.
-const MAX_REPLY_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_REPLY_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct Bridge {
     config: ChildConfig,
