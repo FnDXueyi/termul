@@ -187,6 +187,8 @@ pub mod conformance_support {
         budgets, create_tab, dispatch, eval_resolved, session_ended, set_browser_host,
         BrowserCall, DesktopBrowserHost, HostServices,
     };
+    pub use crate::browser_automation::engine::events::{NavPolicy, NavVerdict, TabEvents};
+    pub use crate::browser_automation::engine::profile::{delete_dir, DataStore};
     pub use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 }
 pub use pty::PtyManager;

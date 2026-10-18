@@ -16,12 +16,11 @@
 //!    session starts logged out; clearing the global profile then leaves a
 //!    new global tab logged out.
 //!
-//! Ignored by default: it needs a display and a webview runtime. Run it
-//! alone, on one test thread (macOS needs the event loop on the main
-//! thread):
+//! It runs from the conformance runner's binary, which owns the main
+//! thread as macOS needs, and only when asked:
 //!
 //! ```text
-//! cargo test --lib engine::profile::engine_fixture -- --ignored --test-threads=1
+//! TERMUL_PROFILE_FIXTURE=1 cargo test --test browser_conformance -- --nocapture
 //! ```
 
 use std::collections::BTreeMap;
@@ -35,10 +34,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, WebviewBuilder, WebviewUrl};
 use uuid::Uuid;
 
-use super::{delete_dir, DataStore};
-use crate::browser_automation::engine::events::{NavPolicy, NavVerdict, TabEvents};
-use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
+use termul_manager_lib::conformance_support::{
+    delete_dir, BrowserBounds, BrowserTabManager, DataStore, NavPolicy, NavVerdict, TabEvents,
+};
 
+/// Runs the fixture instead of the conformance suite.
+pub const ENABLE_VAR: &str = "TERMUL_PROFILE_FIXTURE";
 const PHASE_VAR: &str = "TERMUL_PROFILE_FIXTURE_PHASE";
 const OUT_VAR: &str = "TERMUL_PROFILE_FIXTURE_OUT";
 const IDENTIFIER: &str = "com.termul-manager.profile-fixture";
@@ -225,22 +226,18 @@ impl Driver {
     }
 }
 
-fn run_phase(phase: &str, out: &Path) {
+fn run_phase(phase: &str, out: &Path, mut context: tauri::Context<tauri::Wry>) {
     let tabs_port = serve();
     let dev_port = serve();
     let report: Arc<Mutex<BTreeMap<String, serde_json::Value>>> = Arc::default();
     let sink = report.clone();
     let phase = phase.to_string();
 
-    let mut context = crate::app_context();
     context.config_mut().identifier = IDENTIFIER.to_string();
     context.config_mut().app.windows.clear();
     context.config_mut().build.dev_url =
         Some(format!("http://localhost:{dev_port}/").parse().unwrap());
-    let builder = tauri::Builder::default();
-    #[cfg(any(windows, target_os = "linux"))]
-    let builder = builder.any_thread();
-    let app = builder
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .setup(move |app| {
             if phase == "first" {
@@ -290,21 +287,8 @@ fn run_phase(phase: &str, out: &Path) {
     std::fs::write(out, serde_json::to_vec_pretty(&report).unwrap()).expect("write phase report");
 }
 
-fn test_name() -> String {
-    let module = module_path!();
-    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
-    format!("{module}::agent_profiles_isolate_persist_and_clear_on_the_real_engine")
-}
-
 fn run_child(phase: &str, out: &Path) -> BTreeMap<String, serde_json::Value> {
-    let status = Command::new(std::env::current_exe().expect("test executable"))
-        .args([
-            test_name().as_str(),
-            "--exact",
-            "--ignored",
-            "--test-threads=1",
-            "--nocapture",
-        ])
+    let status = Command::new(std::env::current_exe().expect("runner executable"))
         .env(PHASE_VAR, phase)
         .env(OUT_VAR, out)
         .status()
@@ -318,11 +302,11 @@ fn names(list: &[&str]) -> serde_json::Value {
     serde_json::json!(list)
 }
 
-#[test]
-#[ignore = "needs a display and a webview runtime; see the module docs"]
-fn agent_profiles_isolate_persist_and_clear_on_the_real_engine() {
+/// One phase when the parent started this process for it, otherwise the
+/// whole fixture. Panics on the first unexpected observation.
+pub fn main(context: tauri::Context<tauri::Wry>) {
     if let (Ok(phase), Some(out)) = (std::env::var(PHASE_VAR), std::env::var_os(OUT_VAR)) {
-        run_phase(&phase, Path::new(&out));
+        run_phase(&phase, Path::new(&out), context);
         return;
     }
     let scratch = tempfile::tempdir().unwrap();
@@ -401,4 +385,5 @@ fn agent_profiles_isolate_persist_and_clear_on_the_real_engine() {
         names(&[]),
         "clearing logged the global profile out"
     );
+    println!("profile fixture: every check passed");
 }

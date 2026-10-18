@@ -13,6 +13,7 @@ mod cases;
 mod expected;
 #[path = "../browser_fixtures/server.rs"]
 mod fixture_server;
+mod profile;
 mod report;
 
 use std::path::PathBuf;
@@ -132,12 +133,16 @@ async fn run_all(
 }
 
 fn main() {
+    let mut context = tauri::generate_context!();
+    if std::env::var_os(profile::ENABLE_VAR).is_some() {
+        profile::main(context);
+        return;
+    }
     if std::env::var_os(ENABLE_VAR).is_none() {
         println!("browser_conformance: skipped, set {ENABLE_VAR}=1 to run it");
         return;
     }
 
-    let mut context = tauri::generate_context!();
     // Keeps the webview profile and app data apart from an installed app.
     context.config_mut().identifier = "com.termul-manager.conformance".to_string();
     context.config_mut().app.windows.clear();

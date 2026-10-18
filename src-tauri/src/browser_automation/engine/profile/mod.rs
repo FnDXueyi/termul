@@ -148,9 +148,9 @@ impl AgentProfiles {
         })
     }
 
-    /// The global profile's directory: the engine's data folder on
-    /// WebView2 and WebKitGTK, a marker on macOS.
-    pub fn global_dir(&self) -> PathBuf {
+    /// The global profile's data directory on WebView2 and WebKitGTK.
+    #[cfg(any(test, not(target_os = "macos")))]
+    fn global_dir(&self) -> PathBuf {
         self.root.join(self.current.lock().name())
     }
 
@@ -319,8 +319,5 @@ async fn remove_data_store(app: &AppHandle, generation: Generation) -> bool {
     false
 }
 
-#[cfg(test)]
-#[path = "../../../../tests/browser_fixtures/profile.rs"]
-mod engine_fixture;
 #[cfg(test)]
 mod tests;

@@ -43,6 +43,18 @@ cd src-tauri
 TERMUL_BROWSER_CONFORMANCE=1 cargo test --test browser_conformance -- --nocapture
 ```
 
-On Linux wrap the command in `xvfb-run -a` when no display is available. On
+On Linux wrap the command in `xvfb-run -a` when no display is available.
+
+## Agent profile fixture
+
+With `TERMUL_PROFILE_FIXTURE=1` the same binary runs `profile.rs` instead of
+the suite. It builds tabs on the app profile, the global agent profile and
+per-session ephemeral profiles, restarts itself as a second process, and
+checks that cookies stay where they belong:
+
+```sh
+cd src-tauri
+TERMUL_PROFILE_FIXTURE=1 cargo test --test browser_conformance -- --nocapture
+``` On
 Windows build the test executable with `tests/browser_conformance/build-windows-tests.ps1`
 first, which installs the Common-Controls manifest the executable needs.
