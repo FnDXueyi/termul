@@ -946,7 +946,7 @@ describe('AgentLauncher ACP new thread', () => {
   })
 
   it('applies the displayed options to a claimed warm session before the first prompt', async () => {
-    const key = 'acp-registry:claude-acp /work '
+    const key = 'acp-registry:claude-acp\0/work\0'
     acpStateRef.current.agentConfigs = [ACP_CONFIG]
     mockPersistRead.mockResolvedValue({
       success: true,
