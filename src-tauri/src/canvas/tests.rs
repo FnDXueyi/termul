@@ -1651,6 +1651,49 @@ async fn web_open_accepts_doc_path_inside_project_boundary() {
     assert_eq!(parsed["success"], true, "doc inside the boundary opens");
 }
 
+/// The Windows project registry stores `\\?\D:\…` roots, and the renderer
+/// echoes them back joined with `/` or with every `\` turned into `/`.
+#[cfg(windows)]
+#[tokio::test]
+async fn web_open_keys_a_verbatim_root_doc_by_its_plain_path() {
+    let root = tempfile::tempdir().expect("tempdir (boundary root)");
+    std::fs::write(root.path().join("design.figcraft"), b"{}").expect("write doc");
+    let verbatim = root
+        .path()
+        .canonicalize()
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    let plain = verbatim.trim_start_matches(r"\\?\").to_string();
+    let forward = verbatim.replace('\\', "/");
+    let app = web_canvas_app_with_boundary(None, root.path());
+    for (index, name) in ["design.figcraft", "new.figcraft"].into_iter().enumerate() {
+        let expected = format!(r"{plain}\{name}");
+        for (form, doc) in [
+            format!(r"{verbatim}\{name}"),
+            format!("{verbatim}/{name}"),
+            format!("{forward}/{name}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let project = format!("proj-verbatim-{index}-{form}");
+            let parsed = web_open(app.clone(), &doc, &project).await;
+            assert_eq!(
+                parsed["data"]["docKey"],
+                expected.as_str(),
+                "{doc}: {parsed}"
+            );
+            crate::canvas::static_server::close_canvas(
+                &project,
+                crate::canvas::persistence::CloseMode::Discard,
+            )
+            .await
+            .unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn pool_release_still_evicts_after_doc_file_deleted() {
     // The doc file can vanish (deleted/renamed) while its daemon is live —

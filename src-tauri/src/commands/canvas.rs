@@ -30,7 +30,7 @@ const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The canonical doc path. A document that does not exist yet (the first
 /// open of a project's `design.figcraft`) is validated through its parent
 /// directory; the first save creates it.
-fn validate_canvas_doc_path(doc_path: &str) -> Result<String, String> {
+pub(super) fn validate_canvas_doc_path(doc_path: &str) -> Result<String, String> {
     let path = Path::new(doc_path);
     let validated = if path.exists() {
         validate_project_path(doc_path)?
