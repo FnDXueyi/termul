@@ -1000,6 +1000,9 @@ export interface AgentsWatchDelta {
     // The host's browser-open shim captured an agent's auth URL; the payload is
     // `{ agentId, url }`. Not part of the roster state: a missed delta is lost.
     | 'browser_open_request'
+    // One browser policy scope changed; the payload is `{ scope, projectId?,
+    // revision }` and clients re-read that scope. Not roster state either.
+    | 'browser_policy_changed'
   payload: unknown
 }
 
