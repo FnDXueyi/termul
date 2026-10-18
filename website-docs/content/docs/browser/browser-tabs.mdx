@@ -1,0 +1,50 @@
+---
+title: Preview a page in a browser tab
+description: Open a web page or your local dev server in a tab next to your code.
+---
+
+<Callout type="info">This works in the desktop app only.</Callout>
+
+A browser tab shows a web page inside Termul. Use it to check your app while you edit the code or while an agent works on it. You don't have to switch to another window.
+
+## Open a browser tab
+
+Use one of these ways:
+
+- Press `Ctrl+Shift+N` (`Cmd+Shift+N` on macOS).
+- Click **+** (**New tab**) at the right end of the tab bar, then click **New browser tab**.
+- Open the command palette with `Ctrl+K` (`Cmd+K` on macOS), then run **New Browser Tab**.
+
+The new tab opens in the pane you are working in and loads Google. The tab shows the host name of the page, such as `localhost:5173`.
+
+## Go to a page
+
+1. Click the address bar at the top of the browser tab.
+2. Type the address.
+3. Press `Enter`.
+
+If you leave out `http://` or `https://`, Termul adds `https://`. Most local dev servers use plain `http`, so type the full address, for example `http://localhost:5173`.
+
+The buttons to the left of the address bar are **Back**, **Forward**, and **Reload**. A spinner shows in the address bar while the page loads.
+
+## Preview your dev server next to your code
+
+1. Start your dev server in a terminal tab, for example with `bun run dev`.
+2. Open a browser tab and go to the address the dev server prints.
+3. Move the browser tab into its own pane, so the page and your code are side by side. See [Terminals](/docs/terminals) for how to work with panes.
+
+Click **Reload** after a change if your dev server doesn't refresh the page by itself.
+
+## Open terminal links in a browser tab
+
+By default, `Ctrl`+click (`Cmd`+click on macOS) on a link in terminal output opens the link in your system browser. To open those links in a Termul browser tab instead:
+
+1. Open **Settings** with `Ctrl+,` (`Cmd+,` on macOS).
+2. Go to **Behavior**.
+3. Set **Open Terminal Links In** to **Termul Browser**.
+
+Each link you `Ctrl`+click then opens in a new browser tab.
+
+## Close a browser tab
+
+Click the **x** on the tab, or middle-click the tab. To close several at once, right-click a browser tab and click **Close Other Browser Tabs** or **Close All Browser Tabs**.
