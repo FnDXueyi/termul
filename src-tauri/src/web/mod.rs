@@ -21,6 +21,7 @@ mod agent_reaper_tests;
 pub mod assets;
 pub mod acp_api;
 pub mod auth;
+pub mod browser_policy_api;
 pub mod canvas_api;
 pub mod capabilities;
 pub mod catalog_api;

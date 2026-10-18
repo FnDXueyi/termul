@@ -8,6 +8,7 @@
 pub mod agent_process;
 pub mod archive;
 pub mod atomic_file;
+pub mod browser_policy;
 pub mod browser_shim;
 pub mod catalog;
 pub mod chat_history_store;
