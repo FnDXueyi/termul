@@ -49,11 +49,11 @@ fn a_completed_call_yields_the_helpers_json_value() {
 fn engine_failures_and_unusable_text_are_terminal() {
     assert_eq!(
         parse(Err(EngineErrorKind::PageException)),
-        Err(EngineError::new(EngineErrorKind::PageException, false))
+        Err(EngineError::new(EngineErrorKind::PageException))
     );
     assert_eq!(
         parse(Ok("undefined".into())),
-        Err(EngineError::new(EngineErrorKind::Malformed, false))
+        Err(EngineError::new(EngineErrorKind::Malformed))
     );
 }
 
@@ -111,7 +111,7 @@ async fn a_closure_the_ui_thread_reaches_after_the_timeout_does_not_issue() {
     let queue = FakeUiQueue::default();
     let ran = Arc::new(AtomicBool::new(false));
     let result = run(|job| queue.push(job), SHORT, flag_issue(&ran)).await;
-    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Timeout, true)));
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Timeout)));
     queue.drain();
     assert!(!ran.load(Ordering::SeqCst), "the late closure ran its action");
 }
@@ -142,12 +142,12 @@ async fn a_call_issued_before_the_deadline_but_unanswered_is_terminal() {
     );
     let (result, ()) = tokio::join!(pending, async { queue.drain() });
     assert!(ran.load(Ordering::SeqCst));
-    assert_eq!(result, Err(EngineError::new(EngineErrorKind::NoReply, false)));
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::NoReply)));
 }
 
 #[tokio::test]
 async fn a_queue_that_refuses_the_closure_is_a_dispatch_failure() {
     let ran = Arc::new(AtomicBool::new(false));
     let result = run(|_job| Err(()), SHORT, flag_issue(&ran)).await;
-    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Dispatch, true)));
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Dispatch)));
 }

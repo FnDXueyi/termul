@@ -76,8 +76,8 @@ pub type CallResult = Result<String, EngineErrorKind>;
 /// Parse a completed call. Every failure here is terminal: the engine
 /// processed the call, so the helper may have run.
 pub fn parse(result: CallResult) -> Result<Value, EngineError> {
-    let json = result.map_err(|kind| EngineError::new(kind, false))?;
-    serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed, false))
+    let json = result.map_err(EngineError::new)?;
+    serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed))
 }
 
 /// Where an adapter's completion callback sends its [`CallResult`].
@@ -102,11 +102,14 @@ where
             issue(platform, tx);
         }
     }))
-    .map_err(|()| EngineError::new(EngineErrorKind::Dispatch, true))?;
+    .map_err(|()| EngineError::new(EngineErrorKind::Dispatch))?;
     match tokio::time::timeout(deadline, rx).await {
         Ok(Ok(result)) => parse(result),
-        Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-        Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, gate.cancel())),
+        Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
+        Err(_) => {
+            gate.cancel();
+            Err(EngineError::new(EngineErrorKind::Timeout))
+        }
     }
 }
 
@@ -130,7 +133,7 @@ mod ui {
     {
         let webview = tabs
             .webview(tab)
-            .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+            .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
         run(
             |job| webview.with_webview(move |platform| job(&platform)).map_err(|_| ()),
             EVAL_STEP,

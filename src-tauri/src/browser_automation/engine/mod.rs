@@ -228,14 +228,11 @@ pub enum EngineErrorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineError {
     pub kind: EngineErrorKind,
-    /// True only when the command provably never reached the page, so a
-    /// retry on another channel cannot repeat its side effects.
-    pub retryable: bool,
 }
 
 impl EngineError {
-    pub fn new(kind: EngineErrorKind, retryable: bool) -> Self {
-        Self { kind, retryable }
+    pub fn new(kind: EngineErrorKind) -> Self {
+        Self { kind }
     }
 }
 

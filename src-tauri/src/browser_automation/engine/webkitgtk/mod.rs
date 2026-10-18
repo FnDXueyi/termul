@@ -51,10 +51,10 @@ impl BrowserEngine for WebKitGtkEngine {
         _at: Point,
         _mode: InputMode,
     ) -> EngineFuture<'a, ()> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 }
