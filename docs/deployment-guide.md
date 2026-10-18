@@ -88,7 +88,7 @@ Every record must have a nonempty URL and minisign signature. Missing keys, malf
 
 ### Linux and Browser Bundle
 
-Linux desktop and standalone-server builds preserve the current Ubuntu 22.04 dependency setup, including WebKitGTK, appindicator, SVG, D-Bus, and `patchelf`. The standalone server builds natively on both architectures: `ubuntu-22.04` for x64 and `ubuntu-22.04-arm` for arm64, with no cross-compilation. Both build paths create and validate `dist-web/index.html` before Rust compilation so the in-process browser client is embedded rather than relying on files outside the installation.
+Linux desktop and standalone-server builds preserve the current Ubuntu 22.04 dependency setup, including WebKitGTK 2.40 or later (the agent browser links a call added in 2.40), appindicator, SVG, D-Bus, and `patchelf`. The standalone server builds natively on both architectures: `ubuntu-22.04` for x64 and `ubuntu-22.04-arm` for arm64, with no cross-compilation. Both build paths create and validate `dist-web/index.html` before Rust compilation so the in-process browser client is embedded rather than relying on files outside the installation.
 
 #### Installing `termul-server`
 
