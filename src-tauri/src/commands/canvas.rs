@@ -24,6 +24,7 @@ use crate::canvas::static_server::{
     CODE_BUNDLE_LISTENER_DOWN,
 };
 use crate::canvas::{CanvasError, CanvasStatus, CODE_DAEMON_DOWN};
+use crate::path_validation::client_path;
 
 const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -31,9 +32,10 @@ const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// open of a project's `design.figcraft`) is validated through its parent
 /// directory; the first save creates it.
 pub(super) fn validate_canvas_doc_path(doc_path: &str) -> Result<String, String> {
-    let path = Path::new(doc_path);
+    let doc_path = client_path(doc_path);
+    let path = Path::new(&doc_path);
     let validated = if path.exists() {
-        validate_project_path(doc_path)?
+        validate_project_path(&doc_path)?
     } else {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return Err(format!("Invalid canvas document path: {doc_path}"));
