@@ -59,7 +59,8 @@ pub const ACTION_CLICK: Duration = EVAL_STEP.saturating_add(CDP_CALL).saturating
 /// A settle loop can start its last readiness probe just before it ends.
 pub const ACTION_HISTORY: Duration = NAV_SETTLE.saturating_add(EVAL_STEP);
 pub const ACTION_NAVIGATE: Duration = TAB_OPEN.saturating_add(ACTION_HISTORY);
-pub const ACTION_NEW_TAB: Duration = TAB_OPEN;
+/// Opens the tab, then waits for its first navigation the way navigate does.
+pub const ACTION_NEW_TAB: Duration = ACTION_NAVIGATE;
 pub const ACTION_WAIT: Duration = WAIT_MAX.saturating_add(EVAL_STEP);
 
 /// An absolute point in time a call must finish by.
