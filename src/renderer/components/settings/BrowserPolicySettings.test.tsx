@@ -122,9 +122,13 @@ describe('BrowserPolicySettings', () => {
     expect(
       await screen.findByText(/This system cannot keep a shared agent profile/)
     ).toBeInTheDocument()
-    expect(await screen.findByText(/Agents browse logged out in this project for now/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/Agents browse logged out in this project for now/)
+    ).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'Shared agent profile' })).toBeChecked()
-    expect(screen.getByRole('switch', { name: 'Browse logged out in this project' })).not.toBeChecked()
+    expect(
+      screen.getByRole('switch', { name: 'Browse logged out in this project' })
+    ).not.toBeChecked()
   })
 
   it('shows no fallback note while agents get the profile they asked for', async () => {
