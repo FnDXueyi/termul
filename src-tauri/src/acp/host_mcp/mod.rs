@@ -343,6 +343,10 @@ impl<'de> Deserialize<'de> for TermulBrowserInput {
     }
 }
 
+/// The parent reads at most this much of a child's request line, newline
+/// included, so a misbehaving peer cannot grow it unbounded.
+pub const MAX_REQUEST_FRAME_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FrameRequest {
     pub token: String,

@@ -330,12 +330,10 @@ impl HostPlanServer {
     /// connect is sub-ms).
     async fn handle_conn(self: Arc<Self>, stream: tokio::net::TcpStream) -> std::io::Result<()> {
         let (reader, mut writer) = stream.into_split();
-        // Cap the request at 1 MiB so a misbehaving peer can't grow `line`
-        // unbounded. The largest plausible plan (hundreds of todos) is well
-        // under this.
-        const MAX_FRAME: u64 = 1024 * 1024;
+        // The largest plausible plan (hundreds of todos) is well under the
+        // cap; a canvas call over it is refused by the bridge before sending.
         const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        let mut reader = BufReader::new(reader.take(MAX_FRAME));
+        let mut reader = BufReader::new(reader.take(super::MAX_REQUEST_FRAME_BYTES));
 
         let mut line = String::new();
         // Bound the read so an idle peer that connects but never sends is

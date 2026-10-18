@@ -328,3 +328,29 @@ fn ui_tools_pass_through_and_report_canvas_hidden() {
         assert_eq!(frame.method, method, "{tool}");
     }
 }
+
+#[test]
+fn an_oversize_request_is_an_engine_error_naming_the_limit_not_a_closed_canvas() {
+    let (harness, configs) = Harness::new(&[("sess-1", Some("proj-1"))]);
+    let seen = mount_renderer(&harness.router(), "conn-a", "proj-1", 1, |_| {
+        Some(Ok("{}".to_string()))
+    });
+    let limit = usize::try_from(crate::acp::host_mcp::MAX_REQUEST_FRAME_BYTES).unwrap();
+    let mut bridge = Bridge::new(configs[0].clone());
+
+    let error = error_of(bridge.call(
+        "engine.execute",
+        json!({ "command": "x", "params": { "text": "a".repeat(limit) } }),
+    ));
+    assert_eq!(error["code"], "ENGINE_ERROR", "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains(&limit.to_string()), "{message}");
+    assert!(seen.recv_timeout(Duration::from_millis(200)).is_err());
+
+    bridge
+        .call(
+            "engine.execute",
+            json!({ "params": { "text": "a".repeat(limit / 2) } }),
+        )
+        .expect("a request under the limit reaches the editor");
+}

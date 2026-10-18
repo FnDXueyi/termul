@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use crate::acp::host_mcp::canvas::{CanvasError, CanvasErrorCode};
 use crate::acp::host_mcp::child::ChildConfig;
-use crate::acp::host_mcp::{FrameKind, FrameReply, FrameRequest};
+use crate::acp::host_mcp::{FrameKind, FrameReply, FrameRequest, MAX_REQUEST_FRAME_BYTES};
 
 /// Replies carry rendered PNGs and exports as base64, so the cap is far above
 /// the other host tools' 1 MiB.
@@ -60,7 +60,26 @@ impl Bridge {
             canvas_params: Some(params.to_string()),
             canvas_tool: self.tool.clone(),
         };
-        let reply = exchange(self.config.port, &frame).map_err(|error| {
+        let mut line = serde_json::to_vec(&frame).map_err(|error| {
+            CanvasError::new(
+                CanvasErrorCode::EngineError,
+                format!("could not encode the canvas request: {error}"),
+            )
+        })?;
+        line.push(b'\n');
+        // The parent would cut an oversize line short and answer it like a
+        // gateway refusal, which reads as "the canvas is closed".
+        if line.len() as u64 > MAX_REQUEST_FRAME_BYTES {
+            return Err(CanvasError::new(
+                CanvasErrorCode::EngineError,
+                format!(
+                    "the {method} request is {} bytes, over the canvas gateway's {} byte limit; send smaller params",
+                    line.len(),
+                    MAX_REQUEST_FRAME_BYTES
+                ),
+            ));
+        }
+        let reply = exchange(self.config.port, &line).map_err(|error| {
             CanvasError::new(
                 CanvasErrorCode::CanvasClosed,
                 format!("the canvas gateway is unreachable: {error}"),
@@ -94,14 +113,13 @@ impl Bridge {
     }
 }
 
-/// One frame out, one newline-terminated reply in, on a fresh connection.
-fn exchange(port: u16, frame: &FrameRequest) -> Result<FrameReply, String> {
+/// One encoded frame line out, one newline-terminated reply in, on a fresh
+/// connection.
+fn exchange(port: u16, line: &[u8]) -> Result<FrameReply, String> {
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect failed: {e}"))?;
-    let mut buf = serde_json::to_vec(frame).map_err(|e| format!("encode frame: {e}"))?;
-    buf.push(b'\n');
     stream
-        .write_all(&buf)
+        .write_all(line)
         .map_err(|e| format!("write frame: {e}"))?;
     let mut reader = BufReader::new(stream.take(MAX_REPLY_BYTES));
     let mut line = String::new();
