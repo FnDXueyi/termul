@@ -1,4 +1,4 @@
-var target = p.path ? byPath(p.path) : deepActive();
+var target = p.path ? locate(p.path) : deepActive();
 if (p.path && !target) return STALE;
 var facts = {
   frameOrigin: location.origin,
