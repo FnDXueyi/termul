@@ -15,6 +15,7 @@ enum Route {
   MainDoEvent,
   WidgetEvent,
   NoFocus,
+  LockFocus,
 }
 
 pub struct GtkSynth {
@@ -30,6 +31,7 @@ impl GtkSynth {
     let route = match variant {
       "widget" => Route::WidgetEvent,
       "nofocus" => Route::NoFocus,
+      "lockfocus" => Route::LockFocus,
       _ => Route::MainDoEvent,
     };
     Self {
@@ -90,7 +92,11 @@ impl GtkSynth {
         true
       }
       Route::WidgetEvent => gts::gtk_widget_event(b, ev) != 0,
-      Route::NoFocus if is_key => gts::gtk_widget_event(b, ev) != 0,
+      Route::NoFocus | Route::LockFocus if is_key => gts::gtk_widget_event(b, ev) != 0,
+      Route::LockFocus => {
+        gts::gtk_main_do_event(ev);
+        true
+      }
       Route::NoFocus => {
         if is_press {
           gts::gtk_widget_set_can_focus(b, 0);
@@ -138,6 +144,9 @@ impl Synth for GtkSynth {
       let w = self.gtk_window();
       gts::gtk_window_present(w);
       gts::gtk_widget_grab_focus(self.a.to_glib_none().0);
+      if self.route == Route::LockFocus {
+        gts::gtk_widget_set_can_focus(self.b.to_glib_none().0, 0);
+      }
     }
     self.native_state()
   }

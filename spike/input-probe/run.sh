@@ -22,8 +22,13 @@ Linux)
   export WEBKIT_DISABLE_DMABUF_RENDERER=1
   pkg-config --modversion webkit2gtk-4.1 >"$OUT/webkit-version.txt" 2>&1
   XV=(xvfb-run -a -s "-screen 0 1280x1024x24")
-  for v in main widget nofocus; do run "x11-input-$v" "${XV[@]}" env GDK_BACKEND=x11 "$BIN" input "$v"; done
+  for v in main widget nofocus lockfocus; do run "x11-input-$v" "${XV[@]}" env GDK_BACKEND=x11 "$BIN" input "$v"; done
+  pulseaudio -D --exit-idle-time=-1 >"$OUT/pulse.log" 2>&1
+  pactl load-module module-null-sink sink_name=probe_sink >>"$OUT/pulse.log" 2>&1
+  pactl load-module module-virtual-source source_name=probe_mic master=probe_sink.monitor >>"$OUT/pulse.log" 2>&1
+  pactl list short sources >>"$OUT/pulse.log" 2>&1
   for m in deny allow none; do run "x11-perm-$m" "${XV[@]}" env GDK_BACKEND=x11 "$BIN" perm "$m"; done
+  for m in deny allow; do run "x11-permmockfirst-$m" "${XV[@]}" env GDK_BACKEND=x11 "$BIN" perm "$m" mock_first; done
 
   export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$UID}"
   mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
@@ -38,7 +43,7 @@ Linux)
   fi
   if [ -S "$XDG_RUNTIME_DIR/wl-probe" ]; then
     WL=(env -u DISPLAY GDK_BACKEND=wayland WAYLAND_DISPLAY=wl-probe)
-    for v in main widget nofocus; do run "wl-input-$v" "${WL[@]}" "$BIN" input "$v"; done
+    for v in main widget nofocus lockfocus; do run "wl-input-$v" "${WL[@]}" "$BIN" input "$v"; done
     for m in deny allow none; do run "wl-perm-$m" "${WL[@]}" "$BIN" perm "$m"; done
   else
     echo "weston socket missing" >>"$OUT/weston.log"
@@ -47,8 +52,9 @@ Linux)
 Darwin)
   sw_vers >"$OUT/os-version.txt" 2>&1
   defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info.plist CFBundleVersion >>"$OUT/os-version.txt" 2>&1
-  for v in direct window spi tracking; do run "mac-input-$v" "$BIN" input "$v"; done
+  for v in direct window spi tracking keyswap keyinsert; do run "mac-input-$v" "$BIN" input "$v"; done
   for m in deny allow none; do run "mac-perm-$m" "$BIN" perm "$m"; done
+  run "mac-permmockfirst-deny" "$BIN" perm deny mock_first
   ;;
 *)
   for m in deny allow none; do run "win-perm-$m" "$BIN.exe" perm "$m"; done

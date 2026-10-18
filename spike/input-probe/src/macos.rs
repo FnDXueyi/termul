@@ -3,7 +3,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{class, msg_send, sel};
 use objc2_app_kit::NSWindow;
-use objc2_foundation::{NSPoint, NSRect, NSString};
+use objc2_foundation::{NSPoint, NSRange, NSRect, NSString};
 use serde_json::{json, Value};
 use std::ffi::c_void;
 use wry::{WebViewExtMacOS, WryWebView};
@@ -42,7 +42,15 @@ enum Route {
   Tracking,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum KeyRoute {
+  Direct,
+  Swap,
+  Insert,
+}
+
 pub struct MacSynth {
+  key_route: KeyRoute,
   window: Retained<NSWindow>,
   a: Retained<WryWebView>,
   b: Retained<WryWebView>,
@@ -60,11 +68,16 @@ impl MacSynth {
   pub fn new(a: &wry::WebView, b: &wry::WebView, variant: &str) -> Self {
     let route = match variant {
       "window" => Route::Window,
-      "spi" => Route::Spi,
+      "spi" | "keyswap" | "keyinsert" => Route::Spi,
       "tracking" => Route::Tracking,
       _ => Route::Direct,
     };
-    Self { window: b.ns_window(), a: a.webview(), b: b.webview(), route }
+    let key_route = match variant {
+      "keyswap" => KeyRoute::Swap,
+      "keyinsert" => KeyRoute::Insert,
+      _ => KeyRoute::Direct,
+    };
+    Self { key_route, window: b.ns_window(), a: a.webview(), b: b.webview(), route }
   }
 
   fn window_number(&self) -> isize {
@@ -213,6 +226,17 @@ impl Synth for MacSynth {
     let s = NSString::from_str(&ch.to_string());
     let code: u16 = if ch == 'b' { 11 } else { 0 };
     let mut out = Vec::new();
+    if self.key_route == KeyRoute::Insert {
+      let range = NSRange::new(isize::MAX as usize, 0);
+      unsafe {
+        let _: () = msg_send![&*self.b, insertText: &*s, replacementRange: range];
+      }
+      return json!({ "via": "insertText:replacementRange:" });
+    }
+    if self.key_route == KeyRoute::Swap {
+      let ok: bool = unsafe { msg_send![&*self.window, makeFirstResponder: &*self.b] };
+      out.push(json!({ "swap_to_b": ok }));
+    }
     for (ty, method) in [(KEY_DOWN, sel!(keyDown:)), (KEY_UP, sel!(keyUp:))] {
       let ev: Option<Retained<AnyObject>> = unsafe {
         msg_send![class!(NSEvent), keyEventWithType: ty, location: NSPoint::new(0.0, 0.0), modifierFlags: 0usize, timestamp: uptime(), windowNumber: self.window_number(), context: std::ptr::null_mut::<AnyObject>(), characters: &*s, charactersIgnoringModifiers: &*s, isARepeat: Bool::NO, keyCode: code]
@@ -221,6 +245,10 @@ impl Synth for MacSynth {
         Some(ev) => json!(self.deliver(method, &ev)),
         None => json!("event_construction_failed"),
       });
+    }
+    if self.key_route == KeyRoute::Swap {
+      let ok: bool = unsafe { msg_send![&*self.window, makeFirstResponder: &*self.a] };
+      out.push(json!({ "swap_back_a": ok }));
     }
     json!({ "via": out })
   }

@@ -163,8 +163,14 @@ fn input_steps() -> Vec<Step> {
   v
 }
 
-fn perm_steps() -> Vec<Step> {
+fn perm_steps(mock_first: bool) -> Vec<Step> {
   use Step::*;
+  if mock_first {
+    let mut v = vec![Wait, Wait, MockMedia, Wait, Load("/perm?phase=mock_first")];
+    v.extend((0..44).map(|_| Wait));
+    v.extend([Read("perm_mock_first"), Exit]);
+    return v;
+  }
   let mut v: Vec<Step> = (0..44).map(|_| Wait).collect();
   v.extend([Read("perm_default"), MockMedia, Wait, Load("/perm?phase=mock")]);
   v.extend((0..44).map(|_| Wait));
@@ -207,8 +213,10 @@ fn main() {
         r
       }) as PermHandler
     });
-    let b = child(&window, &format!("{base}/perm?phase=default"), 0.0, 800.0, handler);
-    (None, b, perm_steps())
+    let mock_first = args.get(3).map(String::as_str) == Some("mock_first");
+    let first = if mock_first { "/blank" } else { "/perm?phase=default" };
+    let b = child(&window, &format!("{base}{first}"), 0.0, 800.0, handler);
+    (None, b, perm_steps(mock_first))
   } else {
     let a = child(&window, &format!("{base}/chat"), 0.0, 250.0, None);
     let b = child(&window, &format!("{base}/target"), 250.0, 550.0, None);
