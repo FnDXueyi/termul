@@ -39,8 +39,7 @@ export function browserConsentSummary(
 
 const PROFILE_LABELS: Record<BrowserConsentTicket['profile'], string> = {
   global: 'Global agent profile, shared across all projects',
-  ephemeral: 'Ephemeral profile, discarded when the session ends',
-  shared: 'App browser profile, shared with your own browser tabs'
+  ephemeral: 'Ephemeral profile, discarded when the session ends'
 }
 
 export function browserConsentProfileLabel(profile: BrowserConsentTicket['profile']): string {

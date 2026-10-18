@@ -116,10 +116,10 @@ describe('BrowserConsentCard', () => {
     ])
   })
 
-  it('names the shared app profile when the agent tab runs in it', () => {
-    render(<BrowserConsentCard consent={ticket({ profile: 'shared' })} />)
+  it('names the ephemeral profile when the agent tab runs in it', () => {
+    render(<BrowserConsentCard consent={ticket({ profile: 'ephemeral' })} />)
     expect(
-      screen.getByText('App browser profile, shared with your own browser tabs')
+      screen.getByText('Ephemeral profile, discarded when the session ends')
     ).toBeInTheDocument()
   })
 

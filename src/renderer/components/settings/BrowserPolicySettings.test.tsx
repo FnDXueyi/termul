@@ -116,6 +116,24 @@ describe('BrowserPolicySettings', () => {
     expect(host.app.globalProfileEnabled).toBe(false)
   })
 
+  it('says when agents browse logged out although the shared profile is requested', async () => {
+    host.engineKeepsGlobal = false
+    render(<BrowserPolicySettings />)
+    expect(
+      await screen.findByText(/This system cannot keep a shared agent profile/)
+    ).toBeInTheDocument()
+    expect(await screen.findByText(/Agents browse logged out in this project for now/)).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Shared agent profile' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Browse logged out in this project' })).not.toBeChecked()
+  })
+
+  it('shows no fallback note while agents get the profile they asked for', async () => {
+    render(<BrowserPolicySettings />)
+    await screen.findByRole('switch', { name: 'Shared agent profile' })
+    expect(screen.queryByText(/This system cannot keep a shared agent profile/)).toBeNull()
+    expect(screen.queryByText(/Agents browse logged out in this project for now/)).toBeNull()
+  })
+
   it('lists a pre-approval added from the project form', async () => {
     render(<BrowserPolicySettings />)
     const list = await screen.findByRole('textbox', { name: 'Pre-approved actions' })

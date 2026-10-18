@@ -32,6 +32,8 @@ export interface BrowserPolicyHost {
   /** What the clear operation does; defaults to refusing like an unwired engine. */
   clearOutcome: 'unavailable' | 'ok'
   cleared: number
+  /** Whether the engine can keep the shared agent profile (macOS 14+). */
+  engineKeepsGlobal: boolean
   dispatch: (command: HostCommand, args: Record<string, unknown>) => IpcResult<unknown>
 }
 
@@ -63,12 +65,14 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
       revision: 0,
       readOnly: false,
       globalProfileEnabled: true,
+      effectiveGlobalProfile: true,
       preapprovals: [],
       clearImpact: { sessions: 0, projects: 0 }
     },
     applyCalls: 0,
     clearOutcome: 'unavailable',
     cleared: 0,
+    engineKeepsGlobal: true,
     dispatch: () => {
       throw new Error('replaced below')
     }
@@ -83,12 +87,24 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
         readOnly: false,
         allowList: [],
         preapprovals: [],
-        profileMode: 'global'
+        profileMode: 'global',
+        effectiveProfileMode: 'global'
       }
       host.projects.set(id, policy)
     }
     return policy
   }
+
+  const appView = (): AppBrowserPolicy => ({
+    ...structuredClone(host.app),
+    effectiveGlobalProfile: host.app.globalProfileEnabled && host.engineKeepsGlobal
+  })
+
+  const projectView = (policy: ProjectBrowserPolicy): ProjectBrowserPolicy => ({
+    ...structuredClone(policy),
+    effectiveProfileMode:
+      policy.profileMode === 'global' && appView().effectiveGlobalProfile ? 'global' : 'ephemeral'
+  })
 
   const applyProject = (args: Record<string, unknown>): IpcResult<unknown> => {
     host.applyCalls += 1
@@ -142,7 +158,7 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
         return refuse('malformed_operation', 'the operation is not recognized')
     }
     if (changed) policy.revision += 1
-    return { success: true, data: structuredClone(policy) }
+    return { success: true, data: projectView(policy) }
   }
 
   const applyApp = (args: Record<string, unknown>): IpcResult<unknown> => {
@@ -157,7 +173,7 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
         )
       }
       host.cleared += 1
-      return { success: true, data: structuredClone(host.app) }
+      return { success: true, data: appView() }
     }
     if (host.app.readOnly) return refuse('policy_read_only', 'this policy is read-only')
     if (args.expectedRevision !== host.app.revision) {
@@ -197,15 +213,15 @@ export function createBrowserPolicyHost(): BrowserPolicyHost {
         return refuse('malformed_operation', 'the operation is not recognized')
     }
     if (changed) host.app.revision += 1
-    return { success: true, data: structuredClone(host.app) }
+    return { success: true, data: appView() }
   }
 
   host.dispatch = (command, args) => {
     switch (command) {
       case 'get_project':
-        return { success: true, data: structuredClone(projectOf(String(args.projectId))) }
+        return { success: true, data: projectView(projectOf(String(args.projectId))) }
       case 'get_app':
-        return { success: true, data: structuredClone(host.app) }
+        return { success: true, data: appView() }
       case 'apply_project':
         return applyProject(args)
       case 'apply_app':

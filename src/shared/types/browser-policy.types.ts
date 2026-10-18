@@ -54,7 +54,10 @@ export interface ProjectBrowserPolicy {
   /** Canonical entries: `https://example.com` or `https://*.example.com`. */
   allowList: string[]
   preapprovals: BrowserPreapproval[]
+  /** What the project asks for. */
   profileMode: BrowserProfileMode
+  /** What its agents get: ephemeral while the app switch is off or the system cannot keep a shared profile. */
+  effectiveProfileMode: BrowserProfileMode
 }
 
 /** What clearing the global agent profile would close right now. */
@@ -67,6 +70,8 @@ export interface AppBrowserPolicy {
   revision: number
   readOnly: boolean
   globalProfileEnabled: boolean
+  /** The switch is on and this system can keep a shared profile (macOS needs 14). */
+  effectiveGlobalProfile: boolean
   preapprovals: BrowserPreapproval[]
   clearImpact: BrowserProfileClearImpact
 }

@@ -124,6 +124,12 @@ export function BrowserProjectPolicy({ projectId }: { projectId: string }): Reac
             }}
           />
         </SettingsCard>
+        {policy.profileMode === 'global' && policy.effectiveProfileMode === 'ephemeral' && (
+          <SettingsNotice>
+            Agents browse logged out in this project for now: the shared agent profile is off or
+            this system cannot keep one.
+          </SettingsNotice>
+        )}
         {switchError && (
           <SettingsNotice tone="danger" role="alert">
             {switchError}
@@ -221,6 +227,12 @@ export function BrowserAppPolicy(): React.JSX.Element {
             </Button>
           </SettingsRow>
         </SettingsCard>
+        {policy.globalProfileEnabled && !policy.effectiveGlobalProfile && (
+          <SettingsNotice>
+            This system cannot keep a shared agent profile, so agents browse logged out. It needs
+            macOS 14 or later.
+          </SettingsNotice>
+        )}
         {(switchError ?? clearError) && (
           <SettingsNotice tone="danger" role="alert">
             {switchError ?? clearError}
