@@ -136,11 +136,12 @@ impl WebView2Engine {
 }
 
 /// What this adapter implements today. Eval rides CDP `Runtime.evaluate`
-/// (a native channel) in the page's main world; DOM-event verbs are
+/// in the page's main world, so it is declared with the same tier as the
+/// bridge engine until an isolated world exists; DOM-event verbs are
 /// synthetic.
 pub fn capability_table() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented on the WebView2 engine yet")
-        .with(CapabilityId::IsolatedEval, Support::Trusted)
+        .with(CapabilityId::IsolatedEval, Support::Synthetic)
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
