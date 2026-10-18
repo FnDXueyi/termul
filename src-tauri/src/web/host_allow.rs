@@ -100,8 +100,7 @@ impl HostAllowList {
         &self,
         lines: &mut impl Iterator<Item = std::io::Result<String>>,
     ) -> bool {
-        read_header_block(lines)
-            .is_some_and(|headers| self.allows(header_value(&headers, "host")))
+        read_header_block(lines).is_some_and(|headers| self.allows(header_value(&headers, "host")))
     }
 }
 

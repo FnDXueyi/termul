@@ -101,24 +101,32 @@ fn lines(raw: &str) -> impl Iterator<Item = std::io::Result<String>> + '_ {
 fn hand_parsed_requests_are_checked_on_their_host_header() {
     let hosts = HostAllowList::loopback();
     let check = |raw: &str| hosts.allows_header_block(&mut lines(raw));
-    assert!(!check("Accept: */*
+    assert!(!check(
+        "Accept: */*
 HOST: attacker.example:5000
 
-body"));
-    assert!(check("Host: 127.0.0.1:5000
+body"
+    ));
+    assert!(check(
+        "Host: 127.0.0.1:5000
 Accept: */*
 
-"));
-    assert!(check("host: localhost:5000
+"
+    ));
+    assert!(check(
+        "host: localhost:5000
 
-"));
+"
+    ));
 }
 
 #[test]
 fn hand_parsed_requests_without_a_complete_header_block_fail() {
     let hosts = HostAllowList::loopback();
-    assert!(!hosts.allows_header_block(&mut lines("Host: 127.0.0.1:5000
-Accept: */*")));
+    assert!(!hosts.allows_header_block(&mut lines(
+        "Host: 127.0.0.1:5000
+Accept: */*"
+    )));
     let mut failing = std::iter::once(Err(std::io::Error::from(std::io::ErrorKind::TimedOut)));
     assert!(!hosts.allows_header_block(&mut failing));
 }

@@ -150,6 +150,15 @@ fn percent_decode(raw: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn create_tab(
+    manager: &BrowserTabManager,
+    label: String,
+    url: &str,
+    bounds: BrowserBounds,
+) -> Result<(), String> {
+    tauri::async_runtime::block_on(manager.create(label, url.to_string(), bounds)).map(|_| ())
+}
+
 fn run() -> Report {
     let (remote_port, remote_requests) = serve_fixture_page();
     let (dev_port, dev_requests) = serve_fixture_page();
@@ -253,20 +262,13 @@ fn run() -> Report {
                 };
                 let mut refusals = BTreeMap::new();
                 for (label, target) in &denied_targets {
-                    let create = tauri::async_runtime::block_on(manager.create(
-                        format!("refused-{label}"),
-                        target.clone(),
-                        bounds(0),
-                    ));
-                    refusals.insert(format!("create {label}"), create.map(|_| ()));
+                    let create =
+                        create_tab(&manager, format!("refused-{label}"), target, bounds(0));
+                    refusals.insert(format!("create {label}"), create);
                 }
                 for (index, (label, url)) in loaded_tabs.iter().enumerate() {
-                    tauri::async_runtime::block_on(manager.create(
-                        (*label).to_string(),
-                        url.clone(),
-                        bounds(index),
-                    ))
-                    .expect("tab created");
+                    create_tab(&manager, (*label).to_string(), url, bounds(index))
+                        .expect("tab created");
                 }
                 let mut page_navigation_tried: Vec<&str> = Vec::new();
                 let started = Instant::now();
