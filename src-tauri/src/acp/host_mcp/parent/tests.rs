@@ -242,8 +242,7 @@ fn browser_frame_without_host_fails_closed_with_typed_code() {
             "token": token,
             "session_id": provisional,
             "kind": "browser",
-            "browser_action": "navigate",
-            "browser_args": {"url": "https://example.com"},
+            "browser_input": {"action": "navigate", "url": "https://example.com"},
         });
         let reply = connect_and_send(port, &frame).await;
         assert_eq!(reply["ok"], false);
@@ -266,33 +265,39 @@ fn browser_frame_missing_action_is_rejected() {
         });
         let reply = connect_and_send(port, &frame).await;
         assert_eq!(reply["ok"], false);
-        assert_eq!(reply["error"], "browser_action is required");
+        assert_eq!(reply["code"], "invalid_params");
+        assert_eq!(reply["error"], "missing 'action'");
     });
 }
 
 #[test]
-fn browser_frame_round_trip_serializes_payload_fields() {
-    // Wire shape the child emits — must survive serde unchanged so the
-    // parent can reconstruct BrowserCall.
-    let frame = FrameRequest {
-        token: "t".into(),
-        session_id: "p".into(),
-        kind: FrameKind::Browser,
-        todos: Vec::new(),
-        title: None,
-        branch: None,
-        browser_action: Some("click".into()),
-        browser_args: Some(serde_json::json!({"ref": "@e3"})),
-        browser_element: Some("the save button".into()),
-        ask: None,
-    };
-    let value = serde_json::to_value(&frame).unwrap();
-    assert_eq!(value["kind"], "browser");
-    assert_eq!(value["browser_action"], "click");
-    assert_eq!(value["browser_args"]["ref"], "@e3");
-    let decoded: FrameRequest = serde_json::from_value(value).unwrap();
-    assert_eq!(decoded.kind, FrameKind::Browser);
-    assert_eq!(decoded.browser_action.as_deref(), Some("click"));
+fn describe_frame_is_served_before_the_session_is_bound() {
+    // Children describe at startup, before `session/new` returns: the token
+    // alone authenticates. Without a host the schema fails closed.
+    let _guard = crate::browser_automation::TEST_HOST_LOCK.lock().unwrap();
+    crate::browser_automation::clear_browser_host();
+    let server = HostPlanServer::start(vec![], None);
+    let (port, token, provisional) = server.register_session("agent-1");
+    let runtime = Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let bad = connect_and_send(
+            port,
+            &serde_json::json!({ "token": "bogus", "session_id": provisional, "kind": "describe" }),
+        )
+        .await;
+        assert_eq!(bad["error"], "auth rejected");
+        let reply = connect_and_send(
+            port,
+            &serde_json::json!({ "token": token, "session_id": provisional, "kind": "describe" }),
+        )
+        .await;
+        assert_eq!(reply["ok"], true);
+        assert_eq!(
+            reply["result"]["description"],
+            crate::browser_automation::describe().description
+        );
+        assert!(reply["result"]["input_schema"].is_object());
+    });
 }
 
 // -- spec-acp-browser-automation-v2 CAP-6: boundary failure logs -----------
@@ -363,7 +368,7 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             "token": token,
             "session_id": provisional,
             "kind": "browser",
-            "browser_action": action,
+            "browser_input": {"action": action},
         })
     };
 
@@ -447,6 +452,9 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
         }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
+        }
+        fn engine_facts(&self) -> crate::browser_automation::engine::EngineFacts {
+            crate::browser_automation::engine::EngineFacts::all_trusted()
         }
     }
     crate::browser_automation::set_browser_host(std::sync::Arc::new(FailingHost));
@@ -575,24 +583,16 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }
+        fn engine_facts(&self) -> crate::browser_automation::engine::EngineFacts {
+            crate::browser_automation::engine::EngineFacts::all_trusted()
+        }
     }
     crate::browser_automation::set_browser_host(std::sync::Arc::new(EchoHost));
 
-    let input: crate::acp::host_mcp::TermulBrowserInput = serde_json::from_value(
-        serde_json::json!({ "action": "navigate", "url": "https://example.com" }),
-    )
-    .unwrap();
     let frame = FrameRequest {
-        token: "unused".into(),
-        session_id: "unused".into(),
         kind: FrameKind::Browser,
-        todos: Vec::new(),
-        title: None,
-        branch: None,
-        browser_action: Some(input.action),
-        browser_args: Some(input.args),
-        browser_element: input.element,
-        ask: None,
+        browser_input: Some(serde_json::json!({ "action": "navigate", "url": "https://example.com" })),
+        ..FrameRequest::default()
     };
 
     let server = HostPlanServer::start(vec![], None);

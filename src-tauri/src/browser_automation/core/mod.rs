@@ -4,6 +4,7 @@
 
 pub mod boundary;
 mod consent;
+mod actions;
 mod dispatch;
 pub mod ports;
 mod reply;
@@ -20,12 +21,13 @@ use tauri::AppHandle;
 use tokio::sync::oneshot;
 
 pub use boundary::BrowserError;
+pub use dispatch::{expected_args_text, schema, ToolSchema};
 pub use reply::{
     ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
-use super::engine::{self, BrowserEngine};
+use super::engine::{self, BrowserEngine, EngineFacts};
 use super::{BrowserCall, BrowserHost};
 use crate::acp::events;
 use crate::browser_tab_manager::BrowserTabManager;
@@ -58,7 +60,7 @@ impl DesktopBrowserHost {
         sinks: Vec<Arc<dyn EventSink>>,
     ) -> Arc<Self> {
         let engine = engine::desktop_engine(tabs.clone());
-        let traits = engine.traits();
+        let traits = engine.facts().traits;
         log::info!(
             "[browser-agent] engine registered (isolated_world={}, background_render={})",
             traits.isolated_world,
@@ -90,9 +92,14 @@ impl BrowserHost for DesktopBrowserHost {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>>
     {
         Box::pin(async move {
+            let spec = dispatch::admit(&call.action, &call.args, self.engine.facts())?;
             self.ensure_consent(session_id, agent_id, &call).await?;
-            self.act(session_id, call).await
+            self.act(session_id, spec.verb, call).await
         })
+    }
+
+    fn engine_facts(&self) -> EngineFacts {
+        self.engine.facts().clone()
     }
 
     fn end_session(&self, session_id: &str) {

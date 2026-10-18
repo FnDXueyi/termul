@@ -19,8 +19,8 @@ use windows_core::HSTRING;
 use super::cdp::{self, CdpMethod, CdpTransport, CALL_ISSUED, CALL_PENDING};
 use super::jsbridge::{self, JsBridge};
 use super::{
-    BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFuture,
-    EngineTraits, InputMode, Point, Support,
+    BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
+    EngineFuture, InputMode, Point, Support,
 };
 use crate::browser_tab_manager::BrowserTabManager;
 
@@ -123,7 +123,7 @@ async fn call(
 pub struct WebView2Engine {
     transport: WebView2Transport,
     bridge: JsBridge,
-    capabilities: CapabilityTable,
+    facts: EngineFacts,
 }
 
 impl WebView2Engine {
@@ -131,7 +131,10 @@ impl WebView2Engine {
         Self {
             transport: WebView2Transport { tabs: tabs.clone() },
             bridge: JsBridge::new(tabs),
-            capabilities: capability_table(),
+            facts: EngineFacts {
+                capabilities: capability_table(),
+                traits: jsbridge::MAIN_WORLD_TRAITS,
+            },
         }
     }
 }
@@ -150,12 +153,8 @@ pub fn capability_table() -> CapabilityTable {
 }
 
 impl BrowserEngine for WebView2Engine {
-    fn capabilities(&self) -> &CapabilityTable {
-        &self.capabilities
-    }
-
-    fn traits(&self) -> EngineTraits {
-        jsbridge::MAIN_WORLD_TRAITS
+    fn facts(&self) -> &EngineFacts {
+        &self.facts
     }
 
     fn evaluate<'a>(&'a self, tab: &'a str, script: &'a str) -> EngineFuture<'a, Value> {

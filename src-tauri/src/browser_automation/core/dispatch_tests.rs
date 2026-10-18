@@ -1,110 +1,219 @@
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
-use crate::browser_automation::ERR_INVALID_PARAMS;
+use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
+use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_CAPABILITY};
+
+const ALL_VERBS: [&str; 16] = [
+    "navigate",
+    "snapshot",
+    "screenshot",
+    "click",
+    "fill",
+    "type",
+    "press",
+    "scroll",
+    "hover",
+    "wait",
+    "new_tab",
+    "list_tabs",
+    "close_tab",
+    "back",
+    "forward",
+    "reload",
+];
+
+fn bridge_like() -> EngineFacts {
+    EngineFacts {
+        capabilities: CapabilityTable::uniform(Support::Synthetic)
+            .with(CapabilityId::Screenshot, Support::Unavailable("no screenshots here")),
+        traits: EngineTraits {
+            isolated_world: false,
+            background_render: false,
+            network_observe: false,
+        },
+    }
+}
 
 #[test]
-fn url_allowlist_accepts_http_s_only() {
-    assert!(check_url("https://example.com").is_ok());
-    assert!(check_url("http://127.0.0.1:3000/app").is_ok());
-    for bad in [
-        "file:///etc/passwd",
-        "javascript:alert(1)",
-        "data:text/html,<h1>x</h1>",
-        "about:blank",
-        "not a url",
-        "",
+fn registry_holds_each_verb_once_in_documented_order() {
+    let names: Vec<&str> = REGISTRY.iter().map(|s| s.name).collect();
+    assert_eq!(names, ALL_VERBS);
+    for name in ALL_VERBS {
+        assert_eq!(spec(name).map(|s| s.name), Some(name));
+    }
+    assert!(spec("teleport").is_none());
+    assert!(spec("Navigate").is_none(), "verbs are exact lowercase names");
+}
+
+#[test]
+fn expected_args_text_comes_from_the_registry() {
+    let table = [
+        ("navigate", "'url' (optional 'tabId')"),
+        ("new_tab", "'url'"),
+        ("click", "'ref' (optional 'tabId')"),
+        ("fill", "'ref' and 'value' (optional 'tabId')"),
+        ("type", "'text' (optional 'ref', 'tabId')"),
+        ("press", "optional 'key', 'ref', 'tabId'"),
+        ("scroll", "optional 'dy', 'ref', 'tabId'"),
+        ("hover", "'ref' (optional 'tabId')"),
+        ("wait", "'ms' or 'text' (optional 'tabId')"),
+        ("snapshot", "optional 'tabId'"),
+        ("back", "optional 'tabId'"),
+        ("list_tabs", "no arguments"),
+        ("teleport", "action-specific fields"),
+    ];
+    for (action, text) in table {
+        assert_eq!(expected_args_text(action), text, "{action}");
+    }
+}
+
+#[test]
+fn validate_names_missing_required_keys_and_the_one_of_rule() {
+    let err = spec("fill").unwrap().validate(&json!({ "ref": "@e1" })).unwrap_err();
+    assert_eq!(err.code, ERR_INVALID_PARAMS);
+    assert_eq!(err.message, "fill needs 'ref' and 'value' (optional 'tabId')");
+    assert_eq!(err.arg_keys, vec!["value"]);
+
+    let err = spec("navigate").unwrap().validate(&Value::Null).unwrap_err();
+    assert_eq!(err.arg_keys, vec!["url"]);
+
+    let err = spec("wait").unwrap().validate(&json!({ "tabId": "agent-a" })).unwrap_err();
+    assert_eq!(err.message, "wait needs 'ms' or 'text' (optional 'tabId')");
+    assert_eq!(err.arg_keys, vec!["ms", "text"]);
+
+    // JSON null counts as absent.
+    let err = spec("navigate").unwrap().validate(&json!({ "url": null })).unwrap_err();
+    assert_eq!(err.arg_keys, vec!["url"]);
+}
+
+#[test]
+fn validate_rejects_wrong_json_types_naming_the_key() {
+    for (action, args, key, message) in [
+        ("navigate", json!({ "url": 7 }), "url", "navigate: 'url' must be a string"),
+        ("navigate", json!({ "url": "https://x", "tabId": 3 }), "tabId", "navigate: 'tabId' must be a string"),
+        ("wait", json!({ "ms": "500" }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("wait", json!({ "ms": -1 }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("scroll", json!({ "dy": "down" }), "dy", "scroll: 'dy' must be a number"),
     ] {
-        let err = check_url(bad).unwrap_err();
-        assert_eq!(err.code, ERR_INVALID_PARAMS);
-        // Site attribution pinned from origin: the failing key is `url`.
-        assert_eq!(err.arg_keys, vec!["url"], "must name 'url': {bad}");
+        let err = spec(action).unwrap().validate(&args).unwrap_err();
+        assert_eq!((err.message.as_str(), err.arg_keys.clone()), (message, vec![key]));
     }
 }
 
 #[test]
-fn require_url_arg_missing_or_non_string_names_url() {
-    let missing = require_url_arg(&json!({ "tabId": "t-1" }), "navigate")
-        .expect_err("missing url must error");
-    assert_eq!(missing.code, ERR_INVALID_PARAMS);
-    // Site attribution pinned from origin: the failing key is `url`.
-    assert_eq!(missing.arg_keys, vec!["url"]);
-    assert!(
-        missing.message.contains("url"),
-        "must name 'url': {}",
-        missing.message
-    );
-    assert!(
-        missing.message.contains("navigate"),
-        "must name the action: {}",
-        missing.message
-    );
-
-    let non_string = require_url_arg(&json!({ "url": 7 }), "new_tab")
-        .expect_err("non-string url must error");
-    assert_eq!(non_string.code, ERR_INVALID_PARAMS);
-    assert_eq!(non_string.arg_keys, vec!["url"]);
-    assert!(
-        non_string.message.contains("url"),
-        "must name 'url': {}",
-        non_string.message
-    );
-    assert!(
-        non_string.message.contains("new_tab"),
-        "must name the action: {}",
-        non_string.message
-    );
-
-    let ok =
-        require_url_arg(&json!({ "url": "https://example.com" }), "navigate")
-            .expect("string url extracts");
-    assert_eq!(ok, "https://example.com");
-}
-
-#[test]
-fn tab_id_arg_rejects_non_string_and_empty_naming_tabid() {
-    // Missing (and JSON null) mean "use the default tab".
-    assert_eq!(
-        tab_id_arg(&json!({}), "navigate").expect("absent tabId is Ok"),
-        None
-    );
-    assert_eq!(
-        tab_id_arg(&json!({"tabId": null}), "navigate")
-            .expect("null tabId is Ok"),
-        None
-    );
-    let err = tab_id_arg(&json!({"tabId": 7}), "navigate")
-        .expect_err("non-string tabId must error");
-    assert_eq!(err.code, ERR_INVALID_PARAMS);
-    // Site attribution pinned from origin: the failing key is `tabId`.
-    assert_eq!(err.arg_keys, vec!["tabId"]);
-    assert!(
-        err.message.contains("tabId"),
-        "must name 'tabId': {}",
-        err.message
-    );
-    let err = tab_id_arg(&json!({"tabId": ""}), "navigate")
-        .expect_err("empty tabId must error");
-    assert_eq!(err.code, ERR_INVALID_PARAMS);
-    assert_eq!(err.arg_keys, vec!["tabId"]);
-    assert!(
-        err.message.contains("tabId"),
-        "must name 'tabId': {}",
-        err.message
-    );
-    let ok = tab_id_arg(&json!({"tabId": "agent-a"}), "navigate")
-        .expect("string tabId extracts");
-    assert_eq!(ok.as_deref(), Some("agent-a"));
-}
-
-#[test]
-fn check_ref_validates_host_minted_tokens_naming_ref() {
-    // Host-minted `@eN` shape only.
-    assert!(check_ref("@e12").is_ok());
-    for bad in ["@e", "@ex", "e3", "@e3x", ""] {
-        let err = check_ref(bad).unwrap_err();
-        assert_eq!(err.code, ERR_INVALID_PARAMS);
-        // Site attribution pinned from origin: the failing key is `ref`.
-        assert_eq!(err.arg_keys, vec!["ref"], "must name 'ref': {bad}");
+fn validate_accepts_well_formed_calls_and_ignores_unknown_keys() {
+    for (action, args) in [
+        ("navigate", json!({ "url": "https://example.com" })),
+        ("wait", json!({ "ms": 0 })),
+        ("wait", json!({ "text": "Done" })),
+        ("scroll", json!({ "dy": -120.5 })),
+        ("scroll", Value::Null),
+        ("list_tabs", json!({ "foo": 1 })),
+        ("press", json!({})),
+    ] {
+        spec(action)
+            .unwrap()
+            .validate(&args)
+            .unwrap_or_else(|e| panic!("{action} {args}: {}", e.message));
     }
+}
+
+#[test]
+fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
+    let facts = bridge_like();
+    let err = admit("teleport", &Value::Null, &facts).unwrap_err();
+    assert_eq!((err.code, err.message.as_str()), (ERR_INVALID_PARAMS, "unknown action 'teleport'"));
+
+    let err = admit("screenshot", &Value::Null, &facts).unwrap_err();
+    assert_eq!((err.code, err.message.as_str()), (ERR_CAPABILITY, "no screenshots here"));
+
+    // The capability pre-check runs before argument validation.
+    let err = admit("screenshot", &json!({ "tabId": 5 }), &facts).unwrap_err();
+    assert_eq!(err.code, ERR_CAPABILITY);
+
+    let admitted = admit("click", &json!({ "ref": "@e1" }), &facts).expect("synthetic click is available");
+    assert_eq!(admitted.verb, Verb::Click);
+    assert_eq!(
+        admit("click", &Value::Null, &facts).unwrap_err().arg_keys,
+        vec!["ref"]
+    );
+}
+
+fn action_enum(schema: &ToolSchema) -> Vec<String> {
+    schema.input_schema["properties"]["action"]["enum"]
+        .as_array()
+        .expect("action enum")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
+    let schema = schema(Some(&EngineFacts::all_trusted()));
+    assert_eq!(action_enum(&schema), ALL_VERBS);
+    let props = &schema.input_schema["properties"];
+    let nested = &props["args"];
+    assert_eq!(nested["type"], "object");
+    for (key, ty) in [
+        ("url", "string"),
+        ("tabId", "string"),
+        ("ref", "string"),
+        ("value", "string"),
+        ("text", "string"),
+        ("key", "string"),
+        ("ms", "integer"),
+        ("dy", "number"),
+    ] {
+        assert_eq!(props[key]["type"], ty, "flat {key}");
+        assert_eq!(nested["properties"][key]["type"], ty, "nested {key}");
+    }
+    assert_eq!(props["element"]["type"], "string");
+    assert_eq!(schema.input_schema["required"], json!(["action"]));
+    for line in [
+        "- navigate {url, tabId?}:",
+        "- fill {ref, value, tabId?}:",
+        "- wait {ms?, text?, tabId?}:",
+        "- list_tabs {}:",
+    ] {
+        assert!(schema.description.contains(line), "missing {line:?}: {}", schema.description);
+    }
+    assert!(schema.description.contains("never a string"));
+    assert!(!schema.description.contains("Not available on this host"));
+    assert!(!schema.description.contains("page's own script context"));
+}
+
+#[test]
+fn schema_omits_withdrawn_verbs_and_says_which_and_why_results_are_page_controlled() {
+    let schema = schema(Some(&bridge_like()));
+    let verbs = action_enum(&schema);
+    assert!(!verbs.contains(&"screenshot".to_string()));
+    assert_eq!(verbs.len(), ALL_VERBS.len() - 1);
+    assert!(!schema.description.contains("- screenshot"));
+    assert!(schema.description.contains("Not available on this host: screenshot."));
+    assert!(schema.description.contains("page's own script context"));
+}
+
+#[test]
+fn schema_without_a_host_fails_closed() {
+    let schema = schema(None);
+    assert!(schema.description.contains("not available on this host"));
+    assert!(schema.description.contains("capability_unavailable"));
+    assert_eq!(
+        schema.input_schema,
+        json!({
+            "type": "object",
+            "properties": { "action": { "type": "string" } },
+            "required": ["action"],
+        })
+    );
+}
+
+#[test]
+fn schema_rev_tracks_the_served_content() {
+    let trusted = EngineFacts::all_trusted();
+    assert_eq!(schema(Some(&trusted)).schema_rev, schema(Some(&trusted)).schema_rev);
+    assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&bridge_like())).schema_rev);
+    assert_ne!(schema(Some(&trusted)).schema_rev, schema(None).schema_rev);
 }

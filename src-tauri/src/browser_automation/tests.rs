@@ -82,6 +82,9 @@ fn registered_host_routes_dispatch_and_session_end() {
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }
+        fn engine_facts(&self) -> engine::EngineFacts {
+            engine::EngineFacts::all_trusted()
+        }
     }
     let stub = Arc::new(Stub {
         ended: parking_lot::Mutex::new(Vec::new()),

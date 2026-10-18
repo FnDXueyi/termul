@@ -20,13 +20,15 @@ pub mod engine;
 #[cfg(test)]
 pub use self::core::boundary::BROWSER_CALL_FAILED_PREFIX;
 pub use self::core::boundary::{boundary_arg_keys, boundary_failure_line};
-pub use self::core::{BrowserError, DesktopBrowserHost, ERR_INVALID_PARAMS};
+pub use self::core::{expected_args_text, BrowserError, DesktopBrowserHost, ToolSchema, ERR_INVALID_PARAMS};
 #[cfg(test)]
 pub use self::core::{
     ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_STALE_REF, ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
 use std::sync::{Arc, RwLock};
+
+use engine::EngineFacts;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -62,6 +64,8 @@ pub trait BrowserHost: Send + Sync {
     fn resolve_consent(&self, request_id: &str, allowed: bool) -> bool;
     /// Resolve a pending eval bridge reply from `browser_agent_eval_result`.
     fn resolve_eval(&self, nonce: &str, ok: bool, value: Option<String>) -> bool;
+    /// The registered engine's frozen capability table and traits.
+    fn engine_facts(&self) -> EngineFacts;
 }
 
 static BROWSER_HOST: RwLock<Option<Arc<dyn BrowserHost>>> = RwLock::new(None);
@@ -95,6 +99,13 @@ pub async fn dispatch(
             "browser automation is only available on the desktop app",
         )),
     }
+}
+
+/// The `browser` tool schema served to host_mcp children: built from the
+/// registered host's engine, or the fail-closed schema when none is.
+pub fn describe() -> ToolSchema {
+    let facts = browser_host().map(|host| host.engine_facts());
+    self::core::schema(facts.as_ref())
 }
 
 /// Called by `HostPlanServer::unregister_session` — closes the session's
