@@ -14,10 +14,13 @@
 //!   saved version and the atomic document write (AD-23, AD-31).
 //! - [`pin`] — the figcraft bundle tag this build expects.
 
+pub mod doc_path;
 pub mod persistence;
 pub mod pin;
 pub mod static_server;
 
+#[cfg(test)]
+mod doc_path_tests;
 #[cfg(test)]
 mod pin_tests;
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //!
 //! Registered AHEAD of the static fallback, so the SPA mount cannot shadow
 //! any of it. Doc paths on `/canvas/open` are validated against the
-//! project-root boundary exactly like the fs/git routes (`validate_doc_path`).
+//! project-root boundary exactly like the fs/git routes (`canvas::doc_path`).
 //! Auth split (browser iframes cannot send `Authorization: Bearer` headers):
 //! - the API routes stay behind the outer bearer `web_auth_gate`
 //!   (`"/canvas/"` in `GATED_PREFIXES` — the renderer facades already hold
@@ -22,7 +22,6 @@
 //! stale `ct` params and cookies stop authenticating.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -31,6 +30,7 @@ use axum::routing::{any, get, post};
 use axum::Router;
 use serde::Deserialize;
 
+use crate::canvas::doc_path::resolve_doc_path;
 use crate::canvas::persistence::CloseOutcome;
 use crate::canvas::static_server::{
     close_canvas, open_canvas, same_origin_base, serve_bundle, CanvasOpenInfo, CookiePolicy,
@@ -72,45 +72,6 @@ pub(crate) fn check_canvas_write<T>(
         state.write_flags.shared_live_writes_denied,
         route,
     )
-}
-
-/// Validate a canvas doc path against the project boundary — mirrors the
-/// fs/git route validation (`fs_api::resolve_request_path` canonicalization +
-/// `git_api::ensure_within_project_boundary` containment): the doc a web
-/// client opens must live inside a registered, non-archived project root,
-/// exactly like every other web fs operation. Returns the
-/// canonicalized, verbatim-stripped doc path on success; a typed
-/// `PATH_VALIDATION_FAILED` pair on rejection. `None` boundary (test
-/// compositions) skips validation and returns the verbatim-stripped path.
-fn validate_doc_path(
-    boundary: Option<&CanvasProjectBoundary>,
-    doc_path: &str,
-) -> Result<String, (String, String)> {
-    let failed = |message: String| {
-        (
-            message,
-            crate::canvas::CODE_PATH_VALIDATION_FAILED.to_string(),
-        )
-    };
-    let Some(boundary) = boundary else {
-        return Ok(crate::path_validation::strip_verbatim_prefix(doc_path).into_owned());
-    };
-    // Traversal rejection + canonicalization (same helper the fs routes use;
-    // ancestor-walks for not-yet-existing tails).
-    let resolved: PathBuf = crate::web::fs_api::resolve_request_path(Path::new(doc_path))
-        .map_err(|(message, code)| failed(format!("{message} (code {code})")))?;
-    // Containment vs any registered, non-archived project root.
-    let outside =
-        crate::web::git_api::ensure_within_project_boundary::<()>(&resolved, &boundary.registry)
-            .is_some();
-    if outside {
-        return Err(failed(format!(
-            "doc path '{}' is outside the project boundary",
-            resolved.display()
-        )));
-    }
-    // Tool-friendly string form (verbatim-stripped), like `git_api::cwd_string`.
-    Ok(crate::path_validation::strip_verbatim_prefix(&resolved.to_string_lossy()).into_owned())
 }
 
 /// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
@@ -174,14 +135,19 @@ async fn open(
         return Json(forbidden);
     }
     let log_project_id = crate::commands::sanitize_log_field(&req.project_id);
-    let doc_key = match validate_doc_path(state.boundary.as_ref(), &req.doc_path) {
+    let registry = state
+        .boundary
+        .as_ref()
+        .map(|boundary| boundary.registry.as_ref());
+    let doc_key = match resolve_doc_path(&req.doc_path, registry) {
         Ok(path) => path,
-        Err((message, code)) => {
+        Err(err) => {
             tracing::warn!(
                 target: "termul::web::canvas",
-                "canvas open rejected project_id={log_project_id}: {message}"
+                "canvas open rejected project_id={log_project_id}: {}",
+                err.message
             );
-            return Json(IpcBody::err(message, code));
+            return Json(IpcBody::err(err.message, err.code));
         }
     };
     match open_canvas(same_origin_base(), &req.project_id, doc_key, req.request).await {

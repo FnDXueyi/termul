@@ -9,10 +9,33 @@
 //!
 //! The AD-19 relay-execution repros are named `audit_*` (`cargo test --lib audit_`).
 
+/// Run a `Wire`-generic body as two tests: `<name>::fault_carrier` and
+/// `<name>::channel_carrier`.
+#[cfg(test)]
+macro_rules! on_both_carriers {
+    ($body:ident) => {
+        mod $body {
+            use super::*;
+
+            #[tokio::test(start_paused = true)]
+            async fn fault_carrier() {
+                super::$body::<Peer>().await;
+            }
+
+            #[tokio::test(start_paused = true)]
+            async fn channel_carrier() {
+                super::$body::<ChannelPeer>().await;
+            }
+        }
+    };
+}
+
 pub(crate) mod carrier;
 pub(crate) mod raw_client;
 pub(crate) mod wire;
 
+#[cfg(test)]
+mod canvas_gateway_tests;
 #[cfg(test)]
 mod chat_reads_tests;
 #[cfg(test)]

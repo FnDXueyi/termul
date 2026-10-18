@@ -13,26 +13,6 @@ use super::*;
 use crate::acp::manager::FakeTurn;
 use crate::web::connection_runtime::{CLOSE_GOING_AWAY, CLOSE_REASON_HOST_STOPPING};
 
-/// Run a `Wire`-generic body as two tests: `<name>::fault_carrier` and
-/// `<name>::channel_carrier`.
-macro_rules! on_both_carriers {
-    ($body:ident) => {
-        mod $body {
-            use super::*;
-
-            #[tokio::test(start_paused = true)]
-            async fn fault_carrier() {
-                super::$body::<Peer>().await;
-            }
-
-            #[tokio::test(start_paused = true)]
-            async fn channel_carrier() {
-                super::$body::<ChannelPeer>().await;
-            }
-        }
-    };
-}
-
 /// A host whose agent finishes every prompt turn immediately.
 fn completing_host() -> Host {
     Host::new(|acp, sessions| {

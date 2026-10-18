@@ -19,10 +19,11 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
 use super::{CanvasPersistence, ExpiredLease, Lifecycle, Link, Mount, RendererId};
 use crate::acp::host_mcp::canvas::{
