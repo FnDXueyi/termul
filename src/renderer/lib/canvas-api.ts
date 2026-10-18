@@ -23,7 +23,7 @@ function transport(): CanvasApi {
 }
 
 export const canvasApi: CanvasApi = {
-  open(docPath, projectId, autosaveMs) {
+  open(docPath, projectId, autosaveMs, maxMounted) {
     if (isMobileWebShellViewport()) {
       return Promise.resolve({
         success: false,
@@ -31,9 +31,11 @@ export const canvasApi: CanvasApi = {
         code: 'UNSUPPORTED_SURFACE'
       })
     }
-    return transport().open(docPath, projectId, autosaveMs)
+    return transport().open(docPath, projectId, autosaveMs, maxMounted)
   },
   close: (projectId, discard) => transport().close(projectId, discard),
+  setVisible: (projectId, mountSeq, visible) =>
+    transport().setVisible(projectId, mountSeq, visible),
   readDocument: (projectId, mountSeq) => transport().readDocument(projectId, mountSeq),
   documentLoaded: (projectId, mountSeq, ack) =>
     transport().documentLoaded(projectId, mountSeq, ack),

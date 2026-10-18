@@ -22,6 +22,7 @@ import { isTauriContext } from './tauri-runtime'
 const IPC_COMMANDS = {
   OPEN: 'canvas_open',
   CLOSE: 'canvas_close',
+  SET_VISIBLE: 'canvas_set_visible',
   READ_DOCUMENT: 'canvas_read_document',
   DOCUMENT_LOADED: 'canvas_document_loaded',
   DIRTY_CHANGED: 'canvas_dirty_changed',
@@ -48,9 +49,14 @@ export function createTauriCanvasApi(): CanvasApi {
     open(
       docPath: string,
       projectId: string,
-      autosaveMs?: number
+      autosaveMs?: number,
+      maxMounted?: number
     ): Promise<IpcResult<CanvasOpenInfo>> {
-      return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs })
+      return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs, maxMounted })
+    },
+
+    setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+      return invokeCanvas(IPC_COMMANDS.SET_VISIBLE, { projectId, mountSeq, visible })
     },
 
     close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

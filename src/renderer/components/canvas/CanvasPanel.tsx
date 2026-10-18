@@ -5,7 +5,9 @@
  * and this panel only claims the slot it is laid over while visible. The
  * mount itself is driven by the canvas store's phase; this panel re-sends
  * `host.theme` / `host.locale` when Termul's theme or the browser language
- * changes, without reloading the editor.
+ * changes, without reloading the editor. While it shows a mounted canvas it
+ * also tells the host the user is looking at it, which the mount cap ranks
+ * eviction by (AD-26). A canvas the host unloaded shows a reopen prompt.
  */
 
 import { useEffect, useState } from 'react'
@@ -14,7 +16,12 @@ import { Button } from '@/components/ui/button'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { basename } from '@/lib/path-basename'
 import { COLOR_THEME_CHANGED_EVENT } from '@/lib/themes'
-import { type CanvasPhase, useCanvasSession, useCanvasStore } from '@/stores/canvas-store'
+import {
+  type CanvasPhase,
+  type UnloadReason,
+  useCanvasSession,
+  useCanvasStore
+} from '@/stores/canvas-store'
 import { useCanvasSlots } from './canvas-slots'
 
 interface CanvasPanelProps {
@@ -34,18 +41,30 @@ function statusLabel(phase: CanvasPhase, closing: boolean): string {
       return 'Ready'
     case 'failed':
       return 'Canvas unavailable'
+    case 'unloaded':
+      return 'Unloaded'
   }
 }
 
 /** The area the project's iframe is laid over while this panel shows. */
-function CanvasSlot({ projectId }: { projectId: string }): React.JSX.Element {
+function CanvasSlot({
+  projectId,
+  mountSeq
+}: {
+  projectId: string
+  mountSeq: number
+}): React.JSX.Element {
   const [element, setElement] = useState<HTMLDivElement | null>(null)
   useEffect(() => {
     if (!element) return
     const slots = useCanvasSlots.getState()
     slots.claimSlot(projectId, element)
-    return () => useCanvasSlots.getState().releaseSlot(projectId, element)
-  }, [projectId, element])
+    void useCanvasStore.getState().setCanvasVisible(projectId, mountSeq, true)
+    return () => {
+      useCanvasSlots.getState().releaseSlot(projectId, element)
+      void useCanvasStore.getState().setCanvasVisible(projectId, mountSeq, false)
+    }
+  }, [projectId, mountSeq, element])
   return <div ref={setElement} className="h-full w-full" data-canvas-slot={projectId} />
 }
 
@@ -55,6 +74,40 @@ function Notice({ text, testId }: { text: string; testId?: string }): React.JSX.
       <span className="text-center text-sm text-muted-foreground" data-testid={testId}>
         {text}
       </span>
+    </div>
+  )
+}
+
+function UnloadedNotice({
+  projectId,
+  docPath,
+  reason,
+  message
+}: {
+  projectId: string
+  docPath: string
+  reason: UnloadReason
+  message: string | null
+}): React.JSX.Element {
+  const evicted = reason === 'evicted'
+  return (
+    <div
+      className="flex h-full w-full flex-col items-center justify-center gap-3 bg-background p-4"
+      data-testid="canvas-unloaded"
+      data-canvas-unload-reason={reason}
+    >
+      <span className="text-center text-sm text-muted-foreground">
+        {evicted
+          ? 'This canvas was unloaded to save memory. Click to reopen.'
+          : (message ?? 'Another canvas could not be unloaded to make room.')}
+      </span>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => void useCanvasStore.getState().openCanvas(projectId, docPath)}
+      >
+        {evicted ? 'Reopen canvas' : 'Try again'}
+      </Button>
     </div>
   )
 }
@@ -145,9 +198,16 @@ export function CanvasPanel({
       </div>
       <div className="relative min-h-0 flex-1">
         {mount ? (
-          isVisible && <CanvasSlot projectId={projectId} />
+          isVisible && <CanvasSlot projectId={projectId} mountSeq={mount.mountSeq} />
         ) : phase.kind === 'failed' ? (
           <Notice text={phase.message} testId="canvas-mount-failed" />
+        ) : phase.kind === 'unloaded' ? (
+          <UnloadedNotice
+            projectId={projectId}
+            docPath={session.docPath || docPath}
+            reason={phase.reason}
+            message={phase.message}
+          />
         ) : (
           <Notice text="Starting canvas…" />
         )}

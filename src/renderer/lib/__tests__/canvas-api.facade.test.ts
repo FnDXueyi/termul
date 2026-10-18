@@ -44,7 +44,8 @@ const WEB_INFO: CanvasOpenInfo = {
   canvasToken: 'cafebabecafebabecafebabecafebabe',
   pinTag: 'termul-v1',
   docKey: DOC,
-  mountSeq: 1
+  mountSeq: 1,
+  evicted: []
 }
 
 describe('canvasApi (web vs desktop branch)', () => {
@@ -97,6 +98,27 @@ describe('canvasApi (web vs desktop branch)', () => {
     expect(mockInvoke).not.toHaveBeenCalled()
     expect(result).toEqual({ success: true, data: WEB_INFO })
     expect(document.cookie).toBe(cookieBefore)
+  })
+
+  it('open: both transports carry canvas.max_mounted next to the autosave delay', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: WEB_INFO }))
+    await canvasApi.open(DOC, PROJECT, 1500, 3)
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${window.location.origin}/canvas/open`,
+      expect.objectContaining({
+        body: JSON.stringify({ docPath: DOC, projectId: PROJECT, autosaveMs: 1500, maxMounted: 3 })
+      })
+    )
+
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({ success: true, data: WEB_INFO })
+    await canvasApi.open(DOC, PROJECT, 1500, 3)
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
+      docPath: DOC,
+      projectId: PROJECT,
+      autosaveMs: 1500,
+      maxMounted: 3
+    })
   })
 
   it('open: web keeps the server-provided typed error code', async () => {
@@ -185,6 +207,13 @@ describe('canvasApi (web vs desktop branch)', () => {
       command: 'canvas_dirty_changed',
       route: '/canvas/dirty-changed',
       args: { projectId: PROJECT, mountSeq: 3, dirty: true, contentVersion: '9007199254740993' }
+    },
+    {
+      name: 'setVisible',
+      call: () => canvasApi.setVisible(PROJECT, 3, true),
+      command: 'canvas_set_visible',
+      route: '/canvas/set-visible',
+      args: { projectId: PROJECT, mountSeq: 3, visible: true }
     },
     {
       name: 'writeSnapshot',

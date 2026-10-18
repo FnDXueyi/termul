@@ -21,15 +21,23 @@
 //! routes through it instead of keeping its own, and every unmount runs the
 //! AD-31 sequence ([`close`]).
 //!
+//! At most `canvas.max_mounted` mounts live at once (AD-26): each mount
+//! records when it was last active (an agent call or the user viewing it), and
+//! [`CanvasPersistence::admit`] evicts the least recently active one through
+//! [`CanvasPersistence::close`] before it makes room for another.
+//!
 //! Tauri-free so the desktop commands and termul-server's routes share it.
 //! Nothing here logs: the transports log at their boundary, never bytes.
 
 mod close;
+mod evict;
 mod gateway;
 mod wire;
 
 #[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod evict_tests;
 #[cfg(test)]
 mod gateway_tests;
 #[cfg(test)]
@@ -50,6 +58,7 @@ use tokio::sync::watch;
 use super::CanvasError;
 
 pub use close::{CloseMode, CloseOutcome};
+pub use evict::{mount_cap, Admitted, Eviction, CODE_EVICTION_BLOCKED, DEFAULT_MAX_MOUNTED};
 pub use gateway::ReplyMatch;
 pub use wire::{
     dirty_changed, document_loaded, parse_version, read_document, write_snapshot, DocumentBytes,
@@ -107,9 +116,26 @@ enum Lifecycle {
     Closed,
 }
 
+/// What decides eviction order: when the mount was last active (a position
+/// on the registry's clock, so ties cannot happen) and whether a user is
+/// looking at it right now. A viewed mount outranks every unviewed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Activity {
+    tick: u64,
+    visible: bool,
+}
+
+impl Activity {
+    /// Smaller is evicted first.
+    fn rank(self) -> (bool, u64) {
+        (self.visible, self.tick)
+    }
+}
+
 struct MountState {
     phase: Phase,
     lifecycle: Lifecycle,
+    activity: Activity,
     /// The renderer connection the editor runs in, once it reported the
     /// mount; `None` until then and after it disconnected.
     connection: Option<gateway::Connection>,
@@ -206,6 +232,10 @@ fn closed() -> CanvasError {
 pub struct CanvasPersistence {
     mounts: Mutex<HashMap<String, Arc<Mount>>>,
     next_mount_seq: AtomicU64,
+    /// Orders [`Activity`] across mounts.
+    clock: AtomicU64,
+    /// Serializes [`Self::admit`], so two opens cannot both see room.
+    admission: tokio::sync::Mutex<()>,
     write: WriteFn,
     calls: gateway::Calls,
     /// How long the host's own editor calls (the close sequence's snapshot
@@ -224,6 +254,8 @@ impl CanvasPersistence {
         Self {
             mounts: Mutex::new(HashMap::new()),
             next_mount_seq: AtomicU64::new(0),
+            clock: AtomicU64::new(0),
+            admission: tokio::sync::Mutex::new(()),
             write,
             calls: gateway::Calls::default(),
             host_call_timeout: crate::acp::host_mcp::canvas::DEFAULT_CALL_TIMEOUT,
@@ -260,6 +292,10 @@ impl CanvasPersistence {
             state: Mutex::new(MountState {
                 phase: Phase::Loading,
                 lifecycle: Lifecycle::Open,
+                activity: Activity {
+                    tick: self.tick(),
+                    visible: false,
+                },
                 connection: None,
             }),
             generation,
@@ -270,6 +306,32 @@ impl CanvasPersistence {
         if let Some(previous) = previous {
             Self::retire(&previous);
         }
+    }
+
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// The user started or stopped looking at the project's canvas. Reporting
+    /// either way counts as activity.
+    ///
+    /// # Errors
+    /// `CANVAS_CLOSED` for a missing or stale mount (an evicted canvas
+    /// answers this to a renderer that still shows it).
+    pub fn set_visible(
+        &self,
+        project_id: &str,
+        mount_seq: u64,
+        visible: bool,
+    ) -> Result<(), CanvasError> {
+        let mount = self.mount_for(project_id, mount_seq)?;
+        let tick = self.tick();
+        let mut state = mount.state.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(closed());
+        }
+        state.activity = Activity { tick, visible };
+        Ok(())
     }
 
     /// Drop the project's mount without saving; waiting debounces resolve

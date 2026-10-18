@@ -67,14 +67,17 @@ fn persistence_result<T>(
     }
 }
 
-/// `canvas_open { docPath, projectId, autosaveMs? }` — the loopback bundle
-/// base plus a minted `ct` token and a new `mountSeq` for the project's
-/// canvas. Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound.
+/// `canvas_open { docPath, projectId, autosaveMs?, maxMounted? }` — the
+/// loopback bundle base plus a minted `ct` token and a new `mountSeq` for the
+/// project's canvas, after unloading the least recently active canvases
+/// beyond `maxMounted` (typed `EVICTION_BLOCKED` when one cannot be saved).
+/// Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound.
 #[tauri::command]
 pub async fn canvas_open(
     doc_path: String,
     project_id: String,
     autosave_ms: Option<u64>,
+    max_mounted: Option<u64>,
     server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
     let doc_key = match validate_canvas_doc_path(&doc_path) {
@@ -91,7 +94,7 @@ pub async fn canvas_open(
             CODE_BUNDLE_LISTENER_DOWN,
         ));
     };
-    match open_canvas(base, &project_id, doc_key, autosave_ms) {
+    match open_canvas(base, &project_id, doc_key, autosave_ms, max_mounted).await {
         Ok(info) => {
             log::info!(
                 "[canvas] open project_id={log_project_id} canvas_id={} mount_seq={}",
@@ -159,6 +162,19 @@ fn log_closed(log_project_id: &str, outcome: &CloseOutcome) {
             outcome.saved_version.as_deref().unwrap_or("none")
         );
     }
+}
+
+/// `canvas_set_visible { projectId, mountSeq, visible }` — the user started
+/// or stopped looking at the canvas; activity the mount cap ranks eviction
+/// by. A mount that is gone (evicted) answers `CANVAS_CLOSED`.
+#[tauri::command]
+pub async fn canvas_set_visible(
+    project_id: String,
+    mount_seq: u64,
+    visible: bool,
+) -> Result<IpcResult<()>, String> {
+    let result = canvas_mounts().set_visible(&project_id, mount_seq, visible);
+    Ok(persistence_result("set visible", &project_id, result))
 }
 
 /// `canvas_read_document { projectId, mountSeq }` — the mounted document's

@@ -12,6 +12,13 @@
 
 import type { IpcResult } from './ipc.types'
 
+/** A canvas the host unloaded (after saving it) to stay under
+ * `canvas.max_mounted` (spine AD-26). */
+export interface CanvasEviction {
+  projectId: string
+  reason: string
+}
+
 export interface CanvasOpenInfo {
   /** Project-derived id the `/canvas/<id>/` bundle routes on. */
   canvasId: string
@@ -27,6 +34,8 @@ export interface CanvasOpenInfo {
   /** Host-allocated, never reused: stamps every bridge envelope and
    * persistence call of this mount. */
   mountSeq: number
+  /** Canvases this open unloaded to make room; the renderer marks them. */
+  evicted: CanvasEviction[]
 }
 
 /** The host's persistence projection of one mount. */
@@ -80,6 +89,7 @@ export const CanvasErrorCodes = {
   CANVAS_CLOSED: 'CANVAS_CLOSED',
   CANVAS_CLOSING: 'CANVAS_CLOSING',
   SAVE_FAILED: 'SAVE_FAILED',
+  EVICTION_BLOCKED: 'EVICTION_BLOCKED',
   CANVAS_NOT_READY: 'CANVAS_NOT_READY',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   READ_FAILED: 'READ_FAILED',
@@ -116,15 +126,22 @@ export type CanvasBridgeErrorCode = (typeof CANVAS_BRIDGE_ERROR_CODES)[number]
  * the editor reports and does what the host decides.
  */
 export interface CanvasApi {
+  /** `maxMounted` is `canvas.max_mounted`: opening beyond it unloads the
+   * least recently active canvas first (`EVICTION_BLOCKED` when that canvas
+   * cannot be saved). */
   open: (
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    autosaveMs?: number,
+    maxMounted?: number
   ) => Promise<IpcResult<CanvasOpenInfo>>
   /** Unmount through the host's AD-31 sequence. A failed save answers
    * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit
    * choice to drop unsaved changes. */
   close: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
+  /** The user started or stopped looking at the canvas: activity the host
+   * ranks eviction by. `CANVAS_CLOSED` means the host no longer holds it. */
+  setVisible: (projectId: string, mountSeq: number, visible: boolean) => Promise<IpcResult<void>>
   readDocument: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDocumentBytes>>
   /** `ack` is the `host.openDocument` result text, `null` for a new document. */
   documentLoaded: (

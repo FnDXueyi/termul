@@ -29,7 +29,9 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::persistence::{autosave_delay, canvas_mounts, CloseMode, CloseOutcome};
+use super::persistence::{
+    autosave_delay, canvas_mounts, mount_cap, CloseMode, CloseOutcome, Eviction,
+};
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
@@ -204,29 +206,53 @@ pub struct CanvasOpenInfo {
     /// The new mount's sequence number (persistence registry); every bridge
     /// envelope and persistence call for this mount carries it.
     pub mount_seq: u64,
+    /// Canvases this open unloaded to stay under `canvas.max_mounted` (AD-26),
+    /// each saved first. The renderer shows them as unloaded.
+    pub evicted: Vec<Eviction>,
 }
 
 /// Mint (or reuse) the project's bundle token and start a new persistence
-/// mount for the document. Shared by `canvas_open` and `POST /canvas/open`,
-/// which differ only in the base they pass.
-pub fn open_canvas(
+/// mount for the document, first evicting the least recently active canvases
+/// beyond `max_mounted` (AD-26). Shared by `canvas_open` and
+/// `POST /canvas/open`, which differ only in the base they pass.
+///
+/// # Errors
+/// `EVICTION_BLOCKED` when a canvas that must make room could not be saved:
+/// it stays mounted and nothing new mounts.
+pub async fn open_canvas(
     base: CanvasBundleBase,
     project_id: &str,
     doc_key: String,
     autosave_ms: Option<u64>,
+    max_mounted: Option<u64>,
 ) -> Result<CanvasOpenInfo, CanvasError> {
     let canvas_id = canvas_id_for_project(project_id);
+    let cap = mount_cap(max_mounted);
+    let admitted = canvas_mounts()
+        .admit(
+            project_id,
+            PathBuf::from(&doc_key),
+            autosave_delay(autosave_ms),
+            cap,
+        )
+        .await;
+    for eviction in &admitted.evicted {
+        bundle_tokens().revoke(&canvas_id_for_project(&eviction.project_id));
+        log::info!(
+            "[canvas] evicted project_id={} reason=\"{}\" max_mounted={cap} for project_id={}",
+            crate::commands::sanitize_log_field(&eviction.project_id),
+            eviction.reason,
+            crate::commands::sanitize_log_field(project_id)
+        );
+    }
+    let mount_seq = admitted.mount?;
     let canvas_token = bundle_tokens().issue(&canvas_id).map_err(|reason| {
+        canvas_mounts().unmount(project_id);
         CanvasError::new(
             CODE_TOKEN_GENERATION_FAILED,
             format!("failed to mint the canvas session token: {reason}"),
         )
     })?;
-    let mount_seq = canvas_mounts().mount(
-        project_id,
-        PathBuf::from(&doc_key),
-        autosave_delay(autosave_ms),
-    );
     Ok(CanvasOpenInfo {
         canvas_id,
         base_url: base.base_url,
@@ -234,6 +260,7 @@ pub fn open_canvas(
         pin_tag: base.pin_tag,
         doc_key,
         mount_seq,
+        evicted: admitted.evicted,
     })
 }
 

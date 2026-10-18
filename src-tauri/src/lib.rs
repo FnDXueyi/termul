@@ -12,8 +12,8 @@ mod browser_tab_manager;
 pub mod canvas;
 // One host per durable path (AD-14): sidecar `File::try_lock` locks taken before
 // any store opens. Tauri-free so the desktop and `termul-server` share it.
-pub mod data_lock;
 mod commands;
+pub mod data_lock;
 mod exit_cleanup;
 mod logging;
 mod migrations;
@@ -2013,6 +2013,7 @@ pub fn run() {
             commands::canvas_read_document,
             commands::canvas_document_loaded,
             commands::canvas_dirty_changed,
+            commands::canvas_set_visible,
             commands::canvas_write_snapshot,
             commands::canvas_save,
             commands::canvas_status,

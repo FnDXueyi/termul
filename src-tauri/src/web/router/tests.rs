@@ -632,6 +632,7 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/canvas/read-document",
         "/canvas/document-loaded",
         "/canvas/dirty-changed",
+        "/canvas/set-visible",
         "/canvas/write-snapshot",
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
