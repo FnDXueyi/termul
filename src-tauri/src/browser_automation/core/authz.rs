@@ -234,13 +234,6 @@ impl SessionGrants {
             .insert(origin);
     }
 
-    pub fn is_granted(&self, session_id: &str, origin: &CanonicalOrigin) -> bool {
-        self.sessions
-            .lock()
-            .get(session_id)
-            .is_some_and(|s| s.granted.contains(origin))
-    }
-
     pub fn revoke_session(&self, session_id: &str) {
         if let Some(session) = self.sessions.lock().get_mut(session_id) {
             session.granted.clear();

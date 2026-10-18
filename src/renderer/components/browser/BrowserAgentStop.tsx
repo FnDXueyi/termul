@@ -54,9 +54,7 @@ export function BrowserAgentIndicator({
     >
       <Globe size={13} className="shrink-0 text-primary" aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate text-muted-foreground">
-        {stopped
-          ? 'Browsing stopped. The agent can use the browser again after your next message.'
-          : 'The agent is using the browser.'}
+        {stopped ? 'Browsing stopped until your next message.' : 'The agent is using the browser.'}
       </span>
       {stopped ? null : (
         <Button

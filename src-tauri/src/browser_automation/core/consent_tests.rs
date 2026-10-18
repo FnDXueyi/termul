@@ -423,10 +423,11 @@ async fn a_stop_that_lands_while_allow_is_in_flight_refuses_the_call() {
         code_reason(&err),
         ("confirmation_required", Some("stopped_by_user"))
     );
+    let race: Url = "https://race.example/".parse().unwrap();
     assert!(
-        !gate.grants.is_granted(
-            "s1",
-            &CanonicalOrigin::parse("https://race.example").unwrap()
+        matches!(
+            gate.grants.check_hop("s1", &race),
+            HopVerdict::Ungranted(..)
         ),
         "an Allow answered after Stop records no grant"
     );
