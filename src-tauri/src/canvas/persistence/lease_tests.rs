@@ -374,3 +374,35 @@ async fn the_router_drops_a_mount_whose_holder_did_not_come_back() {
     let (late, _) = connect("tab-a", "conn-a2");
     assert!(!host.mounts.attach(PROJECT, seq_a, late));
 }
+
+#[tokio::test]
+async fn a_duplicate_tab_with_the_same_id_saves_and_tells_the_live_holder_first() {
+    let host = Host::new();
+    let (seq_a, mut tab_a) = host.open_loaded("tab-a", "conn-a").await;
+    host.edit(seq_a).await;
+
+    let duplicate = host.open_in_background("tab-a");
+    let snapshot = tab_a.next("host.snapshot").await;
+    tab_a.answer(&host.mounts, &snapshot, Ok(&snapshot_of(2, b"edited in a")));
+    let verify = tab_a.next("host.markSaved").await;
+    tab_a.answer(
+        &host.mounts,
+        &verify,
+        Ok(r#"{"dirty":false,"contentVersion":2}"#),
+    );
+
+    let opened = duplicate.await.unwrap().unwrap();
+    assert_eq!(
+        opened.lease,
+        LeaseChange::TakenOver {
+            previous: seq_a,
+            saved_version: Some("2".into()),
+        }
+    );
+    assert_eq!(std::fs::read(&host.doc).unwrap(), b"edited in a");
+    let notice = tab_a
+        .notices
+        .try_recv()
+        .expect("the live page is told it lost the canvas");
+    assert_eq!(notice.mount_seq, seq_a);
+}

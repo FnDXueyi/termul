@@ -184,12 +184,21 @@ impl CanvasPersistence {
             let current = self.mounts.lock().get(project_id).cloned();
             let (lease, expected) = match &current {
                 None => (LeaseChange::Granted, None),
-                Some(mount) if mount.holder == request.renderer => (
-                    LeaseChange::Remounted {
-                        previous: mount.mount_seq,
-                    },
-                    Some(mount),
-                ),
+                // The same renderer id with its page gone (reloaded) remounts
+                // without a save. A page still attached is another live tab
+                // that copied the id (a duplicated tab copies sessionStorage):
+                // it is taken over like any other holder.
+                Some(mount)
+                    if mount.holder == request.renderer
+                        && mount.state.lock().link.connection().is_none() =>
+                {
+                    (
+                        LeaseChange::Remounted {
+                            previous: mount.mount_seq,
+                        },
+                        Some(mount),
+                    )
+                }
                 Some(mount) => (self.take_over(project_id, mount).await?, None),
             };
             let mount_seq = self.next_mount_seq();
@@ -215,7 +224,9 @@ impl CanvasPersistence {
             .link
             .connection()
             .map(|connection| connection.holder().clone());
-        let closed = self.close(project_id, CloseMode::Save).await?;
+        let closed = self
+            .close_mount(project_id, mount.mount_seq, CloseMode::Save)
+            .await?;
         if let Some(renderer) = connected.filter(|_| closed.unmounted) {
             renderer.tell_lease_lost(project_id, mount.mount_seq, reason);
         }
