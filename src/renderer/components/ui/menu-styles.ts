@@ -34,7 +34,7 @@ export const MENU_SUB_TRIGGER_OPEN_CLASS = 'data-[state=open]:bg-foreground/[0.0
 /** Slot for the checked `Check` on a `pl-8` checkbox, radio or select row. */
 export const MENU_INDICATOR_CLASS = 'absolute left-2 flex h-3.5 w-3.5 items-center justify-center'
 
-/** Group label: the `.label-panel` role (11px / semibold / tracked) with row padding. */
+/** Group label: the `.label-panel` role (12px / medium / sentence case) with row padding. */
 export const MENU_LABEL_CLASS = 'label-panel px-2 pb-1 pt-2'
 
 /** Hairline between groups, edge to edge inside the 4px shell padding. */

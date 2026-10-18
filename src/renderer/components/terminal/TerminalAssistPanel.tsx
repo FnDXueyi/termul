@@ -117,7 +117,7 @@ export function TerminalAssistPanel({
       </div>
       {commands.length > 0 ? (
         <div className="border-t border-border/60 px-3 py-2">
-          <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
             Suggested commands — inserted for review, never run
           </p>
           {commands.map((command, i) => (
