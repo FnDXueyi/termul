@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Spine AD-24: canvas/figcraft.pin and the figcraft-mcp Cargo dependency name
-// the same fork release. A `tag =` dependency must equal the pin's tag (the
-// check fails closed). A `rev =` dependency is the interim state before the
-// fork publishes a `termul-*` tag: a commit cannot be compared with a release
-// tag, so the check warns and passes until the dependency moves to `tag =`.
+// the same fork release. A `tag =` dependency must equal the pin's tag; any
+// mismatch fails the check. A `rev =` dependency cannot be compared with a
+// release tag, so it only warns.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { cargoFigcraftMcpRef, readPin } from './figcraft-pin.mjs'
