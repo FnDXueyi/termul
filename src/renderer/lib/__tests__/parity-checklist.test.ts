@@ -1578,9 +1578,16 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(join(RENDERER, 'stores', 'canvas-store.ts'), 'utf-8')).toMatch(
         /canvasApi/
       )
+      // AD-19: the iframe lives in the mount layer both shells render, not in
+      // the tab; the panel only claims the slot it is laid over.
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasPanel.tsx'), 'utf-8')
+      ).toMatch(/claimSlot/)
+      expect(
+        readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasMountLayer.tsx'), 'utf-8')
       ).toMatch(/CanvasShell/)
+      const layout = readFileSync(join(RENDERER, 'layouts', 'WorkspaceLayout.tsx'), 'utf-8')
+      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(2)
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasShell.tsx'), 'utf-8')
       ).toMatch(/createCanvasBridge/)
@@ -1594,8 +1601,22 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(paneContent, 'utf-8')).toMatch(/CanvasPanel/)
       const tabBar = join(RENDERER, 'components', 'workspace', 'WorkspaceTabBar.tsx')
       expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeWorkspaceTab/)
+      // Closing the tab hides the canvas; only project close and quit unmount
+      // it, through the host's AD-31 sequence.
       expect(readFileSync(join(LIB_DIR, 'workspace-tab-close.ts'), 'utf-8')).toMatch(
-        /canvas: \(tab\) => \{[^}]*closeCanvas/
+        /canvas: removeTab/
+      )
+      expect(readFileSync(join(RENDERER, 'stores', 'project-store.ts'), 'utf-8')).toMatch(
+        /unmountCanvases\(\[id\]\)/
+      )
+      expect(
+        readFileSync(join(RENDERER, 'layouts', 'workspace-layout', 'use-app-close.ts'), 'utf-8')
+      ).toMatch(/unmountCanvases\(\)/)
+      expect(readFileSync(join(LIB_DIR, 'tauri-canvas-api.ts'), 'utf-8')).toContain(
+        'IPC_COMMANDS.CLOSE, { projectId, discard }'
+      )
+      expect(readFileSync(join(LIB_DIR, 'web-canvas-api.ts'), 'utf-8')).toContain(
+        "'/canvas/close', { projectId, discard }"
       )
       const tree = join(RENDERER, 'stores', 'workspace-store', 'tree.ts')
       expect(readFileSync(tree, 'utf-8')).toMatch(/export function canvasTabId/)

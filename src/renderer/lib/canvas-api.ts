@@ -33,7 +33,7 @@ export const canvasApi: CanvasApi = {
     }
     return transport().open(docPath, projectId, autosaveMs)
   },
-  close: (projectId) => transport().close(projectId),
+  close: (projectId, discard) => transport().close(projectId, discard),
   readDocument: (projectId, mountSeq) => transport().readDocument(projectId, mountSeq),
   documentLoaded: (projectId, mountSeq, ack) =>
     transport().documentLoaded(projectId, mountSeq, ack),

@@ -16,11 +16,22 @@
 //! them atomically and advances `saved_version` only after the write
 //! succeeded; the renderer then sends `host.markSaved` with that version.
 //!
+//! This is also the one mount registry (AD-19): each mount records the
+//! renderer connection that holds it ([`gateway`]), so the agent gateway
+//! routes through it instead of keeping its own, and every unmount runs the
+//! AD-31 sequence ([`close`]).
+//!
 //! Tauri-free so the desktop commands and termul-server's routes share it.
 //! Nothing here logs: the transports log at their boundary, never bytes.
 
+mod close;
+mod gateway;
 mod wire;
 
+#[cfg(test)]
+mod close_tests;
+#[cfg(test)]
+mod gateway_tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
@@ -38,6 +49,8 @@ use tokio::sync::watch;
 
 use super::CanvasError;
 
+pub use close::{CloseMode, CloseOutcome};
+pub use gateway::ReplyMatch;
 pub use wire::{
     dirty_changed, document_loaded, parse_version, read_document, write_snapshot, DocumentBytes,
     CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD, CODE_READ_FAILED,
@@ -71,6 +84,11 @@ impl Persisted {
     fn save_due(&self) -> bool {
         self.dirty && self.content_version.is_some() && self.content_version != self.saved_version
     }
+
+    /// The host knows of an edit that is not on disk.
+    fn unsaved(&self) -> bool {
+        self.dirty || (self.content_version.is_some() && self.content_version != self.saved_version)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,14 +97,27 @@ enum Phase {
     Ready(Persisted),
 }
 
+/// Where a mount is in its life. `Closing` is the AD-31 quiesce: agent calls
+/// are refused `CANVAS_CLOSING` while the host saves; a failed save returns
+/// the mount to `Open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    Open,
+    Closing,
+    Closed,
+}
+
 struct MountState {
     phase: Phase,
-    closed: bool,
+    lifecycle: Lifecycle,
+    /// The renderer connection the editor runs in, once it reported the
+    /// mount; `None` until then and after it disconnected.
+    connection: Option<gateway::Connection>,
 }
 
 /// One mounted document. `generation` is the debounce: every dirty
 /// notification bumps it, and a waiter whose generation moved on was
-/// superseded.
+/// superseded. `in_flight` counts agent calls the quiesce waits out.
 struct Mount {
     mount_seq: u64,
     doc_path: PathBuf,
@@ -94,6 +125,7 @@ struct Mount {
     state: Mutex<MountState>,
     generation: watch::Sender<u64>,
     write_lock: tokio::sync::Mutex<()>,
+    in_flight: watch::Sender<usize>,
 }
 
 impl Mount {
@@ -175,6 +207,10 @@ pub struct CanvasPersistence {
     mounts: Mutex<HashMap<String, Arc<Mount>>>,
     next_mount_seq: AtomicU64,
     write: WriteFn,
+    calls: gateway::Calls,
+    /// How long the host's own editor calls (the close sequence's snapshot
+    /// and verify) wait for an answer.
+    host_call_timeout: Duration,
 }
 
 impl Default for CanvasPersistence {
@@ -189,34 +225,56 @@ impl CanvasPersistence {
             mounts: Mutex::new(HashMap::new()),
             next_mount_seq: AtomicU64::new(0),
             write,
+            calls: gateway::Calls::default(),
+            host_call_timeout: crate::acp::host_mcp::canvas::DEFAULT_CALL_TIMEOUT,
         }
+    }
+
+    #[must_use]
+    pub fn with_host_call_timeout(mut self, timeout: Duration) -> Self {
+        self.host_call_timeout = timeout;
+        self
     }
 
     /// A fresh `Loading` mount for the project, replacing any previous one.
     /// The returned `mountSeq` is never reused within the process.
     pub fn mount(&self, project_id: &str, doc_path: PathBuf, autosave: Duration) -> u64 {
         let mount_seq = self.next_mount_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.insert_mount(project_id, mount_seq, doc_path, autosave);
+        mount_seq
+    }
+
+    fn insert_mount(
+        &self,
+        project_id: &str,
+        mount_seq: u64,
+        doc_path: PathBuf,
+        autosave: Duration,
+    ) {
         let (generation, _) = watch::channel(0);
+        let (in_flight, _) = watch::channel(0);
         let mount = Arc::new(Mount {
             mount_seq,
             doc_path,
             autosave,
             state: Mutex::new(MountState {
                 phase: Phase::Loading,
-                closed: false,
+                lifecycle: Lifecycle::Open,
+                connection: None,
             }),
             generation,
             write_lock: tokio::sync::Mutex::new(()),
+            in_flight,
         });
         let previous = self.mounts.lock().insert(project_id.to_string(), mount);
         if let Some(previous) = previous {
             Self::retire(&previous);
         }
-        mount_seq
     }
 
-    /// Drop the project's mount; waiting debounces resolve `Superseded`.
-    /// Idempotent.
+    /// Drop the project's mount without saving; waiting debounces resolve
+    /// `Superseded` and calls in flight `CANVAS_CLOSED`. Idempotent. Every
+    /// user-facing unmount goes through [`Self::close`] instead.
     pub fn unmount(&self, project_id: &str) {
         let removed = self.mounts.lock().remove(project_id);
         if let Some(mount) = removed {
@@ -224,9 +282,21 @@ impl CanvasPersistence {
         }
     }
 
+    /// Closed for good: debounces are superseded and dropping the connection
+    /// resolves every call still waiting on it.
     fn retire(mount: &Mount) {
-        mount.state.lock().closed = true;
+        let connection = {
+            let mut state = mount.state.lock();
+            state.lifecycle = Lifecycle::Closed;
+            state.connection.take()
+        };
+        drop(connection);
         mount.bump_generation();
+    }
+
+    /// Every project with a mount.
+    pub fn mounted_projects(&self) -> Vec<String> {
+        self.mounts.lock().keys().cloned().collect()
     }
 
     /// The live mount for `(project_id, mount_seq)`; a stale `mount_seq` is
@@ -311,7 +381,7 @@ impl CanvasPersistence {
                 }
             }
         }
-        if mount.state.lock().closed {
+        if mount.state.lock().lifecycle == Lifecycle::Closed {
             return Ok(DirtyOutcome::Superseded);
         }
         let view = mount.view();
@@ -408,8 +478,30 @@ fn is_canvas_document(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("figcraft"))
 }
 
-/// The process-wide registry both transports share, like `bundle_tokens`.
-pub fn canvas_mounts() -> &'static CanvasPersistence {
-    static MOUNTS: OnceLock<CanvasPersistence> = OnceLock::new();
-    MOUNTS.get_or_init(CanvasPersistence::default)
+/// The process-wide registry both transports and the agent gateway share,
+/// like `bundle_tokens`.
+pub fn canvas_mounts() -> &'static Arc<CanvasPersistence> {
+    static MOUNTS: OnceLock<Arc<CanvasPersistence>> = OnceLock::new();
+    MOUNTS.get_or_init(Arc::default)
+}
+
+#[cfg(test)]
+impl CanvasPersistence {
+    /// Gateway tests name their own mountSeq: make the project's mount that
+    /// one (a fresh `Loading` mount) unless it already is.
+    pub(crate) fn ensure_test_mount(&self, project_id: &str, mount_seq: u64) {
+        let current = self
+            .mounts
+            .lock()
+            .get(project_id)
+            .map(|mount| mount.mount_seq);
+        if current != Some(mount_seq) {
+            self.insert_mount(
+                project_id,
+                mount_seq,
+                PathBuf::from(format!("{project_id}.figcraft")),
+                Duration::from_millis(DEFAULT_AUTOSAVE_MS),
+            );
+        }
+    }
 }

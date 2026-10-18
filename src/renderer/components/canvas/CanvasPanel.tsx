@@ -1,19 +1,21 @@
 /**
  * The `canvas` tab's pane: a header (doc name, unsaved marker, mount status,
- * save error, Save) over the figcraft iframe. The mount itself is driven by
- * the canvas store's phase; this panel re-sends `host.theme` / `host.locale`
- * when Termul's theme or the browser language changes, without reloading the
- * editor.
+ * save error, Save) over the area the figcraft iframe covers. The iframe is
+ * not a child: `CanvasMountLayer` owns it so it survives this tab (AD-19),
+ * and this panel only claims the slot it is laid over while visible. The
+ * mount itself is driven by the canvas store's phase; this panel re-sends
+ * `host.theme` / `host.locale` when Termul's theme or the browser language
+ * changes, without reloading the editor.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Edit2, Loader2, Save } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { basename } from '@/lib/path-basename'
 import { COLOR_THEME_CHANGED_EVENT } from '@/lib/themes'
 import { type CanvasPhase, useCanvasSession, useCanvasStore } from '@/stores/canvas-store'
-import { CanvasShell } from './CanvasShell'
+import { useCanvasSlots } from './canvas-slots'
 
 interface CanvasPanelProps {
   projectId: string
@@ -21,7 +23,8 @@ interface CanvasPanelProps {
   isVisible: boolean
 }
 
-function statusLabel(phase: CanvasPhase): string {
+function statusLabel(phase: CanvasPhase, closing: boolean): string {
+  if (closing) return 'Saving before close…'
   switch (phase.kind) {
     case 'opening':
       return 'Starting canvas…'
@@ -32,6 +35,18 @@ function statusLabel(phase: CanvasPhase): string {
     case 'failed':
       return 'Canvas unavailable'
   }
+}
+
+/** The area the project's iframe is laid over while this panel shows. */
+function CanvasSlot({ projectId }: { projectId: string }): React.JSX.Element {
+  const [element, setElement] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!element) return
+    const slots = useCanvasSlots.getState()
+    slots.claimSlot(projectId, element)
+    return () => useCanvasSlots.getState().releaseSlot(projectId, element)
+  }, [projectId, element])
+  return <div ref={setElement} className="h-full w-full" data-canvas-slot={projectId} />
 }
 
 function Notice({ text, testId }: { text: string; testId?: string }): React.JSX.Element {
@@ -94,7 +109,9 @@ export function CanvasPanel({
             title="Unsaved changes"
           />
         )}
-        <span className="shrink-0 text-3xs text-muted-foreground">{statusLabel(phase)}</span>
+        <span className="shrink-0 text-3xs text-muted-foreground">
+          {statusLabel(phase, session.closing)}
+        </span>
         {session.saveError && (
           <span
             className="min-w-0 truncate text-3xs text-destructive"
@@ -128,12 +145,7 @@ export function CanvasPanel({
       </div>
       <div className="relative min-h-0 flex-1">
         {mount ? (
-          <CanvasShell
-            key={mount.mountSeq}
-            projectId={projectId}
-            mount={mount}
-            title={`Canvas — ${name}`}
-          />
+          isVisible && <CanvasSlot projectId={projectId} />
         ) : phase.kind === 'failed' ? (
           <Notice text={phase.message} testId="canvas-mount-failed" />
         ) : (

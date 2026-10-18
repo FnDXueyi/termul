@@ -59,7 +59,10 @@ pub const CODE_DAEMON_DOWN: &str = "DAEMON_DOWN";
 pub const CODE_PATH_VALIDATION_FAILED: &str = "PATH_VALIDATION_FAILED";
 /// The canvas was closed (or the pool shut down) mid-operation.
 pub const CODE_CANVAS_CLOSED: &str = "CANVAS_CLOSED";
-/// A save request failed at the daemon transport or protocol level.
+/// The canvas is running its unmount sequence (AD-31 quiesce).
+pub const CODE_CANVAS_CLOSING: &str = "CANVAS_CLOSING";
+/// A save failed: the daemon transport, or a figcraft mount's flush before
+/// unmount (the mount stays open and the user is asked).
 pub const CODE_SAVE_FAILED: &str = "SAVE_FAILED";
 /// The web canvas session token could not be generated (CSPRNG failure).
 pub const CODE_TOKEN_GENERATION_FAILED: &str = "TOKEN_GENERATION_FAILED";

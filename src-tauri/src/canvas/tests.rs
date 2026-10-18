@@ -816,7 +816,12 @@ async fn web_open_mints_a_bundle_mount_without_spawning_a_daemon() {
         0,
         "mounting figcraft never spawns a daemon"
     );
-    crate::canvas::static_server::close_canvas("proj-web-open");
+    crate::canvas::static_server::close_canvas(
+        "proj-web-open",
+        crate::canvas::persistence::CloseMode::Save,
+    )
+    .await
+    .unwrap();
     drop(dir);
 }
 
@@ -880,7 +885,9 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
 
     let third = token_of(&web_open(app, &doc, project).await);
     assert_ne!(first, third, "the next open mints a fresh token");
-    crate::canvas::static_server::close_canvas(project);
+    crate::canvas::static_server::close_canvas(project, crate::canvas::persistence::CloseMode::Save)
+        .await
+        .unwrap();
     drop(dir);
 }
 

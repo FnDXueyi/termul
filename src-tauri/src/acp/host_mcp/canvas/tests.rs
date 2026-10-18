@@ -56,6 +56,12 @@ impl FakeRenderer {
     }
 }
 
+/// The host holds a mount at `mount_seq` and `holder` reports it runs it.
+fn mount(router: &CanvasRouter, project_id: &str, mount_seq: u64, holder: CanvasHolder) {
+    router.mounts().ensure_test_mount(project_id, mount_seq);
+    assert!(router.mount(project_id, mount_seq, holder));
+}
+
 fn code_of(outcome: &CanvasOutcome) -> Option<CanvasErrorCode> {
     outcome.as_ref().err().map(|error| error.code)
 }
@@ -71,7 +77,7 @@ async fn a_project_with_no_mount_answers_canvas_closed() {
 async fn a_call_reaches_the_holder_and_returns_its_result_text_verbatim() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 3, renderer.holder());
+    mount(&router, "proj-1", 3, renderer.holder());
 
     let caller = Arc::clone(&router);
     let call = tokio::spawn(async move {
@@ -99,7 +105,7 @@ async fn a_call_reaches_the_holder_and_returns_its_result_text_verbatim() {
 async fn the_wire_frame_has_the_canvas_call_shape() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 1, renderer.holder());
+    mount(&router, "proj-1", 1, renderer.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "engine.commands", "{}".into()).await });
@@ -123,7 +129,7 @@ async fn the_wire_frame_has_the_canvas_call_shape() {
 async fn an_unanswered_call_times_out_with_canvas_timeout() {
     let router = CanvasRouter::new(Duration::from_millis(50));
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 1, renderer.holder());
+    mount(&router, "proj-1", 1, renderer.holder());
     let outcome = router.call("proj-1", "document.inspect", "{}".into()).await;
     assert_eq!(code_of(&outcome), Some(CanvasErrorCode::CanvasTimeout));
     // A late reply finds nothing waiting.
@@ -135,13 +141,13 @@ async fn an_unanswered_call_times_out_with_canvas_timeout() {
 async fn a_remount_mid_call_resolves_canvas_closed() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 1, renderer.holder());
+    mount(&router, "proj-1", 1, renderer.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "document.inspect", "{}".into()).await });
     let frame = renderer.received(1).await.remove(0);
 
-    router.mount("proj-1", 2, renderer.holder());
+    mount(&router, "proj-1", 2, renderer.holder());
     assert_eq!(
         code_of(&call.await.unwrap()),
         Some(CanvasErrorCode::CanvasClosed)
@@ -163,7 +169,7 @@ async fn a_remount_mid_call_resolves_canvas_closed() {
 async fn a_reply_stamped_with_another_mount_seq_resolves_canvas_closed() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 4, renderer.holder());
+    mount(&router, "proj-1", 4, renderer.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "document.inspect", "{}".into()).await });
@@ -180,14 +186,14 @@ async fn a_newer_renderer_takes_the_project_and_closes_calls_sent_to_the_old_one
     let router = Arc::new(CanvasRouter::default());
     let desktop = FakeRenderer::new("conn-desktop");
     let web = FakeRenderer::new("conn-web");
-    router.mount("proj-1", 1, desktop.holder());
+    mount(&router, "proj-1", 1, desktop.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "document.inspect", "{}".into()).await });
     let frame = desktop.received(1).await.remove(0);
 
     // Same mountSeq, different connection: still a different mount.
-    router.mount("proj-1", 1, web.holder());
+    mount(&router, "proj-1", 1, web.holder());
     assert_eq!(
         code_of(&call.await.unwrap()),
         Some(CanvasErrorCode::CanvasClosed)
@@ -210,7 +216,7 @@ async fn a_newer_renderer_takes_the_project_and_closes_calls_sent_to_the_old_one
 async fn only_the_connection_a_call_went_to_can_answer_it() {
     let router = Arc::new(CanvasRouter::new(Duration::from_millis(200)));
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 1, renderer.holder());
+    mount(&router, "proj-1", 1, renderer.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "document.inspect", "{}".into()).await });
@@ -224,8 +230,8 @@ async fn only_the_connection_a_call_went_to_can_answer_it() {
 async fn the_holder_disconnecting_closes_its_calls_and_its_mounts() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 1, renderer.holder());
-    router.mount("proj-2", 1, renderer.holder());
+    mount(&router, "proj-1", 1, renderer.holder());
+    mount(&router, "proj-2", 1, renderer.holder());
     let caller = Arc::clone(&router);
     let call =
         tokio::spawn(async move { caller.call("proj-1", "document.inspect", "{}".into()).await });
@@ -246,7 +252,7 @@ async fn the_holder_disconnecting_closes_its_calls_and_its_mounts() {
 async fn unmount_only_drops_the_mount_it_names() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
-    router.mount("proj-1", 2, renderer.holder());
+    mount(&router, "proj-1", 2, renderer.holder());
     assert!(!router.unmount("proj-1", "conn-a", 1), "a stale mountSeq");
     assert!(!router.unmount("proj-1", "conn-b", 2), "another connection");
 
@@ -266,7 +272,12 @@ async fn unmount_only_drops_the_mount_it_names() {
 #[tokio::test]
 async fn an_undeliverable_call_answers_canvas_closed_without_waiting() {
     let router = CanvasRouter::new(Duration::from_secs(30));
-    router.mount("proj-1", 1, FakeRenderer::closed("conn-a").holder());
+    mount(
+        &router,
+        "proj-1",
+        1,
+        FakeRenderer::closed("conn-a").holder(),
+    );
     let outcome = tokio::time::timeout(
         Duration::from_secs(1),
         router.call("proj-1", "document.inspect", "{}".into()),
@@ -274,6 +285,24 @@ async fn an_undeliverable_call_answers_canvas_closed_without_waiting() {
     .await
     .expect("an undeliverable call must not wait for the timeout");
     assert_eq!(code_of(&outcome), Some(CanvasErrorCode::CanvasClosed));
+}
+
+#[tokio::test]
+async fn a_report_for_a_mount_the_host_does_not_hold_is_refused() {
+    let router = CanvasRouter::default();
+    let renderer = FakeRenderer::new("conn-a");
+    assert!(
+        !router.mount("proj-1", 1, renderer.holder()),
+        "no mount at all"
+    );
+    router.mounts().ensure_test_mount("proj-1", 2);
+    assert!(
+        !router.mount("proj-1", 1, renderer.holder()),
+        "a stale mountSeq"
+    );
+    let outcome = router.call("proj-1", "document.inspect", "{}".into()).await;
+    assert_eq!(code_of(&outcome), Some(CanvasErrorCode::CanvasClosed));
+    assert!(renderer.frames().is_empty());
 }
 
 #[test]

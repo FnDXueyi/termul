@@ -15,7 +15,8 @@ use tauri::State;
 use super::{sanitize_log_field, validate_project_path, IpcResult};
 use crate::canvas::mcp_proxy;
 use crate::canvas::persistence::{
-    self, canvas_mounts, DirtyOutcome, DocumentBytes, PersistenceView, WriteOutcome,
+    self, canvas_mounts, CloseMode, CloseOutcome, DirtyOutcome, DocumentBytes, PersistenceView,
+    WriteOutcome,
 };
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
@@ -109,16 +110,55 @@ pub async fn canvas_open(
     }
 }
 
-/// `canvas_close { projectId }` — revoke the project's bundle token and drop
-/// its persistence mount. Idempotent.
+/// `canvas_close { projectId, discard? }` — unmount the project's canvas
+/// through the AD-31 sequence (quiesce, save, verify, unmount). A failed save
+/// answers `SAVE_FAILED` and keeps the mount; `discard: true` is the user's
+/// explicit choice to drop unsaved changes. Idempotent.
 #[tauri::command]
-pub async fn canvas_close(project_id: String) -> Result<IpcResult<bool>, String> {
-    log::info!(
-        "[canvas] close project_id={}",
-        sanitize_log_field(&project_id)
-    );
-    close_canvas(&project_id);
-    Ok(IpcResult::success(true))
+pub async fn canvas_close(
+    project_id: String,
+    discard: Option<bool>,
+) -> Result<IpcResult<CloseOutcome>, String> {
+    let mode = close_mode(discard);
+    let log_project_id = sanitize_log_field(&project_id);
+    log::info!("[canvas] close project_id={log_project_id} mode={mode:?}");
+    Ok(match close_canvas(&project_id, mode).await {
+        Ok(outcome) => {
+            log_closed(&log_project_id, &outcome);
+            IpcResult::success(outcome)
+        }
+        Err(err) => {
+            log::warn!(
+                "[canvas] close refused project_id={log_project_id} code={}: {}",
+                err.code,
+                err.message
+            );
+            IpcResult::error(err.message, err.code)
+        }
+    })
+}
+
+/// The close mode a transport's `discard` flag asks for.
+pub(crate) fn close_mode(discard: Option<bool>) -> CloseMode {
+    if discard == Some(true) {
+        CloseMode::Discard
+    } else {
+        CloseMode::Save
+    }
+}
+
+fn log_closed(log_project_id: &str, outcome: &CloseOutcome) {
+    if outcome.discarded {
+        log::warn!(
+            "[canvas] closed project_id={log_project_id}: unsaved changes discarded by the user"
+        );
+    } else {
+        log::info!(
+            "[canvas] closed project_id={log_project_id} unmounted={} saved={}",
+            outcome.unmounted,
+            outcome.saved_version.as_deref().unwrap_or("none")
+        );
+    }
 }
 
 /// `canvas_read_document { projectId, mountSeq }` — the mounted document's

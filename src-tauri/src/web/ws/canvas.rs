@@ -1,11 +1,14 @@
 //! The canvas gateway's renderer leg on `/ws` (spine AD-21, AD-29): the same
 //! requests and frame on the desktop Channel and on a browser socket.
 //!
-//! - `canvas_mount{projectId, mountSeq}`: this connection now holds the
-//!   project's canvas; gateway calls for it arrive here as top-level
+//! - `canvas_mount{projectId, mountSeq}`: this connection now runs the
+//!   project's mount (`{attached: false}` when the host holds no such mount);
+//!   gateway calls for it arrive here as top-level
 //!   `{"type":"canvas_call", callId, projectId, mountSeq, method, params}`
-//!   frames.
-//! - `canvas_unmount{projectId, mountSeq}`: it no longer does.
+//!   frames, including the host's own `host.snapshot` / `host.markSaved`
+//!   when it closes the mount (AD-31).
+//! - `canvas_unmount{projectId, mountSeq}`: it no longer does; the mount
+//!   itself closes only through the host's AD-31 sequence.
 //! - `canvas_reply{callId, mountSeq, ok, result | error: {code, message}}`:
 //!   the answer to one `canvas_call`; `params` and `result` are JSON text.
 //!
@@ -43,10 +46,11 @@ pub(super) fn handle_canvas_mount(id: String, payload: &Value, env: &HandlerEnv)
         Ok(parsed) => parsed,
         Err(error) => return malformed(id, "canvas_mount", "projectId, mountSeq", &error),
     };
-    env.acp
-        .canvas_router()
-        .mount(&parsed.project_id, parsed.mount_seq, holder_for(env));
-    WsReply::ok(id, Some(json!({})))
+    let attached =
+        env.acp
+            .canvas_router()
+            .mount(&parsed.project_id, parsed.mount_seq, holder_for(env));
+    WsReply::ok(id, Some(json!({ "attached": attached })))
 }
 
 pub(super) fn handle_canvas_unmount(id: String, payload: &Value, env: &HandlerEnv) -> WsReply {

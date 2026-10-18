@@ -98,6 +98,7 @@ fn mount_renderer(
 ) -> mpsc::Receiver<CanvasCallFrame> {
     let (frames_tx, frames_rx) = mpsc::channel::<CanvasCallFrame>();
     let (seen_tx, seen_rx) = mpsc::channel::<CanvasCallFrame>();
+    router.mounts().ensure_test_mount(project_id, mount_seq);
     router.mount(
         project_id,
         mount_seq,

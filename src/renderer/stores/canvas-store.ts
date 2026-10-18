@@ -15,16 +15,24 @@
  * settles; when the host says a save is due, or the user saves, it runs
  * `host.snapshot` → facade write → `host.markSaved`.
  *
+ * A mount outlives its tab (AD-19): closing the tab only hides the iframe
+ * (`CanvasMountLayer` keeps it offscreen), so agent calls still reach it and
+ * reopening the tab shows the same mount. A session ends only through
+ * `unmountCanvas`, which asks the host to run the AD-31 sequence (quiesce,
+ * save, verify, unmount) and drops the session once the host unmounted.
+ *
  * Bridges live in a module-level map, not in reactive state: they are
  * imperative controllers that `CanvasShell` attaches and detaches with the
  * iframe. Logs never carry the `ct` token or document content.
  */
 
 import type {
+  CanvasCloseOutcome,
   CanvasErrorCode,
   CanvasOpenInfo,
   CanvasPersistenceView
 } from '@shared/types/canvas.types'
+import type { IpcResult } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { canvasApi } from '@/lib/canvas-api'
@@ -63,6 +71,8 @@ export interface CanvasSession {
   savedVersion: string | null
   saving: boolean
   saveError: string | null
+  /** The host is running the unmount sequence for this mount. */
+  closing: boolean
 }
 
 export interface CanvasState {
@@ -71,7 +81,10 @@ export interface CanvasState {
    * failure (callers fall back); 'superseded' when a newer open or close
    * took over the project while this one was in flight. */
   openCanvas: (projectId: string, docPath: string) => Promise<boolean | 'superseded'>
-  closeCanvas: (projectId: string) => Promise<void>
+  /** Unmount through the host's AD-31 sequence; the session ends only when
+   * the host unmounted. `discard` is the user's choice to drop unsaved
+   * changes after a failed save. */
+  unmountCanvas: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
   attachBridge: (projectId: string, mountSeq: number, bridge: CanvasBridge) => void
   detachBridge: (projectId: string, bridge: CanvasBridge) => void
   handleBridgeEvent: (projectId: string, mountSeq: number, event: CanvasBridgeEvent) => void
@@ -93,7 +106,8 @@ const CLEAN_PROJECTION = {
   contentVersion: null,
   savedVersion: null,
   saving: false,
-  saveError: null
+  saveError: null,
+  closing: false
 } as const satisfies Partial<CanvasSession>
 
 function nextLifecycleGeneration(projectId: string): number {
@@ -338,6 +352,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         useWorkspaceStore.getState().addCanvasTab(projectId, docPath)
         return true
       }
+      if (existing && mountOf(existing.phase)) {
+        const closed = await get().unmountCanvas(projectId)
+        if (!closed.success) {
+          toast.error(`Could not close the open canvas: ${closed.error}`)
+          return false
+        }
+        return get().openCanvas(projectId, docPath)
+      }
       const generation = nextLifecycleGeneration(projectId)
       if (existing === undefined) {
         set((state) => ({
@@ -384,9 +406,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       return true
     },
 
-    closeCanvas: async (projectId) => {
-      if (!get().sessions[projectId]) return
-      const generation = nextLifecycleGeneration(projectId)
+    unmountCanvas: async (projectId, discard = false) => {
+      if (!get().sessions[projectId]) {
+        return {
+          success: true,
+          data: { unmounted: false, savedVersion: null, discarded: false }
+        }
+      }
+      patchSession(projectId, { closing: true })
+      const result = await canvasApi.close(projectId, discard)
+      if (!result.success) {
+        logCanvas(
+          'warn',
+          'unmountCanvas',
+          `canvas unmount refused for project ${projectId}: ${result.code} ${result.error}`
+        )
+        patchSession(projectId, { closing: false })
+        return result
+      }
+      nextLifecycleGeneration(projectId)
       bridges.get(projectId)?.bridge.dispose()
       bridges.delete(projectId)
       savesInFlight.delete(projectId)
@@ -394,14 +432,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         const { [projectId]: _closed, ...rest } = state.sessions
         return { sessions: rest }
       })
-      const result = await canvasApi.close(projectId)
-      if (!result.success && !isStaleLifecycle(projectId, generation)) {
-        logCanvas(
-          'warn',
-          'closeCanvas',
-          `canvas close failed for project ${projectId}: ${result.code} ${result.error}`
-        )
-      }
+      logCanvas(
+        result.data.discarded ? 'warn' : 'info',
+        'unmountCanvas',
+        `canvas unmounted for project ${projectId} saved=${result.data.savedVersion ?? 'none'} discarded=${result.data.discarded}`
+      )
+      return result
     },
 
     attachBridge: (projectId, mountSeq, bridge) => {
