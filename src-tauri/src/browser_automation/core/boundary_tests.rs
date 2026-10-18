@@ -62,7 +62,7 @@ fn line_for(err: &BrowserError, action: &str) -> String {
 
 #[test]
 fn boundary_failure_line_covers_every_wire_code_with_key_names() {
-    // One row per wire error code (spec I/O matrix): the line carries the
+    // One row per wire error code: the line carries the
     // code, the action, the argument key names, and the agent id.
     let cases: &[(&'static str, &str, BrowserError)] = &[
         // capability_unavailable — the no-host dispatch is a deep site
