@@ -275,7 +275,9 @@ async fn closing_a_dirty_canvas_snapshots_it_over_the_socket_before_unmounting()
 
 #[tokio::test]
 async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
-    use crate::canvas::persistence::{MountRequest, RendererId, DEFAULT_MAX_MOUNTED};
+    use crate::canvas::persistence::{
+        MountRequest, RendererId, DEFAULT_CRASH_TIMEOUTS, DEFAULT_MAX_MOUNTED,
+    };
 
     let acp = Arc::new(AcpManager::new(vec![]));
     let relay = Arc::new(WsRelaySink::new());
@@ -296,6 +298,7 @@ async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
         doc_path: dir.path().join("design.figcraft"),
         autosave: Duration::from_secs(60),
         lease_grace: Duration::from_secs(5),
+        crash_timeouts: DEFAULT_CRASH_TIMEOUTS,
     };
     let mounts = Arc::clone(acp.canvas_router().mounts());
     let mount = |seq: u64| {
@@ -330,7 +333,12 @@ async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
     };
     assert_eq!(
         serde_json::to_value(&notice).unwrap(),
-        json!({ "type": "canvas_lease_lost", "projectId": "proj-lease", "mountSeq": first.mount_seq })
+        json!({
+            "type": "canvas_lease_lost",
+            "projectId": "proj-lease",
+            "mountSeq": first.mount_seq,
+            "reason": "takenOver"
+        })
     );
     let attached = route(&mount(second.mount_seq), &tab_b).await;
     assert_eq!(attached.payload, Some(json!({ "attached": true })));

@@ -310,3 +310,78 @@ describe('CanvasPanel', () => {
     expect(screen.getByTestId('canvas-save-error').getAttribute('title')).toContain('disk full')
   })
 })
+
+describe('CanvasPanel recovery', () => {
+  const READY: CanvasPhase = { kind: 'ready', mount: { mountSeq: 4, info: INFO } }
+  const CONFLICT = { diskHash: 'ab'.repeat(32), version: '5' }
+
+  it('checks the document on disk when the canvas is shown', () => {
+    const checkDisk = vi.fn(async () => {})
+    setPhase(READY)
+    useCanvasStore.setState({ checkDisk })
+    renderPanel()
+    expect(checkDisk).toHaveBeenCalledWith(PROJECT)
+  })
+
+  it('offers keep mine, take disk and save a copy for a conflict', () => {
+    const resolveConflict = vi.fn(async () => true)
+    setPhase(READY, { dirty: true, conflict: CONFLICT })
+    useCanvasStore.setState({ resolveConflict, checkDisk: vi.fn(async () => {}) })
+    renderPanel()
+
+    const bar = screen.getByRole('alertdialog', { name: 'Canvas changed on disk' })
+    expect(bar.textContent).toContain('Autosave is paused')
+    for (const [label, choice] of [
+      ['Keep mine', 'keepMine'],
+      ['Take disk', 'takeDisk'],
+      ['Save a copy', 'saveCopy']
+    ] as const) {
+      fireEvent.click(screen.getByRole('button', { name: label }))
+      expect(resolveConflict).toHaveBeenLastCalledWith(PROJECT, choice)
+    }
+  })
+
+  it('offers only keep mine for a deleted document, and nothing while resolving', () => {
+    setPhase(READY, { conflict: { diskHash: null, version: '3' }, resolving: true })
+    useCanvasStore.setState({ checkDisk: vi.fn(async () => {}) })
+    renderPanel()
+    expect(screen.getByTestId('canvas-conflict').textContent).toContain('was deleted')
+    expect(screen.queryByRole('button', { name: 'Take disk' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Save a copy' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Keep mine' }).hasAttribute('disabled')).toBe(true)
+  })
+
+  it('shows what a crash lost until dismissed', () => {
+    const sinceMs = new Date(2026, 9, 18, 9, 30, 0).getTime()
+    setPhase(
+      { kind: 'loading', mount: { mountSeq: 6, info: { ...INFO, mountSeq: 6 } } },
+      {
+        crash: {
+          previousMountSeq: 4,
+          mountSeq: 6,
+          reason: '3 consecutive calls timed out',
+          lost: { count: 4, sinceMs }
+        }
+      }
+    )
+    renderPanel()
+    const notice = screen.getByTestId('canvas-crash-notice')
+    expect(notice.textContent).toContain(
+      `4 unsaved changes since ${new Date(sinceMs).toLocaleTimeString()} were lost.`
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByTestId('canvas-crash-notice')).toBeNull()
+    expect(useCanvasStore.getState().sessions[PROJECT]?.crash).toBeNull()
+  })
+
+  it('says nothing was lost when the editor was clean', () => {
+    setPhase(READY, {
+      crash: { previousMountSeq: 4, mountSeq: 6, reason: 'x', lost: null }
+    })
+    useCanvasStore.setState({ checkDisk: vi.fn(async () => {}) })
+    renderPanel()
+    const text = screen.getByTestId('canvas-crash-notice').textContent ?? ''
+    expect(text).toContain('reloaded from the last save')
+    expect(text).not.toContain('lost')
+  })
+})

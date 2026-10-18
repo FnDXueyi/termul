@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Admitted, CanvasPersistence, CloseMode, Mount, PersistenceView};
+use super::{Admitted, CanvasPersistence, CloseMode, CloseOutcome, Mount, PersistenceView};
+use crate::acp::host_mcp::canvas::LeaseLostReason;
 use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE};
 
 /// `canvas.lease_grace_ms` when the renderer sends none.
@@ -78,6 +79,8 @@ pub struct MountRequest {
     pub doc_path: PathBuf,
     pub autosave: Duration,
     pub lease_grace: Duration,
+    /// `canvas.crash_timeouts` ([`super::crash_timeouts`]).
+    pub crash_timeouts: u32,
 }
 
 #[cfg(test)]
@@ -88,6 +91,7 @@ impl MountRequest {
             doc_path,
             autosave,
             lease_grace: lease_grace(None),
+            crash_timeouts: super::DEFAULT_CRASH_TIMEOUTS,
         }
     }
 }
@@ -174,10 +178,34 @@ impl CanvasPersistence {
                 ),
                 Some(mount) => (self.take_over(project_id, mount).await?, None),
             };
-            if let Some(mount_seq) = self.install(project_id, expected, request) {
+            let mount_seq = self.next_mount_seq();
+            let mount = Mount::new(mount_seq, self.tick(), request.clone(), None);
+            if self.install(project_id, expected, mount) {
                 return Ok(Opened { mount_seq, lease });
             }
         }
+    }
+
+    /// Close `mount` through AD-31 with a save, then tell the renderer running
+    /// it why it lost the canvas. A takeover and an eviction both unmount
+    /// another renderer's canvas this way.
+    pub(super) async fn save_and_unmount(
+        &self,
+        project_id: &str,
+        mount: &Arc<Mount>,
+        reason: LeaseLostReason,
+    ) -> Result<CloseOutcome, CanvasError> {
+        let connected = mount
+            .state
+            .lock()
+            .link
+            .connection()
+            .map(|connection| connection.holder().clone());
+        let closed = self.close(project_id, CloseMode::Save).await?;
+        if let Some(renderer) = connected.filter(|_| closed.unmounted) {
+            renderer.tell_lease_lost(project_id, mount.mount_seq, reason);
+        }
+        Ok(closed)
     }
 
     async fn take_over(
@@ -185,34 +213,26 @@ impl CanvasPersistence {
         project_id: &str,
         holder: &Arc<Mount>,
     ) -> Result<LeaseChange, CanvasError> {
-        let loser = holder
-            .state
-            .lock()
-            .link
-            .connection()
-            .map(|connection| connection.holder().clone());
         let closed = self
-            .close(project_id, CloseMode::Save)
+            .save_and_unmount(project_id, holder, LeaseLostReason::TakenOver)
             .await
             .map_err(|error| refused_takeover(&error))?;
-        if let Some(loser) = loser {
-            loser.tell_lease_lost(project_id, holder.mount_seq);
-        }
         Ok(LeaseChange::TakenOver {
             previous: holder.mount_seq,
             saved_version: closed.saved_version,
         })
     }
 
-    /// Put a new mount in the project's slot if the slot still holds
-    /// `expected`; `None` when another open or close changed it first.
-    fn install(
+    /// Put `mount` in the project's slot if the slot still holds `expected`,
+    /// and retire what it replaced. False when another open, close or remount
+    /// changed the slot first. Every mount enters the registry here.
+    pub(super) fn install(
         &self,
         project_id: &str,
         expected: Option<&Arc<Mount>>,
-        request: &MountRequest,
-    ) -> Option<u64> {
-        let (mount_seq, previous) = {
+        mount: Arc<Mount>,
+    ) -> bool {
+        let previous = {
             let mut mounts = self.mounts.lock();
             let unchanged = match (mounts.get(project_id), expected) {
                 (None, None) => true,
@@ -220,18 +240,13 @@ impl CanvasPersistence {
                 _ => false,
             };
             if !unchanged {
-                return None;
+                return false;
             }
-            let mount_seq = self.next_mount_seq();
-            let previous = mounts.insert(
-                project_id.to_string(),
-                Mount::new(mount_seq, self.tick(), request.clone()),
-            );
-            (mount_seq, previous)
+            mounts.insert(project_id.to_string(), mount)
         };
         if let Some(previous) = previous {
             Self::retire(&previous);
         }
-        Some(mount_seq)
+        true
     }
 }

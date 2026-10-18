@@ -130,28 +130,31 @@ describe('canvasApi (web vs desktop branch)', () => {
     expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
       docPath: DOC,
       projectId: PROJECT,
-      clientInstanceId: getClientInstanceId()
+      request: { clientInstanceId: getClientInstanceId() }
     })
     expect(mockFetch).not.toHaveBeenCalled()
     expect(result).toEqual({ success: true, data: desktopInfo })
   })
 
-  it('open: both transports send the autosave, lease-grace and mount-cap settings alike', async () => {
-    const options = { autosaveMs: 1500, leaseGraceMs: 5000, maxMounted: 3 }
-    const expected = {
-      docPath: DOC,
-      projectId: PROJECT,
-      clientInstanceId: getClientInstanceId(),
-      ...options
-    }
+  it('open: both transports send one open request with every canvas setting', async () => {
+    const options = { autosaveMs: 1500, leaseGraceMs: 5000, maxMounted: 3, crashTimeouts: 4 }
+    const request = { clientInstanceId: getClientInstanceId(), ...options }
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: WEB_INFO }))
     await canvasApi.open(DOC, PROJECT, options)
-    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual(expected)
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual({
+      docPath: DOC,
+      projectId: PROJECT,
+      ...request
+    })
 
     mockIsTauriContext.mockReturnValue(true)
     mockInvoke.mockResolvedValueOnce({ success: true, data: WEB_INFO })
     await canvasApi.open(DOC, PROJECT, options)
-    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', expected)
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
+      docPath: DOC,
+      projectId: PROJECT,
+      request
+    })
   })
 
   it('open: a refused lease takeover keeps its typed code on both transports', async () => {
@@ -240,6 +243,33 @@ describe('canvasApi (web vs desktop branch)', () => {
       command: 'canvas_write_snapshot',
       route: '/canvas/write-snapshot',
       args: { projectId: PROJECT, mountSeq: 3, snapshot: '{"contentVersion":8,"bytes":"AA=="}' }
+    },
+    {
+      name: 'diskChanged',
+      call: () => canvasApi.diskChanged(PROJECT, 3),
+      command: 'canvas_disk_changed',
+      route: '/canvas/disk-changed',
+      args: { projectId: PROJECT, mountSeq: 3 }
+    },
+    {
+      name: 'resolveConflict',
+      call: () =>
+        canvasApi.resolveConflict(PROJECT, 3, 'saveCopy', '{"contentVersion":8,"bytes":"AA=="}'),
+      command: 'canvas_resolve_conflict',
+      route: '/canvas/resolve-conflict',
+      args: {
+        projectId: PROJECT,
+        mountSeq: 3,
+        choice: 'saveCopy',
+        snapshot: '{"contentVersion":8,"bytes":"AA=="}'
+      }
+    },
+    {
+      name: 'crashed',
+      call: () => canvasApi.crashed(PROJECT, 3, 'wasm panic'),
+      command: 'canvas_crashed',
+      route: '/canvas/crashed',
+      args: { projectId: PROJECT, mountSeq: 3, reason: 'wasm panic' }
     }
   ] as const
 

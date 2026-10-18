@@ -164,9 +164,9 @@ pub struct CanvasMountPayload {
     pub mount_seq: u64,
 }
 
-/// Host → renderer `{"type":"canvas_lease_lost", projectId, mountSeq}`:
-/// another renderer opened the canvas, and the mount at `mountSeq` was saved
-/// and unmounted for it (AD-30).
+/// Host → renderer `{"type":"canvas_lease_lost", projectId, mountSeq, reason}`:
+/// the mount at `mountSeq` was saved and unmounted, because another renderer
+/// opened the canvas (AD-30) or the mount cap evicted it (AD-26).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasLeaseLostFrame {
@@ -174,6 +174,17 @@ pub struct CanvasLeaseLostFrame {
     type_: &'static str,
     pub project_id: String,
     pub mount_seq: u64,
+    pub reason: LeaseLostReason,
+}
+
+/// Why a renderer lost its mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeaseLostReason {
+    /// Another renderer opened the canvas and holds it now.
+    TakenOver,
+    /// The mount cap unloaded it to make room for another canvas.
+    Evicted,
 }
 
 /// Top-level type of [`CanvasLeaseLostFrame`].
@@ -229,14 +240,20 @@ impl CanvasHolder {
         (self.deliver)(frame)
     }
 
-    /// Tell the connection another renderer took `project_id`'s lease from
-    /// its mount at `mount_seq`; false when it was not queued.
-    pub fn tell_lease_lost(&self, project_id: &str, mount_seq: u64) -> bool {
+    /// Tell the connection its mount of `project_id` at `mount_seq` was saved
+    /// and unmounted for `reason`; false when it was not queued.
+    pub fn tell_lease_lost(
+        &self,
+        project_id: &str,
+        mount_seq: u64,
+        reason: LeaseLostReason,
+    ) -> bool {
         self.lease_lost.as_ref().is_some_and(|notify| {
             notify(CanvasLeaseLostFrame {
                 type_: CANVAS_LEASE_LOST_TYPE,
                 project_id: project_id.to_string(),
                 mount_seq,
+                reason,
             })
         })
     }

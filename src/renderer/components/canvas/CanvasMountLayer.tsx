@@ -7,9 +7,12 @@
  *
  * Rendered once by `WorkspaceLayout` (both renderer roots), beside either
  * shell, so a breakpoint change does not remount it either. It also hosts the
- * unsaved-canvas question of the unmount flow.
+ * unsaved-canvas question of the unmount flow and the file watch that tells
+ * the mounted canvases their documents changed on disk.
  */
 
+import { useEffect } from 'react'
+import { startCanvasDiskWatch } from '@/lib/canvas-disk-watch'
 import { basename } from '@/lib/path-basename'
 import { useCanvasStore } from '@/stores/canvas-store'
 import { CanvasShell } from './CanvasShell'
@@ -19,6 +22,7 @@ import { useCanvasSlots } from './canvas-slots'
 export function CanvasMountLayer(): React.JSX.Element {
   const sessions = useCanvasStore((state) => state.sessions)
   const slots = useCanvasSlots((state) => state.slots)
+  useEffect(() => startCanvasDiskWatch(), [])
 
   return (
     <>

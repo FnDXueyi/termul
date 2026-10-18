@@ -30,8 +30,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::persistence::{
-    autosave_delay, canvas_mounts, lease_grace, mount_cap, CloseMode, CloseOutcome, Eviction,
-    LeaseChange, MountRequest, RendererId,
+    autosave_delay, canvas_mounts, crash_timeouts, lease_grace, mount_cap, CloseMode, CloseOutcome,
+    Eviction, LeaseChange, MountRequest, RendererId,
 };
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
@@ -212,8 +212,11 @@ pub struct CanvasOpenInfo {
     pub evicted: Vec<Eviction>,
 }
 
-/// What a renderer's open carries besides the document.
-#[derive(Debug, Clone)]
+/// What a renderer's open carries besides the document: the one shape both
+/// transports accept, `canvas_open`'s `request` argument and the rest of
+/// `POST /canvas/open`'s body. Every setting is optional; the host clamps it.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenRequest {
     /// The opening window or tab; it gets the lease.
     pub client_instance_id: String,
@@ -223,6 +226,8 @@ pub struct OpenRequest {
     pub lease_grace_ms: Option<u64>,
     /// `canvas.max_mounted`.
     pub max_mounted: Option<u64>,
+    /// `canvas.crash_timeouts`.
+    pub crash_timeouts: Option<u32>,
 }
 
 /// Mint (or reuse) the project's bundle token and start a new persistence
@@ -255,6 +260,7 @@ pub async fn open_canvas(
                 doc_path: PathBuf::from(&doc_key),
                 autosave: autosave_delay(request.autosave_ms),
                 lease_grace: lease_grace(request.lease_grace_ms),
+                crash_timeouts: crash_timeouts(request.crash_timeouts),
             },
             cap,
         )

@@ -42,7 +42,11 @@ export const canvasApi: CanvasApi = {
   dirtyChanged: (projectId, mountSeq, dirty, contentVersion) =>
     transport().dirtyChanged(projectId, mountSeq, dirty, contentVersion),
   writeSnapshot: (projectId, mountSeq, snapshot) =>
-    transport().writeSnapshot(projectId, mountSeq, snapshot)
+    transport().writeSnapshot(projectId, mountSeq, snapshot),
+  diskChanged: (projectId, mountSeq) => transport().diskChanged(projectId, mountSeq),
+  resolveConflict: (projectId, mountSeq, choice, snapshot) =>
+    transport().resolveConflict(projectId, mountSeq, choice, snapshot),
+  crashed: (projectId, mountSeq, reason) => transport().crashed(projectId, mountSeq, reason)
 }
 
 export { createTauriCanvasApi } from './tauri-canvas-api'

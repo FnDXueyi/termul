@@ -4,9 +4,9 @@
  * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
  * auth header):
  * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
- *   autosaveMs, leaseGraceMs, maxMounted }` → `CanvasOpenInfo` with an empty
- *   `baseUrl` (the bundle is same-origin); this tab takes the mount lease,
- *   after the least recently active canvases beyond `maxMounted` unloaded;
+ *   ...CanvasOpenOptions }` → `CanvasOpenInfo` with an empty `baseUrl` (the
+ *   bundle is same-origin); this tab takes the mount lease, after the least
+ *   recently active canvases beyond `maxMounted` unloaded;
  * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
  *   unmount (save, verify, unmount), which also revokes the `ct` token;
  * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
@@ -22,11 +22,15 @@
 import type {
   CanvasApi,
   CanvasCloseOutcome,
+  CanvasConflictChoice,
   CanvasDirtyOutcome,
+  CanvasDiskOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
   CanvasOpenOptions,
   CanvasPersistenceView,
+  CanvasRemount,
+  CanvasResolveOutcome,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
@@ -44,9 +48,7 @@ export const webCanvasApi: CanvasApi = {
       docPath,
       projectId,
       clientInstanceId: getClientInstanceId(),
-      autosaveMs: options.autosaveMs,
-      leaseGraceMs: options.leaseGraceMs,
-      maxMounted: options.maxMounted
+      ...options
     })
   },
 
@@ -98,5 +100,27 @@ export const webCanvasApi: CanvasApi = {
       mountSeq,
       snapshot
     })
+  },
+
+  diskChanged(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDiskOutcome>> {
+    return postJson<CanvasDiskOutcome>('/canvas/disk-changed', { projectId, mountSeq })
+  },
+
+  resolveConflict(
+    projectId: string,
+    mountSeq: number,
+    choice: CanvasConflictChoice,
+    snapshot?: string
+  ): Promise<IpcResult<CanvasResolveOutcome>> {
+    return postJson<CanvasResolveOutcome>('/canvas/resolve-conflict', {
+      projectId,
+      mountSeq,
+      choice,
+      snapshot
+    })
+  },
+
+  crashed(projectId: string, mountSeq: number, reason: string): Promise<IpcResult<CanvasRemount>> {
+    return postJson<CanvasRemount>('/canvas/crashed', { projectId, mountSeq, reason })
   }
 }

@@ -22,6 +22,7 @@ import {
   useCanvasSession,
   useCanvasStore
 } from '@/stores/canvas-store'
+import { CanvasConflictBar, CanvasCrashNotice } from './CanvasRecovery'
 import { useCanvasSlots } from './canvas-slots'
 
 interface CanvasPanelProps {
@@ -172,6 +173,13 @@ export function CanvasPanel({
     }
   }, [projectId])
 
+  const readyMountSeq = session?.phase.kind === 'ready' ? session.phase.mount.mountSeq : null
+  useEffect(() => {
+    // A canvas outside the watched directories (another project's) gets no
+    // watcher events: check its file whenever it is shown.
+    if (isVisible && readyMountSeq !== null) void useCanvasStore.getState().checkDisk(projectId)
+  }, [projectId, isVisible, readyMountSeq])
+
   if (isPhoneWidth) {
     return (
       <Notice
@@ -237,6 +245,14 @@ export function CanvasPanel({
           </Button>
         </div>
       </div>
+      {session.conflict && (
+        <CanvasConflictBar
+          projectId={projectId}
+          conflict={session.conflict}
+          resolving={session.resolving}
+        />
+      )}
+      {session.crash && <CanvasCrashNotice projectId={projectId} remount={session.crash} />}
       <div className="relative min-h-0 flex-1">
         {mount ? (
           isVisible && <CanvasSlot projectId={projectId} mountSeq={mount.mountSeq} />
