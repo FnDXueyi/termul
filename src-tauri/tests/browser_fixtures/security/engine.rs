@@ -405,7 +405,10 @@ fn tabs_invoke_no_command_and_never_load_termul_origins() {
         rejected_at(app_origin(), false)
     );
 
-    for denied in [
+    // A release build has no dev server, so its origin is an ordinary
+    // loopback page there: reachable, and still without commands.
+    let denied = |label: &str| tauri::is_dev() || !label.ends_with("-dev-origin");
+    for target in [
         "agent-to-dev-origin",
         "tab-user-to-dev-origin",
         "agent-to-app-origin",
@@ -413,10 +416,15 @@ fn tabs_invoke_no_command_and_never_load_termul_origins() {
         "agent-to-unspecified",
         "agent-to-metadata",
     ] {
+        let expected_origin = if denied(target) {
+            &report.remote_origin
+        } else {
+            &report.dev_origin
+        };
         assert_eq!(
-            outcome(denied),
-            rejected_at(&report.remote_origin, denied.starts_with("tab-user")),
-            "{denied} stays on its page after navigating itself to a denied target"
+            outcome(target),
+            rejected_at(expected_origin, target.starts_with("tab-user")),
+            "{target} after navigating itself"
         );
     }
     assert_eq!(
@@ -425,12 +433,17 @@ fn tabs_invoke_no_command_and_never_load_termul_origins() {
         "every create and navigate was tried"
     );
     for (attempt, result) in &report.refused {
-        assert!(
-            result
-                .as_ref()
-                .is_err_and(|error| error.starts_with("navigation target not allowed")),
-            "{attempt}: {result:?}"
-        );
+        let target = attempt.split_once(' ').map_or("", |(_, target)| target);
+        if denied(target) {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with("navigation target not allowed")),
+                "{attempt}: {result:?}"
+            );
+        } else {
+            assert_eq!(result, &Ok(()), "{attempt}");
+        }
     }
     assert!(
         !report.remote_requests.is_empty(),
