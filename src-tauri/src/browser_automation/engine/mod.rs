@@ -69,6 +69,29 @@ impl CapabilityId {
         CapabilityId::NetworkObserve,
     ];
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CapabilityId::IsolatedEval => "isolated_eval",
+            CapabilityId::ScriptMessage => "script_message",
+            CapabilityId::PersistentProfile => "persistent_profile",
+            CapabilityId::NavigationIntercept => "navigation_intercept",
+            CapabilityId::NewWindowIntercept => "new_window_intercept",
+            CapabilityId::DialogIntercept => "dialog_intercept",
+            CapabilityId::FileChooser => "file_chooser",
+            CapabilityId::DownloadIntercept => "download_intercept",
+            CapabilityId::PermissionIntercept => "permission_intercept",
+            CapabilityId::ExternalProtocolIntercept => "external_protocol_intercept",
+            CapabilityId::Screenshot => "screenshot",
+            CapabilityId::PointerClick => "pointer_click",
+            CapabilityId::TrustedKey => "trusted_key",
+            CapabilityId::PointerMove => "pointer_move",
+            CapabilityId::Wheel => "wheel",
+            CapabilityId::Drag => "drag",
+            CapabilityId::ConsoleObserve => "console_observe",
+            CapabilityId::NetworkObserve => "network_observe",
+        }
+    }
+
     fn index(self) -> usize {
         self as usize
     }

@@ -461,10 +461,9 @@ impl HostPlanServer {
                     // The parser already logged code, action and expected
                     // key names (never values).
                     Err(message) => {
-                        return FrameReply::err_code(
-                            crate::browser_automation::ERR_INVALID_PARAMS,
+                        return browser_failure(&crate::browser_automation::BrowserError::invalid(
                             message,
-                        );
+                        ));
                     }
                 };
                 let action = input.action.clone();
@@ -476,7 +475,7 @@ impl HostPlanServer {
                 match crate::browser_automation::dispatch(&real_session_id, &auth.agent_id, call)
                     .await
                 {
-                    Ok(result) => FrameReply::ok_with(result),
+                    Ok(success) => FrameReply::ok_with(success.to_json()),
                     Err(e) => {
                         // Durable boundary log: wire code + action + argument
                         // KEY NAMES + agent id + redacted session. Never the
@@ -493,7 +492,7 @@ impl HostPlanServer {
                                 &crate::logging::redact_session_id(&real_session_id),
                             )
                         );
-                        FrameReply::err_code(e.code, e.message)
+                        browser_failure(&e)
                     }
                 }
             }
@@ -585,6 +584,15 @@ impl HostPlanServer {
                 }
             }
         }
+    }
+}
+
+/// A failed browser call: the reply JSON the child forwards verbatim, with
+/// the code and message mirrored on the frame.
+fn browser_failure(e: &crate::browser_automation::BrowserError) -> FrameReply {
+    FrameReply {
+        result: Some(e.to_json()),
+        ..FrameReply::err_code(e.code, e.message.clone())
     }
 }
 

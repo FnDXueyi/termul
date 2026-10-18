@@ -1,12 +1,16 @@
-//! Per-verb handlers: argument checks and the engine calls they make.
+//! Per-verb handlers: argument checks, the engine and surface calls they
+//! make, and the success reply each one shapes.
+
+use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::Manager;
 use uuid::Uuid;
 
 use super::dispatch::Verb;
-use super::reply::{engine_error, eval_gate, shape_snapshot};
-use super::tabs::{default_session_tab, navigate_resolution, NavigateResolution};
+use super::ports::{CanonicalOrigin, TabProfile};
+use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, Success, TabFacts};
+use super::surface::HistoryStep;
+use super::tabs::{default_session_tab, navigate_resolution, AgentTab, NavigateResolution};
 use super::{BrowserError, DesktopBrowserHost, ERR_TIMEOUT};
 use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
 use crate::browser_automation::BrowserCall;
@@ -66,7 +70,57 @@ pub(super) fn check_ref(ref_id: &str) -> Result<(), BrowserError> {
     }
 }
 
+fn ref_arg(args: &Value) -> Result<Option<&str>, BrowserError> {
+    let r = args.get("ref").and_then(Value::as_str);
+    if let Some(r) = r {
+        check_ref(r)?;
+    }
+    Ok(r)
+}
+
+fn required_ref(args: &Value) -> Result<&str, BrowserError> {
+    ref_arg(args)?.ok_or_else(|| BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]))
+}
+
+fn mutated(fidelity: Fidelity, tab: TabFacts) -> Success {
+    Success {
+        fidelity: Some(fidelity),
+        tab: Some(tab),
+        ..Success::default()
+    }
+}
+
 impl DesktopBrowserHost {
+    /// Host facts for `id`, its origin from the tab's current URL.
+    fn tab_facts(&self, id: &str, tab: &AgentTab) -> TabFacts {
+        let origin = self
+            .surface
+            .info(id)
+            .ok()
+            .and_then(|info| CanonicalOrigin::parse(&info.url));
+        TabFacts {
+            id: id.to_string(),
+            epoch: tab.epoch(),
+            origin,
+            profile: TabProfile::Shared,
+        }
+    }
+
+    fn page_meta(&self, id: &str) -> Option<PageData> {
+        self.surface
+            .info(id)
+            .ok()
+            .map(|info| PageData::meta(&info.url, &info.title))
+    }
+
+    fn resolve_arg_tab(
+        &self,
+        session_id: &str,
+        args: &Value,
+    ) -> Result<(String, Arc<AgentTab>), BrowserError> {
+        self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))
+    }
+
     /// Run a helper script through the engine. A failure is the eval's
     /// final outcome (the engine already applied its one safe fallback).
     async fn eval(&self, tab_id: &str, expr: &str) -> Result<Value, BrowserError> {
@@ -93,106 +147,121 @@ impl DesktopBrowserHost {
         }
     }
 
-    pub(super) async fn act(
-        &self,
-        session_id: &str,
-        verb: Verb,
-        call: BrowserCall,
-    ) -> Result<Value, BrowserError> {
+    pub(super) async fn act(&self, session_id: &str, verb: Verb, call: BrowserCall) -> Result<Success, BrowserError> {
         let args = &call.args;
         match verb {
-            Verb::ListTabs => {
-                let tabs = self.agent_tabs.lock();
-                let list: Vec<Value> = tabs
-                    .iter()
-                    .filter(|(_, t)| t.session_id == session_id)
-                    .filter_map(|(id, _)| {
-                        self.tabs
-                            .info(id)
-                            .ok()
-                            .map(|info| json!({ "tabId": id, "url": info.url, "title": info.title }))
-                    })
-                    .collect();
-                Ok(json!({ "tabs": list }))
-            }
+            Verb::ListTabs => Ok(self.list_tabs(session_id)),
             Verb::NewTab => {
                 let url = check_url(&require_url_arg(args, "new_tab")?)?;
-                let tab_id = self.open_agent_tab(session_id, Some(&url)).await?;
-                Ok(json!({ "tabId": tab_id }))
+                let id = self.open_agent_tab(session_id, Some(&url)).await?;
+                let tab = self
+                    .agent_tab(&id)
+                    .ok_or_else(|| BrowserError::tab_not_found(&id).with_arg_keys(&["tabId"]))?;
+                let mut facts = self.tab_facts(&id, &tab);
+                // The pane may not report the URL until it has loaded.
+                facts.origin = facts.origin.or_else(|| CanonicalOrigin::parse(&url));
+                Ok(mutated(Fidelity::Trusted, facts))
             }
             Verb::CloseTab => {
-                let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                self.close_agent_tab(&tab_id);
-                Ok(json!({ "closed": tab_id }))
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let facts = self.tab_facts(&id, &tab);
+                self.close_agent_tab(&id);
+                Ok(mutated(Fidelity::Trusted, facts))
             }
             Verb::Navigate => self.navigate(session_id, args).await,
             Verb::Back | Verb::Forward | Verb::Reload => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let r = match verb {
-                    Verb::Back => self.tabs.go_back(&tab_id),
-                    Verb::Forward => self.tabs.go_forward(&tab_id),
-                    _ => self.tabs.reload(&tab_id),
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let step = match verb {
+                    Verb::Back => HistoryStep::Back,
+                    Verb::Forward => HistoryStep::Forward,
+                    _ => HistoryStep::Reload,
                 };
-                r.map_err(BrowserError::internal)?;
+                self.surface.history(&id, step).map_err(BrowserError::internal)?;
                 tab.bump_epoch();
-                self.settle(&tab_id).await;
-                Ok(json!({ "ok": true }))
+                self.settle(&id).await;
+                Ok(Success {
+                    page: self.page_meta(&id),
+                    ..mutated(Fidelity::Trusted, self.tab_facts(&id, &tab))
+                })
             }
             Verb::Snapshot => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let epoch = tab.epoch();
-                let out = self.eval(&tab_id, &assets::snapshot_script()).await?;
-                shape_snapshot(&out, &tab_id, epoch)
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let facts = self.tab_facts(&id, &tab);
+                let out = self.eval(&id, &assets::snapshot_script()).await?;
+                let (page, refs) = shape_snapshot(&out)?;
+                Ok(Success {
+                    tab: Some(facts),
+                    page: Some(page),
+                    data: Some(json!({ "refs": refs })),
+                    ..Success::default()
+                })
             }
             Verb::Screenshot => {
-                let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                self.screenshot(session_id, &tab_id).await
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let path = self.screenshot(session_id, &id).await?;
+                Ok(Success {
+                    tab: Some(self.tab_facts(&id, &tab)),
+                    data: Some(json!({ "path": path })),
+                    ..Success::default()
+                })
             }
             Verb::Click => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let el = args
-                    .get("ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]))?;
-                check_ref(el)?;
-                self.click_ref(&tab_id, el, tab.epoch()).await?;
-                Ok(json!({ "ok": true }))
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let el = required_ref(args)?;
+                let fidelity = self.click_ref(&id, el, tab.epoch()).await?;
+                Ok(mutated(fidelity, self.tab_facts(&id, &tab)))
             }
             Verb::Fill => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let ref_id = args
-                    .get("ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]))?;
-                check_ref(ref_id)?;
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                let ref_id = required_ref(args)?;
                 let value = args
                     .get("value")
                     .and_then(Value::as_str)
                     .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
-                let out = self
-                    .eval(&tab_id, &assets::fill_ref(ref_id, value, tab.epoch()))
-                    .await?;
-                eval_gate(out)?;
-                Ok(json!({ "ok": true }))
+                let out = self.eval(&id, &assets::fill_ref(ref_id, value, tab.epoch())).await?;
+                eval_gate(&out, Some(ref_id))?;
+                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&id, &tab)))
             }
             Verb::Type | Verb::Press | Verb::Scroll | Verb::Hover => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                // `ref` is optional for these (type/press fall back to the
-                // focused element); validate when present.
-                if let Some(r) = args.get("ref").and_then(Value::as_str) {
-                    check_ref(r)?;
-                }
+                let (id, tab) = self.resolve_arg_tab(session_id, args)?;
+                // `ref` is optional for type/press/scroll (they fall back to
+                // the focused element or the page).
+                let ref_id = ref_arg(args)?;
                 let out = self
-                    .eval(&tab_id, &assets::interaction(&call.action, args, tab.epoch()))
+                    .eval(&id, &assets::interaction(&call.action, args, tab.epoch()))
                     .await?;
-                eval_gate(out)?;
-                Ok(json!({ "ok": true }))
+                eval_gate(&out, ref_id)?;
+                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&id, &tab)))
             }
             Verb::Wait => self.wait(session_id, args).await,
         }
     }
 
-    async fn navigate(&self, session_id: &str, args: &Value) -> Result<Value, BrowserError> {
+    fn list_tabs(&self, session_id: &str) -> Success {
+        let owned: Vec<(String, Arc<AgentTab>)> = {
+            let tabs = self.agent_tabs.lock();
+            let mut owned: Vec<_> = tabs
+                .iter()
+                .filter(|(_, t)| t.session_id == session_id)
+                .map(|(id, t)| (id.clone(), t.clone()))
+                .collect();
+            owned.sort_by(|a, b| a.0.cmp(&b.0));
+            owned
+        };
+        let list: Vec<Value> = owned
+            .iter()
+            .filter_map(|(id, tab)| {
+                let page = self.page_meta(id)?;
+                Some(json!({ "tab": self.tab_facts(id, tab), "page": page }))
+            })
+            .collect();
+        Success {
+            data: Some(json!({ "tabs": list })),
+            ..Success::default()
+        }
+    }
+
+    async fn navigate(&self, session_id: &str, args: &Value) -> Result<Success, BrowserError> {
         let url = check_url(&require_url_arg(args, "navigate")?)?;
         let tab_id = tab_id_arg(args, "navigate")?;
         let resolution = {
@@ -232,26 +301,31 @@ impl DesktopBrowserHost {
             }
         };
         if !fresh {
-            self.tabs
+            self.surface
                 .navigate(&tab_id, url.clone())
                 .map_err(BrowserError::internal)?;
         }
         tab.bump_epoch();
         self.settle(&tab_id).await;
         // Report the tab's real URL — never fabricate the requested one.
-        let url_now = self
-            .tabs
-            .info(&tab_id)
-            .map(|i| i.url)
-            .map_err(|_| BrowserError::tab_not_found(&tab_id).with_arg_keys(&["tabId"]))?;
-        Ok(json!({ "tabId": tab_id, "url": url_now }))
+        let page = self
+            .page_meta(&tab_id)
+            .ok_or_else(|| BrowserError::tab_not_found(&tab_id).with_arg_keys(&["tabId"]))?;
+        Ok(Success {
+            page: Some(page),
+            ..mutated(Fidelity::Trusted, self.tab_facts(&tab_id, &tab))
+        })
     }
 
-    async fn wait(&self, session_id: &str, args: &Value) -> Result<Value, BrowserError> {
-        let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
+    async fn wait(&self, session_id: &str, args: &Value) -> Result<Success, BrowserError> {
+        let (tab_id, tab) = self.resolve_arg_tab(session_id, args)?;
+        let done = |host: &Self| Success {
+            tab: Some(host.tab_facts(&tab_id, &tab)),
+            ..Success::default()
+        };
         if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
             tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
-            return Ok(json!({ "ok": true }));
+            return Ok(done(self));
         }
         let text = args.get("text").and_then(Value::as_str).ok_or_else(|| {
             BrowserError::invalid("wait needs 'ms' or 'text'").with_arg_keys(&["ms", "text"])
@@ -265,20 +339,21 @@ impl DesktopBrowserHost {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if found {
-                return Ok(json!({ "ok": true }));
+                return Ok(done(self));
             }
             if std::time::Instant::now() > deadline {
                 return Err(BrowserError::new(ERR_TIMEOUT, "wait: text did not appear within 30s")
+                    .with_reason("text_not_found")
                     .with_arg_keys(&["text"]));
             }
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
     }
 
-    /// Click an `@eN` ref: resolve to a rect (the page re-verifies the
-    /// fingerprint and reports `stale_ref` if the DOM changed), then a
-    /// trusted click where the engine has one, else a synthetic DOM click.
-    async fn click_ref(&self, tab_id: &str, ref_id: &str, epoch: u64) -> Result<(), BrowserError> {
+    /// Click an `@eN` ref and report the input actually used: a trusted
+    /// click at the resolved point where the engine has one (falling back
+    /// to a synthetic DOM click if it fails), else the synthetic click.
+    async fn click_ref(&self, tab_id: &str, ref_id: &str, epoch: u64) -> Result<Fidelity, BrowserError> {
         let mode = match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
             Support::Trusted => InputMode::Trusted,
             Support::Synthetic => InputMode::Synthetic,
@@ -286,9 +361,10 @@ impl DesktopBrowserHost {
         };
         if mode == InputMode::Trusted {
             let out = self.eval(tab_id, &assets::resolve_ref(ref_id, epoch)).await?;
-            eval_gate(out.clone())?;
+            eval_gate(&out, Some(ref_id))?;
             let rect = out.get("rect").ok_or_else(|| {
-                BrowserError::new(super::ERR_STALE_REF, format!("{ref_id} no longer resolves"))
+                BrowserError::new(super::ERR_STALE_REF, format!("ref {ref_id} no longer resolves; take a new snapshot"))
+                    .with_reason("ref_not_resolved")
                     .with_arg_keys(&["ref"])
             })?;
             let at = Point {
@@ -296,7 +372,7 @@ impl DesktopBrowserHost {
                 y: rect.get("cy").and_then(Value::as_f64).unwrap_or(0.0),
             };
             match self.engine.pointer_click(tab_id, at, InputMode::Trusted).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => return Ok(Fidelity::Trusted),
                 Err(e) => log::warn!(
                     "[browser-agent] trusted click failed on tab {tab_id} ({:?}), synthetic fallback",
                     e.kind
@@ -304,10 +380,12 @@ impl DesktopBrowserHost {
             }
         }
         let out = self.eval(tab_id, &assets::dom_click(ref_id, epoch)).await?;
-        eval_gate(out)
+        eval_gate(&out, Some(ref_id))?;
+        Ok(Fidelity::Synthetic)
     }
 
-    async fn screenshot(&self, session_id: &str, tab_id: &str) -> Result<Value, BrowserError> {
+    /// Capture the tab and write the PNG under the session's artifact dir.
+    async fn screenshot(&self, session_id: &str, tab_id: &str) -> Result<String, BrowserError> {
         let png = self
             .engine
             .screenshot(tab_id)
@@ -320,16 +398,14 @@ impl DesktopBrowserHost {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .collect();
         let dir = self
-            .app
-            .path()
-            .app_data_dir()
-            .map_err(|e| BrowserError::internal(format!("app_data_dir: {e}")))?
-            .join("browser-artifacts")
+            .surface
+            .artifacts_root()
+            .map_err(BrowserError::internal)?
             .join(if safe_sid.is_empty() { "_".to_string() } else { safe_sid });
         std::fs::create_dir_all(&dir).map_err(|e| BrowserError::internal(format!("artifact dir: {e}")))?;
         let path = dir.join(format!("shot-{}.png", Uuid::new_v4()));
         std::fs::write(&path, png).map_err(|e| BrowserError::internal(format!("write artifact: {e}")))?;
-        Ok(json!({ "path": path.to_string_lossy() }))
+        Ok(path.to_string_lossy().into_owned())
     }
 }
 
