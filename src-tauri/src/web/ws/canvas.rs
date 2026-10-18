@@ -18,6 +18,13 @@
 //!   can report its mount again.
 //! - `canvas_reply{callId, mountSeq, ok, result | error: {code, message}}`:
 //!   the answer to one `canvas_call`; `params` and `result` are JSON text.
+//!   A long `result` is sent as several `canvas_reply` messages, each with
+//!   `partial: true` but the last: `/ws` takes no message past tungstenite's
+//!   default (16 MiB frame, 64 MiB message) from any peer, and a connection
+//!   cannot raise that limit once it has authenticated. A slice is answered
+//!   `{accepted}`; `false` tells the sender the call is gone or the reply
+//!   passed the limit.| error: {code, message}}`:
+//!   the answer to one `canvas_call`; `params` and `result` are JSON text.
 //!
 //! The connection closing releases its mounts (`ConnectionCleanup`). Logs name
 //! the project and method, never params or results.
@@ -95,7 +102,7 @@ pub(super) fn handle_canvas_unmount(id: String, payload: &Value, env: &HandlerEn
 }
 
 pub(super) fn handle_canvas_reply(id: String, payload: &Value, env: &HandlerEnv) -> WsReply {
-    let parsed: CanvasReplyPayload = match serde_json::from_value(payload.clone()) {
+    let parsed = match CanvasReplyPayload::deserialize(payload) {
         Ok(parsed) => parsed,
         Err(error) => {
             return malformed(
@@ -107,6 +114,21 @@ pub(super) fn handle_canvas_reply(id: String, payload: &Value, env: &HandlerEnv)
         }
     };
     let (call_id, mount_seq) = (parsed.call_id, parsed.mount_seq);
+    if parsed.partial {
+        let Some(slice) = parsed.result.as_deref().filter(|_| parsed.ok) else {
+            warn!(target: "termul::web::ws", "canvas_reply refused: failure=partial_without_result");
+            return WsReply::err(
+                id,
+                WsErrorCode::Unsupported,
+                "a partial canvas_reply must be ok and carry a result",
+            );
+        };
+        let accepted =
+            env.acp
+                .canvas_router()
+                .reply_slice(&env.connection_id.to_string(), call_id, slice);
+        return WsReply::ok(id, Some(json!({ "accepted": accepted })));
+    }
     let resolved = env.acp.canvas_router().reply(
         &env.connection_id.to_string(),
         call_id,

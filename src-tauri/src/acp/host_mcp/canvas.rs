@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub use crate::canvas::persistence::RendererId;
-use crate::canvas::persistence::{CanvasPersistence, ReplyMatch};
+use crate::canvas::persistence::{CanvasPersistence, ReplyMatch, SliceMatch};
 
 /// `canvas.call_timeout_ms` default (AD-29).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_millis(10_000);
@@ -128,6 +128,9 @@ pub struct CanvasReplyPayload {
     pub ok: bool,
     #[serde(default)]
     pub result: Option<String>,
+    /// `result` is a slice that more slices follow, not the whole result.
+    #[serde(default)]
+    pub partial: bool,
     #[serde(default)]
     pub error: Option<CanvasReplyError>,
 }
@@ -398,6 +401,21 @@ impl CanvasRouter {
                     );
                 }
             });
+        }
+    }
+
+    /// A renderer sent a slice of its reply to `call_id` that is not the last
+    /// (the wire carries one message at a time, and a long result does not fit
+    /// one). Returns whether the slice was taken: false once the call is gone
+    /// or the reply passed the limit, and the renderer should stop sending.
+    pub fn reply_slice(&self, holder_id: &str, call_id: u64, slice: &str) -> bool {
+        match self.mounts.push_reply_slice(holder_id, call_id, slice) {
+            SliceMatch::Buffered => true,
+            SliceMatch::NotWaiting => false,
+            SliceMatch::TooLarge => {
+                log::warn!("[canvas-gateway] reply to call {call_id} refused: past the size limit");
+                false
+            }
         }
     }
 
