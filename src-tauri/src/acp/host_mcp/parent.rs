@@ -150,6 +150,7 @@ impl HostPlanServer {
                         }
                     };
                     let port = listener.local_addr().map(|addr| addr.port()).unwrap_or(0);
+                    crate::browser_automation::core::authz::register_owned_port(port);
                     let _ = server_for_thread.port.set(port);
                     let _ = port_tx.send(port);
                     log::info!("[host-mcp] listening on 127.0.0.1:{port}");

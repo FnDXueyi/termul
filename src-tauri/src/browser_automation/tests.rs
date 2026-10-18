@@ -43,7 +43,10 @@ fn hooks_without_host_are_noops() {
     // Real nonces/request ids are `Uuid`s — keep the test values in the
     // same shape (and avoid hard-coded literal nonces).
     assert!(!eval_resolved(&Uuid::new_v4().to_string(), true, None));
-    assert!(!consent_responded(&Uuid::new_v4().to_string(), true));
+    assert_eq!(stop_session("s1"), None, "no host means no stop to apply");
+    let page: tauri::Url = "https://example.com".parse().unwrap();
+    assert!(navigation_allowed("tab-1", &page), "without a host the hook never cancels");
+    user_turn("s1");
     tab_closed("t1");
     tab_navigated("t1");
     session_ended("s1");
@@ -57,6 +60,8 @@ fn registered_host_routes_dispatch_and_session_end() {
     clear_browser_host();
     struct Stub {
         ended: parking_lot::Mutex<Vec<String>>,
+        stopped: parking_lot::Mutex<Vec<String>>,
+        turns: parking_lot::Mutex<Vec<String>>,
     }
     impl BrowserHost for Stub {
         fn execute<'a>(
@@ -83,8 +88,15 @@ fn registered_host_routes_dispatch_and_session_end() {
         }
         fn notify_tab_closed(&self, _tab_id: &str) {}
         fn notify_tab_navigated(&self, _tab_id: &str) {}
-        fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-            false
+        fn stop(&self, session_id: &str) -> bool {
+            self.stopped.lock().push(session_id.to_string());
+            true
+        }
+        fn user_turn(&self, session_id: &str) {
+            self.turns.lock().push(session_id.to_string());
+        }
+        fn navigation_allowed(&self, tab_id: &str, _url: &tauri::Url) -> bool {
+            tab_id != "agent-blocked"
         }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
@@ -95,6 +107,8 @@ fn registered_host_routes_dispatch_and_session_end() {
     }
     let stub = Arc::new(Stub {
         ended: parking_lot::Mutex::new(Vec::new()),
+        stopped: parking_lot::Mutex::new(Vec::new()),
+        turns: parking_lot::Mutex::new(Vec::new()),
     });
     set_browser_host(stub.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -109,8 +123,15 @@ fn registered_host_routes_dispatch_and_session_end() {
     let data = out.data.expect("stub data");
     assert_eq!(data["sid"], "sess-1");
     assert_eq!(data["action"], "list_tabs");
+    assert_eq!(stop_session("sess-1"), Some(true));
+    user_turn("sess-1");
+    let page: tauri::Url = "https://example.com".parse().unwrap();
+    assert!(!navigation_allowed("agent-blocked", &page));
+    assert!(navigation_allowed("tab-user", &page));
     session_ended("sess-1");
     assert_eq!(stub.ended.lock().as_slice(), &["sess-1".to_string()]);
+    assert_eq!(stub.stopped.lock().as_slice(), &["sess-1".to_string()]);
+    assert_eq!(stub.turns.lock().as_slice(), &["sess-1".to_string()]);
     clear_browser_host();
 }
 

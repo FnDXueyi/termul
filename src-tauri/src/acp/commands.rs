@@ -154,6 +154,7 @@ pub async fn acp_mcp_oauth_start(app: tauri::AppHandle, server_url: String) -> R
         .local_addr()
         .map_err(|e| format!("failed to get callback port: {e}"))?
         .port();
+    crate::browser_automation::core::authz::register_owned_port(port);
     let redirect_uri = format!(
         "http://127.0.0.1:{port}{}",
         crate::acp::mcp_oauth::OAUTH_REDIRECT_PATH

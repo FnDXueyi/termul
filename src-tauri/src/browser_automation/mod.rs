@@ -21,7 +21,9 @@ pub mod engine;
 #[cfg(test)]
 pub use self::core::boundary::BROWSER_CALL_FAILED_PREFIX;
 pub use self::core::boundary::{boundary_arg_keys, boundary_failure_line};
-pub use self::core::{expected_args_text, BrowserError, DesktopBrowserHost, Success, ToolSchema};
+pub use self::core::{
+    expected_args_text, BrowserError, DesktopBrowserHost, HostServices, Success, ToolSchema,
+};
 #[cfg(test)]
 pub use self::core::{
     ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
@@ -65,7 +67,20 @@ pub trait BrowserHost: Send + Sync {
     /// Advance the per-tab epoch (rides snapshot replies so an agent can
     /// detect document changes; ref staleness is decided page-side).
     fn notify_tab_navigated(&self, tab_id: &str);
-    fn resolve_consent(&self, request_id: &str, allowed: bool) -> bool;
+    /// Stop: latch the session until the user's next prompt turn. Returns
+    /// false when it was already stopped. Hosts that drive no tabs have
+    /// nothing to stop.
+    fn stop(&self, _session_id: &str) -> bool {
+        false
+    }
+    /// The user submitted a prompt in the session: clears Stop.
+    fn user_turn(&self, _session_id: &str) {}
+    /// Engine navigation hook, run for every top-level navigation request
+    /// (including redirect hops) of every tab webview: false cancels it.
+    /// Tab webviews exist only under the desktop host, which overrides this.
+    fn navigation_allowed(&self, _tab_id: &str, _url: &tauri::Url) -> bool {
+        true
+    }
     /// Resolve a pending eval bridge reply from `browser_agent_eval_result`.
     fn resolve_eval(&self, nonce: &str, ok: bool, value: Option<String>) -> bool;
     /// The registered engine's frozen capability table and traits.
@@ -126,12 +141,22 @@ pub fn session_ended(session_id: &str) {
     }
 }
 
-/// `browser_consent_respond` command → resolve the pending consent prompt.
-pub fn consent_responded(request_id: &str, allowed: bool) -> bool {
-    match browser_host() {
-        Some(host) => host.resolve_consent(request_id, allowed),
-        None => false,
+/// Stop from the desktop command or the `/ws` route. `None` when this
+/// process has no automation host.
+pub fn stop_session(session_id: &str) -> Option<bool> {
+    browser_host().map(|host| host.stop(session_id))
+}
+
+/// Called when a prompt turn of the session starts.
+pub fn user_turn(session_id: &str) {
+    if let Some(host) = browser_host() {
+        host.user_turn(session_id);
     }
+}
+
+/// The engine navigation hook's verdict for a tab webview's request.
+pub fn navigation_allowed(tab_id: &str, url: &tauri::Url) -> bool {
+    browser_host().is_none_or(|host| host.navigation_allowed(tab_id, url))
 }
 
 /// `browser_agent_eval_result` command → resolve the pending eval waiter.

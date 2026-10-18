@@ -415,40 +415,40 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             let err = match call.action.as_str() {
                 "navigate" => BrowserError {
                     code: crate::browser_automation::ERR_INVALID_PARAMS,
+                    reason: None,
                     message: format!("invalid url: {SECRET_URL}"),
                     arg_keys: vec!["url"],
-                    reason: None,
                 },
                 "click" => BrowserError {
                     code: crate::browser_automation::ERR_TAB_NOT_FOUND,
+                    reason: None,
                     message: "tab 'agent-gone' not found".to_string(),
                     arg_keys: vec!["tabId"],
-                    reason: None,
                 },
                 "fill" => BrowserError {
                     code: crate::browser_automation::ERR_STALE_REF,
+                    reason: None,
                     message: "stale_ref: @e42 detached".to_string(),
                     arg_keys: Vec::new(),
-                    reason: None,
                 },
                 "snapshot" => BrowserError {
                     code: crate::browser_automation::ERR_TIMEOUT,
+                    reason: None,
                     message: "eval timed out".to_string(),
                     arg_keys: Vec::new(),
-                    reason: None,
                 },
                 "screenshot" => BrowserError {
                     code: crate::browser_automation::ERR_INTERNAL,
+                    reason: None,
                     message: "eval failed after fill 'hunter2'".to_string(),
                     arg_keys: Vec::new(),
-                    reason: None,
                 },
                 _ => BrowserError {
                     code: crate::browser_automation::ERR_CONFIRMATION,
+                    reason: None,
                     message: "user did not grant browser automation for this session"
                         .to_string(),
                     arg_keys: Vec::new(),
-                    reason: None,
                 },
             };
             Box::pin(async move { Err(err) })
@@ -459,9 +459,6 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
         }
         fn notify_tab_closed(&self, _tab_id: &str) {}
         fn notify_tab_navigated(&self, _tab_id: &str) {}
-        fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-            false
-        }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }
@@ -1426,9 +1423,6 @@ impl crate::browser_automation::BrowserHost for EchoHost {
     }
     fn notify_tab_closed(&self, _tab_id: &str) {}
     fn notify_tab_navigated(&self, _tab_id: &str) {}
-    fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-        false
-    }
     fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
         false
     }

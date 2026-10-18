@@ -23,6 +23,7 @@ pub mod destructive_guard;
 pub mod events;
 pub mod factory_key;
 pub mod history_import;
+pub mod host_ticket;
 pub mod host_mcp;
 pub mod https_only;
 pub mod install;
