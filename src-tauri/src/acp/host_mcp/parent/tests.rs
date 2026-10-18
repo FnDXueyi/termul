@@ -287,6 +287,7 @@ fn browser_frame_round_trip_serializes_payload_fields() {
         ask: None,
         canvas_method: None,
         canvas_params: None,
+        canvas_tool: None,
     };
     let value = serde_json::to_value(&frame).unwrap();
     assert_eq!(value["kind"], "browser");
@@ -597,6 +598,7 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
         ask: None,
         canvas_method: None,
         canvas_params: None,
+        canvas_tool: None,
     };
 
     let server = HostPlanServer::start(vec![], None);

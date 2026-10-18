@@ -514,8 +514,13 @@ impl HostPlanServer {
                 }
             }
             FrameKind::Canvas => {
-                self.canvas_call(&real_session_id, req.canvas_method, req.canvas_params)
-                    .await
+                self.canvas_call(
+                    &real_session_id,
+                    req.canvas_tool,
+                    req.canvas_method,
+                    req.canvas_params,
+                )
+                .await
             }
             FrameKind::AskUser => {
                 let Some(input) = req.ask else {

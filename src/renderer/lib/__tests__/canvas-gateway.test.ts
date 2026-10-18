@@ -6,14 +6,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
-vi.mock('@/lib/canvas-api', () => ({ canvasApi: { open: vi.fn(), close: vi.fn() } }))
+const writeSnapshot = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/canvas-api', () => ({
+  canvasApi: { open: vi.fn(), close: vi.fn(), writeSnapshot }
+}))
+vi.mock('sonner', () => ({ toast: { error: vi.fn() } }))
 
 import type { CanvasOpenInfo } from '@shared/types/canvas.types'
 import type { AcpTransport } from '@/lib/acp-transport'
 import { CanvasGatewayClient } from '@/lib/acp-transport/canvas-gateway-client'
 import { asJsonText, type CanvasBridge } from '@/lib/canvas-bridge'
 import { type CanvasPhase, useCanvasStore } from '@/stores/canvas-store'
-import { startCanvasGateway } from '../canvas-gateway'
+import { useProjectStore } from '@/stores/project-store'
+import { projectRelativePath, startCanvasGateway } from '../canvas-gateway'
 
 const INFO: CanvasOpenInfo = {
   canvasId: 'cv1',
@@ -63,6 +68,8 @@ afterEach(() => {
   stopGateway?.()
   stopGateway = null
   useCanvasStore.setState({ sessions: {} })
+  useProjectStore.setState({ projects: [] })
+  writeSnapshot.mockReset()
 })
 
 describe('startCanvasGateway', () => {
@@ -131,5 +138,117 @@ describe('startCanvasGateway', () => {
         error: expect.objectContaining({ code: 'CANVAS_CLOSED' })
       })
     ])
+  })
+
+  function hostSaveCall(canvas: CanvasGatewayClient, callId: number, mountSeq: number): void {
+    canvas.handleFrame({
+      type: 'canvas_call',
+      callId,
+      projectId: 'proj-1',
+      mountSeq,
+      method: 'host.save',
+      params: '{}'
+    })
+  }
+
+  function snapshotBridge(): CanvasBridge {
+    return {
+      call: vi.fn(async (method: string) =>
+        method === 'host.snapshot'
+          ? { ok: true as const, result: asJsonText('{"contentVersion":7,"bytes":"Zm9v"}') }
+          : { ok: true as const, result: asJsonText('{"dirty":false,"contentVersion":7}') }
+      ),
+      dispose: vi.fn()
+    }
+  }
+
+  it('answers host.save by saving through the store and replying with the project-relative path', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    useProjectStore.setState({
+      projects: [{ id: 'proj-1', name: 'p', color: 'blue', path: 'C:\\P' }]
+    })
+    setPhase('proj-1', { kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    const bridge = snapshotBridge()
+    useCanvasStore.getState().attachBridge('proj-1', 4, bridge)
+    writeSnapshot.mockResolvedValue({
+      success: true,
+      data: {
+        view: {
+          mountSeq: 4,
+          ready: true,
+          dirty: false,
+          contentVersion: '7',
+          savedVersion: '7',
+          saveError: null
+        },
+        markSaved: '7'
+      }
+    })
+
+    hostSaveCall(canvas, 3, 4)
+    await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
+    expect(writeSnapshot).toHaveBeenCalledWith('proj-1', 4, '{"contentVersion":7,"bytes":"Zm9v"}')
+    expect(bridge.call).not.toHaveBeenCalledWith('host.save', expect.anything())
+    expect(sent.at(-1)).toEqual([
+      'canvas_reply',
+      { callId: 3, mountSeq: 4, ok: true, result: '{"path":"design.figcraft"}' }
+    ])
+    useCanvasStore.getState().detachBridge('proj-1', bridge)
+  })
+
+  it('answers host.save with ENGINE_ERROR and the save error when the write fails', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    const bridge = snapshotBridge()
+    useCanvasStore.getState().attachBridge('proj-1', 4, bridge)
+    writeSnapshot.mockResolvedValue({ success: false, code: 'IO_ERROR', error: 'disk full' })
+
+    hostSaveCall(canvas, 6, 4)
+    await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
+    expect(sent.at(-1)).toEqual([
+      'canvas_reply',
+      {
+        callId: 6,
+        mountSeq: 4,
+        ok: false,
+        error: { code: 'ENGINE_ERROR', message: 'IO_ERROR disk full' }
+      }
+    ])
+    useCanvasStore.getState().detachBridge('proj-1', bridge)
+  })
+
+  it('answers host.save with CANVAS_CLOSED while the document is still loading', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'loading', mount: { mountSeq: 4, info: INFO } })
+
+    hostSaveCall(canvas, 5, 4)
+    await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
+    expect(sent.at(-1)).toEqual([
+      'canvas_reply',
+      expect.objectContaining({
+        callId: 5,
+        ok: false,
+        error: expect.objectContaining({ code: 'CANVAS_CLOSED' })
+      })
+    ])
+    expect(writeSnapshot).not.toHaveBeenCalled()
+  })
+})
+
+describe('projectRelativePath', () => {
+  it('strips the project root, folding case and separators for drive paths', () => {
+    expect(projectRelativePath('C:/p/design/app.figcraft', 'c:\\P\\')).toBe('design/app.figcraft')
+    expect(projectRelativePath('/home/u/p/a.figcraft', '/home/u/p')).toBe('a.figcraft')
+  })
+
+  it('keeps the full path for a document outside the root or with no root', () => {
+    expect(projectRelativePath('/home/u/other/a.figcraft', '/home/u/p')).toBe(
+      '/home/u/other/a.figcraft'
+    )
+    expect(projectRelativePath('/home/u/pp/a.figcraft', '/home/u/p')).toBe('/home/u/pp/a.figcraft')
+    expect(projectRelativePath('C:\\p\\a.figcraft', undefined)).toBe('C:/p/a.figcraft')
   })
 })

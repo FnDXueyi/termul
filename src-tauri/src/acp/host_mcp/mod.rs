@@ -22,8 +22,13 @@
 
 pub mod bridge;
 pub mod canvas;
+pub mod canvas_policy;
+pub mod canvas_tools;
 pub mod child;
 pub mod parent;
+
+#[cfg(test)]
+mod gateway_harness;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -367,6 +372,9 @@ pub struct FrameRequest {
     /// JSON text of a `Canvas` frame's params, forwarded unparsed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_params: Option<String>,
+    /// The agent tool a `Canvas` frame serves, for the gateway's logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_tool: Option<String>,
 }
 
 /// Parent reply frame (one per connection). `result` carries the browser

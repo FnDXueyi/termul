@@ -126,21 +126,24 @@ describe('canvasApi (web vs desktop branch)', () => {
     expect(result).toEqual({ success: true, data: desktopInfo })
   })
 
-  it('close: web → POST /canvas/close with projectId', async () => {
+  it('close: web → POST /canvas/close with projectId and discard', async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: true }))
     await expect(canvasApi.close(PROJECT)).resolves.toEqual({ success: true, data: true })
     expect(mockFetch).toHaveBeenCalledWith(
       `${window.location.origin}/canvas/close`,
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ projectId: PROJECT }) })
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ projectId: PROJECT, discard: false })
+      })
     )
     expect(mockInvoke).not.toHaveBeenCalled()
   })
 
-  it('close: desktop → invoke("canvas_close") with projectId', async () => {
+  it('close: desktop → invoke("canvas_close") with projectId and discard', async () => {
     mockIsTauriContext.mockReturnValue(true)
     mockInvoke.mockResolvedValueOnce({ success: true, data: true })
     await canvasApi.close(PROJECT)
-    expect(mockInvoke).toHaveBeenCalledWith('canvas_close', { projectId: PROJECT })
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_close', { projectId: PROJECT, discard: false })
     expect(mockFetch).not.toHaveBeenCalled()
   })
 
