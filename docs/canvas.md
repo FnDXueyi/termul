@@ -57,7 +57,7 @@ The iframe cannot send an `Authorization` header, so the bundle has its own cred
 - The token is a path segment: the iframe loads `/canvas/<id>/<token>/`, so the bundle's relative sub-resource URLs carry it too. Tokens are compared in constant time.
 - No cookie is involved. On the desktop the loopback iframe is a cross-site frame inside the app webview, and WKWebView (macOS) and WebKitGTK (Linux) drop third-party cookies by default.
 - `close` revokes the token, so stale URLs stop working.
-- The token is never logged.
+- The token is never logged. Every log line that names a request path writes the token segment as `[redacted]` (`canvas::bundle_path::redact_canvas_path`).
 - The `/canvas/open`, `/canvas/close` and persistence routes stay behind the web auth bearer. They are write routes: a view-only peer (remote peer without write access, or the desktop shared-live host) is refused with `FORBIDDEN`. A doc path must lie inside the root of the project that opens it (a registered, non-archived project), on the web routes and the desktop commands alike.
 
 ## Agents

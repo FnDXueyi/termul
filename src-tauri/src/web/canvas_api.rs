@@ -11,7 +11,7 @@
 //!   (`"/canvas/"` in `GATED_PREFIXES` — the renderer facades already hold
 //!   the web auth token);
 //! - `/canvas/<id>/*` (the bundle) is EXEMPT from the bearer gate
-//!   (`router::is_canvas_proxy_path`) and authenticated by
+//!   (`canvas::bundle_path::is_bundle_path`) and authenticated by
 //!   `static_server::serve_bundle`: the token segment of
 //!   `/canvas/<id>/<token>/` must constant-time-match the token minted by
 //!   the project's open.

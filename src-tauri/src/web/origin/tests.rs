@@ -219,3 +219,53 @@ fn repeated_lists_merge() {
     assert!(merged.contains("https://a.example"));
     assert!(merged.contains("https://b.example"));
 }
+
+mod refusal_log {
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::any;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::web::log_capture::capture_tracing;
+
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    async fn refused_post(path: &str) -> (StatusCode, String) {
+        let app = layer(
+            Router::new().route("/{*rest}", any(|| async { StatusCode::OK })),
+            OriginPolicy::default(),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::ORIGIN, "https://evil.example")
+            .body(Body::empty())
+            .expect("request");
+        let (response, logged) = capture_tracing(async { app.oneshot(request).await }).await;
+        (response.expect("response").status(), logged)
+    }
+
+    #[tokio::test]
+    async fn a_refused_canvas_bundle_request_logs_no_token() {
+        let (status, logged) = refused_post(&format!("/canvas/cv123/{TOKEN}/app.js")).await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(logged.contains("rejected request origin"), "{logged}");
+        assert!(
+            logged.contains("/canvas/cv123/[redacted]/app.js"),
+            "{logged}"
+        );
+        assert!(!logged.contains(TOKEN), "{logged}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_api_request_still_logs_its_path() {
+        let (status, logged) = refused_post("/fs/write").await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(logged.contains("/fs/write"), "{logged}");
+    }
+}

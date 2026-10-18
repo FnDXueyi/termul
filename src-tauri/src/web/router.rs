@@ -20,6 +20,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::canvas::bundle_path::{is_bundle_path, redact_canvas_path};
 use crate::web::acp_api;
 use crate::web::auth::{BearerVerified, WebAuth};
 
@@ -332,7 +333,7 @@ pub fn router(
         // same-origin /canvas/<id>/* bundle. Merged BEFORE the static fallback
         // so the SPA mount cannot shadow them. The API routes are bearer-gated
         // via GATED_PREFIXES ("/canvas/"); /canvas/<id>/* is exempt
-        // (is_canvas_proxy_path) and authenticated by the canvas session token
+        // (is_bundle_path) and authenticated by the canvas session token
         // instead (browser iframes cannot send Authorization headers). The
         // boundary validates web-opened doc paths against the same project
         // registry the fs/git routes use.
@@ -435,33 +436,10 @@ const GATED_PREFIXES: &[&str] = &[
     "/acp/",
     "/worktree/",
     // The /canvas/ API routes require the token. The /canvas/<id>/* bundle
-    // paths are exempt — see [`is_canvas_proxy_path`] (canvas-token authed
+    // paths are exempt — see [`is_bundle_path`] (canvas-token authed
     // in the sub-router).
     "/canvas/",
 ];
-
-/// Whether `path` is canvas-token authed INSTEAD of the outer bearer gate:
-/// the `/canvas/<id>/<token>/…` bundle paths (the first segment after
-/// `/canvas/` is a canvas id, not an API route name).
-fn is_canvas_proxy_path(path: &str) -> bool {
-    path.strip_prefix("/canvas/").is_some_and(|rest| {
-        !matches!(
-            rest.split('/').next(),
-            Some(
-                "open"
-                    | "close"
-                    | "read-document"
-                    | "document-loaded"
-                    | "dirty-changed"
-                    | "set-visible"
-                    | "write-snapshot"
-                    | "disk-changed"
-                    | "resolve-conflict"
-                    | "crashed"
-            )
-        )
-    })
-}
 
 /// Whether `path` is a gated API route. Pure decision fn (unit-testable).
 fn requires_token(path: &str) -> bool {
@@ -470,7 +448,7 @@ fn requires_token(path: &str) -> bool {
     }
     // Canvas bundle paths carry their own canvas token in the path; the
     // outer bearer gate skips them.
-    if is_canvas_proxy_path(path) {
+    if is_bundle_path(path) {
         return false;
     }
     GATED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
@@ -515,7 +493,7 @@ async fn web_auth_gate(
         _ => {
             tracing::warn!(
                 target: "termul::web::router",
-                path = request.uri().path(),
+                path = %redact_canvas_path(request.uri().path()),
                 "web auth gate refused API request"
             );
             (
