@@ -19,6 +19,10 @@ pub enum CommitKind {
     NewDocument,
     /// The URL changed inside the same document (`pushState`, fragment,
     /// same-document history step).
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        allow(dead_code, reason = "WKWebView reports no same-document changes yet")
+    )]
     SameDocument,
 }
 
@@ -117,6 +121,10 @@ impl TabEvents {
         });
     }
 
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        allow(dead_code, reason = "WKWebView reports no same-document changes yet")
+    )]
     pub fn same_document(&self, url: &str) {
         self.publish(TabEvent::NavCommitted {
             nav_id: None,
