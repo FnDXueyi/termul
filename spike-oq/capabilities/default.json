@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Mirrors termul's default capability scope: window main, no remote block",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
