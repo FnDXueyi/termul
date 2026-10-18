@@ -16,7 +16,9 @@ export async function openProjectCanvas(projectId: string, projectPath: string):
     toast.error(`Could not read the project folder: ${result.error}`)
     return
   }
-  const docPath =
-    pickCanvasDoc(result.data)?.path ?? `${projectPath.replace(/[/]+$/, '')}/${NEW_CANVAS_DOC_NAME}`
+  // Joined from the project path, not the listing's entry path: the desktop
+  // listing collapses the `\\?\` of a verbatim root into an invalid `/?/`.
+  const name = pickCanvasDoc(result.data)?.name ?? NEW_CANVAS_DOC_NAME
+  const docPath = `${projectPath.replace(/[/]+$/, '')}/${name}`
   await useCanvasStore.getState().openCanvas(projectId, docPath)
 }
