@@ -409,31 +409,37 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             let err = match call.action.as_str() {
                 "navigate" => BrowserError {
                     code: crate::browser_automation::ERR_INVALID_PARAMS,
+                    reason: None,
                     message: format!("invalid url: {SECRET_URL}"),
                     arg_keys: vec!["url"],
                 },
                 "click" => BrowserError {
                     code: crate::browser_automation::ERR_TAB_NOT_FOUND,
+                    reason: None,
                     message: "tab 'agent-gone' not found".to_string(),
                     arg_keys: vec!["tabId"],
                 },
                 "fill" => BrowserError {
                     code: crate::browser_automation::ERR_STALE_REF,
+                    reason: None,
                     message: "stale_ref: @e42 detached".to_string(),
                     arg_keys: Vec::new(),
                 },
                 "snapshot" => BrowserError {
                     code: crate::browser_automation::ERR_TIMEOUT,
+                    reason: None,
                     message: "eval timed out".to_string(),
                     arg_keys: Vec::new(),
                 },
                 "screenshot" => BrowserError {
                     code: crate::browser_automation::ERR_INTERNAL,
+                    reason: None,
                     message: "eval failed after fill 'hunter2'".to_string(),
                     arg_keys: Vec::new(),
                 },
                 _ => BrowserError {
                     code: crate::browser_automation::ERR_CONFIRMATION,
+                    reason: None,
                     message: "user did not grant browser automation for this session"
                         .to_string(),
                     arg_keys: Vec::new(),
@@ -447,9 +453,6 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
         }
         fn notify_tab_closed(&self, _tab_id: &str) {}
         fn notify_tab_navigated(&self, _tab_id: &str) {}
-        fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-            false
-        }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }
@@ -577,9 +580,6 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
         }
         fn notify_tab_closed(&self, _tab_id: &str) {}
         fn notify_tab_navigated(&self, _tab_id: &str) {}
-        fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-            false
-        }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }

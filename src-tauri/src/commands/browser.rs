@@ -282,26 +282,53 @@ pub async fn browser_agent_eval_result(
     Ok(())
 }
 
-/// Renderer response to an `acp:browser_consent_request` prompt. Restricted
-/// to the main webview — browser tabs share the app-wide event channel and
-/// could otherwise observe the request id and self-grant consent.
+/// Only the `main` webview answers host consent and presses Stop: browser
+/// tabs share the app-wide event channel and could otherwise observe a
+/// ticket id and approve themselves.
+fn require_main_webview(webview: &Webview, command: &str) -> Result<(), String> {
+    if webview.label() == "main" {
+        return Ok(());
+    }
+    log::warn!("[Security] {command} rejected from a non-main webview");
+    Err(format!("{command} must come from the main window"))
+}
+
+/// Desktop answer to a host-originated browser consent ticket (`host:`
+/// request id). `option_id: None` denies.
 #[tauri::command]
-pub async fn browser_consent_respond(
+pub async fn browser_ticket_respond(
     request_id: String,
-    allowed: bool,
+    option_id: Option<String>,
     webview: Webview,
-) -> Result<(), String> {
-    if webview.label() != "main" {
-        log::warn!(
-            "[Security] browser_consent_respond rejected from '{}'",
-            webview.label()
-        );
-        return Err("consent must come from the main window".to_string());
-    }
-    if !crate::browser_automation::consent_responded(&request_id, allowed) {
-        return Err("unknown or expired consent request".to_string());
-    }
-    Ok(())
+    tickets: State<'_, Arc<crate::acp::host_ticket::HostTickets>>,
+) -> Result<IpcResult<()>, String> {
+    use crate::acp::host_ticket::{AnswerError, Approver};
+    require_main_webview(&webview, "browser_ticket_respond")?;
+    Ok(
+        match tickets.answer(Approver::Desktop, &request_id, option_id.as_deref()) {
+            Ok(_) => IpcResult::success(()),
+            Err(err) => {
+                let code = match err {
+                    AnswerError::NotFound => "TICKET_NOT_FOUND",
+                    AnswerError::AlreadyResolved => "TICKET_ALREADY_RESOLVED",
+                    AnswerError::Unqualified => "TICKET_UNQUALIFIED",
+                    AnswerError::TooEarly => "TICKET_TOO_EARLY",
+                    AnswerError::InvalidOption => "TICKET_INVALID_OPTION",
+                };
+                IpcResult::error(err.as_str(), code)
+            }
+        },
+    )
+}
+
+/// Stop agent browsing for a session until the user's next prompt turn.
+#[tauri::command]
+pub async fn browser_stop(session_id: String, webview: Webview) -> Result<IpcResult<()>, String> {
+    require_main_webview(&webview, "browser_stop")?;
+    Ok(match crate::browser_automation::stop_session(&session_id) {
+        Some(_) => IpcResult::success(()),
+        None => IpcResult::error("browser automation is not running", "BROWSER_STOP_UNAVAILABLE"),
+    })
 }
 
 /// Report title change from browser tab webview (called by injected JS poller)

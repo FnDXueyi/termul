@@ -298,6 +298,7 @@ pub async fn serve_router(
 
     let listener = TcpListener::bind(bind_addr).await?;
     let addr = listener.local_addr()?;
+    crate::browser_automation::core::authz::register_owned_port(addr.port());
     info!("ACP web server listening on http://{}", addr);
 
     if !assets::dist_web_ready() {

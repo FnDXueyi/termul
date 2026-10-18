@@ -457,6 +457,7 @@ pub async fn start_server(
     let addr = listener
         .local_addr()
         .map_err(|e| format!("Local addr: {e}"))?;
+    crate::browser_automation::core::authz::register_owned_port(addr.port());
     let token = tokio_util::sync::CancellationToken::new();
     let t = token.clone();
     tokio::spawn(async move {
