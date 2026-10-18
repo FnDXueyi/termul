@@ -2104,7 +2104,7 @@ describe('Git History commit detail parity', () => {
   })
 })
 
-describe('Browser policy parity (CAP-7)', () => {
+describe('Browser policy parity', () => {
   const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
   const Facade = join(LIB_DIR, 'browser-policy-api.ts')
   const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
