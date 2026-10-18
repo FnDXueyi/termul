@@ -1,0 +1,16 @@
+name: Browser conformance (unit branch)
+
+# Temporary: runs the browser conformance workflow (clippy, the Rust test
+# suite and the conformance runner on Windows, macOS and Linux) for pushes
+# to this unit branch before a pull request exists. Delete before landing.
+
+on:
+  push:
+    branches: [unit/v3-merge-4-2]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    uses: ./.github/workflows/browser-conformance.yml
