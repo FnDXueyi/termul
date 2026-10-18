@@ -63,11 +63,15 @@ pub(super) struct Calls {
 
 /// Who is asking. Agent calls are refused while the mount quiesces and are
 /// counted so the quiesce can wait them out; the host's own calls belong to
-/// the close sequence and name the mount they expect.
+/// the close sequence and name the mount they expect. Presence lookups
+/// follow an agent call already answered: they reach only a connected
+/// editor, and never count as activity, as a call the quiesce waits for, or
+/// toward the crash timeouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Caller {
     Agent,
     Host { mount_seq: u64 },
+    Presence,
 }
 
 /// Keeps an agent call counted in its mount's `in_flight` until it settles.
@@ -95,6 +99,8 @@ struct Route {
     holder: CanvasHolder,
     gone: watch::Receiver<()>,
     _in_flight: Option<InFlight>,
+    /// Whether the answer or timeout feeds the crash detector.
+    watched: bool,
 }
 
 /// Where a call can go right now.
@@ -287,7 +293,7 @@ impl CanvasPersistence {
         let mut state = mount.state.lock();
         match (state.lifecycle, caller) {
             (Lifecycle::Closed, _) => return Err(no_canvas()),
-            (Lifecycle::Closing, Caller::Agent) => {
+            (Lifecycle::Closing, Caller::Agent | Caller::Presence) => {
                 return Err(refused(
                     CanvasErrorCode::CanvasClosing,
                     "the canvas is closing",
@@ -297,7 +303,9 @@ impl CanvasPersistence {
         }
         let connection = match &state.link {
             Link::Attached(connection) => connection,
-            Link::Lost { since, ended } if since.elapsed() < mount.lease_grace => {
+            Link::Lost { since, ended }
+                if caller != Caller::Presence && since.elapsed() < mount.lease_grace =>
+            {
                 return Ok(Routed::Reconnecting {
                     ended: ended.subscribe(),
                     grace_ends: *since + mount.lease_grace,
@@ -315,6 +323,7 @@ impl CanvasPersistence {
             holder,
             gone,
             _in_flight: (caller == Caller::Agent).then(|| InFlight::enter(&mount)),
+            watched: caller != Caller::Presence,
         }))
     }
 
@@ -379,6 +388,50 @@ impl CanvasPersistence {
         .await
     }
 
+    /// A presence lookup (`node.get`, `document.inspect`) for an agent call
+    /// already answered. It goes only to a connected editor, never waits out
+    /// a reconnect, and leaves activity, the quiesce and the crash count
+    /// alone (see [`Caller::Presence`]).
+    pub async fn presence_call(
+        &self,
+        project_id: &str,
+        method: &str,
+        params: String,
+        timeout: Duration,
+    ) -> CanvasOutcome {
+        let Routed::Ready(route) = self.route(project_id, Caller::Presence)? else {
+            return Err(not_running());
+        };
+        self.forward(
+            project_id,
+            route,
+            method,
+            params,
+            (Instant::now() + timeout, timeout),
+        )
+        .await
+    }
+
+    /// A presence notice (`host.guest*`) to the connected editor of
+    /// `project_id`'s open mount. False when none is connected or the frame
+    /// was not queued; nothing waits for the answer.
+    pub fn presence_notice(&self, project_id: &str, method: &str, params: String) -> bool {
+        let Some(mount) = self.mounts.lock().get(project_id).cloned() else {
+            return false;
+        };
+        let holder = {
+            let state = mount.state.lock();
+            if state.lifecycle != Lifecycle::Open {
+                return false;
+            }
+            let Some(connection) = state.link.connection() else {
+                return false;
+            };
+            connection.holder.clone()
+        };
+        self.notify(&holder, project_id, mount.mount_seq, method, params)
+    }
+
     async fn forward(
         &self,
         project_id: &str,
@@ -392,6 +445,7 @@ impl CanvasPersistence {
             holder,
             mut gone,
             _in_flight,
+            watched,
         } = route;
         let call_id = self.calls.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (responder, waiting) = oneshot::channel();
@@ -420,7 +474,9 @@ impl CanvasPersistence {
         let outcome = tokio::select! {
             answered = waiting => match answered {
                 Ok(outcome) => {
-                    self.call_answered(project_id, mount_seq);
+                    if watched {
+                        self.call_answered(project_id, mount_seq);
+                    }
                     outcome
                 }
                 Err(_) => gone_before_answer(),
@@ -428,7 +484,9 @@ impl CanvasPersistence {
             _ = gone.changed() => gone_before_answer(),
             () = tokio::time::sleep_until(deadline) => {
                 self.calls.waiting.lock().remove(&call_id);
-                self.call_timed_out(project_id, mount_seq);
+                if watched {
+                    self.call_timed_out(project_id, mount_seq);
+                }
                 Err(timed_out(timeout))
             }
         };
@@ -438,7 +496,8 @@ impl CanvasPersistence {
 
     /// A host notice to the renderer on `holder`, on the call channel so it
     /// reaches both transports alike. Nothing waits for the answer: a reply
-    /// to it finds no waiting call and is dropped.
+    /// to it finds no waiting call and is dropped. False when it was not
+    /// queued.
     pub(super) fn notify(
         &self,
         holder: &CanvasHolder,
@@ -446,11 +505,11 @@ impl CanvasPersistence {
         mount_seq: u64,
         method: &str,
         params: String,
-    ) {
+    ) -> bool {
         let call_id = self.calls.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = holder.deliver(CanvasCallFrame::new(
+        holder.deliver(CanvasCallFrame::new(
             call_id, project_id, mount_seq, method, params,
-        ));
+        ))
     }
 
     /// A renderer answered `call_id`. Only the connection the call went to

@@ -208,3 +208,41 @@ async fn a_clean_crash_loses_nothing() {
     let remount = editor.mounts.crashed(PROJECT, editor.seq, "x").unwrap();
     assert_eq!(remount.lost, None);
 }
+
+#[tokio::test]
+async fn presence_lookups_that_time_out_never_remount_nor_reset_the_count() {
+    let mut editor = Editor::mounted(true);
+    editor.time_out().await;
+    editor.time_out().await;
+    for _ in 0..4 {
+        let outcome = editor
+            .mounts
+            .presence_call(PROJECT, "node.get", "{}".into(), QUICK)
+            .await;
+        assert_eq!(outcome.unwrap_err().code, CanvasErrorCode::CanvasTimeout);
+        editor
+            .frames
+            .recv()
+            .await
+            .expect("the lookup reached the renderer");
+    }
+    assert!(editor.still_mounted(), "presence timeouts are not a crash");
+
+    let mounts = Arc::clone(&editor.mounts);
+    let lookup = tokio::spawn(async move {
+        mounts
+            .presence_call(PROJECT, "node.get", "{}".into(), Duration::from_secs(5))
+            .await
+    });
+    let frame = editor.frames.recv().await.expect("the lookup");
+    editor
+        .mounts
+        .reply(HOLDER, frame.call_id, frame.mount_seq, Ok("{}".into()));
+    assert_eq!(lookup.await.unwrap(), Ok("{}".to_string()));
+    editor.time_out().await;
+    let notice = editor.remounted_notice().await;
+    assert_eq!(
+        notice.previous_mount_seq, editor.seq,
+        "a presence answer does not reset the agent's timeouts"
+    );
+}

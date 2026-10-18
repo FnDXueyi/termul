@@ -60,3 +60,43 @@ async fn a_new_mount_seq_drops_the_old_connection() {
     );
     assert!(mounts.attach("p", second, holder("a")));
 }
+
+#[tokio::test(start_paused = true)]
+async fn presence_reaches_only_a_connected_editor_and_never_waits_for_one() {
+    let mounts = CanvasPersistence::default();
+    assert!(
+        !mounts.presence_notice("p", "host.guestHide", "{}".into()),
+        "no mount"
+    );
+    let seq = mounts.mount("p", PathBuf::from("p.figcraft"), Duration::from_secs(1));
+    assert!(
+        !mounts.presence_notice("p", "host.guestHide", "{}".into()),
+        "nothing attached"
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tab = CanvasHolder::new(
+        "a",
+        crate::canvas::persistence::test_renderer(),
+        Arc::new(move |frame| tx.send(frame).is_ok()),
+    );
+    assert!(mounts.attach("p", seq, tab));
+    assert!(mounts.presence_notice("p", "host.guestHide", r#"{"id":"s"}"#.into()));
+    let frame = rx.try_recv().expect("the notice was queued");
+    assert_eq!(
+        (
+            frame.method.as_str(),
+            frame.params.as_str(),
+            frame.mount_seq
+        ),
+        ("host.guestHide", r#"{"id":"s"}"#, seq)
+    );
+
+    assert!(!mounts.release_holder("a").is_empty(), "inside its grace");
+    let started = tokio::time::Instant::now();
+    let outcome = mounts
+        .presence_call("p", "node.get", "{}".into(), Duration::from_secs(5))
+        .await;
+    assert_eq!(outcome.unwrap_err().code, CanvasErrorCode::CanvasClosed);
+    assert_eq!(started.elapsed(), Duration::ZERO, "no wait for a reconnect");
+    assert!(!mounts.presence_notice("p", "host.guestHide", "{}".into()));
+}
