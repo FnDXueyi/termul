@@ -329,15 +329,23 @@ enum SnapshotItem {
 const SNAPSHOT_MAX_INDENT: usize = 32;
 const SNAPSHOT_CAP_LINE: &str = "…[snapshot line cap]";
 
-/// Page text that reads like a ref (`@e12`) gets a space after the `@`,
-/// so the refs the host minted are the only ref tokens in the outline.
-fn defang_refs(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+/// Page text as one outline-safe line. Whitespace and control characters,
+/// line breaks included, collapse to one space, so page text can never
+/// start a line of its own. Text that reads like a ref (`@e12`, or `@e+12`,
+/// which ref parsing also accepts) gets a space after the `@`, so the refs
+/// the host minted are the only ref tokens in the outline.
+fn outline_text(text: &str) -> String {
+    let flat = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = String::with_capacity(flat.len());
+    let mut rest = flat.as_str();
     while let Some(at) = rest.find("@e") {
-        let digit_follows = rest[at + 2..].starts_with(|c: char| c.is_ascii_digit());
+        let ref_like = rest[at + 2..].starts_with(|c: char| c.is_ascii_digit() || c == '+');
         out.push_str(&rest[..at]);
-        out.push_str(if digit_follows { "@ e" } else { "@e" });
+        out.push_str(if ref_like { "@ e" } else { "@e" });
         rest = &rest[at + 2..];
     }
     out.push_str(rest);
@@ -394,14 +402,14 @@ fn format_snapshot(
                 ..
             } => {
                 let token = tokens.next().unwrap_or_default();
-                let mut line = format!("{}- {} \"{}\" {token}", indent(*depth), defang_refs(role), defang_refs(name));
+                let mut line = format!("{}- {} \"{}\" {token}", indent(*depth), outline_text(role), outline_text(name));
                 if let Some(href) = href {
                     line.push(' ');
-                    line.push_str(&defang_refs(href));
+                    line.push_str(&outline_text(href));
                 }
                 if let Some(t) = input_type {
                     line.push_str(" type=");
-                    line.push_str(&defang_refs(t));
+                    line.push_str(&outline_text(t));
                 }
                 match checked {
                     Some(true) => line.push_str(" checked"),
@@ -410,14 +418,12 @@ fn format_snapshot(
                 }
                 line
             }
-            SnapshotItem::Landmark { depth, role, name } if name.is_empty() => {
-                format!("{}- {}", indent(*depth), defang_refs(role))
-            }
-            SnapshotItem::Landmark { depth, role, name } => {
-                format!("{}- {} \"{}\"", indent(*depth), defang_refs(role), defang_refs(name))
-            }
+            SnapshotItem::Landmark { depth, role, name } => match outline_text(name).as_str() {
+                "" => format!("{}- {}", indent(*depth), outline_text(role)),
+                name => format!("{}- {} \"{}\"", indent(*depth), outline_text(role), name),
+            },
             SnapshotItem::Text { depth, text } => {
-                format!("{}- text \"{}\"", indent(*depth), defang_refs(text))
+                format!("{}- text \"{}\"", indent(*depth), outline_text(text))
             }
         };
         lines.push(line);
