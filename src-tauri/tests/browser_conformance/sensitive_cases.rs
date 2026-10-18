@@ -216,6 +216,17 @@ pub async fn upload_refusals(c: &Ctx<'_>) -> CaseResult {
     c.expect_text("Picked: none").await
 }
 
+/// A chooser the page opens on an agent tab never shows the native
+/// dialog: the host cancels it, and the page sees the cancel.
+pub async fn file_chooser(c: &Ctx<'_>) -> CaseResult {
+    c.open("/upload.html", UPLOAD_READY).await?;
+    c.click("button", "Open the file chooser").await?;
+    c.call("wait", json!({ "text": "Chooser: cancelled" }))
+        .await?;
+    c.expect_text("Picked: none").await?;
+    expect_tickets(c, &[], "a page-opened file chooser")
+}
+
 fn files_in(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|entries| entries.flatten().map(|e| e.path()).collect())

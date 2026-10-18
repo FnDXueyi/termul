@@ -69,6 +69,7 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("tainted_navigation", &["snapshot"]),
     cap("upload", &["snapshot"]),
     cap("upload_refusals", &["snapshot"]),
+    cap("file_chooser", &["click"]),
     cap("download", &["snapshot"]),
     cap("download_preapproved", &["snapshot"]),
 ];
@@ -499,6 +500,7 @@ pub async fn run(
         "tainted_navigation" => sensitive_cases::tainted_navigation(&ctx).await,
         "upload" => sensitive_cases::upload(&ctx).await,
         "upload_refusals" => sensitive_cases::upload_refusals(&ctx).await,
+        "file_chooser" => sensitive_cases::file_chooser(&ctx).await,
         "download" => sensitive_cases::download(&ctx).await,
         "download_preapproved" => sensitive_cases::download_preapproved(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
