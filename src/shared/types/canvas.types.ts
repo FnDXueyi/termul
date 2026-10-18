@@ -12,6 +12,13 @@
 
 import type { IpcResult } from './ipc.types'
 
+/** A canvas the host unloaded (after saving it) to stay under
+ * `canvas.max_mounted` (spine AD-26). */
+export interface CanvasEviction {
+  projectId: string
+  reason: string
+}
+
 export interface CanvasOpenInfo {
   /** Project-derived id the `/canvas/<id>/` bundle routes on. */
   canvasId: string
@@ -27,6 +34,8 @@ export interface CanvasOpenInfo {
   /** Host-allocated, never reused: stamps every bridge envelope and
    * persistence call of this mount. */
   mountSeq: number
+  /** Canvases this open unloaded to make room; the renderer marks them. */
+  evicted: CanvasEviction[]
 }
 
 /** The host's persistence projection of one mount. */
@@ -79,7 +88,9 @@ export const CanvasErrorCodes = {
   DOCUMENT_LOAD_FAILED: 'DOCUMENT_LOAD_FAILED',
   CANVAS_CLOSED: 'CANVAS_CLOSED',
   CANVAS_CLOSING: 'CANVAS_CLOSING',
+  CANVAS_OPEN_ELSEWHERE: 'CANVAS_OPEN_ELSEWHERE',
   SAVE_FAILED: 'SAVE_FAILED',
+  EVICTION_BLOCKED: 'EVICTION_BLOCKED',
   CANVAS_NOT_READY: 'CANVAS_NOT_READY',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   READ_FAILED: 'READ_FAILED',
@@ -115,16 +126,42 @@ export type CanvasBridgeErrorCode = (typeof CANVAS_BRIDGE_ERROR_CODES)[number]
  * The persistence methods are the renderer's half of AD-23: it forwards what
  * the editor reports and does what the host decides.
  */
+/** Why a window no longer holds a canvas mount (spine AD-30): another window
+ * took the lease, or the host dropped the mount after the window's
+ * connection was gone longer than the lease grace. */
+export type CanvasLeaseLoss = 'elsewhere' | 'expired'
+
+/** Settings sent with each open; the host clamps each. */
+export interface CanvasOpenOptions {
+  /** `canvas.autosave_ms`. */
+  autosaveMs?: number
+  /** `canvas.lease_grace_ms`: how long this window keeps the canvas after
+   * its connection drops, so a reload or reconnect keeps it. */
+  leaseGraceMs?: number
+  /** `canvas.max_mounted`: opening beyond it unloads the least recently
+   * active canvas first (`EVICTION_BLOCKED` when that canvas cannot be
+   * saved). */
+  maxMounted?: number
+}
+
 export interface CanvasApi {
+  /** Mount the project's document in this window, which takes the mount
+   * lease (spine AD-30). When another window holds it, that window saves and
+   * unmounts first; if it cannot save, this answers `CANVAS_OPEN_ELSEWHERE`.
+   * The transports send this window's `clientInstanceId` as the lease
+   * holder. */
   open: (
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    options?: CanvasOpenOptions
   ) => Promise<IpcResult<CanvasOpenInfo>>
   /** Unmount through the host's AD-31 sequence. A failed save answers
    * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit
    * choice to drop unsaved changes. */
   close: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
+  /** The user started or stopped looking at the canvas: activity the host
+   * ranks eviction by. `CANVAS_CLOSED` means the host no longer holds it. */
+  setVisible: (projectId: string, mountSeq: number, visible: boolean) => Promise<IpcResult<void>>
   readDocument: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDocumentBytes>>
   /** `ack` is the `host.openDocument` result text, `null` for a new document. */
   documentLoaded: (

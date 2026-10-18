@@ -9,10 +9,22 @@ use super::*;
 use std::time::Duration;
 
 use crate::acp::host_mcp::canvas::{CanvasCallFrame, CanvasErrorCode};
+use crate::canvas::persistence::TEST_RENDERER;
 use crate::web::project_registry::ProjectRegistry;
 
 fn request(id: &str, type_: &str, payload: Value) -> String {
     json!({ "id": id, "type": type_, "payload": payload }).to_string()
+}
+
+/// The connection authenticated as the window or tab `client_instance_id`.
+pub(super) fn as_renderer(env: HandlerEnv, client_instance_id: &str) -> HandlerEnv {
+    env.identity
+        .set(ClientIdentity {
+            device_id: "device".into(),
+            client_instance_id: client_instance_id.into(),
+        })
+        .unwrap();
+    env
 }
 
 #[tokio::test]
@@ -21,7 +33,10 @@ async fn a_mounted_connection_serves_canvas_calls_over_its_queue() {
     let relay = Arc::new(WsRelaySink::new());
     let registry = Arc::new(ProjectRegistry::new());
     let (tx, mut rx) = test_outbound();
-    let env = test_env(&acp, &relay, &registry, &tx, &Arc::default());
+    let env = as_renderer(
+        test_env(&acp, &relay, &registry, &tx, &Arc::default()),
+        TEST_RENDERER,
+    );
     acp.canvas_router().mounts().ensure_test_mount("proj-1", 2);
 
     let mounted = route(
@@ -99,7 +114,10 @@ async fn another_connection_cannot_answer_or_unmount_a_call_it_does_not_hold() {
     let registry = Arc::new(ProjectRegistry::new());
     let (holder_tx, mut holder_rx) = test_outbound();
     let (other_tx, _other_rx) = test_outbound();
-    let holder = test_env(&acp, &relay, &registry, &holder_tx, &Arc::default());
+    let holder = as_renderer(
+        test_env(&acp, &relay, &registry, &holder_tx, &Arc::default()),
+        TEST_RENDERER,
+    );
     let other = test_env(&acp, &relay, &registry, &other_tx, &Arc::default());
     acp.canvas_router().mounts().ensure_test_mount("proj-1", 1);
 
@@ -198,7 +216,10 @@ async fn closing_a_dirty_canvas_snapshots_it_over_the_socket_before_unmounting()
     let relay = Arc::new(WsRelaySink::new());
     let registry = Arc::new(ProjectRegistry::new());
     let (tx, mut rx) = test_outbound();
-    let env = test_env(&acp, &relay, &registry, &tx, &Arc::default());
+    let env = as_renderer(
+        test_env(&acp, &relay, &registry, &tx, &Arc::default()),
+        TEST_RENDERER,
+    );
     let dir = tempfile::tempdir().unwrap();
     let doc = dir.path().join("design.figcraft");
     std::fs::write(&doc, b"v1").unwrap();
@@ -250,4 +271,81 @@ async fn closing_a_dirty_canvas_snapshots_it_over_the_socket_before_unmounting()
         .call("proj-close", "node.get", "{}".into())
         .await;
     assert_eq!(after.unwrap_err().code, CanvasErrorCode::CanvasClosed);
+}
+
+#[tokio::test]
+async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
+    use crate::canvas::persistence::{MountRequest, RendererId, DEFAULT_MAX_MOUNTED};
+
+    let acp = Arc::new(AcpManager::new(vec![]));
+    let relay = Arc::new(WsRelaySink::new());
+    let registry = Arc::new(ProjectRegistry::new());
+    let (a_tx, mut a_rx) = test_outbound();
+    let (b_tx, mut b_rx) = test_outbound();
+    let tab_a = as_renderer(
+        test_env(&acp, &relay, &registry, &a_tx, &Arc::default()),
+        "tab-a",
+    );
+    let tab_b = as_renderer(
+        test_env(&acp, &relay, &registry, &b_tx, &Arc::default()),
+        "tab-b",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let opens = |tab: &str| MountRequest {
+        renderer: RendererId::new(tab),
+        doc_path: dir.path().join("design.figcraft"),
+        autosave: Duration::from_secs(60),
+        lease_grace: Duration::from_secs(5),
+    };
+    let mounts = Arc::clone(acp.canvas_router().mounts());
+    let mount = |seq: u64| {
+        request(
+            "m",
+            "canvas_mount",
+            json!({ "projectId": "proj-lease", "mountSeq": seq }),
+        )
+    };
+
+    let first = mounts
+        .open("proj-lease", opens("tab-a"), DEFAULT_MAX_MOUNTED)
+        .await
+        .opened
+        .unwrap();
+    let refused = route(&mount(first.mount_seq), &tab_b).await;
+    assert_eq!(
+        refused.payload,
+        Some(json!({ "attached": false, "heldElsewhere": true })),
+        "tab-b does not hold the lease"
+    );
+    let attached = route(&mount(first.mount_seq), &tab_a).await;
+    assert_eq!(attached.payload, Some(json!({ "attached": true })));
+
+    let second = mounts
+        .open("proj-lease", opens("tab-b"), DEFAULT_MAX_MOUNTED)
+        .await
+        .opened
+        .unwrap();
+    let Some(Outbound::CanvasLeaseLost(notice)) = a_rx.recv().await else {
+        panic!("expected a canvas_lease_lost frame");
+    };
+    assert_eq!(
+        serde_json::to_value(&notice).unwrap(),
+        json!({ "type": "canvas_lease_lost", "projectId": "proj-lease", "mountSeq": first.mount_seq })
+    );
+    let attached = route(&mount(second.mount_seq), &tab_b).await;
+    assert_eq!(attached.payload, Some(json!({ "attached": true })));
+
+    let router = acp.canvas_router();
+    router.set_call_timeout(Duration::from_millis(200));
+    let call =
+        tokio::spawn(async move { router.call("proj-lease", "node.get", "{}".into()).await });
+    let Some(Outbound::Canvas(frame)) = b_rx.recv().await else {
+        panic!("expected the call on the new holder's queue");
+    };
+    assert_eq!(frame.mount_seq, second.mount_seq);
+    assert!(a_rx.try_recv().is_err(), "the old holder gets no call");
+    assert_eq!(
+        call.await.unwrap().unwrap_err().code,
+        CanvasErrorCode::CanvasTimeout
+    );
 }

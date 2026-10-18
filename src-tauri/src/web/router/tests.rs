@@ -632,6 +632,7 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/canvas/read-document",
         "/canvas/document-loaded",
         "/canvas/dirty-changed",
+        "/canvas/set-visible",
         "/canvas/write-snapshot",
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
@@ -982,7 +983,7 @@ async fn ungated_canvas_open_refuses_a_doc_outside_every_project() {
                 ))))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"docPath":"C:/proj/design.figcraft","projectId":"p-1"}"#,
+                    r#"{"docPath":"C:/proj/design.figcraft","projectId":"p-1","clientInstanceId":"tab"}"#,
                 ))
                 .expect("build request"),
         )

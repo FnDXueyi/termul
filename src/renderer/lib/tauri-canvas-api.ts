@@ -11,6 +11,7 @@ import type {
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
+  CanvasOpenOptions,
   CanvasPersistenceView,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
@@ -18,10 +19,12 @@ import type { IpcResult } from '@shared/types/ipc.types'
 
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
+import { getClientInstanceId } from './web-client-identity'
 
 const IPC_COMMANDS = {
   OPEN: 'canvas_open',
   CLOSE: 'canvas_close',
+  SET_VISIBLE: 'canvas_set_visible',
   READ_DOCUMENT: 'canvas_read_document',
   DOCUMENT_LOADED: 'canvas_document_loaded',
   DIRTY_CHANGED: 'canvas_dirty_changed',
@@ -48,9 +51,20 @@ export function createTauriCanvasApi(): CanvasApi {
     open(
       docPath: string,
       projectId: string,
-      autosaveMs?: number
+      options: CanvasOpenOptions = {}
     ): Promise<IpcResult<CanvasOpenInfo>> {
-      return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs })
+      return invokeCanvas(IPC_COMMANDS.OPEN, {
+        docPath,
+        projectId,
+        clientInstanceId: getClientInstanceId(),
+        autosaveMs: options.autosaveMs,
+        leaseGraceMs: options.leaseGraceMs,
+        maxMounted: options.maxMounted
+      })
+    },
+
+    setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+      return invokeCanvas(IPC_COMMANDS.SET_VISIBLE, { projectId, mountSeq, visible })
     },
 
     close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

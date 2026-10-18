@@ -65,6 +65,9 @@ pub(crate) enum Outbound {
     /// A forwarded canvas call for the mount this connection holds, the
     /// top-level `{"type":"canvas_call", ...}` frame.
     Canvas(crate::acp::host_mcp::canvas::CanvasCallFrame),
+    /// Another renderer took a canvas lease from this connection, the
+    /// top-level `{"type":"canvas_lease_lost", ...}` frame.
+    CanvasLeaseLost(crate::acp::host_mcp::canvas::CanvasLeaseLostFrame),
     /// Terminal close handshake (CAP-11: after a binary-frame protocol error).
     /// The channel is FIFO, so everything enqueued ahead of it (the
     /// `unsupported` error reply) is flushed first; the write loop then sends

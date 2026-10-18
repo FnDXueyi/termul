@@ -3,10 +3,14 @@
  * `src-tauri/src/web/canvas_api.rs` and `canvas_persistence_api.rs`
  * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
  * auth header):
- * - `POST /canvas/open` body `{ docPath, projectId, autosaveMs }` →
- *   `CanvasOpenInfo` with an empty `baseUrl` (the bundle is same-origin);
+ * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
+ *   autosaveMs, leaseGraceMs, maxMounted }` → `CanvasOpenInfo` with an empty
+ *   `baseUrl` (the bundle is same-origin); this tab takes the mount lease,
+ *   after the least recently active canvases beyond `maxMounted` unloaded;
  * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
  *   unmount (save, verify, unmount), which also revokes the `ct` token;
+ * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
+ *   user-visibility half of the mount cap's activity ranking;
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
  *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
@@ -21,20 +25,33 @@ import type {
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
+  CanvasOpenOptions,
   CanvasPersistenceView,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 
 import { postJson } from './ipc/http'
+import { getClientInstanceId } from './web-client-identity'
 
 export const webCanvasApi: CanvasApi = {
   open(
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    options: CanvasOpenOptions = {}
   ): Promise<IpcResult<CanvasOpenInfo>> {
-    return postJson<CanvasOpenInfo>('/canvas/open', { docPath, projectId, autosaveMs })
+    return postJson<CanvasOpenInfo>('/canvas/open', {
+      docPath,
+      projectId,
+      clientInstanceId: getClientInstanceId(),
+      autosaveMs: options.autosaveMs,
+      leaseGraceMs: options.leaseGraceMs,
+      maxMounted: options.maxMounted
+    })
+  },
+
+  setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+    return postJson<void>('/canvas/set-visible', { projectId, mountSeq, visible })
   },
 
   close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

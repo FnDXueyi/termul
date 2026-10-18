@@ -23,6 +23,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import type { CanvasOpenInfo } from '@shared/types/canvas.types'
 import { canvasApi } from '../canvas-api'
+import { getClientInstanceId } from '../web-client-identity'
 
 const NARROW_QUERY = '(max-width: 767px)'
 
@@ -44,7 +45,8 @@ const WEB_INFO: CanvasOpenInfo = {
   canvasToken: 'cafebabecafebabecafebabecafebabe',
   pinTag: 'termul-v1',
   docKey: DOC,
-  mountSeq: 1
+  mountSeq: 1,
+  evicted: []
 }
 
 describe('canvasApi (web vs desktop branch)', () => {
@@ -83,7 +85,7 @@ describe('canvasApi (web vs desktop branch)', () => {
     }
   })
 
-  it('open: web → POST /canvas/open with docPath + projectId, no cookie written', async () => {
+  it('open: web → POST /canvas/open with docPath, projectId and this tab as the lease holder, no cookie written', async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: WEB_INFO }))
     const cookieBefore = document.cookie
     const result = await canvasApi.open(DOC, PROJECT)
@@ -91,7 +93,11 @@ describe('canvasApi (web vs desktop branch)', () => {
       `${window.location.origin}/canvas/open`,
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ docPath: DOC, projectId: PROJECT })
+        body: JSON.stringify({
+          docPath: DOC,
+          projectId: PROJECT,
+          clientInstanceId: getClientInstanceId()
+        })
       })
     )
     expect(mockInvoke).not.toHaveBeenCalled()
@@ -121,9 +127,44 @@ describe('canvasApi (web vs desktop branch)', () => {
     const desktopInfo = { ...WEB_INFO, baseUrl: 'http://127.0.0.1:5199' }
     mockInvoke.mockResolvedValueOnce({ success: true, data: desktopInfo })
     const result = await canvasApi.open(DOC, PROJECT)
-    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', { docPath: DOC, projectId: PROJECT })
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', {
+      docPath: DOC,
+      projectId: PROJECT,
+      clientInstanceId: getClientInstanceId()
+    })
     expect(mockFetch).not.toHaveBeenCalled()
     expect(result).toEqual({ success: true, data: desktopInfo })
+  })
+
+  it('open: both transports send the autosave, lease-grace and mount-cap settings alike', async () => {
+    const options = { autosaveMs: 1500, leaseGraceMs: 5000, maxMounted: 3 }
+    const expected = {
+      docPath: DOC,
+      projectId: PROJECT,
+      clientInstanceId: getClientInstanceId(),
+      ...options
+    }
+    mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: WEB_INFO }))
+    await canvasApi.open(DOC, PROJECT, options)
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body as string)).toEqual(expected)
+
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce({ success: true, data: WEB_INFO })
+    await canvasApi.open(DOC, PROJECT, options)
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_open', expected)
+  })
+
+  it('open: a refused lease takeover keeps its typed code on both transports', async () => {
+    const refused = {
+      success: false,
+      error: 'This canvas is open in another window, and it could not be saved there',
+      code: 'CANVAS_OPEN_ELSEWHERE'
+    }
+    mockFetch.mockResolvedValueOnce(jsonResponse(refused))
+    await expect(canvasApi.open(DOC, PROJECT)).resolves.toEqual(refused)
+    mockIsTauriContext.mockReturnValue(true)
+    mockInvoke.mockResolvedValueOnce(refused)
+    await expect(canvasApi.open(DOC, PROJECT)).resolves.toEqual(refused)
   })
 
   it('close: web → POST /canvas/close with projectId and discard', async () => {
@@ -185,6 +226,13 @@ describe('canvasApi (web vs desktop branch)', () => {
       command: 'canvas_dirty_changed',
       route: '/canvas/dirty-changed',
       args: { projectId: PROJECT, mountSeq: 3, dirty: true, contentVersion: '9007199254740993' }
+    },
+    {
+      name: 'setVisible',
+      call: () => canvasApi.setVisible(PROJECT, 3, true),
+      command: 'canvas_set_visible',
+      route: '/canvas/set-visible',
+      args: { projectId: PROJECT, mountSeq: 3, visible: true }
     },
     {
       name: 'writeSnapshot',

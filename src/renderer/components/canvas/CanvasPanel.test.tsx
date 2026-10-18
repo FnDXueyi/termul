@@ -31,7 +31,8 @@ const INFO: CanvasOpenInfo = {
   canvasToken: 'cafe',
   pinTag: 'termul-v1',
   docKey: DOC,
-  mountSeq: 4
+  mountSeq: 4,
+  evicted: []
 }
 
 function setPhase(phase: CanvasPhase, projection: Partial<CanvasSession> = {}): void {
@@ -85,10 +86,12 @@ function editorReady(iframe: HTMLIFrameElement): void {
 }
 
 const original = useCanvasStore.getState()
+const setCanvasVisible = vi.fn().mockResolvedValue(undefined)
 
 beforeEach(() => {
   phoneWidth.value = false
-  useCanvasStore.setState(original, true)
+  setCanvasVisible.mockClear()
+  useCanvasStore.setState({ ...original, setCanvasVisible }, true)
 })
 
 afterEach(() => {
@@ -184,6 +187,73 @@ describe('CanvasPanel', () => {
 
     expect(screen.getByTestId('canvas-mount-failed').textContent).toBe('Bundle mismatch.')
     expect(screen.queryByTitle(/Canvas —/)).toBeNull()
+  })
+
+  it('shows a canvas open in another window with a Take back that opens it here', async () => {
+    const openCanvas = vi.fn().mockResolvedValue(true)
+    setPhase({ kind: 'elsewhere' })
+    useCanvasStore.setState({ openCanvas })
+    renderPanel()
+
+    expect(screen.getByTestId('canvas-open-elsewhere').textContent).toContain(
+      'open in another window'
+    )
+    expect(screen.queryByTitle(/Canvas —/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save canvas' })).toHaveProperty('disabled', true)
+    const takeBack = screen.getByRole('button', { name: 'Take back' })
+    fireEvent.click(takeBack)
+    expect(openCanvas).toHaveBeenCalledWith(PROJECT, DOC)
+    expect(takeBack).toHaveProperty('disabled', true)
+    await waitFor(() => expect(takeBack).toHaveProperty('disabled', false))
+  })
+
+  it('tells the host while a mounted canvas is on screen, and when it leaves', async () => {
+    setPhase({ kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    const view = renderPanel()
+    await waitFor(() => expect(setCanvasVisible).toHaveBeenCalledWith(PROJECT, 4, true))
+
+    view.rerender(<Workspace tab="hidden" />)
+    await waitFor(() => expect(setCanvasVisible).toHaveBeenLastCalledWith(PROJECT, 4, false))
+  })
+
+  it('a canvas whose tab was never shown reports nothing', () => {
+    setPhase({ kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    render(<Workspace tab="hidden" />)
+    expect(setCanvasVisible).not.toHaveBeenCalled()
+  })
+
+  it('an evicted canvas says it was unloaded to save memory and reopens on click', () => {
+    const openCanvas = vi.fn().mockResolvedValue(true)
+    setPhase({ kind: 'unloaded', reason: 'evicted', message: null })
+    useCanvasStore.setState({ openCanvas })
+    renderPanel()
+
+    expect(screen.getByTestId('canvas-unloaded').textContent).toContain(
+      'unloaded to save memory. Click to reopen'
+    )
+    expect(screen.getByText('Unloaded')).toBeTruthy()
+    expect(screen.queryByTitle(/Canvas —/)).toBeNull()
+    expect(setCanvasVisible).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen canvas' }))
+    expect(openCanvas).toHaveBeenCalledWith(PROJECT, DOC)
+  })
+
+  it('an open blocked by an unsaved canvas shows the typed error and offers to try again', () => {
+    const openCanvas = vi.fn().mockResolvedValue(true)
+    setPhase({
+      kind: 'unloaded',
+      reason: 'blocked',
+      message: 'could not unload the least recently active canvas (project p2) to make room'
+    })
+    useCanvasStore.setState({ openCanvas })
+    renderPanel()
+
+    expect(screen.getByTestId('canvas-unloaded').textContent).toContain(
+      'could not unload the least recently active canvas (project p2)'
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(openCanvas).toHaveBeenCalledWith(PROJECT, DOC)
   })
 
   it('is gated off on phone-width viewports', () => {

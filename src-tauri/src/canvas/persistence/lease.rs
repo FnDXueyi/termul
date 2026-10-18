@@ -1,0 +1,237 @@
+//! The mount lease (spine AD-30): one lease per project's document per host,
+//! held by the renderer that opened it, a desktop window or a browser tab.
+//!
+//! The newest opener takes the lease. When another renderer holds it, the
+//! holder's mount runs the AD-31 close first (quiesce, save, verify,
+//! unmount), the holder is told it lost the lease, and only then does the
+//! opener get a mount. If that save fails, the opener is refused
+//! `CANVAS_OPEN_ELSEWHERE` and the holder keeps its mount.
+//!
+//! The lease names a renderer, not a connection: a reload or a socket
+//! reconnect is a new `/ws` connection from the same `clientInstanceId`, so
+//! the holder can take its mount up again within the grace
+//! ([`super::gateway`]) or re-open it with a new `mountSeq`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::{Admitted, CanvasPersistence, CloseMode, Mount, PersistenceView};
+use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE};
+
+/// `canvas.lease_grace_ms` when the renderer sends none.
+pub const DEFAULT_LEASE_GRACE_MS: u64 = 5000;
+const MAX_LEASE_GRACE_MS: u64 = 60_000;
+
+/// How long a holder whose connection ended keeps its lease, clamped.
+pub fn lease_grace(requested_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        requested_ms
+            .unwrap_or(DEFAULT_LEASE_GRACE_MS)
+            .min(MAX_LEASE_GRACE_MS),
+    )
+}
+
+/// A renderer that can hold a lease, named by the `clientInstanceId` it
+/// presents on `/ws` `authenticate`. Unlike a connection id it survives a
+/// reload of that window or tab.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RendererId(String);
+
+impl RendererId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// A `clientInstanceId` from a request, held to the rule `/ws`
+    /// `authenticate` applies to it (it reaches log lines).
+    ///
+    /// # Errors
+    /// `INVALID_PAYLOAD` for an empty, oversized or control-character id.
+    pub fn parse(id: String) -> Result<Self, CanvasError> {
+        if id.is_empty()
+            || id.len() > crate::web::ws::MAX_CLIENT_ID_LEN
+            || id.chars().any(char::is_control)
+        {
+            return Err(CanvasError::new(
+                super::CODE_INVALID_PAYLOAD,
+                "clientInstanceId must be a non-empty id without control characters",
+            ));
+        }
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The first 8 characters, like `ClientIdentity::log_label`.
+    pub fn log_label(&self) -> String {
+        self.0.chars().take(8).collect()
+    }
+}
+
+/// What a renderer's open asks for.
+#[derive(Debug, Clone)]
+pub struct MountRequest {
+    pub renderer: RendererId,
+    pub doc_path: PathBuf,
+    pub autosave: Duration,
+    pub lease_grace: Duration,
+}
+
+#[cfg(test)]
+impl MountRequest {
+    pub(crate) fn for_test(doc_path: PathBuf, autosave: Duration) -> Self {
+        Self {
+            renderer: super::test_renderer(),
+            doc_path,
+            autosave,
+            lease_grace: lease_grace(None),
+        }
+    }
+}
+
+/// How the lease moved when a renderer opened the canvas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseChange {
+    /// Nobody held it.
+    Granted,
+    /// The holder opened again (a reload, or a remount after a failure).
+    /// Its previous mount was dropped without a save: the page that ran it
+    /// is gone, so its last autosave stands.
+    Remounted { previous: u64 },
+    /// Another renderer held it. Its mount was saved and unmounted first.
+    TakenOver {
+        previous: u64,
+        saved_version: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    pub mount_seq: u64,
+    pub lease: LeaseChange,
+}
+
+/// What a mount dropped at the end of its grace left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredLease {
+    pub saved_version: Option<String>,
+    /// The host knew of an edit newer than the file on disk.
+    pub unsaved: bool,
+}
+
+impl ExpiredLease {
+    pub(super) fn of(view: &PersistenceView) -> Self {
+        Self {
+            saved_version: view.saved_version.clone(),
+            unsaved: view.dirty || view.content_version != view.saved_version,
+        }
+    }
+}
+
+fn refused_takeover(error: &CanvasError) -> CanvasError {
+    CanvasError::new(
+        CODE_CANVAS_OPEN_ELSEWHERE,
+        format!(
+            "This canvas is open in another window, and it could not be saved there ({}: {}). \
+             It stays open in that window.",
+            error.code, error.message
+        ),
+    )
+}
+
+impl CanvasPersistence {
+    /// A fresh `Loading` mount of the project's document for `request`'s
+    /// renderer, which then holds the lease. Room is made under the mount
+    /// `cap` first ([`super::evict`]); when another renderer holds the lease, that
+    /// mount is closed through AD-31 and its renderer is told.
+    ///
+    /// `opened` is `EVICTION_BLOCKED` when a victim could not be saved, or
+    /// `CANVAS_OPEN_ELSEWHERE` when the holder's save failed or it was
+    /// already closing; the holder keeps the lease.
+    pub async fn open(&self, project_id: &str, request: MountRequest, cap: usize) -> Admitted {
+        let _admitting = self.admission.lock().await;
+        let mut evicted = Vec::new();
+        let opened = match self.make_room(project_id, cap, &mut evicted).await {
+            Ok(()) => self.lease(project_id, &request).await,
+            Err(error) => Err(error),
+        };
+        Admitted { evicted, opened }
+    }
+
+    async fn lease(&self, project_id: &str, request: &MountRequest) -> Result<Opened, CanvasError> {
+        loop {
+            let current = self.mounts.lock().get(project_id).cloned();
+            let (lease, expected) = match &current {
+                None => (LeaseChange::Granted, None),
+                Some(mount) if mount.holder == request.renderer => (
+                    LeaseChange::Remounted {
+                        previous: mount.mount_seq,
+                    },
+                    Some(mount),
+                ),
+                Some(mount) => (self.take_over(project_id, mount).await?, None),
+            };
+            if let Some(mount_seq) = self.install(project_id, expected, request) {
+                return Ok(Opened { mount_seq, lease });
+            }
+        }
+    }
+
+    async fn take_over(
+        &self,
+        project_id: &str,
+        holder: &Arc<Mount>,
+    ) -> Result<LeaseChange, CanvasError> {
+        let loser = holder
+            .state
+            .lock()
+            .link
+            .connection()
+            .map(|connection| connection.holder().clone());
+        let closed = self
+            .close(project_id, CloseMode::Save)
+            .await
+            .map_err(|error| refused_takeover(&error))?;
+        if let Some(loser) = loser {
+            loser.tell_lease_lost(project_id, holder.mount_seq);
+        }
+        Ok(LeaseChange::TakenOver {
+            previous: holder.mount_seq,
+            saved_version: closed.saved_version,
+        })
+    }
+
+    /// Put a new mount in the project's slot if the slot still holds
+    /// `expected`; `None` when another open or close changed it first.
+    fn install(
+        &self,
+        project_id: &str,
+        expected: Option<&Arc<Mount>>,
+        request: &MountRequest,
+    ) -> Option<u64> {
+        let (mount_seq, previous) = {
+            let mut mounts = self.mounts.lock();
+            let unchanged = match (mounts.get(project_id), expected) {
+                (None, None) => true,
+                (Some(live), Some(expected)) => Arc::ptr_eq(live, expected),
+                _ => false,
+            };
+            if !unchanged {
+                return None;
+            }
+            let mount_seq = self.next_mount_seq();
+            let previous = mounts.insert(
+                project_id.to_string(),
+                Mount::new(mount_seq, self.tick(), request.clone()),
+            );
+            (mount_seq, previous)
+        };
+        if let Some(previous) = previous {
+            Self::retire(&previous);
+        }
+        Some(mount_seq)
+    }
+}

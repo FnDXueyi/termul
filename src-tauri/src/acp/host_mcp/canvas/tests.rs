@@ -30,6 +30,7 @@ impl FakeRenderer {
         let accept = self.accept;
         CanvasHolder::new(
             self.id,
+            crate::canvas::persistence::test_renderer(),
             Arc::new(move |frame| {
                 if accept {
                     frames.lock().unwrap().push(frame);

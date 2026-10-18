@@ -1482,6 +1482,7 @@ describe('Parity Checklist Automation', () => {
       readDocument: { command: 'canvas_read_document', route: '/canvas/read-document' },
       documentLoaded: { command: 'canvas_document_loaded', route: '/canvas/document-loaded' },
       dirtyChanged: { command: 'canvas_dirty_changed', route: '/canvas/dirty-changed' },
+      setVisible: { command: 'canvas_set_visible', route: '/canvas/set-visible' },
       writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' }
     } as const
 

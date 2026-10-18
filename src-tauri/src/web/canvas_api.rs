@@ -63,7 +63,7 @@ use crate::canvas::persistence::CloseOutcome;
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
     bundle_tokens, close_canvas, open_canvas, query_param, same_origin_base, serve_bundle,
-    CanvasOpenInfo, CookiePolicy,
+    CanvasOpenInfo, CookiePolicy, OpenRequest,
 };
 use crate::web::auth::WebAuth;
 use crate::web::canvas_persistence_api::PERSISTENCE_ROUTES;
@@ -173,14 +173,21 @@ const CT_GATE_EXEMPT_PATHS: &[&str] = &[
 ];
 
 /// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
-/// "autosaveMs"?: n }`.
+/// "clientInstanceId": "...", "autosaveMs"?: n, "leaseGraceMs"?: n,
+/// "maxMounted"?: n }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasOpenRequest {
     doc_path: String,
     project_id: String,
+    /// The opening tab; it gets the mount lease (AD-30).
+    client_instance_id: String,
     #[serde(default)]
     autosave_ms: Option<u64>,
+    #[serde(default)]
+    lease_grace_ms: Option<u64>,
+    #[serde(default)]
+    max_mounted: Option<u64>,
 }
 
 /// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
@@ -376,12 +383,13 @@ async fn open(
             return Json(IpcBody::err(message, code));
         }
     };
-    match open_canvas(
-        same_origin_base(),
-        &req.project_id,
-        doc_key,
-        req.autosave_ms,
-    ) {
+    let request = OpenRequest {
+        client_instance_id: req.client_instance_id,
+        autosave_ms: req.autosave_ms,
+        lease_grace_ms: req.lease_grace_ms,
+        max_mounted: req.max_mounted,
+    };
+    match open_canvas(same_origin_base(), &req.project_id, doc_key, request).await {
         Ok(info) => {
             tracing::info!(
                 target: "termul::web::canvas",
