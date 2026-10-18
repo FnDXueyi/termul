@@ -108,14 +108,13 @@ mod process {
         }
 
         pub(super) fn terminate(&mut self) {
-            // The child is the leader of its own process group, so this
-            // reaches grandchildren spawned by wrapper launchers (`npx →
-            // node`, `uvx → python`) and the real agent of a launcher that
-            // already exited. `ESRCH` means the group is already gone.
+            // The child leads its own process group, so this reaches the
+            // workers of wrapper launchers (`npx → node`, `uvx → python`)
+            // and the real agent of a launcher that already exited. `ESRCH`
+            // means the group is already gone.
             // SAFETY: `killpg` has no memory-safety preconditions; the pid
             // came from this process's own spawn.
             unsafe { libc::killpg(self.pid as libc::pid_t, libc::SIGKILL) };
-            // A harmless double tap that also lets tokio reap the child.
             drop(self.child.start_kill());
         }
     }
