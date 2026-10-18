@@ -18,11 +18,45 @@ use serde_json::{json, Value};
 use crate::acp::host_mcp::bridge::Bridge;
 use crate::acp::host_mcp::child::ChildConfig;
 
-/// figcraft's tools as rmcp definitions.
+/// Prefixed to every canvas tool's description. Some MCP clients never show
+/// the server `instructions` to the model, and upstream's descriptions call
+/// the editor "FigCraft", so without this an agent cannot tell that
+/// `create_node` or `run_command` draw on the project's canvas.
+pub const DESCRIPTION_TAG: &str = "Termul Canvas (this project's design canvas, a .figcraft \
+document; change it only through these tools, never by editing files): ";
+
+/// The canvas section of the session `instructions`, followed by figcraft's
+/// own guide to its tools.
+const CANVAS_GUIDE: &str = "Design canvas: this project has a design canvas, Termul Canvas, a \
+Figma-class editor. Its document is the project's .figcraft file (design.figcraft by default). \
+When the user asks for a design, mockup, wireframe, screen or anything \"on the canvas\", build it \
+with this server's canvas tools: create_node, set_properties, list_commands, run_command, batch, \
+inspect_document, get_node, select, screenshot, export, undo and redo (pointer, key, type_text and \
+inspect_ui drive the editor UI and need the canvas on screen). save_file saves the document; \
+Termul chooses the file and ignores any path you pass. Do not create or edit .figcraft, .pen or \
+.op files on disk, do not call open_file, and do not look for other design tools, MCP servers or \
+canvas apps: these tools are the canvas. Agents cannot open the canvas. A CANVAS_CLOSED error \
+means it is not open, so ask the user to open it with the Canvas button in Termul's left rail, \
+then retry. The canvas editor is FigCraft, and the rest of this section is its own guide.";
+
+/// The canvas part of the session `instructions`.
+#[must_use]
+pub fn instructions() -> String {
+    format!("{CANVAS_GUIDE}\n\n{}", figcraft_mcp::INSTRUCTIONS)
+}
+
+/// figcraft's tools as rmcp definitions, each description prefixed with
+/// [`DESCRIPTION_TAG`].
 #[must_use]
 pub fn tools() -> Vec<Tool> {
     figcraft_mcp::tool_definitions()
         .into_iter()
+        .map(|mut definition| {
+            if let Some(Value::String(description)) = definition.get_mut("description") {
+                description.insert_str(0, DESCRIPTION_TAG);
+            }
+            definition
+        })
         .filter_map(
             |definition| match serde_json::from_value::<Tool>(definition) {
                 Ok(tool) => Some(tool),

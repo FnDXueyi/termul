@@ -147,7 +147,7 @@ async fn server_discover_without_meta_lists_tools() {
         // `initialize` — pin the instructions delivery on this path too.
         assert_eq!(
             discover["result"]["instructions"].as_str(),
-            Some(crate::acp::host_mcp::TERMUL_CHAT_INSTRUCTIONS),
+            Some(crate::acp::host_mcp::session_instructions().as_str()),
             "discover result must carry the chat-output instructions verbatim"
         );
 
@@ -220,10 +220,11 @@ async fn legacy_initialize_still_lists_tools() {
 }
 
 /// The `initialize` result must carry `instructions` advertising the chat
-/// renderer's markdown affordances — this is the only channel that tells
-/// agents images embed inline and file links open in Termul's editor.
+/// renderer's markdown affordances and the design canvas: this is the channel
+/// that tells agents images embed inline, file links open in Termul's editor,
+/// and the canvas tools draw on the project's canvas.
 #[tokio::test]
-async fn initialize_advertises_termul_chat_instructions() {
+async fn initialize_advertises_the_chat_and_canvas_instructions() {
     let (server_io, client_io) = tokio::io::duplex(64 * 1024);
     let (server_read, server_write) = tokio::io::split(server_io);
     let (client_read, mut client_write) = tokio::io::split(client_io);
@@ -241,10 +242,27 @@ async fn initialize_advertises_termul_chat_instructions() {
             init_reply.get("error").is_none(),
             "initialize failed: {init_reply}"
         );
-        assert_eq!(
-            init_reply["result"]["instructions"].as_str(),
-            Some(crate::acp::host_mcp::TERMUL_CHAT_INSTRUCTIONS),
-            "initialize result must carry the chat-output instructions verbatim"
+        let instructions = init_reply["result"]["instructions"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            instructions.starts_with(crate::acp::host_mcp::TERMUL_CHAT_INSTRUCTIONS),
+            "{instructions}"
+        );
+        for needle in [
+            "design.figcraft",
+            "create_node",
+            "save_file",
+            "Do not create or edit .figcraft, .pen or .op files",
+            "do not look for other design tools",
+            "CANVAS_CLOSED",
+            "Canvas button in Termul's left rail",
+        ] {
+            assert!(instructions.contains(needle), "missing {needle:?}");
+        }
+        assert!(
+            instructions.ends_with(figcraft_mcp::INSTRUCTIONS),
+            "figcraft's own guide closes the instructions"
         );
         drop(client_write);
         drop(reader);
@@ -484,7 +502,7 @@ fn listed(reply: &serde_json::Value, list: &str, key: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn tools_list_carries_figcraft_tools_exactly_as_the_crate_defines_them() {
+async fn tools_list_carries_figcraft_tools_by_name_with_the_canvas_tag() {
     with_mcp_session(handshake_config(), |mut writer, mut reader| async move {
         send_line(
             &mut writer,
@@ -511,13 +529,20 @@ async fn tools_list_carries_figcraft_tools_exactly_as_the_crate_defines_them() {
                 .iter()
                 .find(|tool| tool["name"] == definition["name"])
                 .expect("every figcraft tool is listed");
-            for field in ["inputSchema", "description", "title", "annotations"] {
+            for field in ["inputSchema", "title", "annotations"] {
                 assert_eq!(
                     tool[field], definition[field],
                     "{} {field}",
                     definition["name"]
                 );
             }
+            let upstream = definition["description"].as_str().unwrap_or_default();
+            assert_eq!(
+                tool["description"].as_str(),
+                Some(format!("{}{upstream}", canvas_tools::DESCRIPTION_TAG).as_str()),
+                "{} description",
+                definition["name"]
+            );
         }
         drop(writer);
     })
