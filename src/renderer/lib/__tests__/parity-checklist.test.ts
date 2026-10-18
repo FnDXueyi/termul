@@ -1489,7 +1489,14 @@ describe('Parity Checklist Automation', () => {
       readDocument: { command: 'canvas_read_document', route: '/canvas/read-document' },
       documentLoaded: { command: 'canvas_document_loaded', route: '/canvas/document-loaded' },
       dirtyChanged: { command: 'canvas_dirty_changed', route: '/canvas/dirty-changed' },
-      writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' }
+      setVisible: { command: 'canvas_set_visible', route: '/canvas/set-visible' },
+      writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' },
+      diskChanged: { command: 'canvas_disk_changed', route: '/canvas/disk-changed' },
+      resolveConflict: {
+        command: 'canvas_resolve_conflict',
+        route: '/canvas/resolve-conflict'
+      },
+      crashed: { command: 'canvas_crashed', route: '/canvas/crashed' }
     } as const
 
     it('the adapters exist and export the factory and the singleton', () => {
@@ -1530,6 +1537,8 @@ describe('Parity Checklist Automation', () => {
         'utf-8'
       )
       const router = readFileSync(join(RustRoot, 'web', 'router.rs'), 'utf-8')
+      const bundlePath = readFileSync(join(RustRoot, 'canvas', 'bundle_path.rs'), 'utf-8')
+      expect(router, 'the bearer gate exempts only bundle paths').toContain('is_bundle_path')
       const lib = readFileSync(join(RustRoot, 'lib.rs'), 'utf-8')
       for (const [method, { command, route }] of Object.entries(CANVAS_FACADE)) {
         expect(tauri, `tauri adapter ${method}`).toMatch(new RegExp(`\\b${method}\\s*\\(`))
@@ -1543,7 +1552,7 @@ describe('Parity Checklist Automation', () => {
         expect(routes + persistenceRoutes, `web route ${route}`).toMatch(
           new RegExp(`\\.route\\(\\s*"${route}"`)
         )
-        expect(router, `${route} stays behind the bearer gate`).toContain(
+        expect(bundlePath, `${route} stays behind the bearer gate`).toContain(
           `"${route.slice('/canvas/'.length)}"`
         )
       }
@@ -1554,6 +1563,34 @@ describe('Parity Checklist Automation', () => {
       for (const rust of [commands, routes]) {
         expect(rust).toMatch(/open_canvas\(/)
         expect(rust).toMatch(/close_canvas\(/)
+        expect(rust, 'one doc-path check against the opening project root').toMatch(
+          /resolve_doc_path\(&(\w+\.)?doc_path, &(\w+\.)?project_id, /
+        )
+      }
+    })
+
+    it('agent calls reach the lease holder through one gateway client on both transports', () => {
+      const ws = readFileSync(join(LIB_DIR, 'acp-transport', 'ws-transport.ts'), 'utf-8')
+      expect(ws).toMatch(/readonly canvas = new CanvasGatewayClient\(/)
+      expect(ws).toMatch(/this\.canvas\.handleFrame\(/)
+      expect(ws).toMatch(/this\.canvas\.handleLeaseLost\(/)
+      expect(ws, 're-reports its mounts on every (re)connect').toMatch(
+        /this\.canvas\.onConnected\(\)/
+      )
+      const desktop = readFileSync(join(LIB_DIR, 'acp-transport', 'desktop-transport.ts'), 'utf-8')
+      expect(desktop).toMatch(/class DesktopAcpTransport extends WsAcpTransport\b/)
+      expect(desktop).toMatch(/WebSocketImpl: ChannelSocket\b/)
+      const harness = readFileSync(
+        join(RustRoot, 'web', 'ws', 'harness', 'canvas_gateway_tests.rs'),
+        'utf-8'
+      )
+      for (const body of [
+        'a_gateway_call_reaches_the_holder_and_its_reply_answers_the_agent',
+        'a_holder_back_within_the_grace_takes_its_calls_again',
+        'a_holder_gone_past_the_grace_leaves_calls_closed',
+        'a_call_the_holder_never_answers_times_out'
+      ]) {
+        expect(harness, body).toContain(`on_both_carriers!(${body});`)
       }
     })
 
@@ -1585,9 +1622,17 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(join(RENDERER, 'stores', 'canvas-store.ts'), 'utf-8')).toMatch(
         /canvasApi/
       )
+      // AD-19: the iframe lives in the mount layer both shells render, not in
+      // the tab; the panel only claims the slot it is laid over.
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasPanel.tsx'), 'utf-8')
+      ).toMatch(/claimSlot/)
+      expect(
+        readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasMountLayer.tsx'), 'utf-8')
       ).toMatch(/CanvasShell/)
+      const layout = readFileSync(join(RENDERER, 'layouts', 'WorkspaceLayout.tsx'), 'utf-8')
+      // Both shells and the mid-session token screen keep the layer.
+      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(3)
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasShell.tsx'), 'utf-8')
       ).toMatch(/createCanvasBridge/)
@@ -1601,8 +1646,22 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(paneContent, 'utf-8')).toMatch(/CanvasPanel/)
       const tabBar = join(RENDERER, 'components', 'workspace', 'WorkspaceTabBar.tsx')
       expect(readFileSync(tabBar, 'utf-8')).toMatch(/closeWorkspaceTab/)
+      // Closing the tab hides the canvas; only project close and quit unmount
+      // it, through the host's AD-31 sequence.
       expect(readFileSync(join(LIB_DIR, 'workspace-tab-close.ts'), 'utf-8')).toMatch(
-        /canvas: \(tab\) => \{[^}]*closeCanvas/
+        /canvas: removeTab/
+      )
+      expect(readFileSync(join(RENDERER, 'stores', 'project-store.ts'), 'utf-8')).toMatch(
+        /unmountCanvases\(\[id\]\)/
+      )
+      expect(
+        readFileSync(join(RENDERER, 'layouts', 'workspace-layout', 'use-app-close.ts'), 'utf-8')
+      ).toMatch(/unmountCanvases\(\)/)
+      expect(readFileSync(join(LIB_DIR, 'tauri-canvas-api.ts'), 'utf-8')).toContain(
+        'IPC_COMMANDS.CLOSE, { projectId, mountSeq, discard }'
+      )
+      expect(readFileSync(join(LIB_DIR, 'web-canvas-api.ts'), 'utf-8')).toContain(
+        "'/canvas/close', { projectId, mountSeq, discard }"
       )
       const tree = join(RENDERER, 'stores', 'workspace-store', 'tree.ts')
       expect(readFileSync(tree, 'utf-8')).toMatch(/export function canvasTabId/)

@@ -6,14 +6,13 @@ mod agent_registry;
 mod agentation;
 mod browser_automation;
 mod browser_tab_manager;
-// OpenPencil canvas mode (spec-openpencil-canvas-mode): shared, Tauri-free
-// daemon pool + proxies. Compiled unconditionally so the standalone
-// `termul-server` (server_main.rs) constructs its own pool too.
+// Canvas mode: shared, Tauri-free bundle server + persistence. Compiled
+// unconditionally so the standalone `termul-server` mounts the same routes.
 pub mod canvas;
 // One host per durable path (AD-14): sidecar `File::try_lock` locks taken before
 // any store opens. Tauri-free so the desktop and `termul-server` share it.
-pub mod data_lock;
 mod commands;
+pub mod data_lock;
 mod exit_cleanup;
 mod logging;
 mod migrations;
@@ -1333,11 +1332,6 @@ pub fn run() {
             Arc::new(browser_tab_manager::BrowserTabManager::new(handle.clone()));
             app.manage(browser_tab_manager.clone());
 
-            // OpenPencil canvas mode: the shared daemon pool. Tauri-free so
-            // the standalone server composes it too; the desktop's four
-            // canvas_* commands drive it.
-            app.manage(Arc::new(crate::canvas::pool::CanvasDaemonPool::real()));
-
             // figcraft canvas bundle: the 127.0.0.1:0 static listener the
             // canvas iframe loads from (restarted if it dies).
             crate::canvas::static_server::log_bundle_status();
@@ -2007,16 +2001,17 @@ pub fn run() {
             agentation::agentation_reply,
             agentation::agentation_set_enabled,
             agentation::agentation_is_enabled,
-            // OpenPencil canvas mode (managed sidecar daemon lifecycle)
+            // Canvas mode (figcraft editor mount and persistence)
             commands::canvas_open,
             commands::canvas_close,
             commands::canvas_read_document,
             commands::canvas_document_loaded,
             commands::canvas_dirty_changed,
+            commands::canvas_set_visible,
             commands::canvas_write_snapshot,
-            commands::canvas_save,
-            commands::canvas_status,
-            commands::canvas_bundle_base,
+            commands::canvas_disk_changed,
+            commands::canvas_resolve_conflict,
+            commands::canvas_crashed,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -2069,17 +2064,15 @@ pub fn run() {
                 .try_state::<web::ws::channel::WsChannelHost>()
                 .map(|state| state.inner().clone());
 
-            // OpenPencil canvas mode: join the daemon pool shutdown (stdin
-            // EOF → kill) in the exit cleanup so no op-host-web-server
-            // process outlives the app.
-            let canvas_pool = app_handle
-                .try_state::<Arc<crate::canvas::pool::CanvasDaemonPool>>()
-                .map(|state| state.inner().clone());
-
             let pty_manager = app_handle
                 .try_state::<Arc<PtyManager>>()
                 .map(|state| state.inner().clone());
             let preserve = async move {
+                // Figcraft canvases save through their renderer (AD-31), so
+                // this runs while the Channel and remote sockets are still up.
+                // The quit dialog already flushed them; this catches an exit
+                // that skipped it.
+                crate::canvas::static_server::close_all_canvases_bounded().await;
                 if let Some(ssh_manager) = ssh_manager {
                     ssh_manager.shutdown().await;
                 }
@@ -2107,9 +2100,6 @@ pub fn run() {
             let teardown = async move {
                 if let Some(pty_manager) = pty_manager {
                     pty_manager.kill_all().await;
-                }
-                if let Some(canvas_pool) = canvas_pool {
-                    canvas_pool.shutdown_all().await;
                 }
                 if let Some(browser_tab_manager) = browser_tab_manager {
                     browser_tab_manager.destroy_all();

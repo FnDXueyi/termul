@@ -39,6 +39,24 @@ pub fn strip_verbatim_prefix(path: &str) -> Cow<'_, str> {
     Cow::Borrowed(path)
 }
 
+/// A Windows path a client sent, in plain backslash form: separators become
+/// `\` and a verbatim prefix is dropped, whatever slashes it was spelled
+/// with (`\\?\D:\p`, `//?/D:/p`, `\\?\D:\p/doc`). Clients echo the registry's
+/// verbatim project roots back joined with `/`, and a verbatim path treats
+/// `/` as part of a file name, so it names a different file.
+pub fn plain_windows_client_path(raw: &str) -> String {
+    strip_verbatim_prefix(&raw.replace('/', r"\")).into_owned()
+}
+
+/// The path a client sent, in this host's native spelling.
+pub fn client_path(raw: &str) -> String {
+    if cfg!(windows) {
+        plain_windows_client_path(raw)
+    } else {
+        raw.to_string()
+    }
+}
+
 /// Validates that a search path is within the allowed project boundary.
 /// Returns the canonicalized path if valid, or an error if the path
 /// attempts to escape the project root or contains path traversal.

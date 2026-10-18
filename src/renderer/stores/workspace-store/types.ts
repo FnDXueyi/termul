@@ -40,7 +40,7 @@ export type WorkspaceTab =
       oldPath?: string
     }
   | {
-      /** OpenPencil canvas tab (singleton per project — AD-7): the id is a
+      /** Canvas tab (singleton per project — AD-7): the id is a
        * deterministic function of the projectId, so repeat opens focus the
        * existing tab and a doc switch re-binds `docPath` in place. */
       type: 'canvas'
@@ -197,12 +197,11 @@ export interface WorkspaceState extends ProjectWorkspace {
    */
   addDiffTab: (cwd: string, path: string, staged: boolean, targetPaneId?: string) => void
   /**
-   * Open (or activate) the project's canvas tab (OpenPencil canvas mode,
-   * AD-7 singleton-per-project): the tab id is a deterministic function of
-   * the projectId, so a repeat open focuses the one existing tab regardless
-   * of the doc, and opening a different `.op` re-binds `docPath` in place
-   * (the pool releases the old doc's daemon and acquires the new one; the
-   * iframe navigates to the new embed URL).
+   * Open (or activate) the project's canvas tab (AD-7 singleton-per-project):
+   * the tab id is a deterministic function of the projectId, so a repeat open
+   * focuses the one existing tab regardless of the doc, and opening a
+   * different `.figcraft` re-binds `docPath` in place (the host remounts the
+   * canvas on the new doc).
    */
   addCanvasTab: (projectId: string, docPath: string, targetPaneId?: string) => void
   /**

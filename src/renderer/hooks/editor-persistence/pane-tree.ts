@@ -224,7 +224,7 @@ export function reconcileTerminalTabs(
           case 'commit-diff':
             return [tab]
           case 'canvas':
-            // Canvas tabs: the daemon/iframe runtime is host-local state, never
+            // Canvas tabs: the mount/iframe runtime is host-local state, never
             // portable across a restore — dropped here like every other
             // non-portable tab body; the canvas re-opens user-initiated.
             return []

@@ -6,10 +6,12 @@
 //! - `termul-server` (and the desktop's shared-live server) mount the same
 //!   [`serve_bundle`] under `web::canvas_api` and the iframe is same-origin.
 //!
-//! Authorization is per canvas: the first request carries the `ct` query
-//! token and gets the per-canvas cookie back, which then authorizes the
-//! bundle's sub-resources (their relative URLs drop the query). Neither the
-//! token nor the cookie value is ever logged.
+//! Authorization is per canvas: the canvas token is the path segment after
+//! the canvas id, `/canvas/<id>/<token>/...`, so the bundle's relative
+//! sub-resource URLs carry it as well. A cookie cannot do this on the
+//! desktop: the loopback iframe is a cross-site frame inside the app
+//! webview, and WKWebView and WebKitGTK drop third-party cookies by default.
+//! The token is never logged.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -29,13 +31,13 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::persistence::{autosave_delay, canvas_mounts};
+use super::persistence::{
+    autosave_delay, canvas_mounts, crash_timeouts, lease_grace, mount_cap, CloseMode, CloseOutcome,
+    Eviction, LeaseChange, MountRequest, RendererId,
+};
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
-
-/// Cookie-name prefix for the per-canvas session cookie: `op_canvas_ct_<id>`.
-pub const CANVAS_COOKIE_PREFIX: &str = "op_canvas_ct_";
 
 /// Typed error for a renderer query while the desktop listener is not bound.
 pub const CODE_BUNDLE_LISTENER_DOWN: &str = "BUNDLE_LISTENER_DOWN";
@@ -43,69 +45,11 @@ pub const CODE_BUNDLE_LISTENER_DOWN: &str = "BUNDLE_LISTENER_DOWN";
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
-pub fn canvas_cookie_name(canvas_id: &str) -> String {
-    format!("{CANVAS_COOKIE_PREFIX}{canvas_id}")
-}
-
 /// A fresh 32-hex-char token from the OS CSPRNG. Never logged.
 pub fn generate_token() -> Result<String, &'static str> {
     let mut raw = [0u8; 16];
     getrandom::getrandom(&mut raw).map_err(|_| "CSPRNG failure")?;
     Ok(raw.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-/// Raw (undecoded) query param. Canvas tokens are plain hex.
-pub fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
-    query?.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name == key).then_some(value)
-    })
-}
-
-fn cookie_values<'a>(headers: &'a HeaderMap, name: &'a str) -> impl Iterator<Item = &'a str> {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|cookies| cookies.split(';'))
-        .filter_map(move |pair| {
-            let (cookie_name, value) = pair.trim().split_once('=')?;
-            (cookie_name == name).then_some(value)
-        })
-}
-
-/// How a request proved it may read a canvas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Access {
-    Denied,
-    Query,
-    Cookie,
-}
-
-impl Access {
-    pub fn granted(self) -> bool {
-        self != Self::Denied
-    }
-}
-
-/// The cookie attributes differ by surface. A same-origin web iframe uses a
-/// first-party `Lax` cookie, which also works over plain `http` on a LAN. The
-/// desktop iframe lives on a loopback origin inside the app webview, so its
-/// cookie is third-party there and must be `SameSite=None; Secure` (browsers
-/// treat loopback `http` as a secure context for cookies).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CookiePolicy {
-    SameOrigin,
-    EmbeddedLoopback,
-}
-
-impl CookiePolicy {
-    fn attributes(self) -> &'static str {
-        match self {
-            Self::SameOrigin => "HttpOnly; SameSite=Lax",
-            Self::EmbeddedLoopback => "HttpOnly; SameSite=None; Secure",
-        }
-    }
 }
 
 /// Per-canvas session tokens for the bundle routes. Process-wide so the
@@ -137,35 +81,12 @@ impl BundleTokens {
         self.by_canvas.lock().contains_key(canvas_id)
     }
 
-    /// Constant-time check of the `ct` query token, then of any per-canvas
-    /// cookie. A browser holding both a stale and a current cookie of the
-    /// same name sends both, so every value is tried.
-    pub fn authorize(&self, canvas_id: &str, query: Option<&str>, headers: &HeaderMap) -> Access {
+    /// Constant-time check of the token a bundle path presents.
+    pub fn authorize(&self, canvas_id: &str, presented: &str) -> bool {
         let tokens = self.by_canvas.lock();
-        let Some(token) = tokens.get(canvas_id) else {
-            return Access::Denied;
-        };
-        let matches = |presented: &str| -> bool {
+        tokens.get(canvas_id).is_some_and(|token| {
             !presented.is_empty() && token.as_bytes().ct_eq(presented.as_bytes()).into()
-        };
-        if query_param(query, "ct").is_some_and(matches) {
-            return Access::Query;
-        }
-        let name = canvas_cookie_name(canvas_id);
-        if cookie_values(headers, &name).any(matches) {
-            return Access::Cookie;
-        }
-        Access::Denied
-    }
-
-    fn session_cookie(&self, canvas_id: &str, policy: CookiePolicy) -> Option<HeaderValue> {
-        let token = self.by_canvas.lock().get(canvas_id)?.clone();
-        HeaderValue::from_str(&format!(
-            "{}={token}; Path=/canvas/{canvas_id}/; {}",
-            canvas_cookie_name(canvas_id),
-            policy.attributes()
-        ))
-        .ok()
+        })
     }
 }
 
@@ -191,7 +112,7 @@ pub fn same_origin_base() -> CanvasBundleBase {
 }
 
 /// What the renderer needs to mount a project's canvas: it builds the iframe
-/// URL `<baseUrl>/canvas/<canvasId>/?embed=kiosk&ct=<canvasToken>&ho=..&ms=<mountSeq>`
+/// URL `<baseUrl>/canvas/<canvasId>/<canvasToken>/?embed=kiosk&ho=..&ms=<mountSeq>`
 /// itself. No `Debug`: the token must never reach a log line.
 #[derive(Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -204,29 +125,90 @@ pub struct CanvasOpenInfo {
     /// The new mount's sequence number (persistence registry); every bridge
     /// envelope and persistence call for this mount carries it.
     pub mount_seq: u64,
+    /// Canvases this open unloaded to stay under `canvas.max_mounted` (AD-26),
+    /// each saved first. The renderer shows them as unloaded.
+    pub evicted: Vec<Eviction>,
+}
+
+/// What a renderer's open carries besides the document: the one shape both
+/// transports accept, `canvas_open`'s `request` argument and the rest of
+/// `POST /canvas/open`'s body. Every setting is optional; the host clamps it.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRequest {
+    /// The opening window or tab; it gets the lease.
+    pub client_instance_id: String,
+    /// `canvas.autosave_ms`.
+    pub autosave_ms: Option<u64>,
+    /// `canvas.lease_grace_ms`.
+    pub lease_grace_ms: Option<u64>,
+    /// `canvas.max_mounted`.
+    pub max_mounted: Option<u64>,
+    /// `canvas.crash_timeouts`.
+    pub crash_timeouts: Option<u32>,
 }
 
 /// Mint (or reuse) the project's bundle token and start a new persistence
-/// mount for the document. Shared by `canvas_open` and `POST /canvas/open`,
-/// which differ only in the base they pass.
-pub fn open_canvas(
+/// mount for the document, leased to the opening renderer (AD-30). The least
+/// recently active canvases beyond `max_mounted` are evicted first (AD-26),
+/// and another renderer's mount of this project is saved and unmounted
+/// first. Shared by `canvas_open` and `POST /canvas/open`, which differ only
+/// in the base they pass.
+///
+/// # Errors
+/// `INVALID_PAYLOAD` for a malformed `clientInstanceId`;
+/// `EVICTION_BLOCKED` when a canvas that must make room could not be saved
+/// (it stays mounted and nothing new mounts); `CANVAS_OPEN_ELSEWHERE` when
+/// the renderer holding the lease could not save; `TOKEN_GENERATION_FAILED`.
+pub async fn open_canvas(
     base: CanvasBundleBase,
     project_id: &str,
     doc_key: String,
-    autosave_ms: Option<u64>,
+    request: OpenRequest,
 ) -> Result<CanvasOpenInfo, CanvasError> {
     let canvas_id = canvas_id_for_project(project_id);
+    let renderer_id = RendererId::parse(request.client_instance_id)?;
+    let renderer = renderer_id.log_label();
+    let cap = mount_cap(request.max_mounted);
+    let admitted = canvas_mounts()
+        .open(
+            project_id,
+            MountRequest {
+                renderer: renderer_id,
+                doc_path: PathBuf::from(&doc_key),
+                autosave: autosave_delay(request.autosave_ms),
+                lease_grace: lease_grace(request.lease_grace_ms),
+                crash_timeouts: crash_timeouts(request.crash_timeouts),
+            },
+            cap,
+        )
+        .await;
+    for eviction in &admitted.evicted {
+        release_token(&eviction.project_id);
+        log::info!(
+            "[canvas] evicted project_id={} reason=\"{}\" max_mounted={cap} for project_id={}",
+            crate::commands::sanitize_log_field(&eviction.project_id),
+            eviction.reason,
+            crate::commands::sanitize_log_field(project_id)
+        );
+    }
+    let opened = admitted.opened.inspect_err(|error| {
+        log::warn!(
+            "[canvas] open refused project_id={} renderer={renderer}: {}: {}",
+            crate::commands::sanitize_log_field(project_id),
+            error.code,
+            error.message
+        );
+    })?;
+    log_lease_change(project_id, &renderer, opened.mount_seq, &opened.lease);
+    let mount_seq = opened.mount_seq;
     let canvas_token = bundle_tokens().issue(&canvas_id).map_err(|reason| {
+        canvas_mounts().unmount(project_id);
         CanvasError::new(
             CODE_TOKEN_GENERATION_FAILED,
             format!("failed to mint the canvas session token: {reason}"),
         )
     })?;
-    let mount_seq = canvas_mounts().mount(
-        project_id,
-        PathBuf::from(&doc_key),
-        autosave_delay(autosave_ms),
-    );
     Ok(CanvasOpenInfo {
         canvas_id,
         base_url: base.base_url,
@@ -234,24 +216,145 @@ pub fn open_canvas(
         pin_tag: base.pin_tag,
         doc_key,
         mount_seq,
+        evicted: admitted.evicted,
     })
 }
 
-/// Revoke the project's bundle token so its iframe URL and cookie stop
-/// authorizing, and drop its persistence mount. Idempotent.
-pub fn close_canvas(project_id: &str) {
-    bundle_tokens().revoke(&canvas_id_for_project(project_id));
-    canvas_mounts().unmount(project_id);
+fn log_lease_change(project_id: &str, renderer: &str, mount_seq: u64, change: &LeaseChange) {
+    let project_id = crate::commands::sanitize_log_field(project_id);
+    match change {
+        LeaseChange::Granted => log::info!(
+            "[canvas] lease granted project_id={project_id} renderer={renderer} mount_seq={mount_seq}"
+        ),
+        LeaseChange::Remounted { previous } => log::info!(
+            "[canvas] lease kept by its renderer project_id={project_id} renderer={renderer} mount_seq={mount_seq} replaced={previous}"
+        ),
+        LeaseChange::TakenOver {
+            previous,
+            saved_version,
+        } => log::info!(
+            "[canvas] lease taken over project_id={project_id} renderer={renderer} mount_seq={mount_seq} from_mount_seq={previous} saved={}",
+            saved_version.as_deref().unwrap_or("none")
+        ),
+    }
 }
 
-/// `/canvas/<id>` is `(id, None)`; `/canvas/<id>/a/b` is `(id, Some("a/b"))`.
-fn split_canvas_path(path: &str) -> Option<(&str, Option<&str>)> {
-    let rest = path.strip_prefix("/canvas/")?;
-    let (id, tail) = match rest.split_once('/') {
-        Some((id, tail)) => (id, Some(tail)),
-        None => (rest, None),
-    };
-    (!id.is_empty()).then_some((id, tail))
+/// Unmount the renderer's mount `mount_seq` of the project through the AD-31
+/// sequence (quiesce, save, verify, unmount), then revoke the project's
+/// bundle token once no mount is left, so the iframe URL stops authorizing.
+/// A mount a newer open replaced is not the project's mount any more: the
+/// close leaves the newer one and its token alone. Shared by `canvas_close`
+/// and `POST /canvas/close`. Idempotent. A failed save keeps the mount and
+/// the token: the caller asks the user, who retries or closes again with
+/// [`CloseMode::Discard`].
+///
+/// # Errors
+/// `SAVE_FAILED` or `CANVAS_CLOSING` from the sequence.
+pub async fn close_canvas(
+    project_id: &str,
+    mount_seq: u64,
+    mode: CloseMode,
+) -> Result<CloseOutcome, CanvasError> {
+    let outcome = canvas_mounts()
+        .close_mount(project_id, mount_seq, mode)
+        .await?;
+    release_token(project_id);
+    Ok(outcome)
+}
+
+/// Revoke the project's bundle token unless it has a mount: an open reuses
+/// the token, so revoking it under a live mount would lock out its iframe.
+fn release_token(project_id: &str) {
+    canvas_mounts().when_unmounted(project_id, || {
+        bundle_tokens().revoke(&canvas_id_for_project(project_id));
+    });
+}
+
+/// Close whatever the project has mounted; test cleanup.
+#[cfg(test)]
+pub(crate) async fn close_current_canvas(
+    project_id: &str,
+    mode: CloseMode,
+) -> Result<CloseOutcome, CanvasError> {
+    let outcome = canvas_mounts().close(project_id, mode).await?;
+    release_token(project_id);
+    Ok(outcome)
+}
+
+/// How long app exit waits for the canvases to save before moving on.
+pub const EXIT_FLUSH_BOUND: Duration = Duration::from_secs(5);
+
+/// [`close_all_canvases`] bounded by [`EXIT_FLUSH_BOUND`], so an unresponsive
+/// renderer cannot hold the rest of the exit cleanup.
+pub async fn close_all_canvases_bounded() {
+    if canvas_mounts().mounted_projects().is_empty() {
+        return;
+    }
+    if tokio::time::timeout(EXIT_FLUSH_BOUND, close_all_canvases())
+        .await
+        .is_err()
+    {
+        log::error!(
+            "[canvas] exit: canvases still saving after {}s; exiting without them",
+            EXIT_FLUSH_BOUND.as_secs()
+        );
+    }
+}
+
+/// App exit (desktop quit, termul-server shutdown): save and unmount every
+/// canvas, each through the AD-31 sequence. Nobody is left to ask at this
+/// point, so a failed save is logged by project; the renderer's quit flow
+/// asks the user before it gets here.
+pub async fn close_all_canvases() -> usize {
+    let closed = canvas_mounts().close_all().await;
+    let mut failed = 0;
+    for (project_id, result) in &closed {
+        match result {
+            Ok(outcome) => {
+                release_token(project_id);
+                log::info!(
+                    "[canvas] exit: closed project_id={} saved={} discarded={}",
+                    crate::commands::sanitize_log_field(project_id),
+                    outcome.saved_version.as_deref().unwrap_or("none"),
+                    outcome.discarded
+                );
+            }
+            Err(error) => {
+                failed += 1;
+                log::error!(
+                    "[canvas] exit: unsaved canvas changes could not be saved project_id={} code={}: {}",
+                    crate::commands::sanitize_log_field(project_id),
+                    error.code,
+                    error.message
+                );
+            }
+        }
+    }
+    failed
+}
+
+/// `/canvas/<id>/<token>[/<tail>]`. `tail` is `None` for the bare
+/// `/canvas/<id>/<token>`, which redirects to its trailing-slash form so
+/// relative URLs resolve under the token.
+struct BundlePath<'a> {
+    canvas_id: &'a str,
+    token: &'a str,
+    tail: Option<&'a str>,
+}
+
+impl<'a> BundlePath<'a> {
+    fn parse(path: &'a str) -> Option<Self> {
+        let (canvas_id, rest) = path.strip_prefix("/canvas/")?.split_once('/')?;
+        let (token, tail) = match rest.split_once('/') {
+            Some((token, tail)) => (token, Some(tail)),
+            None => (rest, None),
+        };
+        (!canvas_id.is_empty() && !token.is_empty()).then_some(Self {
+            canvas_id,
+            token,
+            tail,
+        })
+    }
 }
 
 fn unauthorized() -> Response {
@@ -266,31 +369,22 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
-/// Gate and serve one `/canvas/<id>[/...]` request from the bundle.
-pub fn serve_bundle(
-    policy: CookiePolicy,
-    method: &Method,
-    uri: &Uri,
-    headers: &HeaderMap,
-) -> Response {
-    let Some((canvas_id, tail)) = split_canvas_path(uri.path()) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let tokens = bundle_tokens();
-    let access = tokens.authorize(canvas_id, uri.query(), headers);
-    if !access.granted() {
-        log::warn!(
-            "[canvas] bundle request rejected: missing or invalid session token path={}",
-            uri.path()
-        );
+/// Gate and serve one `/canvas/<id>/<token>[/...]` request from the bundle.
+pub fn serve_bundle(method: &Method, uri: &Uri, headers: &HeaderMap) -> Response {
+    let Some(path) = BundlePath::parse(uri.path())
+        .filter(|path| bundle_tokens().authorize(path.canvas_id, path.token))
+    else {
+        log::warn!("[canvas] bundle request rejected: missing or invalid canvas token");
         return unauthorized();
-    }
-
-    let mut response = match tail {
+    };
+    match path.tail {
         None => {
             let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
             let mut redirect = StatusCode::PERMANENT_REDIRECT.into_response();
-            if let Ok(location) = HeaderValue::from_str(&format!("/canvas/{canvas_id}/{query}")) {
+            if let Ok(location) = HeaderValue::from_str(&format!(
+                "/canvas/{}/{}/{query}",
+                path.canvas_id, path.token
+            )) {
                 redirect.headers_mut().insert(header::LOCATION, location);
             }
             redirect
@@ -299,14 +393,8 @@ pub fn serve_bundle(
             log_bundle_missing_once();
             assets::canvas_bundle_missing_response()
         }
-        Some(path) => assets::canvas_bundle_response(method, path, headers),
-    };
-    if access == Access::Query {
-        if let Some(cookie) = tokens.session_cookie(canvas_id, policy) {
-            response.headers_mut().append(header::SET_COOKIE, cookie);
-        }
+        Some(tail) => assets::canvas_bundle_response(method, tail, headers),
     }
-    response
 }
 
 fn log_bundle_missing_once() {
@@ -332,7 +420,7 @@ pub fn log_bundle_status() {
 }
 
 async fn desktop_bundle_handler(method: Method, uri: Uri, headers: HeaderMap) -> Response {
-    serve_bundle(CookiePolicy::EmbeddedLoopback, &method, &uri, &headers)
+    serve_bundle(&method, &uri, &headers)
 }
 
 /// The loopback listener's whole route set.

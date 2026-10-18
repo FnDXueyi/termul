@@ -11,6 +11,7 @@ vi.mock('@/lib/log-api', () => ({
 }))
 
 import {
+  answerGatewayCall,
   asJsonText,
   buildCanvasEmbedUrl,
   type CanvasBridge,
@@ -52,7 +53,7 @@ function fakeEditor(): FakeEditor {
 }
 
 describe('buildCanvasEmbedUrl', () => {
-  it('builds the AD-22 kiosk URL with the host origin and mount sequence', () => {
+  it('builds the AD-22 kiosk URL with the token as a path segment', () => {
     expect(
       buildCanvasEmbedUrl(
         { baseUrl: 'http://127.0.0.1:5199', canvasId: 'cv0123456789abcdef', canvasToken: 'ab12' },
@@ -60,7 +61,7 @@ describe('buildCanvasEmbedUrl', () => {
         3
       )
     ).toBe(
-      'http://127.0.0.1:5199/canvas/cv0123456789abcdef/?embed=kiosk&ct=ab12&ho=http%3A%2F%2Ftauri.localhost&ms=3'
+      'http://127.0.0.1:5199/canvas/cv0123456789abcdef/ab12/?embed=kiosk&ho=http%3A%2F%2Ftauri.localhost&ms=3'
     )
   })
 
@@ -71,7 +72,7 @@ describe('buildCanvasEmbedUrl', () => {
         'https://termul.example',
         1
       )
-    ).toBe('/canvas/cv1/?embed=kiosk&ct=ff&ho=https%3A%2F%2Ftermul.example&ms=1')
+    ).toBe('/canvas/cv1/ff/?embed=kiosk&ho=https%3A%2F%2Ftermul.example&ms=1')
   })
 })
 
@@ -238,5 +239,90 @@ describe('createCanvasBridge', () => {
 
     editor.send({ method: 'event.crashed', params: '{}', mountSeq: MOUNT_SEQ })
     expect(events).toEqual([{ method: 'event.ready' }])
+  })
+})
+
+describe('answerGatewayCall', () => {
+  let editor: FakeEditor
+  let bridge: CanvasBridge
+
+  beforeEach(() => {
+    editor = fakeEditor()
+    bridge = createCanvasBridge({
+      iframe: editor.iframe,
+      canvasOrigin: CANVAS_ORIGIN,
+      mountSeq: MOUNT_SEQ,
+      onEvent: () => {}
+    })
+    editor.ready()
+  })
+
+  afterEach(() => {
+    bridge.dispose()
+  })
+
+  it('maps the gateway callId onto a bridge request and returns the result text unparsed', async () => {
+    const call = {
+      callId: 41,
+      mountSeq: MOUNT_SEQ,
+      method: 'node.get',
+      params: '{"id":18446744073709551615}'
+    }
+    const answer = answerGatewayCall(call, MOUNT_SEQ, (method, params) =>
+      bridge.call(method, params)
+    )
+    const request = editor.lastRequest()
+    expect(request).toEqual({
+      id: 1,
+      method: 'node.get',
+      params: '{"id":18446744073709551615}',
+      mountSeq: MOUNT_SEQ
+    })
+    editor.send({
+      id: request.id,
+      ok: true,
+      result: '{"id":18446744073709551615}',
+      mountSeq: MOUNT_SEQ
+    })
+    await expect(answer).resolves.toEqual({
+      callId: 41,
+      mountSeq: MOUNT_SEQ,
+      ok: true,
+      result: '{"id":18446744073709551615}'
+    })
+  })
+
+  it('carries a typed editor error back under the gateway callId', async () => {
+    const answer = answerGatewayCall(
+      { callId: 5, mountSeq: MOUNT_SEQ, method: 'ui.screenshot', params: '{}' },
+      MOUNT_SEQ,
+      (method, params) => bridge.call(method, params)
+    )
+    editor.send({
+      id: editor.lastRequest().id,
+      ok: false,
+      error: { code: 'CANVAS_HIDDEN', message: 'hidden' },
+      mountSeq: MOUNT_SEQ
+    })
+    await expect(answer).resolves.toEqual({
+      callId: 5,
+      mountSeq: MOUNT_SEQ,
+      ok: false,
+      error: { code: 'CANVAS_HIDDEN', message: 'hidden' }
+    })
+  })
+
+  it('answers CANVAS_CLOSED without reaching the editor when the call targets another mount', async () => {
+    const answer = answerGatewayCall(
+      { callId: 9, mountSeq: MOUNT_SEQ - 1, method: 'document.inspect', params: '{}' },
+      MOUNT_SEQ,
+      (method, params) => bridge.call(method, params)
+    )
+    await expect(answer).resolves.toMatchObject({
+      callId: 9,
+      ok: false,
+      error: { code: 'CANVAS_CLOSED' }
+    })
+    expect(editor.posted).not.toHaveBeenCalled()
   })
 })

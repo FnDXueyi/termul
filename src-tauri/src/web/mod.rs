@@ -37,6 +37,8 @@ pub mod git_history_api;
 pub mod git_hunk_api;
 pub mod install_api;
 pub mod log_api;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod mcp_oauth_api;
 pub mod mcp_probe_api;
 pub mod mcp_servers_api;
@@ -99,11 +101,6 @@ pub(crate) fn test_pty_manager() -> Arc<PtyManager> {
 /// agent subprocesses via [`AcpManager::kill_all`]. Bind failures are returned
 /// to the caller. On serve error, agents are still killed before returning.
 ///
-/// `canvas_pool` is the standalone server's own [`crate::canvas::pool::CanvasDaemonPool`]
-/// (OpenPencil canvas mode) — never shared with a desktop host on the same
-/// machine. It is threaded into the `/canvas/*` routes and shut down
-/// (stdin-EOF → kill) in the serve cleanup, after Axum drains.
-///
 /// `registry` is the host's durable [`ProjectRegistry`] the router reads for
 /// `GET /projects` + project-root containment checks and writes through the
 /// project command service. The standalone binary opens it at startup from its
@@ -146,7 +143,6 @@ pub async fn serve(
     acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
     store: Arc<WebStore>,
     web_auth: Option<Arc<auth::WebAuth>>,
-    canvas_pool: Option<Arc<crate::canvas::pool::CanvasDaemonPool>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Idle agent reaper (standalone server; the desktop starts its own from
     // `lib.rs` — see the module doc for why this is NOT in `serve_router`).
@@ -182,7 +178,12 @@ pub async fn serve(
         ws_relay,
         registry,
         cfg,
-        shutdown_signal_future(),
+        // Figcraft canvases save through their renderer's socket (AD-31), so
+        // they flush before the sockets are told to close.
+        async {
+            shutdown_signal_future().await;
+            crate::canvas::static_server::close_all_canvases_bounded().await;
+        },
         acp_catalog,
         acp_install,
         store,
@@ -190,7 +191,6 @@ pub async fn serve(
         // `--allow-remote-writes` opt-in, not a deployment-mode deny.
         false,
         web_auth,
-        canvas_pool.clone(),
     )
     .await?;
 
@@ -223,13 +223,6 @@ pub async fn serve(
     }
     // PTY cleanup always runs — never skip terminal process-tree kill.
     pty.kill_all().await;
-
-    // Canvas mode (OpenPencil): dispose every managed canvas daemon (stdin
-    // EOF → kill) once Axum has drained. Runs unconditionally — never skip
-    // daemon cleanup because an earlier step failed.
-    if let Some(pool) = &canvas_pool {
-        pool.shutdown_all().await;
-    }
 
     if let Some(first) = cleanup_errors.into_iter().next() {
         return Err(first);
@@ -288,7 +281,6 @@ pub async fn serve_router(
     store: Arc<WebStore>,
     shared_live_writes_denied: bool,
     web_auth: Option<Arc<auth::WebAuth>>,
-    canvas_pool: Option<Arc<crate::canvas::pool::CanvasDaemonPool>>,
 ) -> Result<(SocketAddr, JoinHandle<()>), Box<dyn std::error::Error + Send + Sync>> {
     let bind_addr = cfg.bind_addr().ok_or_else(|| {
         format!(
@@ -368,11 +360,6 @@ pub async fn serve_router(
         // (harmless — never used).
         format!("http://{}", addr),
         web_auth,
-        // OpenPencil canvas mode: the /canvas/* routes' daemon pool. `None`
-        // (desktop shared-live) degrades those routes to typed 502
-        // DAEMON_DOWN — the desktop mounts its MCP proxy on the agentation
-        // server instead (AD-8).
-        canvas_pool,
         cfg.allowed_origins.clone(),
         connections,
     );

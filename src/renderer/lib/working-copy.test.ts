@@ -237,7 +237,7 @@ describe('tabPath', () => {
   it('returns null for tabs without a path', () => {
     const tabs: WorkspaceTab[] = [
       { type: 'browser', id: 'x', browserTabId: 'b' },
-      { type: 'canvas', id: 'x', projectId: 'p', docPath: 'E:/p/d.pen' },
+      { type: 'canvas', id: 'x', projectId: 'p', docPath: 'E:/p/d.figcraft' },
       { type: 'git', id: 'x', cwd: 'E:/p' },
       { type: 'git-history', id: 'x', cwd: 'E:/p' }
     ]
@@ -345,7 +345,7 @@ describe('resolveActiveWorkingCopy', () => {
   it('falls to the pick when the tab has no path', () => {
     const tabs: Array<WorkspaceTab | null> = [
       { type: 'browser', id: 'x', browserTabId: 'b' },
-      { type: 'canvas', id: 'x', projectId: 'p', docPath: 'E:/p/d.pen' },
+      { type: 'canvas', id: 'x', projectId: 'p', docPath: 'E:/p/d.figcraft' },
       { type: 'git', id: 'x', cwd: 'E:/p/.termul/worktrees/a' },
       { type: 'git-history', id: 'x', cwd: 'E:/p/.termul/worktrees/a' },
       null

@@ -8,9 +8,10 @@ use base64::Engine;
 
 use super::{
     autosave_delay, document_loaded, parse_version, read_document, write_snapshot,
-    CanvasPersistence, DirtyOutcome, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD,
+    CanvasPersistence, DirtyOutcome, MountRequest, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD,
 };
 use crate::canvas::{CODE_CANVAS_CLOSED, CODE_PATH_VALIDATION_FAILED};
+use crate::web::fs_api::{CheckedWrite, Expected};
 
 const PROJECT: &str = "project-persist";
 const DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -164,7 +165,7 @@ async fn the_first_save_of_a_new_document_creates_the_file() {
     assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
 }
 
-fn failing_write(_: &Path, _: &[u8]) -> std::io::Result<()> {
+fn failing_write(_: &Path, _: &[u8], _: Option<&Expected>) -> std::io::Result<CheckedWrite> {
     Err(std::io::Error::other("disk full"))
 }
 
@@ -209,9 +210,13 @@ async fn a_failed_real_write_leaves_the_saved_version() {
 
 static COUNTED_WRITES: AtomicUsize = AtomicUsize::new(0);
 
-fn counting_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn counting_write(
+    path: &Path,
+    bytes: &[u8],
+    _: Option<&Expected>,
+) -> std::io::Result<CheckedWrite> {
     COUNTED_WRITES.fetch_add(1, Ordering::SeqCst);
-    std::fs::write(path, bytes)
+    std::fs::write(path, bytes).map(|()| CheckedWrite::Written)
 }
 
 #[tokio::test]
@@ -231,17 +236,28 @@ async fn a_snapshot_older_than_the_saved_version_is_not_written() {
 }
 
 #[tokio::test]
-async fn only_figcraft_documents_are_written() {
+async fn only_figcraft_documents_mount() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("notes.txt");
-    let (mounts, seq) = mounted(path.clone());
-    mounts.document_loaded(PROJECT, seq, None).unwrap();
-    let refused = mounts
-        .write_snapshot(PROJECT, seq, 1, b"x".to_vec())
-        .await
-        .unwrap_err();
-    assert_eq!(refused.code, CODE_PATH_VALIDATION_FAILED);
-    assert!(!path.exists());
+    let mounts = CanvasPersistence::default();
+    let other = mounts.mount("project-other", doc_in(&dir), DEBOUNCE);
+    for name in ["notes.txt", ".env", "design.figcraft.bak", "figcraft"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"secret").unwrap();
+        let admitted = mounts
+            .open(PROJECT, MountRequest::for_test(path, DEBOUNCE), 1)
+            .await;
+        let refused = admitted.opened.expect_err(name);
+        assert_eq!(refused.code, CODE_PATH_VALIDATION_FAILED, "{name}");
+        assert!(admitted.evicted.is_empty(), "{name}: nothing makes room");
+    }
+    assert_eq!(mounts.mounted_projects(), vec!["project-other".to_string()]);
+    assert!(mounts.view("project-other", other).is_ok());
+
+    let upper = dir.path().join("design.FIGCRAFT");
+    let admitted = mounts
+        .open(PROJECT, MountRequest::for_test(upper, DEBOUNCE), 2)
+        .await;
+    assert!(admitted.opened.is_ok(), "the extension is case-insensitive");
 }
 
 #[tokio::test(start_paused = true)]

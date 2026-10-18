@@ -23,7 +23,7 @@ function transport(): CanvasApi {
 }
 
 export const canvasApi: CanvasApi = {
-  open(docPath, projectId, autosaveMs) {
+  open(docPath, projectId, options) {
     if (isMobileWebShellViewport()) {
       return Promise.resolve({
         success: false,
@@ -31,16 +31,22 @@ export const canvasApi: CanvasApi = {
         code: 'UNSUPPORTED_SURFACE'
       })
     }
-    return transport().open(docPath, projectId, autosaveMs)
+    return transport().open(docPath, projectId, options)
   },
-  close: (projectId) => transport().close(projectId),
+  close: (projectId, mountSeq, discard) => transport().close(projectId, mountSeq, discard),
+  setVisible: (projectId, mountSeq, visible) =>
+    transport().setVisible(projectId, mountSeq, visible),
   readDocument: (projectId, mountSeq) => transport().readDocument(projectId, mountSeq),
   documentLoaded: (projectId, mountSeq, ack) =>
     transport().documentLoaded(projectId, mountSeq, ack),
   dirtyChanged: (projectId, mountSeq, dirty, contentVersion) =>
     transport().dirtyChanged(projectId, mountSeq, dirty, contentVersion),
   writeSnapshot: (projectId, mountSeq, snapshot) =>
-    transport().writeSnapshot(projectId, mountSeq, snapshot)
+    transport().writeSnapshot(projectId, mountSeq, snapshot),
+  diskChanged: (projectId, mountSeq) => transport().diskChanged(projectId, mountSeq),
+  resolveConflict: (projectId, mountSeq, choice, snapshot) =>
+    transport().resolveConflict(projectId, mountSeq, choice, snapshot),
+  crashed: (projectId, mountSeq, reason) => transport().crashed(projectId, mountSeq, reason)
 }
 
 export { createTauriCanvasApi } from './tauri-canvas-api'

@@ -6,8 +6,16 @@
 //! - `POST /canvas/document-loaded` `{projectId, mountSeq, ack}` → view;
 //! - `POST /canvas/dirty-changed` `{projectId, mountSeq, dirty,
 //!   contentVersion}` → outcome, answered once the autosave debounce settles;
+//! - `POST /canvas/set-visible` `{projectId, mountSeq, visible}` → `null`,
+//!   the user-visibility half of the mount cap's activity ranking;
 //! - `POST /canvas/write-snapshot` `{projectId, mountSeq, snapshot}` →
-//!   `{view, markSaved}`.
+//!   `{view, markSaved}`;
+//! - `POST /canvas/disk-changed` `{projectId, mountSeq}` → `unchanged |
+//!   reload | conflict` (AD-27);
+//! - `POST /canvas/resolve-conflict` `{projectId, mountSeq, choice,
+//!   snapshot?}` → `{view, reload, copyPath}`;
+//! - `POST /canvas/crashed` `{projectId, mountSeq, reason}` → the remount
+//!   (AD-31).
 //!
 //! Merged into `canvas_api::canvas_router`, so they sit behind the outer
 //! bearer gate and the shared canvas write predicate like `/canvas/open`.
@@ -22,19 +30,24 @@ use axum::Router;
 use serde::Deserialize;
 
 use crate::canvas::persistence::{
-    self, canvas_mounts, DirtyOutcome, DocumentBytes, PersistenceView, WriteOutcome,
+    self, canvas_mounts, ConflictChoice, DirtyOutcome, DiskOutcome, DocumentBytes, PersistenceView,
+    Remount, ResolveOutcome, WriteOutcome,
 };
 use crate::canvas::CanvasError;
 use crate::web::canvas_api::{check_canvas_write, CanvasState};
 use crate::web::fs_api::IpcBody;
 
-/// The web routes this module serves; `canvas_api` exempts them from the
-/// `ct` gate and the router keeps them behind the bearer gate.
+/// The web routes this module serves; the router keeps them behind the
+/// bearer gate.
 pub const PERSISTENCE_ROUTES: &[&str] = &[
     "/canvas/read-document",
     "/canvas/document-loaded",
     "/canvas/dirty-changed",
+    "/canvas/set-visible",
     "/canvas/write-snapshot",
+    "/canvas/disk-changed",
+    "/canvas/resolve-conflict",
+    "/canvas/crashed",
 ];
 
 /// A snapshot is a whole `.figcraft` file as base64 inside JSON.
@@ -64,6 +77,32 @@ struct DirtyRequest {
     content_version: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisibleRequest {
+    project_id: String,
+    mount_seq: u64,
+    visible: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveRequest {
+    project_id: String,
+    mount_seq: u64,
+    choice: ConflictChoice,
+    #[serde(default)]
+    snapshot: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashedRequest {
+    project_id: String,
+    mount_seq: u64,
+    reason: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotRequest {
@@ -77,10 +116,17 @@ pub fn persistence_routes() -> Router<CanvasState> {
         .route("/canvas/read-document", post(read_document))
         .route("/canvas/document-loaded", post(document_loaded))
         .route("/canvas/dirty-changed", post(dirty_changed))
+        .route("/canvas/set-visible", post(set_visible))
         .route(
             "/canvas/write-snapshot",
             post(write_snapshot).layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BODY_BYTES)),
         )
+        .route("/canvas/disk-changed", post(disk_changed))
+        .route(
+            "/canvas/resolve-conflict",
+            post(resolve_conflict).layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BODY_BYTES)),
+        )
+        .route("/canvas/crashed", post(crashed))
 }
 
 fn body<T>(operation: &str, project_id: &str, result: Result<T, CanvasError>) -> Json<IpcBody<T>> {
@@ -146,6 +192,18 @@ async fn dirty_changed(
     body("dirty changed", &req.project_id, result)
 }
 
+async fn set_visible(
+    State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<VisibleRequest>,
+) -> Json<IpcBody<()>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/set-visible") {
+        return Json(forbidden);
+    }
+    let result = canvas_mounts().set_visible(&req.project_id, req.mount_seq, req.visible);
+    body("set visible", &req.project_id, result)
+}
+
 async fn write_snapshot(
     State(state): State<CanvasState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -176,4 +234,58 @@ async fn write_snapshot(
         }
     }
     body("write snapshot", &req.project_id, result)
+}
+
+async fn disk_changed(
+    State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<MountRequest>,
+) -> Json<IpcBody<DiskOutcome>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/disk-changed") {
+        return Json(forbidden);
+    }
+    let result = canvas_mounts()
+        .disk_changed(&req.project_id, req.mount_seq)
+        .await;
+    if let Ok(outcome) = &result {
+        crate::commands::log_disk_outcome(&req.project_id, outcome);
+    }
+    body("disk changed", &req.project_id, result)
+}
+
+async fn resolve_conflict(
+    State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<ResolveRequest>,
+) -> Json<IpcBody<ResolveOutcome>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/resolve-conflict") {
+        return Json(forbidden);
+    }
+    tracing::info!(
+        target: "termul::web::canvas",
+        "canvas conflict resolved project_id={} choice={:?}",
+        crate::commands::sanitize_log_field(&req.project_id),
+        req.choice
+    );
+    let result = persistence::resolve_conflict(
+        canvas_mounts(),
+        &req.project_id,
+        req.mount_seq,
+        req.choice,
+        req.snapshot.as_deref(),
+    )
+    .await;
+    body("resolve conflict", &req.project_id, result)
+}
+
+async fn crashed(
+    State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<CrashedRequest>,
+) -> Json<IpcBody<Remount>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/crashed") {
+        return Json(forbidden);
+    }
+    let result = canvas_mounts().crashed(&req.project_id, req.mount_seq, &req.reason);
+    body("crashed", &req.project_id, result)
 }

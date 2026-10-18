@@ -432,7 +432,7 @@ describe('useEditorPersistence', () => {
           type: 'canvas',
           id: 'canvas-project-a',
           projectId: 'project-a',
-          docPath: '/projects/a/design.op'
+          docPath: '/projects/a/design.figcraft'
         },
         {
           type: 'editor',
@@ -462,7 +462,7 @@ describe('useEditorPersistence', () => {
           type: 'canvas',
           id: 'canvas-project-a',
           projectId: 'project-a',
-          docPath: '/projects/a/design.op'
+          docPath: '/projects/a/design.figcraft'
         },
         { type: 'browser', id: 'browser-b1', browserTabId: 'b1' },
         { type: 'git', id: 'git-/projects/a', cwd: '/projects/a' },
@@ -1078,7 +1078,7 @@ describe('unrecognised persisted tab kinds (E4a)', () => {
       type: 'leaf',
       id: 'pane-1',
       activeTabId: 'canvas-1',
-      tabs: [{ type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }]
+      tabs: [{ type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.figcraft' }]
     } as unknown as PaneNode
     const result = reconcileTerminalTabs(root, new Set(), [], null)
     if (result.type !== 'leaf') throw new Error('expected leaf')

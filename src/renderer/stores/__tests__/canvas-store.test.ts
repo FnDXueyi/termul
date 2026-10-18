@@ -9,29 +9,52 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const {
   open,
   close,
+  setVisible,
   readDocument,
   documentLoaded,
   dirtyChanged,
   writeSnapshot,
+  diskChanged,
+  resolveConflict,
+  crashed,
   toastError,
+  toastWarning,
+  toastSuccess,
   logFrontendError
 } = vi.hoisted(() => ({
   open: vi.fn(),
   close: vi.fn(),
+  setVisible: vi.fn(),
   readDocument: vi.fn(),
   documentLoaded: vi.fn(),
   dirtyChanged: vi.fn(),
   writeSnapshot: vi.fn(),
+  diskChanged: vi.fn(),
+  resolveConflict: vi.fn(),
+  crashed: vi.fn(),
   toastError: vi.fn(),
+  toastWarning: vi.fn(),
+  toastSuccess: vi.fn(),
   logFrontendError: vi.fn()
 }))
 
 vi.mock('@/lib/canvas-api', () => ({
-  canvasApi: { open, close, readDocument, documentLoaded, dirtyChanged, writeSnapshot }
+  canvasApi: {
+    open,
+    close,
+    setVisible,
+    readDocument,
+    documentLoaded,
+    dirtyChanged,
+    writeSnapshot,
+    diskChanged,
+    resolveConflict,
+    crashed
+  }
 }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError }))
 vi.mock('sonner', () => ({
-  toast: { error: toastError, info: vi.fn(), success: vi.fn(), warning: vi.fn() }
+  toast: { error: toastError, info: vi.fn(), success: toastSuccess, warning: toastWarning }
 }))
 
 const THEME = {
@@ -57,6 +80,7 @@ import type {
 import type { IpcResult } from '@shared/types/ipc.types'
 import { asJsonText, createCanvasBridge } from '@/lib/canvas-bridge'
 import type { LeafNode } from '@/types/workspace.types'
+import { useAppSettingsStore } from '../app-settings-store'
 import { type CanvasMount, pinVerdict, useCanvasStore } from '../canvas-store'
 import { useWorkspaceStore } from '../workspace-store'
 
@@ -73,7 +97,8 @@ const INFO: CanvasOpenInfo = {
   canvasToken: 'token-a',
   pinTag: PIN,
   docKey: DOC_A,
-  mountSeq: 41
+  mountSeq: 41,
+  evicted: []
 }
 
 function openInfo(overrides: Partial<CanvasOpenInfo> = {}): IpcResult<CanvasOpenInfo> {
@@ -88,6 +113,7 @@ function view(overrides: Partial<CanvasPersistenceView> = {}): CanvasPersistence
     contentVersion: '3',
     savedVersion: '3',
     saveError: null,
+    conflict: null,
     ...overrides
   }
 }
@@ -199,12 +225,15 @@ function resetStores(): void {
 beforeEach(() => {
   vi.clearAllMocks()
   readCanvasThemeTokens.mockReturnValue(THEME)
-  close.mockResolvedValue({ success: true, data: true })
+  close.mockResolvedValue({
+    success: true,
+    data: { unmounted: true, savedVersion: null, discarded: false }
+  })
   resetStores()
 })
 
 afterEach(async () => {
-  await useCanvasStore.getState().closeCanvas(PROJECT)
+  await useCanvasStore.getState().unmountCanvas(PROJECT)
   vi.unstubAllEnvs()
   resetStores()
 })
@@ -214,7 +243,12 @@ describe('open and close', () => {
     open.mockResolvedValueOnce(openInfo())
     await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
 
-    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, 1500)
+    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, {
+      autosaveMs: 1500,
+      leaseGraceMs: 5000,
+      maxMounted: 2,
+      crashTimeouts: 3
+    })
     expect(session()?.phase.kind).toBe('loading')
     expect(currentMount()).toEqual({ mountSeq: 41, info: INFO })
     expect(canvasTabs()).toEqual([
@@ -234,7 +268,7 @@ describe('open and close', () => {
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_B)
     expect(session()?.docPath).toBe(DOC_B)
     expect(currentMount().mountSeq).toBe(42)
-    expect(close).not.toHaveBeenCalled()
+    expect(close).toHaveBeenCalledWith(PROJECT, INFO.mountSeq, false)
     expect(canvasTabs()).toHaveLength(1)
   })
 
@@ -254,32 +288,149 @@ describe('open and close', () => {
     )
   })
 
-  it('a close that lands while the open is in flight wins', async () => {
+  it('an unmount that lands while the open is in flight wins', async () => {
     let resolveOpen: (value: IpcResult<CanvasOpenInfo>) => void = () => {}
     open.mockReturnValueOnce(new Promise((resolve) => (resolveOpen = resolve)))
     const opening = useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
-    await useCanvasStore.getState().closeCanvas(PROJECT)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
     resolveOpen(openInfo())
 
     await expect(opening).resolves.toBe('superseded')
     expect(session()).toBeUndefined()
     expect(canvasTabs()).toHaveLength(0)
+    expect(close.mock.calls).toEqual([[PROJECT, INFO.mountSeq]])
   })
 
-  it('close unmounts: pending calls resolve CANVAS_CLOSED and the host mount is dropped', async () => {
+  it('an unmount the host ran drops the session: pending calls resolve CANVAS_CLOSED', async () => {
     open.mockResolvedValueOnce(openInfo())
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
     mountEditor()
     const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
 
-    await useCanvasStore.getState().closeCanvas(PROJECT)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
 
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
-    expect(close).toHaveBeenCalledWith(PROJECT)
+    expect(close).toHaveBeenCalledWith(PROJECT, INFO.mountSeq, false)
     expect(session()).toBeUndefined()
     await expect(
       useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
     ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+})
+
+describe('unmount refused by the host', () => {
+  it('a failed save keeps the session and its mount, and a discard then unmounts', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    mountEditor()
+    const mount = currentMount()
+    close.mockResolvedValueOnce({
+      success: false,
+      error: 'could not snapshot the canvas',
+      code: 'SAVE_FAILED'
+    })
+
+    const refused = await useCanvasStore.getState().unmountCanvas(PROJECT)
+
+    expect(refused).toMatchObject({ success: false, code: 'SAVE_FAILED' })
+    expect(currentMount()).toBe(mount)
+    expect(session()?.closing).toBe(false)
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    await expect(Promise.race([pending, Promise.resolve('waiting')])).resolves.toBe('waiting')
+
+    await expect(useCanvasStore.getState().unmountCanvas(PROJECT, true)).resolves.toMatchObject({
+      success: true
+    })
+    expect(close).toHaveBeenLastCalledWith(PROJECT, INFO.mountSeq, true)
+    expect(session()).toBeUndefined()
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+})
+
+describe('lease lost to another window', () => {
+  it('the saved-elsewhere mount shows as open elsewhere: bridge gone, calls CANVAS_CLOSED', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    const editor = await mountReady()
+    editor.dirty(true, '4')
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq - 1, 'elsewhere')
+    expect(session()?.phase.kind).toBe('ready')
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    expect(session()?.phase).toEqual({ kind: 'elsewhere' })
+    expect(session()?.dirty).toBe(false)
+    expect(session()?.docPath).toBe(DOC_A)
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    await expect(
+      useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    expect(canvasTabs()).toHaveLength(1)
+  })
+
+  it('a mount the host dropped after the grace shows as closed, not elsewhere', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'expired')
+
+    expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'CANVAS_CLOSED' })
+  })
+
+  it("a mount the cap evicted for another window's open shows as unloaded", async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await mountReady()
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'evicted')
+
+    expect(session()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+    expect(session()?.docPath).toBe(DOC_A)
+    await expect(
+      useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+
+  it('take back opens the canvas again here with a new mount', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    open.mockResolvedValueOnce(openInfo({ mountSeq: 57 }))
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
+
+    expect(open).toHaveBeenLastCalledWith(DOC_A, PROJECT, expect.any(Object))
+    expect(close).not.toHaveBeenCalled()
+    expect(session()?.phase.kind).toBe('loading')
+    expect(currentMount().mountSeq).toBe(57)
+  })
+
+  it('a refused take back keeps the elsewhere state and says why', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'This canvas is open in another window, and it could not be saved there',
+      code: 'CANVAS_OPEN_ELSEWHERE'
+    })
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(false)
+
+    expect(session()?.phase).toEqual({ kind: 'elsewhere' })
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('could not be saved there'))
+  })
+
+  it('closing an elsewhere canvas here leaves the mount in the other window alone', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    await expect(useCanvasStore.getState().unmountCanvas(PROJECT)).resolves.toMatchObject({
+      success: true,
+      data: { unmounted: false }
+    })
+    expect(close).not.toHaveBeenCalled()
+    expect(session()).toBeUndefined()
   })
 })
 
@@ -408,11 +559,61 @@ describe('mount and load', () => {
     expect(stale.posted).toHaveLength(0)
   })
 
-  it('an editor crash fails the mount', () => {
+  it('an editor crash remounts from the last save under the new mountSeq', async () => {
     const editor = mountEditor()
     editor.ready()
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    const remount = {
+      previousMountSeq: 41,
+      mountSeq: 43,
+      reason: 'the editor crashed: panic',
+      lost: { count: 4, sinceMs: 1_700_000_000_000 }
+    }
+    crashed.mockResolvedValueOnce(ok(remount))
     editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+
+    expect(crashed).toHaveBeenCalledWith(PROJECT, 41, 'panic')
+    expect(session()?.phase).toEqual({
+      kind: 'loading',
+      mount: { mountSeq: 43, info: { ...INFO, mountSeq: 43 } }
+    })
+    expect(session()?.crash).toEqual(remount)
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+
+  it('a remount that crashes again before it loaded is not retried', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    crashed.mockResolvedValueOnce(
+      ok({ previousMountSeq: 41, mountSeq: 43, reason: 'the editor crashed: panic', lost: null })
+    )
+    editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+    const again = mountEditor()
+    again.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 43 })
+    await flush()
+
+    expect(crashed).toHaveBeenCalledTimes(1)
     expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'EDITOR_CRASHED' })
+  })
+
+  it('a crash the host cannot remount fails the mount', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    crashed.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+    expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'EDITOR_CRASHED' })
+  })
+
+  it('a remount notice for a mount this window does not hold changes nothing', () => {
+    mountEditor()
+    const applied = useCanvasStore
+      .getState()
+      .applyRemount(PROJECT, { previousMountSeq: 7, mountSeq: 8, reason: 'x', lost: null })
+    expect(applied).toBe(false)
+    expect(currentMount().mountSeq).toBe(41)
   })
 })
 
@@ -554,11 +755,289 @@ describe('persistence', () => {
   })
 })
 
+describe('disk changes (AD-27)', () => {
+  const CONFLICT = { diskHash: 'ab'.repeat(32), version: '5' }
+
+  beforeEach(async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+  })
+
+  async function conflicted() {
+    const editor = await mountReady()
+    diskChanged.mockResolvedValueOnce(
+      ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+    )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+    return editor
+  }
+
+  it('a change under a clean editor reloads it with the disk bytes', async () => {
+    const editor = await mountReady()
+    diskChanged.mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '9', savedVersion: '9' })))
+    const checking = useCanvasStore.getState().checkDisk(PROJECT)
+    await flush()
+
+    expect(diskChanged).toHaveBeenCalledWith(PROJECT, 41)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"bmV3"}')
+    editor.reply('host.openDocument', '{"contentVersion":9}')
+    await checking
+
+    expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":9}')
+    expect(session()?.savedVersion).toBe('9')
+    expect(toastWarning).not.toHaveBeenCalled()
+  })
+
+  it('a change under unsaved edits raises the conflict once', async () => {
+    await conflicted()
+    expect(session()?.conflict).toEqual(CONFLICT)
+    diskChanged.mockResolvedValueOnce(
+      ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+    )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+    expect(toastWarning).toHaveBeenCalledTimes(1)
+  })
+
+  it('a save the host refused for a conflict is not a save error', async () => {
+    const editor = await mountReady()
+    writeSnapshot.mockResolvedValueOnce(
+      ok({ view: view({ dirty: true, conflict: CONFLICT }), markSaved: null })
+    )
+    const saving = useCanvasStore.getState().saveCanvas(PROJECT)
+    await flush()
+    editor.reply('host.snapshot', '{"contentVersion":4,"bytes":"Zm9v"}')
+    await expect(saving).resolves.toBe(false)
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it('keep mine clears the conflict, then saves the editor over the disk', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(
+      ok({ view: view({ dirty: true }), reload: null, copyPath: null })
+    )
+    writeSnapshot.mockResolvedValueOnce(ok({ view: view({ savedVersion: '5' }), markSaved: '5' }))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'keepMine')
+    await flush()
+    expect(resolveConflict).toHaveBeenCalledWith(PROJECT, 41, 'keepMine', undefined)
+    expect(session()?.conflict).toBeNull()
+    editor.reply('host.snapshot', '{"contentVersion":5,"bytes":"bWluZQ=="}')
+    await flush()
+    editor.reply('host.markSaved', '{"dirty":false,"contentVersion":5}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(writeSnapshot).toHaveBeenCalledWith(
+      PROJECT,
+      41,
+      '{"contentVersion":5,"bytes":"bWluZQ=="}'
+    )
+    expect(session()?.resolving).toBe(false)
+  })
+
+  it('take disk reloads the editor from the bytes the host read', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(ok({ view: view(), reload: 'ZGlzaw==', copyPath: null }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '6', savedVersion: '6' })))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'takeDisk')
+    await flush()
+    editor.reply('host.openDocument', '{"contentVersion":6}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"ZGlzaw=="}')
+    expect(session()).toMatchObject({ conflict: null, savedVersion: '6' })
+    expect(writeSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('save a copy snapshots the editor for the host, then reloads the disk', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(
+      ok({
+        view: view(),
+        reload: 'ZGlzaw==',
+        copyPath: 'C:/proj/design.conflict-20261018-101500.figcraft'
+      })
+    )
+    documentLoaded.mockResolvedValueOnce(ok(view()))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'saveCopy')
+    await flush()
+    editor.reply('host.snapshot', '{"contentVersion":5,"bytes":"bWluZQ=="}')
+    await flush()
+    expect(resolveConflict).toHaveBeenCalledWith(
+      PROJECT,
+      41,
+      'saveCopy',
+      '{"contentVersion":5,"bytes":"bWluZQ=="}'
+    )
+    editor.reply('host.openDocument', '{"contentVersion":3}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(toastSuccess).toHaveBeenCalledWith(
+      'Saved your version as design.conflict-20261018-101500.figcraft'
+    )
+  })
+
+  it('a refused resolution keeps the conflict and says why', async () => {
+    await conflicted()
+    resolveConflict.mockResolvedValueOnce({
+      success: false,
+      error: 'the canvas document was deleted',
+      code: 'DOCUMENT_DELETED'
+    })
+    await expect(useCanvasStore.getState().resolveConflict(PROJECT, 'takeDisk')).resolves.toBe(
+      false
+    )
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastError).toHaveBeenCalledWith(
+      'Could not resolve the canvas conflict: the canvas document was deleted'
+    )
+  })
+})
+
 describe('pinVerdict', () => {
   it('matches only the exact pinned tag and refuses only in release', () => {
     expect(pinVerdict('termul-v1', 'termul-v1', true)).toBe('match')
     expect(pinVerdict('dev', 'termul-v1', false)).toBe('mismatch-logged')
     expect(pinVerdict('dev', 'termul-v1', true)).toBe('mismatch-refused')
     expect(pinVerdict(null, 'termul-v1', true)).toBe('mismatch-refused')
+  })
+})
+
+describe('mount cap (AD-26)', () => {
+  const OTHER = 'proj-2'
+  const other = () => useCanvasStore.getState().sessions[OTHER]
+
+  const openOther = async (): Promise<void> => {
+    open.mockResolvedValueOnce(openInfo({ mountSeq: 50, canvasId: 'cv0000000000000002' }))
+    await useCanvasStore.getState().openCanvas(OTHER, DOC_B)
+  }
+
+  afterEach(() => {
+    useAppSettingsStore.setState({
+      settings: { ...useAppSettingsStore.getState().settings, canvasMaxMounted: 2 }
+    })
+  })
+
+  it('sends the canvas.max_mounted setting with each open', async () => {
+    useAppSettingsStore.setState({
+      settings: { ...useAppSettingsStore.getState().settings, canvasMaxMounted: 3 }
+    })
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, expect.objectContaining({ maxMounted: 3 }))
+  })
+
+  it('a canvas the host evicted becomes unloaded and loses its editor', async () => {
+    await openOther()
+    open.mockResolvedValueOnce(
+      openInfo({ evicted: [{ projectId: OTHER, reason: 'mount cap reached' }] })
+    )
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
+
+    expect(other()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+    expect(other()?.docPath).toBe(DOC_B)
+    expect(other()?.dirty).toBe(false)
+    expect(session()?.phase.kind).toBe('loading')
+    await expect(
+      useCanvasStore.getState().callCanvas(OTHER, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining(OTHER) })
+    )
+  })
+
+  it('an eviction is applied even when the open that caused it was superseded', async () => {
+    await openOther()
+    let resolveOpen: (value: IpcResult<CanvasOpenInfo>) => void = () => {}
+    open.mockReturnValueOnce(new Promise((resolve) => (resolveOpen = resolve)))
+    const opening = useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
+    resolveOpen(openInfo({ evicted: [{ projectId: OTHER, reason: 'mount cap reached' }] }))
+
+    await expect(opening).resolves.toBe('superseded')
+    expect(other()?.phase.kind).toBe('unloaded')
+  })
+
+  it('reopening an unloaded canvas opens it again and may evict another', async () => {
+    await openOther()
+    useCanvasStore.getState().markUnloaded(OTHER, 'evicted')
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+
+    open.mockResolvedValueOnce(
+      openInfo({
+        mountSeq: 60,
+        canvasId: 'cv0000000000000002',
+        evicted: [{ projectId: PROJECT, reason: 'mount cap reached' }]
+      })
+    )
+    await useCanvasStore.getState().openCanvas(OTHER, DOC_B)
+
+    expect(open).toHaveBeenLastCalledWith(DOC_B, OTHER, expect.objectContaining({ maxMounted: 2 }))
+    expect(other()?.phase.kind).toBe('loading')
+    expect(session()?.phase.kind).toBe('unloaded')
+  })
+
+  it('a refused reopen leaves the canvas unloaded, not failed', async () => {
+    await openOther()
+    useCanvasStore.getState().markUnloaded(OTHER, 'evicted')
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'listener down',
+      code: 'BUNDLE_LISTENER_DOWN'
+    })
+
+    await expect(useCanvasStore.getState().openCanvas(OTHER, DOC_B)).resolves.toBe(false)
+
+    expect(other()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+  })
+
+  it('an open blocked by a canvas that could not be saved shows the error in a panel and keeps no mount', async () => {
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'could not unload the least recently active canvas (project proj-2) to make room',
+      code: 'EVICTION_BLOCKED'
+    })
+
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(false)
+
+    expect(session()?.phase).toEqual({
+      kind: 'unloaded',
+      reason: 'blocked',
+      message: 'could not unload the least recently active canvas (project proj-2) to make room'
+    })
+    expect(canvasTabs()).toEqual([expect.objectContaining({ projectId: PROJECT })])
+    expect(toastError).toHaveBeenCalled()
+
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    expect(session()?.phase.kind).toBe('loading')
+  })
+
+  it('a visible report the host answers CANVAS_CLOSED unloads the canvas', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+
+    expect(setVisible).toHaveBeenCalledWith(PROJECT, 41, true)
+    expect(session()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+  })
+
+  it('a live mount, a hidden report and a stale mountSeq leave the session alone', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+
+    setVisible.mockResolvedValueOnce({ success: true, data: undefined })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, false)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 7, true)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'offline', code: 'NETWORK_ERROR' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+
+    expect(session()?.phase.kind).toBe('loading')
   })
 })

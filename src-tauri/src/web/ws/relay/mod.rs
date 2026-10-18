@@ -62,6 +62,12 @@ pub(crate) enum Outbound {
     /// A watch frame: the full state of a watch or one delta, serialized as the
     /// top-level `{"type":"watch", ...}` frame.
     Watch(crate::web::watch::WatchFrame),
+    /// A forwarded canvas call for the mount this connection holds, the
+    /// top-level `{"type":"canvas_call", ...}` frame.
+    Canvas(crate::acp::host_mcp::canvas::CanvasCallFrame),
+    /// Another renderer took a canvas lease from this connection, the
+    /// top-level `{"type":"canvas_lease_lost", ...}` frame.
+    CanvasLeaseLost(crate::acp::host_mcp::canvas::CanvasLeaseLostFrame),
     /// Terminal close handshake (CAP-11: after a binary-frame protocol error).
     /// The channel is FIFO, so everything enqueued ahead of it (the
     /// `unsupported` error reply) is flushed first; the write loop then sends
@@ -113,6 +119,8 @@ pub async fn ws_upgrade(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let lease = state.connections.shutdown.admit();
+    // No size override: a connection cannot raise tungstenite's limits once it
+    // has authenticated, so a bigger one would apply to every peer.
     ws.on_upgrade(move |socket| serve_socket(lease, socket, state, peer, Carrier::Ws))
 }
 
@@ -205,6 +213,7 @@ pub(super) async fn run_relay<S>(
         subscriptions,
     );
     let env = HandlerEnv::new(&state, out_tx.clone(), &conn);
+    let cleanup = cleanup.with_canvas_holder(state.acp.canvas_router(), env.connection_id.to_string());
 
     // The executor lives here, not in the read loop: after the tasks are
     // aborted its in-flight handlers are aborted AND awaited, so none can
@@ -238,6 +247,9 @@ pub(super) struct ConnectionCleanup {
     /// subscriptions are keyed by; released with the rest of the
     /// cleanup.
     watch_conn: Option<OutboundSender>,
+    /// The canvas router and this connection's holder id: the mounts it
+    /// holds are released with the rest of the cleanup.
+    canvas_holder: Option<(Arc<crate::acp::host_mcp::canvas::CanvasRouter>, String)>,
     state: Arc<std::sync::atomic::AtomicU8>,
 }
 
@@ -250,6 +262,7 @@ impl ConnectionCleanup {
             relay,
             subscriptions,
             watch_conn: None,
+            canvas_holder: None,
             state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
@@ -259,12 +272,24 @@ impl ConnectionCleanup {
         self
     }
 
-    /// Drop this connection's per-project fs watch and watch-hub subscriptions
-    /// (sync; safe from `Drop` outside a runtime).
+    pub(super) fn with_canvas_holder(
+        mut self,
+        router: Arc<crate::acp::host_mcp::canvas::CanvasRouter>,
+        holder_id: String,
+    ) -> Self {
+        self.canvas_holder = Some((router, holder_id));
+        self
+    }
+
+    /// Drop this connection's per-project fs watch, watch-hub subscriptions
+    /// and canvas mounts (sync; safe from `Drop` outside a runtime).
     fn release_watches(&self) {
         if let Some(conn) = &self.watch_conn {
             self.relay.fs_watches().unsubscribe_all(conn);
             self.relay.watches().unsubscribe_all(conn);
+        }
+        if let Some((router, holder_id)) = &self.canvas_holder {
+            router.release_holder(holder_id);
         }
     }
 

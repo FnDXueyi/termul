@@ -1,28 +1,28 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
+use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
 use axum::response::Response;
 use tower::ServiceExt;
 
 use super::canvas_id_for_project;
+use super::persistence::CloseMode;
 use super::pin::pinned_tag;
 use super::static_server::{
-    bundle_router, bundle_tokens, canvas_cookie_name, close_canvas, open_canvas, same_origin_base,
-    serve_bundle, Access, BundleTokens, CanvasBundleBase, CookiePolicy, StaticServer,
+    bundle_router, bundle_tokens, close_canvas, close_current_canvas, open_canvas,
+    same_origin_base, serve_bundle, BundleTokens, CanvasBundleBase, OpenRequest, StaticServer,
 };
-use crate::web::auth::{WebAuth, WebAuthToken};
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
 
-fn headers_with_cookie(name: &str, value: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::COOKIE,
-        HeaderValue::from_str(&format!("{name}={value}")).unwrap(),
-    );
-    headers
+fn tab(client_instance_id: &str) -> OpenRequest {
+    OpenRequest {
+        client_instance_id: client_instance_id.to_string(),
+        autosave_ms: None,
+        lease_grace_ms: None,
+        max_mounted: Some(16),
+        crash_timeouts: None,
+    }
 }
 
 async fn body_text(response: Response) -> String {
@@ -52,22 +52,24 @@ fn tokens_are_per_canvas_and_reused_until_revoked() {
     );
 }
 
-#[test]
-fn open_canvas_mints_one_token_per_project_until_close() {
+#[tokio::test]
+async fn open_canvas_mints_one_token_per_project_until_close() {
     let base = CanvasBundleBase {
         base_url: "http://127.0.0.1:4567".into(),
         pin_tag: "termul-test".into(),
     };
     let project = "project-open-canvas";
     let canvas_id = canvas_id_for_project(project);
-    let ct_query = |token: &str| format!("embed=kiosk&ct={token}");
-    let authorized = |token: &str| {
-        bundle_tokens()
-            .authorize(&canvas_id, Some(&ct_query(token)), &HeaderMap::new())
-            .granted()
-    };
+    let authorized = |token: &str| bundle_tokens().authorize(&canvas_id, token);
 
-    let first = open_canvas(base.clone(), project, "C:/p/design.figcraft".into(), None).unwrap();
+    let first = open_canvas(
+        base.clone(),
+        project,
+        "C:/p/design.figcraft".into(),
+        tab("tab-a"),
+    )
+    .await
+    .unwrap();
     let wire = serde_json::to_value(&first).unwrap();
     assert_eq!(
         wire,
@@ -78,14 +80,22 @@ fn open_canvas_mints_one_token_per_project_until_close() {
             "pinTag": "termul-test",
             "docKey": "C:/p/design.figcraft",
             "mountSeq": first.mount_seq,
+            "evicted": [],
         })
     );
     assert!(
         authorized(&first.canvas_token),
-        "the minted ct opens the bundle"
+        "the minted token opens the bundle"
     );
 
-    let again = open_canvas(base.clone(), project, "C:/p/other.figcraft".into(), None).unwrap();
+    let again = open_canvas(
+        base.clone(),
+        project,
+        "C:/p/other.figcraft".into(),
+        tab("tab-a"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         again.canvas_token, first.canvas_token,
         "a repeat open keeps the mounted iframe's URL valid"
@@ -95,70 +105,85 @@ fn open_canvas_mints_one_token_per_project_until_close() {
         "every open is a new mount with a new mountSeq"
     );
 
-    close_canvas(project);
+    let stale = close_canvas(project, first.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!stale.unmounted, "the replaced mount's close is a no-op");
+    assert!(
+        authorized(&again.canvas_token),
+        "the newer mount keeps the token"
+    );
+    close_canvas(project, again.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
     assert!(!authorized(&first.canvas_token), "close revokes the token");
-    close_canvas(project);
+    close_canvas(project, again.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
 
-    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), None).unwrap();
+    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), tab("tab-a"))
+        .await
+        .unwrap();
     assert_ne!(reopened.canvas_token, first.canvas_token);
     assert!(authorized(&reopened.canvas_token));
-    close_canvas(project);
+    close_canvas(project, reopened.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+}
+
+/// Another window took the canvas over while this window's close was on its
+/// way: the close lands after the takeover and must not unmount the new
+/// holder's canvas or revoke the token its iframe loads with.
+#[tokio::test]
+async fn a_close_that_lands_after_a_takeover_leaves_the_new_mount_and_its_token() {
+    let base = same_origin_base();
+    let project = "project-late-close";
+    let canvas_id = canvas_id_for_project(project);
+    let doc = "C:/p/design.figcraft";
+
+    let a = open_canvas(base.clone(), project, doc.into(), tab("tab-a"))
+        .await
+        .unwrap();
+    let b = open_canvas(base, project, doc.into(), tab("tab-b"))
+        .await
+        .unwrap();
+    assert_eq!(a.canvas_token, b.canvas_token);
+
+    let late = close_canvas(project, a.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!late.unmounted);
+    assert!(super::persistence::canvas_mounts()
+        .view(project, b.mount_seq)
+        .is_ok());
+    assert!(bundle_tokens().authorize(&canvas_id, &b.canvas_token));
+
+    close_current_canvas(project, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!bundle_tokens().authorize(&canvas_id, &b.canvas_token));
 }
 
 #[test]
-fn authorize_accepts_query_token_or_own_cookie_only() {
+fn authorize_accepts_only_the_canvas_own_token() {
     let tokens = BundleTokens::default();
     let token = tokens.issue("cv_auth_a").unwrap();
     let other = tokens.issue("cv_auth_b").unwrap();
-    let none = HeaderMap::new();
-    let query = format!("embed=kiosk&ct={token}");
 
-    assert_eq!(
-        tokens.authorize("cv_auth_a", Some(&query), &none),
-        Access::Query
-    );
-    assert_eq!(
-        tokens.authorize(
-            "cv_auth_a",
-            None,
-            &headers_with_cookie(&canvas_cookie_name("cv_auth_a"), &token)
-        ),
-        Access::Cookie
-    );
-
+    assert!(tokens.authorize("cv_auth_a", &token));
     let wrong_same_len = "0".repeat(32);
-    for denied in [
-        tokens.authorize("cv_auth_a", None, &none),
-        tokens.authorize("cv_auth_a", Some("ct="), &none),
-        tokens.authorize("cv_auth_a", Some(&format!("ct={wrong_same_len}")), &none),
-        tokens.authorize("cv_auth_a", Some(&format!("ct={other}")), &none),
-        tokens.authorize("cv_auth_unknown", Some(&query), &none),
-        tokens.authorize(
-            "cv_auth_a",
-            None,
-            &headers_with_cookie(&canvas_cookie_name("cv_auth_b"), &other),
-        ),
-        tokens.authorize(
-            "cv_auth_a",
-            None,
-            &headers_with_cookie(&canvas_cookie_name("cv_auth_a"), &other),
-        ),
+    for (canvas_id, presented) in [
+        ("cv_auth_a", ""),
+        ("cv_auth_a", wrong_same_len.as_str()),
+        ("cv_auth_a", other.as_str()),
+        ("cv_auth_a", &token[..31]),
+        ("cv_auth_unknown", token.as_str()),
     ] {
-        assert_eq!(denied, Access::Denied);
+        assert!(
+            !tokens.authorize(canvas_id, presented),
+            "{canvas_id} {presented}"
+        );
     }
-}
-
-#[test]
-fn a_stale_cookie_does_not_mask_the_current_one() {
-    let tokens = BundleTokens::default();
-    let token = tokens.issue("cv_dup").unwrap();
-    let name = canvas_cookie_name("cv_dup");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::COOKIE,
-        HeaderValue::from_str(&format!("{name}=stale; other=1; {name}={token}")).unwrap(),
-    );
-    assert_eq!(tokens.authorize("cv_dup", None, &headers), Access::Cookie);
 }
 
 #[test]
@@ -180,42 +205,8 @@ fn bundle_base_has_the_same_shape_on_both_surfaces() {
     assert_eq!(keys(&web), keys(&desktop));
 }
 
-#[tokio::test]
-async fn web_route_reports_the_same_origin_base_behind_the_bearer() {
-    let router = web_router(Some(Arc::new(WebAuth::new(
-        WebAuthToken::new("bundle-base-token").unwrap(),
-    ))));
-    let denied = router
-        .clone()
-        .oneshot(
-            Request::get("/canvas/bundle-base")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-
-    let allowed = router
-        .oneshot(
-            Request::get("/canvas/bundle-base")
-                .header(header::AUTHORIZATION, "Bearer bundle-base-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(allowed.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_str(&body_text(allowed).await).unwrap();
-    assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["baseUrl"], "");
-    assert_eq!(body["data"]["pinTag"], pinned_tag());
-}
-
-fn web_router(web_auth: Option<Arc<WebAuth>>) -> axum::Router {
+fn web_router() -> axum::Router {
     canvas_router::<()>(CanvasState {
-        pool: None,
-        web_auth,
         boundary: None,
         write_flags: WriteFlags {
             allow_remote_writes: false,
@@ -229,15 +220,13 @@ async fn unauthorized_bundle_request_never_reaches_the_bundle() {
     let id = "cv_unauth";
     bundle_tokens().issue(id).unwrap();
     let response = serve_bundle(
-        CookiePolicy::SameOrigin,
         &Method::GET,
-        &format!("/canvas/{id}/index.html?ct=nope")
+        &format!("/canvas/{id}/nope/index.html")
             .parse::<Uri>()
             .unwrap(),
         &HeaderMap::new(),
     );
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(response.headers().get(header::SET_COOKIE).is_none());
     let body = body_text(response).await;
     assert!(body.contains("UNAUTHORIZED"));
     assert!(!body.contains("nope"));
@@ -296,19 +285,18 @@ mod served_from_dev_dir {
         }
     }
 
-    fn get(policy: CookiePolicy, uri: &str, headers: &HeaderMap) -> Response {
-        serve_bundle(policy, &Method::GET, &uri.parse::<Uri>().unwrap(), headers)
+    fn get(uri: &str, headers: &HeaderMap) -> Response {
+        serve_bundle(&Method::GET, &uri.parse::<Uri>().unwrap(), headers)
     }
 
     #[tokio::test]
-    async fn first_gated_request_serves_the_page_and_sets_the_per_canvas_cookie() {
+    async fn the_token_path_serves_the_page_without_setting_a_cookie() {
         let _bundle = Bundle::standard();
         let id = "cv_first_page";
         let token = bundle_tokens().issue(id).unwrap();
 
         let response = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/?embed=kiosk&ct={token}"),
+            &format!("/canvas/{id}/{token}/?embed=kiosk"),
             &HeaderMap::new(),
         );
         assert_eq!(response.status(), StatusCode::OK);
@@ -320,73 +308,34 @@ mod served_from_dev_dir {
             response.headers()[header::CACHE_CONTROL],
             "private, no-cache"
         );
-        let cookie = response.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            cookie,
-            format!(
-                "{}={token}; Path=/canvas/{id}/; HttpOnly; SameSite=Lax",
-                canvas_cookie_name(id)
-            )
-        );
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
         assert_eq!(body_text(response).await, INDEX);
     }
 
     #[tokio::test]
-    async fn loopback_cookie_is_third_party_safe() {
-        let _bundle = Bundle::standard();
-        let id = "cv_loopback_cookie";
-        let token = bundle_tokens().issue(id).unwrap();
-        let response = get(
-            CookiePolicy::EmbeddedLoopback,
-            &format!("/canvas/{id}/?ct={token}"),
-            &HeaderMap::new(),
-        );
-        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
-        assert!(
-            cookie.ends_with("HttpOnly; SameSite=None; Secure"),
-            "{cookie}"
-        );
-    }
-
-    #[tokio::test]
-    async fn sub_resources_are_authorized_by_the_cookie_alone() {
+    async fn sub_resources_are_authorized_by_their_path_token_alone() {
         let _bundle = Bundle::standard();
         let id = "cv_subresource";
         let token = bundle_tokens().issue(id).unwrap();
-        let cookie = headers_with_cookie(&canvas_cookie_name(id), &token);
 
         let wasm = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/app_bg.wasm"),
-            &cookie,
+            &format!("/canvas/{id}/{token}/app_bg.wasm"),
+            &HeaderMap::new(),
         );
         assert_eq!(wasm.status(), StatusCode::OK);
         assert_eq!(wasm.headers()[header::CONTENT_TYPE], "application/wasm");
-        assert!(wasm.headers().get(header::SET_COOKIE).is_none());
 
-        let bare = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/app_bg.wasm"),
-            &HeaderMap::new(),
-        );
+        let bare = get(&format!("/canvas/{id}/app_bg.wasm"), &HeaderMap::new());
         assert_eq!(bare.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn revoking_a_canvas_stops_its_cookie() {
+    async fn revoking_a_canvas_stops_its_token_path() {
         let _bundle = Bundle::standard();
         let id = "cv_revoked";
         let token = bundle_tokens().issue(id).unwrap();
-        let cookie = headers_with_cookie(&canvas_cookie_name(id), &token);
         bundle_tokens().revoke(id);
-        let response = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/app.js"),
-            &cookie,
-        );
+        let response = get(&format!("/canvas/{id}/{token}/app.js"), &HeaderMap::new());
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -395,31 +344,21 @@ mod served_from_dev_dir {
         let _bundle = Bundle::standard();
         let id = "cv_etag";
         let token = bundle_tokens().issue(id).unwrap();
-        let cookie = headers_with_cookie(&canvas_cookie_name(id), &token);
-        let uri = format!("/canvas/{id}/app.js");
+        let none = HeaderMap::new();
+        let uri = format!("/canvas/{id}/{token}/app.js");
 
-        let first = get(CookiePolicy::SameOrigin, &uri, &cookie);
+        let first = get(&uri, &none);
         let etag = first.headers()[header::ETAG].clone();
-        let mut revalidate = cookie.clone();
+        let mut revalidate = HeaderMap::new();
         revalidate.insert(header::IF_NONE_MATCH, etag);
-        let second = get(CookiePolicy::SameOrigin, &uri, &revalidate);
+        let second = get(&uri, &revalidate);
         assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
 
-        let head = serve_bundle(
-            CookiePolicy::SameOrigin,
-            &Method::HEAD,
-            &uri.parse::<Uri>().unwrap(),
-            &cookie,
-        );
+        let head = serve_bundle(&Method::HEAD, &uri.parse::<Uri>().unwrap(), &none);
         assert_eq!(head.status(), StatusCode::OK);
         assert_eq!(body_text(head).await, "");
 
-        let post = serve_bundle(
-            CookiePolicy::SameOrigin,
-            &Method::POST,
-            &uri.parse::<Uri>().unwrap(),
-            &cookie,
-        );
+        let post = serve_bundle(&Method::POST, &uri.parse::<Uri>().unwrap(), &none);
         assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
@@ -428,7 +367,6 @@ mod served_from_dev_dir {
         let bundle = Bundle::standard();
         let id = "cv_traversal";
         let token = bundle_tokens().issue(id).unwrap();
-        let cookie = headers_with_cookie(&canvas_cookie_name(id), &token);
         std::fs::write(
             bundle
                 .dir
@@ -449,28 +387,26 @@ mod served_from_dev_dir {
             "..%5Csecret.txt",
         ] {
             let response = get(
-                CookiePolicy::SameOrigin,
-                &format!("/canvas/{id}/{attempt}"),
-                &cookie,
+                &format!("/canvas/{id}/{token}/{attempt}"),
+                &HeaderMap::new(),
             );
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{attempt}");
         }
     }
 
     #[tokio::test]
-    async fn bare_canvas_path_redirects_to_the_trailing_slash_form_keeping_the_query() {
+    async fn bare_token_path_redirects_to_the_trailing_slash_form_keeping_the_query() {
         let _bundle = Bundle::standard();
         let id = "cv_redirect";
         let token = bundle_tokens().issue(id).unwrap();
         let response = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}?ct={token}"),
+            &format!("/canvas/{id}/{token}?embed=kiosk&ms=1"),
             &HeaderMap::new(),
         );
         assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
         assert_eq!(
             response.headers()[header::LOCATION],
-            format!("/canvas/{id}/?ct={token}").as_str()
+            format!("/canvas/{id}/{token}/?embed=kiosk&ms=1").as_str()
         );
     }
 
@@ -479,11 +415,7 @@ mod served_from_dev_dir {
         let _bundle = Bundle::with(&[]);
         let id = "cv_missing_bundle";
         let token = bundle_tokens().issue(id).unwrap();
-        let response = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/?ct={token}"),
-            &HeaderMap::new(),
-        );
+        let response = get(&format!("/canvas/{id}/{token}/"), &HeaderMap::new());
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
         assert_eq!(body["code"], "BUNDLE_MISSING");
@@ -495,9 +427,9 @@ mod served_from_dev_dir {
         let _bundle = Bundle::standard();
         let id = "cv_parity";
         let token = bundle_tokens().issue(id).unwrap();
-        let uri = format!("/canvas/{id}/?embed=kiosk&ct={token}");
+        let uri = format!("/canvas/{id}/{token}/?embed=kiosk");
 
-        let web = web_router(None)
+        let web = web_router()
             .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -513,17 +445,9 @@ mod served_from_dev_dir {
             desktop.headers()[header::CONTENT_TYPE]
         );
         assert_eq!(web.headers()[header::ETAG], desktop.headers()[header::ETAG]);
-        assert!(web.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .contains("SameSite=Lax"));
-        assert!(desktop.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .contains("SameSite=None"));
         assert_eq!(body_text(web).await, body_text(desktop).await);
 
-        for router in [web_router(None), bundle_router()] {
+        for router in [web_router(), bundle_router()] {
             let denied = router
                 .oneshot(
                     Request::get(format!("/canvas/{id}/app.js"))
@@ -550,24 +474,15 @@ mod served_from_dev_dir {
         let name = wasm.file_name().to_string_lossy().into_owned();
         let id = "cv_real_bundle";
         let token = bundle_tokens().issue(id).unwrap();
-        let cookie = headers_with_cookie(&canvas_cookie_name(id), &token);
 
-        let index = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/?ct={token}"),
-            &HeaderMap::new(),
-        );
+        let index = get(&format!("/canvas/{id}/{token}/"), &HeaderMap::new());
         assert_eq!(index.status(), StatusCode::OK);
         assert!(
             body_text(index).await.contains(&name),
             "index.html references the wasm"
         );
 
-        let served = get(
-            CookiePolicy::SameOrigin,
-            &format!("/canvas/{id}/{name}"),
-            &cookie,
-        );
+        let served = get(&format!("/canvas/{id}/{token}/{name}"), &HeaderMap::new());
         assert_eq!(served.status(), StatusCode::OK);
         assert_eq!(served.headers()[header::CONTENT_TYPE], "application/wasm");
         let bytes = to_bytes(served.into_body(), usize::MAX).await.unwrap();
@@ -596,16 +511,18 @@ mod served_from_dev_dir {
 
         let client = reqwest::Client::new();
         let page = client
-            .get(format!("{}/canvas/{id}/?ct={token}", first.base_url))
+            .get(format!("{}/canvas/{id}/{token}/", first.base_url))
             .send()
             .await
             .unwrap();
         assert_eq!(page.status(), 200);
-        assert!(page.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .contains("Secure"));
         assert_eq!(page.text().await.unwrap(), INDEX);
+        let script = client
+            .get(format!("{}/canvas/{id}/{token}/app.js", first.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(script.status(), 200, "a sub-resource needs no cookie");
 
         server.drop_listener();
         let second = loop {
@@ -617,7 +534,7 @@ mod served_from_dev_dir {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         let page = client
-            .get(format!("{}/canvas/{id}/?ct={token}", second.base_url))
+            .get(format!("{}/canvas/{id}/{token}/", second.base_url))
             .send()
             .await
             .unwrap();

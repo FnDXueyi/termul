@@ -7,24 +7,35 @@
 
 import type {
   CanvasApi,
+  CanvasCloseOutcome,
+  CanvasConflictChoice,
   CanvasDirtyOutcome,
+  CanvasDiskOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
+  CanvasOpenOptions,
   CanvasPersistenceView,
+  CanvasRemount,
+  CanvasResolveOutcome,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
+import { getClientInstanceId } from './web-client-identity'
 
 const IPC_COMMANDS = {
   OPEN: 'canvas_open',
   CLOSE: 'canvas_close',
+  SET_VISIBLE: 'canvas_set_visible',
   READ_DOCUMENT: 'canvas_read_document',
   DOCUMENT_LOADED: 'canvas_document_loaded',
   DIRTY_CHANGED: 'canvas_dirty_changed',
-  WRITE_SNAPSHOT: 'canvas_write_snapshot'
+  WRITE_SNAPSHOT: 'canvas_write_snapshot',
+  DISK_CHANGED: 'canvas_disk_changed',
+  RESOLVE_CONFLICT: 'canvas_resolve_conflict',
+  CRASHED: 'canvas_crashed'
 } as const
 
 function notTauri(method: string): IpcResult<never> {
@@ -47,13 +58,25 @@ export function createTauriCanvasApi(): CanvasApi {
     open(
       docPath: string,
       projectId: string,
-      autosaveMs?: number
+      options: CanvasOpenOptions = {}
     ): Promise<IpcResult<CanvasOpenInfo>> {
-      return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs })
+      return invokeCanvas(IPC_COMMANDS.OPEN, {
+        docPath,
+        projectId,
+        request: { clientInstanceId: getClientInstanceId(), ...options }
+      })
     },
 
-    close(projectId: string): Promise<IpcResult<boolean>> {
-      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId })
+    setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+      return invokeCanvas(IPC_COMMANDS.SET_VISIBLE, { projectId, mountSeq, visible })
+    },
+
+    close(
+      projectId: string,
+      mountSeq: number,
+      discard = false
+    ): Promise<IpcResult<CanvasCloseOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId, mountSeq, discard })
     },
 
     readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {
@@ -88,6 +111,32 @@ export function createTauriCanvasApi(): CanvasApi {
       snapshot: string
     ): Promise<IpcResult<CanvasWriteOutcome>> {
       return invokeCanvas(IPC_COMMANDS.WRITE_SNAPSHOT, { projectId, mountSeq, snapshot })
+    },
+
+    diskChanged(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDiskOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.DISK_CHANGED, { projectId, mountSeq })
+    },
+
+    resolveConflict(
+      projectId: string,
+      mountSeq: number,
+      choice: CanvasConflictChoice,
+      snapshot?: string
+    ): Promise<IpcResult<CanvasResolveOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.RESOLVE_CONFLICT, {
+        projectId,
+        mountSeq,
+        choice,
+        snapshot: snapshot ?? null
+      })
+    },
+
+    crashed(
+      projectId: string,
+      mountSeq: number,
+      reason: string
+    ): Promise<IpcResult<CanvasRemount>> {
+      return invokeCanvas(IPC_COMMANDS.CRASHED, { projectId, mountSeq, reason })
     }
   }
 }
