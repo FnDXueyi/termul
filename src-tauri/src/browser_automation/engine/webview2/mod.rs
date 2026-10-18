@@ -22,12 +22,8 @@ use super::{
     BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
     EngineFuture, InputMode, Point, Support,
 };
+use crate::browser_automation::budgets::{CDP_ISSUE, CDP_RESULT};
 use crate::browser_tab_manager::BrowserTabManager;
-
-/// Issue phase: how long the UI thread may take to pick up the closure.
-const ISSUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Result phase: how long an issued command may take to answer.
-const RESULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The WebView2 CDP transport over the pane's tab webviews.
 struct WebView2Transport {
@@ -101,7 +97,7 @@ async fn call(
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?;
     // Issue phase: a cancelled closure is retry-safe; a command that was
     // already issued is terminal from this point on.
-    tokio::time::timeout(ISSUE_TIMEOUT, issue_rx)
+    tokio::time::timeout(CDP_ISSUE, issue_rx)
         .await
         .map_err(|_| {
             EngineError::new(EngineErrorKind::Timeout, cdp::issue_timeout_retryable(&state))
@@ -110,7 +106,7 @@ async fn call(
         .map_err(|()| undelivered(EngineErrorKind::Dispatch))?;
     // Result phase: the command was issued, so a timeout or dropped
     // completion means the page script may have run.
-    let json = tokio::time::timeout(RESULT_TIMEOUT, result_rx)
+    let json = tokio::time::timeout(CDP_RESULT, result_rx)
         .await
         .map_err(|_| EngineError::new(EngineErrorKind::Timeout, false))?
         .map_err(|_| EngineError::new(EngineErrorKind::NoReply, false))?

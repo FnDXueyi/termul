@@ -399,6 +399,7 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             _session_id: &'a str,
             _agent_id: &'a str,
             call: BrowserCall,
+            _deadline: crate::browser_automation::budgets::Deadline,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, BrowserError>> + Send + 'a>,
         > {
@@ -573,6 +574,7 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
             _session_id: &'a str,
             _agent_id: &'a str,
             call: BrowserCall,
+            _deadline: crate::browser_automation::budgets::Deadline,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, BrowserError>> + Send + 'a>,
         > {

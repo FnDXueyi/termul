@@ -6,10 +6,8 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION};
+use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::BrowserCall;
-
-/// How long the consent prompt may sit unanswered before auto-deny.
-const CONSENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 const EVENT_CONSENT_REQUEST: &str = "acp:browser_consent_request";
 
@@ -37,6 +35,7 @@ impl DesktopBrowserHost {
         session_id: &str,
         agent_id: &str,
         call: &BrowserCall,
+        deadline: Deadline,
     ) -> Result<(), BrowserError> {
         if self.consent.lock().contains_key(session_id) {
             return Ok(());
@@ -72,9 +71,9 @@ impl DesktopBrowserHost {
                 }
             }
         }
-        // Timeout or dropped sender (renderer gone) → fail closed.
-        let allowed = matches!(tokio::time::timeout(CONSENT_TIMEOUT, rx).await, Ok(Ok(true)));
-        if allowed {
+        // Unanswered in time or renderer gone (sender dropped): fail closed.
+        let answer = tokio::time::timeout(deadline.clamp(budgets::CONSENT_WAIT), rx).await;
+        if matches!(answer, Ok(Ok(true))) {
             self.consent.lock().insert(session_id.to_string(), ());
             log::info!(
                 "[browser-agent] consent granted for session {}",
@@ -86,10 +85,15 @@ impl DesktopBrowserHost {
                 "[browser-agent] consent denied/timed out for session {}",
                 crate::logging::redact_session_id(session_id)
             );
+            let reason = match answer {
+                Ok(Ok(false)) => "consent_denied",
+                _ => "consent_unanswered",
+            };
             Err(BrowserError::new(
                 ERR_CONFIRMATION,
                 "user did not grant browser automation for this session",
-            ))
+            )
+            .with_reason(reason))
         }
     }
 

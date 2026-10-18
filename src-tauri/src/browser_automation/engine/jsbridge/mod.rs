@@ -19,9 +19,6 @@ use super::{CapabilityId, CapabilityTable, Support};
 use super::{EngineError, EngineErrorKind, EngineTraits};
 use crate::browser_tab_manager::BrowserTabManager;
 
-/// Bridge reply budget (the URL poller shows IPC is sub-ms; 20s is generous).
-const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-
 /// Both current adapters run helpers in the page's main world.
 pub const MAIN_WORLD_TRAITS: EngineTraits = EngineTraits {
     isolated_world: false,
@@ -56,7 +53,7 @@ impl JsBridge {
             self.pending.lock().remove(&nonce);
             EngineError::new(EngineErrorKind::Dispatch, true)
         })?;
-        match tokio::time::timeout(EVAL_TIMEOUT, rx).await {
+        match tokio::time::timeout(crate::browser_automation::budgets::BRIDGE_EVAL, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(()))) => Err(EngineError::new(EngineErrorKind::PageException, false)),
             Ok(Err(_)) => {

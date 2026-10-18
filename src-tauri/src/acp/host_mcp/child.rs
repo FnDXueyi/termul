@@ -114,6 +114,8 @@ struct TermulPlanServer {
 struct DescribedTool {
     description: String,
     input_schema: rmcp::model::JsonObject,
+    /// How long to wait for a browser call's reply.
+    round_trip_ms: u64,
 }
 
 impl TermulPlanServer {
@@ -134,38 +136,58 @@ impl TermulPlanServer {
 
     /// Forward the raw arguments; the parent folds, checks and dispatches
     /// them and answers with the reply JSON, which goes back verbatim.
-    async fn browser(&self, arguments: Option<rmcp::model::JsonObject>) -> CallToolResult {
+    async fn browser(
+        &self,
+        arguments: Option<rmcp::model::JsonObject>,
+        round_trip: std::time::Duration,
+    ) -> CallToolResult {
         let request = FrameRequest {
             browser_input: Some(serde_json::Value::Object(arguments.unwrap_or_default())),
             ..self.frame(FrameKind::Browser)
         };
-        let reply = match forward_to_parent_raw(&self.config, request).await {
-            Ok(FrameReply {
-                result: Some(result),
-                ..
-            }) => result,
-            Ok(FrameReply {
-                ok: true,
-                result: None,
-                ..
-            }) => serde_json::json!({ "ok": true }),
-            Ok(FrameReply { code, error, .. }) => serde_json::json!({
+        let exchange = tokio::time::timeout(round_trip, exchange_frame(&self.config, request)).await;
+        let reply = match exchange {
+            Err(_) => serde_json::json!({
                 "ok": false,
-                "code": code.unwrap_or_else(|| "internal".to_string()),
-                "message": error.unwrap_or_else(|| "the Termul host rejected the call".to_string()),
+                "code": "timeout",
+                "reason": "host_round_trip",
+                "message": "the Termul host did not answer in time",
             }),
-            Err(e) => serde_json::json!({
-                "ok": false,
-                "code": "internal",
-                "reason": "host_unreachable",
-                "message": e,
-            }),
+            Ok(reply) => browser_reply(reply),
         };
         if reply["ok"] == serde_json::Value::Bool(true) {
             CallToolResult::structured(reply)
         } else {
             CallToolResult::structured_error(reply)
         }
+    }
+}
+
+/// The reply JSON for a browser frame exchange: the parent's reply
+/// verbatim, or a failure shaped like one when the parent never produced
+/// it.
+fn browser_reply(reply: Result<FrameReply, String>) -> serde_json::Value {
+    match reply {
+        Ok(FrameReply {
+            result: Some(result),
+            ..
+        }) => result,
+        Ok(FrameReply {
+            ok: true,
+            result: None,
+            ..
+        }) => serde_json::json!({ "ok": true }),
+        Ok(FrameReply { code, error, .. }) => serde_json::json!({
+            "ok": false,
+            "code": code.unwrap_or_else(|| "internal".to_string()),
+            "message": error.unwrap_or_else(|| "the Termul host rejected the call".to_string()),
+        }),
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "code": "internal",
+            "reason": "host_unreachable",
+            "message": e,
+        }),
     }
 }
 
@@ -179,20 +201,21 @@ fn frame(config: &ChildConfig, kind: FrameKind) -> FrameRequest {
 }
 
 fn browser_route(tool: DescribedTool) -> ToolRoute<TermulPlanServer> {
+    let round_trip = std::time::Duration::from_millis(tool.round_trip_ms);
     let attr = rmcp::model::Tool::new("browser", tool.description, tool.input_schema);
-    ToolRoute::new_dyn(attr, |ctx: ToolCallContext<'_, TermulPlanServer>| {
+    ToolRoute::new_dyn(attr, move |ctx: ToolCallContext<'_, TermulPlanServer>| {
         let service = ctx.service;
         let arguments = ctx.arguments;
-        Box::pin(async move { Ok(service.browser(arguments).await.into()) })
+        Box::pin(async move { Ok(service.browser(arguments, round_trip).await.into()) })
     })
 }
 
 /// Fetch the `browser` tool from the parent. `None` (logged) leaves the
 /// tool unserved: no browser tool rather than a guessed one.
 async fn describe_browser_tool(config: &ChildConfig) -> Option<DescribedTool> {
-    const DESCRIBE: std::time::Duration = std::time::Duration::from_secs(5);
     let request = frame(config, FrameKind::Describe);
-    let described = match tokio::time::timeout(DESCRIBE, exchange_frame(config, request)).await {
+    let budget = crate::browser_automation::budgets::DESCRIBE;
+    let described = match tokio::time::timeout(budget, exchange_frame(config, request)).await {
         Ok(Ok(FrameReply {
             ok: true,
             result: Some(result),
@@ -317,19 +340,6 @@ async fn forward_to_parent(
     )
     .await
     .map_err(|_| "parent round trip timed out".to_string())?
-}
-
-/// Browser calls can legitimately block for minutes: the consent prompt
-/// waits up to 120s, `wait` up to 30s, navigation settles ~15s. The raw
-/// reply is returned so typed `code`s reach the agent.
-async fn forward_to_parent_raw(
-    config: &ChildConfig,
-    request: FrameRequest,
-) -> Result<FrameReply, String> {
-    const BROWSER_ROUND_TRIP: std::time::Duration = std::time::Duration::from_secs(150);
-    tokio::time::timeout(BROWSER_ROUND_TRIP, exchange_frame(config, request))
-        .await
-        .map_err(|_| "parent round trip timed out".to_string())?
 }
 
 /// Send one frame to the parent and read its reply, with no timeout of its
