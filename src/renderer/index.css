@@ -172,6 +172,9 @@
     /* Borders - subtle dark borders */
     --border: 0.264 0.002 247.9;
     --input: 0.264 0.002 247.9;
+    /* Edge of text fields and select triggers: 3:1 against card, background
+       and popover (WCAG 1.4.11). --input stays the quieter Switch track. */
+    --field-border: 0.503 0.002 247.9;
     --ring: 0.922 0.001 286.4;
 
     --radius: 0.5rem; /* 8px - rounded corners */

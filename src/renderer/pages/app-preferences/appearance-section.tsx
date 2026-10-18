@@ -1,201 +1,157 @@
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
-import { Label } from '@/components/ui/label'
-import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
+import { SettingsRow, settingsDescriptionId } from '@/components/settings/SettingsRow'
+import { SettingsSelect } from '@/components/settings/SettingsSelect'
+import { SettingsStepper } from '@/components/settings/SettingsStepper'
 import { Switch } from '@/components/ui/switch'
 import { MONO_STACK } from '@/lib/font-stacks'
-import { isTauriContext } from '@/lib/tauri-runtime'
-import { cn } from '@/lib/utils'
 import {
   type AppSettings,
   BUFFER_SIZE_OPTIONS,
   TERMINAL_RENDERER_OPTIONS,
-  UI_ZOOM_DEFAULT,
-  UI_ZOOM_MAX,
-  UI_ZOOM_MIN,
-  UI_ZOOM_STEP
+  TERMINAL_URL_OPEN_MODE_OPTIONS,
+  type TerminalUrlOpenMode
 } from '@/types/settings'
+import { rowId } from './categories'
 
 interface AppearanceSectionProps {
   fontSize: number
-  uiZoomLevel: number
   bufferSize: number
   terminalRenderer: AppSettings['terminalRenderer']
   screenReaderMode: boolean
+  terminalUrlOpenMode: TerminalUrlOpenMode
   handleFontSizeChange: (value: number) => void
-  handleUiZoomChange: (value: number) => void
-  handleUiZoomReset: () => void
   handleBufferSizeChange: (value: number) => void
   handleRendererChange: (value: string) => void
   handleScreenReaderModeChange: (enabled: boolean) => void
+  handleTerminalUrlOpenModeChange: (value: string) => void
 }
+
+const FONT_SIZE_MIN = 10
+const FONT_SIZE_MAX = 24
+
+const BUFFER_OPTIONS = BUFFER_SIZE_OPTIONS.map((option) => ({
+  value: String(option.value),
+  label: option.label
+}))
 
 export function AppearanceSection({
   fontSize,
-  uiZoomLevel,
   bufferSize,
   terminalRenderer,
   screenReaderMode,
+  terminalUrlOpenMode,
   handleFontSizeChange,
-  handleUiZoomChange,
-  handleUiZoomReset,
   handleBufferSizeChange,
   handleRendererChange,
-  handleScreenReaderModeChange
+  handleScreenReaderModeChange,
+  handleTerminalUrlOpenModeChange
 }: AppearanceSectionProps): React.JSX.Element {
   return (
     <SettingsSection id="appearance">
-      <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-        <div className="w-full pt-1 md:w-1/3">
-          <h2 className="text-lg font-medium text-foreground">Terminal Appearance</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            Customize the look and feel of your terminal.
-          </p>
-        </div>
-        <div className="w-full space-y-4 md:w-full md:w-2/3">
-          {/* UI Zoom Level (whole interface) */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="block text-sm font-medium text-secondary-foreground">
-                UI Zoom Level
-              </label>
-              <button
-                type="button"
-                onClick={handleUiZoomReset}
-                className="text-xs text-primary hover:underline disabled:opacity-50"
-                disabled={uiZoomLevel === UI_ZOOM_DEFAULT}
-              >
-                Reset to 100%
-              </button>
-            </div>
-            <div className="flex items-center gap-4">
-              <input
-                type="range"
-                min={UI_ZOOM_MIN}
-                max={UI_ZOOM_MAX}
-                step={UI_ZOOM_STEP}
-                value={uiZoomLevel}
-                onChange={(e) => handleUiZoomChange(parseFloat(e.target.value))}
-                className="flex-1 h-2 bg-secondary rounded-lg appearance-none cursor-pointer accent-primary"
-              />
-              <span className="text-sm text-muted-foreground w-14 text-right">
-                {Math.round(uiZoomLevel * 100)}%
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              {isTauriContext()
-                ? 'Zoom the entire interface (50–300%). Also adjustable with Ctrl+=, Ctrl+-, Ctrl+0.'
-                : // Web (#858): Ctrl+=/-/0 are the browser zoom keys — the
-                  // web defaults bind Alt+=/-/0 instead.
-                  'Zoom the entire interface (50–300%). Also adjustable with Alt+=, Alt+-, Alt+0.'}
-            </p>
-          </div>
+      <SettingsGroup title="Text">
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('terminal-font-size')}
+            label="Font size"
+            description={`Terminal text size, from ${FONT_SIZE_MIN} to ${FONT_SIZE_MAX} px.`}
+          >
+            <SettingsStepper
+              role="group"
+              aria-label="Font size"
+              aria-describedby={settingsDescriptionId('terminal-font-size')}
+              value={fontSize}
+              min={FONT_SIZE_MIN}
+              max={FONT_SIZE_MAX}
+              onValueChange={handleFontSizeChange}
+              format={(value) => `${value} px`}
+              decrementLabel="Decrease font size"
+              incrementLabel="Increase font size"
+            />
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsGroup>
 
-          {/* Font Size */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Font Size: {fontSize}px
-            </label>
-            <div className="flex items-center gap-4">
-              <input
-                type="range"
-                min={10}
-                max={24}
-                value={fontSize}
-                onChange={(e) => handleFontSizeChange(parseInt(e.target.value, 10))}
-                className="flex-1 h-2 bg-secondary rounded-lg appearance-none cursor-pointer accent-primary"
-              />
-              <span className="text-sm text-muted-foreground w-12 text-right">{fontSize}px</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              Adjust terminal text size (10-24px).
-            </p>
-          </div>
-
-          {/* Buffer Size */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Scrollback Buffer Size
-            </label>
-            <select
-              value={bufferSize}
-              onChange={(e) => handleBufferSizeChange(parseInt(e.target.value, 10))}
-              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
-            >
-              {BUFFER_SIZE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground mt-1">
-              Number of lines to keep in terminal history. Higher values use more memory. Changes
-              apply to new terminals.
-            </p>
-          </div>
-
-          {/* Terminal Renderer */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Terminal Renderer
-            </label>
-            <select
+      <SettingsGroup
+        title="Rendering"
+        footnote="Renderer, scrollback and screen reader changes apply to new terminals."
+      >
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('terminal-renderer')}
+            htmlFor="terminal-renderer"
+            label="Renderer"
+            description="WebGL is fastest. Auto falls back to DOM when WebGL is not available."
+          >
+            <SettingsSelect
+              id="terminal-renderer"
+              aria-describedby={settingsDescriptionId('terminal-renderer')}
+              options={TERMINAL_RENDERER_OPTIONS}
               value={terminalRenderer}
-              onChange={(e) => handleRendererChange(e.target.value)}
-              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
-            >
-              {TERMINAL_RENDERER_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground mt-1">
-              GPU-accelerated rendering for terminal output. WebGL provides best performance.
-              Changes apply to new terminals.
-            </p>
-          </div>
-
-          {/* Screen reader mode */}
-          <div className="flex min-h-11 items-center justify-between gap-4 rounded-md border border-border bg-secondary/30 px-4 py-3">
-            <div className="flex-1">
-              <Label htmlFor="terminal-screen-reader-mode">Screen reader mode</Label>
-              <p
-                id="terminal-screen-reader-mode-help"
-                className="mt-0.5 text-xs text-muted-foreground"
-              >
-                Makes terminal output readable by screen readers. Can repeat typed characters in
-                some setups. Changes apply to new terminals.
-              </p>
-            </div>
+              onValueChange={handleRendererChange}
+            />
+          </SettingsRow>
+          <SettingsRow
+            id={rowId('terminal-scrollback')}
+            htmlFor="terminal-scrollback"
+            label="Scrollback"
+            description="Lines kept in terminal history. More lines use more memory."
+          >
+            <SettingsSelect
+              id="terminal-scrollback"
+              aria-describedby={settingsDescriptionId('terminal-scrollback')}
+              options={BUFFER_OPTIONS}
+              value={String(bufferSize)}
+              onValueChange={(value) => handleBufferSizeChange(Number.parseInt(value, 10))}
+            />
+          </SettingsRow>
+          <SettingsRow
+            id={rowId('terminal-screen-reader-mode')}
+            htmlFor="terminal-screen-reader-mode"
+            label="Screen reader mode"
+            description="Makes terminal output readable by screen readers. Can repeat typed characters in some setups. Changes apply to new terminals."
+            layout="inline"
+          >
             <Switch
               id="terminal-screen-reader-mode"
-              aria-describedby="terminal-screen-reader-mode-help"
+              aria-describedby={settingsDescriptionId('terminal-screen-reader-mode')}
               checked={screenReaderMode}
               onCheckedChange={handleScreenReaderModeChange}
             />
-          </div>
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsGroup>
 
-          {/* Preview */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Preview
-            </label>
-            <div
-              className="bg-terminal-bg border border-border rounded-md p-4 text-terminal-fg"
-              style={{
-                fontFamily: MONO_STACK,
-                fontSize: `${fontSize}px`,
-                lineHeight: 1.2
-              }}
-            >
-              <div>$ echo "Hello, World!"</div>
-              <div>Hello, World!</div>
-              <div>$ ls -la</div>
-              <div>drwxr-xr-x 5 user staff 160 Jan 11 10:00 .</div>
-            </div>
-          </div>
+      <SettingsGroup title="Links">
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('terminal-url-open-mode')}
+            htmlFor="terminal-url-open-mode"
+            label="Open links in"
+            description="Where Ctrl/Cmd+Click on a URL in terminal output opens."
+          >
+            <SettingsSelect
+              id="terminal-url-open-mode"
+              aria-describedby={settingsDescriptionId('terminal-url-open-mode')}
+              options={TERMINAL_URL_OPEN_MODE_OPTIONS}
+              value={terminalUrlOpenMode}
+              onValueChange={handleTerminalUrlOpenModeChange}
+            />
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsGroup>
+
+      <SettingsGroup title="Preview">
+        <div
+          className="rounded-lg border border-border bg-terminal-bg p-4 text-terminal-fg"
+          style={{ fontFamily: MONO_STACK, fontSize: `${fontSize}px`, lineHeight: 1.2 }}
+        >
+          <div>$ echo "Hello, World!"</div>
+          <div>Hello, World!</div>
+          <div>$ ls -la</div>
+          <div>drwxr-xr-x 5 user staff 160 Jan 11 10:00 .</div>
         </div>
-      </div>
+      </SettingsGroup>
     </SettingsSection>
   )
 }

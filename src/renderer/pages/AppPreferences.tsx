@@ -1,5 +1,5 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { SettingsLayout } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
@@ -42,18 +42,15 @@ import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
 import { useUpdaterActions, useUpdaterState } from '@/stores/updater-store'
 import type { ProjectColor } from '@/types/project'
-import {
-  TERMINAL_URL_OPEN_MODE_OPTIONS,
-  type TerminalUrlOpenMode,
-  UI_ZOOM_DEFAULT
-} from '@/types/settings'
+import { TERMINAL_URL_OPEN_MODE_OPTIONS, type TerminalUrlOpenMode } from '@/types/settings'
 import { AiAgentsSection } from './app-preferences/ai-agents-section'
 import { AppearanceSection } from './app-preferences/appearance-section'
-import { BehaviorSection } from './app-preferences/behavior-section'
-import { APP_PREF_CATEGORIES, APP_PREF_SEARCH_INDEX } from './app-preferences/categories'
+import { appPrefCategories, appPrefSearchIndex } from './app-preferences/categories'
 import { DiagnosticsSection } from './app-preferences/diagnostics-section'
+import { EditorSection } from './app-preferences/editor-section'
+import { InterfaceSection } from './app-preferences/interface-section'
 import { McpServersSection } from './app-preferences/mcp-servers-section'
-import { ProjectDefaultsSection } from './app-preferences/project-defaults-section'
+import { NotificationsSection } from './app-preferences/notifications-section'
 import { ProviderSection } from './app-preferences/provider-section'
 import { ResetSection } from './app-preferences/reset-section'
 import { ShellSection } from './app-preferences/shell-section'
@@ -65,6 +62,11 @@ import { UpdatesSection } from './app-preferences/updates-section'
 export function AppPreferencesModal(): React.JSX.Element {
   const isOpen = useSettingsModalStore((state) => state.view === 'app')
   const close = useSettingsModalStore((state) => state.close)
+  const appPage = useSettingsModalStore((state) => state.appPage)
+  // Computed per render so the web/desktop split follows the live runtime.
+  const categories = useMemo(() => appPrefCategories(), [])
+  const searchIndex = useMemo(() => appPrefSearchIndex(), [])
+  const setAppPage = useSettingsModalStore((state) => state.setAppPage)
   const isAurUpdater = isAurUpdateMode()
   const fontSize = useTerminalFontSize()
   const uiZoomLevel = useUiZoomLevel()
@@ -134,10 +136,6 @@ export function AppPreferencesModal(): React.JSX.Element {
 
   const handleUiZoomChange = (value: number) => {
     updateSetting('uiZoomLevel', value)
-  }
-
-  const handleUiZoomReset = () => {
-    updateSetting('uiZoomLevel', UI_ZOOM_DEFAULT)
   }
 
   const handleBufferSizeChange = (value: number) => {
@@ -271,60 +269,53 @@ export function AppPreferencesModal(): React.JSX.Element {
 
   return (
     <>
-      <SettingsModal
-        isOpen={isOpen}
-        onClose={close}
-        title="Application Preferences"
-        subtitle="Configure global application settings"
-      >
-        {/* Content */}
+      <SettingsModal isOpen={isOpen} onClose={close} title="Preferences">
         <SettingsLayout
           title="Preferences"
-          categories={APP_PREF_CATEGORIES}
-          searchIndex={APP_PREF_SEARCH_INDEX}
+          categories={categories}
+          searchIndex={searchIndex}
+          onClose={close}
+          page={appPage ?? categories[0]?.id}
+          onPageChange={setAppPage}
         >
-          {/* Terminal Appearance Section */}
+          <InterfaceSection
+            uiZoomLevel={uiZoomLevel}
+            defaultProjectColor={defaultProjectColor}
+            handleUiZoomChange={handleUiZoomChange}
+            handleDefaultProjectColorChange={handleDefaultProjectColorChange}
+          />
+          <NotificationsSection
+            notifyOnTerminalIdle={notifyOnTerminalIdle}
+            notifyOnAgentChatTurnFinished={notifyOnAgentChatTurnFinished}
+            notifyOnAgentChatNeedsYou={notifyOnAgentChatNeedsYou}
+            handleNotifyOnTerminalIdleToggle={handleNotifyOnTerminalIdleToggle}
+            handleNotifyOnAgentChatTurnFinishedToggle={handleNotifyOnAgentChatTurnFinishedToggle}
+            handleNotifyOnAgentChatNeedsYouToggle={handleNotifyOnAgentChatNeedsYouToggle}
+          />
+          <EditorSection
+            editorAutoSave={editorAutoSave}
+            editorAutoSaveDelayMs={editorAutoSaveDelayMs}
+            handleEditorAutoSaveToggle={handleEditorAutoSaveToggle}
+            handleEditorAutoSaveDelayChange={handleEditorAutoSaveDelayChange}
+          />
           <AppearanceSection
             fontSize={fontSize}
-            uiZoomLevel={uiZoomLevel}
             bufferSize={bufferSize}
             terminalRenderer={terminalRenderer}
             screenReaderMode={terminalScreenReaderMode}
+            terminalUrlOpenMode={terminalUrlOpenMode}
             handleFontSizeChange={handleFontSizeChange}
-            handleUiZoomChange={handleUiZoomChange}
-            handleUiZoomReset={handleUiZoomReset}
             handleBufferSizeChange={handleBufferSizeChange}
             handleRendererChange={handleRendererChange}
             handleScreenReaderModeChange={handleScreenReaderModeChange}
+            handleTerminalUrlOpenModeChange={handleTerminalUrlOpenModeChange}
           />
-          {/* Default Shell Section */}
           <ShellSection
             defaultShell={defaultShell}
             availableShells={availableShells}
             handleDefaultShellChange={handleDefaultShellChange}
           />
           <TerminalProfilesSection availableShells={availableShells} />
-          {/* Terminal Behavior Section */}
-          <BehaviorSection
-            terminalUrlOpenMode={terminalUrlOpenMode}
-            editorAutoSave={editorAutoSave}
-            editorAutoSaveDelayMs={editorAutoSaveDelayMs}
-            notifyOnTerminalIdle={notifyOnTerminalIdle}
-            notifyOnAgentChatTurnFinished={notifyOnAgentChatTurnFinished}
-            notifyOnAgentChatNeedsYou={notifyOnAgentChatNeedsYou}
-            handleTerminalUrlOpenModeChange={handleTerminalUrlOpenModeChange}
-            handleEditorAutoSaveToggle={handleEditorAutoSaveToggle}
-            handleEditorAutoSaveDelayChange={handleEditorAutoSaveDelayChange}
-            handleNotifyOnTerminalIdleToggle={handleNotifyOnTerminalIdleToggle}
-            handleNotifyOnAgentChatTurnFinishedToggle={handleNotifyOnAgentChatTurnFinishedToggle}
-            handleNotifyOnAgentChatNeedsYouToggle={handleNotifyOnAgentChatNeedsYouToggle}
-          />
-          {/* New Project Defaults Section */}
-          <ProjectDefaultsSection
-            defaultProjectColor={defaultProjectColor}
-            handleDefaultProjectColorChange={handleDefaultProjectColorChange}
-          />
-          {/* AI Agents Section */}
           <AiAgentsSection
             acpTurnTimeoutSecs={acpTurnTimeoutSecs}
             acpTurnIdleTimeoutSecs={acpTurnIdleTimeoutSecs}
@@ -340,14 +331,12 @@ export function AppPreferencesModal(): React.JSX.Element {
           <SkillsSection />
           <ProviderSection />
           <McpServersSection />
-          {/* Keyboard Shortcuts Section */}
           <ShortcutsSection
             shortcuts={shortcuts}
             updateShortcut={updateShortcut}
             resetShortcut={resetShortcut}
             setIsResetShortcutsDialogOpen={setIsResetShortcutsDialogOpen}
           />
-          {/* Updates Section */}
           <UpdatesSection
             isAurUpdater={isAurUpdater}
             isChecking={isChecking}
@@ -365,7 +354,6 @@ export function AppPreferencesModal(): React.JSX.Element {
             setUpdateChannel={setUpdateChannel}
           />
           <DiagnosticsSection />
-          {/* Reset Section */}
           <ResetSection setIsResetDialogOpen={setIsResetDialogOpen} />
         </SettingsLayout>
       </SettingsModal>
@@ -373,9 +361,9 @@ export function AppPreferencesModal(): React.JSX.Element {
       {/* Reset Confirmation Dialog */}
       <ConfirmDialog
         isOpen={isResetDialogOpen}
-        title="Reset Settings"
-        message="Reset all application settings to their default values? Terminal profiles are kept; delete them under Terminal Profiles. This cannot be undone."
-        confirmLabel="Reset"
+        title="Reset all settings?"
+        message="Every setting goes back to its default, including keyboard shortcuts. Terminal profiles stay. You cannot undo this."
+        confirmLabel="Reset settings"
         cancelLabel="Cancel"
         variant="danger"
         onConfirm={handleResetConfirm}
@@ -385,9 +373,9 @@ export function AppPreferencesModal(): React.JSX.Element {
       {/* Reset Shortcuts Confirmation Dialog */}
       <ConfirmDialog
         isOpen={isResetShortcutsDialogOpen}
-        title="Reset Keyboard Shortcuts"
-        message="Are you sure you want to reset all keyboard shortcuts to their default values?"
-        confirmLabel="Reset"
+        title="Reset all shortcuts?"
+        message="Every keyboard shortcut goes back to its default keys. You cannot undo this."
+        confirmLabel="Reset shortcuts"
         cancelLabel="Cancel"
         variant="danger"
         onConfirm={handleResetShortcutsConfirm}
