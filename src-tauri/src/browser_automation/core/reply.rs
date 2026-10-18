@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::dialogs::DialogView;
 use super::ports::{CanonicalOrigin, TabProfile};
 use super::tabs::RefNode;
 use super::BrowserError;
@@ -44,6 +45,9 @@ pub struct TabFacts {
     /// http(s) origin.
     pub origin: Option<CanonicalOrigin>,
     pub profile: TabProfile,
+    /// For a popup tab, the agent tab whose page opened it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opener: Option<String>,
 }
 
 /// Page-derived data. Untrusted: the page controls every field, and refs
@@ -54,6 +58,10 @@ pub struct PageData {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+    /// The script dialog blocking the tab, or the last one the host closed
+    /// on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<DialogView>,
     /// True when any field above was cut to its cap.
     pub truncated: bool,
 }
@@ -67,9 +75,15 @@ impl PageData {
             url: url.to_string(),
             title: title.to_string(),
             snapshot: None,
+            dialog: None,
             truncated: url_cut || title_cut,
         }
     }
+}
+
+/// Page-controlled text outside the snapshot, cut to the metadata cap.
+pub(super) fn cap_page_text(text: &str) -> String {
+    cap(text, PAGE_META_MAX_CHARS).0.to_string()
 }
 
 /// A successful action. `fidelity` is set exactly when the verb mutates.

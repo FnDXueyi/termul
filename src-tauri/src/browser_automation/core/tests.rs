@@ -13,6 +13,7 @@ use super::surface::{HistoryStep, SurfaceFuture, TabSurface};
 use super::test_support::ScriptedPermissions;
 use super::*;
 use crate::browser_automation::engine::assets::Script;
+use crate::browser_automation::engine::events::{DialogAnswer, DialogKind};
 use crate::browser_automation::engine::profile::DataStore;
 use crate::browser_automation::engine::{
     CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFuture, EngineTraits,
@@ -79,7 +80,7 @@ fn load(events: &TabEvents, url: &str) -> Option<String> {
 }
 
 impl FakePane {
-    fn events(&self, tab: &str) -> TabEvents {
+    pub(super) fn events(&self, tab: &str) -> TabEvents {
         self.tabs.lock().get(tab).unwrap().events.clone()
     }
 
@@ -181,10 +182,15 @@ impl TabSurface for FakePane {
 /// Answers each helper script by what it is.
 pub(super) struct FakeEngine {
     facts: EngineFacts,
-    clicks: Mutex<Vec<(Point, InputMode)>>,
+    pub(super) clicks: Mutex<Vec<(Point, InputMode)>>,
     fail_trusted_click: bool,
     /// The buttons the snapshot helper reports, by name.
     snapshot_buttons: Vec<&'static str>,
+    /// The checkbox state the checked-state helper reads; every click
+    /// toggles it.
+    pub(super) checked: Mutex<bool>,
+    /// Every dialog answer the host delivered, in order.
+    pub(super) answers: Mutex<Vec<(u64, DialogAnswer)>>,
 }
 
 impl FakeEngine {
@@ -201,6 +207,8 @@ impl FakeEngine {
             clicks: Mutex::new(Vec::new()),
             fail_trusted_click: false,
             snapshot_buttons: vec!["Sign in"],
+            checked: Mutex::new(false),
+            answers: Mutex::new(Vec::new()),
         }
     }
 }
@@ -234,8 +242,20 @@ impl BrowserEngine for FakeEngine {
                     "capped": false
                 })
             }
-            "resolve" => json!({ "rect": { "cx": 12.0, "cy": 34.0 }, "role": "button", "name": "Sign in" }),
-            "contains_text" => json!(true),
+            "resolve" => json!({
+                "rect": { "cx": 12.0, "cy": 34.0 },
+                "role": "button",
+                "name": "Sign in",
+                "check": { "checked": *self.checked.lock(), "radio": false },
+            }),
+            "contains_text" => json!(script.params["text"] != "Loading"),
+            "location" => json!("https://example.com/page"),
+            "checked_state" => json!({ "checked": *self.checked.lock(), "radio": false }),
+            "click" => {
+                let mut checked = self.checked.lock();
+                *checked = !*checked;
+                json!({ "ok": true })
+            }
             _ => json!({ "ok": true }),
         };
         Box::pin(async move { Ok(out) })
@@ -243,6 +263,10 @@ impl BrowserEngine for FakeEngine {
     fn pointer_click<'a>(&'a self, _tab: &'a str, at: Point, mode: InputMode) -> EngineFuture<'a, ()> {
         self.clicks.lock().push((at, mode));
         let fail = self.fail_trusted_click;
+        if !fail {
+            let mut checked = self.checked.lock();
+            *checked = !*checked;
+        }
         Box::pin(async move {
             if fail {
                 Err(EngineError::new(EngineErrorKind::Dispatch, true))
@@ -253,6 +277,10 @@ impl BrowserEngine for FakeEngine {
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(async { Ok(vec![0x89, b'P', b'N', b'G']) })
+    }
+    fn answer_dialog<'a>(&'a self, _tab: &'a str, id: u64, answer: DialogAnswer) -> EngineFuture<'a, bool> {
+        self.answers.lock().push((id, answer));
+        Box::pin(async { Ok(true) })
     }
 }
 
@@ -291,7 +319,7 @@ fn bounds() -> BrowserBounds {
 
 pub(super) struct Harness {
     pub(super) host: Arc<DesktopBrowserHost>,
-    engine: Arc<FakeEngine>,
+    pub(super) engine: Arc<FakeEngine>,
     pub(super) pane: Arc<FakePane>,
     sink: Arc<AutoMountSink>,
     _root: tempfile::TempDir,
@@ -308,7 +336,7 @@ impl PermissionRequest for AllowSession {
     fn cancel_session(&self, _session_id: &str) {}
 }
 
-fn harness_with(engine: FakeEngine) -> Harness {
+pub(super) fn harness_with(engine: FakeEngine) -> Harness {
     harness_full(engine, false, Arc::new(AllowSession))
 }
 
@@ -360,6 +388,11 @@ pub(super) fn harness_parts(
 
 pub(super) fn webview2_like() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented")
+        .with(CapabilityId::NavigationIntercept, Support::Trusted)
+        .with(CapabilityId::NewWindowIntercept, Support::Trusted)
+        .with(CapabilityId::DialogIntercept, Support::Trusted)
+        .with(CapabilityId::PermissionIntercept, Support::Trusted)
+        .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted)
         .with(CapabilityId::IsolatedEval, Support::Trusted)
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
@@ -416,7 +449,7 @@ impl Harness {
 }
 
 const REPLY_KEYS: [&str; 8] = ["ok", "code", "reason", "message", "fidelity", "tab", "page", "data"];
-const PAGE_KEYS: [&str; 4] = ["url", "title", "snapshot", "truncated"];
+const PAGE_KEYS: [&str; 5] = ["url", "title", "snapshot", "dialog", "truncated"];
 
 fn assert_closed_shape(reply: &Value) {
     let keys: Vec<&String> = reply.as_object().unwrap().keys().collect();
@@ -447,12 +480,17 @@ async fn every_verb_replies_with_the_closed_shape_and_fidelity_exactly_when_it_m
         ("press", json!({ "key": "Enter" }), Some("synthetic")),
         ("scroll", json!({ "dy": 100 }), Some("synthetic")),
         ("hover", json!({ "ref": "@e1" }), Some("synthetic")),
+        ("select_option", json!({ "ref": "@e1", "value": "blue" }), Some("synthetic")),
+        ("check", json!({ "ref": "@e1" }), Some("trusted")),
+        ("uncheck", json!({ "ref": "@e1" }), Some("trusted")),
         ("wait", json!({ "ms": 1 }), None),
         ("wait", json!({ "text": "Sign in" }), None),
         ("back", json!({}), Some("trusted")),
         ("forward", json!({}), Some("trusted")),
         ("reload", json!({}), Some("trusted")),
         ("list_tabs", json!({}), None),
+        ("wait", json!({ "textGone": "Loading" }), None),
+        ("switch_tab", json!({ "tabId": tab_id }), None),
         ("new_tab", json!({ "url": "https://example.org" }), Some("trusted")),
         ("close_tab", json!({ "tabId": tab_id }), Some("trusted")),
     ];
@@ -470,6 +508,16 @@ async fn every_verb_replies_with_the_closed_shape_and_fidelity_exactly_when_it_m
         }
         covered.push(action);
     }
+    let tab = h.call("new_tab", json!({ "url": "https://example.com/dialog" })).await;
+    let tab = tab["tab"]["id"].as_str().unwrap().to_string();
+    h.pane.events(&tab).dialog_opened(DialogKind::Confirm, "Sure?".into(), None);
+    h.settle_events().await;
+    let reply = h.call("handle_dialog", json!({ "accept": true, "tabId": tab })).await;
+    assert_eq!(reply["ok"], true, "handle_dialog: {reply}");
+    assert_closed_shape(&reply);
+    assert_eq!(reply["fidelity"], "trusted", "handle_dialog: {reply}");
+    assert!(dispatch::spec("handle_dialog").unwrap().mutating);
+    covered.push("handle_dialog");
     for spec in &dispatch::REGISTRY {
         assert!(covered.contains(&spec.name), "{} has no reply-shape case", spec.name);
     }

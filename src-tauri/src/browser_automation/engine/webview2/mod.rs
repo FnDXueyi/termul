@@ -7,7 +7,9 @@
 //! object); the completion handler forwards the result through a oneshot
 //! to the awaiting task.
 
+mod dialogs;
 pub mod events;
+mod external_protocol;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
 use windows_core::HSTRING;
 
 use super::assets::Script;
+use super::events::DialogAnswer;
 use super::cdp::{self, CdpMethod, CdpTransport, CALL_ISSUED, CALL_PENDING};
 use super::{
     BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
@@ -137,12 +140,18 @@ impl WebView2Engine {
 }
 
 /// What this adapter implements today: isolated-world eval, trusted
-/// clicks and screenshots; the DOM-event verbs are synthetic.
+/// clicks and screenshots, the tab-policy hooks; the DOM-event verbs are
+/// synthetic.
 pub fn capability_table() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented on the WebView2 engine yet")
         .with(CapabilityId::IsolatedEval, Support::Trusted)
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
+        .with(CapabilityId::NavigationIntercept, Support::Trusted)
+        .with(CapabilityId::NewWindowIntercept, Support::Trusted)
+        .with(CapabilityId::DialogIntercept, Support::Trusted)
+        .with(CapabilityId::PermissionIntercept, Support::Trusted)
+        .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)
@@ -177,5 +186,14 @@ impl BrowserEngine for WebView2Engine {
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(cdp::capture_screenshot(&self.transport, tab))
+    }
+
+    fn answer_dialog<'a>(
+        &'a self,
+        tab: &'a str,
+        id: u64,
+        answer: DialogAnswer,
+    ) -> EngineFuture<'a, bool> {
+        Box::pin(super::dialogs::answer(&self.transport.tabs, tab, id, answer))
     }
 }

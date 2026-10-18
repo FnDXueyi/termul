@@ -6,8 +6,10 @@ pub mod authz;
 pub mod boundary;
 mod consent;
 mod actions;
+mod dialogs;
 pub(crate) mod dispatch;
 mod events;
+mod page_events;
 pub mod ports;
 mod profile;
 mod reply;
@@ -35,7 +37,7 @@ pub use reply::{
 pub use tabs::TabView;
 
 use super::budgets::Deadline;
-use super::engine::events::{NavPolicy, NavVerdict, TabEvent, TabEvents};
+use super::engine::events::{NavPolicy, NavVerdict, TabEvent, TabEvents, TabRole};
 use super::engine::{self, BrowserEngine, EngineFacts};
 use super::{BrowserCall, BrowserHost, HostFuture, TabCreateError};
 use crate::acp::events as acp_events;
@@ -104,8 +106,8 @@ impl DesktopBrowserHost {
     ) -> Arc<Self> {
         let registry = Arc::new(Mutex::new(TabRegistry::default()));
         let (tx, rx) = unbounded_channel();
-        spawn(events::consume(rx, registry.clone(), surface.clone(), sinks.clone()));
-        Arc::new_cyclic(|me| Self {
+        let consumer = (registry.clone(), surface.clone(), sinks.clone());
+        let host = Arc::new_cyclic(|me| Self {
             me: me.clone(),
             nav_policy: Arc::new(HopPolicy {
                 surface: surface.clone(),
@@ -119,7 +121,10 @@ impl DesktopBrowserHost {
             project_of: services.project_of,
             registry,
             events: tx,
-        })
+        });
+        let (registry, surface, sinks) = consumer;
+        spawn(events::consume(rx, registry, surface, sinks, Arc::downgrade(&host)));
+        host
     }
 
     fn emit<T: Serialize>(&self, session_id: Option<&str>, name: &'static str, payload: &T) {
@@ -127,7 +132,11 @@ impl DesktopBrowserHost {
     }
 
     fn tab_events(&self, label: &str) -> TabEvents {
-        TabEvents::new(label, self.events.clone(), self.nav_policy.clone())
+        let role = match tabs::parse_label(label) {
+            Some(tabs::LabelKind::Agent) => TabRole::Agent,
+            _ => TabRole::User,
+        };
+        TabEvents::new(label, self.events.clone(), self.nav_policy.clone()).with_role(role)
     }
 
     /// Build the webview for a renderer-requested tab and admit it to the
@@ -208,6 +217,10 @@ struct HopPolicy {
 
 impl NavPolicy for HopPolicy {
     fn decide(&self, tab: &str, url: &Url) -> NavVerdict {
+        if page_events::launches_external_app(url) {
+            page_events::log_external_launch(tab);
+            return NavVerdict::Deny;
+        }
         let allowed = self.surface.allows_navigation(tab, url)
             && self.host.upgrade().is_some_and(|host| host.agent_hop_allowed(tab, url));
         if allowed {
@@ -290,6 +303,7 @@ impl BrowserHost for DesktopBrowserHost {
                 return Err(BrowserError::new(ERR_TAB_NOT_FOUND, "this session has ended")
                     .with_reason("session_ended"));
             }
+            self.refuse_if_blocked(session_id, spec.verb, &call.args)?;
             token
                 .guard(async {
                     self.authorize_call(&token, session_id, spec.verb, &call, deadline)
@@ -307,7 +321,7 @@ impl BrowserHost for DesktopBrowserHost {
                         )
                         .with_reason("deadline"));
                     }
-                    self.act(session_id, spec.verb, call, deadline).await
+                    self.act_watched(session_id, spec, call, deadline).await
                 })
                 .await
         })
@@ -350,6 +364,9 @@ impl BrowserHost for DesktopBrowserHost {
             EVENT_STOP_CHANGED,
             &json!({ "sessionId": session_id, "stopped": true }),
         );
+        if let Some(me) = self.me.upgrade() {
+            me.close_popups(session_id);
+        }
         first
     }
 

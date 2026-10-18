@@ -4,7 +4,7 @@ use super::*;
 use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
 use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_CAPABILITY};
 
-const ALL_VERBS: [&str; 16] = [
+const ALL_VERBS: [&str; 21] = [
     "navigate",
     "snapshot",
     "screenshot",
@@ -21,6 +21,11 @@ const ALL_VERBS: [&str; 16] = [
     "back",
     "forward",
     "reload",
+    "select_option",
+    "check",
+    "uncheck",
+    "switch_tab",
+    "handle_dialog",
 ];
 
 fn no_world_like() -> EngineFacts {
@@ -57,7 +62,11 @@ fn expected_args_text_comes_from_the_registry() {
         ("press", "optional 'key', 'ref', 'tabId'"),
         ("scroll", "optional 'dy', 'ref', 'tabId'"),
         ("hover", "'ref' (optional 'tabId')"),
-        ("wait", "'ms' or 'text' (optional 'tabId')"),
+        ("wait", "'ms' or 'text' or 'textGone' or 'urlContains' or 'loadState' (optional 'tabId')"),
+        ("select_option", "'ref' and 'value' (optional 'tabId')"),
+        ("check", "'ref' (optional 'tabId')"),
+        ("switch_tab", "'tabId'"),
+        ("handle_dialog", "'accept' (optional 'text', 'tabId')"),
         ("snapshot", "optional 'tabId'"),
         ("back", "optional 'tabId'"),
         ("list_tabs", "no arguments"),
@@ -79,8 +88,11 @@ fn validate_names_missing_required_keys_and_the_one_of_rule() {
     assert_eq!(err.arg_keys, vec!["url"]);
 
     let err = spec("wait").unwrap().validate(&mut json!({ "tabId": "agent-a" })).unwrap_err();
-    assert_eq!(err.message, "wait needs 'ms' or 'text' (optional 'tabId')");
-    assert_eq!(err.arg_keys, vec!["ms", "text"]);
+    assert_eq!(
+        err.message,
+        "wait needs 'ms' or 'text' or 'textGone' or 'urlContains' or 'loadState' (optional 'tabId')"
+    );
+    assert_eq!(err.arg_keys, vec!["ms", "text", "textGone", "urlContains", "loadState"]);
 
     // JSON null counts as absent.
     let err = spec("navigate").unwrap().validate(&mut json!({ "url": null })).unwrap_err();
@@ -147,7 +159,7 @@ fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
         err.message,
-        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload"
+        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload, select_option, check, uncheck, switch_tab, handle_dialog"
     );
 
     let err = admit("screenshot", &mut Value::Null, &facts).unwrap_err();
@@ -190,6 +202,10 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         ("key", "string"),
         ("ms", "integer"),
         ("dy", "number"),
+        ("textGone", "string"),
+        ("urlContains", "string"),
+        ("loadState", "string"),
+        ("accept", "boolean"),
     ] {
         assert_eq!(props[key]["type"], ty, "flat {key}");
         assert_eq!(nested["properties"][key]["type"], ty, "nested {key}");
@@ -199,7 +215,9 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
     for line in [
         "- navigate {url, tabId?}:",
         "- fill {ref, value, tabId?}:",
-        "- wait {ms?, text?, tabId?}:",
+        "- wait {ms?, text?, textGone?, urlContains?, loadState?, tabId?}:",
+        "- select_option {ref, value, tabId?}:",
+        "- switch_tab {tabId}:",
         "- list_tabs {}:",
     ] {
         assert!(schema.description.contains(line), "missing {line:?}: {}", schema.description);

@@ -128,6 +128,7 @@ fn shape_snapshot_formats_the_outline_with_host_refs_for_nodes_only() {
                 ]
                 .join("\n")
             ),
+            dialog: None,
             truncated: false,
         },
         "page text never carries a ref token"
@@ -155,6 +156,7 @@ fn replies_serialize_the_closed_wire_shape() {
             epoch: 3,
             origin: CanonicalOrigin::parse("https://example.com").ok(),
             profile: TabProfile::Global,
+            opener: None,
         }),
         page: None,
         data: None,

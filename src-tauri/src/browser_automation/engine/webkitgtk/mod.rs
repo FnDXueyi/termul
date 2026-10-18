@@ -1,18 +1,24 @@
 //! WebKitGTK adapter (Linux): isolated-world eval in a named script
-//! world, and tab event hooks.
+//! world, tab event hooks, script dialogs held for the core, and
+//! viewport snapshots.
 
+mod dialogs;
 mod eval;
 pub mod events;
+mod screenshot;
 
 use std::sync::Arc;
 
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 use super::assets::Script;
+use super::events::DialogAnswer;
 use super::{
     string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
     InputMode, Point,
 };
+use crate::browser_automation::budgets::EVAL_STEP;
 use crate::browser_tab_manager::BrowserTabManager;
 
 pub struct WebKitGtkEngine {
@@ -54,7 +60,30 @@ impl BrowserEngine for WebKitGtkEngine {
         Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
     }
 
-    fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+    fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
+        Box::pin(async move {
+            let webview = self
+                .tabs
+                .webview(tab)
+                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+            let (tx, rx) = oneshot::channel();
+            webview
+                .with_webview(move |platform| screenshot::capture(&platform.inner(), tx))
+                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
+            match tokio::time::timeout(EVAL_STEP, rx).await {
+                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind, false)),
+                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
+                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
+            }
+        })
+    }
+
+    fn answer_dialog<'a>(
+        &'a self,
+        tab: &'a str,
+        id: u64,
+        answer: DialogAnswer,
+    ) -> EngineFuture<'a, bool> {
+        Box::pin(super::dialogs::answer(&self.tabs, tab, id, answer))
     }
 }

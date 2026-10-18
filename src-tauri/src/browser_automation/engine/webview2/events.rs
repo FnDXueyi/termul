@@ -1,21 +1,30 @@
 //! WebView2 tab events tauri does not expose: same-document URL changes
 //! (`pushState`, fragments, same-document history steps) through
-//! `SourceChanged`, which reports whether a new document came with them.
+//! `SourceChanged`, which reports whether a new document came with them;
+//! external-app launches on every tab; script dialogs on agent tabs.
 
 use tauri::webview::PlatformWebview;
 use webview2_com::{take_pwstr, SourceChangedEventHandler};
 use windows_core::{BOOL, PWSTR};
 
-use crate::browser_automation::engine::events::TabEvents;
+use super::{dialogs, external_protocol};
+use crate::browser_automation::engine::events::{TabEvents, TabRole};
 
 /// Confirm the controller has a live `ICoreWebView2` and register the
-/// handler. False when the engine never created the webview.
+/// handlers. False when the engine never created the webview, or refused
+/// a handler an agent tab needs.
 pub fn attach(platform: &PlatformWebview, events: TabEvents) -> bool {
     // SAFETY: runs on the UI thread that owns the controller (inside
     // `with_webview`); the handler is reference-counted by WebView2.
     let Ok(core) = (unsafe { platform.controller().CoreWebView2() }) else {
         return false;
     };
+    if !external_protocol::attach(&core, &events) {
+        log::warn!("[browser-tab] WebView2 runtime has no external-launch hook; the navigation hook alone denies them");
+    }
+    if events.role() == TabRole::Agent && !dialogs::attach(&core, &events) {
+        return false;
+    }
     let handler = SourceChangedEventHandler::create(Box::new(move |webview, args| {
         let (Some(webview), Some(args)) = (webview, args) else {
             return Ok(());

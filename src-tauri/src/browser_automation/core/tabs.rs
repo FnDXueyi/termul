@@ -14,9 +14,15 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use super::dialogs::TabDialogs;
 use super::ports::TabProfile;
 use super::BrowserError;
 use crate::browser_automation::engine::events::{CommitKind, NavVerdict};
+
+mod popups;
+pub use popups::PopupNote;
+#[cfg(test)]
+pub use popups::MAX_OPEN_POPUPS;
 
 pub(super) const EVENT_AGENT_TAB: &str = "acp:browser_agent_tab";
 
@@ -116,6 +122,11 @@ pub struct TabRecord {
     waiters: Vec<NavWaiter>,
     opener: Option<Opener>,
     pub refs: TabRefs,
+    /// The agent tab whose page opened this one as a popup.
+    pub popup_of: Option<String>,
+    pub dialogs: TabDialogs,
+    /// Popup outcomes not yet reported to the agent.
+    pub popups: Vec<PopupNote>,
 }
 
 type OpenResult = Result<oneshot::Receiver<NavOutcome>, String>;
@@ -140,7 +151,15 @@ impl TabRecord {
             waiters: Vec::new(),
             opener: None,
             refs: TabRefs::default(),
+            popup_of: None,
+            dialogs: TabDialogs::default(),
+            popups: Vec::new(),
         }
+    }
+
+    /// Whether a navigation the agent asked for is still in flight.
+    pub fn agent_navigating(&self) -> bool {
+        self.waiters.iter().any(|w| !w.tx.is_closed())
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -237,6 +256,7 @@ struct PendingAgentTab {
     session_id: String,
     url: String,
     profile: TabProfile,
+    popup_of: Option<String>,
     opened: oneshot::Sender<OpenResult>,
 }
 
@@ -347,6 +367,7 @@ impl TabRegistry {
                 session_id: session_id.to_string(),
                 url: url.to_string(),
                 profile,
+                popup_of: None,
                 opened: tx,
             },
         );
@@ -447,6 +468,7 @@ impl TabRegistry {
                     &pending.url,
                     opened,
                 );
+                record.popup_of = pending.popup_of;
                 // Registered before the webview exists, so the first
                 // navigation's start hop is the one it claims.
                 let first_nav = record.wait();
@@ -474,8 +496,10 @@ impl TabRegistry {
         }
         record.life = Lifecycle::Live;
         if let Some(opener) = record.opener.take() {
-            if let Some(session) = record.session_id().map(str::to_string) {
-                self.default_tab.entry(session).or_insert_with(|| label.to_string());
+            if let Some(session) = record.session_id().filter(|_| record.popup_of.is_none()) {
+                self.default_tab
+                    .entry(session.to_string())
+                    .or_insert_with(|| label.to_string());
             }
             let _ = opener.tx.send(Ok(opener.first_nav));
         }
@@ -509,7 +533,10 @@ impl TabRegistry {
         record.close("the tab was closed");
         if let Some(session) = record.session_id() {
             if self.default_tab.get(session).is_some_and(|d| d == label) {
-                let next = self.owned(session).into_iter().next();
+                let next = self
+                    .owned(session)
+                    .into_iter()
+                    .find(|l| self.tabs.get(l).is_some_and(|r| r.popup_of.is_none()));
                 match next {
                     Some(next) => self.default_tab.insert(session.to_string(), next),
                     None => self.default_tab.remove(session),
@@ -542,6 +569,11 @@ impl TabRegistry {
 
     pub fn default_tab(&self, session_id: &str) -> Option<&str> {
         self.default_tab.get(session_id).map(String::as_str)
+    }
+
+    /// Make `label`, a tab the caller resolved for this session, its default.
+    pub fn set_default_tab(&mut self, session_id: &str, label: &str) {
+        self.default_tab.insert(session_id.to_string(), label.to_string());
     }
 
     /// Resolve an agent verb's target. An explicit label must name a live

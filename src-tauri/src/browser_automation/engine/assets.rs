@@ -43,6 +43,9 @@ pub const SCROLL: Helper = helper!("scroll");
 pub const HOVER: Helper = helper!("hover");
 pub const CONTAINS_TEXT: Helper = helper!("contains_text");
 pub const READY_STATE: Helper = helper!("ready_state");
+pub const LOCATION: Helper = helper!("location");
+pub const CHECKED_STATE: Helper = helper!("checked_state");
+pub const SELECT_OPTION: Helper = helper!("select_option");
 
 /// A helper with its parameters, ready for an engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +110,22 @@ pub fn hover(path: &str) -> Script {
 /// Whether the page's visible text contains `text`.
 pub fn contains_text(text: &str) -> Script {
     Script::new(CONTAINS_TEXT, json!({ "text": text }))
+}
+
+/// The document's own URL, which also moves on `pushState`.
+pub fn location() -> Script {
+    Script::new(LOCATION, json!({}))
+}
+
+/// Whether the checkbox, switch or radio at `path` is checked.
+pub fn checked_state(path: &str) -> Script {
+    Script::new(CHECKED_STATE, json!({ "path": path }))
+}
+
+/// Pick the option of the select at `path` whose value, else label, is
+/// `value`, through the same value setter and events as `fill`.
+pub fn select_option(path: &str, value: &str) -> Script {
+    Script::new(SELECT_OPTION, json!({ "path": path, "value": value }))
 }
 
 #[cfg(test)]
