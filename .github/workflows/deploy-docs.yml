@@ -57,10 +57,10 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: website-docs
-          command: pages deploy build/client --project-name=termul-docs --branch=${{ github.ref_name == 'main' && 'main' || github.head_ref || github.ref_name }} --commit-dirty=true
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: website-docs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Passed through the environment so a branch name is never parsed as shell code.
+          DEPLOY_BRANCH: ${{ github.ref_name == 'main' && 'main' || github.head_ref || github.ref_name }}
+        run: bunx wrangler@4.95.0 pages deploy build/client --project-name=termul-docs --branch="$DEPLOY_BRANCH" --commit-dirty=true

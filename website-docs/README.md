@@ -23,4 +23,4 @@ bun run docs:build
 
 Write public documentation in `content/docs/`. Each `.mdx` file becomes a page under `/docs`.
 
-The app deploys to `https://docs.termul.dev`. Cloudflare Pages must be configured with the `termul-docs` project and `website-docs/build/client` as its build output directory.
+The site is planned for `https://docs.termul.dev`, which is not live yet. Cloudflare Pages must be configured with the `termul-docs` project and `website-docs/build/client` as its build output directory.
