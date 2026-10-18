@@ -165,13 +165,23 @@ enum Link {
     Attached(gateway::Connection),
     /// The holder's connection ended at `since`. The holder keeps the lease
     /// for the mount's grace so a reconnect or reload can take it up again.
-    /// On the tokio clock, like the grace timer that reads it.
+    /// On the tokio clock, like the grace timer that reads it. Agent calls
+    /// that arrive meanwhile wait on `ended`, which is never sent on:
+    /// replacing this state drops it and wakes them.
     Lost {
         since: tokio::time::Instant,
+        ended: watch::Sender<()>,
     },
 }
 
 impl Link {
+    fn lost() -> Self {
+        Self::Lost {
+            since: tokio::time::Instant::now(),
+            ended: watch::channel(()).0,
+        }
+    }
+
     fn connection(&self) -> Option<&gateway::Connection> {
         match self {
             Self::Attached(connection) => Some(connection),
