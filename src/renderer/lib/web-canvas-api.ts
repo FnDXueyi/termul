@@ -14,8 +14,8 @@
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
  *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
- * The bundle routes set their own HttpOnly per-canvas cookie on the first
- * `ct` request, so this adapter never touches `document.cookie`. Transport
+ * The bundle routes take the canvas token from their own path, so this
+ * adapter never touches cookies. Transport
  * failures map to `NETWORK_ERROR`; server failures keep their typed code.
  */
 

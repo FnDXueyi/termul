@@ -8,8 +8,8 @@
 //! convention); the web route mounts log their own seams. Document contents
 //! and session tokens are never logged.
 //!
-//! - [`static_server`] — bundle serving, the per-canvas `ct` token store and
-//!   cookie gate, and the open/close sequences both transports share.
+//! - [`static_server`] — bundle serving, the per-canvas token store and its
+//!   path gate, and the open/close sequences both transports share.
 //! - [`persistence`] — the mount registry: load floor, autosave debounce,
 //!   saved version and the atomic document write (AD-23, AD-31).
 //! - [`pin`] — the figcraft bundle tag this build expects.

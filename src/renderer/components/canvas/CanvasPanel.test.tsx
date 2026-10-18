@@ -106,7 +106,7 @@ describe('CanvasPanel', () => {
     const iframe = screen.getByTitle('Canvas — design.figcraft') as HTMLIFrameElement
     const origin = encodeURIComponent(window.location.origin)
     expect(iframe.src).toBe(
-      `http://127.0.0.1:5199/canvas/cv0123456789abcdef/?embed=kiosk&ct=cafe&ho=${origin}&ms=4`
+      `http://127.0.0.1:5199/canvas/cv0123456789abcdef/cafe/?embed=kiosk&ho=${origin}&ms=4`
     )
     expect(iframe.dataset.canvasMountSeq).toBe('4')
     expect(screen.getByText('Loading editor…')).toBeTruthy()

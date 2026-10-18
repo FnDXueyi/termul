@@ -150,7 +150,7 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
     );
 
     let embed = format!(
-        "/canvas/{}/?embed=kiosk&ct={first}",
+        "/canvas/{}/{first}/?embed=kiosk",
         canvas_id_for_project(project)
     );
     assert_ne!(
@@ -177,7 +177,7 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
     assert_eq!(
         get_status(app.clone(), &embed).await.0,
         StatusCode::UNAUTHORIZED,
-        "close revokes the ct token"
+        "close revokes the canvas token"
     );
 
     let third = token_of(&web_open(app, &doc, project).await);
@@ -197,13 +197,20 @@ async fn web_canvas_bundle_requires_a_valid_canvas_token() {
         .unwrap()
         .to_string();
 
-    let (status, _) = get_status(app.clone(), &format!("/canvas/{canvas_id}/?ct={token}")).await;
-    assert_ne!(status, StatusCode::UNAUTHORIZED, "valid ct authenticates");
+    for authorized in [
+        format!("/canvas/{canvas_id}/{token}/"),
+        format!("/canvas/{canvas_id}/{token}/assets/x.js"),
+    ] {
+        let (status, _) = get_status(app.clone(), &authorized).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{authorized}");
+    }
 
     for uri in [
+        format!("/canvas/{canvas_id}"),
         format!("/canvas/{canvas_id}/"),
         format!("/canvas/{canvas_id}/assets/x.js"),
-        format!("/canvas/{canvas_id}/assets/x.js?ct={:0<32}", "0"),
+        format!("/canvas/{canvas_id}/{:0<32}/assets/x.js", "0"),
+        format!("/canvas/{canvas_id}/assets/x.js?ct={token}"),
     ] {
         let (status, body) = get_status(app.clone(), &uri).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "uri {uri}");
@@ -215,13 +222,14 @@ async fn web_canvas_bundle_requires_a_valid_canvas_token() {
 
 #[tokio::test]
 async fn web_canvas_routes_trailing_slash_and_catch_all_reach_the_token_gate() {
-    // The iframe URL shape is `/canvas/<id>/` — it must route (via the
-    // catch-all) into the token-gated bundle, which rejects without a ct
+    // The iframe URL shape is `/canvas/<id>/<token>/` — it must route (via
+    // the catch-all) into the token-gated bundle, which rejects a wrong token
     // rather than 404ing.
     let app = web_canvas_app();
     for uri in [
         "/canvas/cv0123456789abcdef/",
-        "/canvas/cv0123456789abcdef/assets/x.js",
+        "/canvas/cv0123456789abcdef/0123/",
+        "/canvas/cv0123456789abcdef/0123/assets/x.js",
     ] {
         let (status, _) = get_status(app.clone(), uri).await;
         assert_eq!(

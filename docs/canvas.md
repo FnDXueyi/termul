@@ -11,7 +11,7 @@ renderer          canvas tab -> CanvasShell iframe /canvas/<id>/?embed=kiosk&ct=
                   canvas-bridge.ts   postMessage, figcraft control protocol
                   canvas-api.ts      facade -> tauri-canvas-api.ts / web-canvas-api.ts
 host              src-tauri/src/canvas/
-                    static_server.rs   bundle serving, ct token store, cookie gate, open/close
+                    static_server.rs   bundle serving, canvas token store, path gate, open/close
                     persistence/       mount registry, lease, autosave, conflicts, close sequence
                     pin.rs             the bundle tag this build expects
                   src-tauri/src/web/canvas_api.rs, canvas_persistence_api.rs   web routes
@@ -53,11 +53,11 @@ The renderer sends these with each canvas open, and the host clamps them.
 
 The iframe cannot send an `Authorization` header, so the bundle has its own credential, separate from the web auth bearer.
 
-- `open` mints a per-canvas `ct` token (32 hex characters from the OS CSPRNG) and reuses it on repeat opens.
-- The first request to `/canvas/<id>/` carries `?ct=<token>`. The response sets a per-canvas cookie `canvas_ct_<canvasId>` scoped to `/canvas/<id>/`, which authorizes the bundle's sub-resources. Tokens are compared in constant time.
-- The desktop cookie is `SameSite=None; Secure` (the iframe is a third-party context on a loopback origin). The same-origin web cookie is `HttpOnly; SameSite=Lax`.
-- `close` revokes the token, so stale URLs and cookies stop working.
-- Neither the token nor the cookie value is ever logged.
+- `open` mints a per-canvas token (32 hex characters from the OS CSPRNG) and reuses it on repeat opens.
+- The token is a path segment: the iframe loads `/canvas/<id>/<token>/`, so the bundle's relative sub-resource URLs carry it too. Tokens are compared in constant time.
+- No cookie is involved. On the desktop the loopback iframe is a cross-site frame inside the app webview, and WKWebView (macOS) and WebKitGTK (Linux) drop third-party cookies by default.
+- `close` revokes the token, so stale URLs stop working.
+- The token is never logged.
 - The `/canvas/open`, `/canvas/close` and persistence routes stay behind the web auth bearer. They are write routes: a view-only peer (remote peer without write access, or the desktop shared-live host) is refused with `FORBIDDEN`. A doc path must lie inside the root of the project that opens it (a registered, non-archived project), on the web routes and the desktop commands alike.
 
 ## Agents
@@ -71,7 +71,7 @@ Canvas tools live in the per-session host `termul` MCP server (`acp/host_mcp`). 
 | Open a project canvas | `canvas_open` | `POST /canvas/open` |
 | Close, with optional discard | `canvas_close` | `POST /canvas/close` |
 | Persistence round trip | `canvas_read_document`, `canvas_document_loaded`, `canvas_dirty_changed`, `canvas_set_visible`, `canvas_write_snapshot`, `canvas_disk_changed`, `canvas_resolve_conflict`, `canvas_crashed` | `POST /canvas/read-document`, `/document-loaded`, `/dirty-changed`, `/set-visible`, `/write-snapshot`, `/disk-changed`, `/resolve-conflict`, `/crashed` |
-| The bundle | loopback listener `http://127.0.0.1:<port>/canvas/<id>/` | `GET /canvas/<id>/` |
+| The bundle | loopback listener `http://127.0.0.1:<port>/canvas/<id>/<token>/` | `GET /canvas/<id>/<token>/` |
 
 Both transports share the same Rust service and typed error codes. Every facade method exists in both `tauri-canvas-api.ts` and `web-canvas-api.ts`, and parity tests hold them together.
 
@@ -91,4 +91,4 @@ An earlier canvas embedded OpenPencil as a managed `op-host-web-server` sidecar,
 - the HTTP proxy to the daemon, including the root `/pkg`, `/canvaskit` and `/api` relays (those paths are plain SPA paths now),
 - `.op` document handling, the `canvas_save`, `canvas_status` and `canvas_bundle_base` commands, and the `/canvas/save`, `/canvas/bundle-base` and `/canvas/mcp` routes.
 
-The `ct` token store and the per-canvas cookie gate survived, and the cookie was renamed from `op_canvas_ct_<id>` to `canvas_ct_<id>`. Nothing needs migrating: a `.op` file is not a canvas document and is ignored.
+The per-canvas token store survived. Its cookie gate was later replaced by the token path segment. Nothing needs migrating: a `.op` file is not a canvas document and is ignored.

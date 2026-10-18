@@ -441,8 +441,8 @@ const GATED_PREFIXES: &[&str] = &[
 ];
 
 /// Whether `path` is canvas-token authed INSTEAD of the outer bearer gate:
-/// the `/canvas/<id>…` bundle paths (`?ct=` canvas token or cookie, first
-/// segment after `/canvas/` is a canvas id, not an API route name).
+/// the `/canvas/<id>/<token>/…` bundle paths (the first segment after
+/// `/canvas/` is a canvas id, not an API route name).
 fn is_canvas_proxy_path(path: &str) -> bool {
     path.strip_prefix("/canvas/").is_some_and(|rest| {
         !matches!(
@@ -468,8 +468,8 @@ fn requires_token(path: &str) -> bool {
     if PUBLIC_PATHS.contains(&path) {
         return false;
     }
-    // Canvas bundle paths carry their own canvas credentials (ct token or
-    // cookie); the outer bearer gate skips them.
+    // Canvas bundle paths carry their own canvas token in the path; the
+    // outer bearer gate skips them.
     if is_canvas_proxy_path(path) {
         return false;
     }

@@ -176,21 +176,19 @@ export function canvasOriginOf(baseUrl: string): string {
 }
 
 /**
- * The iframe URL (AD-22). Set programmatically, never rendered as an
- * attribute or logged: it carries the `ct` token.
+ * The iframe URL (AD-22). The canvas token is a path segment, so the
+ * bundle's relative sub-resource URLs carry it too: no cookie is needed,
+ * which a cross-site iframe in WKWebView or WebKitGTK would not keep. Set
+ * programmatically, never rendered as an attribute or logged.
  */
 export function buildCanvasEmbedUrl(
   target: Pick<CanvasOpenInfo, 'baseUrl' | 'canvasId' | 'canvasToken'>,
   hostOrigin: string,
   mountSeq: number
 ): string {
-  const query = [
-    'embed=kiosk',
-    `ct=${encodeURIComponent(target.canvasToken)}`,
-    `ho=${encodeURIComponent(hostOrigin)}`,
-    `ms=${mountSeq}`
-  ].join('&')
-  return `${target.baseUrl}/canvas/${encodeURIComponent(target.canvasId)}/?${query}`
+  const query = ['embed=kiosk', `ho=${encodeURIComponent(hostOrigin)}`, `ms=${mountSeq}`].join('&')
+  const canvas = encodeURIComponent(target.canvasId)
+  return `${target.baseUrl}/canvas/${canvas}/${encodeURIComponent(target.canvasToken)}/?${query}`
 }
 
 interface Envelope {

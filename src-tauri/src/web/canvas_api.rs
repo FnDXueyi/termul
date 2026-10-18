@@ -12,14 +12,14 @@
 //!   the web auth token);
 //! - `/canvas/<id>/*` (the bundle) is EXEMPT from the bearer gate
 //!   (`router::is_canvas_proxy_path`) and authenticated by
-//!   `static_server::serve_bundle`: a `ct` query param or the per-canvas
-//!   cookie it sets must constant-time-match the token minted by the
-//!   project's open.
+//!   `static_server::serve_bundle`: the token segment of
+//!   `/canvas/<id>/<token>/` must constant-time-match the token minted by
+//!   the project's open.
 //!
 //! `POST /canvas/open` mounts the figcraft editor: it mints the project's
 //! bundle token (`static_server::open_canvas`) and `/canvas/<id>/*` then
 //! serves the embedded bundle. `POST /canvas/close` revokes the token, so
-//! stale `ct` params and cookies stop authenticating.
+//! stale iframe URLs stop authenticating.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,8 +33,7 @@ use serde::Deserialize;
 use crate::canvas::doc_path::resolve_doc_path;
 use crate::canvas::persistence::CloseOutcome;
 use crate::canvas::static_server::{
-    close_canvas, open_canvas, same_origin_base, serve_bundle, CanvasOpenInfo, CookiePolicy,
-    OpenRequest,
+    close_canvas, open_canvas, same_origin_base, serve_bundle, CanvasOpenInfo, OpenRequest,
 };
 use crate::web::capabilities::WriteFlags;
 use crate::web::fs_api::{check_local_only, IpcBody};
@@ -102,28 +101,24 @@ pub fn canvas_router<S>(state: CanvasState) -> Router<S> {
         .route("/canvas/open", post(open))
         .route("/canvas/close", post(close))
         .merge(crate::web::canvas_persistence_api::persistence_routes())
-        // The iframe src is `/canvas/<id>/` (the trailing slash keeps the
-        // bundle's relative asset URLs inside the prefix). axum does not
-        // collapse the bare and trailing-slash forms, so both are registered.
+        // The iframe src is `/canvas/<id>/<token>/` (the trailing slash keeps
+        // the bundle's relative asset URLs, token included, inside the
+        // prefix). The shorter forms are registered so they answer 401
+        // rather than fall through to the SPA.
         .route("/canvas/{id}", get(bundle))
         .route("/canvas/{id}/", get(bundle))
         .route("/canvas/{id}/{*rest}", any(bundle))
         .with_state(state)
 }
 
-/// `/canvas/<id>[/...]` — the figcraft bundle, gated by the canvas's `ct`
-/// token or cookie.
+/// `/canvas/<id>/<token>[/...]` — the figcraft bundle, gated by the
+/// canvas's token.
 async fn bundle(request: Request) -> Response {
-    serve_bundle(
-        CookiePolicy::SameOrigin,
-        request.method(),
-        request.uri(),
-        request.headers(),
-    )
+    serve_bundle(request.method(), request.uri(), request.headers())
 }
 
 /// `POST /canvas/open` — validate the doc path against the project's root,
-/// then return the same-origin bundle base plus the project's minted `ct`
+/// then return the same-origin bundle base plus the project's minted canvas
 /// token (the twin of the `canvas_open` Tauri command).
 async fn open(
     State(state): State<CanvasState>,

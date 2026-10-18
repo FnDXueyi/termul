@@ -638,13 +638,13 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
     }
-    // …but the `/canvas/<id>/*` bundle paths (the `?ct=` canvas token) are
+    // …but the `/canvas/<id>/<token>/*` bundle paths (the canvas token) are
     // exempt from the bearer gate (browser iframes cannot send Authorization
     // headers).
     for canvas_credentialed in [
         "/canvas/cv0123456789abcdef",
         "/canvas/cv0123456789abcdef/",
-        "/canvas/cv0123456789abcdef/assets/app.js",
+        "/canvas/cv0123456789abcdef/0123/assets/app.js",
     ] {
         assert!(
             !requires_token(canvas_credentialed),
