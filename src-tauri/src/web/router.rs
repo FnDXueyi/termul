@@ -23,9 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::web::acp_api;
 use crate::web::auth::{BearerVerified, WebAuth};
 
-use crate::acp::{
-    AcpCatalogService, AcpInstallService, AcpManager,
-};
+use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager};
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
@@ -464,7 +462,18 @@ const GATED_PREFIXES: &[&str] = &[
 /// — they are not under any gated prefix; their cookie middleware owns them.
 fn is_canvas_proxy_path(path: &str) -> bool {
     path.strip_prefix("/canvas/").is_some_and(|rest| {
-        !matches!(rest.split('/').next(), Some("open" | "close" | "save"))
+        !matches!(
+            rest.split('/').next(),
+            Some(
+                "open"
+                    | "close"
+                    | "save"
+                    | "read-document"
+                    | "document-loaded"
+                    | "dirty-changed"
+                    | "write-snapshot"
+            )
+        )
     })
 }
 

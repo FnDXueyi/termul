@@ -629,6 +629,10 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/canvas/open",
         "/canvas/close",
         "/canvas/save",
+        "/canvas/read-document",
+        "/canvas/document-loaded",
+        "/canvas/dirty-changed",
+        "/canvas/write-snapshot",
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
     }
@@ -965,10 +969,7 @@ async fn non_canvas_root_paths_fall_through_to_spa_unchanged() {
 }
 
 #[tokio::test]
-async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
-    // `router_with_static` never attaches a pool, so the canvas routes run
-    // in degraded mode: IpcBody failure with HTTP 200 (the app-level error
-    // contract, mirroring the Tauri command envelope).
+async fn ungated_canvas_open_refuses_a_doc_outside_every_project() {
     let dir = TempDir::new("canvas-ungated");
     let resp = test_router_with_fixture(dir.path())
         .oneshot(
@@ -981,7 +982,7 @@ async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
                 ))))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"docPath":"C:/proj/design.op","projectId":"p-1"}"#,
+                    r#"{"docPath":"C:/proj/design.figcraft","projectId":"p-1"}"#,
                 ))
                 .expect("build request"),
         )
@@ -993,7 +994,7 @@ async fn ungated_canvas_open_degrades_to_daemon_down_without_pool() {
         .expect("read body");
     let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     assert_eq!(parsed["success"], false);
-    assert_eq!(parsed["code"], "DAEMON_DOWN");
+    assert_eq!(parsed["code"], "PATH_VALIDATION_FAILED");
 }
 
 fn router_for_origins(dir: &Path, origins: OriginPolicy) -> Router {

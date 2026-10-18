@@ -6,10 +6,11 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Ur
 use axum::response::Response;
 use tower::ServiceExt;
 
+use super::canvas_id_for_project;
 use super::pin::pinned_tag;
 use super::static_server::{
-    bundle_router, bundle_tokens, canvas_cookie_name, same_origin_base, serve_bundle, Access,
-    BundleTokens, CookiePolicy, StaticServer,
+    bundle_router, bundle_tokens, canvas_cookie_name, close_canvas, open_canvas, same_origin_base,
+    serve_bundle, Access, BundleTokens, CanvasBundleBase, CookiePolicy, StaticServer,
 };
 use crate::web::auth::{WebAuth, WebAuthToken};
 use crate::web::canvas_api::{canvas_router, CanvasState};
@@ -49,6 +50,59 @@ fn tokens_are_per_canvas_and_reused_until_revoked() {
         first,
         "revoked token is not resurrected"
     );
+}
+
+#[test]
+fn open_canvas_mints_one_token_per_project_until_close() {
+    let base = CanvasBundleBase {
+        base_url: "http://127.0.0.1:4567".into(),
+        pin_tag: "termul-test".into(),
+    };
+    let project = "project-open-canvas";
+    let canvas_id = canvas_id_for_project(project);
+    let ct_query = |token: &str| format!("embed=kiosk&ct={token}");
+    let authorized = |token: &str| {
+        bundle_tokens()
+            .authorize(&canvas_id, Some(&ct_query(token)), &HeaderMap::new())
+            .granted()
+    };
+
+    let first = open_canvas(base.clone(), project, "C:/p/design.figcraft".into(), None).unwrap();
+    let wire = serde_json::to_value(&first).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "canvasId": canvas_id,
+            "baseUrl": "http://127.0.0.1:4567",
+            "canvasToken": first.canvas_token,
+            "pinTag": "termul-test",
+            "docKey": "C:/p/design.figcraft",
+            "mountSeq": first.mount_seq,
+        })
+    );
+    assert!(
+        authorized(&first.canvas_token),
+        "the minted ct opens the bundle"
+    );
+
+    let again = open_canvas(base.clone(), project, "C:/p/other.figcraft".into(), None).unwrap();
+    assert_eq!(
+        again.canvas_token, first.canvas_token,
+        "a repeat open keeps the mounted iframe's URL valid"
+    );
+    assert!(
+        again.mount_seq > first.mount_seq,
+        "every open is a new mount with a new mountSeq"
+    );
+
+    close_canvas(project);
+    assert!(!authorized(&first.canvas_token), "close revokes the token");
+    close_canvas(project);
+
+    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), None).unwrap();
+    assert_ne!(reopened.canvas_token, first.canvas_token);
+    assert!(authorized(&reopened.canvas_token));
+    close_canvas(project);
 }
 
 #[test]

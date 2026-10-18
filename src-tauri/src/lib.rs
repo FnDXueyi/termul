@@ -2010,6 +2010,10 @@ pub fn run() {
             // OpenPencil canvas mode (managed sidecar daemon lifecycle)
             commands::canvas_open,
             commands::canvas_close,
+            commands::canvas_read_document,
+            commands::canvas_document_loaded,
+            commands::canvas_dirty_changed,
+            commands::canvas_write_snapshot,
             commands::canvas_save,
             commands::canvas_status,
             commands::canvas_bundle_base,
