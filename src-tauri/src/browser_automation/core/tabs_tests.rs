@@ -137,7 +137,7 @@ fn manual_redirect_retargets_same_tab_and_kills_pre_navigation_refs() {
     // A pre-navigation ref dies: the navigated document no longer has the
     // registry entry, the page reports `stale_ref:`, and the eval gate
     // maps it to the typed wire code.
-    let err = eval_gate(json!({"error": "stale_ref: @e1 not in this document"}))
+    let err = eval_gate(&json!({"error": "stale_ref: @e1 not in this document"}), Some("@e1"))
         .expect_err("a pre-navigation ref must be rejected");
     assert_eq!(err.code, ERR_STALE_REF);
 }

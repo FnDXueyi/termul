@@ -201,7 +201,7 @@ impl DesktopBrowserHost {
             // The renderer removes the workspace tab on the event; also
             // destroy the native webview directly so a wedged renderer can't
             // leak it.
-            let _ = self.tabs.destroy(tab_id);
+            self.surface.destroy(tab_id);
             log::info!("[browser-agent] closed agent tab {tab_id}");
         }
     }

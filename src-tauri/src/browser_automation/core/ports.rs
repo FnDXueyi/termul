@@ -97,6 +97,9 @@ pub enum ProfileMode {
 pub enum TabProfile {
     Global,
     Ephemeral,
+    /// The app's own webview profile, shared with the user's tabs: what
+    /// every agent tab runs in until per-OS agent profiles land.
+    Shared,
 }
 
 /// Closed set of actions a consent ticket or a pre-approval names.

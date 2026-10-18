@@ -20,10 +20,11 @@ pub mod engine;
 #[cfg(test)]
 pub use self::core::boundary::BROWSER_CALL_FAILED_PREFIX;
 pub use self::core::boundary::{boundary_arg_keys, boundary_failure_line};
-pub use self::core::{expected_args_text, BrowserError, DesktopBrowserHost, ToolSchema, ERR_INVALID_PARAMS};
+pub use self::core::{expected_args_text, BrowserError, DesktopBrowserHost, Success, ToolSchema};
 #[cfg(test)]
 pub use self::core::{
-    ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_STALE_REF, ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
+    ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
+    ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
 use std::sync::{Arc, RwLock};
@@ -52,7 +53,7 @@ pub trait BrowserHost: Send + Sync {
         session_id: &'a str,
         agent_id: &'a str,
         call: BrowserCall,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>>;
     fn end_session(&self, session_id: &str);
     /// Called by `browser_tab_create` — returns true when the tab was a
     /// pending agent tab (so the caller can flag it agent-controlled).
@@ -92,12 +93,13 @@ pub async fn dispatch(
     session_id: &str,
     agent_id: &str,
     call: BrowserCall,
-) -> Result<Value, BrowserError> {
+) -> Result<Success, BrowserError> {
     match browser_host() {
         Some(host) => host.execute(session_id, agent_id, call).await,
         None => Err(BrowserError::capability(
             "browser automation is only available on the desktop app",
-        )),
+        )
+        .with_reason("no_automation_host")),
     }
 }
 

@@ -392,7 +392,6 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
     //    argument-looking values (they must reach the reply, never the
     //    log).
     use crate::browser_automation::{BrowserCall, BrowserError, BrowserHost};
-    use serde_json::Value;
     struct FailingHost;
     impl BrowserHost for FailingHost {
         fn execute<'a>(
@@ -401,7 +400,7 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             _agent_id: &'a str,
             call: BrowserCall,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, BrowserError>> + Send + 'a>,
         > {
             // The action selects the failure shape; per-site arg_keys are
             // attached only where a real error site would ("navigate":
@@ -411,32 +410,38 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
                     code: crate::browser_automation::ERR_INVALID_PARAMS,
                     message: format!("invalid url: {SECRET_URL}"),
                     arg_keys: vec!["url"],
+                    reason: None,
                 },
                 "click" => BrowserError {
                     code: crate::browser_automation::ERR_TAB_NOT_FOUND,
                     message: "tab 'agent-gone' not found".to_string(),
                     arg_keys: vec!["tabId"],
+                    reason: None,
                 },
                 "fill" => BrowserError {
                     code: crate::browser_automation::ERR_STALE_REF,
                     message: "stale_ref: @e42 detached".to_string(),
                     arg_keys: Vec::new(),
+                    reason: None,
                 },
                 "snapshot" => BrowserError {
                     code: crate::browser_automation::ERR_TIMEOUT,
                     message: "eval timed out".to_string(),
                     arg_keys: Vec::new(),
+                    reason: None,
                 },
                 "screenshot" => BrowserError {
                     code: crate::browser_automation::ERR_INTERNAL,
                     message: "eval failed after fill 'hunter2'".to_string(),
                     arg_keys: Vec::new(),
+                    reason: None,
                 },
                 _ => BrowserError {
                     code: crate::browser_automation::ERR_CONFIRMATION,
                     message: "user did not grant browser automation for this session"
                         .to_string(),
                     arg_keys: Vec::new(),
+                    reason: None,
                 },
             };
             Box::pin(async move { Err(err) })
@@ -534,6 +539,9 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
                 Some(message),
                 "{action} reply message must survive verbatim"
             );
+            assert_eq!(reply["result"]["ok"], false, "{action}");
+            assert_eq!(reply["result"]["code"], reply["code"], "{action}");
+            assert_eq!(reply["result"]["message"].as_str(), Some(message), "{action}");
         }
         assert_eq!(by_action("list_tabs")["code"], "capability_unavailable");
         assert_eq!(by_action("navigate")["code"], "invalid_params");
@@ -558,7 +566,6 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
     let _guard = crate::browser_automation::TEST_HOST_LOCK.lock().unwrap();
     crate::browser_automation::clear_browser_host();
     use crate::browser_automation::{BrowserCall, BrowserError, BrowserHost};
-    use serde_json::Value;
     struct EchoHost;
     impl BrowserHost for EchoHost {
         fn execute<'a>(
@@ -567,9 +574,14 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
             _agent_id: &'a str,
             call: BrowserCall,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, BrowserError>> + Send + 'a>,
         > {
-            Box::pin(async move { Ok(call.args) })
+            Box::pin(async move {
+                Ok(crate::browser_automation::Success {
+                    data: Some(call.args),
+                    ..Default::default()
+                })
+            })
         }
         fn end_session(&self, _session_id: &str) {}
         fn notify_tab_created(&self, _tab_id: &str) -> bool {
@@ -606,7 +618,8 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
     runtime.block_on(async move {
         let reply = connect_and_send(port, &wire).await;
         assert_eq!(reply["ok"], true);
-        assert_eq!(reply["result"]["url"], "https://example.com");
+        assert_eq!(reply["result"]["ok"], true);
+        assert_eq!(reply["result"]["data"]["url"], "https://example.com");
     });
     crate::browser_automation::clear_browser_host();
 }

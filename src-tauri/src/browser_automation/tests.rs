@@ -64,9 +64,14 @@ fn registered_host_routes_dispatch_and_session_end() {
             _agent_id: &'a str,
             call: BrowserCall,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>,
+            Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>,
         > {
-            Box::pin(async move { Ok(json!({ "sid": session_id, "action": call.action })) })
+            Box::pin(async move {
+                Ok(Success {
+                    data: Some(json!({ "sid": session_id, "action": call.action })),
+                    ..Success::default()
+                })
+            })
         }
         fn end_session(&self, session_id: &str) {
             self.ended.lock().push(session_id.to_string());
@@ -94,8 +99,9 @@ fn registered_host_routes_dispatch_and_session_end() {
     let out = rt
         .block_on(dispatch("sess-1", "agent", call("list_tabs", Value::Null)))
         .expect("stub host resolves");
-    assert_eq!(out["sid"], "sess-1");
-    assert_eq!(out["action"], "list_tabs");
+    let data = out.data.expect("stub data");
+    assert_eq!(data["sid"], "sess-1");
+    assert_eq!(data["action"], "list_tabs");
     session_ended("sess-1");
     assert_eq!(stub.ended.lock().as_slice(), &["sess-1".to_string()]);
     clear_browser_host();

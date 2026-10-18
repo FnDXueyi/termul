@@ -22,6 +22,8 @@ pub const BROWSER_CALL_FAILED_PREFIX: &str = "[host-mcp] browser call failed";
 #[derive(Debug)]
 pub struct BrowserError {
     pub code: &'static str,
+    /// Finer machine-readable cause under the frozen code.
+    pub reason: Option<&'static str>,
     pub message: String,
     /// Argument key names (never values) implicated in the failure.
     /// Carried to the host boundary so failure logs stay diagnosable from
@@ -42,9 +44,14 @@ impl BrowserError {
     pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
+            reason: None,
             message: message.into(),
             arg_keys: Vec::new(),
         }
+    }
+    pub(crate) fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = Some(reason);
+        self
     }
     /// Attach the argument key names implicated in this failure (key
     /// names only — never values; CWE-532).

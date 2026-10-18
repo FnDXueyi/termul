@@ -8,6 +8,7 @@ mod actions;
 mod dispatch;
 pub mod ports;
 mod reply;
+mod surface;
 mod tabs;
 #[cfg(test)]
 pub mod test_support;
@@ -16,14 +17,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::Value;
 use tauri::AppHandle;
 use tokio::sync::oneshot;
 
 pub use boundary::BrowserError;
 pub use dispatch::{expected_args_text, schema, ToolSchema};
 pub use reply::{
-    ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
+    Success, ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
@@ -33,13 +33,13 @@ use crate::acp::events;
 use crate::browser_tab_manager::BrowserTabManager;
 use crate::web::EventSink;
 use consent::PendingConsent;
+use surface::{PaneSurface, TabSurface};
 use tabs::{bump_epoch_if_agent_tab, AgentTabs};
 
 /// Desktop host: drives real pane webviews through the platform engine
 /// adapter and `BrowserTabManager` for navigation and tab lifecycle.
 pub struct DesktopBrowserHost {
-    app: AppHandle,
-    tabs: Arc<BrowserTabManager>,
+    surface: Arc<dyn TabSurface>,
     engine: Arc<dyn BrowserEngine>,
     sinks: Vec<Arc<dyn EventSink>>,
     /// session_id -> consent granted. Denials are not cached — a denied agent
@@ -66,10 +66,17 @@ impl DesktopBrowserHost {
             traits.isolated_world,
             traits.background_render
         );
+        Self::with_parts(Arc::new(PaneSurface { app, tabs }), engine, sinks)
+    }
+
+    fn with_parts(
+        surface: Arc<dyn TabSurface>,
+        engine: Arc<dyn BrowserEngine>,
+        sinks: Vec<Arc<dyn EventSink>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            app,
+            surface,
             engine,
-            tabs,
             sinks,
             consent: parking_lot::Mutex::new(HashMap::new()),
             pending_consent: parking_lot::Mutex::new(HashMap::new()),
@@ -89,7 +96,7 @@ impl BrowserHost for DesktopBrowserHost {
         session_id: &'a str,
         agent_id: &'a str,
         call: BrowserCall,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, BrowserError>> + Send + 'a>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>>
     {
         Box::pin(async move {
             let spec = dispatch::admit(&call.action, &call.args, self.engine.facts())?;
@@ -144,3 +151,6 @@ impl BrowserHost for DesktopBrowserHost {
         self.engine.deliver_script_reply(nonce, ok, value)
     }
 }
+
+#[cfg(test)]
+mod tests;

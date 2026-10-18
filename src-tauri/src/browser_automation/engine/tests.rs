@@ -29,6 +29,9 @@ fn capability_ids_are_the_closed_snake_case_set() {
             "network_observe",
         ]
     );
+    for id in CapabilityId::ALL {
+        assert_eq!(serde_json::to_value(id).unwrap(), serde_json::json!(id.as_str()));
+    }
 }
 
 #[test]
