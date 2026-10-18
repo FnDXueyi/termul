@@ -255,6 +255,28 @@ impl BrowserTabManager {
         let window = self.get_window()?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
 
+        // Every webview shares one profile, so clearing through the main webview
+        // wipes saved grants before this tab exists to load a page.
+        #[cfg(windows)]
+        if let Some(main) = self.app_handle.get_webview("main") {
+            use crate::browser_tab_saved_grants::{clear_saved_grants, ClearError};
+            match clear_saved_grants(&main).await {
+                Ok(report) if report.reset > 0 => log::warn!(
+                    "[BrowserTab] reset {} saved web permission grants before opening tab={}",
+                    report.reset,
+                    tab_id
+                ),
+                Ok(_) => {}
+                Err(ClearError::Unsupported) => log::warn!(
+                    "[BrowserTab] webview runtime cannot clear saved web permissions; tab={}",
+                    tab_id
+                ),
+                Err(ClearError::Failed) => {
+                    return Err("Could not clear saved web permissions".to_string())
+                }
+            }
+        }
+
         let mut builder = tauri::webview::WebviewBuilder::new(
             tab_id.clone(),
             tauri::WebviewUrl::External(parsed_url),

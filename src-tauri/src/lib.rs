@@ -7,6 +7,7 @@ mod agentation;
 mod browser_automation;
 mod browser_tab_manager;
 mod browser_tab_permissions;
+mod browser_tab_saved_grants;
 // OpenPencil canvas mode (spec-openpencil-canvas-mode): shared, Tauri-free
 // daemon pool + proxies. Compiled unconditionally so the standalone
 // `termul-server` (server_main.rs) constructs its own pool too.
