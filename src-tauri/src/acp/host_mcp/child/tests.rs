@@ -604,6 +604,7 @@ fn create_node_over_stdio_reaches_the_renderer_and_returns_its_result() {
             "engine.execute" => r#"{"id":18446744073709551615}"#.to_string(),
             "node.get" => r#"{"id":18446744073709551615,"name":"Card","type":"FRAME","width":320}"#
                 .to_string(),
+            presence if presence.starts_with("host.guest") => "{}".to_string(),
             other => panic!("unexpected {other}"),
         }))
     });
@@ -639,7 +640,13 @@ fn create_node_over_stdio_reaches_the_renderer_and_returns_its_result() {
             drop(writer);
         }));
     let methods: Vec<String> = seen.try_iter().map(|frame| frame.method).collect();
-    assert_eq!(methods, ["engine.execute", "node.get"]);
+    assert_eq!(methods[..2], ["engine.execute", "node.get"]);
+    assert!(
+        methods[2..]
+            .iter()
+            .all(|method| method == "node.get" || method.starts_with("host.guest")),
+        "only the agent cursor follows: {methods:?}"
+    );
 }
 
 #[tokio::test]

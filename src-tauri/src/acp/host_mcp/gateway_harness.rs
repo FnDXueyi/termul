@@ -76,6 +76,10 @@ impl Harness {
     pub(crate) fn router(&self) -> Arc<CanvasRouter> {
         self.server.canvas_router()
     }
+
+    pub(crate) fn server(&self) -> &Arc<HostPlanServer> {
+        &self.server
+    }
 }
 
 impl Drop for Harness {
