@@ -123,7 +123,11 @@ fn validate_accepts_well_formed_calls_and_ignores_unknown_keys() {
 fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     let facts = bridge_like();
     let err = admit("teleport", &Value::Null, &facts).unwrap_err();
-    assert_eq!((err.code, err.message.as_str()), (ERR_INVALID_PARAMS, "unknown action 'teleport'"));
+    assert_eq!(err.code, ERR_INVALID_PARAMS);
+    assert_eq!(
+        err.message,
+        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload"
+    );
 
     let err = admit("screenshot", &Value::Null, &facts).unwrap_err();
     assert_eq!((err.code, err.message.as_str()), (ERR_CAPABILITY, "no screenshots here"));
@@ -216,4 +220,48 @@ fn schema_rev_tracks_the_served_content() {
     assert_eq!(schema(Some(&trusted)).schema_rev, schema(Some(&trusted)).schema_rev);
     assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&bridge_like())).schema_rev);
     assert_ne!(schema(Some(&trusted)).schema_rev, schema(None).schema_rev);
+}
+
+#[test]
+fn served_text_never_leaks_an_identifier_name_and_documents_the_key_param() {
+    let schema = schema(Some(&EngineFacts::all_trusted()));
+    let served = format!("{} {}", schema.description, schema.input_schema);
+    assert!(!served.contains("ArgKey"), "{served}");
+    assert_eq!(
+        schema.input_schema["properties"]["key"]["description"],
+        "Key name to press, e.g. Enter (the default)."
+    );
+}
+
+#[test]
+fn description_says_where_results_live_and_lists_every_failure_code() {
+    let description = schema(Some(&EngineFacts::all_trusted())).description;
+    for line in [
+        "new_tab gives the new tab's id as tab.id",
+        "list_tabs gives data.tabs[], each {tab, page}",
+        "snapshot gives the outline in page.snapshot and a ref count in data.refs",
+        "screenshot gives the file path in data.path",
+        "tab.id is the tabId to pass back",
+        "the first call in a session may wait for their answer",
+    ] {
+        assert!(description.contains(line), "missing {line:?}: {description}");
+    }
+    for code in [
+        "confirmation_required",
+        "capability_unavailable",
+        "tab_not_found",
+        "stale_ref",
+        "invalid_params",
+        "timeout",
+        "internal",
+    ] {
+        assert!(description.contains(&format!("{code} (")), "missing code {code}: {description}");
+    }
+}
+
+#[test]
+fn a_withdrawn_verb_drops_its_result_line() {
+    let description = schema(Some(&bridge_like())).description;
+    assert!(!description.contains("data.path"), "{description}");
+    assert!(description.contains("data.refs"));
 }
