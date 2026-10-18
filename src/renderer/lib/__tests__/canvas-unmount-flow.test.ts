@@ -102,6 +102,34 @@ describe('unmountCanvases', () => {
     expect(useCanvasStore.getState().sessions.a).toBeUndefined()
   })
 
+  it('concurrent flows each get their own question and answer', async () => {
+    close.mockImplementation((projectId: string, discard: boolean) =>
+      Promise.resolve(
+        discard
+          ? { success: true, data: { unmounted: true, savedVersion: null, discarded: true } }
+          : close.mock.calls.filter(([id]) => id === projectId).length > 1
+            ? UNMOUNTED
+            : SAVE_FAILED
+      )
+    )
+    const first = unmountCanvases(['a'])
+    const second = unmountCanvases(['b'])
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(useCanvasUnmountPrompt.getState().question?.projectId).toBe('a'))
+    useCanvasUnmountPrompt.getState().answer('retry')
+    await vi.waitFor(() => expect(useCanvasUnmountPrompt.getState().question?.projectId).toBe('b'))
+    useCanvasUnmountPrompt.getState().answer('discard')
+    await expect(first).resolves.toBe(true)
+    await expect(second).resolves.toBe(true)
+    expect(close.mock.calls).toEqual([
+      ['a', false],
+      ['b', false],
+      ['a', false],
+      ['b', true]
+    ])
+    expect(useCanvasUnmountPrompt.getState().question).toBeNull()
+  })
+
   it('keep editing stops the close and leaves the canvas mounted', async () => {
     close.mockResolvedValue(SAVE_FAILED)
     const done = unmountCanvases()
