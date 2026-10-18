@@ -14,6 +14,7 @@
 //! Logging: boundary/failure lines only — never page contents, cookies, or
 //! typed values (CWE-532).
 
+pub mod budgets;
 pub mod core;
 pub mod engine;
 
@@ -29,6 +30,7 @@ pub use self::core::{
 
 use std::sync::{Arc, RwLock};
 
+use budgets::Deadline;
 use engine::EngineFacts;
 
 use serde::Deserialize;
@@ -53,6 +55,7 @@ pub trait BrowserHost: Send + Sync {
         session_id: &'a str,
         agent_id: &'a str,
         call: BrowserCall,
+        deadline: Deadline,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>>;
     fn end_session(&self, session_id: &str);
     /// Called by `browser_tab_create` — returns true when the tab was a
@@ -93,9 +96,10 @@ pub async fn dispatch(
     session_id: &str,
     agent_id: &str,
     call: BrowserCall,
+    deadline: Deadline,
 ) -> Result<Success, BrowserError> {
     match browser_host() {
-        Some(host) => host.execute(session_id, agent_id, call).await,
+        Some(host) => host.execute(session_id, agent_id, call, deadline).await,
         None => Err(BrowserError::capability(
             "browser automation is only available on the desktop app",
         )

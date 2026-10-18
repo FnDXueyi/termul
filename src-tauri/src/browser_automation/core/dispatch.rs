@@ -4,11 +4,13 @@
 //! capability pre-check.
 
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use super::{BrowserError, ERR_CAPABILITY};
+use crate::browser_automation::budgets;
 use crate::browser_automation::engine::{CapabilityId, EngineFacts, Support};
 
 /// Closed verb set.
@@ -151,6 +153,9 @@ pub struct ActionSpec {
     pub requires: &'static [CapabilityId],
     /// Mutating verbs report the `fidelity` of the input they used.
     pub mutating: bool,
+    /// Worst-case run time; admission refuses the verb when it no longer
+    /// fits the call's deadline.
+    pub budget: Duration,
     pub summary: &'static str,
 }
 
@@ -164,6 +169,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_NAVIGATE,
         summary: "load url. Without tabId it reuses this session's agent tab, opening one only when the session owns none; an explicit tabId must be a tab this session owns or the call fails with tab_not_found (it never opens another tab).",
     },
     ActionSpec {
@@ -173,6 +179,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval],
         mutating: false,
+        budget: budgets::ACTION_EVAL,
         summary: "read the page as an outline with @eN refs for interactive elements. Take one after every navigation, then act on refs.",
     },
     ActionSpec {
@@ -182,6 +189,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::Screenshot],
         mutating: false,
+        budget: budgets::ACTION_EVAL,
         summary: "save a PNG of the visible page and return its path.",
     },
     ActionSpec {
@@ -191,6 +199,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::PointerClick],
         mutating: true,
+        budget: budgets::ACTION_CLICK,
         summary: "click the element.",
     },
     ActionSpec {
@@ -200,6 +209,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
+        budget: budgets::ACTION_EVAL,
         summary: "replace a form field's value.",
     },
     ActionSpec {
@@ -209,6 +219,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
+        budget: budgets::ACTION_EVAL,
         summary: "append text to the element, or to the focused element without ref.",
     },
     ActionSpec {
@@ -218,6 +229,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
+        budget: budgets::ACTION_EVAL,
         summary: "press a key on the element, or on the focused element without ref.",
     },
     ActionSpec {
@@ -227,6 +239,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::Wheel],
         mutating: true,
+        budget: budgets::ACTION_EVAL,
         summary: "scroll the element into view, or the page by dy.",
     },
     ActionSpec {
@@ -236,6 +249,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::PointerMove],
         mutating: true,
+        budget: budgets::ACTION_EVAL,
         summary: "move the pointer over the element.",
     },
     ActionSpec {
@@ -245,6 +259,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[ArgKey::Ms, ArgKey::Text],
         requires: &[],
         mutating: false,
+        budget: budgets::ACTION_WAIT,
         summary: "sleep ms, or wait up to 30s for text to appear on the page.",
     },
     ActionSpec {
@@ -254,6 +269,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_NEW_TAB,
         summary: "open another agent tab at url and return its tabId.",
     },
     ActionSpec {
@@ -263,6 +279,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: false,
+        budget: budgets::ACTION_INSTANT,
         summary: "list this session's agent tabs.",
     },
     ActionSpec {
@@ -272,6 +289,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_INSTANT,
         summary: "close the tab.",
     },
     ActionSpec {
@@ -281,6 +299,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_HISTORY,
         summary: "go back in the tab's history.",
     },
     ActionSpec {
@@ -290,6 +309,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_HISTORY,
         summary: "go forward in the tab's history.",
     },
     ActionSpec {
@@ -299,6 +319,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[],
         mutating: true,
+        budget: budgets::ACTION_HISTORY,
         summary: "reload the tab.",
     },
 ];
@@ -417,6 +438,8 @@ pub struct ToolSchema {
     pub description: String,
     pub input_schema: Value,
     pub schema_rev: u64,
+    /// How long the child waits for a browser call's reply.
+    pub round_trip_ms: u64,
 }
 
 const FORMS: &str = "Pass action parameters either flat at the top level (e.g. {\"action\":\"navigate\",\"url\":\"https://example.com\"}) or nested under \"args\" (e.g. {\"action\":\"navigate\",\"args\":{\"url\":\"https://example.com\"}}); \"args\" must be a JSON object, never a string.";
@@ -444,6 +467,7 @@ pub fn schema(facts: Option<&EngineFacts>) -> ToolSchema {
         description,
         input_schema,
         schema_rev: hasher.finish(),
+        round_trip_ms: u64::try_from(budgets::ROUND_TRIP.as_millis()).unwrap_or(u64::MAX),
     }
 }
 

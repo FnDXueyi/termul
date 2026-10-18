@@ -12,11 +12,9 @@ use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, 
 use super::surface::HistoryStep;
 use super::tabs::{default_session_tab, navigate_resolution, AgentTab, NavigateResolution};
 use super::{BrowserError, DesktopBrowserHost, ERR_TIMEOUT};
+use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
 use crate::browser_automation::BrowserCall;
-
-/// Post-navigate settle poll budget.
-const NAV_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Validate + normalize a navigation target. http(s) only.
 pub(super) fn check_url(url: &str) -> Result<String, BrowserError> {
@@ -131,23 +129,29 @@ impl DesktopBrowserHost {
         })
     }
 
-    /// Wait until `document.readyState` reaches interactive/complete.
-    async fn settle(&self, tab_id: &str) {
-        let deadline = std::time::Instant::now() + NAV_SETTLE_TIMEOUT;
+    /// Wait until `document.readyState` reaches interactive/complete. A
+    /// slow SPA still settles Ok; the agent retries reads on demand.
+    async fn settle(&self, tab_id: &str, deadline: Deadline) {
+        let settle = Deadline::after(deadline.clamp(budgets::NAV_SETTLE));
         loop {
             let state = self.eval(tab_id, assets::READY_STATE).await.ok();
             if matches!(state.as_ref().and_then(Value::as_str), Some("complete" | "interactive")) {
                 return;
             }
-            // A slow SPA still settles Ok; the agent retries reads on demand.
-            if std::time::Instant::now() > deadline {
+            if settle.remaining().is_zero() {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(settle.clamp(budgets::SETTLE_POLL)).await;
         }
     }
 
-    pub(super) async fn act(&self, session_id: &str, verb: Verb, call: BrowserCall) -> Result<Success, BrowserError> {
+    pub(super) async fn act(
+        &self,
+        session_id: &str,
+        verb: Verb,
+        call: BrowserCall,
+        deadline: Deadline,
+    ) -> Result<Success, BrowserError> {
         let args = &call.args;
         match verb {
             Verb::ListTabs => Ok(self.list_tabs(session_id)),
@@ -168,7 +172,7 @@ impl DesktopBrowserHost {
                 self.close_agent_tab(&id);
                 Ok(mutated(Fidelity::Trusted, facts))
             }
-            Verb::Navigate => self.navigate(session_id, args).await,
+            Verb::Navigate => self.navigate(session_id, args, deadline).await,
             Verb::Back | Verb::Forward | Verb::Reload => {
                 let (id, tab) = self.resolve_arg_tab(session_id, args)?;
                 let step = match verb {
@@ -178,7 +182,7 @@ impl DesktopBrowserHost {
                 };
                 self.surface.history(&id, step).map_err(BrowserError::internal)?;
                 tab.bump_epoch();
-                self.settle(&id).await;
+                self.settle(&id, deadline).await;
                 Ok(Success {
                     page: self.page_meta(&id),
                     ..mutated(Fidelity::Trusted, self.tab_facts(&id, &tab))
@@ -208,7 +212,7 @@ impl DesktopBrowserHost {
             Verb::Click => {
                 let (id, tab) = self.resolve_arg_tab(session_id, args)?;
                 let el = required_ref(args)?;
-                let fidelity = self.click_ref(&id, el, tab.epoch()).await?;
+                let fidelity = self.click_ref(&id, el, tab.epoch(), deadline).await?;
                 Ok(mutated(fidelity, self.tab_facts(&id, &tab)))
             }
             Verb::Fill => {
@@ -233,7 +237,7 @@ impl DesktopBrowserHost {
                 eval_gate(&out, ref_id)?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&id, &tab)))
             }
-            Verb::Wait => self.wait(session_id, args).await,
+            Verb::Wait => self.wait(session_id, args, deadline).await,
         }
     }
 
@@ -261,7 +265,7 @@ impl DesktopBrowserHost {
         }
     }
 
-    async fn navigate(&self, session_id: &str, args: &Value) -> Result<Success, BrowserError> {
+    async fn navigate(&self, session_id: &str, args: &Value, deadline: Deadline) -> Result<Success, BrowserError> {
         let url = check_url(&require_url_arg(args, "navigate")?)?;
         let tab_id = tab_id_arg(args, "navigate")?;
         let resolution = {
@@ -306,7 +310,7 @@ impl DesktopBrowserHost {
                 .map_err(BrowserError::internal)?;
         }
         tab.bump_epoch();
-        self.settle(&tab_id).await;
+        self.settle(&tab_id, deadline).await;
         // Report the tab's real URL — never fabricate the requested one.
         let page = self
             .page_meta(&tab_id)
@@ -317,20 +321,21 @@ impl DesktopBrowserHost {
         })
     }
 
-    async fn wait(&self, session_id: &str, args: &Value) -> Result<Success, BrowserError> {
+    async fn wait(&self, session_id: &str, args: &Value, deadline: Deadline) -> Result<Success, BrowserError> {
         let (tab_id, tab) = self.resolve_arg_tab(session_id, args)?;
         let done = |host: &Self| Success {
             tab: Some(host.tab_facts(&tab_id, &tab)),
             ..Success::default()
         };
         if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
-            tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
+            let ms = std::time::Duration::from_millis(ms).min(budgets::WAIT_MAX);
+            tokio::time::sleep(deadline.clamp(ms)).await;
             return Ok(done(self));
         }
         let text = args.get("text").and_then(Value::as_str).ok_or_else(|| {
             BrowserError::invalid("wait needs 'ms' or 'text'").with_arg_keys(&["ms", "text"])
         })?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let wait = Deadline::after(deadline.clamp(budgets::WAIT_MAX));
         loop {
             let found = self
                 .eval(&tab_id, &assets::contains_text(text))
@@ -341,19 +346,25 @@ impl DesktopBrowserHost {
             if found {
                 return Ok(done(self));
             }
-            if std::time::Instant::now() > deadline {
+            if wait.remaining().is_zero() {
                 return Err(BrowserError::new(ERR_TIMEOUT, "wait: text did not appear within 30s")
                     .with_reason("text_not_found")
                     .with_arg_keys(&["text"]));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(wait.clamp(budgets::WAIT_POLL)).await;
         }
     }
 
     /// Click an `@eN` ref and report the input actually used: a trusted
     /// click at the resolved point where the engine has one (falling back
     /// to a synthetic DOM click if it fails), else the synthetic click.
-    async fn click_ref(&self, tab_id: &str, ref_id: &str, epoch: u64) -> Result<Fidelity, BrowserError> {
+    async fn click_ref(
+        &self,
+        tab_id: &str,
+        ref_id: &str,
+        epoch: u64,
+        deadline: Deadline,
+    ) -> Result<Fidelity, BrowserError> {
         let mode = match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
             Support::Trusted => InputMode::Trusted,
             Support::Synthetic => InputMode::Synthetic,
@@ -373,6 +384,7 @@ impl DesktopBrowserHost {
             };
             match self.engine.pointer_click(tab_id, at, InputMode::Trusted).await {
                 Ok(()) => return Ok(Fidelity::Trusted),
+                Err(e) if !deadline.admits(budgets::EVAL_STEP) => return Err(engine_error(e, tab_id)),
                 Err(e) => log::warn!(
                     "[browser-agent] trusted click failed on tab {tab_id} ({:?}), synthetic fallback",
                     e.kind

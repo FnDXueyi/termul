@@ -23,6 +23,7 @@ fn dispatch_without_host_fails_closed() {
             "sess",
             "agent",
             call("navigate", json!({"url": "https://x"})),
+            budgets::Deadline::after(budgets::FRAME_BUDGET),
         ))
         .expect_err("no host must fail closed");
     assert_eq!(err.code, ERR_CAPABILITY);
@@ -63,6 +64,7 @@ fn registered_host_routes_dispatch_and_session_end() {
             session_id: &'a str,
             _agent_id: &'a str,
             call: BrowserCall,
+            _deadline: crate::browser_automation::budgets::Deadline,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>,
         > {
@@ -97,7 +99,12 @@ fn registered_host_routes_dispatch_and_session_end() {
     set_browser_host(stub.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let out = rt
-        .block_on(dispatch("sess-1", "agent", call("list_tabs", Value::Null)))
+        .block_on(dispatch(
+            "sess-1",
+            "agent",
+            call("list_tabs", Value::Null),
+            budgets::Deadline::after(budgets::FRAME_BUDGET),
+        ))
         .expect("stub host resolves");
     let data = out.data.expect("stub data");
     assert_eq!(data["sid"], "sess-1");

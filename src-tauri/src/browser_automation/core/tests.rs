@@ -181,12 +181,18 @@ fn bridge_like() -> CapabilityTable {
 
 impl Harness {
     async fn call(&self, action: &str, args: Value) -> Value {
+        self.call_within(action, args, crate::browser_automation::budgets::FRAME_BUDGET)
+            .await
+    }
+
+    async fn call_within(&self, action: &str, args: Value, budget: std::time::Duration) -> Value {
         let call = BrowserCall {
             action: action.to_string(),
             args,
             element: None,
         };
-        match self.host.execute("s1", "agent-1", call).await {
+        let deadline = Deadline::after(budget);
+        match self.host.execute("s1", "agent-1", call, deadline).await {
             Ok(success) => success.to_json(),
             Err(e) => e.to_json(),
         }
@@ -355,4 +361,38 @@ async fn withdrawn_verbs_are_refused_before_consent_is_asked() {
     let reply = h.call("screenshot", json!({})).await;
     assert_eq!(reply["code"], "capability_unavailable");
     assert!(h.host.pending_consent.lock().is_empty(), "no prompt for a call that cannot run");
+}
+
+#[tokio::test]
+async fn admission_refuses_a_verb_that_no_longer_fits_the_deadline() {
+    let h = harness_with(FakeEngine::new(webview2_like()));
+    let reply = h
+        .call_within("navigate", json!({ "url": "https://example.com" }), std::time::Duration::from_secs(10))
+        .await;
+    assert_eq!(
+        reply,
+        json!({
+            "ok": false,
+            "code": "timeout",
+            "reason": "deadline",
+            "message": "not enough time left in this call to run navigate; call it again"
+        })
+    );
+    assert!(h.host.agent_tabs.lock().is_empty(), "nothing ran: no tab was opened");
+
+    let reply = h.call_within("list_tabs", json!({}), std::time::Duration::from_secs(10)).await;
+    assert_eq!(reply["ok"], true, "a verb whose budget fits still runs");
+}
+
+#[tokio::test]
+async fn the_consent_wait_ends_at_the_call_deadline() {
+    let h = harness_with(FakeEngine::new(webview2_like()));
+    h.host.consent.lock().clear();
+    let started = std::time::Instant::now();
+    let reply = h
+        .call_within("snapshot", json!({}), std::time::Duration::from_millis(100))
+        .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "never waits the full consent budget");
+    assert_eq!(reply["code"], "confirmation_required");
+    assert_eq!(reply["reason"], "consent_unanswered");
 }

@@ -455,6 +455,9 @@ impl HostPlanServer {
 
         match req.kind {
             FrameKind::Browser => {
+                let deadline = crate::browser_automation::budgets::Deadline::after(
+                    crate::browser_automation::budgets::FRAME_BUDGET,
+                );
                 let raw = req.browser_input.unwrap_or(serde_json::Value::Null);
                 let input = match crate::acp::host_mcp::TermulBrowserInput::parse(raw) {
                     Ok(input) => input,
@@ -472,8 +475,13 @@ impl HostPlanServer {
                     args: input.args,
                     element: input.element,
                 };
-                match crate::browser_automation::dispatch(&real_session_id, &auth.agent_id, call)
-                    .await
+                match crate::browser_automation::dispatch(
+                    &real_session_id,
+                    &auth.agent_id,
+                    call,
+                    deadline,
+                )
+                .await
                 {
                     Ok(success) => FrameReply::ok_with(success.to_json()),
                     Err(e) => {

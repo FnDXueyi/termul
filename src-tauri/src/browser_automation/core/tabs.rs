@@ -11,9 +11,6 @@ use uuid::Uuid;
 
 use super::{BrowserError, DesktopBrowserHost};
 
-/// Renderer round-trip to open a workspace tab + native webview.
-const TAB_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
 pub(super) const EVENT_AGENT_TAB: &str = "acp:browser_agent_tab";
 
 #[derive(Debug, Clone, Serialize)]
@@ -160,7 +157,7 @@ impl DesktopBrowserHost {
                 session_id: session_id.to_string(),
             },
         );
-        match tokio::time::timeout(TAB_OPEN_TIMEOUT, rx).await {
+        match tokio::time::timeout(crate::browser_automation::budgets::TAB_OPEN, rx).await {
             Ok(Ok(Ok(()))) => {
                 self.agent_tabs
                     .lock()

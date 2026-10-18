@@ -5,7 +5,7 @@
 pub mod boundary;
 mod consent;
 mod actions;
-mod dispatch;
+pub(crate) mod dispatch;
 pub mod ports;
 mod reply;
 mod surface;
@@ -27,6 +27,7 @@ pub use reply::{
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
+use super::budgets::Deadline;
 use super::engine::{self, BrowserEngine, EngineFacts};
 use super::{BrowserCall, BrowserHost};
 use crate::acp::events;
@@ -96,12 +97,22 @@ impl BrowserHost for DesktopBrowserHost {
         session_id: &'a str,
         agent_id: &'a str,
         call: BrowserCall,
+        deadline: Deadline,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>>
     {
         Box::pin(async move {
             let spec = dispatch::admit(&call.action, &call.args, self.engine.facts())?;
-            self.ensure_consent(session_id, agent_id, &call).await?;
-            self.act(session_id, spec.verb, call).await
+            self.ensure_consent(session_id, agent_id, &call, deadline).await?;
+            // After a consent wait the call may no longer have time to run
+            // the verb: refuse it now rather than act after the agent gave up.
+            if !deadline.admits(spec.budget) {
+                return Err(BrowserError::new(
+                    ERR_TIMEOUT,
+                    format!("not enough time left in this call to run {}; call it again", spec.name),
+                )
+                .with_reason("deadline"));
+            }
+            self.act(session_id, spec.verb, call, deadline).await
         })
     }
 
