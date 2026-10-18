@@ -233,7 +233,7 @@ export function createTauriFilesystemApi(): FilesystemApi {
         const filtered = await Promise.all(
           entries.map(async (entry): Promise<DirectoryEntry> => {
             const name = entry.name
-            const fullPath = `${normalizedDirPath}/${name}`.replace(/\/+/g, '/')
+            const fullPath = `${normalizedDirPath.replace(/\/+$/, '')}/${name}`
             let size = 0
             let modified = Date.now()
             try {

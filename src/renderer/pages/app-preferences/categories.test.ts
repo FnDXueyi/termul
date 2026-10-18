@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { searchSettings } from '@/lib/settings-search'
-import { APP_PREF_SEARCH_INDEX } from './categories'
+import { appPrefSearchIndex } from './categories'
+
+const APP_PREF_SEARCH_INDEX = appPrefSearchIndex()
 
 // L-28: the screen reader switch is reachable from the settings search box.
 describe('APP_PREF_SEARCH_INDEX screen reader mode (L-28)', () => {

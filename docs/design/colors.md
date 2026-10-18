@@ -4,7 +4,7 @@ Tokens are OKLCH `"L C H"` on `:root`. Tailwind maps `oklch(var(--token) / <alph
 
 ## Allowed layers
 
-1. Semantic roles: `background`, `foreground`, `card`, `popover`, `primary`, `primary-fill`, `secondary`, `muted`, `accent`, `destructive`, `destructive-fill`, `success`, `success-fill`, `warning`, `connection`, `border`, `input`, `ring`, `overlay`.
+1. Semantic roles: `background`, `foreground`, `card`, `popover`, `primary`, `primary-fill`, `secondary`, `muted`, `accent`, `destructive`, `destructive-fill`, `success`, `success-fill`, `warning`, `connection`, `border`, `input`, `field-border`, `ring`, `overlay`.
 2. Product identity: `project-{blue,purple,green,yellow,red,cyan,pink,orange,gray}` — chips, graph lanes, pickers only.
 3. Chrome bar (legacy): `status-bar` and `status-bar-{color}`. The StatusBar does not use them now. The tokens stay for back-compat (`statusBarColors` in `lib/colors.ts`). Do not use them in new UI.
 4. Diff: `diff-added`, `diff-modified` (changed files, not a warning). Deletions use `destructive`.
@@ -21,6 +21,7 @@ The default dark theme (`termul`) paints neutrals from an explicit ramp. Other t
 | `popover`, `secondary`, `sidebar-background` | Menu, hover, sidebar | Obsidian `#161718` |
 | `muted` | Recessed well | Midpoint of Obsidian and the border, same hue |
 | `border`, `input` | Hairline | Graphite lightness on the Void hue (`#23252a` drifts off that hue) |
+| `field-border` | Edge of text fields and select triggers | `border` lifted until it reaches 3:1 on card, background and popover (WCAG 1.4.11) |
 | `foreground` | Primary copy | Bone `#e5e5e6` |
 | `secondary-foreground` | Secondary labels | Mist `#d0d6e0` |
 | `muted-foreground` | Muted copy | Fog `#8a8f98` |
@@ -77,6 +78,14 @@ On background / card / popover?
 ```
 
 The StatusBar is quiet: `bg-card`, `border-t border-border`, ink `text-muted-foreground`. Labels use `text-secondary-foreground`. The project colour is in the project glyph (`ProjectIcon`), not in the bar fill. Never `text-white` or `text-primary-foreground` on the bar.
+
+## Syntax
+
+Code color is not a UI token. The editor, chat fences, and diffs share one map: `resolveSyntaxColors`. Termul's map is `termul-syntax.ts`. Other families keep their own overrides.
+
+Termul follows the Cursor editor. Teal is a keyword. Peach is a declared function or type name. Blue is a name being read. Lavender is a name being declared, and also a JSX tag. Pink is a string. Comments stay neutral gray. Property names stay on the foreground.
+
+Roles that sit next to each other stay at least 15° apart in OKLCH hue. Do not use the olive, brown, and khaki set from VS Code Dark+ (`#6a9955`, `#ce9178`, `#dcdcaa`). Do not use the UI blue (`primary`) as a syntax hue. Each syntax color must clear WCAG AA (4.5:1) on the theme background and on the card.
 
 ## Incorrect
 

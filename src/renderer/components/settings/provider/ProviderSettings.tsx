@@ -224,7 +224,7 @@ export function ProviderSettings(): React.JSX.Element {
           {canManage ? (
             <>
               <Info size={12} className="shrink-0" />
-              Choose an account per project in Project Settings → Provider.
+              Choose an account per project in Project settings → Accounts.
             </>
           ) : (
             <>
