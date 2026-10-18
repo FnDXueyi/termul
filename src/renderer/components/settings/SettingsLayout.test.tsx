@@ -1,210 +1,285 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsSearchEntry } from '@/lib/settings-search'
-import { type SettingsCategory, SettingsLayout, SettingsSection } from './SettingsLayout'
+import {
+  SETTINGS_TARGET_MS,
+  type SettingsCategory,
+  SettingsLayout,
+  SettingsSection
+} from './SettingsLayout'
 
-// jsdom does not implement these; the layout uses them for navigation/scroll-spy.
+// jsdom does not implement scrollIntoView; search jumps use it.
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
 
-// Capture the most recent observer so tests can drive intersection callbacks.
-let lastObserver: IntersectionObserverMock | null = null
-
-class IntersectionObserverMock {
-  callback: IntersectionObserverCallback
-  observed: Element[] = []
-  unobserve = vi.fn()
-  disconnect = vi.fn()
-  takeRecords = vi.fn(() => [])
-  root = null
-  rootMargin = ''
-  thresholds = []
-  constructor(cb: IntersectionObserverCallback) {
-    this.callback = cb
-    lastObserver = this
-  }
-  observe = (el: Element): void => {
-    this.observed.push(el)
-  }
-  /** Test helper: fire the callback with the given section intersections. */
-  emit(items: Array<{ id: string; isIntersecting: boolean; top: number }>): void {
-    const entries = items.map((item) => {
-      const target = this.observed.find(
-        (el) => (el as HTMLElement).dataset.settingsSection === item.id
-      )
-      return {
-        target,
-        isIntersecting: item.isIntersecting,
-        boundingClientRect: { top: item.top } as DOMRectReadOnly
-      } as IntersectionObserverEntry
-    })
-    this.callback(entries, this as unknown as IntersectionObserver)
-  }
-}
-
 beforeEach(() => {
-  lastObserver = null
-  vi.stubGlobal('IntersectionObserver', IntersectionObserverMock)
   ;(window.HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+    cb(0)
+    return 0
+  })
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 const categories: SettingsCategory[] = [
-  { id: 'appearance', label: 'Appearance' },
-  { id: 'shell', label: 'Shell' },
-  { id: 'mcp-servers', label: 'MCP Servers' },
-  { id: 'updates', label: 'Updates' }
+  { id: 'appearance', label: 'Appearance', group: 'Terminal', description: 'How terminals look.' },
+  { id: 'shell', label: 'Shell', group: 'Terminal' },
+  { id: 'mcp-servers', label: 'MCP servers', group: 'Agents' },
+  { id: 'updates', label: 'Updates', group: 'App' }
 ]
 
 const searchIndex: SettingsSearchEntry[] = [
-  { categoryId: 'appearance', label: 'Font Family', description: 'monospace font' },
-  { categoryId: 'shell', label: 'Default Shell', keywords: ['bash'] },
+  {
+    categoryId: 'appearance',
+    label: 'Font family',
+    description: 'monospace font',
+    anchorId: 'setting-font'
+  },
+  { categoryId: 'shell', label: 'Default shell', keywords: ['bash'], anchorId: 'setting-shell' },
   {
     categoryId: 'mcp-servers',
-    label: 'MCP Servers',
+    label: 'MCP servers',
     description: 'Manage stdio, HTTP, and SSE servers.',
     keywords: ['model context protocol']
   },
   { categoryId: 'updates', label: 'Auto-update', description: 'check for updates' }
 ]
 
-function renderLayout() {
-  return render(
-    <SettingsLayout title="Settings" categories={categories} searchIndex={searchIndex}>
+function Pages(): React.JSX.Element {
+  return (
+    <>
       <SettingsSection id="appearance">
-        <h2>Appearance</h2>
+        <div id="setting-font">Font row</div>
       </SettingsSection>
       <SettingsSection id="shell">
-        <h2>Shell</h2>
+        <div id="setting-shell">Shell row</div>
       </SettingsSection>
       <SettingsSection id="mcp-servers">
-        <h2>MCP Servers</h2>
+        <p>MCP body</p>
       </SettingsSection>
       <SettingsSection id="updates">
-        <h2>Updates</h2>
+        <p>Updates body</p>
       </SettingsSection>
+    </>
+  )
+}
+
+function renderLayout(props: Partial<React.ComponentProps<typeof SettingsLayout>> = {}) {
+  return render(
+    <SettingsLayout title="Settings" categories={categories} searchIndex={searchIndex} {...props}>
+      <Pages />
     </SettingsLayout>
   )
 }
 
+const nav = () => screen.getByRole('navigation', { name: 'Settings pages' })
+
 describe('SettingsLayout', () => {
-  it('renders all categories in the sidebar', () => {
+  it('lists every page in the sidebar under its group heading', () => {
     renderLayout()
-    const nav = screen.getByRole('navigation', { name: /settings categories/i })
-    expect(nav).toBeInTheDocument()
+
     for (const category of categories) {
-      expect(screen.getByRole('button', { name: category.label })).toBeInTheDocument()
+      expect(within(nav()).getByRole('button', { name: category.label })).toBeInTheDocument()
     }
+    expect(screen.getAllByTestId('settings-group-label').map((el) => el.textContent)).toEqual([
+      'Terminal',
+      'Agents',
+      'App'
+    ])
   })
 
-  it('marks the first category active by default', () => {
+  it('shows only the first page by default, with its title and description', () => {
     renderLayout()
-    expect(screen.getByRole('button', { name: 'Appearance' })).toHaveAttribute(
+
+    expect(within(nav()).getByRole('button', { name: 'Appearance' })).toHaveAttribute(
       'aria-current',
-      'true'
+      'page'
     )
+    expect(screen.getByRole('heading', { name: 'Appearance', level: 2 })).toBeInTheDocument()
+    expect(screen.getByText('How terminals look.')).toBeInTheDocument()
+    expect(screen.getByText('Font row')).toBeVisible()
+    expect(screen.getByText('Updates body')).not.toBeVisible()
   })
 
-  it('scrolls to a section and activates it when a category is clicked', () => {
+  it('switches the page when a sidebar item is selected, keeping other pages mounted', () => {
     renderLayout()
-    const shellButton = screen.getByRole('button', { name: 'Shell' })
-    fireEvent.click(shellButton)
+
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Shell' }))
+
+    expect(within(nav()).getByRole('button', { name: 'Shell' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    expect(screen.getByText('Shell row')).toBeVisible()
+    expect(screen.getByText('Font row')).not.toBeVisible()
+    expect(screen.getByText('Font row')).toBeInTheDocument()
+  })
+
+  it('works controlled through page and onPageChange', () => {
+    const onPageChange = vi.fn()
+    function Controlled(): React.JSX.Element {
+      const [page, setPage] = useState('updates')
+      return (
+        <SettingsLayout
+          title="Settings"
+          categories={categories}
+          searchIndex={searchIndex}
+          page={page}
+          onPageChange={(next) => {
+            onPageChange(next)
+            setPage(next)
+          }}
+        >
+          <Pages />
+        </SettingsLayout>
+      )
+    }
+    render(<Controlled />)
+
+    expect(screen.getByText('Updates body')).toBeVisible()
+    fireEvent.click(within(nav()).getByRole('button', { name: 'MCP servers' }))
+    expect(onPageChange).toHaveBeenCalledWith('mcp-servers')
+    expect(screen.getByText('MCP body')).toBeVisible()
+  })
+
+  it('filters to matching settings with the page path, and matches keywords', () => {
+    renderLayout()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+
+    const result = within(nav()).getByRole('button', { name: /Default shell/ })
+    expect(result).toHaveTextContent('Terminal · Shell')
+    expect(screen.getByText('1 result')).toBeInTheDocument()
+  })
+
+  it('shows an empty state with Clear search when no settings match', () => {
+    renderLayout()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'zzzzqqq' }
+    })
+    expect(screen.getByText(/No settings match/i)).toBeInTheDocument()
+
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Clear search' }))
+    expect(screen.getByRole('textbox', { name: /search settings/i })).toHaveValue('')
+  })
+
+  it('opens the page of a result, scrolls to the setting and marks it for two seconds', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    renderLayout()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Default shell/ }))
+
+    const target = screen.getByText('Shell row')
+    expect(target).toBeVisible()
     expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled()
-    expect(shellButton).toHaveAttribute('aria-current', 'true')
+    expect(target).toHaveAttribute('data-settings-target')
+
+    act(() => {
+      vi.advanceTimersByTime(SETTINGS_TARGET_MS)
+    })
+    expect(target).not.toHaveAttribute('data-settings-target')
   })
 
-  it('renders the section content tagged with the category id', () => {
-    const { container } = renderLayout()
-    expect(container.querySelector('[data-settings-section="appearance"]')).toBeInTheDocument()
-    expect(container.querySelector('#settings-section-shell')).toBeInTheDocument()
-  })
-
-  it('filters to matching settings when searching', () => {
+  it('cancels a pending jump so the first row does not stay marked', () => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextId = 1
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++
+      frames.set(id, cb)
+      return id
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id)
+    })
     renderLayout()
-    const search = screen.getByLabelText('Search settings')
-    fireEvent.change(search, { target: { value: 'font' } })
-    expect(screen.getByText('Font Family')).toBeInTheDocument()
-    // Non-matching categories are not shown as plain category buttons while searching.
-    expect(screen.queryByRole('button', { name: 'Updates' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Default shell/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'font' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Font family/ }))
+
+    expect(frames.size).toBe(1)
+    act(() => {
+      for (const frame of frames.values()) frame(0)
+    })
+
+    expect(screen.getByText('Shell row')).not.toHaveAttribute('data-settings-target')
+    expect(screen.getByText('Font row')).toHaveAttribute('data-settings-target')
   })
 
-  it('matches a setting via keywords', () => {
-    renderLayout()
-    const search = screen.getByLabelText('Search settings')
-    fireEvent.change(search, { target: { value: 'bash' } })
-    expect(screen.getByText('Default Shell')).toBeInTheDocument()
-    fireEvent.change(search, { target: { value: 'model context protocol' } })
-    expect(screen.getAllByText('MCP Servers').length).toBeGreaterThan(0)
-  })
+  it('cancels a pending jump when the layout unmounts', () => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextId = 1
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++
+      frames.set(id, cb)
+      return id
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id)
+    })
+    const view = renderLayout()
 
-  it('shows an empty state when no settings match', () => {
-    renderLayout()
-    const search = screen.getByLabelText('Search settings')
-    fireEvent.change(search, { target: { value: 'zzzzz' } })
-    expect(screen.getByText(/no settings match/i)).toBeInTheDocument()
-  })
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Default shell/ }))
+    expect(frames.size).toBe(1)
 
-  it('selecting a search result scrolls to its section', () => {
-    renderLayout()
-    const search = screen.getByLabelText('Search settings')
-    fireEvent.change(search, { target: { value: 'font' } })
-    fireEvent.click(screen.getByText('Font Family'))
-    expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled()
+    view.unmount()
+    expect(frames.size).toBe(0)
   })
 
   it('clears the search when the clear button is pressed', () => {
     renderLayout()
-    const search = screen.getByLabelText('Search settings') as HTMLInputElement
-    fireEvent.change(search, { target: { value: 'font' } })
-    fireEvent.click(screen.getByLabelText('Clear search'))
-    expect(search.value).toBe('')
-    // Category buttons return after clearing.
-    expect(screen.getByRole('button', { name: 'Updates' })).toBeInTheDocument()
+
+    const input = screen.getByRole('textbox', { name: /search settings/i })
+    fireEvent.change(input, { target: { value: 'font' } })
+    fireEvent.click(screen.getAllByRole('button', { name: /clear search/i })[0])
+
+    expect(input).toHaveValue('')
+    expect(within(nav()).getByRole('button', { name: 'Appearance' })).toBeInTheDocument()
   })
 
-  it('activates the section nearest the viewport top via scroll-spy', () => {
+  it('moves focus between pages with the arrow keys', () => {
     renderLayout()
-    expect(lastObserver).not.toBeNull()
 
-    // "shell" is scrolled partway past the top (large negative top) while
-    // "updates" sits just below the viewport edge. The section closest to 0
-    // should win, not the one with the smallest raw top.
-    act(() => {
-      lastObserver?.emit([
-        { id: 'appearance', isIntersecting: false, top: -600 },
-        { id: 'shell', isIntersecting: true, top: -200 },
-        { id: 'updates', isIntersecting: true, top: 20 }
-      ])
-    })
-
-    expect(screen.getByRole('button', { name: 'Updates' })).toHaveAttribute('aria-current', 'true')
-    expect(screen.getByRole('button', { name: 'Shell' })).not.toHaveAttribute('aria-current')
+    const first = within(nav()).getByRole('button', { name: 'Appearance' })
+    first.focus()
+    fireEvent.keyDown(first, { key: 'ArrowDown' })
+    expect(within(nav()).getByRole('button', { name: 'Shell' })).toHaveFocus()
   })
 
-  it('active category is a neutral keycap with constant weight; idle rows hover at 3%', () => {
+  it('renders a named Close button when onClose is given', () => {
+    const onClose = vi.fn()
+    renderLayout({ onClose })
+
+    const [close] = screen.getAllByRole('button', { name: 'Close Settings' })
+    fireEvent.click(close)
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('marks the active page with a neutral keycap; idle rows hover at 3%', () => {
     renderLayout()
-    const active = screen.getByRole('button', { name: 'Appearance' })
-    const idle = screen.getByRole('button', { name: 'Shell' })
+
+    const active = within(nav()).getByRole('button', { name: 'Appearance' })
+    const idle = within(nav()).getByRole('button', { name: 'Shell' })
     expect(active.className).toContain('keycap')
-    expect(active.className).toContain('h-8')
-    expect(active.className).not.toMatch(/bg-primary|text-primary|font-medium/)
+    expect(active.className).not.toContain('bg-primary')
     expect(idle.className).toContain('hover:bg-foreground/[0.03]')
-    expect(idle.className).toContain('text-secondary-foreground')
-  })
-
-  it('renders the panel header label and sets a Reset category apart', () => {
-    render(
-      <SettingsLayout
-        title="Preferences"
-        categories={[...categories, { id: 'reset', label: 'Reset Settings' }]}
-        searchIndex={searchIndex}
-      >
-        <SettingsSection id="appearance">
-          <h2>Appearance</h2>
-        </SettingsSection>
-      </SettingsLayout>
-    )
-    expect(screen.getByText('Preferences').className).toContain('label-panel')
-    expect(screen.getByPlaceholderText('Search settings')).toBeInTheDocument()
-    const divider = screen.getByTestId('settings-category-divider')
-    expect(divider.nextElementSibling).toHaveTextContent('Reset Settings')
   })
 })

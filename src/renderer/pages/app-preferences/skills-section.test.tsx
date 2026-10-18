@@ -67,15 +67,17 @@ describe('SkillsSection', () => {
 
   it('lists global and project skills for the open project', () => {
     render(<SkillsSection />)
-    expect(screen.getByRole('heading', { name: 'Global' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Project · Cloud Hello' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Global · 1 skill' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { name: 'Project · Cloud Hello · 1 skill' })
+    ).toBeInTheDocument()
     expect(screen.getByText('review')).toBeInTheDocument()
     expect(screen.getByText('writing-guidelines')).toBeInTheDocument()
   })
 
   it('opens the skill file and closes settings', async () => {
     render(<SkillsSection />)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Open' })[0]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Open review' }))
     await vi.waitFor(() => {
       expect(openFile).toHaveBeenCalledWith(globalSkill.path)
     })

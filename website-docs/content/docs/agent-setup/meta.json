@@ -1,0 +1,12 @@
+{
+  "title": "Agent setup",
+  "pages": [
+    "index",
+    "install-agents",
+    "custom-agents",
+    "claude-accounts",
+    "mcp-servers",
+    "skills",
+    "timeouts"
+  ]
+}

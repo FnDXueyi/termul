@@ -9,19 +9,20 @@ export const TRAFFIC_LIGHT_CLEARANCE_PX = 80
 /**
  * Where the shell steps aside for the macOS traffic lights while the Rail is
  * collapsed. The collapsed Rail (48px) and the shell gap (8px) already sit
- * under the lights, so the Side panel header only adds the rest:
- * 80 - 48 - 8 = 24px of start padding (8px more than the usual 16px).
+ * under the lights, so the bar at the start of the shell row only adds the
+ * rest: 80 - 48 - 8 = 24px of start padding. The Side panel header and the
+ * main card stay at the top; nothing moves down.
  */
 export interface TrafficLightInset {
-  /** Start padding of the Side panel header, so its content clears the lights. */
+  /**
+   * Start padding of the bar that touches the Rail: the Side panel header, or
+   * the main card's top row while no Side panel column shows.
+   */
   panelHeaderStartPx: number
-  /** Top margin of the main card: it starts below the lights in both Side panel states. */
-  mainTopPx: number
 }
 
 const INSET: TrafficLightInset = {
-  panelHeaderStartPx: TRAFFIC_LIGHT_CLEARANCE_PX - COLLAPSED_WIDTH - SHELL_GAP,
-  mainTopPx: 36
+  panelHeaderStartPx: TRAFFIC_LIGHT_CLEARANCE_PX - COLLAPSED_WIDTH - SHELL_GAP
 }
 
 /**

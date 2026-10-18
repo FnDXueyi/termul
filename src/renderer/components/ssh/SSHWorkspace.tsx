@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import {
   ShowSidePanelSlot,
-  useShowSidePanelVisible
+  useShowSidePanelSlotVisible
 } from '@/components/shell/SidePanelVisibilityButtons'
 import { WindowControls } from '@/components/shell/TopRowChrome'
 import { hostLabel } from '@/lib/ssh-messages'
@@ -61,7 +61,7 @@ export function SSHWorkspace({ topRow }: SSHWorkspaceProps): React.JSX.Element {
   const { setActiveTab, duplicateProfile, toggleFavorite, importConfig } = useSSHActions()
   const dialogs = useSSHPanelDialogs()
   // The slot brings its own start padding, so the header drops its own.
-  const showSidePanel = useShowSidePanelVisible() && Boolean(topRow?.showSidePanel)
+  const showSidePanel = useShowSidePanelSlotVisible() && Boolean(topRow?.showSidePanel)
 
   const profileById = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles])
   const pendingSession = sessions.find((s) => s.id === pendingClose)
