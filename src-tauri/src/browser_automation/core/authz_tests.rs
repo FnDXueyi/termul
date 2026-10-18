@@ -236,3 +236,19 @@ async fn the_hop_check_and_policy_edits_read_one_owned_port_registry() {
         .unwrap_err();
     assert_eq!(refusal.reason(), "reserved_origin");
 }
+
+#[test]
+fn every_metadata_endpoint_the_policy_refuses_is_denied_at_the_hop() {
+    for target in [
+        "http://100.100.100.200/latest/meta-data",
+        "http://168.63.129.16/machine",
+        "http://metadata.goog/computeMetadata",
+        "http://instance-data/latest",
+    ] {
+        assert_eq!(
+            class_of(target, &[]),
+            OriginClass::Denied(DenyReason::MetadataAddress),
+            "{target}"
+        );
+    }
+}

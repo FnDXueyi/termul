@@ -15,7 +15,7 @@ use parking_lot::{Mutex, RwLock};
 use tauri::Url;
 
 use super::ports::{ActionClass, CanonicalOrigin};
-use crate::acp::browser_policy::OriginPattern;
+use crate::acp::browser_policy::{OriginPattern, ReservedKind};
 
 /// Hostnames the Tauri runtime serves the app and its protocols on.
 const APP_HOSTS: [&str; 3] = ["tauri.localhost", "ipc.localhost", "asset.localhost"];
@@ -150,6 +150,15 @@ fn classify_domain(domain: &str) -> HostKind {
     }
 }
 
+fn reserved_reason(kind: ReservedKind) -> DenyReason {
+    match kind {
+        ReservedKind::Unspecified => DenyReason::UnspecifiedAddress,
+        ReservedKind::Metadata => DenyReason::MetadataAddress,
+        ReservedKind::AppOrigin => DenyReason::AppOrigin,
+        ReservedKind::TermulPort => DenyReason::TermulOwned,
+    }
+}
+
 /// The origin class of `url`. `owned_port` says whether a loopback port
 /// is one termul listens on.
 pub fn classify(
@@ -175,9 +184,17 @@ pub fn classify(
     } else {
         classify_domain(host)
     };
+    let origin = CanonicalOrigin::parse(url.as_str()).ok();
+    // Every origin the policy refuses to allow-list is also unreachable.
+    if let Some(reserved) = origin.as_ref().and_then(|o| o.reserved_kind(&[])) {
+        if !matches!(kind, HostKind::Denied(_)) {
+            return OriginClass::Denied(reserved_reason(reserved));
+        }
+    }
     let listed = || {
-        CanonicalOrigin::parse(url.as_str())
-            .is_ok_and(|origin| allow_list.iter().any(|p| p.matches(&origin)))
+        origin
+            .as_ref()
+            .is_some_and(|origin| allow_list.iter().any(|p| p.matches(origin)))
     };
     match kind {
         HostKind::Denied(reason) => OriginClass::Denied(reason),
