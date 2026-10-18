@@ -103,6 +103,15 @@ Run shape. Boot the nightly server (Pass 3 lever with `--keep-server`, or a loca
 4. Assert on the wire: `message_chunk` events arrived, `prompt_complete` arrived, the concatenated text contains the expected token.
 5. `close_session`, then `kill_agent`.
 
+
+Wire facts learned the hard way (2026-10-19 run), all verified against the live protocol:
+
+- Ledgered `/ws` requests (`spawn_agent`, `create_session`, `send_prompt`, `close_session`) are refused `invalid_command_id` without one. The field is `command_id` (snake_case) on `/ws` but `commandId` (camelCase) on `/terminal/ws`. The host strips nothing; send the right casing per endpoint.
+- `send_prompt`'s `command_id` must equal its payload `turnId`, and its reply resolves only after the full agent turn (`payload: "end_turn"`).
+- Events arrive as `{sid, seq, type, payload}` frames; `message_chunk` text lives at `payload.content.text` with `payload.role` distinguishing `thought` from `agent` turns. Assert on `role === 'agent'` text only, or thought content pollutes the assertion.
+- The first frame after connect is the `auth_required` event, which can land in the same TCP chunk as the WS handshake reply. A probe that drops post-handshake leftovers loses it and every early frame.
+- The relay sends `ping` requests every 20 s; answer or the connection dies on the 75 s `pongTimeoutMs`.
+
 Log every frame to `goal-routine-runs/<run>/chat-agent-qa.jsonl`. Assertions are on the log, not on memory of watching it.
 
 Findings file as issues per Pass 3 rules. Two failure classes deserve a second look before filing: greeting-turn latency at `create_session` (known opencode behavior, see the QA report's P2) and idle-agent CPU pinning (open issue #1391) — both already have issues. Do not file duplicates of known findings.
