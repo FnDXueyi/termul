@@ -51,13 +51,10 @@ vi.mock('@/lib/log-api', () => ({
   logFrontendError: vi.fn(async () => {})
 }))
 
-// BrowserPanel's webview + title plumbing are native-side; stub them out so
-// the panel renders as pure DOM under jsdom.
+// BrowserPanel's webview plumbing is native-side; stub it out so the panel
+// renders as pure DOM under jsdom.
 vi.mock('@/hooks/use-browser-webview', () => ({
   useBrowserWebview: () => ({ containerRef: { current: null } })
-}))
-vi.mock('@/lib/browser-api', () => ({
-  onBrowserTabTitleChanged: () => ({ unlisten: () => {} })
 }))
 vi.mock('@/components/browser/BrowserControls', () => ({
   BrowserControls: () => null

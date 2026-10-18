@@ -747,7 +747,11 @@ export const ACP_EVENTS = {
   usageUpdate: 'acp:usage_update',
   browserOpenRequest: 'acp:browser_open_request',
   browserConsentRequest: 'acp:browser_consent_request',
-  browserAgentTab: 'acp:browser_agent_tab'
+  browserAgentTab: 'acp:browser_agent_tab',
+  /** An agent tab's URL, title, loading state or epoch changed. The
+   *  desktop pane mirrors the Tauri event of the same name instead. */
+  browserTabUpdated: 'acp:browser_tab_updated',
+  browserTabClosed: 'acp:browser_tab_closed'
 } as const
 
 /** Host asks the user to grant browser automation for a session
