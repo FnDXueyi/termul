@@ -361,3 +361,85 @@ async fn a_browser_takes_the_canvas_from_a_desktop_window() {
 async fn a_desktop_window_takes_the_canvas_from_a_browser() {
     takeover_across_carriers::<Peer, ChannelPeer>().await;
 }
+
+/// The params of a host presence notice, after checking it is a plain
+/// `canvas_call` envelope for the holder's mount.
+fn presence_params(frame: &Value, mount_seq: u64, method: &str) -> Value {
+    assert_eq!(
+        frame,
+        &json!({
+            "type": "canvas_call",
+            "callId": frame["callId"],
+            "projectId": PROJECT,
+            "mountSeq": mount_seq,
+            "method": method,
+            "params": frame["params"],
+        })
+    );
+    serde_json::from_str(frame["params"].as_str().expect("params are JSON text")).unwrap()
+}
+
+/// An answered agent call shows on the holder's canvas as the session's
+/// guest: one bounds lookup, then the cursor and the ring, and the hide when
+/// the turn ends. Same envelopes on both carriers.
+async fn an_answered_agent_call_shows_as_a_guest_on_the_holders_canvas<W: Wire>() {
+    use crate::acp::host_mcp::presence::{
+        colour_of, CallOrigin, Presence, GUEST_CURSOR, GUEST_FLASH, GUEST_HIDE,
+    };
+    let host = host();
+    let doc = tempfile::tempdir().unwrap();
+    let mut tab = renderer::<W>(&host, "tab-a").await;
+    let seq = open(&host, &doc, "tab-a").await;
+    report_mount(&mut tab, "m1", seq).await;
+    let presence = Presence::new(std::sync::Arc::clone(
+        host.state.acp.canvas_router().mounts(),
+    ));
+    presence.name_agent("agent-a", "opencode");
+    let origin = CallOrigin {
+        session_id: "sess-a",
+        agent_id: "agent-a",
+        project_id: PROJECT,
+    };
+    presence.after_call(
+        origin,
+        "create_node",
+        "engine.execute",
+        &json!({ "command": "node.create", "params": { "type": "frame" } }),
+        U64_ID,
+    );
+
+    let lookup = next_call(&mut tab, 0).await;
+    assert_eq!(
+        presence_params(&lookup, seq, "node.get"),
+        json!({ "id": u64::MAX, "depth": 0 })
+    );
+    answer(
+        &mut tab,
+        "r1",
+        &lookup,
+        r#"{"id":18446744073709551615,"absoluteBounds":{"x":0,"y":10,"width":40,"height":20}}"#,
+    )
+    .await;
+    let cursor = next_call(&mut tab, 1).await;
+    assert_eq!(
+        presence_params(&cursor, seq, GUEST_CURSOR),
+        json!({ "id": "sess-a", "name": "opencode", "color": colour_of("sess-a"), "x": 20.0, "y": 20.0 })
+    );
+    let flash = next_call(&mut tab, 2).await;
+    assert!(flash["params"]
+        .as_str()
+        .unwrap()
+        .contains("18446744073709551615"));
+    assert_eq!(
+        presence_params(&flash, seq, GUEST_FLASH),
+        json!({ "id": "sess-a", "ids": [u64::MAX], "kind": "write" })
+    );
+
+    presence.hide("sess-a");
+    let hide = next_call(&mut tab, 3).await;
+    assert_eq!(
+        presence_params(&hide, seq, GUEST_HIDE),
+        json!({ "id": "sess-a" })
+    );
+}
+on_both_carriers!(an_answered_agent_call_shows_as_a_guest_on_the_holders_canvas);
