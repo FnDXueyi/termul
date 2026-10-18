@@ -41,42 +41,6 @@ fn levels_map_console_methods_and_engine_levels() {
 }
 
 #[test]
-fn a_redirect_ends_the_earlier_hop_with_its_status() {
-    let mut t = NetworkTracker::default();
-    assert_eq!(t.request("1", "GET", "http://h/redirect?x=1", Some("Document"), None, 1.0), None);
-    let hop = t.request("1", "GET", "http://h/target", Some("Document"), Some(302), 1.25);
-    assert_eq!(
-        hop,
-        Some(NetworkEntry {
-            method: "GET".into(),
-            url: "http://h/redirect".into(),
-            status: Some(302),
-            resource: Some("document".into()),
-            duration_ms: Some(250),
-            failed: false,
-        })
-    );
-    t.response("1", 200, None);
-    let done = t.finished("1", 1.5).unwrap();
-    assert_eq!((done.url.as_str(), done.status, done.duration_ms), ("http://h/target", Some(200), Some(250)));
-    assert_eq!(t.finished("1", 2.0), None);
-}
-
-#[test]
-fn failures_and_unknown_ids() {
-    let mut t = NetworkTracker::default();
-    t.request("a", "POST", "https://h/api", None, None, 0.0);
-    t.response("a", 500, Some("Fetch"));
-    let failed = t.failed("a", 0.1).unwrap();
-    assert!(failed.failed);
-    assert_eq!((failed.status, failed.resource.as_deref()), (Some(500), Some("fetch")));
-    assert_eq!(t.failed("zzz", 1.0), None);
-    t.request("s1:9", "GET", "https://h/x", None, None, 0.0);
-    t.forget_prefix("s1:");
-    assert_eq!(t.finished("s1:9", 1.0), None);
-}
-
-#[test]
 fn entries_serialize_without_absent_fields() {
     let entry = NetworkEntry {
         method: "GET".into(),

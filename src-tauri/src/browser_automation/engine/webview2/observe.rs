@@ -18,10 +18,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use webview2_com::{take_pwstr, CallDevToolsProtocolMethodCompletedHandler, DevToolsProtocolEventReceivedEventHandler};
 use windows_core::{Interface, HSTRING, PWSTR};
 
-use crate::browser_automation::engine::cdp::observe::{self as cdp_observe, Observed};
+use crate::browser_automation::engine::cdp::observe::{self as cdp_observe, NetworkTracker, Observed};
 use crate::browser_automation::engine::cdp::CdpMethod;
 use crate::browser_automation::engine::events::{TabEvent, TabEvents};
-use crate::browser_automation::engine::observe::NetworkTracker;
 
 struct FrameSession {
     frame: String,

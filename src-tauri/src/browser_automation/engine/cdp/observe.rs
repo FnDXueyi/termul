@@ -6,10 +6,16 @@
 //! gets the same domains enabled, and auto-attach on a frame session
 //! reaches the frames nested in it.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use super::CdpMethod;
-use crate::browser_automation::engine::observe::{ConsoleEntry, ConsoleLevel, NetworkEntry, NetworkTracker, TEXT_MAX};
+use crate::browser_automation::engine::observe::{cap, strip_url, ConsoleEntry, ConsoleLevel, NetworkEntry, TEXT_MAX};
+
+/// Requests in flight a tracker follows per tab; later ones go unreported
+/// until earlier ones finish.
+const PENDING_MAX: usize = 512;
 
 /// The events an observing adapter subscribes to.
 pub const EVENTS: [&str; 9] = [
@@ -115,6 +121,89 @@ pub fn parse(tracker: &mut NetworkTracker, session: &str, method: &str, params: 
             None => Observed::None,
         },
         _ => Observed::None,
+    }
+}
+
+struct Pending {
+    method: String,
+    url: String,
+    resource: Option<String>,
+    started_s: f64,
+    status: Option<u16>,
+}
+
+/// Requests in flight, keyed by the engine's request id. Times are seconds
+/// on any one monotonic clock per tracker.
+#[derive(Default)]
+pub struct NetworkTracker {
+    pending: HashMap<String, Pending>,
+}
+
+impl NetworkTracker {
+    /// A request starts. When `id` is already in flight this is a redirect:
+    /// the earlier hop ends with `redirect_status` and is returned.
+    pub fn request(
+        &mut self,
+        id: &str,
+        method: &str,
+        url: &str,
+        resource: Option<&str>,
+        redirect_status: Option<u16>,
+        at_s: f64,
+    ) -> Option<NetworkEntry> {
+        let hop = self.pending.remove(id).map(|mut hop| {
+            hop.status = redirect_status.or(hop.status);
+            finish(hop, at_s, false)
+        });
+        if self.pending.len() < PENDING_MAX {
+            self.pending.insert(
+                id.to_string(),
+                Pending {
+                    method: cap(method, 16).to_string(),
+                    url: strip_url(url),
+                    resource: resource.map(|r| cap(r, 32).to_ascii_lowercase()),
+                    started_s: at_s,
+                    status: None,
+                },
+            );
+        }
+        hop
+    }
+
+    pub fn response(&mut self, id: &str, status: u16, resource: Option<&str>) {
+        if let Some(p) = self.pending.get_mut(id) {
+            p.status = Some(status);
+            if p.resource.is_none() {
+                p.resource = resource.map(|r| cap(r, 32).to_ascii_lowercase());
+            }
+        }
+    }
+
+    pub fn finished(&mut self, id: &str, at_s: f64) -> Option<NetworkEntry> {
+        self.pending.remove(id).map(|p| finish(p, at_s, false))
+    }
+
+    pub fn failed(&mut self, id: &str, at_s: f64) -> Option<NetworkEntry> {
+        self.pending.remove(id).map(|p| finish(p, at_s, true))
+    }
+
+    /// Forget every request whose id starts with `prefix` (a closed frame
+    /// session's requests).
+    pub fn forget_prefix(&mut self, prefix: &str) {
+        self.pending.retain(|id, _| !id.starts_with(prefix));
+    }
+}
+
+fn finish(p: Pending, at_s: f64, failed: bool) -> NetworkEntry {
+    let elapsed = at_s - p.started_s;
+    NetworkEntry {
+        method: p.method,
+        url: p.url,
+        status: p.status,
+        resource: p.resource,
+        // Saturating float-to-int cast; a negative span reads as unknown.
+        duration_ms: (elapsed >= 0.0).then(|| (elapsed * 1000.0).round() as u64),
+        failed,
     }
 }
 

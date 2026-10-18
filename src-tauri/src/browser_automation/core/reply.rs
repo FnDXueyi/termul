@@ -435,15 +435,6 @@ fn outline_text(text: &str) -> String {
     out
 }
 
-/// Shape a snapshot helper result into page data plus the ref count.
-#[cfg(test)]
-pub(super) fn shape_snapshot(
-    out: Value,
-    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
-) -> Result<(PageData, usize), BrowserError> {
-    parse_snapshot(out).map(|snapshot| shape_parsed(snapshot, mint))
-}
-
 /// Shape a snapshot into page data plus the ref count: one outline line
 /// per item, with host refs minted by `mint` for its nodes in document
 /// order.

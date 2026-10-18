@@ -3,6 +3,13 @@ use serde_json::{json, Value};
 use super::*;
 use crate::browser_automation::engine::{EngineError, EngineErrorKind};
 
+fn shape_snapshot(
+    out: Value,
+    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
+) -> Result<(PageData, usize), BrowserError> {
+    parse_snapshot(out).map(|snapshot| shape_parsed(snapshot, mint))
+}
+
 #[test]
 fn action_result_maps_page_errors_to_host_templates() {
     let err = action_result(json!({"error": "stale_ref: @e3 detached <b>x</b>"}), Some("@e3"))
