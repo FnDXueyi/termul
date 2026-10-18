@@ -100,11 +100,15 @@ pub async fn dispatch(
 ) -> Result<Success, BrowserError> {
     match browser_host() {
         Some(host) => host.execute(session_id, agent_id, call, deadline).await,
-        None => Err(BrowserError::capability(
-            "browser automation is only available on the desktop app",
-        )
-        .with_reason("no_automation_host")),
+        None => Err(no_host_error()),
     }
+}
+
+/// What every call gets when no automation host is registered (the
+/// standalone server, tests): fail closed, never hang or succeed.
+pub fn no_host_error() -> BrowserError {
+    BrowserError::capability("browser automation is only available on the desktop app")
+        .with_reason("no_automation_host")
 }
 
 /// The `browser` tool schema served to host_mcp children: built from the

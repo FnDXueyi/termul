@@ -177,3 +177,15 @@ fn layering_keeps_platform_code_inside_engine_adapters() {
     assert!(scanned >= 8, "scanned only {scanned} files");
     assert_eq!(violations, Vec::<String>::new());
 }
+
+/// Only the desktop app registers an automation host; the standalone
+/// server composition never does, so its browser tool fails closed.
+#[test]
+fn only_the_desktop_setup_registers_a_browser_host() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let server = std::fs::read_to_string(src.join("server_main.rs")).expect("server composition");
+    assert!(!server.contains("set_browser_host"));
+    assert!(!server.contains("DesktopBrowserHost"));
+    let desktop = std::fs::read_to_string(src.join("lib.rs")).expect("desktop composition");
+    assert_eq!(desktop.matches("set_browser_host(").count(), 1);
+}
