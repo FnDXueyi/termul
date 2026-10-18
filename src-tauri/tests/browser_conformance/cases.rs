@@ -187,7 +187,7 @@ impl Ctx<'_> {
         if snap.text.contains(needle) {
             Ok(())
         } else {
-            Err(mismatch(format!("snapshot lacks \"{needle}\"")))
+            Err(mismatch(format!("snapshot lacks \"{needle}\": {}", snap.text)))
         }
     }
 
