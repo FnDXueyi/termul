@@ -76,14 +76,16 @@ async fn a_drag_presses_moves_with_the_button_held_and_releases_at_the_end() {
 }
 
 #[tokio::test]
-async fn text_goes_through_insert_text_and_the_wheel_carries_its_point() {
+async fn text_goes_through_insert_text_and_pointer_events_carry_their_point() {
     let t = Recorder::default();
     insert_text(&t, "agent-1", "héllo").await.unwrap();
+    move_to(&t, "agent-1", Point { x: 5.0, y: 6.0 }).await.unwrap();
     wheel(&t, "agent-1", Point { x: 5.0, y: 6.0 }, 0.0, 300.0).await.unwrap();
     assert_eq!(
         t.calls(),
         [
             ("Input.insertText", json!({ "text": "héllo" })),
+            ("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": 5.0, "y": 6.0 })),
             (
                 "Input.dispatchMouseEvent",
                 json!({ "type": "mouseWheel", "x": 5.0, "y": 6.0, "deltaX": 0.0, "deltaY": 300.0 })

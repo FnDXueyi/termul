@@ -83,11 +83,7 @@ fn posted_reports_are_kept_in_order_as_json() {
         let mut stream = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
         write!(
             stream,
-            "POST {REPORT_PATH} HTTP/1.1
-Host: 127.0.0.1
-Content-Length: {}
-
-{body}",
+            "POST {REPORT_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         )
         .unwrap();

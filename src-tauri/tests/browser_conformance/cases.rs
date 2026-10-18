@@ -91,8 +91,8 @@ pub fn mismatch(message: impl Into<String>) -> Failure {
 
 pub type CaseResult = Result<(), Failure>;
 
-struct Snapshot {
-    text: String,
+pub struct Snapshot {
+    pub text: String,
     url: String,
     title: String,
 }
@@ -158,7 +158,7 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    async fn snapshot(&self) -> Result<Snapshot, Failure> {
+    pub async fn snapshot(&self) -> Result<Snapshot, Failure> {
         let reply = self.call("snapshot", json!({})).await?;
         let field = |name: &str| reply["page"][name].as_str().unwrap_or_default().to_string();
         Ok(Snapshot {
@@ -200,7 +200,7 @@ impl Ctx<'_> {
 }
 
 /// `- button "Submit" @e2` -> `@e2`.
-fn find_ref(snapshot: &str, role: &str, name: &str) -> Option<String> {
+pub fn find_ref(snapshot: &str, role: &str, name: &str) -> Option<String> {
     let prefix = format!("- {role} \"{name}\" @e");
     snapshot.lines().find_map(|line| {
         let rest = line.trim_start().strip_prefix(&prefix)?;

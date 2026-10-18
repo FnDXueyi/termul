@@ -114,9 +114,7 @@ fn read_request_head(stream: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {
     }
     let split = buf
         .windows(4)
-        .position(|w| w == b"
-
-")
+        .position(|w| w == b"\r\n\r\n")
         .map_or(buf.len(), |i| i + 4);
     let rest = buf.split_off(split);
     Ok((String::from_utf8_lossy(&buf).into_owned(), rest))
@@ -159,11 +157,7 @@ fn serve(mut stream: TcpStream, reports: &Reports) -> io::Result<()> {
         if let Ok(mut all) = reports.lock() {
             all.push(String::from_utf8_lossy(&body).into_owned());
         }
-        stream.write_all(b"HTTP/1.1 204 No Content
-Content-Length: 0
-Connection: close
-
-")?;
+        stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
         return stream.flush();
     }
 

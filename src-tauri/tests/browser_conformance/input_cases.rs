@@ -11,7 +11,7 @@ use termul_manager_lib::conformance_support::{
     EngineError, EngineErrorKind, InputMode, Key, KeyInput, NamedKey, Point, Support,
 };
 
-use crate::cases::{expect_code_reason, mismatch, tab_id, CaseResult, Ctx, Failure};
+use crate::cases::{expect_code_reason, find_ref, mismatch, tab_id, CaseResult, Ctx, Failure};
 
 const READY_WAIT: Duration = Duration::from_secs(10);
 const REPORT_WAIT: Duration = Duration::from_secs(5);
@@ -363,9 +363,13 @@ pub async fn actionability_moving(c: &Ctx<'_>) -> CaseResult {
 
 pub async fn actionability_hidden(c: &Ctx<'_>) -> CaseResult {
     open_actionability(c).await?;
-    let target = c.ref_of("button", "Hidden target").await?;
-    c.click("button", "Hide it").await?;
-    c.expect_text("Clicks: hide").await?;
+    // One snapshot for both refs: a later one would supersede the first.
+    let snap = c.snapshot().await?;
+    let find = |name: &str| {
+        find_ref(&snap.text, "button", name).ok_or_else(|| mismatch(format!("snapshot has no button \"{name}\"")))
+    };
+    let (target, hide) = (find("Hidden target")?, find("Hide it")?);
+    c.call("click", json!({ "ref": hide })).await?;
     expect_code_reason(
         c.call("click", json!({ "ref": target })).await,
         "timeout",
