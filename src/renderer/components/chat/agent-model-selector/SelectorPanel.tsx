@@ -19,7 +19,6 @@ import { SelectorFooter } from './SelectorFooter'
 import {
   AgentRow,
   BusyBlock,
-  CapabilitySummary,
   ContextSummary,
   Hint,
   InstallState,
@@ -33,7 +32,7 @@ import {
   armableConfigId,
   buildAgentTabs,
   type CatalogModel,
-  capabilityRows,
+  capabilitySummary,
   catalogModels,
   entryDisableReason,
   MORE_AGENTS_VIEW,
@@ -215,6 +214,8 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
     setView(tab.configId)
   }
 
+  // Capabilities belong to the chat's agent, so only its model rows carry them.
+  const capabilities = capabilitySummary(props.capabilities)
   const rows = (
     configId: string | null,
     catalog: ModelCatalog | null,
@@ -227,7 +228,11 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
       <ModelRow
         key={`${configId}\0${model.value}`}
         name={model.name}
-        description={model.description}
+        title={
+          [model.description, configId === sw.currentConfigId ? capabilities : null]
+            .filter(Boolean)
+            .join('\n\n') || undefined
+        }
         selected={model.value === selectedValue}
         glyph={showAgent && tab ? <TabGlyph tab={tab} /> : undefined}
         meta={showAgent && configId !== effectiveId ? tab?.name : undefined}
@@ -583,15 +588,6 @@ export function SelectorPanel(props: SelectorPanelProps): React.JSX.Element {
         <>
           <div className="h-px bg-border" />
           {footer}
-        </>
-      ) : null}
-      {!searching &&
-      viewId !== null &&
-      viewId === sw.currentConfigId &&
-      capabilityRows(props.capabilities).length > 0 ? (
-        <>
-          <div className="h-px bg-border" />
-          <CapabilitySummary capabilities={props.capabilities} touch={touch} />
         </>
       ) : null}
       {otherHint ? (

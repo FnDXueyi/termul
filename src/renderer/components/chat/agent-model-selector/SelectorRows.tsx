@@ -1,8 +1,8 @@
-import { Fragment, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { EntryGlyph } from '@/components/agents/launcher/pickers'
 import { ArrowRightLeft, Check, Download } from '@/components/icons'
 import { Spinner } from '@/components/ui/spinner'
-import type { AgentCapabilities, SessionUsage } from '@/lib/acp-api'
+import type { SessionUsage } from '@/lib/acp-api'
 import { cn } from '@/lib/utils'
 import {
   conversationUsageMetrics,
@@ -11,7 +11,7 @@ import {
   isMeaningfulReportedCost
 } from '../context-usage-utils'
 import { SegmentedTrack } from './SegmentedTrack'
-import { type AgentTab, capabilityRows } from './selector-model'
+import type { AgentTab } from './selector-model'
 import type { SelectorModelStatus } from './selector-source'
 
 export const ROW =
@@ -34,7 +34,7 @@ export function TabGlyph({ tab }: { tab: AgentTab }): React.JSX.Element {
 /** One model. Selected = a check only, no fill (the fill means hover or focus). */
 export function ModelRow({
   name,
-  description,
+  title,
   selected,
   glyph,
   meta,
@@ -43,7 +43,7 @@ export function ModelRow({
   onPick
 }: {
   name: string
-  description?: string | null
+  title?: string
   selected: boolean
   glyph?: ReactNode
   meta?: string
@@ -56,7 +56,7 @@ export function ModelRow({
       type="button"
       data-selector-row=""
       aria-pressed={selected}
-      title={description ?? undefined}
+      title={title}
       disabled={disabled}
       data-press-feedback="off"
       onClick={onPick}
@@ -335,8 +335,8 @@ export function ContextSummary({
   return (
     <div
       className={cn(
-        'flex items-center justify-between gap-2 px-2 tabular-nums',
-        touch ? 'min-h-11 py-2.5' : 'min-h-8 py-1.5'
+        'flex items-center justify-between gap-2 px-2 text-sm tabular-nums',
+        rowSize(touch)
       )}
       title={`Context window: ${formatTokenCount(metrics.totalSize)} tokens. ${formatTokenCount(metrics.remaining)} remaining.${costTitle}`}
     >
@@ -346,42 +346,5 @@ export function ContextSummary({
         <span className="text-foreground"> · {Math.round(metrics.percent)}%</span>
       </span>
     </div>
-  )
-}
-
-/**
- * Read-only summary of what the chat's agent advertised at `initialize`: the
- * prompt content it accepts and the MCP transports it connects to. Renders
- * nothing for an agent that advertised neither, so no row claims more than the
- * agent said. Same row shape as {@link ContextSummary}.
- */
-export function CapabilitySummary({
-  capabilities,
-  touch
-}: {
-  capabilities: AgentCapabilities | null | undefined
-  touch: boolean
-}): React.JSX.Element | null {
-  const rows = capabilityRows(capabilities)
-  if (rows.length === 0) return null
-  return (
-    <dl data-testid="agent-capabilities" className="flex flex-col">
-      {rows.map((row) => (
-        <div
-          key={row.label}
-          className={cn('flex items-center justify-between gap-2 px-2', rowSize(touch))}
-        >
-          <dt className="shrink-0 text-muted-foreground">{row.label}</dt>
-          <dd className="min-w-0 truncate text-right text-foreground">
-            {row.items.map((item, index) => (
-              <Fragment key={item.name}>
-                {index > 0 ? ' · ' : null}
-                {item.name}
-              </Fragment>
-            ))}
-          </dd>
-        </div>
-      ))}
-    </dl>
   )
 }

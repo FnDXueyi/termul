@@ -263,41 +263,55 @@ describe('AgentModelSelector agent capabilities', () => {
     }
   }
 
-  it('shows what the chat agent advertises under its options', () => {
+  it('puts what the chat agent advertises in its model tooltips, not under its options', () => {
     seedAgent(advertised)
     renderSelector()
     open()
 
-    const summary = screen.getByTestId('agent-capabilities')
-    expect(
-      within(summary)
-        .getAllByRole('definition')
-        .map((item) => item.textContent)
-    ).toEqual(['Text · Images · Embedded context', 'stdio · HTTP'])
+    expect(screen.getByRole('button', { name: 'Opus 5.5' })).toHaveAttribute(
+      'title',
+      'Accepts: Text · Images · Embedded context\nMCP servers: stdio · HTTP'
+    )
+    expect(screen.queryByText(/Accepts/)).toBeNull()
   })
 
-  it('shows nothing for an agent that advertised no capabilities', () => {
+  it('keeps the model description above the capabilities', () => {
+    seedAgent({ mcpCapabilities: { sse: true } })
+    renderSelector({
+      modelOption: {
+        ...option('model', 'Model', 'model', 'opus', []),
+        options: [{ value: 'opus', name: 'Opus 5.5', description: 'Most capable' }]
+      }
+    })
+    open()
+
+    expect(screen.getByRole('button', { name: 'Opus 5.5' })).toHaveAttribute(
+      'title',
+      'Most capable\n\nMCP servers: stdio · SSE'
+    )
+  })
+
+  it('leaves the tooltip off for an agent that advertised no capabilities', () => {
     seedAgent(null)
     renderSelector()
     open()
 
-    expect(screen.getByTestId('agent-model-selector-panel')).toBeInTheDocument()
-    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Opus 5.5' })).not.toHaveAttribute('title')
   })
 
-  it('never shows the chat agent profile under another agent tab', () => {
+  it("never puts the chat agent profile on another agent's models", () => {
     seed([readyEntry(CLAUDE)])
+    acpStateRef.current.agentOptionsCache = { [CLAUDE.id]: CLAUDE_MODELS }
     seedAgent(advertised)
     renderSelector()
     open()
-    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Claude Agent' }))
 
-    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Claude Haiku' })).not.toHaveAttribute('title')
   })
 
-  it('with a switch armed, shows the profile only on the chat agent tab', () => {
+  it('with a switch armed, leaves the profile off the armed agent models', () => {
     seed([readyEntry(CLAUDE)], { switching: { toConfigId: CLAUDE.id } })
     seedAgent(advertised)
     renderSelector()
@@ -307,14 +321,10 @@ describe('AgentModelSelector agent capabilities', () => {
       'aria-selected',
       'true'
     )
-    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Cursor' }))
-
-    expect(screen.getByTestId('agent-capabilities')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Opus 5.5' })).not.toHaveAttribute('title')
   })
 
-  it('hides the summary while the search results are showing', () => {
+  it('keeps the tooltip on the chat agent models in search results', () => {
     seedAgent(advertised)
     renderSelector()
     open()
@@ -322,7 +332,11 @@ describe('AgentModelSelector agent capabilities', () => {
       target: { value: 'opus' }
     })
 
-    expect(screen.queryByTestId('agent-capabilities')).toBeNull()
+    const results = screen.getByTestId('selector-list')
+    expect(within(results).getByRole('button', { name: /Opus 5\.5/ })).toHaveAttribute(
+      'title',
+      'Accepts: Text · Images · Embedded context\nMCP servers: stdio · HTTP'
+    )
   })
 })
 
