@@ -1,0 +1,51 @@
+---
+title: Fix connection problems
+description: What each SSH connection error means and how to fix it.
+---
+
+<Callout type="info">This works in the desktop app only.</Callout>
+
+When a connection fails, the session tab shows a title and a hint. Find the title below to see what to do. In the titles, `<host>` is the server address and `<user>` is the username.
+
+To see the exact error, click **Technical details** in the tab. After you fix the problem, click **Try again**.
+
+## The server can't be reached
+
+| Message | What to do |
+| --- | --- |
+| **Can't find &lt;host&gt;** | The address did not resolve. Check its spelling in the host settings, then check your network and DNS. |
+| **&lt;host&gt; refused the connection** | No SSH server listens on that port. Check the port, and check that the SSH service runs on the server. |
+| **&lt;host&gt; didn't respond in time** | The server may be offline, or a firewall may block the port. Check your network, then try again. |
+| **Can't reach &lt;host&gt;** | Your computer has no network path to the server. Check your connection or your VPN. |
+| **Couldn't start a secure connection** | The service on that port is not an SSH server. Check the port in the host settings. |
+| **Host details are incomplete** | Check the address, the port, and the username in the host settings. |
+
+## The server rejects your sign-in
+
+| Message | What to do |
+| --- | --- |
+| **Wrong username or password** | Check the username in the host settings, then type the password again. |
+| **The server rejected your key** | Add your public key to `~/.ssh/authorized_keys` for that user on the server, or choose another key. |
+| **No agent key was accepted** | Load the right key into your SSH agent with `ssh-add`, or choose a key file in the host settings. |
+| **The server doesn't allow this sign-in method** | The server has that method turned off. Choose another **Authentication** method in the host settings. |
+| **Wrong passphrase** | The passphrase did not unlock the key. Type it again. |
+
+## Termul can't use your key or agent
+
+| Message | What to do |
+| --- | --- |
+| **Private key not found** | The key file moved or was deleted. Choose the key again in the host settings. |
+| **Termul can't use this key** | Choose a private key in OpenSSH or PEM format. If the key is a PuTTY `.ppk` file, convert it to OpenSSH format with PuTTYgen. |
+| **SSH agent not available** | Start your SSH agent and add a key with `ssh-add`. You can also choose a key file in the host settings. |
+
+## Other problems
+
+| Message | What to do |
+| --- | --- |
+| **Server not trusted** | You clicked **Cancel** on the server's key, so Termul sent no credentials. Connect again to review the key. |
+| **Signed in, but the shell didn't start** | The server refused a terminal. Check the account's login shell and the server's session limits. |
+| **Too many terminals open** | Close a terminal or a session tab, then try again. |
+| **This host was removed** | The host was deleted while the tab was open. Close the tab, or add the host again. |
+| **Connection cancelled** | You clicked **Cancel**. Connect again when you are ready. |
+
+If the server's key changed, see [If the server's identity changed](/docs/ssh/connect#if-the-servers-identity-changed).

@@ -344,22 +344,23 @@ describe('ShellFrame', () => {
       expect(dragRegions()).toHaveLength(0)
     })
 
-    it('starts the main card below the traffic lights only with the Rail collapsed on macOS', () => {
+    it('keeps the main card at the top and pads the top row under the traffic lights', () => {
       platformRef.mac = true
       useShellLayoutStore.setState({ railExpanded: false })
-      const { unmount } = renderFrame(withProject)
-      expect(screen.getByRole('main')).toHaveStyle({ marginTop: '36px' })
+      const { unmount } = renderFrame()
+      expect(screen.getByRole('main').style.marginTop).toBe('')
+      expect(screen.getByTestId('show-side-panel-slot')).toHaveStyle({ paddingLeft: '24px' })
       unmount()
 
       useShellLayoutStore.setState({ railExpanded: true })
-      const second = renderFrame(withProject)
-      expect(screen.getByRole('main').style.marginTop).toBe('')
+      const second = renderFrame()
+      expect(screen.queryByTestId('show-side-panel-slot')).not.toBeInTheDocument()
       second.unmount()
 
       platformRef.mac = false
       useShellLayoutStore.setState({ railExpanded: false })
-      renderFrame(withProject)
-      expect(screen.getByRole('main').style.marginTop).toBe('')
+      renderFrame()
+      expect(screen.queryByTestId('show-side-panel-slot')).not.toBeInTheDocument()
     })
 
     it('keeps workspaceMain mounted when the mode flips between fallback and panes', () => {

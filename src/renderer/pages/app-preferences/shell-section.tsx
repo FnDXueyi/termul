@@ -1,7 +1,9 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
-import { PANEL_FIELD_CLASS } from '@/components/ui/panel-styles'
-import { cn } from '@/lib/utils'
+import { SettingsRow, settingsDescriptionId } from '@/components/settings/SettingsRow'
+import { SettingsSelect } from '@/components/settings/SettingsSelect'
+import { rowId } from './categories'
 
 interface ShellSectionProps {
   defaultShell: string
@@ -9,57 +11,59 @@ interface ShellSectionProps {
   handleDefaultShellChange: (value: string) => void
 }
 
+/** Radix Select reserves the empty string; the system default needs its own value. */
+const SYSTEM_DEFAULT_SHELL = '__system_default__'
+
+/** Stored value may be a name or a path; show the matching detected shell's path. */
+function displayValue(defaultShell: string, availableShells: DetectedShells | null): string {
+  if (!defaultShell) return SYSTEM_DEFAULT_SHELL
+  if (defaultShell.includes('\\') || defaultShell.includes('/')) return defaultShell
+  const match = availableShells?.available.find((shell) => {
+    if (shell.name === defaultShell) return true
+    return shell.path.split(/[\\/]/).pop() === defaultShell
+  })
+  return match?.path ?? defaultShell
+}
+
 export function ShellSection({
   defaultShell,
   availableShells,
   handleDefaultShellChange
 }: ShellSectionProps): React.JSX.Element {
+  const value = displayValue(defaultShell, availableShells)
+  const options = [
+    { value: SYSTEM_DEFAULT_SHELL, label: 'System default' },
+    ...(availableShells?.available ?? []).map((shell) => ({
+      value: shell.path,
+      label: shell.displayName
+    }))
+  ]
+  // Keep a stored shell that detection did not find, so the menu shows it.
+  if (!options.some((option) => option.value === value)) {
+    options.push({ value, label: value })
+  }
   return (
     <SettingsSection id="shell">
-      <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-        <div className="w-full pt-1 md:w-1/3">
-          <h2 className="text-lg font-medium text-foreground">Default Shell</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            Set the default shell for new terminals.
-          </p>
-        </div>
-        <div className="w-full space-y-4 md:w-full md:w-2/3">
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Shell
-            </label>
-            <select
-              value={(() => {
-                // Normalize the stored defaultShell for display
-                // If it's a path, use it directly; if it's a name, find matching shell's path
-                if (!defaultShell) return ''
-                if (defaultShell.includes('\\') || defaultShell.includes('/')) {
-                  return defaultShell
-                }
-                // Find shell by name or by basename of path
-                const match = availableShells?.available.find((s) => {
-                  if (s.name === defaultShell) return true
-                  const pathBasename = s.path.split(/[\\/]/).pop()
-                  return pathBasename === defaultShell
-                })
-                return match?.path ?? defaultShell
-              })()}
-              onChange={(e) => handleDefaultShellChange(e.target.value)}
-              className={cn(PANEL_FIELD_CLASS, 'w-full px-3 py-2 text-sm')}
-            >
-              <option value="">System Default</option>
-              {availableShells?.available?.map((shell) => (
-                <option key={shell.path} value={shell.path}>
-                  {shell.displayName}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground mt-1">
-              This can be overridden per-project in project settings.
-            </p>
-          </div>
-        </div>
-      </div>
+      <SettingsGroup title="Default shell">
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('default-shell')}
+            htmlFor="default-shell"
+            label="Shell"
+            description="A project can choose its own shell in Project settings."
+          >
+            <SettingsSelect
+              id="default-shell"
+              aria-describedby={settingsDescriptionId('default-shell')}
+              options={options}
+              value={value}
+              onValueChange={(next) =>
+                handleDefaultShellChange(next === SYSTEM_DEFAULT_SHELL ? '' : next)
+              }
+            />
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsGroup>
     </SettingsSection>
   )
 }
