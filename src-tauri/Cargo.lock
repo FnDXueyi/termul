@@ -6856,6 +6856,7 @@ dependencies = [
  "notify",
  "notify-rust",
  "oauth2",
+ "objc2",
  "parking_lot",
  "portable-pty",
  "regex",

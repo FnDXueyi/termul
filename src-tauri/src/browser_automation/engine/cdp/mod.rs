@@ -13,11 +13,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::{EngineError, EngineErrorKind, EngineFuture, Point};
 
+pub mod input;
+
 /// Closed CDP method allow-list: a transport can issue nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CdpMethod {
     RuntimeEvaluate,
     InputDispatchMouseEvent,
+    InputDispatchKeyEvent,
+    InputInsertText,
     PageCaptureScreenshot,
 }
 
@@ -26,6 +30,8 @@ impl CdpMethod {
         match self {
             CdpMethod::RuntimeEvaluate => "Runtime.evaluate",
             CdpMethod::InputDispatchMouseEvent => "Input.dispatchMouseEvent",
+            CdpMethod::InputDispatchKeyEvent => "Input.dispatchKeyEvent",
+            CdpMethod::InputInsertText => "Input.insertText",
             CdpMethod::PageCaptureScreenshot => "Page.captureScreenshot",
         }
     }

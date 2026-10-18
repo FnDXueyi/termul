@@ -14,7 +14,7 @@ use super::test_support::ScriptedPermissions;
 use super::*;
 use crate::browser_automation::engine::{
     CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFuture, EngineTraits,
-    InputMode, Point, Support,
+    InputMode, KeyInput, KeyKind, Point, Support,
 };
 use crate::web::sink::AcpEvent;
 
@@ -164,8 +164,13 @@ impl TabSurface for FakePane {
 struct FakeEngine {
     facts: EngineFacts,
     clicks: Mutex<Vec<(Point, InputMode)>>,
+    keys: Mutex<Vec<String>>,
     fail_trusted_click: bool,
     snapshot_text: &'static str,
+    /// Fields that override the default ready facts of every element.
+    facts_patch: Value,
+    /// The key-press tier when it differs from text entry's.
+    press_tier: Option<Support>,
 }
 
 impl FakeEngine {
@@ -180,8 +185,11 @@ impl FakeEngine {
                 },
             },
             clicks: Mutex::new(Vec::new()),
+            keys: Mutex::new(Vec::new()),
             fail_trusted_click: false,
             snapshot_text: "- button \"Sign in\" @e1",
+            facts_patch: json!({}),
+            press_tier: None,
         }
     }
 }
@@ -200,6 +208,19 @@ impl BrowserEngine for FakeEngine {
                 "text": self.snapshot_text,
                 "refs": 1
             })
+        } else if script.contains("elementFromPoint") {
+            if script.contains("\"@e9\"") {
+                json!({ "state": "detached" })
+            } else {
+                let mut facts = json!({
+                    "state": "present", "role": "button", "name": "Sign in", "x": 12.0, "y": 34.0,
+                    "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "text"
+                });
+                for (key, value) in self.facts_patch.as_object().unwrap() {
+                    facts[key] = value.clone();
+                }
+                facts
+            }
         } else if script.contains("\"@e9\"") {
             json!({ "error": "stale_ref: @e9 detached <script>steal()</script>" })
         } else if script.contains("rect:{cx") {
@@ -221,6 +242,21 @@ impl BrowserEngine for FakeEngine {
                 Ok(())
             }
         })
+    }
+    fn key_support(&self, kind: KeyKind) -> Support {
+        match (kind, self.press_tier) {
+            (KeyKind::Press, Some(tier)) => tier,
+            _ => self.facts.capabilities.get(CapabilityId::TrustedKey),
+        }
+    }
+    fn key<'a>(&'a self, _tab: &'a str, input: KeyInput<'a>, mode: InputMode) -> EngineFuture<'a, ()> {
+        assert_eq!(mode, InputMode::Trusted);
+        assert_eq!(self.key_support(match input {
+            KeyInput::Text(_) => KeyKind::Text,
+            KeyInput::Press(_) => KeyKind::Press,
+        }), Support::Trusted, "trusted keys only where declared");
+        self.keys.lock().push(format!("{input:?}"));
+        Box::pin(async { Ok(()) })
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(async { Ok(vec![0x89, b'P', b'N', b'G']) })
@@ -468,7 +504,7 @@ async fn list_tabs_nests_page_text_per_tab() {
 }
 
 #[tokio::test]
-async fn click_fidelity_follows_the_input_actually_used() {
+async fn click_fidelity_follows_the_declared_tier_and_never_falls_back() {
     let h = harness_with(FakeEngine::new(webview2_like()));
     h.call("navigate", json!({ "url": "https://example.com" })).await;
     h.call("snapshot", json!({})).await;
@@ -485,7 +521,8 @@ async fn click_fidelity_follows_the_input_actually_used() {
     h.call("navigate", json!({ "url": "https://example.com" })).await;
     h.call("snapshot", json!({})).await;
     let reply = h.call("click", json!({ "ref": "@e1" })).await;
-    assert_eq!(reply["fidelity"], "synthetic", "a failed trusted click falls back and says so");
+    assert_eq!(reply["ok"], false, "a failed trusted click is never retried as a synthetic one: {reply}");
+    assert_eq!(reply["reason"], "engine_unreachable");
 
     let h = harness_with(FakeEngine::new(bridge_like()));
     h.call("navigate", json!({ "url": "https://example.com" })).await;
@@ -843,4 +880,82 @@ async fn a_session_in_teardown_admits_no_call() {
     let reply = h.call("navigate", json!({ "url": "https://example.com/" })).await;
     assert_eq!(code_and_reason(&reply), (Some("tab_not_found"), Some("session_ended")));
     assert!(h.pane.tabs.lock().is_empty());
+}
+
+fn all_trusted() -> CapabilityTable {
+    webview2_like()
+        .with(CapabilityId::TrustedKey, Support::Trusted)
+        .with(CapabilityId::PointerMove, Support::Trusted)
+        .with(CapabilityId::Wheel, Support::Trusted)
+}
+
+async fn snapshotted(engine: FakeEngine) -> Harness {
+    let h = harness_with(engine);
+    h.call("navigate", json!({ "url": "https://example.com" })).await;
+    h.call("snapshot", json!({})).await;
+    h
+}
+
+#[tokio::test]
+async fn a_trusted_fill_focuses_with_a_click_then_inserts_the_text() {
+    let h = snapshotted(FakeEngine::new(all_trusted())).await;
+    let reply = h.call("fill", json!({ "ref": "@e1", "value": "Ada" })).await;
+    assert_eq!(reply["fidelity"], "trusted", "{reply}");
+    assert_eq!(
+        h.engine.clicks.lock().as_slice(),
+        [(Point { x: 12.0, y: 34.0 }, InputMode::Trusted)]
+    );
+    assert_eq!(h.engine.keys.lock().as_slice(), ["Text(\"Ada\")"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_covered_target_times_out_and_gets_no_input() {
+    let mut engine = FakeEngine::new(all_trusted());
+    engine.facts_patch = json!({ "hit": false });
+    let h = snapshotted(engine).await;
+    for (action, args) in [
+        ("click", json!({ "ref": "@e1" })),
+        ("fill", json!({ "ref": "@e1", "value": "Ada" })),
+        ("type", json!({ "ref": "@e1", "text": "Ada" })),
+        ("press", json!({ "ref": "@e1", "key": "Enter" })),
+        ("hover", json!({ "ref": "@e1" })),
+    ] {
+        let reply = h.call(action, args).await;
+        assert_eq!((reply["code"].as_str(), reply["reason"].as_str()), (Some("timeout"), Some("covered")), "{action}: {reply}");
+    }
+    assert!(h.engine.clicks.lock().is_empty());
+    assert!(h.engine.keys.lock().is_empty());
+}
+
+#[tokio::test]
+async fn where_key_presses_are_synthetic_text_stays_trusted_and_presses_say_synthetic() {
+    let mut engine = FakeEngine::new(all_trusted());
+    engine.press_tier = Some(Support::Synthetic);
+    let h = snapshotted(engine).await;
+    let reply = h.call("press", json!({ "ref": "@e1", "key": "Enter" })).await;
+    assert_eq!(reply["fidelity"], "synthetic", "{reply}");
+    let reply = h.call("type", json!({ "ref": "@e1", "text": "x" })).await;
+    assert_eq!(reply["fidelity"], "trusted", "{reply}");
+    assert_eq!(h.engine.keys.lock().as_slice(), ["Text(\"x\")"]);
+}
+
+#[tokio::test]
+async fn a_key_press_on_a_button_is_delivered_without_clicking_it() {
+    let mut engine = FakeEngine::new(all_trusted());
+    engine.facts_patch = json!({ "kind": "other" });
+    let h = snapshotted(engine).await;
+    let reply = h.call("press", json!({ "ref": "@e1", "key": "Enter" })).await;
+    assert_eq!(reply["fidelity"], "synthetic", "{reply}");
+    assert!(h.engine.clicks.lock().is_empty(), "focusing a button by click would press it");
+    let reply = h.call("press", json!({ "key": "Enter" })).await;
+    assert_eq!(reply["fidelity"], "trusted", "{reply}");
+    assert_eq!(h.engine.keys.lock().as_slice(), ["Press(Named(Enter))"]);
+}
+
+#[tokio::test]
+async fn an_unknown_key_name_is_refused_where_presses_are_trusted() {
+    let h = snapshotted(FakeEngine::new(all_trusted())).await;
+    let reply = h.call("press", json!({ "key": "Control+a" })).await;
+    assert_eq!(reply["code"], "invalid_params", "{reply}");
+    assert!(h.engine.keys.lock().is_empty());
 }

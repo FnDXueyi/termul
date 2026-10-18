@@ -9,6 +9,7 @@
 //! to the awaiting task.
 
 pub mod events;
+pub mod input;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;

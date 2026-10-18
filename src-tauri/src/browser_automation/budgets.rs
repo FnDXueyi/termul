@@ -53,9 +53,24 @@ pub const EVAL_STEP: Duration = CDP_ISSUE.saturating_add(BRIDGE_EVAL);
 /// worst case of the steps the verb runs.
 pub const ACTION_INSTANT: Duration = secs(1);
 pub const ACTION_EVAL: Duration = EVAL_STEP;
-/// Resolve the ref, then press and release. The synthetic fallback runs
-/// only if its own step still fits the deadline.
-pub const ACTION_CLICK: Duration = EVAL_STEP.saturating_add(CDP_CALL).saturating_add(CDP_CALL);
+/// How long the core waits for an element to become actionable, and how
+/// often it reads the element's facts again.
+pub const ACTIONABILITY_WAIT: Duration = secs(5);
+pub const ACTIONABILITY_POLL: Duration = Duration::from_millis(100);
+/// Native input on macOS and Linux: one UI-thread round trip.
+pub const NATIVE_INPUT: Duration = secs(5);
+/// One trusted input event on any engine; CDP is the slowest.
+const INPUT_EVENT: Duration = CDP_CALL;
+/// The actionability wait can start its last facts probe just before it
+/// ends.
+const ACTIONABLE: Duration = ACTIONABILITY_WAIT.saturating_add(EVAL_STEP);
+/// Wait until the element is actionable, then press and release. Hover
+/// and scroll need no more.
+pub const ACTION_CLICK: Duration = ACTIONABLE.saturating_add(INPUT_EVENT).saturating_add(INPUT_EVENT);
+/// Text verbs click to focus, place the caret, then type or press: more
+/// steps than a click, held to the same bound. Every step is cut at it, so
+/// a slow engine answers `timeout` instead of late.
+pub const ACTION_TEXT: Duration = ACTION_CLICK;
 /// A settle loop can start its last readiness probe just before it ends.
 pub const ACTION_HISTORY: Duration = NAV_SETTLE.saturating_add(EVAL_STEP);
 pub const ACTION_NAVIGATE: Duration = TAB_OPEN.saturating_add(ACTION_HISTORY);

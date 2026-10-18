@@ -183,6 +183,10 @@ pub mod conformance_support {
     pub use crate::browser_automation::core::ports::{
         PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
     };
+    pub use crate::browser_automation::engine::{
+        desktop_engine, BrowserEngine, CapabilityId, EngineError, EngineErrorKind, InputMode, Key, KeyInput,
+        KeyKind, NamedKey, Point, Support,
+    };
     pub use crate::browser_automation::{
         budgets, create_tab, dispatch, eval_resolved, session_ended, set_browser_host,
         BrowserCall, DesktopBrowserHost, HostServices,

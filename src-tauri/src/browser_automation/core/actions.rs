@@ -13,7 +13,7 @@ use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, rewrite_snapshot_refs, stale_ref_error, NavOutcome, RefNode, RefStale};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
 use crate::browser_automation::budgets::{self, Deadline};
-use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
+use crate::browser_automation::engine::assets;
 use crate::browser_automation::BrowserCall;
 
 /// Validate + normalize a navigation target. http(s) only.
@@ -67,7 +67,7 @@ pub(super) fn check_ref(ref_id: &str) -> Result<(), BrowserError> {
     }
 }
 
-fn ref_arg(args: &Value) -> Result<Option<&str>, BrowserError> {
+pub(super) fn ref_arg(args: &Value) -> Result<Option<&str>, BrowserError> {
     let r = args.get("ref").and_then(Value::as_str);
     if let Some(r) = r {
         check_ref(r)?;
@@ -89,14 +89,14 @@ fn mutated(fidelity: Fidelity, tab: TabFacts) -> Success {
 
 /// A ref resolved against the tab's current document. `node.path` is the
 /// page helper's handle for the element.
-struct ResolvedRef {
-    node: RefNode,
-    epoch: u64,
+pub(super) struct ResolvedRef {
+    pub(super) node: RefNode,
+    pub(super) epoch: u64,
 }
 
 impl DesktopBrowserHost {
     /// Host facts for `label` from the registry.
-    fn tab_facts(&self, label: &str) -> Result<TabFacts, BrowserError> {
+    pub(super) fn tab_facts(&self, label: &str) -> Result<TabFacts, BrowserError> {
         let registry = self.registry.lock();
         let record = registry
             .get(label)
@@ -129,7 +129,7 @@ impl DesktopBrowserHost {
             })
     }
 
-    fn resolve_ref(&self, label: &str, token: &str) -> Result<ResolvedRef, BrowserError> {
+    pub(super) fn resolve_ref(&self, label: &str, token: &str) -> Result<ResolvedRef, BrowserError> {
         let registry = self.registry.lock();
         let record = registry
             .get(label)
@@ -147,7 +147,7 @@ impl DesktopBrowserHost {
 
     /// Run a helper script through the engine. A failure is the eval's
     /// final outcome (the engine already applied its one safe fallback).
-    async fn eval(&self, tab_id: &str, expr: &str) -> Result<Value, BrowserError> {
+    pub(super) async fn eval(&self, tab_id: &str, expr: &str) -> Result<Value, BrowserError> {
         self.engine.evaluate(tab_id, expr).await.map_err(|e| {
             // Tab id + kind only: eval failures can quote page content.
             log::warn!("[browser-agent] eval failed on tab {tab_id} ({:?})", e.kind);
@@ -268,11 +268,15 @@ impl DesktopBrowserHost {
                     ..Success::default()
                 })
             }
-            Verb::Click => {
+            Verb::Click | Verb::Hover => {
                 let label = self.resolve_tab(session_id, args)?;
                 let token = required_ref(args)?;
                 let resolved = self.resolve_ref(&label, token)?;
-                let fidelity = self.click_ref(&label, token, &resolved, deadline).await?;
+                let fidelity = if verb == Verb::Click {
+                    self.click(&label, token, &resolved, deadline).await?
+                } else {
+                    self.hover(&label, token, &resolved, deadline).await?
+                };
                 Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
             Verb::Fill => {
@@ -283,30 +287,17 @@ impl DesktopBrowserHost {
                     .and_then(Value::as_str)
                     .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
                 let resolved = self.resolve_ref(&label, token)?;
-                self.revalidate(&label, token, &resolved).await?;
-                let script = assets::fill_ref(&resolved.node.path, value, resolved.epoch);
-                let out = self.eval(&label, &script).await?;
-                eval_gate(&out, Some(token))?;
-                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
+                let fidelity = self.fill(&label, token, &resolved, value, deadline).await?;
+                Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
-            Verb::Type | Verb::Press | Verb::Scroll | Verb::Hover => {
+            Verb::Type | Verb::Press | Verb::Scroll => {
                 let label = self.resolve_tab(session_id, args)?;
-                // `ref` is optional for type/press/scroll (they fall back to
-                // the focused element or the page).
-                let token = ref_arg(args)?;
-                let mut page_args = args.clone();
-                let mut epoch = self.tab_facts(&label)?.epoch;
-                if let Some(token) = token {
-                    let resolved = self.resolve_ref(&label, token)?;
-                    self.revalidate(&label, token, &resolved).await?;
-                    page_args["ref"] = Value::String(resolved.node.path.clone());
-                    epoch = resolved.epoch;
-                }
-                let out = self
-                    .eval(&label, &assets::interaction(&call.action, &page_args, epoch))
-                    .await?;
-                eval_gate(&out, token)?;
-                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
+                let fidelity = match verb {
+                    Verb::Type => self.type_text(&label, args, deadline).await?,
+                    Verb::Press => self.press(&label, args, deadline).await?,
+                    _ => self.scroll(&label, args, self.tab_facts(&label)?.epoch).await?,
+                };
+                Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
             Verb::Wait => self.wait(session_id, args, deadline).await,
         }
@@ -425,7 +416,7 @@ impl DesktopBrowserHost {
 
     /// Check the page element behind `resolved` still has the role and
     /// name its ref was minted for.
-    async fn revalidate(&self, label: &str, token: &str, resolved: &ResolvedRef) -> Result<Value, BrowserError> {
+    pub(super) async fn revalidate(&self, label: &str, token: &str, resolved: &ResolvedRef) -> Result<Value, BrowserError> {
         let out = self
             .eval(label, &assets::resolve_ref(&resolved.node.path, resolved.epoch))
             .await?;
@@ -472,46 +463,6 @@ impl DesktopBrowserHost {
             }
             tokio::time::sleep(wait.clamp(budgets::WAIT_POLL)).await;
         }
-    }
-
-    /// Click a ref and report the input actually used: a trusted click at
-    /// the resolved point where the engine has one (falling back to a
-    /// synthetic DOM click if it fails), else the synthetic click.
-    async fn click_ref(
-        &self,
-        label: &str,
-        token: &str,
-        resolved: &ResolvedRef,
-        deadline: Deadline,
-    ) -> Result<Fidelity, BrowserError> {
-        let mode = match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
-            Support::Trusted => InputMode::Trusted,
-            Support::Synthetic => InputMode::Synthetic,
-            Support::Unavailable(reason) => return Err(BrowserError::capability(reason)),
-        };
-        let out = self.revalidate(label, token, resolved).await?;
-        if mode == InputMode::Trusted {
-            let rect = out
-                .get("rect")
-                .ok_or_else(|| stale_ref_error(token, RefStale::Gone))?;
-            let at = Point {
-                x: rect.get("cx").and_then(Value::as_f64).unwrap_or(0.0),
-                y: rect.get("cy").and_then(Value::as_f64).unwrap_or(0.0),
-            };
-            match self.engine.pointer_click(label, at, InputMode::Trusted).await {
-                Ok(()) => return Ok(Fidelity::Trusted),
-                Err(e) if !deadline.admits(budgets::EVAL_STEP) => return Err(engine_error(e, label)),
-                Err(e) => log::warn!(
-                    "[browser-agent] trusted click failed on tab {label} ({:?}), synthetic fallback",
-                    e.kind
-                ),
-            }
-        }
-        let out = self
-            .eval(label, &assets::dom_click(&resolved.node.path, resolved.epoch))
-            .await?;
-        eval_gate(&out, Some(token))?;
-        Ok(Fidelity::Synthetic)
     }
 
     /// Capture the tab and write the PNG under the session's artifact dir.
