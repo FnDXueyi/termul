@@ -47,6 +47,7 @@ pub const LOCATION: Helper = helper!("location");
 pub const CHECKED_STATE: Helper = helper!("checked_state");
 pub const SELECT_OPTION: Helper = helper!("select_option");
 pub const FRAME_ORIGIN: Helper = helper!("frame_origin");
+#[cfg(any(test, target_os = "windows"))]
 pub const OWNER_PATH: Helper = helper!("owner_path");
 #[cfg_attr(target_os = "windows", allow(dead_code, reason = "WebView2 reads the console through CDP"))]
 pub const CONSOLE_PULL: Helper = helper!("console_pull");
@@ -96,6 +97,7 @@ pub fn frame_origin(path: &str) -> Script {
 
 /// The path of the element the call is bound to (`this`), for engines
 /// that resolve a frame's owner element natively.
+#[cfg(any(test, target_os = "windows"))]
 pub fn owner_path() -> Script {
     Script::new(OWNER_PATH, json!({}))
 }

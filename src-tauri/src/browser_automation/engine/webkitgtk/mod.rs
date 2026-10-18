@@ -14,7 +14,7 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use super::assets::{self, Script};
-use super::observe::{self, ConsoleEntry};
+use super::observe::{parse_console_batches, ConsoleEntry};
 use super::events::DialogAnswer;
 use super::{
     string_eval, BrowserEngine, CapabilityId, Support, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
@@ -88,7 +88,7 @@ impl BrowserEngine for WebKitGtkEngine {
     fn pull_console<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<ConsoleEntry>> {
         Box::pin(async move {
             let pulled = self.evaluate(tab, assets::console_pull()).await?;
-            Ok(observe::parse_console_batches(&pulled))
+            Ok(parse_console_batches(&pulled))
         })
     }
 
