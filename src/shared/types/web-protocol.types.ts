@@ -607,7 +607,11 @@ export const WS_ERROR_CODES = {
   // for. Never replayed, never executed.
   COMMAND_CONFLICT: 'command_conflict',
   // A request's `commandId` is malformed (not 1-128 chars of [A-Za-z0-9_-]).
-  INVALID_COMMAND_ID: 'invalid_command_id'
+  INVALID_COMMAND_ID: 'invalid_command_id',
+  // The Claude Account a request needs is not signed in: choosing it for a
+  // Project or as the default (nothing changed), or starting a managed Claude
+  // agent on it. The message names the Account and where to sign in.
+  CLAUDE_ACCOUNT_SIGNED_OUT: 'claude_account_signed_out'
 } as const
 
 /** Union of all WS error code strings. */

@@ -19,7 +19,14 @@
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { WS_ERROR_CODES } from '@shared/types/web-protocol.types'
 import { describe, expect, it } from 'vitest'
+import { mapTauriVerdict } from '../acp-transport/tauri-verdicts'
+import { AcpTransportError } from '../acp-transport/types'
+import {
+  claudeAccountSignedOutMessage,
+  isClaudeAccountSignedOutError
+} from '../agents/acp-spawn-errors'
 
 // Type definitions for our test data
 interface DomainCheck {
@@ -2027,6 +2034,34 @@ describe('Claude Accounts parity (ADR-0004)', () => {
     expect(wsTransport).toMatch(/'spawn_agent',\s*\{ config, projectId: projectId \?\? null \}/)
     expect(read('web', 'ws', 'agents.rs')).toMatch(/project_id: Option<String>/)
     expect(read('acp', 'manager', 'mod.rs')).toMatch(/project_id: Option<String>/)
+  })
+
+  it('every UI carrier checks the sign-in before it stores a choice; headless setup does not', () => {
+    // #1392: the ws handlers serve desktop and the browser; the Tauri commands
+    // are the desktop invoke carrier. Both refuse a signed-out Account. The
+    // `termul-server claude account` CLI may assign before `login`.
+    const ws = read('web', 'ws', 'claude_accounts.rs')
+    const tauri = read('acp', 'commands', 'claude_accounts.rs')
+    for (const source of [ws, tauri]) {
+      expect(source).toMatch(/set_default_account\([^;]*SignInCheck::Required\)/s)
+      expect(source).toMatch(/set_project_account\([^;]*SignInCheck::Required,?\s*\)/s)
+    }
+    expect(read('acp', 'claude_admin.rs')).not.toContain('SignInCheck::Required')
+    const dispatch = read('web', 'ws', 'dispatch.rs')
+    expect(dispatch).toContain('handle_set_default_claude_account(id, &req.payload, acp).await')
+    expect(dispatch).toContain('handle_set_project_claude_account(id, &req.payload, acp).await')
+  })
+
+  it('a signed-out refusal reads the same on the /ws code and the desktop invoke prefix', () => {
+    const reason = 'The Claude account "Work" is not signed in.'
+    const viaWs = new AcpTransportError(WS_ERROR_CODES.CLAUDE_ACCOUNT_SIGNED_OUT, reason)
+    const viaInvoke = mapTauriVerdict(`ACP_CLAUDE_ACCOUNT_SIGNED_OUT: ${reason}`)
+    expect(viaInvoke).toEqual(viaWs)
+    for (const error of [viaWs, viaInvoke, `ACP_CLAUDE_ACCOUNT_SIGNED_OUT: ${reason}`]) {
+      expect(isClaudeAccountSignedOutError(error)).toBe(true)
+      expect(claudeAccountSignedOutMessage(error)).toBe(reason)
+    }
+    expect(isClaudeAccountSignedOutError(new Error(reason))).toBe(false)
   })
 })
 

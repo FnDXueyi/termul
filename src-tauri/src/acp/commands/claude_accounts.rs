@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::acp::claude_accounts::usage::ClaudeAccountUsage;
 use crate::acp::claude_accounts::{ClaudeAccount, ClaudeAccountsSnapshot};
-use crate::acp::ClaudeAgentService;
+use crate::acp::{ClaudeAgentService, SignInCheck};
 
 #[tauri::command]
 pub async fn claude_accounts_list(
@@ -74,18 +74,24 @@ pub async fn claude_accounts_remove(
 }
 
 #[tauri::command]
-pub fn claude_accounts_set_default(
+pub async fn claude_accounts_set_default(
     service: State<'_, Arc<ClaudeAgentService>>,
     account_id: String,
 ) -> Result<(), String> {
-    service.set_default_account(&account_id)
+    let service = Arc::clone(service.inner());
+    service
+        .set_default_account(&account_id, SignInCheck::Required)
+        .await
 }
 
 #[tauri::command]
-pub fn claude_accounts_set_project(
+pub async fn claude_accounts_set_project(
     service: State<'_, Arc<ClaudeAgentService>>,
     project_id: String,
     account_id: Option<String>,
 ) -> Result<(), String> {
-    service.set_project_account(&project_id, account_id.as_deref())
+    let service = Arc::clone(service.inner());
+    service
+        .set_project_account(&project_id, account_id.as_deref(), SignInCheck::Required)
+        .await
 }
