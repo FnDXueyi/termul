@@ -17,6 +17,7 @@ import {
   onBrowserTabUpdated
 } from '@/lib/browser-api'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
+import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useBrowserWebview } from './use-browser-webview'
 import {
   resetNativeWebviewOcclusionForTests,
@@ -443,6 +444,37 @@ describe('useBrowserWebview registry projection', () => {
       loading: false
     })
     expect(browserTabNavigate).not.toHaveBeenCalled()
+    view.unmount()
+  })
+})
+
+describe('useBrowserWebview refused agent tab', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(LOGICAL_RECT)
+    vi.mocked(browserTabDestroy).mockResolvedValue({ success: true, data: undefined })
+    vi.mocked(browserTabCreate).mockResolvedValue({
+      success: false,
+      error: 'no agent asked for this tab',
+      code: 'BROWSER_TAB_UNKNOWN_AGENT_TAB'
+    })
+    useBrowserSessionStore.getState().createTab('browser-1', 'https://example.com')
+    useWorkspaceStore.getState().addBrowserTab('browser-1')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('drops the pane tab of an agent tab the host no longer waits on', async () => {
+    expect(JSON.stringify(useWorkspaceStore.getState().root)).toContain('browser-browser-1')
+    const view = render(<BrowserWebviewHarness />)
+    await waitFor(() =>
+      expect(useBrowserSessionStore.getState().getTab('browser-1')).toBeUndefined()
+    )
+    expect(JSON.stringify(useWorkspaceStore.getState().root)).not.toContain('browser-browser-1')
     view.unmount()
   })
 })
