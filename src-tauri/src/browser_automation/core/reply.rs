@@ -179,25 +179,91 @@ pub(super) fn engine_error(err: EngineError, tab: &str) -> BrowserError {
     BrowserError::new(code, message).with_reason(reason)
 }
 
-/// Map a helper script's `{error: "…"}` result to a wire code. Only the
-/// code reaches the reply, never the helper's text: a `stale_ref` prefix
-/// maps to `stale_ref` (take a fresh snapshot), anything else to
-/// `internal`.
-pub(super) fn eval_gate(out: &Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
-    let Some(e) = out.get("error").and_then(Value::as_str) else {
-        return Ok(());
-    };
+/// A helper that could not do its job: `{error: "…"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelperFailure {
+    error: String,
+}
+
+/// What an input helper (click, fill, type, press, scroll, hover) returns
+/// when it ran: exactly `{ok: true}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionDone {
+    ok: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ActionReply {
+    Done(ActionDone),
+    Failed(HelperFailure),
+}
+
+/// The centre of an element in main-frame CSS px.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub(super) struct Rect {
+    pub cx: f64,
+    pub cy: f64,
+}
+
+/// What the resolve helper reports for an element that still exists.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(super) struct ResolvedElement {
+    pub rect: Rect,
+    pub role: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResolveReply {
+    Found(ResolvedElement),
+    Failed(HelperFailure),
+}
+
+fn malformed_helper_result() -> BrowserError {
+    BrowserError::new(ERR_INTERNAL, "the page helper returned an unusable result")
+        .with_reason("page_helper_malformed")
+}
+
+/// Parse an input helper's result. Only `{ok: true}` is success: any other
+/// shape is `internal`, so an action that may not have happened never
+/// reports ok.
+pub(super) fn action_result(out: Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
+    match serde_json::from_value::<ActionReply>(out) {
+        Ok(ActionReply::Done(ActionDone { ok: true })) => Ok(()),
+        Ok(ActionReply::Failed(failure)) => Err(helper_failure(&failure.error, ref_id)),
+        Ok(ActionReply::Done(_)) | Err(_) => Err(malformed_helper_result()),
+    }
+}
+
+/// Parse the resolve helper's result: the element's centre, role and name,
+/// or the failure it reported.
+pub(super) fn resolve_result(out: Value, ref_id: Option<&str>) -> Result<ResolvedElement, BrowserError> {
+    match serde_json::from_value::<ResolveReply>(out) {
+        Ok(ResolveReply::Found(element)) => Ok(element),
+        Ok(ResolveReply::Failed(failure)) => Err(helper_failure(&failure.error, ref_id)),
+        Err(_) => Err(malformed_helper_result()),
+    }
+}
+
+/// Map a helper's `{error: "…"}` to a wire code. Only the code reaches the
+/// reply, never the helper's text: a `stale_ref` prefix maps to
+/// `stale_ref` (take a fresh snapshot), anything else to `internal`.
+fn helper_failure(e: &str, ref_id: Option<&str>) -> BrowserError {
     if e.starts_with("stale_ref") {
         let message = match ref_id {
             Some(r) => format!("ref {r} no longer resolves; take a new snapshot"),
             None => "the ref no longer resolves; take a new snapshot".to_string(),
         };
-        return Err(BrowserError::new(ERR_STALE_REF, message).with_reason("ref_not_resolved"));
+        return BrowserError::new(ERR_STALE_REF, message).with_reason("ref_not_resolved");
     }
     if e == "no focused element" {
-        return Err(BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element"));
+        return BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element");
     }
-    Err(BrowserError::new(ERR_INTERNAL, "the page helper reported a failure").with_reason("page_helper_error"))
+    BrowserError::new(ERR_INTERNAL, "the page helper reported a failure").with_reason("page_helper_error")
 }
 
 /// Hard cut at `max` bytes on a UTF-8 char boundary; true when cut.
@@ -223,8 +289,7 @@ pub(super) fn truncate_snapshot(text: &str) -> (String, bool) {
 
 /// The page outline the snapshot helper returns. Every string in it is
 /// page-controlled; the structure is the helper's.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct PageSnapshot {
     url: String,
     title: String,
