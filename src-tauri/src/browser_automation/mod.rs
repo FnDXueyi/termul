@@ -21,17 +21,23 @@ pub mod engine;
 #[cfg(test)]
 pub use self::core::boundary::BROWSER_CALL_FAILED_PREFIX;
 pub use self::core::boundary::{boundary_arg_keys, boundary_failure_line};
-pub use self::core::{expected_args_text, BrowserError, DesktopBrowserHost, Success, ToolSchema};
+pub use self::core::{
+    expected_args_text, BrowserError, DesktopBrowserHost, Success, TabView, ToolSchema,
+};
 #[cfg(test)]
 pub use self::core::{
     ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use budgets::Deadline;
 use engine::EngineFacts;
+
+use crate::browser_tab_manager::BrowserBounds;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -47,6 +53,15 @@ pub struct BrowserCall {
     pub element: Option<String>,
 }
 
+pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Why the registry refused or failed a renderer-requested tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabCreateError {
+    pub code: &'static str,
+    pub message: String,
+}
+
 /// Host-side capability. The desktop registers the real impl; standalone
 /// servers and tests leave it unset — `dispatch` then fails closed.
 pub trait BrowserHost: Send + Sync {
@@ -58,13 +73,20 @@ pub trait BrowserHost: Send + Sync {
         deadline: Deadline,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Success, BrowserError>> + Send + 'a>>;
     fn end_session(&self, session_id: &str);
-    /// Called by `browser_tab_create` — returns true when the tab was a
-    /// pending agent tab (so the caller can flag it agent-controlled).
-    fn notify_tab_created(&self, tab_id: &str) -> bool;
-    fn notify_tab_closed(&self, tab_id: &str);
-    /// Advance the per-tab epoch (rides snapshot replies so an agent can
-    /// detect document changes; ref staleness is decided page-side).
-    fn notify_tab_navigated(&self, tab_id: &str);
+    /// `browser_tab_create`: the registry validates the label, builds the
+    /// webview and admits the tab once the engine confirmed it.
+    fn create_tab<'a>(
+        &'a self,
+        _label: &'a str,
+        _url: &'a str,
+        _bounds: BrowserBounds,
+    ) -> HostFuture<'a, Result<TabView, TabCreateError>> {
+        Box::pin(async { Err(no_tab_host()) })
+    }
+    /// `browser_tab_destroy`: close the tab and wait for the engine.
+    fn destroy_tab<'a>(&'a self, _label: &'a str) -> HostFuture<'a, ()> {
+        Box::pin(async {})
+    }
     fn resolve_consent(&self, request_id: &str, allowed: bool) -> bool;
     /// Resolve a pending eval bridge reply from `browser_agent_eval_result`.
     fn resolve_eval(&self, nonce: &str, ok: bool, value: Option<String>) -> bool;
@@ -143,27 +165,29 @@ pub fn eval_resolved(nonce: &str, ok: bool, value: Option<String>) -> bool {
     }
 }
 
-/// `browser_tab_create` hook — returns true when `tab_id` is a pending agent
-/// tab (the caller marks it agent-controlled).
-pub fn tab_created(tab_id: &str) -> bool {
+fn no_tab_host() -> TabCreateError {
+    TabCreateError {
+        code: "BROWSER_TAB_NO_HOST",
+        message: "browser tabs need the desktop automation host".to_string(),
+    }
+}
+
+/// `browser_tab_create`: build a tab through the registry.
+pub async fn create_tab(
+    label: &str,
+    url: &str,
+    bounds: BrowserBounds,
+) -> Result<TabView, TabCreateError> {
     match browser_host() {
-        Some(host) => host.notify_tab_created(tab_id),
-        None => false,
+        Some(host) => host.create_tab(label, url, bounds).await,
+        None => Err(no_tab_host()),
     }
 }
 
-/// `browser_tab_destroy` / user-close hook.
-pub fn tab_closed(tab_id: &str) {
+/// `browser_tab_destroy`: close a tab through the registry.
+pub async fn destroy_tab(label: &str) {
     if let Some(host) = browser_host() {
-        host.notify_tab_closed(tab_id);
-    }
-}
-
-/// `browser_tab_report_url` hook — user/script-driven navigation inside an
-/// agent tab invalidates stored refs too.
-pub fn tab_navigated(tab_id: &str) {
-    if let Some(host) = browser_host() {
-        host.notify_tab_navigated(tab_id);
+        host.destroy_tab(label).await;
     }
 }
 

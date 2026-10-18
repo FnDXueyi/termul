@@ -6,19 +6,22 @@ pub mod boundary;
 mod consent;
 mod actions;
 pub(crate) mod dispatch;
+mod events;
 pub mod ports;
 mod reply;
 mod surface;
 mod tabs;
+mod teardown;
 #[cfg(test)]
 pub mod test_support;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
+use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::AppHandle;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 pub use boundary::BrowserError;
 pub use dispatch::{expected_args_text, schema, ToolSchema};
@@ -26,20 +29,24 @@ pub use reply::{
     Success, ERR_CAPABILITY, ERR_CONFIRMATION, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_STALE_REF,
     ERR_TAB_NOT_FOUND, ERR_TIMEOUT,
 };
+pub use tabs::TabView;
 
 use super::budgets::Deadline;
+use super::engine::events::{AllowAll, NavPolicy, TabEvent, TabEvents};
 use super::engine::{self, BrowserEngine, EngineFacts};
-use super::{BrowserCall, BrowserHost};
-use crate::acp::events;
-use crate::browser_tab_manager::BrowserTabManager;
+use super::{BrowserCall, BrowserHost, HostFuture, TabCreateError};
+use crate::acp::events as acp_events;
+use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 use crate::web::EventSink;
 use consent::PendingConsent;
+use events::TabProjection;
 use surface::{PaneSurface, TabSurface};
-use tabs::{bump_epoch_if_agent_tab, AgentTabs};
+use tabs::TabRegistry;
 
-/// Desktop host: drives real pane webviews through the platform engine
-/// adapter and `BrowserTabManager` for navigation and tab lifecycle.
+/// Desktop host: owns the tab registry and drives the pane's webviews
+/// through the platform engine adapter and the tab surface.
 pub struct DesktopBrowserHost {
+    me: Weak<DesktopBrowserHost>,
     surface: Arc<dyn TabSurface>,
     engine: Arc<dyn BrowserEngine>,
     sinks: Vec<Arc<dyn EventSink>>,
@@ -50,8 +57,9 @@ pub struct DesktopBrowserHost {
     /// waiting on it). Concurrent tool calls share ONE prompt instead of
     /// stacking dialogs.
     pending_consent: parking_lot::Mutex<HashMap<String, PendingConsent>>,
-    pending_tab_open: parking_lot::Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>,
-    agent_tabs: parking_lot::Mutex<AgentTabs>,
+    registry: Arc<Mutex<TabRegistry>>,
+    events: UnboundedSender<(String, TabEvent)>,
+    nav_policy: Arc<dyn NavPolicy>,
 }
 
 impl DesktopBrowserHost {
@@ -67,7 +75,9 @@ impl DesktopBrowserHost {
             traits.isolated_world,
             traits.background_render
         );
-        Self::with_parts(Arc::new(PaneSurface { app, tabs }), engine, sinks)
+        let surface: Arc<dyn TabSurface> = Arc::new(PaneSurface { app, tabs });
+        teardown::spawn_startup_sweep(surface.clone());
+        Self::with_parts(surface, engine, sinks)
     }
 
     fn with_parts(
@@ -75,19 +85,106 @@ impl DesktopBrowserHost {
         engine: Arc<dyn BrowserEngine>,
         sinks: Vec<Arc<dyn EventSink>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let registry = Arc::new(Mutex::new(TabRegistry::default()));
+        let (tx, rx) = unbounded_channel();
+        spawn(events::consume(rx, registry.clone(), surface.clone(), sinks.clone()));
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             surface,
             engine,
             sinks,
             consent: parking_lot::Mutex::new(HashMap::new()),
             pending_consent: parking_lot::Mutex::new(HashMap::new()),
-            pending_tab_open: parking_lot::Mutex::new(HashMap::new()),
-            agent_tabs: parking_lot::Mutex::new(HashMap::new()),
+            registry,
+            events: tx,
+            nav_policy: Arc::new(AllowAll),
         })
     }
 
     fn emit<T: Serialize>(&self, session_id: Option<&str>, name: &'static str, payload: &T) {
-        events::fan_out(&self.sinks, session_id, name, payload);
+        acp_events::fan_out(&self.sinks, session_id, name, payload);
+    }
+
+    fn tab_events(&self, label: &str) -> TabEvents {
+        TabEvents::new(label, self.events.clone(), self.nav_policy.clone())
+    }
+
+    /// Build the webview for a renderer-requested tab and admit it to the
+    /// registry once the engine confirmed it.
+    async fn create_tab_inner(
+        &self,
+        label: &str,
+        url: &str,
+        bounds: BrowserBounds,
+    ) -> Result<TabView, TabCreateError> {
+        let url = self
+            .registry
+            .lock()
+            .begin_create(label, url)
+            .map_err(|refusal| TabCreateError {
+                code: refusal.code(),
+                message: refusal.message().to_string(),
+            })?;
+        if let Err(message) = self
+            .surface
+            .create(label, &url, bounds, self.tab_events(label))
+            .await
+        {
+            self.registry
+                .lock()
+                .fail_create(label, "the browser engine did not create the tab");
+            return Err(TabCreateError {
+                code: "BROWSER_TAB_CREATE_FAILED",
+                message,
+            });
+        }
+        let live = self.registry.lock().finish_create(label);
+        if !live {
+            // Closed while it was being built.
+            self.surface.close(label).await;
+            return Err(TabCreateError {
+                code: "BROWSER_TAB_CLOSED",
+                message: "the tab was closed while it was being created".to_string(),
+            });
+        }
+        let (view, session) = {
+            let registry = self.registry.lock();
+            let session = registry
+                .get(label)
+                .and_then(|record| record.session_id().map(str::to_string));
+            let view = registry.view(label).ok_or_else(|| TabCreateError {
+                code: "BROWSER_TAB_CLOSED",
+                message: "the tab closed during creation".to_string(),
+            })?;
+            (view, session)
+        };
+        let projection = TabProjection::Updated(view.clone());
+        events::publish(self.surface.as_ref(), &self.sinks, session.as_deref(), &projection);
+        log::info!("[browser-tab] tab {} live", events::label_prefix(label));
+        Ok(view)
+    }
+
+    async fn destroy_tab_inner(&self, label: &str) {
+        let closing = self.registry.lock().begin_close(label);
+        if closing {
+            self.surface.close(label).await;
+        }
+    }
+}
+
+/// Run `fut` on the current tokio runtime when there is one (tests), else
+/// on tauri's.
+fn spawn<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(fut);
+        }
+        Err(_) => {
+            tauri::async_runtime::spawn(fut);
+        }
     }
 }
 
@@ -102,6 +199,10 @@ impl BrowserHost for DesktopBrowserHost {
     {
         Box::pin(async move {
             let spec = dispatch::admit(&call.action, &call.args, self.engine.facts())?;
+            if self.registry.lock().is_closing(session_id) {
+                return Err(BrowserError::new(ERR_TAB_NOT_FOUND, "this session has ended")
+                    .with_reason("session_ended"));
+            }
             self.ensure_consent(session_id, agent_id, &call, deadline).await?;
             // After a consent wait the call may no longer have time to run
             // the verb: refuse it now rather than act after the agent gave up.
@@ -121,37 +222,25 @@ impl BrowserHost for DesktopBrowserHost {
     }
 
     fn end_session(&self, session_id: &str) {
-        self.forget_consent(session_id);
-        let ids: Vec<String> = {
-            let tabs = self.agent_tabs.lock();
-            tabs.iter()
-                .filter(|(_, t)| t.session_id == session_id)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in ids {
-            self.close_agent_tab(&id);
+        if let Some(me) = self.me.upgrade() {
+            let session_id = session_id.to_string();
+            spawn(async move {
+                me.teardown_session(&session_id).await;
+            });
         }
     }
 
-    fn notify_tab_created(&self, tab_id: &str) -> bool {
-        match self.pending_tab_open.lock().remove(tab_id) {
-            Some(tx) => {
-                let _ = tx.send(Ok(()));
-                true
-            }
-            None => false,
-        }
+    fn create_tab<'a>(
+        &'a self,
+        label: &'a str,
+        url: &'a str,
+        bounds: BrowserBounds,
+    ) -> HostFuture<'a, Result<TabView, TabCreateError>> {
+        Box::pin(self.create_tab_inner(label, url, bounds))
     }
 
-    fn notify_tab_closed(&self, tab_id: &str) {
-        if self.agent_tabs.lock().remove(tab_id).is_some() {
-            log::info!("[browser-agent] agent tab closed externally: {tab_id}");
-        }
-    }
-
-    fn notify_tab_navigated(&self, tab_id: &str) {
-        bump_epoch_if_agent_tab(&self.agent_tabs.lock(), tab_id);
+    fn destroy_tab<'a>(&'a self, label: &'a str) -> HostFuture<'a, ()> {
+        Box::pin(self.destroy_tab_inner(label))
     }
 
     fn resolve_consent(&self, request_id: &str, allowed: bool) -> bool {

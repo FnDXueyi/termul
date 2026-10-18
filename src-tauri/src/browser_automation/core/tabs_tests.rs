@@ -1,195 +1,376 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use serde_json::json;
-
 use super::*;
-use crate::browser_automation::core::reply::eval_gate;
-use crate::browser_automation::{ERR_STALE_REF, ERR_TAB_NOT_FOUND};
+use crate::browser_automation::ERR_TAB_NOT_FOUND;
 
-fn agent_tab(session_id: &str) -> Arc<AgentTab> {
-    Arc::new(AgentTab::new(session_id))
-}
+const AGENT_A: &str = "agent-0b7c2d1e-5f60-4a1b-9c2d-3e4f5a6b7c8d";
+const AGENT_B: &str = "agent-1c8d3e2f-6071-4b2c-8d3e-4f5a6b7c8d9e";
+const USER: &str = "tab-2d9e4f30-7182-4c3d-9e4f-5a6b7c8d9e0f";
 
-#[test]
-fn n_call_session_reuses_exactly_one_agent_tab() {
-    // N-call reuse (navigate → snapshot → navigate → …): the first
-    // navigate auto-opens, every later navigate retargets the SAME tab —
-    // exactly 1 agent tab exists for the session.
-    let mut tabs = HashMap::new();
-    match navigate_resolution(&tabs, "sess-1", None) {
-        NavigateResolution::AutoOpen => {}
-        _ => panic!("first navigate (session owns no tab) must auto-open"),
-    }
-    // The open landed exactly one tab (the model: single reused tab).
-    tabs.insert("agent-a".to_string(), agent_tab("sess-1"));
-    for _ in 0..4 {
-        match navigate_resolution(&tabs, "sess-1", None) {
-            NavigateResolution::Reuse(id, _) => assert_eq!(id, "agent-a"),
-            _ => panic!("later navigates must reuse the session's tab"),
-        }
-    }
-    assert_eq!(tabs.len(), 1, "exactly one agent tab for the session");
-}
-
-#[test]
-fn navigate_resolution_reuses_session_tab_even_with_foreign_tabs_present() {
-    // Other sessions' tabs never leak in as the default target.
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-b".to_string(), agent_tab("sess-other"));
-    match navigate_resolution(&tabs, "sess-1", None) {
-        NavigateResolution::AutoOpen => {}
-        _ => panic!("session with no owned tab must auto-open, not reuse a foreign tab"),
-    }
-    tabs.insert("agent-a".to_string(), agent_tab("sess-1"));
-    match navigate_resolution(&tabs, "sess-1", None) {
-        NavigateResolution::Reuse(id, tab) => {
-            assert_eq!(id, "agent-a");
-            assert_eq!(tab.session_id, "sess-1");
-        }
-        _ => panic!("no tabId + owned tab must resolve to Reuse"),
+fn node(role: &str, name: &str, path: &str) -> RefNode {
+    RefNode {
+        role: role.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        frame: String::new(),
     }
 }
 
-#[test]
-fn explicit_foreign_or_unknown_tabid_is_tab_not_found_never_auto_open() {
-    // An explicit `tabId` that is unknown or owned by another session is
-    // a caller error: `tab_not_found`, no fallback to the session's own
-    // tab, and never an auto-open (the tab-proliferation bug).
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-own".to_string(), agent_tab("sess-1"));
-    tabs.insert("agent-foreign".to_string(), agent_tab("sess-2"));
-    for bad in ["agent-foreign", "agent-unknown"] {
-        match navigate_resolution(&tabs, "sess-1", Some(bad)) {
-            NavigateResolution::TabNotFound(e) => {
-                assert_eq!(e.code, ERR_TAB_NOT_FOUND);
-                assert!(
-                    e.message.contains(bad),
-                    "error must name the tab: {}",
-                    e.message
-                );
-            }
-            _ => panic!("explicit non-owned tabId must be TabNotFound, got {bad}"),
-        }
-    }
-    // The session's own tab is still there — resolution opened nothing.
-    assert_eq!(tabs.len(), 2);
-}
-
-#[test]
-fn explicit_owned_tabid_reuses_that_tab() {
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-own".to_string(), agent_tab("sess-1"));
-    match navigate_resolution(&tabs, "sess-1", Some("agent-own")) {
-        NavigateResolution::Reuse(id, tab) => {
-            assert_eq!(id, "agent-own");
-            assert_eq!(tab.session_id, "sess-1");
-        }
-        _ => panic!("explicit session-owned tabId must resolve to Reuse"),
-    }
-}
-
-#[test]
-fn user_closed_tab_means_next_navigate_auto_opens_fresh() {
-    // Closing the agent tab revokes control (notify_tab_closed removes
-    // the mapping); the session owns nothing again, so the next navigate
-    // (no tabId) mints a fresh tab.
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-a".to_string(), agent_tab("sess-1"));
-    tabs.remove("agent-a");
-    match navigate_resolution(&tabs, "sess-1", None) {
-        NavigateResolution::AutoOpen => {}
-        _ => panic!("after the user closed the tab the next navigate must auto-open"),
-    }
-}
-
-#[test]
-fn manual_redirect_retargets_same_tab_and_kills_pre_navigation_refs() {
-    // The user manually navigated the agent tab elsewhere: the next agent
-    // navigate retargets the SAME tab silently (Reuse — no error, no new
-    // tab), the tab epoch advances, and a ref minted before the redirect
-    // reports `stale_ref` through the eval gate.
-    let tab = agent_tab("sess-1");
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-a".to_string(), tab.clone());
-    let pre_nav_epoch = tab.epoch();
-    // browser_tab_report_url → notify_tab_navigated →
-    // bump_epoch_if_agent_tab (the notify path's core, driven directly
-    // here — the host wrapper needs an AppHandle).
-    bump_epoch_if_agent_tab(&tabs, "agent-a");
+/// An agent tab the host asked for and the engine confirmed, with the
+/// opener's first-navigation waiter.
+fn live_agent_tab(
+    registry: &mut TabRegistry,
+    label: &str,
+    session: &str,
+) -> oneshot::Receiver<NavOutcome> {
+    let mut opened = registry.expect_agent_tab(label, session, "https://example.com/");
     assert_eq!(
-        tab.epoch(),
-        pre_nav_epoch + 1,
-        "manual navigation must advance the tab epoch"
+        registry.begin_create(label, "ignored").as_deref(),
+        Ok("https://example.com/")
     );
-    // A tab id that is not an agent tab is a no-op (the notify hook also
-    // fires for plain user tabs).
-    bump_epoch_if_agent_tab(&tabs, "user-tab");
-    assert_eq!(tab.epoch(), pre_nav_epoch + 1);
-    // Silent retarget: still the same tab, no error surfaced.
-    match navigate_resolution(&tabs, "sess-1", None) {
-        NavigateResolution::Reuse(id, t) => {
-            assert_eq!(id, "agent-a");
-            assert!(Arc::ptr_eq(&t, &tab), "the same agent tab is retargeted");
-        }
-        _ => panic!("manual redirect must not detach or replace the session tab"),
-    }
-    // A pre-navigation ref dies: the navigated document no longer has the
-    // registry entry, the page reports `stale_ref:`, and the eval gate
-    // maps it to the typed wire code.
-    let err = eval_gate(&json!({"error": "stale_ref: @e1 not in this document"}), Some("@e1"))
-        .expect_err("a pre-navigation ref must be rejected");
-    assert_eq!(err.code, ERR_STALE_REF);
+    assert!(registry.finish_create(label));
+    opened
+        .try_recv()
+        .expect("the opener hears the tab is live")
+        .expect("created")
 }
 
 #[test]
-fn default_tab_pick_is_deterministic_across_multiple_owned_tabs() {
-    // `new_tab` still mints several tabs per session by design; the
-    // default (no tabId) pick must be stable, not HashMap-iteration
-    // order � and the auto-open race re-check reuses the same pick.
-    let mut tabs = HashMap::new();
-    tabs.insert("agent-z".to_string(), agent_tab("sess-1"));
-    tabs.insert("agent-a".to_string(), agent_tab("sess-1"));
-    tabs.insert("agent-m".to_string(), agent_tab("sess-1"));
-    for _ in 0..8 {
-        match navigate_resolution(&tabs, "sess-1", None) {
-            NavigateResolution::Reuse(id, _) => {
-                assert_eq!(id, "agent-a", "the lexicographically smallest owned id")
-            }
-            _ => panic!("owned tabs must resolve to Reuse"),
-        }
+fn labels_parse_only_in_their_canonical_form() {
+    assert_eq!(parse_label(USER), Some(LabelKind::User));
+    assert_eq!(parse_label(AGENT_A), Some(LabelKind::Agent));
+    assert_eq!(parse_label(&mint_agent_label()), Some(LabelKind::Agent));
+    for bad in [
+        "",
+        "main",
+        "tab-",
+        "agent-1",
+        "agent-someone-else",
+        "tab-2D9E4F30-7182-4C3D-9E4F-5A6B7C8D9E0F",
+        "tab-2d9e4f3071824c3d9e4f5a6b7c8d9e0f",
+        "browser-2d9e4f30-7182-4c3d-9e4f-5a6b7c8d9e0f",
+    ] {
+        assert_eq!(parse_label(bad), None, "{bad:?}");
     }
-    // The same core drives resolve_tab for every other action.
-    let (id, tab) = owned_tab_or_default(&tabs, "sess-1", None)
-        .expect("core resolves without an error")
-        .expect("session owns tabs");
-    assert_eq!(id, "agent-a");
-    assert_eq!(tab.session_id, "sess-1");
 }
 
 #[test]
-fn owned_tab_or_default_core_contract() {
-    let mut tabs = HashMap::new();
-    // No owned tab, no tabId ? Ok(None): the caller decides (navigate
-    // auto-opens; other actions error with the no-agent-tab message).
-    assert!(owned_tab_or_default(&tabs, "sess-1", None)
-        .expect("missing default is not an error")
-        .is_none());
-    // Foreign tab, no tabId ? still Ok(None) for this session.
-    tabs.insert("agent-f".to_string(), agent_tab("sess-2"));
-    assert!(owned_tab_or_default(&tabs, "sess-1", None)
-        .expect("missing default is not an error")
-        .is_none());
-    // Explicit foreign tabId ? typed tab_not_found (never a default
-    // fallback).
-    let err = owned_tab_or_default(&tabs, "sess-1", Some("agent-f"))
-        .expect_err("explicit foreign tabId must error");
-    assert_eq!(err.code, ERR_TAB_NOT_FOUND);
-    // Site attribution pinned from origin: the failing key is `tabId`.
-    assert_eq!(err.arg_keys, vec!["tabId"]);
+fn the_renderer_cannot_create_a_tab_the_registry_did_not_admit() {
+    let mut registry = TabRegistry::default();
+    assert_eq!(
+        registry.begin_create("browser-1", "https://a.test/"),
+        Err(CreateRefusal::Malformed)
+    );
+    assert_eq!(
+        registry.begin_create(AGENT_A, "https://a.test/"),
+        Err(CreateRefusal::UnknownAgentTab),
+        "an agent label nobody asked for"
+    );
+    assert_eq!(
+        registry.begin_create(USER, "https://a.test/").as_deref(),
+        Ok("https://a.test/")
+    );
+    assert_eq!(
+        registry.begin_create(USER, "https://a.test/"),
+        Err(CreateRefusal::AlreadyExists)
+    );
+}
+
+#[test]
+fn an_explicit_tab_id_resolves_only_to_a_live_agent_tab_of_the_same_session() {
+    let mut registry = TabRegistry::default();
+    let _first_nav = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let _foreign = live_agent_tab(&mut registry, AGENT_B, "s2");
+    registry.begin_create(USER, "https://a.test/").unwrap();
+    registry.finish_create(USER);
+
+    assert_eq!(
+        registry.resolve("s1", Some(AGENT_A)).unwrap().as_deref(),
+        Some(AGENT_A)
+    );
+    for bad in [AGENT_B, USER, "agent-unknown", "not a label"] {
+        let err = registry.resolve("s1", Some(bad)).expect_err(bad);
+        assert_eq!(err.code, ERR_TAB_NOT_FOUND, "{bad}");
+        assert_eq!(err.arg_keys, ["tabId"]);
+    }
+    assert_eq!(
+        registry.resolve("s1", None).unwrap().as_deref(),
+        Some(AGENT_A)
+    );
+    assert_eq!(
+        registry.resolve("s3", None).unwrap(),
+        None,
+        "a session with no tab"
+    );
+}
+
+#[test]
+fn a_tab_still_being_built_is_not_resolvable() {
+    let mut registry = TabRegistry::default();
+    let _opened = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/");
+    registry.begin_create(AGENT_A, "").unwrap();
+    assert!(registry.resolve("s1", Some(AGENT_A)).is_err());
+    assert_eq!(registry.resolve("s1", None).unwrap(), None);
+    assert!(registry.wait_for_navigation(AGENT_A).is_none());
+}
+
+#[test]
+fn the_default_tab_is_the_first_opened_and_moves_to_the_oldest_survivor() {
+    let mut registry = TabRegistry::default();
+    let _a = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let _b = live_agent_tab(&mut registry, AGENT_B, "s1");
+    assert_eq!(registry.default_tab("s1"), Some(AGENT_A));
+    assert_eq!(registry.owned("s1"), [AGENT_A, AGENT_B]);
+
+    assert!(registry.begin_close(AGENT_A));
+    assert!(!registry.begin_close(AGENT_A), "closing twice is a no-op");
+    registry.remove(AGENT_A);
+    assert_eq!(registry.default_tab("s1"), Some(AGENT_B));
+    registry.remove(AGENT_B);
+    assert_eq!(registry.default_tab("s1"), None);
+}
+
+#[test]
+fn the_first_navigation_completes_on_its_commit_with_epoch_one() {
+    let mut registry = TabRegistry::default();
+    let mut first_nav = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(1, NavVerdict::Allow);
+    assert!(first_nav.try_recv().is_err(), "a start hop is not a commit");
+    record.committed(Some(1), CommitKind::NewDocument, "https://example.com/");
+    assert_eq!(first_nav.try_recv(), Ok(NavOutcome::Committed { epoch: 1 }));
+}
+
+#[test]
+fn every_new_document_commit_bumps_the_epoch_and_same_document_ones_do_not() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(1, NavVerdict::Allow);
+    record.committed(Some(1), CommitKind::NewDocument, "https://example.com/");
+    // A link the user clicked, then a page-script `location.assign`.
+    for (hop, url) in [
+        (2, "https://example.com/clicked"),
+        (3, "https://example.com/scripted"),
+    ] {
+        record.nav_starting(hop, NavVerdict::Allow);
+        record.committed(Some(hop), CommitKind::NewDocument, url);
+    }
+    assert_eq!(
+        (record.epoch, record.url.as_str()),
+        (3, "https://example.com/scripted")
+    );
+    record.committed(
+        None,
+        CommitKind::SameDocument,
+        "https://example.com/scripted#pushed",
+    );
+    assert_eq!(
+        (record.epoch, record.url.as_str()),
+        (3, "https://example.com/scripted#pushed"),
+        "pushState moves the URL, not the epoch"
+    );
+}
+
+#[test]
+fn a_redirect_chain_completes_on_the_final_commit() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let mut nav = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(1, NavVerdict::Allow);
+    record.nav_starting(2, NavVerdict::Allow);
+    assert!(nav.try_recv().is_err(), "a redirect hop is not a commit");
+    record.committed(
+        Some(2),
+        CommitKind::NewDocument,
+        "https://example.com/final",
+    );
+    assert_eq!(nav.try_recv(), Ok(NavOutcome::Committed { epoch: 1 }));
+    assert_eq!(record.url, "https://example.com/final");
+}
+
+#[test]
+fn a_navigation_ignores_commits_of_hops_that_started_before_it() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    registry
+        .get_mut(AGENT_A)
+        .unwrap()
+        .nav_starting(1, NavVerdict::Allow);
+    let mut nav = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.committed(
+        Some(1),
+        CommitKind::NewDocument,
+        "https://example.com/earlier",
+    );
     assert!(
-        err.message.contains("agent-f"),
-        "error must name the tab: {}",
-        err.message
+        nav.try_recv().is_err(),
+        "that commit belongs to someone else"
+    );
+    record.nav_starting(2, NavVerdict::Allow);
+    record.committed(Some(2), CommitKind::NewDocument, "https://example.com/mine");
+    assert_eq!(nav.try_recv(), Ok(NavOutcome::Committed { epoch: 2 }));
+}
+
+#[test]
+fn a_same_document_commit_finishes_only_a_navigation_without_a_start_hop() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let mut back = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.committed(None, CommitKind::SameDocument, "https://example.com/#a");
+    assert_eq!(
+        back.try_recv(),
+        Ok(NavOutcome::Committed { epoch: 0 }),
+        "history step inside the page"
+    );
+
+    let mut nav = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(1, NavVerdict::Allow);
+    record.committed(
+        None,
+        CommitKind::SameDocument,
+        "https://example.com/#script",
+    );
+    assert!(
+        nav.try_recv().is_err(),
+        "page script during a real navigation does not finish it"
+    );
+    record.committed(Some(1), CommitKind::NewDocument, "https://example.com/next");
+    assert_eq!(nav.try_recv(), Ok(NavOutcome::Committed { epoch: 1 }));
+}
+
+#[test]
+fn a_denied_hop_ends_the_navigation_and_a_load_without_commit_ends_it_too() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let mut denied = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(1, NavVerdict::Allow);
+    record.nav_starting(2, NavVerdict::Deny);
+    assert_eq!(denied.try_recv(), Ok(NavOutcome::Denied));
+
+    let mut fragment = registry.wait_for_navigation(AGENT_A).unwrap();
+    let record = registry.get_mut(AGENT_A).unwrap();
+    record.nav_starting(3, NavVerdict::Allow);
+    record.load_finished();
+    assert_eq!(fragment.try_recv(), Ok(NavOutcome::Committed { epoch: 0 }));
+    assert!(!record.loading);
+}
+
+#[test]
+fn closing_a_tab_ends_its_waiters_and_a_failed_create_tells_the_opener() {
+    let mut registry = TabRegistry::default();
+    let _first = live_agent_tab(&mut registry, AGENT_A, "s1");
+    let mut nav = registry.wait_for_navigation(AGENT_A).unwrap();
+    registry.begin_close(AGENT_A);
+    assert_eq!(nav.try_recv(), Ok(NavOutcome::Closed));
+
+    let mut opened = registry.expect_agent_tab(AGENT_B, "s1", "https://example.com/");
+    registry.begin_create(AGENT_B, "").unwrap();
+    registry.fail_create(AGENT_B, "the browser engine did not create the tab");
+    assert_eq!(
+        opened.try_recv().unwrap().err().as_deref(),
+        Some("the browser engine did not create the tab")
+    );
+    assert!(
+        registry.get(AGENT_B).is_none(),
+        "a refused tab leaves no record"
+    );
+}
+
+#[test]
+fn a_session_in_teardown_gets_no_new_tab() {
+    let mut registry = TabRegistry::default();
+    let mut pending = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/");
+    registry.begin_session_teardown("s1");
+    assert!(registry.is_closing("s1"));
+    assert_eq!(
+        pending.try_recv().unwrap().err().as_deref(),
+        Some("the session ended")
+    );
+    assert_eq!(
+        registry.begin_create(AGENT_A, ""),
+        Err(CreateRefusal::UnknownAgentTab)
+    );
+    registry.end_session_teardown("s1");
+    assert!(!registry.is_closing("s1"));
+}
+
+#[test]
+fn refs_from_an_older_document_or_snapshot_are_stale() {
+    let mut refs = TabRefs::default();
+    let first = refs.mint_snapshot(
+        1,
+        vec![node("button", "Go", "@e1"), node("link", "Docs", "@e2")],
+    );
+    assert_eq!(first, ["@e1", "@e2"]);
+    assert_eq!(refs.resolve("@e2", 1).unwrap().path, "@e2");
+
+    let again = refs.mint_snapshot(
+        1,
+        vec![node("link", "Docs", "@e2"), node("link", "New", "@e3")],
+    );
+    assert_eq!(
+        again,
+        ["@e2", "@e3"],
+        "an identical node keeps its ref within the epoch"
+    );
+    assert_eq!(refs.resolve("@e1", 1).err(), Some(RefStale::Superseded));
+
+    let next_doc = refs.mint_snapshot(2, vec![node("button", "Go", "@e1")]);
+    assert_eq!(next_doc, ["@e4"], "refs are never reused across documents");
+    assert_eq!(refs.resolve("@e2", 2).err(), Some(RefStale::OlderDocument));
+    assert_eq!(
+        refs.resolve("@e4", 3).err(),
+        Some(RefStale::OlderDocument),
+        "the tab moved on"
+    );
+    assert_eq!(refs.resolve("@e99", 2).err(), Some(RefStale::Unknown));
+    assert_eq!(refs.resolve("e4", 2).err(), Some(RefStale::Unknown));
+}
+
+#[test]
+fn duplicate_role_and_name_never_resolve() {
+    let mut refs = TabRefs::default();
+    let minted = refs.mint_snapshot(
+        1,
+        vec![
+            node("button", "Delete", "@e1"),
+            node("button", "Delete", "@e2"),
+            node("button", "Keep", "@e3"),
+        ],
+    );
+    for token in &minted[..2] {
+        assert_eq!(refs.resolve(token, 1).err(), Some(RefStale::Ambiguous));
+    }
+    assert_eq!(refs.resolve(&minted[2], 1).unwrap().name, "Keep");
+    assert_eq!(
+        stale_ref_error(&minted[0], RefStale::Ambiguous).reason,
+        Some("ref_ambiguous")
+    );
+}
+
+#[test]
+fn snapshot_text_gets_host_refs_in_place_of_page_handles() {
+    let text = "- heading \"Title\"\n  - button \"Sign in\" @e1\n  - text \"call @e7 now\"\n  - link \"A \\\" @e2\" @e2 https://a.test/";
+    let mut seen = Vec::new();
+    let (out, count) = rewrite_snapshot_refs(text, |nodes| {
+        seen = nodes;
+        vec!["@e10".to_string(), "@e11".to_string()]
+    });
+    assert_eq!(count, 2);
+    assert_eq!(
+        seen,
+        [
+            node("button", "Sign in", "@e1"),
+            node("link", "A \\\" @e2", "@e2")
+        ],
+        "page text that looks like a handle is not a node"
+    );
+    assert_eq!(
+        out,
+        "- heading \"Title\"\n  - button \"Sign in\" @e10\n  - text \"call @e7 now\"\n  - link \"A \\\" @e2\" @e11 https://a.test/"
     );
 }

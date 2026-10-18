@@ -113,7 +113,7 @@ Updates visibility state to influence tracker polling behavior.
 ## Browser Tab Commands
 
 ### `browser_tab_create`
-Creates a child browser webview with bounds and initial URL.
+Asks the host tab registry to build a tab webview with bounds and an initial URL. The label must be `tab-<uuid>` for a tab the user opens, or the `agent-<uuid>` label of an agent tab the host asked the renderer to mount. Any other label is refused (`BROWSER_TAB_LABEL_INVALID`, `BROWSER_TAB_UNKNOWN_AGENT_TAB`). The call resolves only after the engine confirmed the webview exists. A webview the engine failed to build is closed and refused (`BROWSER_TAB_CREATE_FAILED`).
 
 ### `browser_tab_navigate`
 Navigates an existing browser tab to a URL.
@@ -128,7 +128,7 @@ Shows a hidden browser child webview.
 Hides a browser child webview.
 
 ### `browser_tab_destroy`
-Destroys a browser child webview.
+Closes a tab through the registry and resolves after the engine destroyed the webview.
 
 ### `browser_tab_go_back`
 Navigates backward in history.
@@ -151,15 +151,7 @@ Pushes marker annotations into the browser overlay.
 ### `browser_tab_update_annotation_marker_selection`
 Updates which annotation marker is selected.
 
-### Browser Reporting Commands
-Used by injected page scripts to report browser state back to the app:
-
-- `browser_tab_report_url`
-- `browser_tab_report_loaded`
-- `browser_tab_report_region_captured`
-- `browser_tab_report_element_captured`
-- `browser_tab_report_title`
-- `browser_tab_report_annotation_marker_clicked`
+Pages in tab webviews report nothing through commands. Tab URL, title, loading state and document epoch come from engine navigation and title events (see Browser Event Flow).
 
 ## Data Migration Commands
 
@@ -218,14 +210,12 @@ The renderer expects event-style updates for:
 Shared callback types are defined in `src/shared/types/ipc.types.ts`.
 
 ### Browser Event Flow
-Renderer browser adapters subscribe to:
+The host tab registry owns every browser tab. It emits these Tauri events to the desktop renderer:
 
-- `browser-tab-navigated`
-- `browser-tab-loaded`
-- `browser-tab-region-captured`
-- `browser-tab-element-captured`
-- `browser-tab-title-changed`
-- `browser-tab-annotation-marker-clicked`
+- `browser_tab_updated`: `{ tabId, url, title, loading, agentControlled, epoch }` after every navigation start, commit, title change and load finish, whoever started it. `epoch` counts the new documents the tab committed.
+- `browser_tab_closed`: `{ tabId }` after the engine destroyed the webview.
+
+For an agent tab, the same payloads also go down the owning session's stream as `browser_tab_updated` and `browser_tab_closed`.
 
 ### Updater/Menu Event Flow
 The app also emits menu/updater-related events such as the updater check trigger from the native menu.
@@ -532,6 +522,8 @@ A session log event has one of three delivery tiers (`tier_of` in `src-tauri/src
 | `acp:local_title_generated` | session | Session log event (reliable). Durable record of a host-generated background title. Clients have no handler for it: the title reaches the UI through the `acp:session_info_update` that follows. |
 | `acp:browser_consent_request` | session | Session log event (reliable). The host asks the user to allow browser automation for the session. Only the desktop renders it. Answer with the Tauri command `browser_consent_respond`. The host denies on timeout. |
 | `acp:browser_agent_tab` | session | Session log event (reliable). The agent's browser tab opened or closed. |
+| `acp:browser_tab_updated` | session | Session log event (reliable). The tab registry's view of one of the session's agent tabs, `{tabId, url, title, loading, agentControlled, epoch}`, after an engine navigation, title or load event. |
+| `acp:browser_tab_closed` | session | Session log event (reliable). The engine destroyed one of the session's agent tabs, `{tabId}`. |
 | `acp:browser_open_request` | agent | `agents` watch delta. A POSIX host captured a URL the agent tried to open, `{agentId, url}`. A delta lost to a gap is lost. |
 | `acp:worktree_branch_renamed` | agent | `chat_history` watch delta. The host renamed a worktree's branch. |
 | `acp:worktree_progress` | none | Plain Tauri event on the desktop only, `{progressId, line}`. The `worktree_create` command emits it while `git worktree add` runs. It never travels the relay. |

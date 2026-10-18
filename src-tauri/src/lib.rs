@@ -1839,10 +1839,6 @@ pub fn run() {
             commands::browser_tab_go_forward,
             commands::browser_tab_reload,
             commands::browser_tab_open_devtools,
-            // Browser tab URL sync commands (called by injected JS)
-            commands::browser_tab_report_url,
-            commands::browser_tab_report_loaded,
-            commands::browser_tab_report_title,
             // Agentation toolbar injection (on-demand)
             commands::browser_tab_inject_agentation,
             // Agent browser automation (eval bridge reply + consent respond)

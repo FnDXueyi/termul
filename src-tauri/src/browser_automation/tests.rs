@@ -39,13 +39,10 @@ fn dispatch_without_host_fails_closed() {
 fn hooks_without_host_are_noops() {
     let _g = HOST_LOCK.lock().unwrap();
     clear_browser_host();
-    assert!(!tab_created("t1"));
     // Real nonces/request ids are `Uuid`s — keep the test values in the
     // same shape (and avoid hard-coded literal nonces).
     assert!(!eval_resolved(&Uuid::new_v4().to_string(), true, None));
     assert!(!consent_responded(&Uuid::new_v4().to_string(), true));
-    tab_closed("t1");
-    tab_navigated("t1");
     session_ended("s1");
 }
 
@@ -78,11 +75,6 @@ fn registered_host_routes_dispatch_and_session_end() {
         fn end_session(&self, session_id: &str) {
             self.ended.lock().push(session_id.to_string());
         }
-        fn notify_tab_created(&self, _tab_id: &str) -> bool {
-            false
-        }
-        fn notify_tab_closed(&self, _tab_id: &str) {}
-        fn notify_tab_navigated(&self, _tab_id: &str) {}
         fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
             false
         }
