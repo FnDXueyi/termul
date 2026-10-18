@@ -246,7 +246,7 @@ async fn only_figcraft_documents_mount() {
         let admitted = mounts
             .open(PROJECT, MountRequest::for_test(path, DEBOUNCE), 1)
             .await;
-        let refused = admitted.opened.err().expect(name);
+        let refused = admitted.opened.expect_err(name);
         assert_eq!(refused.code, CODE_PATH_VALIDATION_FAILED, "{name}");
         assert!(admitted.evicted.is_empty(), "{name}: nothing makes room");
     }
