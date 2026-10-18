@@ -20,13 +20,14 @@ use tauri::webview::PlatformWebview;
 use tauri::Url;
 use webkit2gtk::{Download, DownloadExt, SettingsExt, URIRequestExt, WebContextExt, WebViewExt};
 
-use super::dialogs;
+use super::{chooser, dialogs};
 use crate::browser_automation::engine::events::{TabEvents, TabRole};
 
 pub fn attach(platform: &PlatformWebview, events: TabEvents) -> bool {
     let webview = platform.inner();
     if events.role() == TabRole::Agent {
         dialogs::attach(&webview, events.clone());
+        chooser::attach(&webview, events.label().to_string());
         // Agent input on this engine is page-script events, which the
         // popup blocker refuses; every popup still meets the host's popup
         // policy.

@@ -1,12 +1,14 @@
 //! WebKitGTK adapter (Linux): isolated-world eval in a named script
-//! world, tab event hooks, script dialogs held for the core, and
-//! viewport snapshots.
+//! world, tab event hooks, script dialogs held for the core, file inputs
+//! set through the file chooser, and viewport snapshots.
 
+mod chooser;
 mod dialogs;
 mod eval;
 pub mod events;
 mod screenshot;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -15,8 +17,8 @@ use tokio::sync::oneshot;
 use super::assets::Script;
 use super::events::DialogAnswer;
 use super::{
-    string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
-    InputMode, Point,
+    file_chooser, string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts,
+    EngineFuture, InputMode, Point,
 };
 use crate::browser_automation::budgets::EVAL_STEP;
 use crate::browser_tab_manager::BrowserTabManager;
@@ -85,5 +87,14 @@ impl BrowserEngine for WebKitGtkEngine {
         answer: DialogAnswer,
     ) -> EngineFuture<'a, bool> {
         Box::pin(super::dialogs::answer(&self.tabs, tab, id, answer))
+    }
+
+    fn set_input_files<'a>(
+        &'a self,
+        tab: &'a str,
+        path: &'a str,
+        files: &'a [PathBuf],
+    ) -> EngineFuture<'a, ()> {
+        Box::pin(file_chooser::set_input_files(&self.tabs, tab, path, files, eval::call))
     }
 }
