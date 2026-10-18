@@ -319,6 +319,8 @@ pub struct CanvasDaemon {
     /// Daemon version from the handshake.
     pub version: String,
     pub(crate) core: Arc<DaemonCore>,
+    /// Keeps browser tabs from navigating to the daemon's port.
+    _owned_port: crate::host_perimeter::OwnedPort,
 }
 
 impl std::fmt::Debug for CanvasDaemon {
@@ -529,6 +531,7 @@ pub(crate) async fn spawn_daemon_from_command(
         token: handshake.token,
         version: handshake.version,
         core: core.clone(),
+        _owned_port: crate::host_perimeter::OwnedPort::claim(handshake.port),
     });
     tokio::spawn(supervise_daemon_exit(core, child));
     log::info!(
@@ -556,6 +559,7 @@ pub(crate) fn synthetic_daemon(doc_key: &str, port: u16, allow_origin: &str) -> 
             exited: exited_tx,
             disposed: AtomicBool::new(false),
         }),
+        _owned_port: crate::host_perimeter::OwnedPort::claim(port),
     })
 }
 

@@ -17,6 +17,7 @@ pub mod canvas;
 pub mod data_lock;
 mod commands;
 mod exit_cleanup;
+mod host_perimeter;
 mod logging;
 mod migrations;
 mod path_validation;
@@ -1087,6 +1088,8 @@ pub fn run() {
     // Install the panic hook before anything can panic so Rust panics are
     // captured to the log file with a backtrace (issue #244).
     logging::install_panic_hook();
+    // Before any webview exists: the engines read these at creation.
+    let scrubbed_engine_env = host_perimeter::scrub_engine_debug_env();
 
     let builder = tauri::Builder::default();
 
@@ -1155,7 +1158,7 @@ pub fn run() {
                     }
                     allow
                 } else {
-                    true
+                    host_perimeter::allow_tab_navigation(webview, url)
                 }
             })
             .build(),
@@ -1176,12 +1179,15 @@ pub fn run() {
                 }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // Startup diagnostic banner (issue #244): version, OS/arch, build
             // channel, session id, and resolved log path on a single line.
             logging::log_startup_banner(&handle);
+            for key in &scrubbed_engine_env {
+                log::warn!("[perimeter] removed engine debug setting from the environment: {key}");
+            }
 
             // AD-14: one host per durable path. Lock `app_data_dir` (and the
             // stores a server could be pointed at inside it) BEFORE any store
@@ -1599,6 +1605,7 @@ pub fn run() {
                     (relay, manager)
                 }
             };
+            host_perimeter::claim_for_process(acp_manager.host_plan_server_port());
             // Attach the permission and question rendezvous: every `/ws` client
             // (the desktop renderer's channel, a phone, a browser) answers
             // `acp:permission_request` and structured questions through them.
@@ -1842,7 +1849,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(host_perimeter::main_webview_only(tauri::generate_handler![
             // OS notification with click-to-focus (issue #865)
             commands::notification_show,
             // Desktop `/ws` carrier over a Tauri `ipc::Channel`
@@ -2066,7 +2073,7 @@ pub fn run() {
             commands::canvas_close,
             commands::canvas_save,
             commands::canvas_status,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

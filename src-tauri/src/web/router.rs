@@ -41,6 +41,7 @@ use crate::web::log_api;
 use crate::web::mcp_oauth_api;
 use crate::web::mcp_probe_api;
 use crate::web::mcp_servers_api;
+use crate::web::host_allow::{self, HostAllowList};
 use crate::web::origin::{self, OriginPolicy};
 use crate::web::project_icon_api;
 use crate::web::project_registry::ProjectRegistry;
@@ -150,6 +151,9 @@ impl AppState {
 /// `connections` is the host's [`ConnectionRuntime`]: the shutdown handle every
 /// upgraded `/ws` + `/terminal/ws` socket joins, and the outbound overflow
 /// tolerance (AD-19).
+///
+/// `host_allow` names the `Host` values this listener serves beyond IP
+/// literals and `localhost`; it is checked before anything else.
 #[allow(clippy::too_many_arguments)]
 pub fn router(
     acp: Arc<AcpManager>,
@@ -170,6 +174,7 @@ pub fn router(
     web_auth: Option<Arc<WebAuth>>,
     canvas_pool: Option<Arc<CanvasDaemonPool>>,
     allowed_origins: OriginPolicy,
+    host_allow: HostAllowList,
     connections: ConnectionRuntime,
 ) -> Router {
     let r = Router::new()
@@ -416,7 +421,11 @@ pub fn router(
     // the token gate; they authenticate after the upgrade) are covered, and
     // a rejected origin does not reach a handler. Token checks still run
     // for every request this layer allows.
-    origin::layer(maybe_gate_api(state.web_auth.clone(), r), allowed_origins).with_state(state)
+    host_allow::layer(
+        origin::layer(maybe_gate_api(state.web_auth.clone(), r), allowed_origins),
+        host_allow,
+    )
+    .with_state(state)
 }
 
 /// Apply the web auth middleware to the router when the gate is active.
@@ -681,7 +690,12 @@ pub fn router_with_static(
     let r = r
         .layer(middleware::from_fn(assets::immutable_asset_cache_headers))
         .layer(assets::static_compression_layer());
-    origin::layer(maybe_gate_api(web_auth.clone(), r), allowed_origins).with_state({
+    let host_allow = HostAllowList::from_origins(&allowed_origins);
+    host_allow::layer(
+        origin::layer(maybe_gate_api(web_auth.clone(), r), allowed_origins),
+        host_allow,
+    )
+    .with_state({
         AppState {
             acp,
             terminal_events: pty.terminal_events(),
