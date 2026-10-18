@@ -41,7 +41,7 @@ export interface BrowserConsentTicket {
   action: BrowserConsentAction
   /** Agent-supplied intent: shown as such, never trusted. */
   element?: string
-  profile: 'global' | 'ephemeral'
+  profile: 'global' | 'ephemeral' | 'shared'
   options: BrowserConsentOptionId[]
 }
 
@@ -92,7 +92,8 @@ export function parseBrowserConsentTicket(event: unknown): BrowserConsentTicket 
         : browser.targetUrl.length,
     action,
     element: typeof browser.element === 'string' ? browser.element : undefined,
-    profile: browser.profile === 'ephemeral' ? 'ephemeral' : 'global',
+    profile:
+      browser.profile === 'ephemeral' || browser.profile === 'shared' ? browser.profile : 'global',
     options: offered.length > 0 ? offered : [...OPTION_IDS]
   }
 }

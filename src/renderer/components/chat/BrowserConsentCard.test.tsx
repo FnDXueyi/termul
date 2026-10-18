@@ -116,6 +116,13 @@ describe('BrowserConsentCard', () => {
     ])
   })
 
+  it('names the shared app profile when the agent tab runs in it', () => {
+    render(<BrowserConsentCard consent={ticket({ profile: 'shared' })} />)
+    expect(
+      screen.getByText('App browser profile, shared with your own browser tabs')
+    ).toBeInTheDocument()
+  })
+
   it('labels the agent-supplied intent and the shortened address', () => {
     render(
       <BrowserConsentCard

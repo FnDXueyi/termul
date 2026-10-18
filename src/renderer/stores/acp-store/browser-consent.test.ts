@@ -167,6 +167,15 @@ describe('browser consent tickets on the permission contract', () => {
     })
   })
 
+  it('keeps the shared app profile the host reports', () => {
+    const request = permissionRequest() as unknown as {
+      _meta: { termul: { browser: Record<string, unknown> } }
+    }
+    request._meta.termul.browser.profile = 'shared'
+    useAcpStore.getState()._onPermissionRequest(request as never)
+    expect(useAcpStore.getState().pendingBrowserConsents[TICKET_ID]?.profile).toBe('shared')
+  })
+
   it('keeps an agent request that claims the browser origin kind on the agent path', () => {
     arrive({ requestId: 'perm-1', agentId: 'agent-1' })
     expect(useAcpStore.getState().pendingBrowserConsents['perm-1']).toBeUndefined()

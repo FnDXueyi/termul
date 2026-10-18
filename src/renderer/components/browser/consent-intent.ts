@@ -37,10 +37,14 @@ export function browserConsentSummary(
   return `${agentName ?? BROWSER_CONSENT_ACTOR} wants to ${ACTION_PHRASES[ticket.action]} ${ticket.origin} in the agent browser.`
 }
 
+const PROFILE_LABELS: Record<BrowserConsentTicket['profile'], string> = {
+  global: 'Global agent profile, shared across all projects',
+  ephemeral: 'Ephemeral profile, discarded when the session ends',
+  shared: 'App browser profile, shared with your own browser tabs'
+}
+
 export function browserConsentProfileLabel(profile: BrowserConsentTicket['profile']): string {
-  return profile === 'global'
-    ? 'Global agent profile, shared across all projects'
-    : 'Ephemeral profile, discarded when the session ends'
+  return PROFILE_LABELS[profile]
 }
 
 /** The target URL line, with the byte count when the host shortened it. */
