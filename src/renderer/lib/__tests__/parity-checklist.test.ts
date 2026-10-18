@@ -1622,7 +1622,8 @@ describe('Parity Checklist Automation', () => {
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasMountLayer.tsx'), 'utf-8')
       ).toMatch(/CanvasShell/)
       const layout = readFileSync(join(RENDERER, 'layouts', 'WorkspaceLayout.tsx'), 'utf-8')
-      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(2)
+      // Both shells and the mid-session token screen keep the layer.
+      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(3)
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasShell.tsx'), 'utf-8')
       ).toMatch(/createCanvasBridge/)
