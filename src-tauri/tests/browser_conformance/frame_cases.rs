@@ -123,8 +123,8 @@ pub async fn frame_password_submit(c: &Ctx<'_>) -> CaseResult {
     expect_tickets(c, &[ActionClass::PasswordSubmit], "frame password submit")
 }
 
-/// An upload pre-approved for the frame's origin lands on the frame's own
-/// file input.
+/// An upload pre-approved for the frame's origin runs without a prompt and
+/// lands on the frame's own file input.
 pub async fn frame_upload(c: &Ctx<'_>) -> CaseResult {
     c.engine.go_ephemeral(&c.session).await.map_err(mismatch)?;
     let outline = cross_frame(c, "upload.html", "Attachment").await?;
@@ -140,7 +140,7 @@ pub async fn frame_upload(c: &Ctx<'_>) -> CaseResult {
     if !after.contains(&picked) {
         return Err(mismatch(format!("the frame's input did not get the file: {after}")));
     }
-    expect_tickets(c, &[ActionClass::Upload], "pre-approved frame upload")
+    expect_tickets(c, &[], "an upload pre-approved for the frame's origin")
 }
 
 /// A chooser a cross-origin frame opens is cancelled like the page's own.
