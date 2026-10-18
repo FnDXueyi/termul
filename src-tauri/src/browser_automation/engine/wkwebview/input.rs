@@ -15,6 +15,7 @@
 
 use std::ffi::{c_void, CString};
 use std::sync::Arc;
+use std::time::Duration;
 
 use objc2::encode::{Encode, Encoding};
 use objc2::rc::autoreleasepool;
@@ -110,9 +111,13 @@ extern "C" {
     fn CFRelease(cf: *const c_void);
 }
 
+/// Between a click's press and release. WebKit drops the click when both
+/// arrive in one run-loop turn.
+const CLICK_HOLD: Duration = Duration::from_millis(80);
+
 #[derive(Debug, Clone)]
 enum Op {
-    Click(Point),
+    Button { at: Point, down: bool },
     Wheel { at: Point, dx: f64, dy: f64 },
     Text(String),
 }
@@ -163,16 +168,19 @@ unsafe fn perform(wk: *mut AnyObject, op: &Op) -> Result<(), EngineErrorKind> {
         return Err(EngineErrorKind::Dispatch);
     }
     match op {
-        Op::Click(at) => {
+        Op::Button { at, down } => {
             let p = window_point(wk, *at);
             let number: isize = msg_send![window, windowNumber];
-            let down = mouse_event(LEFT_MOUSE_DOWN, p, number, 1.0);
-            let up = mouse_event(LEFT_MOUSE_UP, p, number, 0.0);
-            if down.is_null() || up.is_null() {
+            let (kind, pressure) = if *down { (LEFT_MOUSE_DOWN, 1.0) } else { (LEFT_MOUSE_UP, 0.0) };
+            let event = mouse_event(kind, p, number, pressure);
+            if event.is_null() {
                 return Err(EngineErrorKind::Dispatch);
             }
-            let _: () = msg_send![wk, mouseDown: down];
-            let _: () = msg_send![wk, mouseUp: up];
+            if *down {
+                let _: () = msg_send![wk, mouseDown: event];
+            } else {
+                let _: () = msg_send![wk, mouseUp: event];
+            }
         }
         Op::Wheel { at, dx, dy } => {
             let p = window_point(wk, *at);
@@ -269,7 +277,11 @@ impl NativeInput for AppKitInput {
     }
 
     fn click<'a>(&'a self, tab: &'a str, at: Point) -> EngineFuture<'a, ()> {
-        self.run(tab, Op::Click(at))
+        Box::pin(async move {
+            self.run(tab, Op::Button { at, down: true }).await?;
+            tokio::time::sleep(CLICK_HOLD).await;
+            self.run(tab, Op::Button { at, down: false }).await
+        })
     }
 
     fn wheel<'a>(&'a self, tab: &'a str, at: Point, dx: f64, dy: f64) -> EngineFuture<'a, ()> {

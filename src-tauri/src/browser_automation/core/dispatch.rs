@@ -97,7 +97,7 @@ impl ArgKey {
             ArgKey::Ref => "Element ref (@eN) from the latest snapshot.",
             ArgKey::Value => "Value to set on the element.",
             ArgKey::Text => "Text to type (type) or to wait for (wait).",
-            ArgKey::Key => "Key name to press, e.g. Enter (the default).",
+            ArgKey::Key => "Key to press: one character, or Enter (the default), Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown or Space.",
             ArgKey::Ms => "Milliseconds to wait (max 30000).",
             ArgKey::Dy => "Pixels to scroll vertically (default 600).",
         }

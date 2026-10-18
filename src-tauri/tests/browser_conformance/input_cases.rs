@@ -306,6 +306,8 @@ pub async fn focus_retention(c: &Ctx<'_>) -> CaseResult {
     let input = c.engine.input();
     c.trusted_click(&tab, BUTTON, "click").await?;
     c.trusted_click(&tab, FIELD, "focus click").await?;
+    c.await_report(mark, REPORT_WAIT, "field focus", |r| is(r, "agent", "focus") && r["id"] == "field")
+        .await?;
     if tiers.text == Support::Trusted {
         input
             .key(&tab, KeyInput::Text("xyz"), InputMode::Trusted)
