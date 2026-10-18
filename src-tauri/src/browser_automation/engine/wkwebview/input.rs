@@ -169,7 +169,7 @@ unsafe fn perform(wk: *mut AnyObject, op: &Op) -> Result<(), EngineErrorKind> {
     }
     match op {
         Op::Button { at, down } => {
-            let p = window_point(wk, *at);
+            let p = window_point(wk, window, *at);
             let number: isize = msg_send![window, windowNumber];
             let (kind, pressure) = if *down { (LEFT_MOUSE_DOWN, 1.0) } else { (LEFT_MOUSE_UP, 0.0) };
             let event = mouse_event(kind, p, number, pressure);
@@ -183,7 +183,7 @@ unsafe fn perform(wk: *mut AnyObject, op: &Op) -> Result<(), EngineErrorKind> {
             }
         }
         Op::Wheel { at, dx, dy } => {
-            let p = window_point(wk, *at);
+            let p = window_point(wk, window, *at);
             let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
             let main: *mut AnyObject = msg_send![screens, firstObject];
             if main.is_null() {
@@ -236,14 +236,22 @@ unsafe fn perform(wk: *mut AnyObject, op: &Op) -> Result<(), EngineErrorKind> {
 
 /// A point in the view's CSS px, in window coordinates.
 ///
+/// WebKit insets the page by the part of the view under the titlebar
+/// (above the window's content layout rect), so CSS y = 0 sits that far
+/// below the view's top.
+///
 /// # Safety
-/// Main thread; `wk` is a live view in a window.
-unsafe fn window_point(wk: *mut AnyObject, at: Point) -> CGPoint {
+/// Main thread; `wk` is a live view in `window`.
+unsafe fn window_point(wk: *mut AnyObject, window: *mut AnyObject, at: Point) -> CGPoint {
     let flipped: bool = msg_send![wk, isFlipped];
     let bounds: CGRect = msg_send![wk, bounds];
+    let in_window: CGRect = msg_send![wk, convertRect: bounds, toView: std::ptr::null_mut::<AnyObject>()];
+    let layout: CGRect = msg_send![window, contentLayoutRect];
+    let top_inset = ((in_window.origin.y + in_window.size.height) - (layout.origin.y + layout.size.height)).max(0.0);
+    let from_top = at.y + top_inset;
     let local = CGPoint {
         x: at.x,
-        y: if flipped { at.y } else { bounds.size.height - at.y },
+        y: if flipped { from_top } else { bounds.size.height - from_top },
     };
     msg_send![wk, convertPoint: local, toView: std::ptr::null_mut::<AnyObject>()]
 }
