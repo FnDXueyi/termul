@@ -191,12 +191,28 @@ describe('ProviderSettings', () => {
     await waitFor(() => expect(api.remove).toHaveBeenCalledWith('ab12'))
   })
 
-  it('makes an account the default from its menu', async () => {
+  it('makes a signed-in account the default from its menu', async () => {
+    api.list.mockResolvedValue({
+      ...SNAPSHOT,
+      accounts: [SNAPSHOT.accounts[0], { ...SNAPSHOT.accounts[1], signedIn: true }]
+    })
+    api.usage.mockResolvedValue([USAGE[0], { ...USAGE[1], status: 'ok', subscriptionType: 'pro' }])
     render(<ProviderSettings />)
     await screen.findByTestId('claude-account-ab12')
     openMenu('Work')
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Make default' }))
     await waitFor(() => expect(api.setDefault).toHaveBeenCalledWith('ab12'))
+  })
+
+  it('does not make a signed-out account the default and says why', async () => {
+    render(<ProviderSettings />)
+    await screen.findByTestId('claude-account-ab12')
+    openMenu('Work')
+    const item = await screen.findByRole('menuitem', { name: /Make default/ })
+    expect(item).toHaveAttribute('aria-disabled', 'true')
+    expect(item).toHaveTextContent('Make defaultSign in to it first')
+    fireEvent.click(item)
+    expect(api.setDefault).not.toHaveBeenCalled()
   })
 
   it('nudges to add a second account when there is only one', async () => {
@@ -218,7 +234,7 @@ describe('ProviderSettings', () => {
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
     expect(screen.getByText('termul-server claude account')).toBeInTheDocument()
     openMenu('Work')
-    expect(await screen.findByRole('menuitem', { name: 'Make default' })).toBeInTheDocument()
+    expect(await screen.findByRole('menuitem', { name: /Make default/ })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: 'Remove' })).not.toBeInTheDocument()
   })
 
