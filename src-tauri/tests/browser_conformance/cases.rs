@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use crate::adapter::{Engine, StepError};
 use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
+#[path = "event_cases.rs"]
+mod events;
+
 const FORM_READY: &str = "Conformance form";
 const DELAYED_READY: &str = "Delayed element";
 const REDIRECT_READY: &str = "Redirect target reached";
@@ -49,6 +52,17 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("reload", &["snapshot"]),
     cap("stale_ref", &["snapshot"]),
     cap("tamper", &["snapshot"]),
+    cap("dialog_alert", &["click"]),
+    cap("dialog_confirm", &["click"]),
+    cap("dialog_prompt", &["click"]),
+    cap("dialog_beforeunload", &["click"]),
+    cap("popup", &["click"]),
+    cap("external_protocol", &["click"]),
+    cap("permissions", &["snapshot"]),
+    cap("select_option", &["snapshot"]),
+    cap("check", &["click"]),
+    cap("wait_semantic", &["navigate"]),
+    cap("switch_tab", &["snapshot"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -461,6 +475,17 @@ pub async fn run(
         "stale_ref" => stale_ref(&ctx).await,
         "tamper" => tamper(&ctx).await,
         "screenshot" => screenshot(&ctx).await,
+        "dialog_alert" => events::dialog_alert(&ctx).await,
+        "dialog_confirm" => events::dialog_confirm(&ctx).await,
+        "dialog_prompt" => events::dialog_prompt(&ctx).await,
+        "dialog_beforeunload" => events::dialog_beforeunload(&ctx).await,
+        "popup" => events::popup(&ctx).await,
+        "external_protocol" => events::external_protocol(&ctx).await,
+        "permissions" => events::permissions(&ctx).await,
+        "select_option" => events::select_option(&ctx).await,
+        "check" => events::check(&ctx).await,
+        "wait_semantic" => events::wait_semantic(&ctx).await,
+        "switch_tab" => events::switch_tab(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

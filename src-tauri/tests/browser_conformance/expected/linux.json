@@ -1,10 +1,1 @@
-{
-  "note": "Screenshots have no engine path on this OS yet and say so directly.",
-  "knownFailing": [
-    {
-      "capability": "screenshot",
-      "code": "capability_unavailable",
-      "observed": "screenshots are not implemented on this engine yet"
-    }
-  ]
-}
+{ "knownFailing": [] }
