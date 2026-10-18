@@ -5,7 +5,9 @@
 use super::super::ports::{ActionClass, AppPolicyOp, ProjectPolicyOp};
 use super::super::test_support::InMemoryPolicyStore;
 use super::*;
-use crate::acp::browser_policy::{AppPreapproval, CanonicalOrigin, OriginPattern, ProjectPreapproval};
+use crate::acp::browser_policy::{
+    AppPreapproval, CanonicalOrigin, OriginPattern, ProjectPreapproval,
+};
 
 const LOGIN: &str = "http://127.0.0.1:4100/login";
 const ORIGIN: &str = "http://127.0.0.1:4100";
@@ -271,7 +273,10 @@ async fn page_controlled_facts_trust_the_allow_list_only_on_ephemeral_tabs() {
     assert_eq!(reply["code"], ERR_CONFIRMATION, "{reply}");
     assert_eq!(
         r.ticket_actions(),
-        vec![(ActionClass::PasswordSubmit, ConsentOption::ONCE_OR_DENY.to_vec())],
+        vec![(
+            ActionClass::PasswordSubmit,
+            ConsentOption::ONCE_OR_DENY.to_vec()
+        )],
         "a global tab's logins outlive the project that listed the origin"
     );
 }
