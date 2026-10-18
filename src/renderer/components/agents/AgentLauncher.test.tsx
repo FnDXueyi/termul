@@ -4042,9 +4042,12 @@ describe('AgentLauncher Claude account chip', () => {
       chip
     )
 
-    mockClaudeAccountsApi.list.mockResolvedValue(snapshot({ p1: 'ab12' }))
     fireEvent.pointerDown(chip, { button: 0, ctrlKey: false })
     expect(await screen.findByText('Account for this project')).toBeInTheDocument()
+    // The menu re-reads the account list when it opens; let that read finish
+    // before the post-switch snapshot becomes the next list result.
+    await waitFor(() => expect(mockClaudeAccountsApi.list).toHaveBeenCalledTimes(2))
+    mockClaudeAccountsApi.list.mockResolvedValue(snapshot({ p1: 'ab12' }))
     fireEvent.click(screen.getByRole('menuitem', { name: /Work/ }))
 
     await waitFor(() => expect(mockSwitchProjectClaudeAccount).toHaveBeenCalledWith('p1', 'ab12'))

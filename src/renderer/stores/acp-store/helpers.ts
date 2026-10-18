@@ -36,8 +36,10 @@ import { agentConfigIdentityKey } from '@/lib/agents/acp-config-identity'
 import { type AgentAuthPolicy, agentPolicyForConfigId } from '@/lib/agents/acp-registry'
 import {
   classifySetupError,
+  claudeAccountSignedOutMessage,
   describeProviderFailure,
-  isAgentAuthRequiredError
+  isAgentAuthRequiredError,
+  isClaudeAccountSignedOutError
 } from '@/lib/agents/acp-spawn-errors'
 import { logFrontendError } from '@/lib/log-api'
 import {
@@ -567,7 +569,9 @@ export function withSessionResumeError(
     [sessionId]: {
       ...session,
       replaying: null,
-      ...plainLastError(`${RESUME_FAILED_PREFIX}${String(err)}`)
+      ...plainLastError(
+        `${RESUME_FAILED_PREFIX}${isClaudeAccountSignedOutError(err) ? claudeAccountSignedOutMessage(err) : String(err)}`
+      )
     }
   }
 }

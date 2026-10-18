@@ -5,6 +5,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { ChevronDown, Info, Link2, Plus, RefreshCw, Save, Upload, X } from '@/components/icons'
 import { NewProjectModal } from '@/components/NewProjectModal'
 import { ColorSwatchGroup } from '@/components/settings/ColorSwatchGroup'
+import { toastAccountChoiceError } from '@/components/settings/provider/account-choice-error'
 import { ProjectProviderSettings } from '@/components/settings/provider/ProjectProviderSettings'
 import { SettingsLayout, SettingsSection } from '@/components/settings/SettingsLayout'
 import { SettingsModal } from '@/components/settings/SettingsModal'
@@ -189,9 +190,7 @@ export function ProjectSettingsModal() {
           if (changed) void applyProjectClaudeAccount(projectId, { credentialsRenewed: true })
         })
         .catch((err) => {
-          toast.error(
-            `Could not save the Claude account: ${err instanceof Error ? err.message : String(err)}`
-          )
+          toastAccountChoiceError(err, 'Could not save the Claude account')
         })
       setEnvVars(normalizedEnvVars)
       setSymlinkDirs(normalizedSymlinkDirs)

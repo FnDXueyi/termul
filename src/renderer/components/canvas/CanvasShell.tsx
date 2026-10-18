@@ -1,32 +1,53 @@
 /**
- * Canvas shell (OpenPencil canvas mode, AD-3): the single iframe surface on
- * every client. The embed URL comes verbatim from the canvas open response
- * (desktop: the loopback daemon URL with the raw-concat `?embed=vscode`
- * query; web: the same-origin `/canvas/<id>/?embed=vscode&ct=<token>` proxy
- * path) and is used as-is — never re-encoded.
+ * The figcraft editor iframe for one mount. Owns the bridge for that mount:
+ * the bridge starts listening first, then `src` is set programmatically so
+ * the URL (it carries the `ct` token) never appears in the DOM attributes or
+ * in a log. Remounting (a new `mountSeq`) is a new component instance.
  *
- * No `sandbox` attribute: the cross-origin editor page needs its own
- * postMessage bridge to the parent (sandboxing would break it), and
- * clipboard writes are relayed through the host (`op-shell/copy`) anyway.
- * `allow="clipboard-read; clipboard-write"` mirrors the OpenPencil embed.
+ * No `sandbox`: the editor needs its own origin's storage and the parent
+ * `postMessage` channel, both of which a sandbox would cut.
  */
 
-import type { RefObject } from 'react'
+import { useEffect, useRef } from 'react'
+import { buildCanvasEmbedUrl, canvasOriginOf, createCanvasBridge } from '@/lib/canvas-bridge'
+import { type CanvasMount, useCanvasStore } from '@/stores/canvas-store'
 
 interface CanvasShellProps {
-  embedUrl: string
+  projectId: string
+  mount: CanvasMount
   title: string
-  iframeRef: RefObject<HTMLIFrameElement>
 }
 
-export function CanvasShell({ embedUrl, title, iframeRef }: CanvasShellProps): React.JSX.Element {
+export function CanvasShell({ projectId, mount, title }: CanvasShellProps): React.JSX.Element {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  useEffect(() => {
+    const iframe = iframeRef.current
+    if (!iframe) return
+    const { mountSeq, info } = mount
+    const store = useCanvasStore.getState()
+    const bridge = createCanvasBridge({
+      iframe,
+      canvasOrigin: canvasOriginOf(info.baseUrl),
+      mountSeq,
+      onEvent: (event) => {
+        useCanvasStore.getState().handleBridgeEvent(projectId, mountSeq, event)
+      }
+    })
+    store.attachBridge(projectId, mountSeq, bridge)
+    iframe.src = buildCanvasEmbedUrl(info, window.location.origin, mountSeq)
+    return () => {
+      useCanvasStore.getState().detachBridge(projectId, bridge)
+    }
+  }, [projectId, mount])
+
   return (
     <iframe
       ref={iframeRef}
-      src={embedUrl}
       title={title}
       allow="clipboard-read; clipboard-write"
-      className="h-full w-full border-0 block"
+      className="block h-full w-full border-0"
+      data-canvas-mount-seq={mount.mountSeq}
     />
   )
 }

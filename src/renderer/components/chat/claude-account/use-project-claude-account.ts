@@ -3,6 +3,7 @@ import type {
   ClaudeAccountView,
   ClaudeUsageWindow
 } from '@shared/types/claude-accounts.types'
+import { accountReadiness } from '@/components/settings/provider/account-status'
 import { type ClaudeAccountsState, useClaudeAccounts } from '@/hooks/use-claude-accounts'
 import { primaryUsageWindow } from '@/lib/claude-usage-format'
 
@@ -50,9 +51,9 @@ export function useProjectClaudeAccount(projectId: string | null): ProjectClaude
   if (!currentAccount) return null
 
   const alternatives = snapshot.accounts
-    .filter((a) => a.id !== currentAccount.id && a.signedIn !== false)
+    .filter((a) => a.id !== currentAccount.id && accountReadiness(a, usage[a.id]) === 'ready')
     .map((a) => choice(a, usage))
-    .filter((c) => c.usage?.status !== 'signed_out' && (c.window?.percent ?? 0) < 100)
+    .filter((c) => (c.window?.percent ?? 0) < 100)
     .sort((x, y) => (x.window?.percent ?? 0) - (y.window?.percent ?? 0))
 
   return {

@@ -1,16 +1,16 @@
 use super::*;
 use crate::acp::ClaudeAgentService;
 
-/// A host state dir whose account list already holds one non-built-in Account,
-/// so the handlers never create links into the real Claude config folder.
-fn manager_with_account() -> (tempfile::TempDir, Arc<AcpManager>) {
+/// A host state dir whose account list holds the built-in Account and "Work"
+/// (`ab12`); the login probe reports the Accounts in `signed_out` signed out.
+fn manager_with_account(signed_out: &[&str]) -> (tempfile::TempDir, Arc<AcpManager>) {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
         root.path().join("claude-accounts.json"),
         br#"{"version":1,"accounts":[{"id":"default","name":"Default","createdAt":0},{"id":"ab12","name":"Work","createdAt":1}],"defaultAccountId":"default"}"#,
     )
     .unwrap();
-    let service = ClaudeAgentService::system(root.path().join("acp-registry-binaries"));
+    let service = ClaudeAgentService::with_logins_for_test(root.path(), signed_out);
     let acp = Arc::new(AcpManager::with_claude_agent(vec![], Arc::new(service)));
     (root, acp)
 }
@@ -20,17 +20,18 @@ fn stored(root: &tempfile::TempDir) -> Value {
         .unwrap()
 }
 
-#[test]
-fn set_default_and_project_account_persist_on_the_host() {
-    let (root, acp) = manager_with_account();
+#[tokio::test]
+async fn set_default_and_project_account_persist_on_the_host() {
+    let (root, acp) = manager_with_account(&[]);
     let reply =
-        handle_set_default_claude_account("1".into(), &json!({ "accountId": "ab12" }), &acp);
+        handle_set_default_claude_account("1".into(), &json!({ "accountId": "ab12" }), &acp).await;
     assert!(reply.ok);
     let reply = handle_set_project_claude_account(
         "2".into(),
         &json!({ "projectId": "office", "accountId": "ab12" }),
         &acp,
-    );
+    )
+    .await;
     assert!(reply.ok);
     let file = stored(&root);
     assert_eq!(file["defaultAccountId"], "ab12");
@@ -40,20 +41,59 @@ fn set_default_and_project_account_persist_on_the_host() {
         "3".into(),
         &json!({ "projectId": "office", "accountId": null }),
         &acp,
-    );
+    )
+    .await;
     assert!(reply.ok);
     assert!(stored(&root)["projectAccounts"].get("office").is_none());
 }
 
-#[test]
-fn unknown_accounts_and_malformed_payloads_are_rejected() {
-    let (_root, acp) = manager_with_account();
+#[tokio::test]
+async fn unknown_accounts_and_malformed_payloads_are_rejected() {
+    let (_root, acp) = manager_with_account(&[]);
     let reply =
-        handle_set_default_claude_account("1".into(), &json!({ "accountId": "ffff" }), &acp);
+        handle_set_default_claude_account("1".into(), &json!({ "accountId": "ffff" }), &acp).await;
     assert_eq!(reply.err.unwrap().code, "not_found");
     let reply =
-        handle_set_project_claude_account("2".into(), &json!({ "accountId": "ab12" }), &acp);
+        handle_set_project_claude_account("2".into(), &json!({ "accountId": "ab12" }), &acp).await;
     assert_eq!(reply.err.unwrap().code, "unsupported");
+}
+
+#[tokio::test]
+async fn a_signed_out_account_is_refused_with_its_code_and_the_choice_stays() {
+    let (root, acp) = manager_with_account(&["ab12"]);
+    let reply = handle_set_project_claude_account(
+        "1".into(),
+        &json!({ "projectId": "office", "accountId": "ab12" }),
+        &acp,
+    )
+    .await;
+    let err = reply.err.unwrap();
+    assert_eq!(err.code, "claude_account_signed_out");
+    assert_eq!(
+        err.message,
+        "The Claude account \"Work\" is not signed in. Sign in to it in Settings → Accounts, then choose it again."
+    );
+    let reply =
+        handle_set_default_claude_account("2".into(), &json!({ "accountId": "ab12" }), &acp).await;
+    assert_eq!(reply.err.unwrap().code, "claude_account_signed_out");
+    let file = stored(&root);
+    assert_eq!(file["defaultAccountId"], "default");
+    assert!(file
+        .get("projectAccounts")
+        .is_none_or(|p| p.get("office").is_none()));
+}
+
+#[test]
+fn a_signed_out_spawn_reply_carries_the_code_without_the_tag() {
+    let reply = acp_err_to_reply(
+        "1".into(),
+        crate::acp::claude_accounts::signed_out_error(
+            "The Claude account \"Work\" is not signed in.",
+        ),
+    );
+    let err = reply.err.unwrap();
+    assert_eq!(err.code, "claude_account_signed_out");
+    assert_eq!(err.message, "The Claude account \"Work\" is not signed in.");
 }
 
 #[tokio::test]
@@ -67,7 +107,7 @@ async fn a_host_without_state_reports_no_accounts() {
 
 #[tokio::test]
 async fn usage_in_api_key_mode_lists_every_account_without_a_probe() {
-    let (root, acp) = manager_with_account();
+    let (root, acp) = manager_with_account(&[]);
     std::fs::write(root.path().join("claude-auth-mode"), b"api-key").unwrap();
     let reply = handle_list_claude_usage("1".into(), &json!({}), &acp).await;
     assert!(reply.ok);
