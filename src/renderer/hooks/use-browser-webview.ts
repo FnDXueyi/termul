@@ -12,6 +12,7 @@ import {
 } from '@/lib/browser-api'
 import { logFrontendError } from '@/lib/log-api'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
+import { useWorkspaceStore, browserTabId as workspaceBrowserTabId } from '@/stores/workspace-store'
 
 interface BrowserBounds {
   x: number
@@ -175,6 +176,11 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
           requestAnimationFrame(() => {
             void resyncAndShow()
           })
+        } else if (result.code === 'BROWSER_TAB_UNKNOWN_AGENT_TAB') {
+          // A replayed agent-tab open the host no longer waits on: the
+          // agent never gets this tab, so the pane drops it.
+          useWorkspaceStore.getState().removeTab(workspaceBrowserTabId(browserTabId))
+          useBrowserSessionStore.getState().removeTab(browserTabId)
         } else {
           void logFrontendError({
             message: `browserTabCreate failed for tab ${browserTabId}: ${result.error ?? 'unknown'} [${result.code ?? 'NO_CODE'}]`,
