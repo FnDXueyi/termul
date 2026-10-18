@@ -43,7 +43,9 @@ fn action_budget(action: &str) -> Duration {
         "back" | "forward" | "reload" => ACTION_HISTORY,
         "click" => ACTION_CLICK,
         "wait" => ACTION_WAIT,
-        "list_tabs" | "close_tab" => ACTION_INSTANT,
+        "select_option" => ACTION_SELECT,
+        "check" | "uncheck" => ACTION_TOGGLE,
+        "list_tabs" | "close_tab" | "switch_tab" => ACTION_INSTANT,
         _ => ACTION_EVAL,
     }
 }

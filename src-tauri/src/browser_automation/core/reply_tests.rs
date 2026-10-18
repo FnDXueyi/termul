@@ -62,9 +62,16 @@ fn resolve_result_returns_the_element_or_the_helpers_failure() {
         ResolvedElement {
             rect: Rect { cx: 12.0, cy: 34.0 },
             role: "button".into(),
-            name: "Sign in".into()
+            name: "Sign in".into(),
+            check: None,
         }
     );
+    let checkbox = resolve_result(
+        json!({"rect": {"cx": 1.0, "cy": 2.0}, "role": "checkbox", "name": "Terms", "check": {"checked": true, "radio": false}}),
+        Some("@e2"),
+    )
+    .expect("a checkable element parses");
+    assert_eq!(checkbox.check, Some(CheckState { checked: true, radio: false }));
     let err = resolve_result(json!({"error": "stale_ref"}), Some("@e1")).unwrap_err();
     assert_eq!(err.code, ERR_STALE_REF);
     for bad in [
@@ -80,6 +87,19 @@ fn resolve_result_returns_the_element_or_the_helpers_failure() {
             (ERR_INTERNAL, Some("page_helper_malformed")),
             "{bad}"
         );
+    }
+}
+
+#[test]
+fn check_result_reads_the_state_or_the_helpers_failure() {
+    assert_eq!(
+        check_result(json!({"checked": false, "radio": true}), Some("@e1")).unwrap(),
+        CheckState { checked: false, radio: true }
+    );
+    assert_eq!(check_result(json!({"error": "stale_ref"}), Some("@e1")).unwrap_err().code, ERR_STALE_REF);
+    for bad in [json!({"checked": "yes", "radio": false}), json!({"checked": true}), json!({"ok": true})] {
+        let err = check_result(bad.clone(), None).unwrap_err();
+        assert_eq!((err.code, err.reason), (ERR_INTERNAL, Some("page_helper_malformed")), "{bad}");
     }
 }
 
@@ -212,6 +232,7 @@ fn shape_snapshot_formats_the_outline_with_host_refs_for_nodes_only() {
                 ]
                 .join("\n")
             ),
+            dialog: None,
             truncated: false,
         },
         "page text never carries a ref token"
@@ -239,6 +260,7 @@ fn replies_serialize_the_closed_wire_shape() {
             epoch: 3,
             origin: CanonicalOrigin::parse("https://example.com").ok(),
             profile: TabProfile::Global,
+            opener: None,
         }),
         page: None,
         data: None,

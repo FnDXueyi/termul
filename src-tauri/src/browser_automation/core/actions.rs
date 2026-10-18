@@ -14,6 +14,9 @@ use super::reply::{
 use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
+
+#[path = "page_actions.rs"]
+mod page_actions;
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::engine::assets::{self, Script};
 use crate::browser_automation::engine::{CapabilityId, InputMode, Point, Support};
@@ -98,7 +101,7 @@ struct ResolvedRef {
 
 impl DesktopBrowserHost {
     /// Host facts for `label` from the registry.
-    fn tab_facts(&self, label: &str) -> Result<TabFacts, BrowserError> {
+    pub(super) fn tab_facts(&self, label: &str) -> Result<TabFacts, BrowserError> {
         let registry = self.registry.lock();
         let record = registry
             .get(label)
@@ -110,14 +113,17 @@ impl DesktopBrowserHost {
             profile: record
                 .profile()
                 .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?,
+            opener: record.popup_of.clone(),
         })
     }
 
-    fn page_meta(&self, label: &str) -> Option<PageData> {
+    /// Page metadata, with the dialog blocking the tab if there is one.
+    pub(super) fn page_meta(&self, label: &str) -> Option<PageData> {
         let registry = self.registry.lock();
-        registry
-            .get(label)
-            .map(|record| PageData::meta(&record.url, &record.title))
+        registry.get(label).map(|record| PageData {
+            dialog: record.dialogs.open().map(|open| open.view.clone()),
+            ..PageData::meta(&record.url, &record.title)
+        })
     }
 
     /// The agent tab an action targets: the explicit `tabId` (which must be
@@ -314,6 +320,16 @@ impl DesktopBrowserHost {
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
             Verb::Wait => self.wait(session_id, args, deadline).await,
+            Verb::SelectOption => {
+                let label = self.resolve_tab(session_id, args)?;
+                self.select_option(&label, args).await
+            }
+            Verb::Check | Verb::Uncheck => {
+                let label = self.resolve_tab(session_id, args)?;
+                self.set_checked(&label, args, verb == Verb::Check, deadline).await
+            }
+            Verb::SwitchTab => self.switch_tab(session_id, args),
+            Verb::HandleDialog => self.handle_dialog(session_id, args).await,
         }
     }
 
@@ -380,6 +396,9 @@ impl DesktopBrowserHost {
         session_id: &str,
         url: &str,
     ) -> Result<(String, oneshot::Receiver<NavOutcome>), BrowserError> {
+        if let Some(missing) = super::dispatch::floor_gap(self.engine.facts()) {
+            return Err(super::dispatch::floor_error(missing));
+        }
         let label = mint_agent_label();
         let requested = self.requested_profile(session_id).await;
         let opened = self
@@ -446,42 +465,6 @@ impl DesktopBrowserHost {
         Ok(element)
     }
 
-    async fn wait(&self, session_id: &str, args: &Value, deadline: Deadline) -> Result<Success, BrowserError> {
-        let label = self.resolve_tab(session_id, args)?;
-        if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
-            let ms = std::time::Duration::from_millis(ms).min(budgets::WAIT_MAX);
-            tokio::time::sleep(deadline.clamp(ms)).await;
-            return Ok(Success {
-                tab: Some(self.tab_facts(&label)?),
-                ..Success::default()
-            });
-        }
-        let text = args.get("text").and_then(Value::as_str).ok_or_else(|| {
-            BrowserError::invalid("wait needs 'ms' or 'text'").with_arg_keys(&["ms", "text"])
-        })?;
-        let wait = Deadline::after(deadline.clamp(budgets::WAIT_MAX));
-        loop {
-            let found = self
-                .eval(&label, assets::contains_text(text))
-                .await
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if found {
-                return Ok(Success {
-                    tab: Some(self.tab_facts(&label)?),
-                    ..Success::default()
-                });
-            }
-            if wait.remaining().is_zero() {
-                return Err(BrowserError::new(ERR_TIMEOUT, "wait: text did not appear within 30s")
-                    .with_reason("text_not_found")
-                    .with_arg_keys(&["text"]));
-            }
-            tokio::time::sleep(wait.clamp(budgets::WAIT_POLL)).await;
-        }
-    }
-
     /// Click a ref and report the input actually used: a trusted click at
     /// the resolved point where the engine has one (falling back to a
     /// synthetic DOM click if it fails), else the synthetic click.
@@ -492,12 +475,30 @@ impl DesktopBrowserHost {
         resolved: &ResolvedRef,
         deadline: Deadline,
     ) -> Result<Fidelity, BrowserError> {
-        let mode = match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
-            Support::Trusted => InputMode::Trusted,
-            Support::Synthetic => InputMode::Synthetic,
-            Support::Unavailable(reason) => return Err(BrowserError::capability(reason)),
-        };
+        let mode = self.click_mode()?;
         let element = self.revalidate(label, token, resolved).await?;
+        self.click_revalidated(label, token, resolved, &element, mode, deadline).await
+    }
+
+    fn click_mode(&self) -> Result<InputMode, BrowserError> {
+        match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
+            Support::Trusted => Ok(InputMode::Trusted),
+            Support::Synthetic => Ok(InputMode::Synthetic),
+            Support::Unavailable(reason) => Err(BrowserError::capability(reason)),
+        }
+    }
+
+    /// The press half of `click_ref`, at the centre of `element`, the
+    /// resolve helper's reply for `resolved`.
+    async fn click_revalidated(
+        &self,
+        label: &str,
+        token: &str,
+        resolved: &ResolvedRef,
+        element: &ResolvedElement,
+        mode: InputMode,
+        deadline: Deadline,
+    ) -> Result<Fidelity, BrowserError> {
         if mode == InputMode::Trusted {
             let at = Point {
                 x: element.rect.cx,

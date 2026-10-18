@@ -28,6 +28,43 @@ pub enum CommitKind {
     SameDocument,
 }
 
+/// Which policy a tab's hooks serve. Only agent tabs get their script
+/// dialogs and popups intercepted; user tabs keep the engine's defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabRole {
+    User,
+    Agent,
+}
+
+/// The kind of a page script dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogKind {
+    Alert,
+    Confirm,
+    Prompt,
+    BeforeUnload,
+}
+
+impl DialogKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DialogKind::Alert => "alert",
+            DialogKind::Confirm => "confirm",
+            DialogKind::Prompt => "prompt",
+            DialogKind::BeforeUnload => "beforeunload",
+        }
+    }
+}
+
+/// How the core answers a held dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogAnswer {
+    /// OK, with the text a prompt returns.
+    Accept { text: Option<String> },
+    /// Cancel: `confirm` returns false, `prompt` null, a navigation stays.
+    Dismiss,
+}
+
 /// A per-hop navigation verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavVerdict {
@@ -53,6 +90,22 @@ pub enum TabEvent {
     },
     /// The document finished loading.
     LoadFinished,
+    /// The page opened a script dialog; the adapter holds it until the
+    /// core answers `id` (`BrowserEngine::answer_dialog`). `message` and
+    /// `default_text` are page text.
+    DialogOpened {
+        id: u64,
+        kind: DialogKind,
+        message: String,
+        default_text: Option<String>,
+    },
+    /// The page asked for a new window. The engine refused it; the core
+    /// decides whether `url` opens as an owned popup tab.
+    NewWindowRequested {
+        url: String,
+    },
+    /// The engine refused to hand a URL to another application.
+    ExternalProtocolBlocked,
     TitleChanged {
         title: String,
     },
@@ -77,6 +130,8 @@ pub struct TabEvents {
     /// expose none, so ids are minted in hook order: a commit belongs to
     /// the latest hop that started before it.
     last_nav: Arc<AtomicU64>,
+    last_dialog: Arc<AtomicU64>,
+    role: TabRole,
 }
 
 impl TabEvents {
@@ -90,7 +145,35 @@ impl TabEvents {
             tx,
             policy,
             last_nav: Arc::new(AtomicU64::new(0)),
+            last_dialog: Arc::new(AtomicU64::new(0)),
+            role: TabRole::User,
         }
+    }
+
+    #[must_use]
+    pub fn with_role(mut self, role: TabRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub fn role(&self) -> TabRole {
+        self.role
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Publish a dialog the adapter now holds, under a fresh id.
+    pub fn dialog_opened(&self, kind: DialogKind, message: String, default_text: Option<String>) -> u64 {
+        let id = self.last_dialog.fetch_add(1, Ordering::AcqRel) + 1;
+        self.publish(TabEvent::DialogOpened {
+            id,
+            kind,
+            message,
+            default_text,
+        });
+        id
     }
 
     /// Run the policy for a starting hop and publish it. Returns whether

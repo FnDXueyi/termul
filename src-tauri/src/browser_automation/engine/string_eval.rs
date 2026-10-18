@@ -34,8 +34,9 @@ pub fn params_json(script: &Script) -> String {
     script.params.to_string()
 }
 
-/// What both WebKit adapters implement today: isolated-world eval, with
-/// every input verb run as synthetic DOM events by the helpers.
+/// What both WebKit adapters implement today: isolated-world eval, the
+/// tab-policy hooks and viewport snapshots, with every input verb run as
+/// synthetic DOM events by the helpers.
 pub fn isolated_facts() -> EngineFacts {
     EngineFacts {
         capabilities: CapabilityTable::unavailable("not implemented on this engine yet")
@@ -44,10 +45,12 @@ pub fn isolated_facts() -> EngineFacts {
             .with(CapabilityId::TrustedKey, Support::Synthetic)
             .with(CapabilityId::PointerMove, Support::Synthetic)
             .with(CapabilityId::Wheel, Support::Synthetic)
-            .with(
-                CapabilityId::Screenshot,
-                Support::Unavailable("screenshots are not implemented on this engine yet"),
-            ),
+            .with(CapabilityId::Screenshot, Support::Trusted)
+            .with(CapabilityId::NavigationIntercept, Support::Trusted)
+            .with(CapabilityId::NewWindowIntercept, Support::Trusted)
+            .with(CapabilityId::DialogIntercept, Support::Trusted)
+            .with(CapabilityId::PermissionIntercept, Support::Trusted)
+            .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted),
         traits: EngineTraits {
             isolated_world: true,
             background_render: false,

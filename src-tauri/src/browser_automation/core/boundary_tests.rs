@@ -17,7 +17,10 @@ fn action_arg_keys_pin_the_documented_param_table() {
     assert_eq!(action_arg_keys("press"), &["key", "ref", "tabId"]);
     assert_eq!(action_arg_keys("scroll"), &["dy", "ref", "tabId"]);
     assert_eq!(action_arg_keys("hover"), &["ref", "tabId"]);
-    assert_eq!(action_arg_keys("wait"), &["ms", "text", "tabId"]);
+    assert_eq!(
+        action_arg_keys("wait"),
+        &["ms", "text", "textGone", "urlContains", "loadState", "tabId"]
+    );
     for a in ["close_tab", "back", "forward", "reload", "snapshot", "screenshot"] {
         assert_eq!(action_arg_keys(a), &["tabId"]);
     }

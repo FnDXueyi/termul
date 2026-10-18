@@ -33,6 +33,9 @@ pub const TAB_CONFIRM: Duration = secs(5);
 /// Post-navigation wait for the document to become interactive.
 pub const NAV_SETTLE: Duration = secs(15);
 pub const SETTLE_POLL: Duration = Duration::from_millis(200);
+/// How long a script dialog may hold an agent tab before the host
+/// dismisses it.
+pub const DIALOG_ANSWER: Duration = secs(60);
 /// Longest `wait`, by `ms` or for `text`.
 pub const WAIT_MAX: Duration = secs(30);
 pub const WAIT_POLL: Duration = Duration::from_millis(300);
@@ -61,6 +64,11 @@ pub const ACTION_NAVIGATE: Duration = TAB_OPEN.saturating_add(ACTION_HISTORY);
 /// Opens the tab, then waits for its first navigation the way navigate does.
 pub const ACTION_NEW_TAB: Duration = ACTION_NAVIGATE;
 pub const ACTION_WAIT: Duration = WAIT_MAX.saturating_add(EVAL_STEP);
+/// Resolve the ref, then run the select helper.
+pub const ACTION_SELECT: Duration = EVAL_STEP.saturating_add(EVAL_STEP);
+/// The click path, whose resolve step also reads the checked state. The
+/// confirming read after the click runs only if it still fits.
+pub const ACTION_TOGGLE: Duration = ACTION_CLICK;
 
 /// An absolute point in time a call must finish by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -48,7 +48,7 @@ fn capability_table_raises_only_the_named_tiers() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn webview2_declares_isolated_eval_trusted_click_and_screenshot_and_synthetic_dom_events() {
+fn webview2_declares_isolated_eval_trusted_click_screenshot_and_policy_hooks_and_synthetic_dom_events() {
     let table = webview2::capability_table();
     assert_eq!(table.get(CapabilityId::IsolatedEval), Support::Trusted);
     assert_eq!(table.get(CapabilityId::PointerClick), Support::Trusted);
@@ -56,8 +56,13 @@ fn webview2_declares_isolated_eval_trusted_click_and_screenshot_and_synthetic_do
     for id in [CapabilityId::TrustedKey, CapabilityId::PointerMove, CapabilityId::Wheel] {
         assert_eq!(table.get(id), Support::Synthetic, "{id:?}");
     }
-    assert!(matches!(
-        table.get(CapabilityId::NavigationIntercept),
-        Support::Unavailable(_)
-    ));
+    for id in [
+        CapabilityId::NavigationIntercept,
+        CapabilityId::NewWindowIntercept,
+        CapabilityId::DialogIntercept,
+        CapabilityId::PermissionIntercept,
+        CapabilityId::ExternalProtocolIntercept,
+    ] {
+        assert_eq!(table.get(id), Support::Trusted, "{id:?}");
+    }
 }

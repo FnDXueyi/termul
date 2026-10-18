@@ -1,27 +1,39 @@
 //! Engine hooks every tab webview is built with, through tauri's
 //! cross-engine builder hooks: navigation start (with the core's verdict),
-//! new-document commit, load finish and title change. Each adapter adds
-//! what tauri does not expose (same-document URL changes) when the webview
-//! is confirmed.
+//! new-document commit, load finish and title change, and on agent tabs
+//! the new-window request. Each adapter adds what tauri does not expose
+//! (same-document URL changes, script dialogs, external-app launches)
+//! when the webview is confirmed.
 
-use tauri::webview::{PageLoadEvent, PlatformWebview, WebviewBuilder};
+use tauri::webview::{NewWindowResponse, PageLoadEvent, PlatformWebview, WebviewBuilder};
 use tauri::{Webview, Wry};
 use tokio::sync::oneshot;
 
-use super::events::{TabEvent, TabEvents};
+use super::dialogs;
+use super::events::{TabEvent, TabEvents, TabRole};
 use crate::browser_automation::budgets;
 
 pub fn install(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuilder<Wry> {
     let nav = events.clone();
     let load = events.clone();
     let title = events.clone();
-    builder
+    let builder = builder
         .on_navigation(move |url| nav.nav_starting(url))
         .on_page_load(move |_, payload| match payload.event() {
             PageLoadEvent::Started => load.committed(payload.url().as_str()),
             PageLoadEvent::Finished => load.publish(TabEvent::LoadFinished),
         })
-        .on_document_title_changed(move |_, t| title.publish(TabEvent::TitleChanged { title: t }))
+        .on_document_title_changed(move |_, t| title.publish(TabEvent::TitleChanged { title: t }));
+    if events.role() != TabRole::Agent {
+        return builder;
+    }
+    // The engine window never opens: the opener-less tab the core may open
+    // instead is the popup's only form.
+    let popup = events.clone();
+    builder.on_new_window(move |url, _| {
+        popup.publish(TabEvent::NewWindowRequested { url: url.to_string() });
+        NewWindowResponse::Deny
+    })
 }
 
 /// Why a built webview is refused.
@@ -81,6 +93,8 @@ fn attach_platform(platform: &PlatformWebview, events: TabEvents) -> bool {
 /// the UI thread handles webview messages in order, so a closure queued
 /// behind the close settles only after the webview is destroyed.
 pub async fn close(webview: &Webview) {
+    let label = webview.label().to_string();
+    let _ = webview.with_webview(move |_| dialogs::release_tab(&label));
     let _ = webview.close();
     let (tx, rx) = oneshot::channel::<()>();
     if webview.with_webview(move |_| drop(tx)).is_ok() {

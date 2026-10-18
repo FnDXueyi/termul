@@ -1,16 +1,20 @@
 //! Consumes the engine's per-tab event streams: each event updates the
-//! tab registry (epoch, URL, title, loading, waiting navigations) and the
-//! renderer gets the new tab state as a projection.
+//! tab registry (epoch, URL, title, loading, waiting navigations, script
+//! dialogs) and the renderer gets the new tab state as a projection.
+//! Dialogs and popups then get their host side effects.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::dialogs::Disposition;
+use super::page_events::log_external_launch;
 use super::surface::TabSurface;
 use super::tabs::{Owner, TabRegistry, TabView};
+use super::DesktopBrowserHost;
 use crate::acp::events as acp_events;
-use crate::browser_automation::engine::events::TabEvent;
+use crate::browser_automation::engine::events::{DialogKind, TabEvent};
 use crate::web::EventSink;
 
 /// What the renderer mirrors.
@@ -48,6 +52,14 @@ pub(super) enum Applied {
     },
     /// A user tab finished a load: page-load extras may run on it.
     UserPageLoaded(TabView),
+    /// The engine holds a dialog; the registry decided what happens to it.
+    Dialog {
+        id: u64,
+        kind: DialogKind,
+        disposition: Disposition,
+    },
+    /// An agent tab's page asked for a new window.
+    NewWindow { session: String, url: String },
     Ignored,
 }
 
@@ -89,6 +101,45 @@ pub(super) fn apply(registry: &mut TabRegistry, label: &str, event: TabEvent) ->
             None => Applied::Ignored,
         };
     }
+    if let TabEvent::ExternalProtocolBlocked = event {
+        log_external_launch(label);
+        return Applied::Ignored;
+    }
+    let Some(record) = registry.get_mut(label) else {
+        return Applied::Ignored;
+    };
+    match event {
+        TabEvent::DialogOpened {
+            id,
+            kind,
+            message,
+            default_text,
+        } => {
+            let navigating = record.agent_navigating();
+            let disposition = record
+                .dialogs
+                .opened(id, kind, &message, default_text.as_deref(), navigating);
+            Applied::Dialog {
+                id,
+                kind,
+                disposition,
+            }
+        }
+        TabEvent::NewWindowRequested { url } => {
+            match record.session_id() {
+                Some(session) if record.is_live() => Applied::NewWindow {
+                    session: session.to_string(),
+                    url,
+                },
+                _ => Applied::Ignored,
+            }
+        }
+        event => apply_navigation(registry, label, event),
+    }
+}
+
+/// Navigation, load and title events: they change what the renderer shows.
+fn apply_navigation(registry: &mut TabRegistry, label: &str, event: TabEvent) -> Applied {
     let Some(record) = registry.get_mut(label) else {
         return Applied::Ignored;
     };
@@ -101,7 +152,10 @@ pub(super) fn apply(registry: &mut TabRegistry, label: &str, event: TabEvent) ->
         TabEvent::NavCommitted { nav_id, kind, url } => record.committed(nav_id, kind, &url),
         TabEvent::LoadFinished => record.load_finished(),
         TabEvent::TitleChanged { title } => record.title = title,
-        TabEvent::Closed => unreachable!("handled above"),
+        TabEvent::Closed
+        | TabEvent::DialogOpened { .. }
+        | TabEvent::NewWindowRequested { .. }
+        | TabEvent::ExternalProtocolBlocked => unreachable!("handled by apply"),
     }
     let Some(view) = registry.view(label) else {
         return Applied::Ignored;
@@ -122,6 +176,7 @@ pub(super) async fn consume(
     registry: Arc<Mutex<TabRegistry>>,
     surface: Arc<dyn TabSurface>,
     sinks: Vec<Arc<dyn EventSink>>,
+    host: Weak<DesktopBrowserHost>,
 ) {
     while let Some((label, event)) = rx.recv().await {
         let kind = event_kind(&event);
@@ -138,6 +193,20 @@ pub(super) async fn consume(
                 surface.publish(&TabProjection::Updated(view));
                 surface.user_page_loaded(&label);
             }
+            Applied::Dialog {
+                id,
+                kind,
+                disposition,
+            } => {
+                if let Some(host) = host.upgrade() {
+                    host.on_dialog(&label, id, kind, disposition);
+                }
+            }
+            Applied::NewWindow { session, url } => {
+                if let Some(host) = host.upgrade() {
+                    host.on_new_window(&label, &session, &url);
+                }
+            }
             Applied::Ignored => {}
         }
     }
@@ -150,6 +219,9 @@ fn event_kind(event: &TabEvent) -> &'static str {
         TabEvent::LoadFinished => "load_finished",
         TabEvent::TitleChanged { .. } => "title_changed",
         TabEvent::Closed => "closed",
+        TabEvent::DialogOpened { .. } => "dialog_opened",
+        TabEvent::NewWindowRequested { .. } => "new_window_requested",
+        TabEvent::ExternalProtocolBlocked => "external_protocol_blocked",
     }
 }
 

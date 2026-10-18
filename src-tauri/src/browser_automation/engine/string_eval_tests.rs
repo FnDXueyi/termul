@@ -58,7 +58,7 @@ fn engine_failures_and_unusable_text_are_terminal() {
 }
 
 #[test]
-fn webkit_engines_declare_isolated_eval_and_synthetic_input_only() {
+fn webkit_engines_declare_isolated_eval_the_policy_hooks_and_synthetic_input() {
     let facts = isolated_facts();
     assert!(facts.traits.isolated_world);
     assert_eq!(facts.capabilities.get(CapabilityId::IsolatedEval), Support::Trusted);
@@ -70,7 +70,17 @@ fn webkit_engines_declare_isolated_eval_and_synthetic_input_only() {
     ] {
         assert_eq!(facts.capabilities.get(id), Support::Synthetic, "{id:?}");
     }
-    for id in [CapabilityId::Screenshot, CapabilityId::ScriptMessage, CapabilityId::Drag] {
+    for id in [
+        CapabilityId::Screenshot,
+        CapabilityId::NavigationIntercept,
+        CapabilityId::NewWindowIntercept,
+        CapabilityId::DialogIntercept,
+        CapabilityId::PermissionIntercept,
+        CapabilityId::ExternalProtocolIntercept,
+    ] {
+        assert_eq!(facts.capabilities.get(id), Support::Trusted, "{id:?}");
+    }
+    for id in [CapabilityId::ScriptMessage, CapabilityId::Drag] {
         assert!(matches!(facts.capabilities.get(id), Support::Unavailable(_)), "{id:?}");
     }
 
