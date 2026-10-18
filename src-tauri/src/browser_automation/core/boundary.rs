@@ -1,4 +1,4 @@
-//! Host-boundary failure logging for browser tool calls (CAP-6).
+//! Host-boundary failure logging for browser tool calls.
 //!
 //! The failure log line printed by the parent (`acp::host_mcp::parent`)
 //! when a `FrameKind::Browser` call fails: wire error code + action +
