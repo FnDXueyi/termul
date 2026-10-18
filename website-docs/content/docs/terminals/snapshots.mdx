@@ -1,0 +1,66 @@
+---
+title: Snapshots
+description: Save the terminals of a project and bring them back later.
+---
+
+A snapshot saves the terminals of the active project: their names, shells, and folders. It also keeps the last 1,000 lines of output from each terminal, but a restore doesn't show that output. Restore a snapshot to get the same set of terminals back, for example after you closed them or switched to other work.
+
+A snapshot doesn't save running programs, the split layout, or tabs that aren't terminals, such as chats and files. A terminal that runs an AI agent comes back as a plain shell.
+
+Each project has its own snapshots. Termul also keeps snapshots per device. A snapshot you save on your phone doesn't appear in the browser on your computer, and the reverse.
+
+## Save a snapshot
+
+1. Open the command palette with `Ctrl+K` (`Cmd+K` on macOS).
+2. Run **Save Workspace Snapshot**.
+3. Type a **Snapshot Name**. Add a **Description (optional)** if you want one.
+4. Select **Create**.
+
+![The Create Snapshot dialog with the name Discount work and a short description](/screenshots/terminals-snapshot-create.png)
+
+Termul saves the snapshot. It doesn't show a confirmation message.
+
+You can also save a snapshot from the **Workspace Snapshots** page. Select **Create New Snapshot**, or **Create First Snapshot** if the list is empty. On a phone, the button is **New**. After you save a snapshot on a phone, Termul goes back to the chat screen. Open the snapshots page again to see it.
+
+## See your snapshots
+
+The **Workspace Snapshots** page lists the snapshots of the active project, newest first.
+
+- **On a phone**, open the menu and select the camera icon at the bottom.
+- **In a browser on a computer**, add `#/snapshots` to the end of the Termul address, for example `https://termul.example.com/#/snapshots`.
+
+<Callout type="info">The desktop app has no button or command that opens the snapshots page yet. You can save snapshots there, but you can't restore them.</Callout>
+
+![The Workspace Snapshots page for acme-shop with a snapshot named Discount work and a Restore button](/screenshots/terminals-snapshots-page.png)
+
+## Restore a snapshot
+
+<Callout type="warn">
+  Restoring closes every terminal in the project and ends the programs running in them. Save your work first.
+</Callout>
+
+1. On the **Workspace Snapshots** page, select **Restore** on the snapshot.
+2. Read the **Restore Snapshot** dialog. It says how many terminals the snapshot will recreate. If the project has open terminals, it warns that restoring ends their processes.
+3. Select **Restore**.
+
+![The Restore Snapshot dialog, which says it will close all current terminals and recreate 2 terminals, with a warning about running processes](/screenshots/terminals-snapshot-restore.png)
+
+Termul closes the project's terminals. Then it opens a new shell for each terminal in the snapshot, with the saved name, shell, and folder. The restored terminals start with a new prompt, without the old output. They open as tabs in the active pane, and Termul takes you back to the workspace. Chats, files, and terminals in other projects are not affected.
+
+## Rename or delete a snapshot
+
+To delete a snapshot on a computer, hover it on the **Workspace Snapshots** page and select the trash icon (**Delete**). On a phone, select the trash icon on the snapshot. Confirm with **Delete**. You can't undo this.
+
+To rename a snapshot, use a phone:
+
+1. Select the pencil icon on the snapshot.
+2. Type the new name.
+3. Press `Enter`, or tap somewhere else. Press `Esc` to cancel.
+
+The pencil icon on a computer doesn't work yet.
+
+![The Workspace Snapshots page on a phone, with a snapshot named Discount work, a Restore button, and pencil and trash icons](/screenshots/terminals-mobile-snapshots.png)
+
+## When snapshot storage is full
+
+Each project has limited room for snapshots. When it fills up, Termul first removes the saved terminal output from older snapshots. If that isn't enough, it deletes the oldest snapshots. It never deletes the newest one. Termul shows a warning that says how many snapshots it changed or removed.
