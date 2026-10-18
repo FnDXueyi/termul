@@ -96,8 +96,12 @@ impl CapabilityTable {
     /// Every capability unavailable with the same reason; adapters raise
     /// the tiers they implement with [`CapabilityTable::with`].
     pub fn unavailable(reason: &'static str) -> Self {
+        Self::uniform(Support::Unavailable(reason))
+    }
+
+    pub fn uniform(support: Support) -> Self {
         Self {
-            tiers: [Support::Unavailable(reason); CapabilityId::ALL.len()],
+            tiers: [support; CapabilityId::ALL.len()],
         }
     }
 
@@ -120,6 +124,28 @@ pub struct EngineTraits {
     /// Background tabs keep rendering.
     pub background_render: bool,
     pub network_observe: bool,
+}
+
+/// What the core and the tool schema read about the registered engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineFacts {
+    pub capabilities: CapabilityTable,
+    pub traits: EngineTraits,
+}
+
+#[cfg(test)]
+impl EngineFacts {
+    /// An engine with every capability trusted, for stub hosts.
+    pub fn all_trusted() -> Self {
+        Self {
+            capabilities: CapabilityTable::uniform(Support::Trusted),
+            traits: EngineTraits {
+                isolated_world: true,
+                background_render: true,
+                network_observe: true,
+            },
+        }
+    }
 }
 
 /// The input mode the core picks from the capability tier.
@@ -176,8 +202,8 @@ pub type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EngineError
 
 /// Capability-level engine commands. Tab ids are pane labels.
 pub trait BrowserEngine: Send + Sync {
-    fn capabilities(&self) -> &CapabilityTable;
-    fn traits(&self) -> EngineTraits;
+    /// Frozen at construction, before the host registers.
+    fn facts(&self) -> &EngineFacts;
     /// Run a helper script from [`assets`] and return its JSON completion
     /// value (`isolated_eval`; [`EngineTraits::isolated_world`] says which
     /// world it runs in).

@@ -10,6 +10,7 @@
 //! Pure module: every helper is headless-testable and pinned by unit
 //! tests in `boundary_tests`.
 
+use super::dispatch::spec;
 use super::{ERR_CAPABILITY, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_TAB_NOT_FOUND};
 
 /// Prefix shared by every host-boundary browser failure line. Extracted
@@ -65,26 +66,13 @@ impl BrowserError {
     }
 }
 
-/// Documented argument key names per action (the child tool's param
-/// table; `element` is agent-stated intent, not an action arg). The
+/// Documented argument key names per action, from the action registry
+/// (`element` is agent-stated intent, not an action arg). The
 /// host-boundary failure log quotes these KEY NAMES — never the values —
 /// so a field failure is diagnosable without leaking argument data
-/// (CWE-532). Pure: pinned by unit tests.
-pub fn action_arg_keys(action: &str) -> &'static [&'static str] {
-    match action {
-        "navigate" => &["url", "tabId"],
-        "new_tab" => &["url"],
-        "click" => &["ref", "tabId"],
-        "fill" => &["ref", "value", "tabId"],
-        "type" => &["text", "ref", "tabId"],
-        "press" => &["key", "ref", "tabId"],
-        "scroll" => &["dy", "ref", "tabId"],
-        "hover" => &["ref", "tabId"],
-        "wait" => &["ms", "text", "tabId"],
-        "close_tab" | "back" | "forward" | "reload" | "snapshot" | "screenshot" => &["tabId"],
-        // `list_tabs` and unknown actions take no documented arguments.
-        _ => &[],
-    }
+/// (CWE-532). Unknown actions take no documented arguments.
+pub fn action_arg_keys(action: &str) -> Vec<&'static str> {
+    spec(action).map(|s| s.arg_keys().collect()).unwrap_or_default()
 }
 
 /// Argument key names the host-boundary failure log prints for `err`
@@ -96,7 +84,7 @@ pub fn action_arg_keys(action: &str) -> &'static [&'static str] {
 /// this line's output by construction).
 pub fn boundary_arg_keys(err: &BrowserError, action: &str) -> Vec<&'static str> {
     if err.arg_keys.is_empty() {
-        action_arg_keys(action).to_vec()
+        action_arg_keys(action)
     } else {
         err.arg_keys.clone()
     }
@@ -107,31 +95,8 @@ pub fn boundary_arg_keys(err: &BrowserError, action: &str) -> Vec<&'static str> 
 /// an agent-supplied action that is not a documented verb (e.g. a URL or
 /// token sent as `browser_action`) would otherwise flow verbatim into the
 /// log (CWE-532). The agent-facing error keeps the original action text.
-fn sanitize_action(action: &str) -> String {
-    let recognized = matches!(
-        action,
-        "navigate"
-            | "new_tab"
-            | "click"
-            | "fill"
-            | "type"
-            | "press"
-            | "scroll"
-            | "hover"
-            | "wait"
-            | "close_tab"
-            | "back"
-            | "forward"
-            | "reload"
-            | "snapshot"
-            | "screenshot"
-            | "list_tabs"
-    );
-    if recognized {
-        action.to_string()
-    } else {
-        "unknown".to_string()
-    }
+fn sanitize_action(action: &str) -> &'static str {
+    spec(action).map_or("unknown", |s| s.name)
 }
 
 /// Strip control characters from the redacted session prefix before

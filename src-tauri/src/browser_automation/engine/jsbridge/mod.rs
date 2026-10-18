@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 #[cfg(not(target_os = "windows"))]
-use super::{BrowserEngine, EngineFuture, InputMode, Point};
+use super::{BrowserEngine, EngineFacts, EngineFuture, InputMode, Point};
 #[cfg(any(test, not(target_os = "windows")))]
 use super::{CapabilityId, CapabilityTable, Support};
 use super::{EngineError, EngineErrorKind, EngineTraits};
@@ -126,7 +126,7 @@ pub fn capability_table() -> CapabilityTable {
 #[cfg(not(target_os = "windows"))]
 pub struct JsBridgeEngine {
     bridge: JsBridge,
-    capabilities: CapabilityTable,
+    facts: EngineFacts,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -134,19 +134,18 @@ impl JsBridgeEngine {
     pub fn new(tabs: Arc<BrowserTabManager>) -> Self {
         Self {
             bridge: JsBridge::new(tabs),
-            capabilities: capability_table(),
+            facts: EngineFacts {
+                capabilities: capability_table(),
+                traits: MAIN_WORLD_TRAITS,
+            },
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 impl BrowserEngine for JsBridgeEngine {
-    fn capabilities(&self) -> &CapabilityTable {
-        &self.capabilities
-    }
-
-    fn traits(&self) -> EngineTraits {
-        MAIN_WORLD_TRAITS
+    fn facts(&self) -> &EngineFacts {
+        &self.facts
     }
 
     fn evaluate<'a>(&'a self, tab: &'a str, script: &'a str) -> EngineFuture<'a, Value> {

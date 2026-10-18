@@ -1,335 +1,494 @@
-//! Verb dispatch: argument checks, per-verb handlers, and the engine calls
-//! they make.
+//! The action registry: one entry per verb, and the single source for the
+//! served tool schema and description, argument validation, the
+//! `invalid_params` expected-field text, boundary arg-key names, and the
+//! capability pre-check.
 
-use serde_json::{json, Value};
-use tauri::Manager;
-use uuid::Uuid;
+use std::hash::{Hash, Hasher};
 
-use super::reply::{engine_error, eval_gate, shape_snapshot};
-use super::tabs::{default_session_tab, navigate_resolution, NavigateResolution};
-use super::{BrowserError, DesktopBrowserHost, ERR_TIMEOUT};
-use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
-use crate::browser_automation::BrowserCall;
+use serde::Serialize;
+use serde_json::{json, Map, Value};
 
-/// Post-navigate settle poll budget.
-const NAV_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+use super::{BrowserError, ERR_CAPABILITY};
+use crate::browser_automation::engine::{CapabilityId, EngineFacts, Support};
 
-/// Validate + normalize a navigation target. http(s) only.
-pub(super) fn check_url(url: &str) -> Result<String, BrowserError> {
-    let parsed = url
-        .parse::<tauri::Url>()
-        .map_err(|_| BrowserError::invalid(format!("invalid url: {url}")).with_arg_keys(&["url"]))?;
-    match parsed.scheme() {
-        "http" | "https" => Ok(parsed.to_string()),
-        other => Err(BrowserError::invalid(format!(
-            "scheme '{other}' is not allowed (http/https only)"
-        ))
-        .with_arg_keys(&["url"])),
+/// Closed verb set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Navigate,
+    Snapshot,
+    Screenshot,
+    Click,
+    Fill,
+    Type,
+    Press,
+    Scroll,
+    Hover,
+    Wait,
+    NewTab,
+    ListTabs,
+    CloseTab,
+    Back,
+    Forward,
+    Reload,
+}
+
+/// Argument keys. One JSON type per key across every verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgKey {
+    Url,
+    TabId,
+    Ref,
+    Value,
+    Text,
+    Key,
+    Ms,
+    Dy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgType {
+    String,
+    Integer,
+    Number,
+}
+
+impl ArgKey {
+    const ALL: [ArgKey; 8] = [
+        ArgKey::Url,
+        ArgKey::TabId,
+        ArgKey::Ref,
+        ArgKey::Value,
+        ArgKey::Text,
+        ArgKey::Key,
+        ArgKey::Ms,
+        ArgKey::Dy,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ArgKey::Url => "url",
+            ArgKey::TabId => "tabId",
+            ArgKey::Ref => "ref",
+            ArgKey::Value => "value",
+            ArgKey::Text => "text",
+            ArgKey::Key => "key",
+            ArgKey::Ms => "ms",
+            ArgKey::Dy => "dy",
+        }
+    }
+
+    fn ty(self) -> ArgType {
+        match self {
+            ArgKey::Ms => ArgType::Integer,
+            ArgKey::Dy => ArgType::Number,
+            _ => ArgType::String,
+        }
+    }
+
+    fn doc(self) -> &'static str {
+        match self {
+            ArgKey::Url => "http(s) URL to load.",
+            ArgKey::TabId => "Agent tab id from new_tab or list_tabs. Omit to use this session's tab.",
+            ArgKey::Ref => "Element ref (@eN) from the latest snapshot.",
+            ArgKey::Value => "Value to set on the element.",
+            ArgKey::Text => "Text to type (type) or to wait for (wait).",
+            ArgKey::Key => "ArgKey name to press, e.g. Enter (the default).",
+            ArgKey::Ms => "Milliseconds to wait (max 30000).",
+            ArgKey::Dy => "Pixels to scroll vertically (default 600).",
+        }
     }
 }
 
-/// Extract the required `url` arg for navigate/new_tab — a missing or
-/// non-string value fails with `invalid_params` naming the key.
-pub(super) fn require_url_arg(args: &Value, action: &str) -> Result<String, BrowserError> {
-    args.get("url")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| BrowserError::invalid(format!("{action} needs 'url'")).with_arg_keys(&["url"]))
-}
-
-/// Extract the optional `tabId` arg — absent (or JSON null) → `None`
-/// (default-tab resolution); a non-string or empty value fails with
-/// `invalid_params` naming the key. Silently treating a malformed
-/// `tabId` as absent would retarget a tab the caller never named.
-pub(super) fn tab_id_arg(args: &Value, action: &str) -> Result<Option<String>, BrowserError> {
-    match args.get("tabId") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
-        Some(_) => Err(BrowserError::invalid(format!(
-            "{action}: 'tabId' must be a non-empty string when provided"
-        ))
-        .with_arg_keys(&["tabId"])),
+impl ArgType {
+    fn json_name(self) -> &'static str {
+        match self {
+            ArgType::String => "string",
+            ArgType::Integer => "integer",
+            ArgType::Number => "number",
+        }
     }
-}
 
-/// Refs are host-minted `@eN` tokens. Validating before script build
-/// keeps an agent-supplied value out of the page entirely (defense in
-/// depth on top of the script builders' JSON encoding).
-pub(super) fn check_ref(ref_id: &str) -> Result<(), BrowserError> {
-    let ok = ref_id.starts_with("@e")
-        && ref_id.len() > 2
-        && ref_id[2..].chars().all(|c| c.is_ascii_digit());
-    if ok {
-        Ok(())
-    } else {
-        Err(BrowserError::invalid(format!("invalid ref '{ref_id}' (expected @eN)")).with_arg_keys(&["ref"]))
+    fn phrase(self) -> &'static str {
+        match self {
+            ArgType::String => "a string",
+            ArgType::Integer => "a non-negative integer",
+            ArgType::Number => "a number",
+        }
+    }
+
+    fn accepts(self, value: &Value) -> bool {
+        match self {
+            ArgType::String => value.is_string(),
+            ArgType::Integer => value.is_u64(),
+            ArgType::Number => value.is_number(),
+        }
     }
 }
 
-impl DesktopBrowserHost {
-    /// Run a helper script through the engine. A failure is the eval's
-    /// final outcome (the engine already applied its one safe fallback).
-    async fn eval(&self, tab_id: &str, expr: &str) -> Result<Value, BrowserError> {
-        self.engine.evaluate(tab_id, expr).await.map_err(|e| {
-            // Tab id + kind only: eval failures can quote page content.
-            log::warn!("[browser-agent] eval failed on tab {tab_id} ({:?})", e.kind);
-            engine_error(e, tab_id)
-        })
+#[derive(Debug, Clone, Copy)]
+pub struct Param {
+    pub key: ArgKey,
+    pub required: bool,
+}
+
+const fn req(key: ArgKey) -> Param {
+    Param { key, required: true }
+}
+
+const fn opt(key: ArgKey) -> Param {
+    Param { key, required: false }
+}
+
+#[derive(Debug)]
+pub struct ActionSpec {
+    pub verb: Verb,
+    pub name: &'static str,
+    /// Parameters in documented order (also the boundary-log key order).
+    pub params: &'static [Param],
+    /// When non-empty, at least one of these optional keys must be present.
+    pub one_of: &'static [ArgKey],
+    /// Every capability the verb needs; any `Unavailable` one withdraws it.
+    pub requires: &'static [CapabilityId],
+    pub summary: &'static str,
+}
+
+use CapabilityId as Cap;
+
+pub static REGISTRY: [ActionSpec; 16] = [
+    ActionSpec {
+        verb: Verb::Navigate,
+        name: "navigate",
+        params: &[req(ArgKey::Url), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        summary: "load url. Without tabId it reuses this session's agent tab, opening one only when the session owns none; an explicit tabId must be a tab this session owns or the call fails with tab_not_found (it never opens another tab).",
+    },
+    ActionSpec {
+        verb: Verb::Snapshot,
+        name: "snapshot",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval],
+        summary: "read the page as an outline with @eN refs for interactive elements. Take one after every navigation, then act on refs.",
+    },
+    ActionSpec {
+        verb: Verb::Screenshot,
+        name: "screenshot",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::Screenshot],
+        summary: "save a PNG of the visible page and return its path.",
+    },
+    ActionSpec {
+        verb: Verb::Click,
+        name: "click",
+        params: &[req(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::PointerClick],
+        summary: "click the element.",
+    },
+    ActionSpec {
+        verb: Verb::Fill,
+        name: "fill",
+        params: &[req(ArgKey::Ref), req(ArgKey::Value), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::TrustedKey],
+        summary: "replace a form field's value.",
+    },
+    ActionSpec {
+        verb: Verb::Type,
+        name: "type",
+        params: &[req(ArgKey::Text), opt(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::TrustedKey],
+        summary: "append text to the element, or to the focused element without ref.",
+    },
+    ActionSpec {
+        verb: Verb::Press,
+        name: "press",
+        params: &[opt(ArgKey::Key), opt(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::TrustedKey],
+        summary: "press a key on the element, or on the focused element without ref.",
+    },
+    ActionSpec {
+        verb: Verb::Scroll,
+        name: "scroll",
+        params: &[opt(ArgKey::Dy), opt(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::Wheel],
+        summary: "scroll the element into view, or the page by dy.",
+    },
+    ActionSpec {
+        verb: Verb::Hover,
+        name: "hover",
+        params: &[req(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::PointerMove],
+        summary: "move the pointer over the element.",
+    },
+    ActionSpec {
+        verb: Verb::Wait,
+        name: "wait",
+        params: &[opt(ArgKey::Ms), opt(ArgKey::Text), opt(ArgKey::TabId)],
+        one_of: &[ArgKey::Ms, ArgKey::Text],
+        requires: &[],
+        summary: "sleep ms, or wait up to 30s for text to appear on the page.",
+    },
+    ActionSpec {
+        verb: Verb::NewTab,
+        name: "new_tab",
+        params: &[req(ArgKey::Url)],
+        one_of: &[],
+        requires: &[],
+        summary: "open another agent tab at url and return its tabId.",
+    },
+    ActionSpec {
+        verb: Verb::ListTabs,
+        name: "list_tabs",
+        params: &[],
+        one_of: &[],
+        requires: &[],
+        summary: "list this session's agent tabs.",
+    },
+    ActionSpec {
+        verb: Verb::CloseTab,
+        name: "close_tab",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        summary: "close the tab.",
+    },
+    ActionSpec {
+        verb: Verb::Back,
+        name: "back",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        summary: "go back in the tab's history.",
+    },
+    ActionSpec {
+        verb: Verb::Forward,
+        name: "forward",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        summary: "go forward in the tab's history.",
+    },
+    ActionSpec {
+        verb: Verb::Reload,
+        name: "reload",
+        params: &[opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        summary: "reload the tab.",
+    },
+];
+
+pub fn spec(action: &str) -> Option<&'static ActionSpec> {
+    REGISTRY.iter().find(|s| s.name == action)
+}
+
+impl ActionSpec {
+    pub fn arg_keys(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.params.iter().map(|p| p.key.name())
     }
 
-    /// Wait until `document.readyState` reaches interactive/complete.
-    async fn settle(&self, tab_id: &str) {
-        let deadline = std::time::Instant::now() + NAV_SETTLE_TIMEOUT;
-        loop {
-            let state = self.eval(tab_id, assets::READY_STATE).await.ok();
-            if matches!(state.as_ref().and_then(Value::as_str), Some("complete" | "interactive")) {
-                return;
-            }
-            // A slow SPA still settles Ok; the agent retries reads on demand.
-            if std::time::Instant::now() > deadline {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
+    /// The first required capability the engine lacks, with its reason.
+    pub fn missing_capability(&self, facts: &EngineFacts) -> Option<(CapabilityId, &'static str)> {
+        self.requires
+            .iter()
+            .find_map(|id| match facts.capabilities.get(*id) {
+                Support::Unavailable(reason) => Some((*id, reason)),
+                Support::Trusted | Support::Synthetic => None,
+            })
     }
 
-    pub(super) async fn act(&self, session_id: &str, call: BrowserCall) -> Result<Value, BrowserError> {
-        let args = &call.args;
-        match call.action.as_str() {
-            "list_tabs" => {
-                let tabs = self.agent_tabs.lock();
-                let list: Vec<Value> = tabs
-                    .iter()
-                    .filter(|(_, t)| t.session_id == session_id)
-                    .filter_map(|(id, _)| {
-                        self.tabs
-                            .info(id)
-                            .ok()
-                            .map(|info| json!({ "tabId": id, "url": info.url, "title": info.title }))
-                    })
-                    .collect();
-                Ok(json!({ "tabs": list }))
-            }
-            "new_tab" => {
-                let url = check_url(&require_url_arg(args, "new_tab")?)?;
-                let tab_id = self.open_agent_tab(session_id, Some(&url)).await?;
-                Ok(json!({ "tabId": tab_id }))
-            }
-            "close_tab" => {
-                let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                self.close_agent_tab(&tab_id);
-                Ok(json!({ "closed": tab_id }))
-            }
-            "navigate" => self.navigate(session_id, args).await,
-            "back" | "forward" | "reload" => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let r = match call.action.as_str() {
-                    "back" => self.tabs.go_back(&tab_id),
-                    "forward" => self.tabs.go_forward(&tab_id),
-                    _ => self.tabs.reload(&tab_id),
-                };
-                r.map_err(BrowserError::internal)?;
-                tab.bump_epoch();
-                self.settle(&tab_id).await;
-                Ok(json!({ "ok": true }))
-            }
-            "snapshot" => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let epoch = tab.epoch();
-                let out = self.eval(&tab_id, &assets::snapshot_script()).await?;
-                shape_snapshot(&out, &tab_id, epoch)
-            }
-            "screenshot" => {
-                let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                self.screenshot(session_id, &tab_id).await
-            }
-            "click" => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let el = args
-                    .get("ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]))?;
-                check_ref(el)?;
-                self.click_ref(&tab_id, el, tab.epoch()).await?;
-                Ok(json!({ "ok": true }))
-            }
-            "fill" => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                let ref_id = args
-                    .get("ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]))?;
-                check_ref(ref_id)?;
-                let value = args
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
-                let out = self
-                    .eval(&tab_id, &assets::fill_ref(ref_id, value, tab.epoch()))
-                    .await?;
-                eval_gate(out)?;
-                Ok(json!({ "ok": true }))
-            }
-            "type" | "press" | "scroll" | "hover" => {
-                let (tab_id, tab) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-                // `ref` is optional for these (type/press fall back to the
-                // focused element); validate when present.
-                if let Some(r) = args.get("ref").and_then(Value::as_str) {
-                    check_ref(r)?;
-                }
-                let out = self
-                    .eval(&tab_id, &assets::interaction(&call.action, args, tab.epoch()))
-                    .await?;
-                eval_gate(out)?;
-                Ok(json!({ "ok": true }))
-            }
-            "wait" => self.wait(session_id, args).await,
-            other => Err(BrowserError::invalid(format!("unknown action '{other}'"))),
-        }
-    }
-
-    async fn navigate(&self, session_id: &str, args: &Value) -> Result<Value, BrowserError> {
-        let url = check_url(&require_url_arg(args, "navigate")?)?;
-        let tab_id = tab_id_arg(args, "navigate")?;
-        let resolution = {
-            let tabs = self.agent_tabs.lock();
-            navigate_resolution(&tabs, session_id, tab_id.as_deref())
-        };
-        let (tab_id, tab, fresh) = match resolution {
-            NavigateResolution::Reuse(id, tab) => (id, tab, false),
-            // Auto-open ONLY when no `tabId` was given: the first navigate
-            // creates the visible tab already pointing at the target URL
-            // (the renderer loads it on mount — no double nav).
-            NavigateResolution::AutoOpen => {
-                // The resolution and the open are not atomic: re-check under
-                // the lock immediately before minting and reuse a concurrent
-                // winner's tab so a race can't produce two tabs.
-                let winner = default_session_tab(&self.agent_tabs.lock(), session_id);
-                match winner {
-                    Some((id, tab)) => (id, tab, false),
-                    None => {
-                        let id = self.open_agent_tab(session_id, Some(&url)).await?;
-                        let tab = self
-                            .agent_tab(&id)
-                            .ok_or_else(|| BrowserError::tab_not_found(&id).with_arg_keys(&["tabId"]))?;
-                        (id, tab, true)
-                    }
-                }
-            }
-            // An explicit non-resolving `tabId` is a caller error: never
-            // mint another tab (that let a bad target proliferate tabs).
-            NavigateResolution::TabNotFound(e) => {
-                log::warn!(
-                    "[browser-agent] navigate: explicit tabId not owned by session {} ({}), no auto-open",
-                    crate::logging::redact_session_id(session_id),
-                    e.code
-                );
-                return Err(e);
-            }
-        };
-        if !fresh {
-            self.tabs
-                .navigate(&tab_id, url.clone())
-                .map_err(BrowserError::internal)?;
-        }
-        tab.bump_epoch();
-        self.settle(&tab_id).await;
-        // Report the tab's real URL — never fabricate the requested one.
-        let url_now = self
-            .tabs
-            .info(&tab_id)
-            .map(|i| i.url)
-            .map_err(|_| BrowserError::tab_not_found(&tab_id).with_arg_keys(&["tabId"]))?;
-        Ok(json!({ "tabId": tab_id, "url": url_now }))
-    }
-
-    async fn wait(&self, session_id: &str, args: &Value) -> Result<Value, BrowserError> {
-        let (tab_id, _) = self.resolve_tab(session_id, args.get("tabId").and_then(Value::as_str))?;
-        if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
-            tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
-            return Ok(json!({ "ok": true }));
-        }
-        let text = args.get("text").and_then(Value::as_str).ok_or_else(|| {
-            BrowserError::invalid("wait needs 'ms' or 'text'").with_arg_keys(&["ms", "text"])
-        })?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let found = self
-                .eval(&tab_id, &assets::contains_text(text))
-                .await
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if found {
-                return Ok(json!({ "ok": true }));
-            }
-            if std::time::Instant::now() > deadline {
-                return Err(BrowserError::new(ERR_TIMEOUT, "wait: text did not appear within 30s")
-                    .with_arg_keys(&["text"]));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-    }
-
-    /// Click an `@eN` ref: resolve to a rect (the page re-verifies the
-    /// fingerprint and reports `stale_ref` if the DOM changed), then a
-    /// trusted click where the engine has one, else a synthetic DOM click.
-    async fn click_ref(&self, tab_id: &str, ref_id: &str, epoch: u64) -> Result<(), BrowserError> {
-        let mode = match self.engine.capabilities().get(CapabilityId::PointerClick) {
-            Support::Trusted => InputMode::Trusted,
-            Support::Synthetic => InputMode::Synthetic,
-            Support::Unavailable(reason) => return Err(BrowserError::capability(reason)),
-        };
-        if mode == InputMode::Trusted {
-            let out = self.eval(tab_id, &assets::resolve_ref(ref_id, epoch)).await?;
-            eval_gate(out.clone())?;
-            let rect = out.get("rect").ok_or_else(|| {
-                BrowserError::new(super::ERR_STALE_REF, format!("{ref_id} no longer resolves"))
-                    .with_arg_keys(&["ref"])
-            })?;
-            let at = Point {
-                x: rect.get("cx").and_then(Value::as_f64).unwrap_or(0.0),
-                y: rect.get("cy").and_then(Value::as_f64).unwrap_or(0.0),
-            };
-            match self.engine.pointer_click(tab_id, at, InputMode::Trusted).await {
-                Ok(()) => return Ok(()),
-                Err(e) => log::warn!(
-                    "[browser-agent] trusted click failed on tab {tab_id} ({:?}), synthetic fallback",
-                    e.kind
-                ),
-            }
-        }
-        let out = self.eval(tab_id, &assets::dom_click(ref_id, epoch)).await?;
-        eval_gate(out)
-    }
-
-    async fn screenshot(&self, session_id: &str, tab_id: &str) -> Result<Value, BrowserError> {
-        if let Support::Unavailable(reason) = self.engine.capabilities().get(CapabilityId::Screenshot) {
-            return Err(BrowserError::capability(reason));
-        }
-        let png = self
-            .engine
-            .screenshot(tab_id)
-            .await
-            .map_err(|e| engine_error(e, tab_id))?;
-        // The session id is agent-generated — sanitize before it ever
-        // touches a path (only [A-Za-z0-9_-] survive).
-        let safe_sid: String = session_id
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+    /// Human text naming the expected arguments, e.g. `'ref' and 'value'
+    /// (optional 'tabId')`.
+    pub fn expected_args(&self) -> String {
+        let quote = |k: ArgKey| format!("'{}'", k.name());
+        let required: Vec<String> = self
+            .params
+            .iter()
+            .filter(|p| p.required)
+            .map(|p| quote(p.key))
             .collect();
-        let dir = self
-            .app
-            .path()
-            .app_data_dir()
-            .map_err(|e| BrowserError::internal(format!("app_data_dir: {e}")))?
-            .join("browser-artifacts")
-            .join(if safe_sid.is_empty() { "_".to_string() } else { safe_sid });
-        std::fs::create_dir_all(&dir).map_err(|e| BrowserError::internal(format!("artifact dir: {e}")))?;
-        let path = dir.join(format!("shot-{}.png", Uuid::new_v4()));
-        std::fs::write(&path, png).map_err(|e| BrowserError::internal(format!("write artifact: {e}")))?;
-        Ok(json!({ "path": path.to_string_lossy() }))
+        let optional: Vec<String> = self
+            .params
+            .iter()
+            .filter(|p| !p.required && !self.one_of.contains(&p.key))
+            .map(|p| quote(p.key))
+            .collect();
+        let mut head = required.join(" and ");
+        if !self.one_of.is_empty() {
+            let any: Vec<String> = self.one_of.iter().map(|k| quote(*k)).collect();
+            head = any.join(" or ");
+        }
+        match (head.is_empty(), optional.is_empty()) {
+            (true, true) => "no arguments".to_string(),
+            (true, false) => format!("optional {}", optional.join(", ")),
+            (false, true) => head,
+            (false, false) => format!("{head} (optional {})", optional.join(", ")),
+        }
     }
+
+    /// Check the folded args against the entry: JSON types, required keys
+    /// and the one-of rule. Semantic checks (url scheme, ref shape) stay in
+    /// the handlers.
+    pub fn validate(&self, args: &Value) -> Result<(), BrowserError> {
+        let empty = Map::new();
+        let map = args.as_object().unwrap_or(&empty);
+        let present = |k: ArgKey| map.get(k.name()).is_some_and(|v| !v.is_null());
+        for p in self.params {
+            let Some(value) = map.get(p.key.name()).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            if !p.key.ty().accepts(value) {
+                return Err(BrowserError::invalid(format!(
+                    "{}: '{}' must be {}",
+                    self.name,
+                    p.key.name(),
+                    p.key.ty().phrase()
+                ))
+                .with_arg_keys(&[p.key.name()]));
+            }
+        }
+        let missing: Vec<&'static str> = self
+            .params
+            .iter()
+            .filter(|p| p.required && !present(p.key))
+            .map(|p| p.key.name())
+            .collect();
+        if !missing.is_empty() {
+            return Err(self.needs().with_arg_keys(&missing));
+        }
+        if !self.one_of.is_empty() && !self.one_of.iter().any(|k| present(*k)) {
+            let keys: Vec<&'static str> = self.one_of.iter().map(|k| k.name()).collect();
+            return Err(self.needs().with_arg_keys(&keys));
+        }
+        Ok(())
+    }
+
+    fn needs(&self) -> BrowserError {
+        BrowserError::invalid(format!("{} needs {}", self.name, self.expected_args()))
+    }
+}
+
+/// Expected-argument text for an agent-supplied action string.
+pub fn expected_args_text(action: &str) -> String {
+    spec(action).map_or_else(|| "action-specific fields".to_string(), ActionSpec::expected_args)
+}
+
+/// Resolve the verb and refuse it before any side effect: unknown verbs
+/// are `invalid_params`, withdrawn verbs `capability_unavailable`.
+pub fn admit(action: &str, args: &Value, facts: &EngineFacts) -> Result<&'static ActionSpec, BrowserError> {
+    let spec = spec(action).ok_or_else(|| BrowserError::invalid(format!("unknown action '{action}'")))?;
+    if let Some((_, reason)) = spec.missing_capability(facts) {
+        return Err(BrowserError::new(ERR_CAPABILITY, reason));
+    }
+    spec.validate(args)?;
+    Ok(spec)
+}
+
+/// What the parent serves the child in reply to a `describe` frame.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToolSchema {
+    pub description: String,
+    pub input_schema: Value,
+    pub schema_rev: u64,
+}
+
+const FORMS: &str = "Pass action parameters either flat at the top level (e.g. {\"action\":\"navigate\",\"url\":\"https://example.com\"}) or nested under \"args\" (e.g. {\"action\":\"navigate\",\"args\":{\"url\":\"https://example.com\"}}); \"args\" must be a JSON object, never a string.";
+
+const UNAVAILABLE: &str = "Termul browser automation is not available on this host: it needs the Termul desktop app. Every call returns capability_unavailable.";
+
+/// The `browser` tool schema for this host. `None` means no automation
+/// host is registered (termul-server): the tool fails closed.
+pub fn schema(facts: Option<&EngineFacts>) -> ToolSchema {
+    let (description, input_schema) = match facts {
+        Some(facts) => (describe(facts), input_schema(facts)),
+        None => (
+            UNAVAILABLE.to_string(),
+            json!({
+                "type": "object",
+                "properties": { "action": { "type": "string" } },
+                "required": ["action"],
+            }),
+        ),
+    };
+    let mut hasher = std::hash::DefaultHasher::new();
+    description.hash(&mut hasher);
+    input_schema.to_string().hash(&mut hasher);
+    ToolSchema {
+        description,
+        input_schema,
+        schema_rev: hasher.finish(),
+    }
+}
+
+fn available(facts: &EngineFacts) -> impl Iterator<Item = &'static ActionSpec> + '_ {
+    REGISTRY.iter().filter(|s| s.missing_capability(facts).is_none())
+}
+
+fn describe(facts: &EngineFacts) -> String {
+    let mut out = format!("Control the Termul in-app browser (the pane the user can watch). {FORMS}\nActions:");
+    for spec in available(facts) {
+        let params: Vec<String> = spec
+            .params
+            .iter()
+            .map(|p| {
+                let optional = !p.required;
+                format!("{}{}", p.key.name(), if optional { "?" } else { "" })
+            })
+            .collect();
+        out.push_str(&format!("\n- {} {{{}}}: {}", spec.name, params.join(", "), spec.summary));
+    }
+    let withdrawn: Vec<&str> = REGISTRY
+        .iter()
+        .filter(|s| s.missing_capability(facts).is_some())
+        .map(|s| s.name)
+        .collect();
+    if !withdrawn.is_empty() {
+        out.push_str(&format!("\nNot available on this host: {}.", withdrawn.join(", ")));
+    }
+    if !facts.traits.isolated_world {
+        out.push_str("\nPage helpers run in the page's own script context, so page-derived results can be altered by the page.");
+    }
+    out
+}
+
+fn input_schema(facts: &EngineFacts) -> Value {
+    let verbs: Vec<&str> = available(facts).map(|s| s.name).collect();
+    let keys: Vec<ArgKey> = ArgKey::ALL
+        .into_iter()
+        .filter(|k| available(facts).any(|s| s.params.iter().any(|p| p.key == *k)))
+        .collect();
+    let mut params = Map::new();
+    for key in keys {
+        params.insert(
+            key.name().to_string(),
+            json!({ "type": key.ty().json_name(), "description": key.doc() }),
+        );
+    }
+    let mut properties = params.clone();
+    properties.insert(
+        "action".to_string(),
+        json!({ "type": "string", "enum": verbs, "description": "Action verb." }),
+    );
+    properties.insert(
+        "args".to_string(),
+        json!({
+            "type": "object",
+            "description": "Nested form of the action parameters (same keys as the top level).",
+            "properties": params,
+        }),
+    );
+    properties.insert(
+        "element".to_string(),
+        json!({ "type": "string", "description": "Optional human-readable intent for mutating actions, shown to the user." }),
+    );
+    json!({ "type": "object", "properties": properties, "required": ["action"] })
 }
 
 #[cfg(test)]

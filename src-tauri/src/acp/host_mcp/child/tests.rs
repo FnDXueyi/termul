@@ -423,3 +423,57 @@ async fn a_client_cancelled_ask_user_ends_the_parked_call_in_the_parent() {
     drop(reader);
     serve.await.expect("serve task").expect("serve ok");
 }
+
+async fn list_tools(config: ChildConfig) -> Vec<serde_json::Value> {
+    let (server_io, client_io) = tokio::io::duplex(256 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client_io);
+    let serve = tokio::spawn(async move { serve_mcp_transport(config, server_read, server_write).await });
+    let mut reader = BufReader::new(client_read);
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test-client","version":"0.0.1"}}}"#;
+    client_write.write_all(init.as_bytes()).await.unwrap();
+    client_write.write_all(b"\n").await.unwrap();
+    let _ = read_json_id(&mut reader, 1).await;
+    for line in [
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    ] {
+        client_write.write_all(line.as_bytes()).await.unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+    }
+    let tools = read_json_id(&mut reader, 2).await;
+    drop(client_write);
+    drop(reader);
+    serve.await.expect("serve task").expect("serve ok");
+    tools["result"]["tools"].as_array().expect("tools array").clone()
+}
+
+#[test]
+fn the_browser_tool_is_served_from_the_parents_describe_reply() {
+    let _guard = crate::browser_automation::TEST_HOST_LOCK.lock().unwrap();
+    crate::browser_automation::clear_browser_host();
+    let parent = crate::acp::host_mcp::parent::HostPlanServer::start(vec![], None);
+    let (port, token, provisional) = parent.register_session("agent-1");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let tools = runtime.block_on(list_tools(ChildConfig {
+        port,
+        token,
+        session_id: provisional,
+        agent_id: "agent-1".to_string(),
+    }));
+    let browser = tools
+        .iter()
+        .find(|tool| tool["name"] == "browser")
+        .expect("browser tool served after describe");
+    let served = crate::browser_automation::describe();
+    assert_eq!(browser["description"], served.description.as_str());
+    assert_eq!(browser["inputSchema"], served.input_schema);
+}
+
+#[tokio::test]
+async fn no_browser_tool_is_served_when_describe_fails() {
+    let tools = list_tools(handshake_config()).await;
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"plan"), "{names:?}");
+    assert!(!names.contains(&"browser"), "{names:?}");
+}
