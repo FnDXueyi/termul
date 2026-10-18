@@ -131,9 +131,11 @@ fn renderer_errors_reach_the_backend_as_typed_json() {
     });
     let mut bridge = Bridge::new(configs[0].clone());
     let error = error_of(bridge.call("ui.screenshot", json!({})));
-    assert_eq!(
-        error,
-        json!({"code": "CANVAS_HIDDEN", "message": "the canvas tab is hidden"})
+    assert_eq!(error["code"], "CANVAS_HIDDEN");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.starts_with("the canvas tab is hidden. ") && message.contains("Canvas tab"),
+        "{message}"
     );
 }
 

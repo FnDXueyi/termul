@@ -81,6 +81,16 @@ the file in its built-in editor — absolute and cwd-relative paths inside the s
 roots work, a `:line` suffix (or `#L<line>` on the link target) positions the cursor, and \
 bare multi-segment file paths in prose become open-in-editor links too.";
 
+/// The full `instructions` of the child's `initialize` result: the chat
+/// guidance, then the design canvas guide.
+#[must_use]
+pub fn session_instructions() -> String {
+    format!(
+        "{TERMUL_CHAT_INSTRUCTIONS}\n\n{}",
+        canvas_tools::instructions()
+    )
+}
+
 /// Input the agent sends to `plan` (the `arguments` of `tools/call`).
 /// Also re-used as the parent–child TCP frame body (one todo per plan entry).
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]

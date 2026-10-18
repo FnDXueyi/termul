@@ -29,9 +29,9 @@ use tokio::net::TcpStream;
 
 use crate::acp::host_mcp::canvas_tools;
 use crate::acp::host_mcp::{
-    FrameKind, FrameReply, FrameRequest, TermulAskUserInput, TermulBrowserInput, TermulPlanInput,
-    TermulSetTitleInput, ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN,
-    TERMUL_CHAT_INSTRUCTIONS,
+    session_instructions, FrameKind, FrameReply, FrameRequest, TermulAskUserInput,
+    TermulBrowserInput, TermulPlanInput, TermulSetTitleInput, ENV_AGENT_ID, ENV_PORT,
+    ENV_SESSION_ID, ENV_TOKEN,
 };
 
 /// Env-derived configuration for the child. Extracted so the arg parser is
@@ -144,9 +144,9 @@ fn canvas_route(tool: Tool) -> ToolRoute<TermulPlanServer> {
 /// `host_mcp::mod`) — it already derives `JsonSchema`.
 ///
 /// The `ServerHandler` impl lives in its own block below (not the
-/// `server_handler` flag) so `get_info` can attach `TERMUL_CHAT_INSTRUCTIONS`
+/// `server_handler` flag) so `get_info` can attach `session_instructions()`
 /// to the `initialize` result — the channel that advertises the chat
-/// renderer's markdown image + open-in-editor affordances to the agent.
+/// renderer's markdown affordances and the design canvas to the agent.
 #[tool_router]
 impl TermulPlanServer {
     #[tool(
@@ -293,7 +293,7 @@ impl TermulPlanServer {
 /// `#[tool_handler]` fills `call_tool`/`list_tools`/`get_tool` from the router
 /// and skips `get_info` because it is provided here: the returned
 /// `instructions` land in the MCP `initialize` result so agents learn they can
-/// embed images in markdown replies and link files for open-in-editor.
+/// embed images, link files for open-in-editor, and design on the canvas.
 /// Resources and prompts are figcraft's, answered by `canvas_tools`.
 #[tool_handler(router = self.tools)]
 impl ServerHandler for TermulPlanServer {
@@ -305,7 +305,7 @@ impl ServerHandler for TermulPlanServer {
                 .enable_prompts()
                 .build(),
         )
-        .with_instructions(TERMUL_CHAT_INSTRUCTIONS.to_string())
+        .with_instructions(session_instructions())
     }
 
     async fn list_resources(

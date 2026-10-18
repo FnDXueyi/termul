@@ -64,6 +64,41 @@ impl CanvasErrorCode {
         }
     }
 
+    /// What an agent that got this code should do next, appended to the
+    /// message it reads. Agents cannot open, show or move the canvas, so most
+    /// steps go through the user.
+    #[must_use]
+    pub const fn next_step(self) -> Option<&'static str> {
+        match self {
+            Self::CanvasClosed => Some(
+                "The canvas is not open: ask the user to open it with the Canvas button in \
+                 Termul's left rail, then retry.",
+            ),
+            Self::CanvasClosing => Some(
+                "The canvas is closing: ask the user to reopen it with the Canvas button in \
+                 Termul's left rail, then retry.",
+            ),
+            Self::CanvasHidden => Some(
+                "This tool needs the canvas on screen: ask the user to switch to the Canvas tab, \
+                 or use create_node, set_properties, run_command and screenshot, which work \
+                 while it is hidden.",
+            ),
+            Self::CanvasOpenElsewhere => Some(
+                "This project's canvas is held by another Termul window or browser tab: ask the \
+                 user to close it there and reopen it with the Canvas button here, then retry.",
+            ),
+            Self::CanvasTimeout => Some(
+                "The canvas did not answer in time: retry once, and if it times out again ask \
+                 the user to check that the Canvas tab is open and responsive.",
+            ),
+            Self::UnsupportedInKiosk => Some(
+                "Termul owns the canvas file: save with save_file, export only to a relative \
+                 path inside the project, and never open or write design files on disk.",
+            ),
+            Self::UnknownMethod | Self::EngineError => None,
+        }
+    }
+
     /// A wire code; anything outside the contract set is an `ENGINE_ERROR`.
     #[must_use]
     pub fn parse(code: &str) -> Self {
@@ -89,10 +124,20 @@ impl CanvasError {
     }
 
     /// The `Err(String)` figcraft's `Backend` carries: the JSON encoding of
-    /// `{code, message}`.
+    /// `{code, message}`, the message ending in the code's
+    /// [`CanvasErrorCode::next_step`]. This string is what the agent reads.
     #[must_use]
     pub fn to_backend_string(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| {
+        let mut error = self.clone();
+        if let Some(step) = self.code.next_step() {
+            let stop = if error.message.ends_with('.') {
+                ""
+            } else {
+                "."
+            };
+            error.message = format!("{}{stop} {step}", error.message);
+        }
+        serde_json::to_string(&error).unwrap_or_else(|_| {
             format!(
                 r#"{{"code":"{}","message":"unencodable"}}"#,
                 self.code.as_str()
