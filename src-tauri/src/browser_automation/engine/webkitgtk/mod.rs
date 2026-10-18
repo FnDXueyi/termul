@@ -71,7 +71,7 @@ impl BrowserEngine for WebKitGtkEngine {
                 .with_webview(move |platform| screenshot::capture(&platform.inner(), tx))
                 .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
             match tokio::time::timeout(EVAL_STEP, rx).await {
-                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind)),
+                Ok(Ok(shot)) => shot.map_err(EngineError::new),
                 Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
                 Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
