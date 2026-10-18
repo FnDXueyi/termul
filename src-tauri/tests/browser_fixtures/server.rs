@@ -48,6 +48,7 @@ fn route(path: &str) -> Reply {
         "/tamper.html" => Reply::Page(include_str!("pages/tamper.html")),
         "/chat.html" => Reply::Page(include_str!("pages/chat.html")),
         "/input.html" => Reply::Page(include_str!("pages/input.html")),
+        "/input-frame.html" => Reply::Page(include_str!("pages/input-frame.html")),
         "/actionability.html" => Reply::Page(include_str!("pages/actionability.html")),
         "/dialogs.html" => Reply::Page(include_str!("pages/dialogs.html")),
         "/popup.html" => Reply::Page(include_str!("pages/popup.html")),

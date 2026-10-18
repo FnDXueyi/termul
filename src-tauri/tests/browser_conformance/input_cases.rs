@@ -23,6 +23,8 @@ const CHAT_FOCUS_WAIT: Duration = Duration::from_secs(3);
 const BUTTON: Point = Point { x: 120.0, y: 60.0 };
 const FIELD: Point = Point { x: 160.0, y: 136.0 };
 const HOVER: Point = Point { x: 120.0, y: 220.0 };
+/// The button inside the fixture's same-origin frame.
+const FRAME_BUTTON: Point = Point { x: 120.0, y: 360.0 };
 const PAGE_MIDDLE: Point = Point { x: 400.0, y: 400.0 };
 const HANDLE: Point = Point { x: 50.0, y: 290.0 };
 const HANDLE_TARGET: Point = Point { x: 210.0, y: 290.0 };
@@ -302,9 +304,10 @@ pub async fn drag(c: &Ctx<'_>) -> CaseResult {
 }
 
 /// The chat keeps focus and sees nothing while the agent tab is clicked
-/// and typed into through every trusted path the engine declares. Where
-/// focusing an element moves native focus to the tab, the core never
-/// clicks a field with trusted input, so neither does this case.
+/// (on the page and inside a same-origin frame) and typed into through
+/// every trusted path the engine declares. Where focusing an element
+/// moves native focus to the tab, the core never clicks a field with
+/// trusted input, so neither does this case.
 pub async fn focus_retention(c: &Ctx<'_>) -> CaseResult {
     let tiers = c.engine.tiers();
     if tiers.pointer_click != Support::Trusted {
@@ -316,6 +319,9 @@ pub async fn focus_retention(c: &Ctx<'_>) -> CaseResult {
     let input = c.engine.input();
     c.trusted_click(&tab, BUTTON, "click").await?;
     c.trusted_report(mark, "a button click", |r| is(r, "agent", "click") && r["id"] == "btn")
+        .await?;
+    c.trusted_click(&tab, FRAME_BUTTON, "frame click").await?;
+    c.trusted_report(mark, "a click in a same-origin frame", |r| is(r, "agent", "click") && r["id"] == "inner")
         .await?;
     if !tiers.focus_moves {
         c.trusted_click(&tab, FIELD, "focus click").await?;
