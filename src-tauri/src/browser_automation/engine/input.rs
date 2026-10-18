@@ -365,6 +365,15 @@ impl<E: BrowserEngine> BrowserEngine for WithNativeInput<E> {
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         self.inner.screenshot(tab)
     }
+
+    fn answer_dialog<'a>(
+        &'a self,
+        tab: &'a str,
+        id: u64,
+        answer: super::events::DialogAnswer,
+    ) -> EngineFuture<'a, bool> {
+        self.inner.answer_dialog(tab, id, answer)
+    }
 }
 
 #[cfg(test)]

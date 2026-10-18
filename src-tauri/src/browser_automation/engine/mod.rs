@@ -13,6 +13,7 @@
 pub mod assets;
 #[cfg(any(test, target_os = "windows"))]
 pub mod cdp;
+pub mod dialogs;
 pub mod events;
 pub mod hooks;
 pub mod input;
@@ -280,6 +281,14 @@ pub trait BrowserEngine: Send + Sync {
     }
     /// PNG bytes of the visible viewport (`screenshot`).
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>>;
+    /// Complete the script dialog `tab` holds as `id` (`dialog_intercept`).
+    /// False when that dialog is no longer held.
+    fn answer_dialog<'a>(
+        &'a self,
+        tab: &'a str,
+        id: u64,
+        answer: events::DialogAnswer,
+    ) -> EngineFuture<'a, bool>;
 }
 
 /// The engine adapter for this desktop OS.

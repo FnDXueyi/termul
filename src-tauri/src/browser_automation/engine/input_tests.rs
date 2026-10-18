@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use super::*;
+use crate::browser_automation::engine::events::DialogAnswer;
 use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
 
 #[test]
@@ -76,6 +77,9 @@ impl BrowserEngine for Inner {
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         unreachable!()
+    }
+    fn answer_dialog<'a>(&'a self, _tab: &'a str, id: u64, answer: DialogAnswer) -> EngineFuture<'a, bool> {
+        Box::pin(async move { Ok(id == 7 && answer == DialogAnswer::Dismiss) })
     }
 }
 
@@ -152,5 +156,9 @@ async fn the_layer_raises_declared_tiers_and_refuses_trusted_input_elsewhere() {
         engine.element_facts("agent-1", "html>body>button:nth-of-type(1)").await.unwrap(),
         ActionabilityFacts::Detached,
         "facts come through the inner engine's eval"
+    );
+    assert!(
+        engine.answer_dialog("agent-1", 7, DialogAnswer::Dismiss).await.unwrap(),
+        "dialog answers reach the inner engine"
     );
 }

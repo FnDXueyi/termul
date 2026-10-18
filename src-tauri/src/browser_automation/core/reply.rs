@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::dialogs::DialogView;
 use super::ports::{CanonicalOrigin, TabProfile};
 use super::tabs::RefNode;
 use super::BrowserError;
@@ -44,6 +45,9 @@ pub struct TabFacts {
     /// http(s) origin.
     pub origin: Option<CanonicalOrigin>,
     pub profile: TabProfile,
+    /// For a popup tab, the agent tab whose page opened it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opener: Option<String>,
 }
 
 /// Page-derived data. Untrusted: the page controls every field, and refs
@@ -54,6 +58,10 @@ pub struct PageData {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+    /// The script dialog blocking the tab, or the last one the host closed
+    /// on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<DialogView>,
     /// True when any field above was cut to its cap.
     pub truncated: bool,
 }
@@ -67,9 +75,15 @@ impl PageData {
             url: url.to_string(),
             title: title.to_string(),
             snapshot: None,
+            dialog: None,
             truncated: url_cut || title_cut,
         }
     }
+}
+
+/// Page-controlled text outside the snapshot, cut to the metadata cap.
+pub(super) fn cap_page_text(text: &str) -> String {
+    cap(text, PAGE_META_MAX_CHARS).0.to_string()
 }
 
 /// A successful action. `fidelity` is set exactly when the verb mutates.
@@ -208,12 +222,30 @@ pub(super) struct Rect {
     pub cy: f64,
 }
 
+/// Whether a checkbox, switch or radio button is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CheckState {
+    pub checked: bool,
+    pub radio: bool,
+}
+
 /// What the resolve helper reports for an element that still exists.
+/// `check` is null for an element that cannot be checked.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct ResolvedElement {
     pub rect: Rect,
     pub role: String,
     pub name: String,
+    #[serde(default)]
+    pub check: Option<CheckState>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CheckReply {
+    State(CheckState),
+    Failed(HelperFailure),
 }
 
 #[derive(Deserialize)]
@@ -273,6 +305,15 @@ pub(super) struct Viewport {
 
 pub(super) fn viewport_result(out: Value) -> Result<Viewport, BrowserError> {
     serde_json::from_value(out).map_err(|_| malformed_helper_result())
+}
+
+/// Parse the checked-state helper's result.
+pub(super) fn check_result(out: Value, ref_id: Option<&str>) -> Result<CheckState, BrowserError> {
+    match serde_json::from_value::<CheckReply>(out) {
+        Ok(CheckReply::State(state)) => Ok(state),
+        Ok(CheckReply::Failed(failure)) => Err(helper_failure(&failure.error, ref_id)),
+        Err(_) => Err(malformed_helper_result()),
+    }
 }
 
 /// Map a helper's `{error: "…"}` to a wire code. Only the code reaches the

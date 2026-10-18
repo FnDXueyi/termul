@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::browser_automation::engine::assets::Script;
+use crate::browser_automation::engine::events::DialogAnswer;
 use crate::browser_automation::engine::{
     CapabilityTable, EngineFacts, EngineFuture, EngineTraits, InputMode, Support,
 };
@@ -55,6 +56,9 @@ impl BrowserEngine for ScriptedFacts {
         unreachable!()
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
+        unreachable!()
+    }
+    fn answer_dialog<'a>(&'a self, _tab: &'a str, _id: u64, _answer: DialogAnswer) -> EngineFuture<'a, bool> {
         unreachable!()
     }
 }

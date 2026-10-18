@@ -15,6 +15,9 @@ use crate::input_cases;
 use termul_manager_lib::conformance_support::Support;
 use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
+#[path = "event_cases.rs"]
+mod events;
+
 const FORM_READY: &str = "Conformance form";
 const DELAYED_READY: &str = "Delayed element";
 const REDIRECT_READY: &str = "Redirect target reached";
@@ -60,6 +63,17 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("input_wheel", &["navigate"]),
     cap("input_drag", &["navigate"]),
     cap("focus_retention", &["navigate"]),
+    cap("dialog_alert", &["click"]),
+    cap("dialog_confirm", &["click"]),
+    cap("dialog_prompt", &["click"]),
+    cap("dialog_beforeunload", &["click"]),
+    cap("popup", &["click"]),
+    cap("external_protocol", &["click"]),
+    cap("permissions", &["snapshot"]),
+    cap("select_option", &["snapshot"]),
+    cap("check", &["click"]),
+    cap("wait_semantic", &["navigate"]),
+    cap("switch_tab", &["snapshot"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -120,8 +134,16 @@ fn tier_name(support: Support) -> &'static str {
     }
 }
 
+/// The reply names a fidelity, for verbs whose tier the cases do not model.
+pub fn expect_some_fidelity(reply: &Value, what: &str) -> CaseResult {
+    match reply["fidelity"].as_str() {
+        Some("trusted" | "synthetic") => Ok(()),
+        other => Err(mismatch(format!("{what} reply fidelity is {other:?}"))),
+    }
+}
+
 /// The reply's fidelity is the tier the engine declares for the input.
-fn expect_fidelity(reply: &Value, tier: Support, what: &str) -> CaseResult {
+pub fn expect_fidelity(reply: &Value, tier: Support, what: &str) -> CaseResult {
     match reply["fidelity"].as_str() {
         Some(f) if f == tier_name(tier) => Ok(()),
         other => Err(mismatch(format!(
@@ -515,6 +537,17 @@ pub async fn run(
         "input_wheel" => input_cases::wheel(&ctx).await,
         "input_drag" => input_cases::drag(&ctx).await,
         "focus_retention" => input_cases::focus_retention(&ctx).await,
+        "dialog_alert" => events::dialog_alert(&ctx).await,
+        "dialog_confirm" => events::dialog_confirm(&ctx).await,
+        "dialog_prompt" => events::dialog_prompt(&ctx).await,
+        "dialog_beforeunload" => events::dialog_beforeunload(&ctx).await,
+        "popup" => events::popup(&ctx).await,
+        "external_protocol" => events::external_protocol(&ctx).await,
+        "permissions" => events::permissions(&ctx).await,
+        "select_option" => events::select_option(&ctx).await,
+        "check" => events::check(&ctx).await,
+        "wait_semantic" => events::wait_semantic(&ctx).await,
+        "switch_tab" => events::switch_tab(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

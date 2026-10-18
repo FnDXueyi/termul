@@ -30,6 +30,15 @@ function roleOf(el) {
   }
   return TAG_ROLE[el.tagName] || '';
 }
+function checkState(el) {
+  var t = el.tagName === 'INPUT' ? inputType(el) : '';
+  if (t === 'checkbox' || t === 'radio') return { checked: !!el.checked, radio: t === 'radio' };
+  var role = el.getAttribute('role');
+  if (role === 'checkbox' || role === 'switch' || role === 'radio' || role === 'menuitemcheckbox') {
+    return { checked: el.getAttribute('aria-checked') === 'true', radio: role === 'radio' };
+  }
+  return null;
+}
 function labelledText(el) {
   var ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/);
   var out = '';

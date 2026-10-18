@@ -35,6 +35,38 @@ pub enum Verb {
     Back,
     Forward,
     Reload,
+    SelectOption,
+    Check,
+    Uncheck,
+    SwitchTab,
+    HandleDialog,
+}
+
+impl Verb {
+    /// Whether the verb runs page script, input or a navigation on its
+    /// tab. A dialog blocking the tab refuses these, and one that opens
+    /// while such a call runs ends the call with the dialog in the reply.
+    pub fn touches_page(self) -> bool {
+        match self {
+            Verb::ListTabs | Verb::NewTab | Verb::CloseTab | Verb::SwitchTab | Verb::HandleDialog => false,
+            Verb::Navigate
+            | Verb::Snapshot
+            | Verb::Screenshot
+            | Verb::Click
+            | Verb::Fill
+            | Verb::Type
+            | Verb::Press
+            | Verb::Scroll
+            | Verb::Hover
+            | Verb::Wait
+            | Verb::Back
+            | Verb::Forward
+            | Verb::Reload
+            | Verb::SelectOption
+            | Verb::Check
+            | Verb::Uncheck => true,
+        }
+    }
 }
 
 /// Argument keys. One JSON type per key across every verb.
@@ -48,6 +80,10 @@ pub enum ArgKey {
     Key,
     Ms,
     Dy,
+    TextGone,
+    UrlContains,
+    LoadState,
+    Accept,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +91,11 @@ enum ArgType {
     String,
     Integer,
     Number,
+    Boolean,
 }
 
 impl ArgKey {
-    const ALL: [ArgKey; 8] = [
+    const ALL: [ArgKey; 12] = [
         ArgKey::Url,
         ArgKey::TabId,
         ArgKey::Ref,
@@ -67,6 +104,10 @@ impl ArgKey {
         ArgKey::Key,
         ArgKey::Ms,
         ArgKey::Dy,
+        ArgKey::TextGone,
+        ArgKey::UrlContains,
+        ArgKey::LoadState,
+        ArgKey::Accept,
     ];
 
     pub fn name(self) -> &'static str {
@@ -79,6 +120,10 @@ impl ArgKey {
             ArgKey::Key => "key",
             ArgKey::Ms => "ms",
             ArgKey::Dy => "dy",
+            ArgKey::TextGone => "textGone",
+            ArgKey::UrlContains => "urlContains",
+            ArgKey::LoadState => "loadState",
+            ArgKey::Accept => "accept",
         }
     }
 
@@ -86,6 +131,7 @@ impl ArgKey {
         match self {
             ArgKey::Ms => ArgType::Integer,
             ArgKey::Dy => ArgType::Number,
+            ArgKey::Accept => ArgType::Boolean,
             _ => ArgType::String,
         }
     }
@@ -95,11 +141,15 @@ impl ArgKey {
             ArgKey::Url => "http(s) URL to load.",
             ArgKey::TabId => "Agent tab id: tab.id from a new_tab reply, or data.tabs[].tab.id from list_tabs. Omit to use this session's tab.",
             ArgKey::Ref => "Element ref (@eN) from the latest snapshot.",
-            ArgKey::Value => "Value to set on the element.",
-            ArgKey::Text => "Text to type (type) or to wait for (wait).",
+            ArgKey::Value => "Value to set on the element (fill), or the value or label of the option to pick (select_option).",
+            ArgKey::Text => "Text to type (type), to wait for (wait), or to answer a prompt dialog with (handle_dialog).",
             ArgKey::Key => "Key to press: one character, or Enter (the default), Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown or Space.",
             ArgKey::Ms => "Milliseconds to wait (max 30000).",
             ArgKey::Dy => "Pixels to scroll vertically (default 600).",
+            ArgKey::TextGone => "Text to wait for to disappear from the page (wait).",
+            ArgKey::UrlContains => "Text the tab's URL must contain (wait).",
+            ArgKey::LoadState => "Document state to wait for: domcontentloaded or load (wait).",
+            ArgKey::Accept => "true for OK, false for Cancel (handle_dialog).",
         }
     }
 }
@@ -110,6 +160,7 @@ impl ArgType {
             ArgType::String => "string",
             ArgType::Integer => "integer",
             ArgType::Number => "number",
+            ArgType::Boolean => "boolean",
         }
     }
 
@@ -118,6 +169,7 @@ impl ArgType {
             ArgType::String => "a string",
             ArgType::Integer => "a non-negative integer",
             ArgType::Number => "a number",
+            ArgType::Boolean => "true or false",
         }
     }
 
@@ -126,6 +178,7 @@ impl ArgType {
             ArgType::String => value.is_string(),
             ArgType::Integer => value.is_u64(),
             ArgType::Number => value.is_number(),
+            ArgType::Boolean => value.is_boolean(),
         }
     }
 
@@ -135,6 +188,7 @@ impl ArgType {
         let text = value.as_str()?;
         match self {
             ArgType::String => None,
+            ArgType::Boolean => text.parse::<bool>().ok().map(Value::from),
             ArgType::Integer => text.parse::<u64>().ok().map(Value::from),
             ArgType::Number => text
                 .parse::<f64>()
@@ -181,7 +235,7 @@ pub struct ActionSpec {
 
 use CapabilityId as Cap;
 
-pub static REGISTRY: [ActionSpec; 16] = [
+pub static REGISTRY: [ActionSpec; 21] = [
     ActionSpec {
         verb: Verb::Navigate,
         name: "navigate",
@@ -275,12 +329,25 @@ pub static REGISTRY: [ActionSpec; 16] = [
     ActionSpec {
         verb: Verb::Wait,
         name: "wait",
-        params: &[opt(ArgKey::Ms), opt(ArgKey::Text), opt(ArgKey::TabId)],
-        one_of: &[ArgKey::Ms, ArgKey::Text],
+        params: &[
+            opt(ArgKey::Ms),
+            opt(ArgKey::Text),
+            opt(ArgKey::TextGone),
+            opt(ArgKey::UrlContains),
+            opt(ArgKey::LoadState),
+            opt(ArgKey::TabId),
+        ],
+        one_of: &[
+            ArgKey::Ms,
+            ArgKey::Text,
+            ArgKey::TextGone,
+            ArgKey::UrlContains,
+            ArgKey::LoadState,
+        ],
         requires: &[Cap::IsolatedEval],
         mutating: false,
         budget: budgets::ACTION_WAIT,
-        summary: "sleep ms, or wait up to 30s for text to appear on the page.",
+        summary: "sleep ms, or wait up to 30s for one condition: text appears, textGone disappears, the URL contains urlContains, or the document reaches loadState. Pass exactly one.",
     },
     ActionSpec {
         verb: Verb::NewTab,
@@ -342,7 +409,94 @@ pub static REGISTRY: [ActionSpec; 16] = [
         budget: budgets::ACTION_HISTORY,
         summary: "reload the tab.",
     },
+    ActionSpec {
+        verb: Verb::SelectOption,
+        name: "select_option",
+        params: &[req(ArgKey::Ref), req(ArgKey::Value), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::TrustedKey],
+        mutating: true,
+        budget: budgets::ACTION_SELECT,
+        summary: "pick the option of a select element whose value or label is value.",
+    },
+    ActionSpec {
+        verb: Verb::Check,
+        name: "check",
+        params: &[req(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::PointerClick],
+        mutating: true,
+        budget: budgets::ACTION_TOGGLE,
+        summary: "check a checkbox, switch or radio button; clicks it only when it is unchecked (data.changed says whether it did).",
+    },
+    ActionSpec {
+        verb: Verb::Uncheck,
+        name: "uncheck",
+        params: &[req(ArgKey::Ref), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::PointerClick],
+        mutating: true,
+        budget: budgets::ACTION_TOGGLE,
+        summary: "uncheck a checkbox or switch; clicks it only when it is checked (data.changed says whether it did).",
+    },
+    ActionSpec {
+        verb: Verb::SwitchTab,
+        name: "switch_tab",
+        params: &[req(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[],
+        mutating: false,
+        budget: budgets::ACTION_INSTANT,
+        summary: "make tabId this session's tab, so calls without tabId act on it.",
+    },
+    ActionSpec {
+        verb: Verb::HandleDialog,
+        name: "handle_dialog",
+        params: &[req(ArgKey::Accept), opt(ArgKey::Text), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::DialogIntercept],
+        mutating: true,
+        budget: budgets::ACTION_EVAL,
+        summary: "answer the confirm, prompt or beforeunload dialog shown in page.dialog (state open): OK or Cancel, with text for a prompt. Until then the tab refuses other page actions; an unanswered dialog is cancelled after 60s.",
+    },
 ];
+
+/// `download_intercept` and `file_chooser` join the agent-tab floor once
+/// their engine hooks ship; flip this then.
+pub const FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER: bool = false;
+
+/// The tab-policy hooks that must all be `Trusted` before any agent tab
+/// opens.
+const FLOOR: [Cap; 5] = [
+    Cap::NavigationIntercept,
+    Cap::NewWindowIntercept,
+    Cap::DialogIntercept,
+    Cap::PermissionIntercept,
+    Cap::ExternalProtocolIntercept,
+];
+const FLOOR_PENDING: [Cap; 2] = [Cap::DownloadIntercept, Cap::FileChooser];
+
+/// The first floor capability this engine does not enforce natively.
+pub fn floor_gap(facts: &EngineFacts) -> Option<CapabilityId> {
+    let pending: &[Cap] = if FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER {
+        &FLOOR_PENDING
+    } else {
+        &[]
+    };
+    FLOOR
+        .iter()
+        .chain(pending)
+        .copied()
+        .find(|id| facts.capabilities.get(*id) != Support::Trusted)
+}
+
+pub fn floor_error(missing: CapabilityId) -> BrowserError {
+    BrowserError::capability(format!(
+        "this browser engine cannot enforce agent tab policy ({} is not native), so no agent tab opens",
+        missing.as_str()
+    ))
+    .with_reason("engine_floor")
+}
 
 pub fn spec(action: &str) -> Option<&'static ActionSpec> {
     REGISTRY.iter().find(|s| s.name == action)
@@ -526,6 +680,7 @@ fn result_location(verb: Verb) -> Option<&'static str> {
         Verb::ListTabs => Some("list_tabs gives data.tabs[], each {tab, page}"),
         Verb::Snapshot => Some("snapshot gives the outline in page.snapshot and a ref count in data.refs"),
         Verb::Screenshot => Some("screenshot gives the file path in data.path"),
+        Verb::HandleDialog => Some("a script dialog the page opened is page.dialog {kind, message, default_text?, state}; popups the page opened are data.popups[] ({opened: tabId} or {blocked: reason}), and a popup tab's tab.opener names its opener"),
         _ => None,
     }
 }

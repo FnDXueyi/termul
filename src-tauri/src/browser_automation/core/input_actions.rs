@@ -52,7 +52,7 @@ async fn within<T>(
 }
 
 impl DesktopBrowserHost {
-    fn input_mode(&self, id: CapabilityId) -> Result<InputMode, BrowserError> {
+    pub(super) fn input_mode(&self, id: CapabilityId) -> Result<InputMode, BrowserError> {
         mode_of(self.engine.facts().capabilities.get(id))
     }
 
