@@ -1,7 +1,7 @@
 import type { AgentsWatchDelta, WsAgentSummary } from '@shared/types/web-protocol.types'
 import { describe, expect, it, vi } from 'vitest'
 import type { WatchClient, WatchHandlers } from '@/lib/acp-transport/watch-client'
-import { onBrowserPolicyChanged } from '@/lib/browser-policy-api'
+import { onBrowserPolicyChanged, onBrowserPolicyResync } from '@/lib/browser-policy-api'
 import { attachAgentRosterWatch } from './agent-roster-watch'
 import type { AcpState } from './types'
 
@@ -97,6 +97,17 @@ describe('attachAgentRosterWatch', () => {
     ])
     expect(state._onAgentSpawned).not.toHaveBeenCalled()
     expect(state._onAgentDisconnected).not.toHaveBeenCalled()
+  })
+
+  it('asks policy views to re-read whenever the agents watch resyncs', () => {
+    const { handlers } = setup()
+    const resync = vi.fn()
+    const stop = onBrowserPolicyResync(resync)
+    handlers().onState([])
+    handlers().onState([])
+    stop()
+    handlers().onState([])
+    expect(resync).toHaveBeenCalledTimes(2)
   })
 
   it('reconciles the full state: spawns the unknown, disconnects the connected agent the host dropped', () => {
