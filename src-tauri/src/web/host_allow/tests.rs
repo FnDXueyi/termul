@@ -102,31 +102,16 @@ fn hand_parsed_requests_are_checked_on_their_host_header() {
     let hosts = HostAllowList::loopback();
     let check = |raw: &str| hosts.allows_header_block(&mut lines(raw));
     assert!(!check(
-        "Accept: */*
-HOST: attacker.example:5000
-
-body"
+        "Accept: */*\r\nHOST: attacker.example:5000\r\n\r\nbody"
     ));
-    assert!(check(
-        "Host: 127.0.0.1:5000
-Accept: */*
-
-"
-    ));
-    assert!(check(
-        "host: localhost:5000
-
-"
-    ));
+    assert!(check("Host: 127.0.0.1:5000\r\nAccept: */*\r\n\r\n"));
+    assert!(check("host: localhost:5000\r\n\r\n"));
 }
 
 #[test]
 fn hand_parsed_requests_without_a_complete_header_block_fail() {
     let hosts = HostAllowList::loopback();
-    assert!(!hosts.allows_header_block(&mut lines(
-        "Host: 127.0.0.1:5000
-Accept: */*"
-    )));
+    assert!(!hosts.allows_header_block(&mut lines("Host: 127.0.0.1:5000\r\nAccept: */*")));
     let mut failing = std::iter::once(Err(std::io::Error::from(std::io::ErrorKind::TimedOut)));
     assert!(!hosts.allows_header_block(&mut failing));
 }
