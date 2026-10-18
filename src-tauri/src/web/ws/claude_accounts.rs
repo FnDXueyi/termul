@@ -5,6 +5,7 @@
 //! start a browser login or delete login state on the host.
 
 use super::*;
+use crate::acp::SignInCheck;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +58,7 @@ pub(super) async fn handle_list_claude_usage(
 }
 
 /// `set_default_claude_account { accountId }`.
-pub(super) fn handle_set_default_claude_account(
+pub(super) async fn handle_set_default_claude_account(
     id: String,
     payload: &Value,
     acp: &Arc<AcpManager>,
@@ -72,17 +73,21 @@ pub(super) fn handle_set_default_claude_account(
             )
         }
     };
-    match acp.claude_agent().set_default_account(&parsed.account_id) {
+    match acp
+        .claude_agent()
+        .set_default_account(&parsed.account_id, SignInCheck::Required)
+        .await
+    {
         Ok(()) => {
             info!(account = %parsed.account_id, "default Claude account set over ws");
             WsReply::ok(id, Some(json!({})))
         }
-        Err(error) => WsReply::err(id, WsErrorCode::NotFound, error),
+        Err(error) => choice_refused(id, error),
     }
 }
 
 /// `set_project_claude_account { projectId, accountId | null }`.
-pub(super) fn handle_set_project_claude_account(
+pub(super) async fn handle_set_project_claude_account(
     id: String,
     payload: &Value,
     acp: &Arc<AcpManager>,
@@ -101,7 +106,12 @@ pub(super) fn handle_set_project_claude_account(
     };
     match acp
         .claude_agent()
-        .set_project_account(&parsed.project_id, parsed.account_id.as_deref())
+        .set_project_account(
+            &parsed.project_id,
+            parsed.account_id.as_deref(),
+            SignInCheck::Required,
+        )
+        .await
     {
         Ok(()) => {
             info!(
@@ -111,7 +121,19 @@ pub(super) fn handle_set_project_claude_account(
             );
             WsReply::ok(id, Some(json!({})))
         }
-        Err(error) => WsReply::err(id, WsErrorCode::NotFound, error),
+        Err(error) => choice_refused(id, error),
+    }
+}
+
+/// A refused Account choice: `claude_account_signed_out` when the Account is
+/// not signed in (the stored choice is unchanged), else `not_found`.
+fn choice_refused(id: String, error: String) -> WsReply {
+    match crate::acp::claude_accounts::strip_signed_out_tag(&error) {
+        Some(message) => {
+            info!("Claude account choice refused over ws: the account is not signed in");
+            WsReply::err(id, WsErrorCode::ClaudeAccountSignedOut, message.to_string())
+        }
+        None => WsReply::err(id, WsErrorCode::NotFound, error),
     }
 }
 

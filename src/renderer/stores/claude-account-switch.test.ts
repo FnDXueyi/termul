@@ -381,3 +381,22 @@ describe('claude account switch when the new account cannot resume the session',
     )
   })
 })
+
+describe('a switch the host refuses', () => {
+  it('leaves the open chats and their agents untouched', async () => {
+    const before = useAcpStore.getState().sessions
+    api.setProjectAccount.mockRejectedValue(
+      new AcpTransportError(
+        'claude_account_signed_out',
+        'The Claude account "Work" is not signed in. Sign in to it in Settings → Accounts, then choose it again.'
+      )
+    )
+    await expect(switchProjectClaudeAccount('office', 'ab12')).rejects.toMatchObject({
+      code: 'claude_account_signed_out'
+    })
+    expect(killAgent).not.toHaveBeenCalled()
+    expect(retryCrashedSession).not.toHaveBeenCalled()
+    expect(useAcpStore.getState().sessions).toBe(before)
+    expect(useAcpStore.getState().sessions.c1.status).toBe('active')
+  })
+})

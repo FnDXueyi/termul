@@ -24,6 +24,7 @@ const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
 mod accounts;
 mod cli;
 mod usage;
+pub use accounts::SignInCheck;
 
 use cli::{claude_cli_command, SystemClaudeRuntimeProbe};
 use usage::{ClaudeUsageProbe, SystemClaudeUsageProbe, UsageCache};
@@ -738,16 +739,17 @@ impl ClaudeAgentService {
                             "[acp-claude] managed config rejected: {} profile is not signed in (status={status:?})",
                             source.label()
                         );
-                        return Err(match source {
+                        let message = match source {
                             ConfigDirSource::Host => "Claude Code CLI is not signed in. Run `claude auth login`, then retry."
                                 .to_string(),
                             ConfigDirSource::Linked => format!(
-                                "The Claude account \"{}\" is not signed in. Sign in to it in Settings → Provider, then retry.",
+                                "The Claude account \"{}\" is not signed in. Sign in to it in Settings → Accounts, then retry.",
                                 account.account_name
                             ),
                             ConfigDirSource::ProjectEnv => "The Claude profile set by CLAUDE_CONFIG_DIR in the project environment is not signed in. Run `claude auth login` with that CLAUDE_CONFIG_DIR, then retry."
                                 .to_string(),
-                        });
+                        };
+                        return Err(crate::acp::claude_accounts::signed_out_error(message));
                     }
                     Err(error) => {
                         log::warn!("[acp-claude] managed config rejected: {error}");
