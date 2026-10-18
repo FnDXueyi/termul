@@ -3,12 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAcpStore } from '@/stores/acp-store'
 import { McpServersSettings } from './McpServersSettings'
 
-const { toastError, toastSuccess } = vi.hoisted(() => ({
+const { toastError, toastSuccess, toastFn } = vi.hoisted(() => ({
   toastError: vi.fn(),
-  toastSuccess: vi.fn()
+  toastSuccess: vi.fn(),
+  toastFn: vi.fn()
 }))
 
-vi.mock('sonner', () => ({ toast: { error: toastError, success: toastSuccess } }))
+vi.mock('sonner', () => ({
+  toast: Object.assign(toastFn, { error: toastError, success: toastSuccess })
+}))
 
 const saveMcpServer = vi.fn(async () => {})
 const importMcpServers = vi.fn(async (_servers: unknown[]) => {})
@@ -44,6 +47,15 @@ function typeJson(value: string): void {
   fireEvent.change(screen.getByLabelText('MCP JSON'), { target: { value } })
 }
 
+/** Open a server's row menu (Radix opens on pointerdown) and choose an item. */
+function chooseRowAction(server: string, item: string): void {
+  fireEvent.pointerDown(screen.getByRole('button', { name: `Actions for ${server}` }), {
+    button: 0,
+    ctrlKey: false
+  })
+  fireEvent.click(screen.getByRole('menuitem', { name: item }))
+}
+
 /** Parse the current JSON editor content (edit dialog pre-fill assertions). */
 function editorJson(): Record<string, unknown> {
   return JSON.parse((screen.getByLabelText('MCP JSON') as HTMLTextAreaElement).value)
@@ -53,6 +65,16 @@ describe('McpServersSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     seedStore()
+  })
+
+  it('does not claim to retain the experimental acp capability (issue #362)', () => {
+    // The Rust schema is built without `unstable_mcp_over_acp`, so an agent's
+    // `mcpCapabilities.acp` is dropped on parse (pinned in the Rust events
+    // tests). The notice must say Termul does not read it.
+    render(<McpServersSettings />)
+    const notice = screen.getByText(/MCP-over-ACP/).closest('p')
+    expect(notice).toHaveTextContent('does not read it')
+    expect(notice).not.toHaveTextContent('retains')
   })
 
   it('adds a bare server object through the JSON editor with a fresh id', async () => {
@@ -191,7 +213,7 @@ describe('McpServersSettings', () => {
       ]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     expect(screen.getByText('Edit MCP server')).toBeInTheDocument()
     // Pre-populated JSON: explicit type, env as an object map, enabled included.
     expect(editorJson()).toMatchObject({
@@ -241,7 +263,7 @@ describe('McpServersSettings', () => {
       ]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit remote/i }))
+    chooseRowAction('Remote', 'Edit as JSON')
     expect(editorJson()).toMatchObject({
       type: 'http',
       name: 'Remote',
@@ -270,7 +292,7 @@ describe('McpServersSettings', () => {
       mcpServers: [{ id: 's2', type: 'stdio', name: 'Files', command: 'node', enabled: true }]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     const edited = editorJson()
     edited.enabled = false
     typeJson(JSON.stringify(edited))
@@ -287,7 +309,7 @@ describe('McpServersSettings', () => {
       mcpServers: [{ id: 's3', type: 'stdio', name: 'Files', command: 'node', enabled: false }]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     const edited = editorJson()
     expect(edited.enabled).toBe(false)
     delete edited.enabled
@@ -305,7 +327,7 @@ describe('McpServersSettings', () => {
       mcpServers: [{ id: 's4', type: 'stdio', name: 'Files', command: 'node', enabled: true }]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     typeJson(JSON.stringify({ mcpServers: { files: { command: 'node' } } }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() =>
@@ -319,7 +341,7 @@ describe('McpServersSettings', () => {
       mcpServers: [{ id: 's6', type: 'stdio', name: 'Files', command: 'node', enabled: true }]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     typeJson(JSON.stringify({ type: 'stdio', name: 'Files', command: '' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() =>
@@ -371,7 +393,7 @@ describe('McpServersSettings', () => {
       mcpServers: [{ id: 's7', type: 'stdio', name: 'Files', command: 'node', enabled: true }]
     })
     render(<McpServersSettings />)
-    fireEvent.click(screen.getByRole('button', { name: /edit files/i }))
+    chooseRowAction('Files', 'Edit as JSON')
     const edited = editorJson()
     edited.command = 'bun'
     typeJson(JSON.stringify(edited))
@@ -389,12 +411,23 @@ describe('McpServersSettings', () => {
     })
     render(<McpServersSettings />)
     fireEvent.click(screen.getByRole('switch', { name: /disable files/i }))
-    fireEvent.click(screen.getByRole('button', { name: /delete files/i }))
+    chooseRowAction('Files', 'Delete')
     await waitFor(() => expect(setMcpServerEnabled).toHaveBeenCalledWith('one', false))
     expect(deleteMcpServer).toHaveBeenCalledWith('one')
+    // Delete acts at once and offers Undo, which re-saves the same server.
+    await waitFor(() => expect(toastFn).toHaveBeenCalled())
+    const [message, options] = toastFn.mock.calls[0] as [
+      string,
+      { action: { onClick: () => void } }
+    ]
+    expect(message).toBe('Deleted Files')
+    options.action.onClick()
+    expect(saveMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'one', name: 'Files' })
+    )
   })
 
-  it('probes enabled servers on mount and shows the connected status dot', async () => {
+  it('probes enabled servers on mount and shows the Connected status word', async () => {
     useAcpStore.setState({
       mcpServers: [{ id: 's1', type: 'stdio', name: 'Files', command: 'node', enabled: true }],
       mcpProbeStatus: { s1: 'connected' },
@@ -402,10 +435,10 @@ describe('McpServersSettings', () => {
     })
     render(<McpServersSettings />)
     await waitFor(() => expect(probeMcpServer).toHaveBeenCalledWith('s1'))
-    expect(screen.getByTitle('Connected (Termul can reach this server)')).toBeInTheDocument()
+    expect(screen.getByText('Connected')).toBeInTheDocument()
   })
 
-  it('shows the disconnected dot and the probe error behind the disclosure', () => {
+  it('shows Unreachable and the probe error with a fix behind the disclosure', () => {
     useAcpStore.setState({
       mcpServers: [
         { id: 's5', type: 'http', name: 'Remote', url: 'https://x.test/m', enabled: true }
@@ -414,15 +447,12 @@ describe('McpServersSettings', () => {
       mcpProbeError: { s5: 'initialize failed: connection refused' }
     })
     render(<McpServersSettings />)
-    expect(
-      screen.getByTitle('Disconnected (Termul could not reach this server)')
-    ).toBeInTheDocument()
+    expect(screen.getByText('Unreachable')).toBeInTheDocument()
     // The error detail lives behind the tools disclosure; expand via the
     // disconnected-specific trigger, then assert the redacted reason.
-    fireEvent.click(screen.getByText(/probe failed — retry/i))
-    expect(
-      screen.getByText(/probe failed — check the server config or network/i)
-    ).toBeInTheDocument()
+    fireEvent.click(screen.getByText(/show error/i))
+    expect(screen.getByText(/could not reach this server/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
     expect(screen.getByText('initialize failed: connection refused')).toBeInTheDocument()
   })
 
@@ -446,7 +476,7 @@ describe('McpServersSettings', () => {
     })
     render(<McpServersSettings />)
     vi.mocked(probeMcpServer).mockClear()
-    fireEvent.click(screen.getByRole('button', { name: /test probe connection/i }))
+    chooseRowAction('Probe', 'Test connection')
     await waitFor(() => expect(probeMcpServer).toHaveBeenCalledWith('s4'))
   })
 
@@ -466,12 +496,10 @@ describe('McpServersSettings', () => {
     expect(screen.queryByLabelText(/environment \(name=value/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: /import json/i })).not.toBeInTheDocument()
     // All row controls stay accessible from the single line.
-    expect(screen.getByRole('button', { name: /test files connection/i })).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: /disable files/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /edit files/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /delete files/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Actions for Files' })).toBeInTheDocument()
     // Preserved surfaces: storage warning + experimental MCP-over-ACP card.
     expect(screen.getByText('$VARIABLE')).toBeInTheDocument()
-    expect(screen.getByText(/experimental mcp-over-acp/i)).toBeInTheDocument()
+    expect(screen.getByText(/mcp-over-acp/i)).toBeInTheDocument()
   })
 })

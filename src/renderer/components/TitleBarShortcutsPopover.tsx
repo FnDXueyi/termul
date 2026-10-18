@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Keyboard } from '@/components/icons'
 import { ShortcutRecorder } from '@/components/ShortcutRecorder'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { useResetShortcut, useUpdateShortcut } from '@/hooks/use-keyboard-shortcuts'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
@@ -18,6 +19,7 @@ const QUICK_SHORTCUT_IDS = [
   'newBrowserTab',
   'toggleFileExplorer',
   'sidebarToggle',
+  'settings',
   'zoomIn',
   'zoomOut',
   'zoomReset'
@@ -27,12 +29,18 @@ interface TitleBarShortcutsPopoverProps {
   buttonClassName: string
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /**
+   * After the popover has closed, return focus to its button when focus fell
+   * to the page body. Off by default (the classic rail keeps today's behavior).
+   */
+  restoreFocusOnClose?: boolean
 }
 
 export function TitleBarShortcutsPopover({
   buttonClassName,
   open,
-  onOpenChange
+  onOpenChange,
+  restoreFocusOnClose = false
 }: TitleBarShortcutsPopoverProps): React.JSX.Element {
   const [openFallback, setOpenFallback] = useState(false)
   const isOpen = open ?? openFallback
@@ -40,6 +48,7 @@ export function TitleBarShortcutsPopover({
   const updateShortcut = useUpdateShortcut()
   const resetShortcut = useResetShortcut()
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   const quickShortcuts = QUICK_SHORTCUT_IDS.filter(
     (id) => isTauriContext() || id !== 'newBrowserTab'
@@ -58,6 +67,12 @@ export function TitleBarShortcutsPopover({
     },
     [onOpenChange]
   )
+
+  const handleExitComplete = useCallback(() => {
+    if (!restoreFocusOnClose) return
+    const active = document.activeElement
+    if (!active || active === document.body) triggerRef.current?.focus()
+  }, [restoreFocusOnClose])
 
   const handleUpdate = (id: string, customKey: string): void => {
     void updateShortcut(id, customKey).catch((error: unknown) => {
@@ -105,21 +120,25 @@ export function TitleBarShortcutsPopover({
 
   return (
     <>
-      <button
-        type="button"
-        className={buttonClassName}
-        title="Keyboard shortcuts"
-        aria-label="Open keyboard shortcuts menu"
-        aria-expanded={isOpen}
-        onClick={(event) => {
-          event.stopPropagation()
-          setOpen(!isOpen)
-        }}
-      >
-        <Keyboard size={16} className={isOpen ? 'text-foreground' : 'text-muted-foreground'} />
-      </button>
+      <RailTooltip label="Keyboard shortcuts">
+        <button
+          ref={triggerRef}
+          type="button"
+          className={buttonClassName}
+          aria-label="Open keyboard shortcuts menu"
+          aria-expanded={isOpen}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen(!isOpen)
+          }}
+        >
+          {/* The keyboard body sits low in its 24px box (a cable runs to the
+              top): 1px up lines it up with the Palette glyph beside it. */}
+          <Keyboard size={16} className="-translate-y-px" />
+        </button>
+      </RailTooltip>
 
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={handleExitComplete}>
         {isOpen && (
           <motion.div
             initial={{ opacity: 0 }}
@@ -156,7 +175,7 @@ export function TitleBarShortcutsPopover({
                   ref={closeButtonRef}
                   type="button"
                   onClick={() => setOpen(false)}
-                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   Esc
                 </button>

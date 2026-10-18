@@ -5,23 +5,41 @@ type SettingsModalView = 'project' | 'app' | null
 interface SettingsModalState {
   /** Which settings modal is open, or `null` when none. */
   view: SettingsModalView
-  /** Open the Project Settings modal. */
-  openProject: () => void
-  /** Open the App Preferences modal. */
-  openApp: () => void
+  /** Active App Preferences page id, or `null` for the first page. */
+  appPage: string | null
+  /** Active Project Settings page id, or `null` for the first page. */
+  projectPage: string | null
+  /** Open the Project Settings modal, optionally on one page. */
+  openProject: (page?: string) => void
+  /** Open the App Preferences modal, optionally on one page. */
+  openApp: (page?: string) => void
+  /** Change the active App Preferences page. */
+  setAppPage: (page: string) => void
+  /** Change the active Project Settings page. */
+  setProjectPage: (page: string) => void
   /** Close whichever settings modal is open. */
   close: () => void
 }
 
 export const useSettingsModalStore = create<SettingsModalState>((set) => ({
   view: null,
+  appPage: null,
+  projectPage: null,
 
-  openProject: (): void => {
-    set({ view: 'project' })
+  openProject: (page?: string): void => {
+    set({ view: 'project', projectPage: page ?? null })
   },
 
-  openApp: (): void => {
-    set({ view: 'app' })
+  openApp: (page?: string): void => {
+    set({ view: 'app', appPage: page ?? null })
+  },
+
+  setAppPage: (page: string): void => {
+    set({ appPage: page })
+  },
+
+  setProjectPage: (page: string): void => {
+    set({ projectPage: page })
   },
 
   close: (): void => {
@@ -31,7 +49,7 @@ export const useSettingsModalStore = create<SettingsModalState>((set) => ({
 
 /**
  * Reactive selector for the current settings-modal view. Components (e.g.
- * `ActivityRail`) use this to derive `aria-pressed` without prop-threading.
+ * the Rail footer) use this to derive `aria-pressed` without prop-threading.
  */
 export function useSettingsModalView(): SettingsModalView {
   return useSettingsModalStore((state) => state.view)

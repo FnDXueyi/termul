@@ -472,9 +472,15 @@ describe('acp-store: composer-selection persistence', () => {
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined) // set_model
 
     await useAcpStore.getState().setModel('sess-persist', 'm2')
-    await vi.waitFor(() => expect(mockPersistenceApi.writeDebounced).toHaveBeenCalled())
+    // The model list is saved under its own key; only the composer-options
+    // write is under test here.
+    const composerWrites = () =>
+      vi
+        .mocked(mockPersistenceApi.writeDebounced)
+        .mock.calls.filter((c) => String(c[0]).startsWith('agents/composer-options/'))
+    await vi.waitFor(() => expect(composerWrites().length).toBeGreaterThan(0))
 
-    const callArgs = vi.mocked(mockPersistenceApi.writeDebounced).mock.calls[0]
+    const callArgs = composerWrites()[0]
     expect(callArgs).toBeDefined()
     const written = callArgs![1] as Record<string, unknown>
     // The merge preserves the existing configValues while adding modelId.
@@ -510,9 +516,13 @@ describe('acp-store: composer-selection persistence', () => {
     ;(invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined) // set_model
 
     await useAcpStore.getState().setModel('sess-eph', 'm2')
-    // Ephemeral sessions skip persistence so agent defaults don't overwrite
-    // the user's real last selection.
-    expect(mockPersistenceApi.writeDebounced).not.toHaveBeenCalled()
+    // Ephemeral sessions skip composer-option persistence so agent defaults
+    // don't overwrite the user's real last selection. (The config's model
+    // list may still be saved: it is per config, not a selection.)
+    const composerWrites = vi
+      .mocked(mockPersistenceApi.writeDebounced)
+      .mock.calls.filter((c) => String(c[0]).startsWith('agents/composer-options/'))
+    expect(composerWrites).toHaveLength(0)
   })
 })
 
@@ -677,6 +687,145 @@ describe('composer option fidelity', () => {
       expect(invokeCallsFor('acp_set_config_option')).toEqual([
         expect.objectContaining({ sessionId: 's1', configId: 'model', valueId: 'm2' })
       ])
+    })
+  })
+
+  describe('sidebar model projection', () => {
+    const modelOption = (current: 'haiku' | 'sonnet') => ({
+      id: 'model',
+      name: 'Model',
+      category: 'model' as const,
+      type: 'select',
+      currentValue: current,
+      options: [
+        { value: 'haiku', name: 'Haiku 5.5' },
+        { value: 'sonnet', name: 'Sonnet 5.5' }
+      ]
+    })
+
+    const indexRow = (modelId: string, modelName: string) => ({
+      id: 's1',
+      agentId: 'agent-1',
+      title: 'Chat',
+      cwd: '/work',
+      projectId: 'p1',
+      createdAt: 1,
+      lastActivityAt: 1,
+      messageCount: 1,
+      status: 'active' as const,
+      modelId,
+      modelName
+    })
+
+    it('setConfigOption records the selected model on the session and the chat index', async () => {
+      seedOptionsSession('s1', 'agent-1', {
+        models: {
+          currentModelId: 'haiku',
+          availableModels: [
+            { modelId: 'haiku', name: 'Haiku 5.5' },
+            { modelId: 'sonnet', name: 'Sonnet 5.5' }
+          ]
+        },
+        configOptions: [modelOption('haiku')]
+      })
+      useAcpStore.setState({ sessionIndex: [indexRow('haiku', 'Haiku 5.5')] })
+      vi.mocked(invoke).mockImplementation(async (command: string) => {
+        if (command === 'acp_set_config_option') return [modelOption('sonnet')]
+        throw new Error(`unexpected invoke command: ${command}`)
+      })
+
+      await useAcpStore.getState().setConfigOption('s1', 'model', 'sonnet')
+
+      const state = useAcpStore.getState()
+      expect(state.sessions.s1.models?.currentModelId).toBe('sonnet')
+      expect(
+        state.sessions.s1.configOptions.find((option) => option.id === 'model')?.currentValue
+      ).toBe('sonnet')
+      expect(state.sessionIndex.find((entry) => entry.id === 's1')).toEqual(
+        expect.objectContaining({ modelId: 'sonnet', modelName: 'Sonnet 5.5' })
+      )
+    })
+
+    it('keeps the selected model when a config update echoes the creation model', () => {
+      seedOptionsSession('s1', 'agent-1', {
+        models: {
+          currentModelId: 'sonnet',
+          availableModels: [
+            { modelId: 'haiku', name: 'Haiku 5.5' },
+            { modelId: 'sonnet', name: 'Sonnet 5.5' }
+          ]
+        },
+        configOptions: [modelOption('sonnet')],
+        creationOptionDefaults: { configValues: { model: 'haiku' } }
+      })
+      useAcpStore.setState({ sessionIndex: [indexRow('sonnet', 'Sonnet 5.5')] })
+
+      useAcpStore.getState()._onConfigOptionsUpdate({
+        agentId: 'agent-1',
+        sessionId: 's1',
+        configOptions: [modelOption('haiku')]
+      })
+
+      const state = useAcpStore.getState()
+      expect(state.sessions.s1.configOptions[0]?.currentValue).toBe('sonnet')
+      expect(state.sessions.s1.models?.currentModelId).toBe('sonnet')
+      expect(state.sessionIndex.find((entry) => entry.id === 's1')?.modelName).toBe('Sonnet 5.5')
+    })
+
+    it('persistSession writes the live model and keeps a host name when the session has none', () => {
+      seedOptionsSession('s1', 'agent-1', {
+        models: {
+          currentModelId: 'haiku',
+          availableModels: [{ modelId: 'haiku', name: 'Haiku 5.5' }]
+        },
+        configOptions: [modelOption('sonnet')]
+      })
+      seedOptionsSession('s-keep', 'agent-1')
+      useAcpStore.setState({
+        sessionIndex: [
+          indexRow('haiku', 'Haiku 5.5'),
+          { ...indexRow('opus', 'Opus'), id: 's-keep' }
+        ],
+        messages: {
+          s1: [
+            {
+              id: 'm1',
+              role: 'user',
+              blocks: [{ type: 'text', text: 'hi' }],
+              streaming: false,
+              timestamp: 1
+            }
+          ],
+          's-keep': [
+            {
+              id: 'm2',
+              role: 'user',
+              blocks: [{ type: 'text', text: 'hi' }],
+              streaming: false,
+              timestamp: 1
+            }
+          ]
+        }
+      })
+
+      useAcpStore.getState()._onSessionInfoUpdate({
+        agentId: 'agent-1',
+        sessionId: 's1',
+        title: 'Named'
+      })
+      useAcpStore.getState()._onSessionInfoUpdate({
+        agentId: 'agent-1',
+        sessionId: 's-keep',
+        title: 'Kept'
+      })
+
+      const state = useAcpStore.getState()
+      expect(state.sessionIndex.find((entry) => entry.id === 's1')).toEqual(
+        expect.objectContaining({ title: 'Named', modelId: 'sonnet', modelName: 'Sonnet 5.5' })
+      )
+      expect(state.sessionIndex.find((entry) => entry.id === 's-keep')).toEqual(
+        expect.objectContaining({ title: 'Kept', modelId: 'opus', modelName: 'Opus' })
+      )
     })
   })
 })

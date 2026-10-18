@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
-  AlertTriangle,
   ChevronDown,
   ExternalLink,
   Pencil,
@@ -11,6 +10,11 @@ import {
   Trash2,
   Unlink
 } from '@/components/icons'
+import { RowMenu } from '@/components/settings/RowMenu'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
+import { SettingsNotice } from '@/components/settings/SettingsNotice'
+import { type StatusTone, StatusWord } from '@/components/settings/StatusWord'
+import { showUndoToast } from '@/components/settings/undo-toast'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
@@ -21,6 +25,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
+import { DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { Spinner } from '@/components/ui/spinner'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
@@ -28,8 +33,10 @@ import { isMcpServerAutoProbed } from '@/hooks/use-acp-mcp'
 import { type StoredMcpServer, transportOf } from '@/lib/acp-mcp-persistence'
 import { logFrontendError } from '@/lib/log-api'
 import { parseMcpJsonImport } from '@/lib/mcp-json-import'
+import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
 import { useAcpStore } from '@/stores/acp-store'
+import { useProjectStore } from '@/stores/project-store'
 
 type McpDialogState = { mode: 'add' } | { mode: 'edit'; server: StoredMcpServer }
 
@@ -108,6 +115,9 @@ export function McpServersSettings(): React.JSX.Element {
   const connectMcpOAuth = useAcpStore((state) => state.connectMcpOAuth)
   const disconnectMcpOAuth = useAcpStore((state) => state.disconnectMcpOAuth)
   const checkMcpOAuthStatus = useAcpStore((state) => state.checkMcpOAuthStatus)
+  // OAuth host calls name the active project (the web host authorizes the URL
+  // against that project's MCP list).
+  const activeProjectId = useProjectStore((state) => state.activeProjectId)
   const [dialog, setDialog] = useState<McpDialogState | null>(null)
   const [jsonText, setJsonText] = useState('')
   const [jsonErrors, setJsonErrors] = useState<string[]>([])
@@ -137,10 +147,10 @@ export function McpServersSettings(): React.JSX.Element {
   useEffect(() => {
     for (const server of servers) {
       if (transportOf(server) === 'http' || transportOf(server) === 'sse') {
-        void checkMcpOAuthStatus(server.id)
+        void checkMcpOAuthStatus(activeProjectId, server.id)
       }
     }
-  }, [servers.map((s) => s.id).join('|')])
+  }, [servers.map((s) => s.id).join('|'), activeProjectId])
 
   const closeDialog = (): void => {
     setDialog(null)
@@ -256,246 +266,279 @@ export function McpServersSettings(): React.JSX.Element {
     }
   }
 
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3 rounded-lg border border-border bg-secondary/20 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-sm font-medium text-foreground">Global MCP registry</p>
-          <p className="text-xs text-muted-foreground">
-            Enabled servers are offered automatically when a new agent session starts.
-          </p>
-        </div>
-        <Button type="button" size="sm" onClick={openAdd}>
-          <Plus size={14} className="mr-1.5" /> Add server
-        </Button>
-      </div>
-
-      <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-        <div className="flex items-start gap-2">
-          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-          <p>
-            Environment variables and headers are stored in the existing application data store.
-            Prefer <code>$VARIABLE</code> references instead of literal credentials.
-          </p>
-        </div>
-      </div>
-
-      {servers.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-8 text-center">
-          <Server size={24} className="mx-auto mb-2 text-muted-foreground" />
-          <p className="text-sm font-medium">No MCP servers configured</p>
-          <p className="mt-1 text-xs text-muted-foreground">Add a stdio, HTTP, or SSE server.</p>
-        </div>
-      ) : (
-        <div className="divide-y divide-border rounded-lg border border-border">
-          {servers.map((server) => {
-            const probeStatus = mcpProbeStatus[server.id]
-            const probing = Boolean(mcpProbing[server.id])
-            const tools = mcpTools[server.id]
-            const isOpen = Boolean(expandedTools[server.id])
-            const detail =
-              transportOf(server) === 'stdio'
-                ? (server as Extract<StoredMcpServer, { type?: 'stdio' }>).command
-                : (server as Extract<StoredMcpServer, { type: 'http' | 'sse' }>).url
-            return (
-              <Collapsible
-                key={server.id}
-                open={isOpen}
-                onOpenChange={(next) => {
-                  setExpandedTools((prev) => ({ ...prev, [server.id]: next }))
-                  if (next) void loadMcpTools(server.id)
-                }}
-              >
-                {/* Compact one-line row: status dot, name, transport,
-                    command/URL, tools trigger, and every row action. Tool
-                    and probe details stay opt-in behind the disclosure. */}
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <span
-                    role="img"
-                    className={
-                      probeStatus === 'connected'
-                        ? 'size-2 shrink-0 rounded-full bg-success-fill'
-                        : probeStatus === 'disconnected'
-                          ? 'size-2 shrink-0 rounded-full bg-destructive-fill'
-                          : probeStatus === 'authRequired'
-                            ? 'size-2 shrink-0 rounded-full bg-warning'
-                            : 'size-2 shrink-0 rounded-full bg-muted-foreground/40'
-                    }
-                    aria-label={
-                      probeStatus === 'connected'
-                        ? `${server.name} reachable`
-                        : probeStatus === 'disconnected'
-                          ? `${server.name} unreachable`
-                          : probeStatus === 'authRequired'
-                            ? `${server.name} requires authentication`
-                            : `${server.name} not probed yet`
-                    }
-                    title={
-                      probeStatus === 'connected'
-                        ? 'Connected (Termul can reach this server)'
-                        : probeStatus === 'disconnected'
-                          ? 'Disconnected (Termul could not reach this server)'
-                          : probeStatus === 'authRequired'
-                            ? 'Authentication required — click "Connect" to authorize'
-                            : 'Not probed yet — click "Test" to check'
-                    }
-                  />
-                  <span className="min-w-0 shrink truncate text-sm font-medium">{server.name}</span>
-                  <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-3xs font-medium uppercase text-muted-foreground">
-                    {transportOf(server)}
-                  </span>
-                  <span className="hidden min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground sm:block">
-                    {detail}
-                  </span>
-                  <CollapsibleTrigger className="inline-flex shrink-0 items-center gap-1 text-3xs text-muted-foreground underline-offset-2 hover:underline">
-                    <ChevronDown size={12} className={isOpen ? 'rotate-180' : ''} />
-                    {tools && tools.length > 0
-                      ? `${tools.length} tool${tools.length === 1 ? '' : 's'}`
-                      : probeStatus === 'disconnected'
-                        ? 'Probe failed — retry'
-                        : 'Show tools'}
-                  </CollapsibleTrigger>
-                  {(probeStatus === 'authRequired' || mcpOAuthConnected[server.id]) && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={mcpOAuthConnected[server.id] ? 'outline' : 'default'}
-                      disabled={Boolean(mcpOAuthConnecting[server.id])}
-                      onClick={() => {
-                        if (mcpOAuthConnected[server.id]) {
-                          void disconnectMcpOAuth(server.id).catch(() =>
-                            toast.error('Could not disconnect OAuth. Try again.')
-                          )
-                        } else {
-                          void connectMcpOAuth(server.id)
-                            .then(() => toast.success(`Connected to ${server.name}`))
-                            .catch(() =>
-                              toast.error(
-                                'OAuth flow failed. Check your browser for the authorization page.'
-                              )
-                            )
-                        }
-                      }}
-                      className="shrink-0"
-                    >
-                      {mcpOAuthConnecting[server.id] ? (
-                        <Spinner size={13} decorative className="mr-1" />
-                      ) : mcpOAuthConnected[server.id] ? (
-                        <Unlink size={13} className="mr-1" />
-                      ) : (
-                        <ExternalLink size={13} className="mr-1" />
-                      )}
-                      {mcpOAuthConnecting[server.id]
-                        ? 'Connecting…'
-                        : mcpOAuthConnected[server.id]
-                          ? 'Disconnect'
-                          : 'Connect'}
-                    </Button>
-                  )}
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    disabled={probing}
-                    onClick={() => void probeMcpServer(server.id)}
-                    aria-label={`Test ${server.name} connection`}
-                  >
-                    {probing ? <Spinner size={14} decorative /> : <RefreshCw size={14} />}
-                  </Button>
-                  <Switch
-                    checked={server.enabled !== false}
-                    aria-label={`${server.enabled !== false ? 'Disable' : 'Enable'} ${server.name}`}
-                    onCheckedChange={(enabled) => {
-                      void setMcpServerEnabled(server.id, enabled).catch(() => {
-                        toast.error(
-                          'Could not update the MCP server. Your previous setting was restored.'
-                        )
-                      })
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => openEdit(server)}
-                  >
-                    <Pencil size={15} />
-                    <span className="sr-only">Edit {server.name}</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => {
-                      void deleteMcpServer(server.id).catch(() => {
-                        toast.error(
-                          'Could not delete the MCP server. Your previous settings were restored.'
-                        )
-                      })
-                    }}
-                  >
-                    <Trash2 size={15} />
-                    <span className="sr-only">Delete {server.name}</span>
-                  </Button>
-                </div>
-                <CollapsibleContent className="px-3 pb-2">
-                  {tools && tools.length > 0 ? (
-                    <ul className="space-y-0.5">
-                      {tools.map((tool) => (
-                        <li key={tool.name} className="flex min-w-0 items-baseline text-3xs">
-                          <span className="font-mono font-medium text-foreground">{tool.name}</span>
-                          {tool.description ? (
-                            <span className="ml-1 min-w-0 flex-1 truncate text-muted-foreground/70">
-                              — {tool.description}
-                            </span>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : probeStatus === 'disconnected' ? (
-                    <div className="space-y-1">
-                      <p className="text-3xs text-destructive">
-                        Probe failed — check the server config or network.
-                      </p>
-                      {mcpProbeError[server.id] ? (
-                        <span className="block font-mono text-3xs text-destructive/80">
-                          {mcpProbeError[server.id]}
-                        </span>
-                      ) : null}
-                    </div>
-                  ) : probeStatus === 'authRequired' ? (
-                    <div className="space-y-1">
-                      <p className="text-3xs text-warning">
-                        This server requires OAuth authentication. Click "Connect" to authorize in
-                        your browser.
-                      </p>
-                    </div>
-                  ) : probeStatus === 'connected' ? (
-                    <p className="text-3xs text-muted-foreground">
-                      Probe completed — no tools found.
-                    </p>
-                  ) : probing ? (
-                    <p className="text-3xs text-muted-foreground">Probing…</p>
-                  ) : (
-                    <p className="text-3xs text-muted-foreground">
-                      Expand to probe (read-only — per-tool toggle coming soon).
-                    </p>
-                  )}
-                </CollapsibleContent>
-              </Collapsible>
+  const deleteServer = (server: StoredMcpServer): void => {
+    void deleteMcpServer(server.id)
+      .then(() => {
+        void logFrontendError({
+          level: 'info',
+          source: 'settings.McpServersSettings',
+          message: 'MCP server deleted; undo offered'
+        })
+        showUndoToast(`Deleted ${server.name}`, () => {
+          void saveMcpServer(server)
+            .then(() =>
+              logFrontendError({
+                level: 'info',
+                source: 'settings.McpServersSettings',
+                message: 'MCP server restored by undo'
+              })
             )
-          })}
-        </div>
-      )}
+            .catch(() => toast.error('Could not restore the MCP server. Add it again from JSON.'))
+        })
+      })
+      .catch(() => {
+        toast.error('Could not delete the MCP server. Your previous settings were restored.')
+      })
+  }
 
-      <div className="rounded-lg border border-border p-3 text-xs text-muted-foreground">
-        <p className="font-medium text-foreground">Experimental MCP-over-ACP</p>
-        <p className="mt-1">
-          Agents may advertise an experimental <code>mcpCapabilities.acp</code> capability. Termul
-          retains that capability for diagnostics, but no native ACP transport can be configured
-          until Termul has an in-process MCP server handler.
-        </p>
-      </div>
+  const enabledCount = servers.filter((server) => server.enabled !== false).length
+
+  return (
+    <div className="flex flex-col gap-6">
+      <SettingsGroup
+        title={
+          servers.length === 0
+            ? 'Global MCP registry'
+            : `${servers.length} server${servers.length === 1 ? '' : 's'} · ${enabledCount} enabled`
+        }
+        actions={
+          servers.length > 0 ? (
+            <Button type="button" size="sm" onClick={openAdd}>
+              <Plus size={14} /> Add server
+            </Button>
+          ) : null
+        }
+        footnote={
+          <>
+            Agents can also advertise experimental MCP-over-ACP (<code>mcpCapabilities.acp</code>).
+            Termul does not read it yet.
+          </>
+        }
+      >
+        <SettingsNotice tone="warning">
+          Environment values and headers are saved in app data. Use <code>$VARIABLE</code>{' '}
+          references instead of real secrets.
+        </SettingsNotice>
+
+        {servers.length === 0 ? (
+          <div className="flex flex-col items-center gap-1.5 rounded-lg border border-border bg-card px-6 py-8 text-center">
+            <Server size={20} className="mb-1 text-muted-foreground" />
+            <p className="text-sm font-medium text-foreground">No MCP servers configured</p>
+            <p className="max-w-sm text-xs text-muted-foreground">
+              Add a stdio, HTTP, or SSE server. New agent chats can then use its tools.
+            </p>
+            <div className="pt-2">
+              <Button type="button" size="sm" onClick={openAdd}>
+                <Plus size={14} /> Add server
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <SettingsCard>
+            {servers.map((server) => {
+              const probeStatus = mcpProbeStatus[server.id]
+              const probing = Boolean(mcpProbing[server.id])
+              const tools = mcpTools[server.id]
+              const isOpen = Boolean(expandedTools[server.id])
+              const enabled = server.enabled !== false
+              const oauthConnected = Boolean(mcpOAuthConnected[server.id])
+              const oauthConnecting = Boolean(mcpOAuthConnecting[server.id])
+              const detail =
+                transportOf(server) === 'stdio'
+                  ? (server as Extract<StoredMcpServer, { type?: 'stdio' }>).command
+                  : (server as Extract<StoredMcpServer, { type: 'http' | 'sse' }>).url
+              const status: { tone: StatusTone; label: string } = !enabled
+                ? { tone: 'muted', label: 'Off' }
+                : probing
+                  ? { tone: 'muted', label: 'Checking…' }
+                  : probeStatus === 'connected'
+                    ? { tone: 'success', label: 'Connected' }
+                    : probeStatus === 'disconnected'
+                      ? { tone: 'danger', label: 'Unreachable' }
+                      : probeStatus === 'authRequired'
+                        ? { tone: 'warning', label: 'Needs sign-in' }
+                        : { tone: 'muted', label: 'Not checked' }
+              return (
+                <Collapsible
+                  key={server.id}
+                  open={isOpen}
+                  onOpenChange={(next) => {
+                    setExpandedTools((prev) => ({ ...prev, [server.id]: next }))
+                    if (next) void loadMcpTools(server.id)
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+                    <div className="min-w-0 flex-1 basis-56">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={cn(
+                            'min-w-0 truncate text-sm font-medium',
+                            enabled ? 'text-foreground' : 'text-muted-foreground'
+                          )}
+                        >
+                          {server.name}
+                        </span>
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-px text-3xs font-medium uppercase text-muted-foreground">
+                          {transportOf(server)}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex min-w-0 items-center gap-3">
+                        <span
+                          className="min-w-0 truncate font-mono text-xs text-muted-foreground"
+                          title={detail}
+                        >
+                          {detail}
+                        </span>
+                        <CollapsibleTrigger className="inline-flex shrink-0 items-center gap-1 rounded text-xs text-secondary-foreground underline-offset-2 hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring">
+                          {tools && tools.length > 0
+                            ? `${tools.length} tool${tools.length === 1 ? '' : 's'}`
+                            : probeStatus === 'disconnected'
+                              ? isOpen
+                                ? 'Hide error'
+                                : 'Show error'
+                              : 'Show tools'}
+                          <ChevronDown
+                            size={12}
+                            className={cn(
+                              'transition-transform duration-150',
+                              isOpen && 'rotate-180'
+                            )}
+                          />
+                        </CollapsibleTrigger>
+                      </div>
+                    </div>
+                    <div className="ml-auto flex shrink-0 items-center gap-3">
+                      <StatusWord tone={status.tone} pending={probing}>
+                        {status.label}
+                      </StatusWord>
+                      {(probeStatus === 'authRequired' || oauthConnected) && (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={oauthConnecting}
+                          onClick={() => {
+                            if (oauthConnected) {
+                              void disconnectMcpOAuth(activeProjectId, server.id).catch(() =>
+                                toast.error('Could not disconnect OAuth. Try again.')
+                              )
+                            } else {
+                              void connectMcpOAuth(activeProjectId, server.id)
+                                .then(() => toast.success(`Connected to ${server.name}`))
+                                .catch(() =>
+                                  toast.error(
+                                    'OAuth flow failed. Check your browser for the authorization page.'
+                                  )
+                                )
+                            }
+                          }}
+                        >
+                          {oauthConnecting ? (
+                            <Spinner size={13} decorative />
+                          ) : oauthConnected ? (
+                            <Unlink size={13} />
+                          ) : (
+                            <ExternalLink size={13} />
+                          )}
+                          {oauthConnecting
+                            ? 'Connecting…'
+                            : oauthConnected
+                              ? 'Disconnect'
+                              : 'Connect'}
+                        </Button>
+                      )}
+                      <Switch
+                        checked={enabled}
+                        aria-label={`${enabled ? 'Disable' : 'Enable'} ${server.name}`}
+                        onCheckedChange={(next) => {
+                          void setMcpServerEnabled(server.id, next).catch(() => {
+                            toast.error(
+                              'Could not update the MCP server. Your previous setting was restored.'
+                            )
+                          })
+                        }}
+                      />
+                      <RowMenu label={`Actions for ${server.name}`}>
+                        <DropdownMenuItem
+                          disabled={probing}
+                          onSelect={() => void probeMcpServer(server.id)}
+                        >
+                          <RefreshCw size={14} />
+                          Test connection
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => openEdit(server)}>
+                          <Pencil size={14} />
+                          Edit as JSON
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => deleteServer(server)}
+                          className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                        >
+                          <Trash2 size={14} />
+                          Delete
+                        </DropdownMenuItem>
+                      </RowMenu>
+                    </div>
+                  </div>
+                  <CollapsibleContent className="px-4 pb-3">
+                    {tools && tools.length > 0 ? (
+                      <ul className="flex flex-col gap-1 rounded-md border border-border bg-background px-3 py-2.5">
+                        {tools.map((tool) => (
+                          <li key={tool.name} className="flex min-w-0 items-baseline gap-2 text-xs">
+                            <span className="shrink-0 font-mono text-foreground">{tool.name}</span>
+                            {tool.description ? (
+                              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                                {tool.description}
+                              </span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : probeStatus === 'disconnected' ? (
+                      <SettingsNotice
+                        tone="danger"
+                        action={
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="outline"
+                            disabled={probing}
+                            onClick={() => void probeMcpServer(server.id)}
+                          >
+                            <RefreshCw size={13} />
+                            Try again
+                          </Button>
+                        }
+                      >
+                        Termul could not reach this server. Check the command, URL and environment
+                        values, then try again.
+                        {mcpProbeError[server.id] ? (
+                          <span className="mt-1 block break-words font-mono text-muted-foreground">
+                            {mcpProbeError[server.id]}
+                          </span>
+                        ) : null}
+                      </SettingsNotice>
+                    ) : probeStatus === 'authRequired' ? (
+                      <SettingsNotice tone="warning">
+                        This server uses OAuth. Select Connect to sign in in your browser.
+                      </SettingsNotice>
+                    ) : probeStatus === 'connected' ? (
+                      <SettingsNotice>The server answered but offers no tools.</SettingsNotice>
+                    ) : probing ? (
+                      <p className="text-xs text-muted-foreground">Checking…</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Opening the tool list runs the first check (read-only).
+                      </p>
+                    )}
+                  </CollapsibleContent>
+                </Collapsible>
+              )
+            })}
+          </SettingsCard>
+        )}
+      </SettingsGroup>
 
       <Dialog
         open={dialog !== null}

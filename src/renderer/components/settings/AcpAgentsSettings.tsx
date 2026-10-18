@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { CustomAcpAgentDialog, exportAgentConfig } from '@/components/agents/CustomAcpAgentDialog'
 import { Clipboard, Plus, RefreshCw, Search } from '@/components/icons'
-import { Badge } from '@/components/ui/badge'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
+import { type StatusTone, StatusWord } from '@/components/settings/StatusWord'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { PANEL_FIELD_CLASS, PANEL_FIELD_ICON_CLASS } from '@/components/ui/panel-styles'
 import { Spinner } from '@/components/ui/spinner'
 import { useAcpRegistryCatalog } from '@/hooks/use-acp-registry-catalog'
 import { useResolvedSupportedAcpAgents } from '@/hooks/use-resolved-supported-acp-agents'
@@ -25,6 +27,16 @@ import { dialogApi } from '@/lib/api'
 import { logFrontendError } from '@/lib/log-api'
 import { cn } from '@/lib/utils'
 import { useAcpStore, useConfigWarmState } from '@/stores/acp-store'
+
+function agentUpdatesLabel(count: number): string {
+  return `${count} agent update${count === 1 ? '' : 's'}`
+}
+
+function formatCheckedAt(iso: string): string {
+  return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(
+    new Date(iso)
+  )
+}
 
 /** Render a sanitized SVG icon string inline (theme-aware via currentColor). */
 function InlineIcon({ svg }: { svg: string }): React.JSX.Element {
@@ -176,23 +188,23 @@ function AgentRow({ entry, update, latest, onUpdate }: AgentRowProps): React.JSX
   // Prefer a persisted custom icon (bundled or uploaded) over the catalog.
   const customIcon = entry.config?.icon
 
-  const statusBadge: { label: string; tone: 'ready' | 'muted' | 'warn' } = warmState.sessionReady
-    ? { label: 'Session ready', tone: 'ready' }
+  const status: { label: string; tone: StatusTone; pending?: boolean } = warmState.sessionReady
+    ? { label: 'Session ready', tone: 'success' }
     : warmState.warming || warmState.warmingSession
-      ? { label: 'Warming…', tone: 'muted' }
+      ? { label: 'Warming…', tone: 'muted', pending: true }
       : warmState.connected
-        ? { label: 'Warm', tone: 'ready' }
+        ? { label: 'Warm', tone: 'success' }
         : entry.status === 'ready'
-          ? { label: 'Available', tone: 'ready' }
+          ? { label: 'Available', tone: 'success' }
           : entry.status === 'install-required'
-            ? { label: 'Install from Agent Chat', tone: 'warn' }
+            ? { label: 'Needs install', tone: 'warning' }
             : entry.status === 'needs-runtime'
               ? {
                   label: entry.runtimeLauncher === 'uvx' ? 'Needs uv' : 'Needs Node.js',
-                  tone: 'warn'
+                  tone: 'warning'
                 }
               : entry.status === 'manual-install'
-                ? { label: 'Manual install', tone: 'warn' }
+                ? { label: 'Manual install', tone: 'warning' }
                 : { label: 'Unavailable', tone: 'muted' }
 
   const handleCopyJson = async (): Promise<void> => {
@@ -219,8 +231,8 @@ function AgentRow({ entry, update, latest, onUpdate }: AgentRowProps): React.JSX
   }
 
   return (
-    <div className="flex items-start gap-3 rounded-md border border-border/60 px-3 py-2.5">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
+    <div className="flex items-start gap-3 px-4 py-3">
+      <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
         {customIcon && iconSanitizesOk(customIcon) ? (
           <InlineIcon svg={customIcon} />
         ) : iconEntry ? (
@@ -233,66 +245,58 @@ function AgentRow({ entry, update, latest, onUpdate }: AgentRowProps): React.JSX
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2">
+        <div className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="truncate text-sm font-medium text-foreground">{entry.agent.name}</span>
           {entry.agent.version && (
-            <span className="shrink-0 font-mono text-3xs text-muted-foreground">
+            <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
               v{entry.agent.version}
             </span>
           )}
-          <Badge
-            variant="secondary"
-            className={cn(
-              'h-4 px-1.5 text-3xs',
-              statusBadge.tone === 'ready' && 'text-success',
-              statusBadge.tone === 'warn' && 'text-warning'
-            )}
-          >
-            {statusBadge.label}
-          </Badge>
           {update && (
-            <Badge
-              variant="secondary"
-              className="h-4 px-1.5 font-mono text-3xs text-connection"
+            <span
+              className="shrink-0 rounded bg-muted px-1.5 py-px font-mono text-3xs text-connection"
               data-testid={`agent-update-${entry.id}`}
             >
               {update.fromVersion} → {update.toVersion}
-            </Badge>
+            </span>
           )}
           {latest && !update && (
             // Positive drift-free signal (user trust): a check has run, this
             // agent has a spawn version, and it matches the target registry.
-            <Badge
-              variant="secondary"
-              className="h-4 px-1.5 text-3xs text-success"
+            <span
+              className="shrink-0 rounded bg-muted px-1.5 py-px text-3xs text-success"
               data-testid={`agent-latest-${entry.id}`}
             >
               Latest
-            </Badge>
+            </span>
           )}
+          <span className="ml-auto flex items-center gap-2">
+            <StatusWord tone={status.tone} pending={status.pending}>
+              {status.label}
+            </StatusWord>
+            {update && entry.config && (
+              // Agent language only: one action. The click absorbs the registry
+              // opt-in on the user's behalf (explicit consent preserved) and
+              // rewrites the pin.
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onClick={() => onUpdate(entry, update)}
+                aria-label={`Update to ${update.toVersion} (${entry.agent.name})`}
+              >
+                Update to {update.toVersion}
+              </Button>
+            )}
+          </span>
         </div>
-        {update && entry.config && (
-          // Agent language only: one action. The click absorbs the registry
-          // opt-in on the user's behalf (explicit consent preserved) and
-          // rewrites the pin.
-          <div className="mt-1.5">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => onUpdate(entry, update)}
-            >
-              Update to {update.toVersion}
-            </Button>
-          </div>
-        )}
         {entry.agent.description && (
           <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
             {entry.agent.description}
           </p>
         )}
         {entry.status !== 'ready' && (
-          <p className="mt-1 text-2xs text-warning">
+          <p className="mt-1 text-xs text-warning">
             {entry.status === 'install-required'
               ? entry.install?.kind === 'managed-npm'
                 ? `Open Agent Chat to install the pinned ${entry.install.package} package.`
@@ -396,18 +400,25 @@ export function AcpAgentsSettings(): React.JSX.Element {
   const handleCheckUpdates = (): void => {
     void (async () => {
       try {
-        const summary = await checkForUpdates(true)
+        const summary = await checkForUpdates('manual')
         if (!summary) {
           toast.error('Could not check for agent updates.')
+          return
+        }
+        if (summary.registryUnreachable) {
+          const cachedAt = summary.fetchedAt ? ` from ${formatCheckedAt(summary.fetchedAt)}` : ''
+          const found =
+            summary.updatedCount === 0 ? 'no updates' : agentUpdatesLabel(summary.updatedCount)
+          toast.warning("Couldn't reach the agent registry.", {
+            description: `Cached results${cachedAt} show ${found}.`
+          })
           return
         }
         if (summary.updatedCount === 0) {
           toast.success('All agents are up to date.')
           return
         }
-        toast.success(
-          `${summary.updatedCount} agent update${summary.updatedCount === 1 ? '' : 's'} available.`
-        )
+        toast.success(`${agentUpdatesLabel(summary.updatedCount)} available.`)
       } catch (err) {
         toast.error(String(err))
       }
@@ -415,59 +426,64 @@ export function AcpAgentsSettings(): React.JSX.Element {
   }
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={checking}
-          onClick={handleCheckUpdates}
-        >
-          {checking ? (
-            <Spinner size={14} decorative className="mr-1.5" />
-          ) : (
-            <RefreshCw size={14} className="mr-1.5" />
+    <SettingsGroup
+      id="settings-available-agents"
+      className="scroll-mt-4"
+      title="Available agents"
+      actions={
+        <>
+          {lastCheckedAt && (
+            <span className="text-xs text-muted-foreground">
+              {remoteAvailable && (advisorySummary?.updatedCount ?? 0) > 0
+                ? `${advisorySummary?.updatedCount} agent update${(advisorySummary?.updatedCount ?? 0) === 1 ? '' : 's'} available`
+                : 'All agents up to date'}{' '}
+              · Checked {lastCheckedAt}
+            </span>
           )}
-          Check for updates
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          onClick={() => setCustomDialogOpen(true)}
-        >
-          <Plus size={14} className="mr-1.5" />
-          Add Custom Agent
-        </Button>
-        {lastCheckedAt && (
-          <span className="text-2xs text-muted-foreground">
-            {remoteAvailable && (advisorySummary?.updatedCount ?? 0) > 0
-              ? `${advisorySummary?.updatedCount} agent update${(advisorySummary?.updatedCount ?? 0) === 1 ? '' : 's'} available`
-              : 'All agents up to date'}{' '}
-            · Checked {lastCheckedAt}
-          </span>
-        )}
-      </div>
-
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={checking}
+            onClick={handleCheckUpdates}
+          >
+            {checking ? <Spinner size={13} decorative /> : <RefreshCw size={13} />}
+            Check for updates
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => setCustomDialogOpen(true)}
+          >
+            <Plus size={13} />
+            Add custom agent
+          </Button>
+        </>
+      }
+    >
       <div className="relative">
-        <Search
-          size={14}
-          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-        />
-        <Input
+        <Search size={13} aria-hidden className={PANEL_FIELD_ICON_CLASS} />
+        <input
+          type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter agents…"
-          className="h-8 pl-8 text-sm"
+          placeholder="Filter agents"
+          aria-label="Filter agents"
+          className={cn(PANEL_FIELD_CLASS, 'h-8 w-full bg-background pl-7 pr-3')}
         />
       </div>
 
-      <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
-        {visible.length === 0 ? (
-          <p className="py-4 text-center text-xs text-muted-foreground">No agents match.</p>
-        ) : (
-          visible.map((entry) => (
+      {visible.length === 0 ? (
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-border bg-card p-5 text-center">
+          <p className="text-xs text-muted-foreground">No agents match "{filter.trim()}".</p>
+          <Button type="button" size="xs" variant="outline" onClick={() => setFilter('')}>
+            Clear filter
+          </Button>
+        </div>
+      ) : (
+        <SettingsCard>
+          {visible.map((entry) => (
             <AgentRow
               key={entry.id}
               entry={entry}
@@ -475,11 +491,11 @@ export function AcpAgentsSettings(): React.JSX.Element {
               latest={latestConfigIds.has(entry.configId)}
               onUpdate={handleAgentUpdate}
             />
-          ))
-        )}
-      </div>
+          ))}
+        </SettingsCard>
+      )}
 
       <CustomAcpAgentDialog open={customDialogOpen} onOpenChange={setCustomDialogOpen} />
-    </div>
+    </SettingsGroup>
   )
 }

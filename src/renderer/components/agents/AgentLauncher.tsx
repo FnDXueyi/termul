@@ -1,8 +1,9 @@
 import type { LastSelectedAgent, PersistedComposerOptions } from '@shared/types/persistence.types'
 import { PersistenceKeys } from '@shared/types/persistence.types'
+import type { BaseBranchInfo } from '@shared/types/worktree.types'
 import type { Editor } from '@tiptap/core'
 import { useIsPresent, useReducedMotion } from 'framer-motion'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { useSelectedAgentUpdate } from '@/components/agents/launcher/AgentUpdateCta'
 import {
@@ -11,27 +12,28 @@ import {
   EMPTY_MCP_SERVERS,
   EMPTY_MCP_TOOLS,
   EMPTY_PROBE_ERROR,
-  EMPTY_PROBE_STATUS
+  EMPTY_PROBE_STATUS,
+  EMPTY_WORKTREES
 } from '@/components/agents/launcher/constants'
 import { LauncherContextStrip } from '@/components/agents/launcher/context-strip'
 import { useFactoryKeyAuth } from '@/components/agents/launcher/FactoryApiKeyForm'
-import { LauncherHero } from '@/components/agents/launcher/hero'
 import {
   LAUNCHER_DISMISS_MS,
-  LAUNCHER_DOCK_BOTTOM_PX,
   LAUNCHER_DOCK_SLIDE_MS,
   LAUNCHER_EXIT_FADE_DELAY_MS,
   LAUNCHER_EXIT_FADE_MS
 } from '@/components/agents/launcher/launcher-motion'
+import { LauncherOverlayChrome } from '@/components/agents/launcher/overlay-chrome'
 import {
-  type LauncherExitAnim,
-  LauncherOverlayChrome
-} from '@/components/agents/launcher/overlay-chrome'
-import { prepareLaunchWorktree } from '@/components/agents/launcher/prepare-launch-worktree'
+  persistedIsolationMode,
+  prepareLaunchWorktree
+} from '@/components/agents/launcher/prepare-launch-worktree'
 import { spawnAcpLoginTerminal } from '@/components/agents/launcher/spawn-acp-login-terminal'
 import { LauncherStatusBanners } from '@/components/agents/launcher/status-banners'
 import { LauncherToolbar } from '@/components/agents/launcher/toolbar'
-import { useServerAdmitsRemoteWrites } from '@/components/agents/launcher/use-server-admits-remote-writes'
+import { useLaunchWorkspace } from '@/components/agents/launcher/use-launch-workspace'
+import { useLauncherExitAnim } from '@/components/agents/launcher/use-launcher-exit-anim'
+import { useLauncherSelectorSource } from '@/components/agents/launcher/use-launcher-selector-source'
 import {
   emptyPendingLauncherOptions,
   hasPendingLauncherOptions,
@@ -50,8 +52,14 @@ import {
   resolveModelOption,
   wireConfigValue
 } from '@/components/chat/chat-input-bar-config'
+import { useComposerToolbarMode } from '@/components/chat/chat-layout'
+import { ChatStarters, ChatStartHero } from '@/components/chat/chat-start'
 import { ChatComposerEditor } from '@/components/chat/composer/ChatComposerEditor'
-import { FileMentionMenu } from '@/components/chat/FileMentionMenu'
+import {
+  FileMentionMenu,
+  MENTION_EMPTY_LABEL,
+  MENTION_SEARCHING_LABEL
+} from '@/components/chat/FileMentionMenu'
 import { SlashCommandMenu, type SlashMenuHandle } from '@/components/chat/SlashCommandMenu'
 import { useChatComposer } from '@/components/chat/use-chat-composer'
 import { useComposerAttachments } from '@/components/chat/use-composer-attachments'
@@ -64,10 +72,12 @@ import { Paperclip } from '@/components/icons'
 import { useAcpRegistryCatalog } from '@/hooks/use-acp-registry-catalog'
 import { useAgentSkills } from '@/hooks/use-agent-skills'
 import { useAttachmentDropZone } from '@/hooks/use-attachment-drop-zone'
+import { useDockClearance } from '@/hooks/use-dock-clearance'
 import { useMentionRecents } from '@/hooks/use-mention-recents'
 import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useOskViewport } from '@/hooks/use-osk-viewport'
 import { useResolvedSupportedAcpAgents } from '@/hooks/use-resolved-supported-acp-agents'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
 import { type AuthMethod, acpApi, type ContentBlock } from '@/lib/acp-api'
 import { resolveAgentEnv } from '@/lib/agent-launch'
 import { agentPolicy } from '@/lib/agents/acp-registry'
@@ -89,8 +99,9 @@ import { isTauriContext } from '@/lib/tauri-runtime'
 import { terminalApi } from '@/lib/terminal-api'
 import { cn } from '@/lib/utils'
 import { randomUUID } from '@/lib/uuid'
-import { type BaseBranchInfo, worktreeApi } from '@/lib/worktree-api'
+import { worktreeApi } from '@/lib/worktree-api'
 import { getDefaultCwdForProject, getProjectRootPath } from '@/lib/worktree-context'
+import { READ_ONLY_SERVER_REASON } from '@/lib/write-gate'
 import {
   type AcpSession,
   agentReuseKey,
@@ -101,6 +112,7 @@ import {
   useAcpStore
 } from '@/stores/acp-store'
 import { useActiveProject, useProjectStore } from '@/stores/project-store'
+import { useWorktreePick } from '@/stores/shell-layout-store'
 import { agentChatTabId, findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
 import { useWorktreeProgressStore } from '@/stores/worktree-progress-store'
 
@@ -146,6 +158,21 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   const launchInFlightRef = useRef(false)
   const menuRef = useRef<SlashMenuHandle>(null)
   const editorRef = useRef<Editor | null>(null)
+  // Set when an agent pick happens INSIDE the open selector popover (the only
+  // place picks originate): the editor must not take focus while that popover
+  // is open — Radix dismisses a popover the moment focus moves outside its
+  // content, which would close the menu on every provider switch. The intent
+  // is consumed by `handleSelectorCloseAutoFocus` once the popover finishes
+  // closing.
+  const deferEditorFocusRef = useRef(false)
+  // A model chosen together with its agent in the model selector. The restore
+  // effect for the new agent applies it over the saved options, so a saved
+  // model does not replace the user's pick.
+  const pendingPickRef = useRef<{
+    configId: string
+    modelId: string
+    modelConfigId: string | null
+  } | null>(null)
   const composerInputRef = useRef<HTMLElement | null>(null)
   const { scheduleRestoreCaret } = useComposerCaretRestore(editorRef)
 
@@ -192,76 +219,16 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   }, [isPresent, paneLeaf, isOverlayLauncher])
   const showOverlayChrome = isOverlayLauncher || (isExiting && overlayVariantRef.current)
 
-  const [exitAnim, setExitAnim] = useState<LauncherExitAnim | null>(null)
-  const exitMeasuredRef = useRef(false)
-
-  // Presence can resume inside the same boundary (overlay hidden → re-shown
-  // while still exiting): drop stale exit styling and re-arm measurement.
-  useLayoutEffect(() => {
-    if (!isPresent) return
-    setExitAnim(null)
-    exitMeasuredRef.current = false
-  }, [isPresent])
-
-  // Measure once on the first exiting commit, while the transform is still
-  // identity: the getBoundingClientRect reflow anchors that computed value so
-  // the follow-up render animates identity → morph instead of jumping. The
-  // once-guard also stops paneLeaf churn mid-exit from re-measuring the
-  // already-transformed card (rects include transforms → wrong math).
-  useLayoutEffect(() => {
-    if (!isExiting || reducedMotion || exitMeasuredRef.current) return
-    const root = rootRef.current
-    const card = composerCardRef.current
-    if (!root || !card) return
-    exitMeasuredRef.current = true
-
-    const activeTab = paneLeaf?.tabs.find((t) => t.id === paneLeaf.activeTabId)
-    const launched =
-      launchInFlightRef.current ||
-      (activeTab?.type === 'agent-chat' && activeTab.id !== prevActiveTabIdRef.current)
-    if (!launched) {
-      setExitAnim({ kind: 'dismiss' })
-      return
-    }
-
-    // Morph target: the real ChatInputBar card mounted by the fresh chat tab
-    // in the same pane. Inactive chat tabs stay mounted (invisible but laid
-    // out) and their composers can differ in height — prefer the composer in
-    // the ACTIVE tab, then any non-invisible one.
-    const paneEl = root.closest('[data-pane-content]')
-    const candidates = paneEl
-      ? Array.from(paneEl.querySelectorAll<HTMLElement>('[data-chat-composer="true"]'))
-      : []
-    const target =
-      candidates.find((el) => el.closest('[data-chat-tab-state="visible"]') !== null) ??
-      candidates.find((el) => el.closest('.invisible') === null) ??
-      candidates[0] ??
-      null
-    const group = card.parentElement ?? card
-    const t = target?.getBoundingClientRect()
-    const g = group.getBoundingClientRect()
-    const c = card.getBoundingClientRect()
-    if (!t || t.width <= 0 || t.height <= 0 || c.width <= 0 || c.height <= 0) {
-      // Chat composer not laid out yet (lazy chunk / jsdom): keep the
-      // constant-distance dock dive as the fallback.
-      const distance = root.getBoundingClientRect().bottom - c.bottom - LAUNCHER_DOCK_BOTTOM_PX
-      setExitAnim({ kind: 'morph', tx: 0, ty: Math.max(0, distance), sx: 1, sy: 1, ox: 0, oy: 0 })
-      return
-    }
-    // Anchor the card's bottom-center (transform origin in the group's local
-    // frame) so the scaled card lands exactly on the target's bottom-center.
-    const ox = c.left - g.left + c.width / 2
-    const oy = c.bottom - g.top
-    setExitAnim({
-      kind: 'morph',
-      sx: t.width / c.width,
-      sy: t.height / c.height,
-      ox,
-      oy,
-      tx: t.left + t.width / 2 - (g.left + ox),
-      ty: t.bottom - (g.top + oy)
-    })
-  }, [isExiting, reducedMotion, paneLeaf])
+  const exitAnim = useLauncherExitAnim({
+    isPresent,
+    isExiting,
+    reducedMotion,
+    paneLeaf,
+    rootRef,
+    composerCardRef,
+    launchInFlightRef,
+    prevActiveTabIdRef
+  })
 
   const acpConfigs = useAcpStore((s) => s.agentConfigs)
   const saveAgentConfig = useAcpStore((s) => s.saveAgentConfig)
@@ -292,9 +259,15 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // the opt-in) does not, avoiding a picker that would fail `FORBIDDEN` at
   // launch. The hook subscribes to the cache so the picker re-renders when the
   // boot fetch resolves.
+  // CAP-15 / AD-9: the picker itself is no longer hidden on such a server —
+  // the strip stays mounted for any git project and shows "New worktree"
+  // disabled with the read-only reason. `canUseWorktree` still gates every
+  // functional path, so a read-only server can never enter worktree mode.
   const serverAdmitsWrites = useServerAdmitsRemoteWrites()
   const canUseWorktree = projectIsGitRepo && serverAdmitsWrites
-  const [isolationMode, setIsolationMode] = useState<'current' | 'worktree'>('current')
+  // Workspace chip (Current checkout / Existing / New worktree); it only reads the pick.
+  const workspace = useLaunchWorkspace(activeProject, useWorktreePick(activeProjectId ?? ''))
+  const { isolationMode, setIsolationMode, existingWorktreeId } = workspace
   const [baseBranch, setBaseBranch] = useState<string | null>(null)
   const [baseBranchInfo, setBaseBranchInfo] = useState<BaseBranchInfo | null>(null)
   // Local branch names for the base-branch picker (CAP-2). Sourced from
@@ -412,6 +385,14 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
           } finally {
             setWorktreeCreating(false)
           }
+        } else if (isolationMode === 'existing') {
+          // A read: resolve the listed worktree (throws when it is gone).
+          ;({ launchCwd, worktreePath, worktreeBranch } = await prepareLaunchWorktree({
+            isolationMode,
+            projectRoot,
+            projectId: activeProjectId,
+            existingWorktreeId
+          }))
         }
         // Start a fresh session against the updated config. Update Application
         // detaches any process with live chats, so those chats keep running
@@ -474,7 +455,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     restartingUpdatedAgent,
     isolationMode,
     canUseWorktree,
-    baseBranch
+    baseBranch,
+    existingWorktreeId
   ])
 
   const manualInstallContext =
@@ -632,6 +614,68 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     })
   }, [])
 
+  // Persist the in-progress launch prompt per project (same lifecycle as the
+  // chat composer's session draft, ChatInputBar): hydrate on mount/project
+  // change, debounced write on change, delete when empty, flush on unmount.
+  // An accidental Escape/backdrop dismiss must not cost the user their text.
+  // The launch path clears `prompt` before unmount, so the persisted draft is
+  // deleted by the empty-value branch — a sent launch never lingers. Restored
+  // text is taken as-is: skill/file tokens it may carry are validated at
+  // launch (buildPromptParts toasts on a missing path), matching the chat.
+  const launchDraftKey = activeProjectId ? PersistenceKeys.lastLaunchDraft(activeProjectId) : null
+  const launchDraftHydratedRef = useRef(false)
+  const launchDraftValueRef = useRef(prompt)
+  launchDraftValueRef.current = prompt
+  useEffect(() => {
+    if (!launchDraftKey) {
+      launchDraftHydratedRef.current = true
+      return
+    }
+    let cancelled = false
+    const firstHydration = !launchDraftHydratedRef.current
+    launchDraftHydratedRef.current = false
+    void (async () => {
+      try {
+        const result = await persistenceApi.read<string>(launchDraftKey)
+        if (cancelled) return
+        const saved = result.success && typeof result.data === 'string' ? result.data : ''
+        // First hydration only fills an untouched composer — a starter pick or
+        // typing may land while the read is in flight. A project switch
+        // replaces the prompt, like a chat session switch does.
+        if (saved && (firstHydration || launchDraftValueRef.current === '')) {
+          setPrompt(saved)
+        }
+      } catch {
+        // Storage unavailable/corrupt — degrade to empty (no UI crash).
+      } finally {
+        if (!cancelled) launchDraftHydratedRef.current = true
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [launchDraftKey])
+  useEffect(() => {
+    if (!launchDraftKey) return
+    if (!launchDraftHydratedRef.current) return
+    if (!prompt) {
+      void persistenceApi.delete(launchDraftKey).catch(() => {})
+      return
+    }
+    const handle = setTimeout(() => {
+      void persistenceApi.writeDebounced(launchDraftKey, prompt).catch(() => {})
+    }, 400)
+    return () => clearTimeout(handle)
+  }, [prompt, launchDraftKey])
+  useEffect(() => {
+    return () => {
+      if (!launchDraftKey) return
+      const latest = launchDraftValueRef.current
+      if (!latest) return
+      void persistenceApi.write(launchDraftKey, latest).catch(() => {})
+    }
+  }, [launchDraftKey])
+
   // Composer-selection persistence is delegated to the store's
   // `persistComposerOptions` helper, which serializes per-key mutations so
   // concurrent calls (e.g. model + mode in the same tick) can't overwrite
@@ -662,8 +706,17 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
         toast.error(`Failed to set option: ${String(err)}`)
         throw err
       }
+      // The store skips persistence for warm-session defaults. An explicit
+      // pick on the prepared session still has to be remembered for the next
+      // new chat. Model picks also record modelId.
+      if (activeConfigId) {
+        persistComposerOptions(activeConfigId, {
+          ...(modelOption?.id === configId ? { modelId: stored } : {}),
+          configValues: { [configId]: stored }
+        })
+      }
     },
-    [preparedSessionId, activeConfigId]
+    [preparedSessionId, activeConfigId, modelOption]
   )
 
   const handleSetModel = useCallback(
@@ -743,7 +796,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // programmatic splices).
   const mentionSections = mentions.sections
   const mentionMenuRef = mentions.menuRef
-  const emptyLabel = mentions.loading ? 'Searching files…' : 'No files match. Try another name.'
+  const emptyLabel = mentions.loading ? MENTION_SEARCHING_LABEL : MENTION_EMPTY_LABEL
   const resetMentions = mentions.reset
   const onMentionSelect = useComposerMentionSelect({
     value: prompt,
@@ -801,7 +854,10 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
           PersistenceKeys.lastComposerOptions(activeConfigId)
         )
         if (cancelled) return
-        if (!result.success || !result.data) return
+        if (!result.success || !result.data) {
+          if (pendingPickRef.current?.configId === activeConfigId) pendingPickRef.current = null
+          return
+        }
         const saved = result.data
         const configValues: Record<string, string> = {}
         if (saved.configValues) {
@@ -851,10 +907,22 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
             modeId = undefined
           }
         }
+        const pick = pendingPickRef.current
+        if (pick && pick.configId === activeConfigId) {
+          pendingPickRef.current = null
+          modelId = pick.modelId
+          if (pick.modelConfigId) configValues[pick.modelConfigId] = pick.modelId
+        }
         if (modelId || modeId || Object.keys(configValues).length > 0) {
           setPendingOptions({ modelId, modeId, configValues })
         }
-        if (saved.isolationMode === 'worktree' && canUseWorktree && saved.baseBranch) {
+        // A restored `worktree` mode applies only when the pick is the project folder.
+        if (
+          saved.isolationMode === 'worktree' &&
+          canUseWorktree &&
+          saved.baseBranch &&
+          workspace.pickIsProjectFolder
+        ) {
           setIsolationMode('worktree')
           if (
             branches.length > 0 &&
@@ -990,7 +1058,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     if (!activeConfigId) return
     if (!canUseWorktree) return
     persistComposerOptions(activeConfigId, {
-      isolationMode,
+      isolationMode: persistedIsolationMode(isolationMode),
       baseBranch: isolationMode === 'worktree' ? baseBranch : null
     })
   }, [activeConfigId, isolationMode, baseBranch, canUseWorktree])
@@ -1159,7 +1227,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
       // No-op when re-selecting the same agent — avoids resetting
       // worktree/pending state and overwriting the persisted record.
       if (entry.configId === selectedConfigId) {
-        editorRef.current?.commands.focus(undefined, { scrollIntoView: false })
+        deferEditorFocusRef.current = true
         return
       }
       setManualPath('')
@@ -1169,13 +1237,40 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
       // Reset worktree isolation + base branch; the restore effect on
       // `[activeConfigId]` will re-seed them from the persisted record for
       // the new agent (or leave them at 'current'/null if no record exists).
-      setIsolationMode('current')
+      workspace.resetWorkspace()
       setBaseBranch(null)
       setSelectedConfigId(entry.configId)
       persistSelection(entry.configId)
-      editorRef.current?.commands.focus(undefined, { scrollIntoView: false })
+      deferEditorFocusRef.current = true
     },
-    [persistSelection, selectedConfigId, factoryKeyAuth]
+    [persistSelection, selectedConfigId, factoryKeyAuth, workspace.resetWorkspace]
+  )
+
+  // Focus the composer when the selector popover finishes closing, but only
+  // when an agent pick deferred it (see `handleSelectAgent`). Radix fires
+  // `onCloseAutoFocus` after the close animation, when the picker content has
+  // fully unmounted; `preventDefault` takes over its default refocus of the
+  // trigger pill so the caret lands in the editor instead. A close without a
+  // pick keeps the default (trigger) focus.
+  const handleSelectorCloseAutoFocus = useCallback((event: Event) => {
+    if (!deferEditorFocusRef.current) return
+    event.preventDefault()
+    deferEditorFocusRef.current = false
+    editorRef.current?.commands.focus(undefined, { scrollIntoView: false })
+  }, [])
+
+  // Model selector: a model on another agent's tab selects that agent with
+  // that model (as pending options, applied when the chat starts).
+  const handleSelectAgentWithModel = useCallback(
+    (entry: SupportedAcpAgentEntry, pick: { modelId: string; modelConfigId: string | null }) => {
+      const configId = entry.config?.id ?? null
+      pendingPickRef.current = configId ? { configId, ...pick } : null
+      handleSelectAgent(entry)
+      const configValues = pick.modelConfigId ? { [pick.modelConfigId]: pick.modelId } : {}
+      setPendingOptions({ modelId: pick.modelId, configValues })
+      if (configId) persistComposerOptions(configId, { modelId: pick.modelId, configValues })
+    },
+    [handleSelectAgent]
   )
 
   // Run the agent-advertised authenticate for a chosen method, then re-prepare
@@ -1424,8 +1519,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
 
     // Build the wire text (skills framed by path under `# Agent Skills`, then
     // the user text with tokens replaced by `(name)`) and the display text (the
-    // raw token value, so the chat timeline re-renders inline chips), with the
-    // active command prefixed to both. Shared with `ChatInputBar.submit` via
+    // raw token value, so the chat timeline re-renders inline chips). A command
+    // token becomes `/name` where the user typed it. Shared with `ChatInputBar.submit` via
     // `useChatComposer.buildPromptParts` so the two surfaces cannot drift. A
     // skill surfaced without a path (web parity gap) blocks the launch —
     // `buildPromptParts` throws and the catch toasts + releases the in-flight
@@ -1450,6 +1545,23 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     let worktreeBranch: string | undefined
     let launchCwd = projectRootSnapshot
 
+    // Existing worktree is a read: resolve it BEFORE the placeholder exists, so
+    // a stale worktree toasts and returns with nothing to roll back.
+    if (isolationMode === 'existing') {
+      try {
+        ;({ launchCwd, worktreePath, worktreeBranch } = await prepareLaunchWorktree({
+          isolationMode,
+          projectRoot: projectRootSnapshot,
+          projectId: projectIdSnapshot,
+          existingWorktreeId
+        }))
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'That worktree is no longer available.')
+        launchInFlightRef.current = false
+        return
+      }
+    }
+
     // Sync first-turn content so the chat can paint like a normal send. The
     // optimistic syncBlocks carry the DISPLAY (token) text so the timeline
     // renders inline chips; the real send dispatches the WIRE text.
@@ -1466,7 +1578,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     // continue in the chat view.
     const store = useAcpStore.getState()
     let sessionId =
-      preparedKeySnapshot != null && isolationMode !== 'worktree'
+      preparedKeySnapshot != null && isolationMode === 'current'
         ? store.claimPreparedChat(preparedKeySnapshot, projectIdSnapshot)
         : null
     let usedPlaceholder = false
@@ -1544,7 +1656,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
             Object.keys(pendingOptions.configValues).length > 0
               ? pendingOptions.configValues
               : undefined,
-          isolationMode,
+          isolationMode: persistedIsolationMode(isolationMode),
           baseBranch: isolationMode === 'worktree' ? baseBranch : null
         })
 
@@ -1628,7 +1740,8 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     skillPathsRef,
     isolationMode,
     canUseWorktree,
-    baseBranch
+    baseBranch,
+    existingWorktreeId
   ])
 
   const handleKeyDown = useCallback(
@@ -1673,6 +1786,7 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
     // covers detached HEAD (no current) and any case where the picker has
     // not settled on a value.
     !(isolationMode === 'worktree' && !baseBranch) &&
+    !(isolationMode === 'existing' && !existingWorktreeId) &&
     !worktreeCreating
   // Deduplicated base-branch options for the picker (CAP-2): current branch
   // first (marked), then the resolved default, the project's reactive branch,
@@ -1702,11 +1816,41 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
   // so the column still fits above the fold. Desktop keeps the centered
   // layout byte-identical.
   const isMobileShell = useMobileWebShell()
+  // Toasts raised here clear the composer column (`useDockClearance`).
+  const dockRef = useDockClearance(isMobileShell)
+  const handleInstallFromSelector = useCallback(
+    (entry: SupportedAcpAgentEntry) => void handleInstallAgent(entry),
+    [handleInstallAgent]
+  )
+  const handleSignInFromSelector = useCallback(() => void handleSignIn(), [handleSignIn])
+  const selectorSource = useLauncherSelectorSource({
+    paneKey: paneId,
+    supportedAgents,
+    agentConfigs: acpConfigs,
+    selectedEntry,
+    installingConfigId,
+    cwd: projectRoot ?? '',
+    projectId: activeProjectId ?? '',
+    onSelectAgent: handleSelectAgent,
+    onSelectAgentWithModel: handleSelectAgentWithModel,
+    onInstall: handleInstallFromSelector,
+    showModelLoading,
+    prepareError,
+    hasCachedModels,
+    canSignIn: Boolean(signInMethod),
+    onSignIn: handleSignInFromSelector,
+    onRetry: handleRetryPrepare,
+    updateAgentIds
+  })
   // Keyboard-aware bottom anchor: when the OSK opens, the visual viewport
   // shrinks but (iOS) the layout viewport does not — inset the bottom by the
   // live keyboard height so the composer stays visible above the keys. The
   // same --termul-keyboard-height CSS var mirrors this value document-wide.
   const osk = useOskViewport()
+  // Same narrow/wide seam as the chat composer toolbar (#859), measured on
+  // the composer card (the toolbar's width container): the chip row scrolls
+  // horizontally instead of wrapping when the window is tight.
+  const toolbarMode = useComposerToolbarMode(composerCardRef)
   // The overlay variant (agentLauncherPaneId set) renders a backdrop + a
   // close control — the empty-pane launcher IS the pane content, so it gets
   // neither. During exit the store value is already cleared, so
@@ -1760,14 +1904,14 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
         )}
         style={mobileBottomInset ? { paddingBottom: mobileBottomInset } : undefined}
       >
-        <LauncherHero
+        <ChatStartHero
           isMobileShell={isMobileShell}
           isExiting={isExiting}
           reducedMotion={reducedMotion}
           projectLabel={projectLabel}
         />
 
-        <div className="flex min-w-0 w-full max-w-4xl flex-col gap-4">
+        <div ref={dockRef} className="flex min-w-0 w-full max-w-4xl flex-col gap-4">
           <div
             data-agent-launcher-composer-group="true"
             className={cn(
@@ -1811,7 +1955,10 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
               ref={composerCardRef}
               data-agent-launcher-composer="true"
               className={cn(
-                'relative z-10 rounded-2xl border border-border/60 bg-card transition-colors focus-within:border-border',
+                'relative z-10 rounded-2xl border border-border/60 bg-card transition-[border-color,box-shadow]',
+                // Same focus affordance as the chat composer card
+                // (ChatInputBar) — the two cards are one visual family.
+                'focus-within:border-border focus-within:ring-1 focus-within:ring-inset focus-within:ring-foreground/20',
                 dragActive && 'border-primary/70'
               )}
               onDragEnter={dropProps.onDragEnter}
@@ -1847,12 +1994,10 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
                 factoryKeyAuth={factoryKeyAuth}
                 inlineKeyMethodId={inlineKeyMethodId}
               />
-              <AttachmentPreviewGroup
-                attachments={attachments}
-                onRemove={removeAttachment}
-                className="px-5 pt-4"
-              />
-              <div className="relative px-5 pb-2 pt-4">
+              <AttachmentPreviewGroup attachments={attachments} onRemove={removeAttachment} />
+              {/* Same inner rhythm as the chat composer card (ChatInputBar):
+                  editor row px-4 pb-1.5 pt-3.5, toolbar px-2 pb-2. */}
+              <div className="px-4 pb-1.5 pt-3.5">
                 {/* Tiptap rich-text editor — the skill "pill" is a real inline
                    DOM node, so the caret sits flush against the pill's right
                    edge by construction. No transparent textarea + mirror
@@ -1872,26 +2017,15 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
                   minHeight={76}
                   maxHeight={160}
                   placeholder={
-                    hasCommandToken
-                      ? 'Add a message (optional)…'
-                      : 'Ask anything… (/ for commands, @ for files)'
+                    composerDisabled
+                      ? 'Composer unavailable'
+                      : hasCommandToken
+                        ? 'Add a message (optional)…'
+                        : 'Ask anything… (/ for commands, @ for files)'
                   }
                   ariaLabel="Agent prompt"
                   autoFocus
                 />
-                {/* Tiptap's `Placeholder` extension is configured with
-                  `showOnlyWhenEditable: true` (ChatComposerEditor.tsx:237-240),
-                  so it suppresses the `data-placeholder` decoration when the
-                  editor is non-editable. The `composerDisabled` branch
-                  (install-required / saving) would therefore paint nothing.
-                  Render an explicit muted hint so the user sees why the
-                  composer is inert. Mirrors the editable-state placeholder's
-                  text-base/pointer-fine:text-sm/leading-relaxed/muted-foreground styling. */}
-                {composerDisabled && (
-                  <p className="pointer-events-none absolute left-5 top-4 m-0 text-base leading-relaxed text-muted-foreground pointer-fine:text-sm">
-                    Composer unavailable
-                  </p>
-                )}
               </div>
               <LauncherToolbar
                 pickFiles={pickFiles}
@@ -1915,20 +2049,13 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
                 restartingUpdatedAgent={restartingUpdatedAgent}
                 handleSelectedAgentUpdate={handleSelectedAgentUpdate}
                 handleRestartUpdatedAgent={handleRestartUpdatedAgent}
-                supportedAgents={supportedAgents}
                 selectedConfig={selectedConfig}
                 installingConfigId={installingConfigId}
                 savingManualPath={savingManualPath}
-                updateAgentIds={updateAgentIds}
-                handleSelectAgent={handleSelectAgent}
+                selectorSource={selectorSource}
                 modelOption={modelOption}
-                showModelLoading={showModelLoading}
-                prepareError={prepareError}
-                hasCachedModels={hasCachedModels}
-                signInMethod={signInMethod}
-                handleSignIn={handleSignIn}
+                modelSource={modelSource}
                 optionsInteractive={optionsInteractive}
-                handleRetryPrepare={handleRetryPrepare}
                 handleSetModel={handleSetModel}
                 thoughtLevel={thoughtLevel}
                 modelConfig={modelConfig}
@@ -1939,19 +2066,34 @@ export function AgentLauncher({ paneId, className }: AgentLauncherProps): React.
                 handleSetMode={handleSetMode}
                 canLaunch={canLaunch}
                 launch={launch}
+                onSelectorCloseAutoFocus={handleSelectorCloseAutoFocus}
+                toolbarMode={toolbarMode}
               />
             </div>
-            {canUseWorktree && (
-              <LauncherContextStrip
-                isolationMode={isolationMode}
-                setIsolationMode={setIsolationMode}
-                baseBranch={baseBranch}
-                setBaseBranch={setBaseBranch}
-                baseBranchInfo={baseBranchInfo}
-                baseOptions={baseOptions}
-              />
-            )}
+            <LauncherContextStrip
+              workspace={workspace}
+              worktrees={activeProject?.worktrees ?? EMPTY_WORKTREES}
+              baseBranch={baseBranch}
+              setBaseBranch={setBaseBranch}
+              baseBranchInfo={baseBranchInfo}
+              baseOptions={baseOptions}
+              interactive={projectIsGitRepo}
+              newWorktreeDisabledReason={serverAdmitsWrites ? undefined : READ_ONLY_SERVER_REASON}
+              gitBranch={projectGitBranch}
+              isGitRepo={projectIsGitRepo}
+            />
           </div>
+          {/* Shared start screen (same starters as an empty chat). Mobile
+              keeps the composer at the bottom, so no starters there. */}
+          {!isMobileShell && (
+            <ChatStarters
+              isExiting={isExiting}
+              onPick={(text) => {
+                setPrompt(text)
+                editorRef.current?.commands.focus('end', { scrollIntoView: false })
+              }}
+            />
+          )}
         </div>
       </div>
     </div>
