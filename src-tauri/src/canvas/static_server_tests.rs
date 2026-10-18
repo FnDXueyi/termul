@@ -31,6 +31,7 @@ fn tab(client_instance_id: &str) -> OpenRequest {
         client_instance_id: client_instance_id.to_string(),
         autosave_ms: None,
         lease_grace_ms: None,
+        max_mounted: Some(16),
     }
 }
 
@@ -94,6 +95,7 @@ async fn open_canvas_mints_one_token_per_project_until_close() {
             "pinTag": "termul-test",
             "docKey": "C:/p/design.figcraft",
             "mountSeq": first.mount_seq,
+            "evicted": [],
         })
     );
     assert!(

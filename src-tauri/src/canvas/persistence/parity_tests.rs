@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use crate::canvas::static_server::{open_canvas, same_origin_base, OpenRequest};
 use crate::commands::{
     canvas_close, canvas_dirty_changed, canvas_document_loaded, canvas_read_document,
-    canvas_write_snapshot,
+    canvas_set_visible, canvas_write_snapshot,
 };
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
@@ -67,6 +67,7 @@ async fn open(project_id: &str, dir: &tempfile::TempDir) -> u64 {
             client_instance_id: "parity-tab".into(),
             autosave_ms: Some(100),
             lease_grace_ms: None,
+            max_mounted: Some(16),
         },
     )
     .await
@@ -163,6 +164,9 @@ async fn tauri_call(route: &'static str, body: Value) -> Value {
             )
             .await,
         ),
+        "set-visible" => tauri(
+            canvas_set_visible(project_id, mount_seq, body["visible"].as_bool().unwrap()).await,
+        ),
         "write-snapshot" => tauri(
             canvas_write_snapshot(
                 project_id,
@@ -257,7 +261,7 @@ async fn the_persistence_routes_refuse_a_view_only_peer() {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({"projectId": "p", "mountSeq": 1, "dirty": true,
-                               "contentVersion": "1", "snapshot": "{}", "ack": null})
+                               "contentVersion": "1", "snapshot": "{}", "ack": null, "visible": true})
                         .to_string(),
                     ))
                     .unwrap(),
@@ -338,4 +342,40 @@ async fn desktop_and_web_close_a_canvas_alike() {
         desktop[2]["data"],
         json!({"unmounted": false, "savedVersion": null, "discarded": false})
     );
+}
+
+async fn run_visibility<F, Fut>(project_id: &str, mount_seq: u64, call: F) -> Vec<Value>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let mut replies = Vec::new();
+    for (visible, seq) in [
+        (true, mount_seq),
+        (false, mount_seq),
+        (true, mount_seq + 1_000_000),
+    ] {
+        let body = json!({"projectId": project_id, "mountSeq": seq, "visible": visible});
+        replies.push(call("set-visible", body).await);
+    }
+    replies
+}
+
+/// The user-visibility report through either transport: a live mount takes it,
+/// and a mount that is gone (evicted, or a stale mountSeq) answers
+/// `CANVAS_CLOSED`.
+#[tokio::test]
+async fn desktop_and_web_report_visibility_alike() {
+    let tauri_dir = tempfile::tempdir().unwrap();
+    let web_dir = tempfile::tempdir().unwrap();
+    let tauri_seq = open("parity-visible-tauri", &tauri_dir).await;
+    let web_seq = open("parity-visible-web", &web_dir).await;
+
+    let desktop = run_visibility("parity-visible-tauri", tauri_seq, tauri_call).await;
+    let web = run_visibility("parity-visible-web", web_seq, web_call).await;
+
+    assert_eq!(desktop, web);
+    assert_eq!(desktop[0], json!({"success": true, "data": null}));
+    assert_eq!(desktop[1], desktop[0]);
+    assert_eq!(desktop[2]["code"], "CANVAS_CLOSED");
 }

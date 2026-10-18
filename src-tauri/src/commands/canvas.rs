@@ -68,11 +68,12 @@ fn persistence_result<T>(
 }
 
 /// `canvas_open { docPath, projectId, clientInstanceId, autosaveMs?,
-/// leaseGraceMs? }` — the loopback bundle base plus a minted `ct` token and a
+/// leaseGraceMs?, maxMounted? }` — the loopback bundle base plus a minted `ct` token and a
 /// new `mountSeq` for the project's canvas, leased to this window (AD-30).
 /// Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound;
 /// `CANVAS_OPEN_ELSEWHERE` when the renderer holding the lease could not
-/// save.
+/// save; `EVICTION_BLOCKED` when a canvas that must make room (AD-26) could
+/// not be saved.
 #[tauri::command]
 pub async fn canvas_open(
     doc_path: String,
@@ -80,6 +81,7 @@ pub async fn canvas_open(
     client_instance_id: String,
     autosave_ms: Option<u64>,
     lease_grace_ms: Option<u64>,
+    max_mounted: Option<u64>,
     server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
     let doc_key = match validate_canvas_doc_path(&doc_path) {
@@ -100,6 +102,7 @@ pub async fn canvas_open(
         client_instance_id,
         autosave_ms,
         lease_grace_ms,
+        max_mounted,
     };
     match open_canvas(base, &project_id, doc_key, request).await {
         Ok(info) => {
@@ -169,6 +172,19 @@ fn log_closed(log_project_id: &str, outcome: &CloseOutcome) {
             outcome.saved_version.as_deref().unwrap_or("none")
         );
     }
+}
+
+/// `canvas_set_visible { projectId, mountSeq, visible }` — the user started
+/// or stopped looking at the canvas; activity the mount cap ranks eviction
+/// by. A mount that is gone (evicted) answers `CANVAS_CLOSED`.
+#[tauri::command]
+pub async fn canvas_set_visible(
+    project_id: String,
+    mount_seq: u64,
+    visible: bool,
+) -> Result<IpcResult<()>, String> {
+    let result = canvas_mounts().set_visible(&project_id, mount_seq, visible);
+    Ok(persistence_result("set visible", &project_id, result))
 }
 
 /// `canvas_read_document { projectId, mountSeq }` — the mounted document's

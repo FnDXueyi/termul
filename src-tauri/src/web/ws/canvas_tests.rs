@@ -275,7 +275,7 @@ async fn closing_a_dirty_canvas_snapshots_it_over_the_socket_before_unmounting()
 
 #[tokio::test]
 async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
-    use crate::canvas::persistence::{MountRequest, RendererId};
+    use crate::canvas::persistence::{MountRequest, RendererId, DEFAULT_MAX_MOUNTED};
 
     let acp = Arc::new(AcpManager::new(vec![]));
     let relay = Arc::new(WsRelaySink::new());
@@ -306,7 +306,11 @@ async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
         )
     };
 
-    let first = mounts.open("proj-lease", opens("tab-a")).await.unwrap();
+    let first = mounts
+        .open("proj-lease", opens("tab-a"), DEFAULT_MAX_MOUNTED)
+        .await
+        .opened
+        .unwrap();
     let refused = route(&mount(first.mount_seq), &tab_b).await;
     assert_eq!(
         refused.payload,
@@ -316,7 +320,11 @@ async fn a_takeover_tells_the_old_connection_and_calls_follow_the_lease() {
     let attached = route(&mount(first.mount_seq), &tab_a).await;
     assert_eq!(attached.payload, Some(json!({ "attached": true })));
 
-    let second = mounts.open("proj-lease", opens("tab-b")).await.unwrap();
+    let second = mounts
+        .open("proj-lease", opens("tab-b"), DEFAULT_MAX_MOUNTED)
+        .await
+        .opened
+        .unwrap();
     let Some(Outbound::CanvasLeaseLost(notice)) = a_rx.recv().await else {
         panic!("expected a canvas_lease_lost frame");
     };

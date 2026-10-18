@@ -471,6 +471,7 @@ fn is_canvas_proxy_path(path: &str) -> bool {
                     | "read-document"
                     | "document-loaded"
                     | "dirty-changed"
+                    | "set-visible"
                     | "write-snapshot"
             )
         )

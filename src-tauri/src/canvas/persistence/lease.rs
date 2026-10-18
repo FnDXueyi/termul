@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{CanvasPersistence, CloseMode, Mount, PersistenceView};
+use super::{Admitted, CanvasPersistence, CloseMode, Mount, PersistenceView};
 use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE};
 
 /// `canvas.lease_grace_ms` when the renderer sends none.
@@ -144,17 +144,24 @@ fn refused_takeover(error: &CanvasError) -> CanvasError {
 
 impl CanvasPersistence {
     /// A fresh `Loading` mount of the project's document for `request`'s
-    /// renderer, which then holds the lease. When another renderer holds it,
-    /// that mount is closed through AD-31 first and its renderer is told.
+    /// renderer, which then holds the lease. Room is made under the mount
+    /// `cap` first ([`super::evict`]); when another renderer holds the lease, that
+    /// mount is closed through AD-31 and its renderer is told.
     ///
-    /// # Errors
+    /// `opened` is `EVICTION_BLOCKED` when a victim could not be saved, or
     /// `CANVAS_OPEN_ELSEWHERE` when the holder's save failed or it was
     /// already closing; the holder keeps the lease.
-    pub async fn open(
-        &self,
-        project_id: &str,
-        request: MountRequest,
-    ) -> Result<Opened, CanvasError> {
+    pub async fn open(&self, project_id: &str, request: MountRequest, cap: usize) -> Admitted {
+        let _admitting = self.admission.lock().await;
+        let mut evicted = Vec::new();
+        let opened = match self.make_room(project_id, cap, &mut evicted).await {
+            Ok(()) => self.lease(project_id, &request).await,
+            Err(error) => Err(error),
+        };
+        Admitted { evicted, opened }
+    }
+
+    async fn lease(&self, project_id: &str, request: &MountRequest) -> Result<Opened, CanvasError> {
         loop {
             let current = self.mounts.lock().get(project_id).cloned();
             let (lease, expected) = match &current {
@@ -167,7 +174,7 @@ impl CanvasPersistence {
                 ),
                 Some(mount) => (self.take_over(project_id, mount).await?, None),
             };
-            if let Some(mount_seq) = self.install(project_id, expected, &request) {
+            if let Some(mount_seq) = self.install(project_id, expected, request) {
                 return Ok(Opened { mount_seq, lease });
             }
         }
@@ -218,7 +225,7 @@ impl CanvasPersistence {
             let mount_seq = self.next_mount_seq();
             let previous = mounts.insert(
                 project_id.to_string(),
-                Mount::new(mount_seq, request.clone()),
+                Mount::new(mount_seq, self.tick(), request.clone()),
             );
             (mount_seq, previous)
         };

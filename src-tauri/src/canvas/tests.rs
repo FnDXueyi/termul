@@ -781,7 +781,7 @@ async fn web_open(app: Router, doc: &str, project_id: &str) -> serde_json::Value
                 .extension(axum::extract::ConnectInfo(web_test_peer()))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({"docPath": doc, "projectId": project_id, "clientInstanceId": "web-tab"})
+                    serde_json::json!({"docPath": doc, "projectId": project_id, "clientInstanceId": "web-tab", "maxMounted": 16})
                         .to_string(),
                 ))
                 .expect("build open request"),

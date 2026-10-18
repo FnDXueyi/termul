@@ -19,6 +19,7 @@ use crate::canvas::CODE_CANVAS_OPEN_ELSEWHERE;
 const PROJECT: &str = "project-lease";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const GRACE: Duration = Duration::from_millis(150);
+const CAP: usize = super::DEFAULT_MAX_MOUNTED;
 
 /// One connection of a renderer (a window or tab), recording what the host
 /// sends it.
@@ -102,8 +103,9 @@ impl Host {
     async fn open_loaded(&self, tab: &str, connection: &str) -> (u64, Connection) {
         let opened = self
             .mounts
-            .open(PROJECT, request(tab, &self.doc))
+            .open(PROJECT, request(tab, &self.doc), CAP)
             .await
+            .opened
             .unwrap();
         self.mounts
             .document_loaded(PROJECT, opened.mount_seq, Some(1))
@@ -126,7 +128,7 @@ impl Host {
     ) -> tokio::task::JoinHandle<Result<super::Opened, crate::canvas::CanvasError>> {
         let mounts = Arc::clone(&self.mounts);
         let request = request(tab, &self.doc);
-        tokio::spawn(async move { mounts.open(PROJECT, request).await })
+        tokio::spawn(async move { mounts.open(PROJECT, request, CAP).await.opened })
     }
 
     fn agent_call(&self) -> tokio::task::JoinHandle<crate::acp::host_mcp::canvas::CanvasOutcome> {
@@ -309,8 +311,9 @@ async fn a_reload_of_the_holder_remounts_with_a_new_mount_seq_and_keeps_the_leas
 
     let reopened = host
         .mounts
-        .open(PROJECT, request("tab-a", &host.doc))
+        .open(PROJECT, request("tab-a", &host.doc), CAP)
         .await
+        .opened
         .unwrap();
     assert_eq!(reopened.lease, LeaseChange::Remounted { previous: seq_a });
     assert!(reopened.mount_seq > seq_a);
@@ -339,8 +342,9 @@ async fn a_clean_holder_in_its_grace_is_taken_over_without_a_save() {
 
     let opened = host
         .mounts
-        .open(PROJECT, request("tab-b", &host.doc))
+        .open(PROJECT, request("tab-b", &host.doc), CAP)
         .await
+        .opened
         .unwrap();
     assert_eq!(
         opened.lease,

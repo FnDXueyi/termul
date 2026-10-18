@@ -45,7 +45,8 @@ const WEB_INFO: CanvasOpenInfo = {
   canvasToken: 'cafebabecafebabecafebabecafebabe',
   pinTag: 'termul-v1',
   docKey: DOC,
-  mountSeq: 1
+  mountSeq: 1,
+  evicted: []
 }
 
 describe('canvasApi (web vs desktop branch)', () => {
@@ -135,8 +136,8 @@ describe('canvasApi (web vs desktop branch)', () => {
     expect(result).toEqual({ success: true, data: desktopInfo })
   })
 
-  it('open: both transports send the autosave and lease-grace settings alike', async () => {
-    const options = { autosaveMs: 1500, leaseGraceMs: 5000 }
+  it('open: both transports send the autosave, lease-grace and mount-cap settings alike', async () => {
+    const options = { autosaveMs: 1500, leaseGraceMs: 5000, maxMounted: 3 }
     const expected = {
       docPath: DOC,
       projectId: PROJECT,
@@ -225,6 +226,13 @@ describe('canvasApi (web vs desktop branch)', () => {
       command: 'canvas_dirty_changed',
       route: '/canvas/dirty-changed',
       args: { projectId: PROJECT, mountSeq: 3, dirty: true, contentVersion: '9007199254740993' }
+    },
+    {
+      name: 'setVisible',
+      call: () => canvasApi.setVisible(PROJECT, 3, true),
+      command: 'canvas_set_visible',
+      route: '/canvas/set-visible',
+      args: { projectId: PROJECT, mountSeq: 3, visible: true }
     },
     {
       name: 'writeSnapshot',

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const {
   open,
   close,
+  setVisible,
   readDocument,
   documentLoaded,
   dirtyChanged,
@@ -18,6 +19,7 @@ const {
 } = vi.hoisted(() => ({
   open: vi.fn(),
   close: vi.fn(),
+  setVisible: vi.fn(),
   readDocument: vi.fn(),
   documentLoaded: vi.fn(),
   dirtyChanged: vi.fn(),
@@ -27,7 +29,7 @@ const {
 }))
 
 vi.mock('@/lib/canvas-api', () => ({
-  canvasApi: { open, close, readDocument, documentLoaded, dirtyChanged, writeSnapshot }
+  canvasApi: { open, close, setVisible, readDocument, documentLoaded, dirtyChanged, writeSnapshot }
 }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError }))
 vi.mock('sonner', () => ({
@@ -57,6 +59,7 @@ import type {
 import type { IpcResult } from '@shared/types/ipc.types'
 import { asJsonText, createCanvasBridge } from '@/lib/canvas-bridge'
 import type { LeafNode } from '@/types/workspace.types'
+import { useAppSettingsStore } from '../app-settings-store'
 import { type CanvasMount, pinVerdict, useCanvasStore } from '../canvas-store'
 import { useWorkspaceStore } from '../workspace-store'
 
@@ -73,7 +76,8 @@ const INFO: CanvasOpenInfo = {
   canvasToken: 'token-a',
   pinTag: PIN,
   docKey: DOC_A,
-  mountSeq: 41
+  mountSeq: 41,
+  evicted: []
 }
 
 function openInfo(overrides: Partial<CanvasOpenInfo> = {}): IpcResult<CanvasOpenInfo> {
@@ -217,7 +221,11 @@ describe('open and close', () => {
     open.mockResolvedValueOnce(openInfo())
     await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
 
-    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, { autosaveMs: 1500, leaseGraceMs: 5000 })
+    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, {
+      autosaveMs: 1500,
+      leaseGraceMs: 5000,
+      maxMounted: 2
+    })
     expect(session()?.phase.kind).toBe('loading')
     expect(currentMount()).toEqual({ mountSeq: 41, info: INFO })
     expect(canvasTabs()).toEqual([
@@ -666,5 +674,144 @@ describe('pinVerdict', () => {
     expect(pinVerdict('dev', 'termul-v1', false)).toBe('mismatch-logged')
     expect(pinVerdict('dev', 'termul-v1', true)).toBe('mismatch-refused')
     expect(pinVerdict(null, 'termul-v1', true)).toBe('mismatch-refused')
+  })
+})
+
+describe('mount cap (AD-26)', () => {
+  const OTHER = 'proj-2'
+  const other = () => useCanvasStore.getState().sessions[OTHER]
+
+  const openOther = async (): Promise<void> => {
+    open.mockResolvedValueOnce(openInfo({ mountSeq: 50, canvasId: 'cv0000000000000002' }))
+    await useCanvasStore.getState().openCanvas(OTHER, DOC_B)
+  }
+
+  afterEach(() => {
+    useAppSettingsStore.setState({
+      settings: { ...useAppSettingsStore.getState().settings, canvasMaxMounted: 2 }
+    })
+  })
+
+  it('sends the canvas.max_mounted setting with each open', async () => {
+    useAppSettingsStore.setState({
+      settings: { ...useAppSettingsStore.getState().settings, canvasMaxMounted: 3 }
+    })
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, expect.objectContaining({ maxMounted: 3 }))
+  })
+
+  it('a canvas the host evicted becomes unloaded and loses its editor', async () => {
+    await openOther()
+    open.mockResolvedValueOnce(
+      openInfo({ evicted: [{ projectId: OTHER, reason: 'mount cap reached' }] })
+    )
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
+
+    expect(other()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+    expect(other()?.docPath).toBe(DOC_B)
+    expect(other()?.dirty).toBe(false)
+    expect(session()?.phase.kind).toBe('loading')
+    await expect(
+      useCanvasStore.getState().callCanvas(OTHER, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    expect(logFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining(OTHER) })
+    )
+  })
+
+  it('an eviction is applied even when the open that caused it was superseded', async () => {
+    await openOther()
+    let resolveOpen: (value: IpcResult<CanvasOpenInfo>) => void = () => {}
+    open.mockReturnValueOnce(new Promise((resolve) => (resolveOpen = resolve)))
+    const opening = useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await useCanvasStore.getState().unmountCanvas(PROJECT)
+    resolveOpen(openInfo({ evicted: [{ projectId: OTHER, reason: 'mount cap reached' }] }))
+
+    await expect(opening).resolves.toBe('superseded')
+    expect(other()?.phase.kind).toBe('unloaded')
+  })
+
+  it('reopening an unloaded canvas opens it again and may evict another', async () => {
+    await openOther()
+    useCanvasStore.getState().markUnloaded(OTHER, 'evicted')
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+
+    open.mockResolvedValueOnce(
+      openInfo({
+        mountSeq: 60,
+        canvasId: 'cv0000000000000002',
+        evicted: [{ projectId: PROJECT, reason: 'mount cap reached' }]
+      })
+    )
+    await useCanvasStore.getState().openCanvas(OTHER, DOC_B)
+
+    expect(open).toHaveBeenLastCalledWith(DOC_B, OTHER, expect.objectContaining({ maxMounted: 2 }))
+    expect(other()?.phase.kind).toBe('loading')
+    expect(session()?.phase.kind).toBe('unloaded')
+  })
+
+  it('a refused reopen leaves the canvas unloaded, not failed', async () => {
+    await openOther()
+    useCanvasStore.getState().markUnloaded(OTHER, 'evicted')
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'listener down',
+      code: 'BUNDLE_LISTENER_DOWN'
+    })
+
+    await expect(useCanvasStore.getState().openCanvas(OTHER, DOC_B)).resolves.toBe(false)
+
+    expect(other()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+  })
+
+  it('an open blocked by a canvas that could not be saved shows the error in a panel and keeps no mount', async () => {
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'could not unload the least recently active canvas (project proj-2) to make room',
+      code: 'EVICTION_BLOCKED'
+    })
+
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(false)
+
+    expect(session()?.phase).toEqual({
+      kind: 'unloaded',
+      reason: 'blocked',
+      message: 'could not unload the least recently active canvas (project proj-2) to make room'
+    })
+    expect(canvasTabs()).toEqual([expect.objectContaining({ projectId: PROJECT })])
+    expect(toastError).toHaveBeenCalled()
+
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    expect(session()?.phase.kind).toBe('loading')
+  })
+
+  it('a visible report the host answers CANVAS_CLOSED unloads the canvas', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+
+    expect(setVisible).toHaveBeenCalledWith(PROJECT, 41, true)
+    expect(session()?.phase).toEqual({ kind: 'unloaded', reason: 'evicted', message: null })
+  })
+
+  it('a live mount, a hidden report and a stale mountSeq leave the session alone', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+
+    setVisible.mockResolvedValueOnce({ success: true, data: undefined })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, false)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 7, true)
+    setVisible.mockResolvedValueOnce({ success: false, error: 'offline', code: 'NETWORK_ERROR' })
+    await useCanvasStore.getState().setCanvasVisible(PROJECT, 41, true)
+
+    expect(session()?.phase.kind).toBe('loading')
   })
 })

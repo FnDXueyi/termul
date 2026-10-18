@@ -6,6 +6,8 @@
 //! - `POST /canvas/document-loaded` `{projectId, mountSeq, ack}` → view;
 //! - `POST /canvas/dirty-changed` `{projectId, mountSeq, dirty,
 //!   contentVersion}` → outcome, answered once the autosave debounce settles;
+//! - `POST /canvas/set-visible` `{projectId, mountSeq, visible}` → `null`,
+//!   the user-visibility half of the mount cap's activity ranking;
 //! - `POST /canvas/write-snapshot` `{projectId, mountSeq, snapshot}` →
 //!   `{view, markSaved}`.
 //!
@@ -34,6 +36,7 @@ pub const PERSISTENCE_ROUTES: &[&str] = &[
     "/canvas/read-document",
     "/canvas/document-loaded",
     "/canvas/dirty-changed",
+    "/canvas/set-visible",
     "/canvas/write-snapshot",
 ];
 
@@ -64,6 +67,14 @@ struct DirtyRequest {
     content_version: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisibleRequest {
+    project_id: String,
+    mount_seq: u64,
+    visible: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotRequest {
@@ -77,6 +88,7 @@ pub fn persistence_routes() -> Router<CanvasState> {
         .route("/canvas/read-document", post(read_document))
         .route("/canvas/document-loaded", post(document_loaded))
         .route("/canvas/dirty-changed", post(dirty_changed))
+        .route("/canvas/set-visible", post(set_visible))
         .route(
             "/canvas/write-snapshot",
             post(write_snapshot).layer(DefaultBodyLimit::max(MAX_SNAPSHOT_BODY_BYTES)),
@@ -144,6 +156,18 @@ async fn dirty_changed(
     )
     .await;
     body("dirty changed", &req.project_id, result)
+}
+
+async fn set_visible(
+    State(state): State<CanvasState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<VisibleRequest>,
+) -> Json<IpcBody<()>> {
+    if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/set-visible") {
+        return Json(forbidden);
+    }
+    let result = canvas_mounts().set_visible(&req.project_id, req.mount_seq, req.visible);
+    body("set visible", &req.project_id, result)
 }
 
 async fn write_snapshot(

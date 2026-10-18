@@ -151,6 +151,7 @@ impl CanvasPersistence {
             if !held_by(&state.link, holder_id) {
                 return false;
             }
+            state.activity.visible = false;
             std::mem::replace(&mut state.link, Link::Unattached)
         };
         drop(taken);
@@ -175,6 +176,7 @@ impl CanvasPersistence {
                 if !held_by(&state.link, holder_id) {
                     continue;
                 }
+                state.activity.visible = false;
                 std::mem::replace(
                     &mut state.link,
                     Link::Lost {
@@ -255,7 +257,7 @@ impl CanvasPersistence {
                 ));
             }
         }
-        let state = mount.state.lock();
+        let mut state = mount.state.lock();
         match (state.lifecycle, caller) {
             (Lifecycle::Closed, _) => return Err(no_canvas()),
             (Lifecycle::Closing, Caller::Agent) => {
@@ -272,10 +274,15 @@ impl CanvasPersistence {
                 "the canvas is not running in any window",
             )
         })?;
+        let holder = connection.holder.clone();
+        let gone = connection.gone.subscribe();
+        if caller == Caller::Agent {
+            state.activity.tick = self.tick();
+        }
         Ok(Route {
             mount_seq: mount.mount_seq,
-            holder: connection.holder.clone(),
-            gone: connection.gone.subscribe(),
+            holder,
+            gone,
             _in_flight: (caller == Caller::Agent).then(|| InFlight::enter(&mount)),
         })
     }

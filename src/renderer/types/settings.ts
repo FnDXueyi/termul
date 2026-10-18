@@ -93,6 +93,10 @@ export interface AppSettings {
    * its connection drops, so a reload or reconnect keeps it (spine AD-30).
    * Sent with each canvas open. */
   canvasLeaseGraceMs: number
+  /** `canvas.max_mounted`: how many canvases stay mounted at once; opening
+   * another unloads the least recently active one after saving it (spine
+   * AD-26). Sent with each canvas open; the host clamps it to 1..16. */
+  canvasMaxMounted: number
   /** ACP per-turn idle timeout in seconds, or null = use the env var / Rust
    * default (unlimited by default). Set via App Preferences; pushed to the
    * Rust core. */
@@ -282,6 +286,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   editorAutoSaveDelayMs: 1000,
   canvasAutosaveMs: 1500,
   canvasLeaseGraceMs: 5000,
+  canvasMaxMounted: 2,
   acpTurnIdleTimeoutSecs: null,
   acpSessionNewTimeoutSecs: null,
   acpSessionReopenTimeoutSecs: null,

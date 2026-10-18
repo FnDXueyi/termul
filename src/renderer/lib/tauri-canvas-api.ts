@@ -24,6 +24,7 @@ import { getClientInstanceId } from './web-client-identity'
 const IPC_COMMANDS = {
   OPEN: 'canvas_open',
   CLOSE: 'canvas_close',
+  SET_VISIBLE: 'canvas_set_visible',
   READ_DOCUMENT: 'canvas_read_document',
   DOCUMENT_LOADED: 'canvas_document_loaded',
   DIRTY_CHANGED: 'canvas_dirty_changed',
@@ -57,8 +58,13 @@ export function createTauriCanvasApi(): CanvasApi {
         projectId,
         clientInstanceId: getClientInstanceId(),
         autosaveMs: options.autosaveMs,
-        leaseGraceMs: options.leaseGraceMs
+        leaseGraceMs: options.leaseGraceMs,
+        maxMounted: options.maxMounted
       })
+    },
+
+    setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+      return invokeCanvas(IPC_COMMANDS.SET_VISIBLE, { projectId, mountSeq, visible })
     },
 
     close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

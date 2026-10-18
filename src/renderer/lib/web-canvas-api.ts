@@ -4,10 +4,13 @@
  * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
  * auth header):
  * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
- *   autosaveMs, leaseGraceMs }` → `CanvasOpenInfo` with an empty `baseUrl`
- *   (the bundle is same-origin); this tab takes the mount lease;
+ *   autosaveMs, leaseGraceMs, maxMounted }` → `CanvasOpenInfo` with an empty
+ *   `baseUrl` (the bundle is same-origin); this tab takes the mount lease,
+ *   after the least recently active canvases beyond `maxMounted` unloaded;
  * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
  *   unmount (save, verify, unmount), which also revokes the `ct` token;
+ * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
+ *   user-visibility half of the mount cap's activity ranking;
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
  *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
@@ -42,8 +45,13 @@ export const webCanvasApi: CanvasApi = {
       projectId,
       clientInstanceId: getClientInstanceId(),
       autosaveMs: options.autosaveMs,
-      leaseGraceMs: options.leaseGraceMs
+      leaseGraceMs: options.leaseGraceMs,
+      maxMounted: options.maxMounted
     })
+  },
+
+  setVisible(projectId: string, mountSeq: number, visible: boolean): Promise<IpcResult<void>> {
+    return postJson<void>('/canvas/set-visible', { projectId, mountSeq, visible })
   },
 
   close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

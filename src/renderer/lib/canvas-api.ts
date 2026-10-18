@@ -34,6 +34,8 @@ export const canvasApi: CanvasApi = {
     return transport().open(docPath, projectId, options)
   },
   close: (projectId, discard) => transport().close(projectId, discard),
+  setVisible: (projectId, mountSeq, visible) =>
+    transport().setVisible(projectId, mountSeq, visible),
   readDocument: (projectId, mountSeq) => transport().readDocument(projectId, mountSeq),
   documentLoaded: (projectId, mountSeq, ack) =>
     transport().documentLoaded(projectId, mountSeq, ack),

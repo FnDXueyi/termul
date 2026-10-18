@@ -173,7 +173,8 @@ const CT_GATE_EXEMPT_PATHS: &[&str] = &[
 ];
 
 /// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
-/// "clientInstanceId": "...", "autosaveMs"?: n, "leaseGraceMs"?: n }`.
+/// "clientInstanceId": "...", "autosaveMs"?: n, "leaseGraceMs"?: n,
+/// "maxMounted"?: n }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasOpenRequest {
@@ -185,6 +186,8 @@ struct CanvasOpenRequest {
     autosave_ms: Option<u64>,
     #[serde(default)]
     lease_grace_ms: Option<u64>,
+    #[serde(default)]
+    max_mounted: Option<u64>,
 }
 
 /// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
@@ -384,6 +387,7 @@ async fn open(
         client_instance_id: req.client_instance_id,
         autosave_ms: req.autosave_ms,
         lease_grace_ms: req.lease_grace_ms,
+        max_mounted: req.max_mounted,
     };
     match open_canvas(same_origin_base(), &req.project_id, doc_key, request).await {
         Ok(info) => {
