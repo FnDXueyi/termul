@@ -200,6 +200,24 @@ export function onBrowserPolicyChanged(listener: ChangeListener): () => void {
   }
 }
 
+const resyncListeners = new Set<() => void>()
+
+/**
+ * Subscribe to "a change may have been missed": the host's watch resynced, so
+ * a `browser_policy_changed` hint can have been lost with it. Returns the
+ * unsubscribe.
+ */
+export function onBrowserPolicyResync(listener: () => void): () => void {
+  resyncListeners.add(listener)
+  return () => {
+    resyncListeners.delete(listener)
+  }
+}
+
+export function requestBrowserPolicyResync(): void {
+  for (const listener of resyncListeners) listener()
+}
+
 /**
  * Hand a `browser_policy_changed` payload to subscribers. Called by the
  * roster watch, which receives the host's event on both transports. A

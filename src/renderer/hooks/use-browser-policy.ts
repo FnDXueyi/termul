@@ -13,7 +13,8 @@ import {
   browserPolicyFailure,
   editAppBrowserPolicy,
   editProjectBrowserPolicy,
-  onBrowserPolicyChanged
+  onBrowserPolicyChanged,
+  onBrowserPolicyResync
 } from '@/lib/browser-policy-api'
 
 export type PolicyResource<P> =
@@ -65,6 +66,7 @@ function usePolicyResource<P, Op>(
     const stop = onBrowserPolicyChanged((change) => {
       if (latest.current.isRelevant(change)) void reload()
     })
+    const stopResync = onBrowserPolicyResync(() => void reload())
     const onVisible = (): void => {
       if (document.visibilityState === 'visible') void reload()
     }
@@ -72,6 +74,7 @@ function usePolicyResource<P, Op>(
     return () => {
       generation.current += 1
       stop()
+      stopResync()
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [scopeKey, reload])

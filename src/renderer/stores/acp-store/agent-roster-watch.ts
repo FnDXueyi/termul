@@ -21,14 +21,19 @@ import type {
   BrowserOpenRequestEvent
 } from '@/lib/acp-api'
 import type { WatchClient } from '@/lib/acp-transport/watch-client'
-import { publishBrowserPolicyChange } from '@/lib/browser-policy-api'
+import { publishBrowserPolicyChange, requestBrowserPolicyResync } from '@/lib/browser-policy-api'
 import { logFrontendError } from '@/lib/log-api'
 import type { AcpState } from './types'
 
 /** Start watching the roster; returns the unsubscribe. */
 export function attachAgentRosterWatch(watches: WatchClient, getState: () => AcpState): () => void {
   return watches.subscribe<WsAgentSummary[], AgentsWatchDelta>('agents', {
-    onState: (summaries) => reconcileRoster(getState(), summaries),
+    onState: (summaries) => {
+      reconcileRoster(getState(), summaries)
+      // A resubscribe means deltas may have been lost, and a policy change
+      // hint travels as a delta that no state repairs.
+      requestBrowserPolicyResync()
+    },
     onDelta: (delta) => applyRosterDelta(getState(), delta)
   })
 }
