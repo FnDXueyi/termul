@@ -354,6 +354,12 @@ pub fn router(
         // sub-router's own credentials instead (browser iframes cannot
         // send Authorization headers). The boundary validates web-opened
         // doc paths against the same project registry the fs/git routes use.
+        .merge(crate::web::browser_policy_api::browser_policy_router(
+            crate::web::browser_policy_api::PolicyRouteState {
+                service: crate::acp::browser_policy::installed(),
+                token_gated: web_auth.is_some(),
+            },
+        ))
         .merge(crate::web::canvas_api::canvas_router(
             crate::web::canvas_api::CanvasState {
                 pool: canvas_pool,
@@ -655,6 +661,12 @@ pub fn router_with_static(
     // what the auth tests assert. The boundary is still wired so open's
     // doc-path validation behavior matches production.
     let r = r
+        .merge(crate::web::browser_policy_api::browser_policy_router(
+            crate::web::browser_policy_api::PolicyRouteState {
+                service: crate::acp::browser_policy::installed(),
+                token_gated: web_auth.is_some(),
+            },
+        ))
         .merge(crate::web::canvas_api::canvas_router(
             crate::web::canvas_api::CanvasState {
                 pool: None,

@@ -50,6 +50,7 @@ import {
 import { AiAgentsSection } from './app-preferences/ai-agents-section'
 import { AppearanceSection } from './app-preferences/appearance-section'
 import { BehaviorSection } from './app-preferences/behavior-section'
+import { BrowserSection } from './app-preferences/browser-section'
 import { APP_PREF_CATEGORIES, APP_PREF_SEARCH_INDEX } from './app-preferences/categories'
 import { DiagnosticsSection } from './app-preferences/diagnostics-section'
 import { McpServersSection } from './app-preferences/mcp-servers-section'
@@ -340,6 +341,7 @@ export function AppPreferencesModal(): React.JSX.Element {
           <SkillsSection />
           <ProviderSection />
           <McpServersSection />
+          <BrowserSection />
           {/* Keyboard Shortcuts Section */}
           <ShortcutsSection
             shortcuts={shortcuts}

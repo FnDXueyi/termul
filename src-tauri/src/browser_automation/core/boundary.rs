@@ -1,4 +1,4 @@
-//! Host-boundary failure logging for browser tool calls (CAP-6).
+//! Host-boundary failure logging for browser tool calls.
 //!
 //! The failure log line printed by the parent (`acp::host_mcp::parent`)
 //! when a `FrameKind::Browser` call fails: wire error code + action +
@@ -8,8 +8,9 @@
 //! keeps the full message (it is the tool result, values allowed there).
 //!
 //! Pure module: every helper is headless-testable and pinned by unit
-//! tests in `super::tests`.
+//! tests in `boundary_tests`.
 
+use super::dispatch::spec;
 use super::{ERR_CAPABILITY, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_TAB_NOT_FOUND};
 
 /// Prefix shared by every host-boundary browser failure line. Extracted
@@ -21,6 +22,8 @@ pub const BROWSER_CALL_FAILED_PREFIX: &str = "[host-mcp] browser call failed";
 #[derive(Debug)]
 pub struct BrowserError {
     pub code: &'static str,
+    /// Finer machine-readable cause under the frozen code.
+    pub reason: Option<&'static str>,
     pub message: String,
     /// Argument key names (never values) implicated in the failure.
     /// Carried to the host boundary so failure logs stay diagnosable from
@@ -38,53 +41,45 @@ impl std::fmt::Display for BrowserError {
 }
 
 impl BrowserError {
-    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
+            reason: None,
             message: message.into(),
             arg_keys: Vec::new(),
         }
     }
+    pub(crate) fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = Some(reason);
+        self
+    }
     /// Attach the argument key names implicated in this failure (key
     /// names only — never values; CWE-532).
-    pub(super) fn with_arg_keys(mut self, keys: &[&'static str]) -> Self {
+    pub(crate) fn with_arg_keys(mut self, keys: &[&'static str]) -> Self {
         self.arg_keys = keys.to_vec();
         self
     }
-    pub(super) fn capability(msg: impl Into<String>) -> Self {
+    pub(crate) fn capability(msg: impl Into<String>) -> Self {
         Self::new(ERR_CAPABILITY, msg)
     }
-    pub(super) fn invalid(msg: impl Into<String>) -> Self {
+    pub(crate) fn invalid(msg: impl Into<String>) -> Self {
         Self::new(ERR_INVALID_PARAMS, msg)
     }
-    pub(super) fn tab_not_found(tab_id: &str) -> Self {
+    pub(crate) fn tab_not_found(tab_id: &str) -> Self {
         Self::new(ERR_TAB_NOT_FOUND, format!("tab '{tab_id}' not found"))
     }
-    pub(super) fn internal(msg: impl Into<String>) -> Self {
+    pub(crate) fn internal(msg: impl Into<String>) -> Self {
         Self::new(ERR_INTERNAL, msg)
     }
 }
 
-/// Documented argument key names per action (the child tool's param
-/// table; `element` is agent-stated intent, not an action arg). The
+/// Documented argument key names per action, from the action registry
+/// (`element` is agent-stated intent, not an action arg). The
 /// host-boundary failure log quotes these KEY NAMES — never the values —
 /// so a field failure is diagnosable without leaking argument data
-/// (CWE-532). Pure: pinned by unit tests.
-pub fn action_arg_keys(action: &str) -> &'static [&'static str] {
-    match action {
-        "navigate" => &["url", "tabId"],
-        "new_tab" => &["url"],
-        "click" => &["ref", "tabId"],
-        "fill" => &["ref", "value", "tabId"],
-        "type" => &["text", "ref", "tabId"],
-        "press" => &["key", "ref", "tabId"],
-        "scroll" => &["dy", "ref", "tabId"],
-        "hover" => &["ref", "tabId"],
-        "wait" => &["ms", "text", "tabId"],
-        "close_tab" | "back" | "forward" | "reload" | "snapshot" | "screenshot" => &["tabId"],
-        // `list_tabs` and unknown actions take no documented arguments.
-        _ => &[],
-    }
+/// (CWE-532). Unknown actions take no documented arguments.
+pub fn action_arg_keys(action: &str) -> Vec<&'static str> {
+    spec(action).map(|s| s.arg_keys().collect()).unwrap_or_default()
 }
 
 /// Argument key names the host-boundary failure log prints for `err`
@@ -96,7 +91,7 @@ pub fn action_arg_keys(action: &str) -> &'static [&'static str] {
 /// this line's output by construction).
 pub fn boundary_arg_keys(err: &BrowserError, action: &str) -> Vec<&'static str> {
     if err.arg_keys.is_empty() {
-        action_arg_keys(action).to_vec()
+        action_arg_keys(action)
     } else {
         err.arg_keys.clone()
     }
@@ -107,31 +102,8 @@ pub fn boundary_arg_keys(err: &BrowserError, action: &str) -> Vec<&'static str> 
 /// an agent-supplied action that is not a documented verb (e.g. a URL or
 /// token sent as `browser_action`) would otherwise flow verbatim into the
 /// log (CWE-532). The agent-facing error keeps the original action text.
-fn sanitize_action(action: &str) -> String {
-    let recognized = matches!(
-        action,
-        "navigate"
-            | "new_tab"
-            | "click"
-            | "fill"
-            | "type"
-            | "press"
-            | "scroll"
-            | "hover"
-            | "wait"
-            | "close_tab"
-            | "back"
-            | "forward"
-            | "reload"
-            | "snapshot"
-            | "screenshot"
-            | "list_tabs"
-    );
-    if recognized {
-        action.to_string()
-    } else {
-        "unknown".to_string()
-    }
+fn sanitize_action(action: &str) -> &'static str {
+    spec(action).map_or("unknown", |s| s.name)
 }
 
 /// Strip control characters from the redacted session prefix before
@@ -163,3 +135,7 @@ pub fn boundary_failure_line(
         arg_keys.join(", ")
     )
 }
+
+#[cfg(test)]
+#[path = "boundary_tests.rs"]
+mod tests;

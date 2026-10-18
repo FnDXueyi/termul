@@ -6,6 +6,8 @@ mod agent_registry;
 mod agentation;
 mod browser_automation;
 mod browser_tab_manager;
+mod browser_tab_permissions;
+mod browser_tab_saved_grants;
 // OpenPencil canvas mode (spec-openpencil-canvas-mode): shared, Tauri-free
 // daemon pool + proxies. Compiled unconditionally so the standalone
 // `termul-server` (server_main.rs) constructs its own pool too.
@@ -1634,6 +1636,43 @@ pub fn run() {
                 ),
             );
 
+            // Host-owned browser policy (allow-list, pre-approvals, global
+            // profile switch). The relay sink carries `browser_policy_changed`
+            // to the desktop renderer and every remote client; the web router
+            // reaches the same service through `browser_policy::installed`.
+            {
+                let owned_handle = handle.clone();
+                let owned_ports: acp::browser_policy::OwnedPorts = Arc::new(move || {
+                    let mut ports = Vec::new();
+                    if let Some(service) =
+                        owned_handle.try_state::<agentation::AgentationService>()
+                    {
+                        ports.push(service.http_port());
+                    }
+                    if let Some(remote) = owned_handle.try_state::<Arc<RemoteServerState>>() {
+                        ports.extend(remote.status().port);
+                    }
+                    if tauri::is_dev() {
+                        let dev_url = owned_handle.config().build.dev_url.as_ref();
+                        ports.extend(dev_url.and_then(|url| url.port_or_known_default()));
+                    }
+                    ports
+                });
+                let policy_root = handle
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| format!("browser policy: app_data_dir: {e}"))?
+                    .join("browser-policy");
+                let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
+                    policy_root,
+                    owned_ports,
+                    vec![ws_relay.clone()],
+                    Arc::new(acp::browser_policy::UnwiredProfileControl),
+                ));
+                acp::browser_policy::install(Arc::clone(&policy_service));
+                app.manage(policy_service);
+            }
+
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));
 
@@ -1836,6 +1875,10 @@ pub fn run() {
             commands::fs_scope_grant,
             // Browser tab commands
             commands::browser_tab_create,
+            commands::browser_policy_get_project,
+            commands::browser_policy_get_app,
+            commands::browser_policy_apply_project,
+            commands::browser_policy_apply_app,
             commands::browser_tab_navigate,
             commands::browser_tab_resize,
             commands::browser_tab_show,

@@ -13,16 +13,20 @@
 //! to the agent. Minimal runtime: no Tauri plugins, no `AppHandle`, no sinks —
 //! works identically on desktop + standalone.
 
+use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use rmcp::service::serve_server;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
+use serde::Deserialize;
+
 use crate::acp::host_mcp::{
-    FrameKind, FrameReply, FrameRequest, TermulAskUserInput, TermulBrowserInput, TermulPlanInput,
-    TermulSetTitleInput, ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN,
-    TERMUL_CHAT_INSTRUCTIONS,
+    FrameKind, FrameReply, FrameRequest, TermulAskUserInput, TermulPlanInput, TermulSetTitleInput,
+    ENV_AGENT_ID, ENV_PORT, ENV_SESSION_ID, ENV_TOKEN, TERMUL_CHAT_INSTRUCTIONS,
 };
 
 /// Env-derived configuration for the child. Extracted so the arg parser is
@@ -96,22 +100,139 @@ pub fn run() -> i32 {
     }
 }
 
-/// The rmcp MCP server service backing `plan`. Holds the per-session
-/// connection info (port + token + session_id) so each `tools/call` can open a
-/// fresh TCP connection to the parent.
+/// The rmcp MCP server service backing the host tools. Holds the
+/// per-session connection info (port + token + session_id) so each
+/// `tools/call` can open a fresh TCP connection to the parent.
 struct TermulPlanServer {
     config: ChildConfig,
+    tool_router: ToolRouter<Self>,
 }
 
-/// rmcp derives the `tools/list` entry from the `#[tool]` attribute; the input
-/// type must implement `schemars::JsonSchema` so rmcp can generate the
-/// `inputSchema`. We re-export the shared `TermulPlanInput` (defined in
-/// `host_mcp::mod`) — it already derives `JsonSchema`.
-///
-/// The `ServerHandler` impl lives in its own block below (not the
-/// `server_handler` flag) so `get_info` can attach `TERMUL_CHAT_INSTRUCTIONS`
-/// to the `initialize` result — the channel that advertises the chat
-/// renderer's markdown image + open-in-editor affordances to the agent.
+/// The `browser` tool as the parent describes it. The child embeds no
+/// browser tool text of its own.
+#[derive(Debug, Deserialize)]
+struct DescribedTool {
+    description: String,
+    input_schema: rmcp::model::JsonObject,
+    /// How long to wait for a browser call's reply.
+    round_trip_ms: u64,
+}
+
+impl TermulPlanServer {
+    fn new(config: ChildConfig, browser: Option<DescribedTool>) -> Self {
+        let mut tool_router = Self::tool_router();
+        if let Some(tool) = browser {
+            tool_router.add_route(browser_route(tool));
+        }
+        Self {
+            config,
+            tool_router,
+        }
+    }
+
+    fn frame(&self, kind: FrameKind) -> FrameRequest {
+        frame(&self.config, kind)
+    }
+
+    /// Forward the raw arguments; the parent folds, checks and dispatches
+    /// them and answers with the reply JSON, which goes back verbatim.
+    async fn browser(
+        &self,
+        arguments: Option<rmcp::model::JsonObject>,
+        round_trip: std::time::Duration,
+    ) -> CallToolResult {
+        let request = FrameRequest {
+            browser_input: Some(serde_json::Value::Object(arguments.unwrap_or_default())),
+            ..self.frame(FrameKind::Browser)
+        };
+        let exchange = tokio::time::timeout(round_trip, exchange_frame(&self.config, request)).await;
+        let reply = match exchange {
+            Err(_) => serde_json::json!({
+                "ok": false,
+                "code": "timeout",
+                "reason": "host_round_trip",
+                "message": "the Termul host did not answer in time",
+            }),
+            Ok(reply) => browser_reply(reply),
+        };
+        if reply["ok"] == serde_json::Value::Bool(true) {
+            CallToolResult::structured(reply)
+        } else {
+            CallToolResult::structured_error(reply)
+        }
+    }
+}
+
+/// The reply JSON for a browser frame exchange: the parent's reply
+/// verbatim, or a failure shaped like one when the parent never produced
+/// it.
+fn browser_reply(reply: Result<FrameReply, String>) -> serde_json::Value {
+    match reply {
+        Ok(FrameReply {
+            result: Some(result),
+            ..
+        }) => result,
+        Ok(FrameReply {
+            ok: true,
+            result: None,
+            ..
+        }) => serde_json::json!({ "ok": true }),
+        Ok(FrameReply { code, error, .. }) => serde_json::json!({
+            "ok": false,
+            "code": code.unwrap_or_else(|| "internal".to_string()),
+            "message": error.unwrap_or_else(|| "the Termul host rejected the call".to_string()),
+        }),
+        Err(e) => serde_json::json!({
+            "ok": false,
+            "code": "internal",
+            "reason": "host_unreachable",
+            "message": e,
+        }),
+    }
+}
+
+fn frame(config: &ChildConfig, kind: FrameKind) -> FrameRequest {
+    FrameRequest {
+        token: config.token.clone(),
+        session_id: config.session_id.clone(),
+        kind,
+        ..FrameRequest::default()
+    }
+}
+
+fn browser_route(tool: DescribedTool) -> ToolRoute<TermulPlanServer> {
+    let round_trip = std::time::Duration::from_millis(tool.round_trip_ms);
+    let attr = rmcp::model::Tool::new("browser", tool.description, tool.input_schema);
+    ToolRoute::new_dyn(attr, move |ctx: ToolCallContext<'_, TermulPlanServer>| {
+        let service = ctx.service;
+        let arguments = ctx.arguments;
+        Box::pin(async move { Ok(service.browser(arguments, round_trip).await.into()) })
+    })
+}
+
+/// Fetch the `browser` tool from the parent. `None` (logged) leaves the
+/// tool unserved: no browser tool rather than a guessed one.
+async fn describe_browser_tool(config: &ChildConfig) -> Option<DescribedTool> {
+    let request = frame(config, FrameKind::Describe);
+    let budget = crate::browser_automation::budgets::DESCRIBE;
+    let described = match tokio::time::timeout(budget, exchange_frame(config, request)).await {
+        Ok(Ok(FrameReply {
+            ok: true,
+            result: Some(result),
+            ..
+        })) => serde_json::from_value(result).ok(),
+        _ => None,
+    };
+    if described.is_none() {
+        eprintln!("[host-mcp-child] browser tool not served: describe failed");
+    }
+    described
+}
+
+/// The static host tools. `get_info` lives in its own `ServerHandler`
+/// block below so it can attach `TERMUL_CHAT_INSTRUCTIONS` to the
+/// `initialize` result — the channel that advertises the chat renderer's
+/// markdown image + open-in-editor affordances to the agent.
 #[tool_router]
 impl TermulPlanServer {
     #[tool(
@@ -120,56 +241,12 @@ impl TermulPlanServer {
     )]
     async fn plan(&self, Parameters(input): Parameters<TermulPlanInput>) -> String {
         let request = FrameRequest {
-            token: self.config.token.clone(),
-            session_id: self.config.session_id.clone(),
-            kind: FrameKind::Plan,
             todos: input.todos,
-            title: None,
-            branch: None,
-            browser_action: None,
-            browser_args: None,
-            browser_element: None,
-            ask: None,
+            ..self.frame(FrameKind::Plan)
         };
         match forward_to_parent(&self.config, request, "plan updated").await {
             Ok(msg) => msg,
             Err(e) => format!("plan error: {e}"),
-        }
-    }
-
-    #[tool(
-        name = "browser",
-        description = "Control the Termul in-app browser (the pane the user can watch). Pass action parameters either FLAT at the top level (e.g. {\"action\":\"navigate\",\"url\":\"https://example.com\"}) or NESTED under \"args\" (e.g. {\"action\":\"navigate\",\"args\":{\"url\":\"https://example.com\"}}) — both forms are accepted for every documented parameter (url, ref, value, text, ms, tabId, key, dy, element); \"args\" must be a JSON object, never a string. Actions: navigate {url, tabId?}, snapshot {}, screenshot {}, click {ref, element?}, fill {ref, value, element?}, type {text, ref?}, press {key}, scroll {dy? | ref?}, hover {ref}, wait {ms | text}, new_tab {url}, list_tabs {}, close_tab {tabId?}, back/forward/reload {tabId?}. navigate without tabId reuses this session's single agent tab (auto-opening one only when the session owns none); an explicit tabId must be a tab this session owns or the call fails with tab_not_found (it never auto-opens another tab). Take a snapshot after navigation to get @eN element refs, then act on refs. Windows desktop only; other platforms report capability_unavailable."
-    )]
-    async fn browser(&self, Parameters(input): Parameters<TermulBrowserInput>) -> String {
-        let request = FrameRequest {
-            token: self.config.token.clone(),
-            session_id: self.config.session_id.clone(),
-            kind: FrameKind::Browser,
-            todos: Vec::new(),
-            title: None,
-            branch: None,
-            browser_action: Some(input.action),
-            browser_args: Some(input.args),
-            browser_element: input.element,
-            ask: None,
-        };
-        match forward_to_parent_raw(&self.config, request).await {
-            Ok(reply) if reply.ok => reply
-                .result
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "{}".to_string()),
-            Ok(reply) => match reply.code {
-                Some(code) => format!(
-                    "browser error [{code}]: {}",
-                    reply.error.unwrap_or_else(|| "unknown".to_string())
-                ),
-                None => format!(
-                    "browser error: {}",
-                    reply.error.unwrap_or_else(|| "unknown".to_string())
-                ),
-            },
-            Err(e) => format!("browser transport error: {e}"),
         }
     }
 
@@ -182,16 +259,9 @@ impl TermulPlanServer {
         Parameters(input): Parameters<TermulSetTitleInput>,
     ) -> String {
         let request = FrameRequest {
-            token: self.config.token.clone(),
-            session_id: self.config.session_id.clone(),
-            kind: FrameKind::SetTitle,
-            todos: Vec::new(),
             title: Some(input.title),
             branch: input.branch,
-            browser_action: None,
-            browser_args: None,
-            browser_element: None,
-            ask: None,
+            ..self.frame(FrameKind::SetTitle)
         };
         match forward_to_parent(&self.config, request, "title updated").await {
             Ok(msg) => msg,
@@ -209,16 +279,8 @@ impl TermulPlanServer {
         cancelled: tokio_util::sync::CancellationToken,
     ) -> String {
         let request = FrameRequest {
-            token: self.config.token.clone(),
-            session_id: self.config.session_id.clone(),
-            kind: FrameKind::AskUser,
-            todos: Vec::new(),
-            title: None,
-            branch: None,
-            browser_action: None,
-            browser_args: None,
-            browser_element: None,
             ask: Some(input),
+            ..self.frame(FrameKind::AskUser)
         };
         // No client-side timeout: the user decides when to answer, and the
         // parent always resolves the call (answer, cancel, or session end).
@@ -243,11 +305,12 @@ impl TermulPlanServer {
     }
 }
 
-/// `#[tool_handler]` fills `call_tool`/`list_tools`/`get_tool` from the router
+/// `#[tool_handler]` fills `call_tool`/`list_tools`/`get_tool` from the
+/// per-instance router (static tools plus the described `browser` tool)
 /// and skips `get_info` because it is provided here: the returned
-/// `instructions` land in the MCP `initialize` result so agents learn they can
-/// embed images in markdown replies and link files for open-in-editor.
-#[tool_handler]
+/// `instructions` land in the MCP `initialize` result so agents learn they
+/// can embed images in markdown replies and link files for open-in-editor.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for TermulPlanServer {
     fn get_info(&self) -> rmcp::model::ServerConfig {
         rmcp::model::ServerConfig::new(
@@ -277,19 +340,6 @@ async fn forward_to_parent(
     )
     .await
     .map_err(|_| "parent round trip timed out".to_string())?
-}
-
-/// Browser calls can legitimately block for minutes: the consent prompt
-/// waits up to 120s, `wait` up to 30s, navigation settles ~15s. The raw
-/// reply is returned so typed `code`s reach the agent.
-async fn forward_to_parent_raw(
-    config: &ChildConfig,
-    request: FrameRequest,
-) -> Result<FrameReply, String> {
-    const BROWSER_ROUND_TRIP: std::time::Duration = std::time::Duration::from_secs(150);
-    tokio::time::timeout(BROWSER_ROUND_TRIP, exchange_frame(config, request))
-        .await
-        .map_err(|_| "parent round trip timed out".to_string())?
 }
 
 /// Send one frame to the parent and read its reply, with no timeout of its
@@ -372,7 +422,8 @@ where
     tokio::spawn(async move {
         let _ = copy_with_discover_meta(stdin, shim_side).await;
     });
-    let service = TermulPlanServer { config };
+    let browser = describe_browser_tool(&config).await;
+    let service = TermulPlanServer::new(config, browser);
     let running = serve_server(service, (server_read, stdout))
         .await
         .map_err(|e| format!("mcp server initialize failed: {e}"))?;

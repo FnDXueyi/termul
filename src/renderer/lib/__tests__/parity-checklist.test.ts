@@ -2103,3 +2103,126 @@ describe('Git History commit detail parity', () => {
     expect(content).toMatch(/tracing::/)
   })
 })
+
+describe('Browser policy parity', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const Facade = join(LIB_DIR, 'browser-policy-api.ts')
+  const RouterRust = join(SRC_TAURI, 'web', 'router.rs')
+  const RouteRust = join(SRC_TAURI, 'web', 'browser_policy_api.rs')
+  const CommandsRust = join(SRC_TAURI, 'commands', 'browser_policy.rs')
+  const LibRust = join(SRC_TAURI, 'lib.rs')
+  const WireRust = join(SRC_TAURI, 'acp', 'browser_policy', 'wire.rs')
+  const ServiceRust = join(SRC_TAURI, 'acp', 'browser_policy', 'service.rs')
+  const SourcesRust = join(SRC_TAURI, 'web', 'watch', 'sources.rs')
+  const ContractTs = join(LIB_DIR, '..', '..', 'shared', 'types', 'browser-policy.types.ts')
+
+  const OPERATIONS = [
+    {
+      method: 'getProject',
+      command: 'browser_policy_get_project',
+      route: '/host/browser-policy/project',
+      service: 'project_view'
+    },
+    {
+      method: 'getApp',
+      command: 'browser_policy_get_app',
+      route: '/host/browser-policy/app',
+      service: 'app_view'
+    },
+    {
+      method: 'applyProject',
+      command: 'browser_policy_apply_project',
+      route: '/host/browser-policy/project',
+      service: 'apply_project'
+    },
+    {
+      method: 'applyApp',
+      command: 'browser_policy_apply_app',
+      route: '/host/browser-policy/app',
+      service: 'apply_app'
+    }
+  ] as const
+
+  for (const op of OPERATIONS) {
+    it(`${op.method} goes through ${op.command} on desktop and ${op.route} on web`, () => {
+      const facade = readFileSync(Facade, 'utf-8')
+      expect(facade).toContain(`${op.method}:`)
+      expect(facade).toContain(`'${op.command}'`)
+      expect(facade).toContain('POLICY_BASE')
+      expect(facade).toMatch(/isTauriContext\(\) \? desktopBrowserPolicyApi : webBrowserPolicyApi/)
+      expect(readFileSync(RouteRust, 'utf-8')).toContain(`"${op.route}"`)
+    })
+
+    it(`${op.command} is defined, registered in lib.rs and calls the shared service (${op.service})`, () => {
+      const commands = readFileSync(CommandsRust, 'utf-8')
+      expect(commands).toContain(`pub async fn ${op.command}(`)
+      expect(commands).toContain(`.${op.service}(`)
+      expect(readFileSync(LibRust, 'utf-8')).toContain(`commands::${op.command},`)
+    })
+
+    it(`the ${op.route} route calls the same shared service method (${op.service})`, () => {
+      expect(readFileSync(RouteRust, 'utf-8')).toContain(`.${op.service}(`)
+    })
+  }
+
+  it('router.rs merges the policy router in BOTH router variants', () => {
+    const content = readFileSync(RouterRust, 'utf-8')
+    const occurrences = content.split('browser_policy_router(').length - 1
+    expect(occurrences, 'both router() and router_with_static() merge it').toBe(2)
+  })
+
+  it('every policy route sits under a bearer-gated prefix', () => {
+    const router = readFileSync(RouterRust, 'utf-8')
+    expect(router).toMatch(/const GATED_PREFIXES[^;]*"\/host\/"/s)
+    for (const route of new Set(OPERATIONS.map((op) => op.route))) {
+      expect(route.startsWith('/host/')).toBe(true)
+    }
+  })
+
+  it('commands run only from the main webview', () => {
+    const commands = readFileSync(CommandsRust, 'utf-8')
+    expect(commands).toMatch(/webview\.label\(\) != "main"/)
+  })
+
+  it('the TypeScript operations and the Rust wire operations are the same set', () => {
+    const rust = readFileSync(WireRust, 'utf-8')
+    const ts = readFileSync(ContractTs, 'utf-8')
+    const variants: Record<string, string> = {
+      add_origin: 'AddOrigin',
+      remove_origin: 'RemoveOrigin',
+      add_preapproval: 'AddPreapproval',
+      remove_preapproval: 'RemovePreapproval',
+      set_ephemeral: 'SetEphemeral',
+      set_global_profile: 'SetGlobalProfile',
+      clear_global_profile: 'ClearGlobalProfile'
+    }
+    for (const [name, variant] of Object.entries(variants)) {
+      expect(ts, name).toContain(`op: '${name}'`)
+      expect(rust, name).toContain(variant)
+    }
+    const tsOps = new Set([...ts.matchAll(/op: '([a-z_]+)'/g)].map((m) => m[1]))
+    expect(tsOps).toEqual(new Set(Object.keys(variants)))
+  })
+
+  it('change events reach every client: fanned out by the service, carried by the agents watch, routed by the roster watch', () => {
+    expect(readFileSync(ServiceRust, 'utf-8')).toContain('"acp:browser_policy_changed"')
+    expect(readFileSync(SourcesRust, 'utf-8')).toMatch(
+      /AGENT_TRANSIENT_EVENTS[^;]*"browser_policy_changed"/s
+    )
+    const roster = readFileSync(
+      join(LIB_DIR, '..', 'stores', 'acp-store', 'agent-roster-watch.ts'),
+      'utf-8'
+    )
+    expect(roster).toContain("'browser_policy_changed'")
+    expect(roster).toContain('publishBrowserPolicyChange')
+  })
+
+  it('the settings section is registered and the facade logs through log-api', () => {
+    const categories = readFileSync(
+      join(LIB_DIR, '..', 'pages', 'app-preferences', 'categories.tsx'),
+      'utf-8'
+    )
+    expect(categories).toContain("id: 'browser'")
+    expect(readFileSync(Facade, 'utf-8')).toContain("from './log-api'")
+  })
+})
