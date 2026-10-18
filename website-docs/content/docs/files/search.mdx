@@ -1,0 +1,46 @@
+---
+title: Search files and content
+description: Find a file by its name, or find every line in the project that contains a word.
+---
+
+<Callout type="info">This works in the desktop app only. In the browser version, the search field shows **Search unavailable** when you type.</Callout>
+
+The search field at the top of the explorer looks for your text in two places at once. It finds the lines inside your files that contain the text, and the files whose names contain it.
+
+## Search the project
+
+1. Open the **Explorer** tab in the side panel. See [Browse and manage files](/docs/files/explorer).
+2. Click the field that says **Search files and content**.
+3. Type at least 2 characters.
+
+The results replace the file tree while the field has text. To get the tree back, click **Clear search** (the `x` in the field) or delete the text.
+
+## Choose Content or Files
+
+Two tabs sit above the results. Each tab shows how many results it has.
+
+- **Content** lists the files whose text contains your search. Under each file name, Termul shows the matching lines with their line numbers and highlights the match. A file shows its first 3 matching lines. Click **Show N more** to see the rest, and **Show less** to fold them again.
+- **Files** lists the files whose names contain your search, with the folder of each file.
+
+Termul opens the tab that has results. After you click a tab yourself, it stays on that tab.
+
+## Open a result
+
+- On the **Content** tab, click a line to open the file at that line. The editor scrolls to the line and selects the match.
+- On the **Content** tab, click a file name to open the file at its first match.
+- On the **Files** tab, click a file to open it.
+
+A Markdown file opens in **Source** view, so you see the exact line. See [Work with Markdown](/docs/files/markdown).
+
+## What the search skips
+
+The search is not case-sensitive and matches your text exactly as you type it. Characters such as `*` and `.` have no special meaning.
+
+The content search skips:
+
+- Files larger than 1 MB.
+- Files that your `.gitignore` excludes.
+- Hidden files and folders, whose names start with a dot.
+- Common generated folders, such as `node_modules`, `.git`, `dist`, `build`, `.next`, `coverage`, and `__pycache__`.
+
+If a search finds very many matches, Termul stops early and shows "Results were truncated for performance."

@@ -253,7 +253,12 @@ export function ClaudeLimitNotice({ sessionId }: { sessionId: string }): React.J
               </Button>
             )}
             {claudeAccountsApi.canManageAccounts() && (
-              <Button type="button" size="xs" variant="ghost" onClick={() => openAppSettings()}>
+              <Button
+                type="button"
+                size="xs"
+                variant="ghost"
+                onClick={() => openAppSettings('provider')}
+              >
                 Add account
               </Button>
             )}

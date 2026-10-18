@@ -34,8 +34,8 @@ export const PANEL_ICON_BUTTON_CLASS = `${QUIET_ICON_BUTTON_CLASS} size-7`
 /** 40px panel header: `.label-panel` at the start, icon buttons at the end. */
 export const PANEL_HEADER_CLASS = 'flex h-10 shrink-0 items-center justify-between pl-4 pr-1.5'
 
-/** Panel text field: card fill, hairline border, neutral focus border. */
-export const PANEL_FIELD_CLASS = `rounded-lg border border-border bg-card text-xs pointer-coarse:text-base text-foreground transition-colors duration-150 ease-out placeholder:text-muted-foreground ${FIELD_FOCUS_CLASS}`
+/** Panel text field: card fill, 3:1 field edge, neutral focus border. */
+export const PANEL_FIELD_CLASS = `rounded-lg border border-field-border bg-card text-xs pointer-coarse:text-base text-foreground transition-colors duration-150 ease-out placeholder:text-muted-foreground ${FIELD_FOCUS_CLASS}`
 
 /** 13px search glyph inside a `relative` wrapper around a panel field. */
 export const PANEL_FIELD_ICON_CLASS =

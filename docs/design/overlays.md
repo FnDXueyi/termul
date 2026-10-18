@@ -38,7 +38,7 @@ Default → Dialog
 - Shell: `rounded-xl border bg-popover p-1`. Rows: `min-h-8 rounded-lg px-2 text-xs`.
 - Highlight (pointer or keyboard): `bg-foreground/[0.06]`. Never `bg-secondary` — in Termul Dark it equals `bg-popover`, so the highlight disappears.
 - Selected or checked: a `Check` icon. No fill. Radio items also use `Check`.
-- Group label: 11px, semibold, uppercase, tracked, `text-muted-foreground`.
+- Group label: `.label-panel` (12px, medium, sentence case, no tracking, `text-muted-foreground`).
 - Destructive item: last, after a separator. `ContextMenuItem` accepts `variant="destructive"`. `DropdownMenuItem` does not.
 
 ## Correct

@@ -1,7 +1,9 @@
 import type { DetectedShells } from '@shared/types/ipc.types'
 import { useId, useState } from 'react'
-import { Pencil, Plus, Terminal, Trash2 } from '@/components/icons'
+import { Pencil, Plus, Terminal, TerminalSquare, Trash2 } from '@/components/icons'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
+import { showUndoToast } from '@/components/settings/undo-toast'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -22,6 +24,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useUpdateAppSetting } from '@/hooks/use-app-settings'
+import { logFrontendError } from '@/lib/log-api'
 import {
   EMPTY_TERMINAL_PROFILE_DRAFT,
   parseTerminalProfileDraft,
@@ -60,77 +63,103 @@ export function TerminalProfilesSection({
     setEditor(null)
   }
 
-  const remove = (id: string): void => {
+  const remove = (profile: TerminalProfile): void => {
+    const index = profiles.findIndex((entry) => entry.id === profile.id)
     void updateSetting(
       'terminalProfiles',
-      profiles.filter((entry) => entry.id !== id)
+      profiles.filter((entry) => entry.id !== profile.id)
     )
+    void logFrontendError({
+      level: 'info',
+      source: 'TerminalProfilesSection.delete',
+      message: 'Terminal profile deleted; undo offered'
+    })
+    showUndoToast(`Deleted ${profile.name}`, () => {
+      const current = useAppSettingsStore.getState().settings.terminalProfiles
+      if (current.some((entry) => entry.id === profile.id)) return
+      const restored = [...current]
+      restored.splice(Math.min(index, restored.length), 0, profile)
+      void updateSetting('terminalProfiles', restored)
+      void logFrontendError({
+        level: 'info',
+        source: 'TerminalProfilesSection.undoDelete',
+        message: 'Terminal profile restored by undo'
+      })
+    })
   }
+
+  const addButton = (
+    <Button type="button" size="sm" disabled={!isLoaded} onClick={() => setEditor({ mode: 'add' })}>
+      <Plus size={14} /> Add profile
+    </Button>
+  )
 
   return (
     <SettingsSection id="terminal-profiles">
-      <div className="flex flex-col gap-6 border-b border-border pb-6 md:flex-row md:items-start">
-        <div className="w-full pt-1 md:w-1/3">
-          <h2 className="text-lg font-medium text-foreground">Terminal Profiles</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Save a shell with its arguments, start folder and environment. Open one from the command
-            palette.
+      {profiles.length === 0 ? (
+        <div className="flex flex-col items-center gap-1.5 rounded-lg border border-border bg-card px-6 py-8 text-center">
+          <Terminal size={20} className="mb-1 text-muted-foreground" />
+          <p className="text-sm font-medium text-foreground">No terminal profiles</p>
+          <p className="max-w-sm text-xs text-muted-foreground">
+            A profile opens a terminal with your shell, folder and variables in one step.
           </p>
+          <div className="pt-2">{addButton}</div>
         </div>
-        <div className="w-full space-y-4 md:w-2/3">
-          <div className="flex justify-end">
-            <Button
-              type="button"
-              size="sm"
-              disabled={!isLoaded}
-              onClick={() => setEditor({ mode: 'add' })}
-            >
-              <Plus size={14} className="mr-1.5" /> Add profile
-            </Button>
-          </div>
-          {profiles.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-8 text-center">
-              <Terminal size={24} className="mx-auto mb-2 text-muted-foreground" />
-              <p className="text-sm font-medium">No terminal profiles</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                A profile opens a terminal with your shell, folder and variables in one step.
-              </p>
-            </div>
-          ) : (
-            <ul className="divide-y divide-border rounded-lg border border-border">
-              {profiles.map((profile) => (
-                <li key={profile.id} className="flex items-center gap-2 px-3 py-2">
-                  <span className="min-w-0 shrink truncate text-sm font-medium">
-                    {profile.name}
-                  </span>
-                  <span className="hidden min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground sm:block">
-                    {terminalProfileCommandLine(profile)}
-                  </span>
-                  <span className="flex-1 sm:hidden" />
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => setEditor({ mode: 'edit', profile })}
-                  >
-                    <Pencil size={15} />
-                    <span className="sr-only">Edit {profile.name}</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => remove(profile.id)}
-                  >
-                    <Trash2 size={15} />
-                    <span className="sr-only">Delete {profile.name}</span>
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
+      ) : (
+        <SettingsGroup
+          title={profiles.length === 1 ? '1 profile' : `${profiles.length} profiles`}
+          actions={addButton}
+        >
+          <SettingsCard>
+            {profiles.map((profile) => (
+              <div key={profile.id} className="flex items-center gap-3 px-4 py-3">
+                <span
+                  aria-hidden="true"
+                  className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-secondary-foreground"
+                >
+                  <TerminalSquare size={14} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-foreground">{profile.name}</div>
+                  <div className="flex min-w-0 gap-1.5 text-xs text-muted-foreground">
+                    <span
+                      className="truncate font-mono"
+                      title={terminalProfileCommandLine(profile)}
+                    >
+                      {terminalProfileCommandLine(profile)}
+                    </span>
+                    {profile.cwd && (
+                      <span className="hidden min-w-0 truncate sm:inline" title={profile.cwd}>
+                        · {profile.cwd}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  className="size-7 text-muted-foreground"
+                  onClick={() => setEditor({ mode: 'edit', profile })}
+                  aria-label={`Edit ${profile.name}`}
+                >
+                  <Pencil size={14} />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  className="size-7 text-muted-foreground"
+                  onClick={() => remove(profile)}
+                  aria-label={`Delete ${profile.name}`}
+                >
+                  <Trash2 size={14} />
+                </Button>
+              </div>
+            ))}
+          </SettingsCard>
+        </SettingsGroup>
+      )}
       {editor && (
         <TerminalProfileDialog
           key={editor.mode === 'edit' ? editor.profile.id : 'add'}
