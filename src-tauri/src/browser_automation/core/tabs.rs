@@ -640,60 +640,6 @@ impl TabRefs {
     }
 }
 
-/// Mint host refs for a snapshot written by the page helper, whose text
-/// carries one line per actionable node, `- <role> "<name>" @e<K>…`, with
-/// `@e<K>` its own handle numbered 1, 2, … in document order. Each handle
-/// becomes the node's `path`, and the text gets the host ref instead.
-/// Lines whose handle is out of sequence are page text, not nodes.
-pub(super) fn rewrite_snapshot_refs(
-    text: &str,
-    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
-) -> (String, usize) {
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-    let mut found: Vec<(usize, std::ops::Range<usize>, RefNode)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let expected = format!("@e{}", found.len() + 1);
-        if let Some((range, node)) = parse_node_line(line, &expected) {
-            found.push((i, range, node));
-        }
-    }
-    let tokens = mint(found.iter().map(|(_, _, node)| node.clone()).collect());
-    let count = tokens.len();
-    for ((i, range, _), token) in found.into_iter().zip(tokens) {
-        lines[i].replace_range(range, &token);
-    }
-    (lines.join("\n"), count)
-}
-
-/// Parse one node line whose handle is `handle`: the handle's byte range
-/// in the line, and the node.
-fn parse_node_line(line: &str, handle: &str) -> Option<(std::ops::Range<usize>, RefNode)> {
-    let body = line.trim_start();
-    let head = line.len() - body.len() + 2;
-    let rest = body.strip_prefix("- ")?;
-    let (role, named) = rest.split_once(" \"")?;
-    if role.is_empty() || role.contains(' ') {
-        return None;
-    }
-    let marker = format!("\" {handle}");
-    let named_at = head + role.len() + 2;
-    let mut from = 0;
-    while let Some(pos) = named[from..].find(&marker).map(|p| p + from) {
-        let end = pos + marker.len();
-        if end == named.len() || named.as_bytes()[end] == b' ' {
-            let node = RefNode {
-                role: role.to_string(),
-                name: named[..pos].to_string(),
-                path: handle.to_string(),
-                frame: String::new(),
-            };
-            return Some((named_at + pos + 2..named_at + end, node));
-        }
-        from = pos + 1;
-    }
-    None
-}
-
 pub(super) fn stale_ref_error(token: &str, why: RefStale) -> BrowserError {
     BrowserError::new(
         super::ERR_STALE_REF,

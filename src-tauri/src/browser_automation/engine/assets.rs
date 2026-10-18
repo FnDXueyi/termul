@@ -1,337 +1,114 @@
 //! Page helper scripts the core hands to [`super::BrowserEngine::evaluate`].
-//! All are self-contained expressions; agent strings enter only as JSON
-//! literals, never concatenated script.
 //!
-//! Ref model: `snapshot` registers interactive elements as `@eN` in
-//! `window.__termulBrowserRefs` with a structural `sel` fingerprint +
-//! role/name. `resolve_ref` re-queries the fingerprint so a navigated/rebuilt
-//! DOM surfaces as `stale_ref` instead of clicking the wrong node. The
-//! Rust-side per-tab epoch is a counter that rides snapshot replies so an
-//! agent can detect document changes — it is not the staleness mechanism
-//! (the fingerprint re-query is).
+//! Each helper is a static function body over one parameter object `p`,
+//! built from the files in `assets/` at compile time. Agent strings reach
+//! a helper only inside `p`, which every engine passes as a native call
+//! argument, so no agent text is ever part of script source. Helpers keep
+//! no state between calls: an element is named by the structural path the
+//! snapshot reported for it, and the core decides whether that path still
+//! names the element its ref was minted for.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-/// Document readiness probe used to settle after navigation.
-pub const READY_STATE: &str = "document.readyState";
+/// The isolated script world every helper runs in.
+pub const WORLD_NAME: &str = "termul_agent";
 
-/// Shared prelude installed on demand: ref registry + helpers. Idempotent —
-/// `__termulBrowser` is created once per document.
-const PRELUDE: &str = r#"
-if (!window.__termulBrowser) {
-  window.__termulBrowser = (function () {
-    var INTERACTIVE =
-      'a[href],button,input,select,textarea,summary,' +
-      '[role=button],[role=link],[role=textbox],[role=checkbox],[role=switch],[role=combobox],[role=listbox],[role=menuitem],[role=tab],[role=slider],[role=searchbox],' +
-      '[contenteditable=true],[contenteditable=""],[onclick],[tabindex]';
-    var TAG_ROLE = {
-      A: 'link', BUTTON: 'button', INPUT: 'textbox', SELECT: 'combobox',
-      TEXTAREA: 'textbox', SUMMARY: 'button', H1: 'heading', H2: 'heading',
-      H3: 'heading', H4: 'heading', H5: 'heading', H6: 'heading',
-      NAV: 'navigation', MAIN: 'main', ASIDE: 'complementary',
-      HEADER: 'banner', FOOTER: 'contentinfo', FORM: 'form', IMG: 'img',
-      UL: 'list', OL: 'list', LI: 'listitem', TABLE: 'table'
+macro_rules! helper {
+    ($name:literal) => {
+        Helper {
+            name: $name,
+            body: concat!(
+                include_str!("assets/prelude.js"),
+                include_str!(concat!("assets/", $name, ".js"))
+            ),
+        }
     };
-    function roleOf(el) {
-      var r = el.getAttribute('role');
-      if (r) return r;
-      if (el.tagName === 'INPUT') {
-        var t = (el.getAttribute('type') || 'text').toLowerCase();
-        if (t === 'checkbox') return 'checkbox';
-        if (t === 'radio') return 'radio';
-        if (t === 'submit' || t === 'button') return 'button';
-        if (t === 'search') return 'searchbox';
-        return 'textbox';
-      }
-      return TAG_ROLE[el.tagName] || '';
-    }
-    function nameOf(el) {
-      // Never read `value` of a password input — snapshots go to the agent's
-      // model provider; autofill would leak credentials into the transcript.
-      var secret = el.tagName === 'INPUT' &&
-        (el.getAttribute('type') || '').toLowerCase() === 'password';
-      var raw = el.getAttribute('aria-label') ||
-        (el.getAttribute('aria-labelledby') ? labelledText(el) : '') ||
-        el.getAttribute('title') || el.getAttribute('placeholder') ||
-        el.getAttribute('alt') || el.innerText ||
-        (secret ? (el.value ? '[redacted]' : '') : el.value) || '';
-      return String(raw).replace(/\s+/g, ' ').trim().slice(0, 100);
-    }
-    function labelledText(el) {
-      var ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/);
-      var out = '';
-      for (var i = 0; i < ids.length; i++) {
-        var t = document.getElementById(ids[i]);
-        if (t) out += (t.innerText || '') + ' ';
-      }
-      return out.trim();
-    }
-    function visible(el) {
-      if (!el.isConnected) return false;
-      var r = el.getBoundingClientRect();
-      if (r.width === 0 && r.height === 0) return false;
-      var s = getComputedStyle(el);
-      return s.visibility !== 'hidden' && s.display !== 'none';
-    }
-    function pathOf(el) {
-      var segs = [];
-      while (el && el.nodeType === 1 && el.tagName !== 'HTML') {
-        var p = el.parentElement;
-        if (!p) break;
-        var same = Array.prototype.filter.call(p.children, function (c) {
-          return c.tagName === el.tagName;
-        });
-        var idx = same.indexOf(el) + 1;
-        segs.unshift(el.tagName.toLowerCase() + ':nth-of-type(' + idx + ')');
-        el = p;
-      }
-      return 'html>' + segs.join('>');
-    }
-    function isInteractive(el) {
-      try { return el.matches(INTERACTIVE); } catch (e) { return false; }
-    }
-    return {
-      INTERACTIVE: INTERACTIVE, roleOf: roleOf, nameOf: nameOf,
-      visible: visible, pathOf: pathOf, isInteractive: isInteractive,
-      refs: {}, nextRef: 1, epoch: 0
-    };
-  })();
-}
-"#;
-
-/// The aria-ish snapshot. Walks the DOM once; interactive elements get
-/// `@eN` refs (fingerprint = structural selector + role + name); headings,
-/// landmarks and text blocks become plain tree lines. Output bounded by the
-/// caller (truncate in Rust).
-pub const SNAPSHOT: &str = r#"(function(){
-  PRELUDE
-  var B = window.__termulBrowser;
-  B.refs = {}; B.nextRef = 1;
-  var lines = [];
-  var MAX_LINES = 800;
-  function emit(depth, text) { if (lines.length < MAX_LINES) lines.push('  '.repeat(depth) + text); }
-  function walk(el, depth) {
-    if (lines.length >= MAX_LINES || depth > 24) return;
-    var tag = el.tagName;
-    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') return;
-    if (tag === 'IFRAME') { emit(depth, '- iframe'); return; }
-    var role = B.roleOf(el), name = B.nameOf(el);
-    var interactive = B.isInteractive(el) && B.visible(el);
-    if (interactive) {
-      var ref = '@e' + (B.nextRef++);
-      B.refs[ref] = { sel: B.pathOf(el), role: role, name: name };
-      var extra = '';
-      if (el.tagName === 'A' && el.href) extra = ' ' + el.href;
-      if (el.tagName === 'INPUT') {
-        var t = (el.getAttribute('type') || 'text').toLowerCase();
-        extra = ' type=' + t;
-        if (t === 'checkbox' || t === 'radio') extra += el.checked ? ' checked' : ' unchecked';
-      }
-      emit(depth, '- ' + (role || tag.toLowerCase()) + ' "' + name + '" ' + ref + extra);
-      return;
-    }
-    if (role === 'heading' || role === 'navigation' || role === 'main' || role === 'form' ||
-        role === 'list' || role === 'listitem' || role === 'img' || role === 'table') {
-      emit(depth, '- ' + role + (name ? ' "' + name + '"' : ''));
-    } else if (['P','BLOCKQUOTE','PRE','TD','TH','LABEL','HGROUP','CAPTION','FIGCAPTION'].indexOf(tag) >= 0) {
-      var t = name || (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 140);
-      if (t) emit(depth, '- text "' + t + '"');
-    }
-    for (var i = 0; i < el.children.length; i++) walk(el.children[i], depth + 1);
-  }
-  walk(document.body || document.documentElement, 0);
-  if (lines.length >= MAX_LINES) lines.push('…[snapshot line cap]');
-  return {
-    url: location.href, title: document.title || '',
-    text: lines.join('\n'), refs: Object.keys(B.refs).length
-  };
-})()"#;
-
-/// Build the snapshot script (PRELUDE + walker inline — one eval round-trip).
-pub fn snapshot_script() -> String {
-    SNAPSHOT.replace("PRELUDE", PRELUDE)
 }
 
-/// Resolve `@eN` → element existence + center rect. The epoch arg is the
-/// Rust-side epoch at call time, echoed back with the rect (snapshot
-/// replies carry it so an agent can detect document changes). Staleness
-/// is decided here by re-querying the stored fingerprint — a
-/// navigated/rebuilt DOM fails the lookup and reports `stale_ref`.
-pub fn resolve_ref(ref_id: &str, epoch: u64) -> String {
-    let r = serde_json::to_string(ref_id).unwrap_or_default();
-    format!(
-        r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var fp=B.refs[{r}];
-  if(!fp) return {{error:'stale_ref: '+{r}+' not in this document'}};
-  var el;
-  try{{ el=document.querySelector(fp.sel); }}catch(e){{ el=null; }}
-  if(!el||!B.visible(el)) return {{error:'stale_ref: '+{r}+' detached'}};
-  var role=B.roleOf(el), name=B.nameOf(el);
-  if(role!==fp.role) return {{error:'stale_ref: '+{r}+' role changed'}};
-  el.scrollIntoView({{block:'center',inline:'center'}});
-  var rc=el.getBoundingClientRect();
-  return {{epoch:{epoch}, rect:{{cx:rc.left+rc.width/2, cy:rc.top+rc.height/2, w:rc.width, h:rc.height}}, role:role, name:name}};
-}})()"#
-    )
+/// One static helper: a function body over the parameter object `p`
+/// whose return value is JSON-serializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Helper {
+    pub name: &'static str,
+    pub body: &'static str,
 }
 
-/// JS fallback click (non-Windows engines): resolve, scroll into view,
-/// synthesize pointer+click (not trusted, but functional everywhere).
-pub fn dom_click(ref_id: &str, epoch: u64) -> String {
-    let r = serde_json::to_string(ref_id).unwrap_or_default();
-    format!(
-        r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var fp=B.refs[{r}];
-  if(!fp) return {{error:'stale_ref: '+{r}+' not in this document'}};
-  var el; try{{el=document.querySelector(fp.sel);}}catch(e){{el=null;}}
-  if(!el||!B.visible(el)) return {{error:'stale_ref: '+{r}+' detached'}};
-  el.scrollIntoView({{block:'center',inline:'center'}});
-  var rc=el.getBoundingClientRect();
-  var cx=rc.left+rc.width/2, cy=rc.top+rc.height/2;
-  ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(t){{
-    el.dispatchEvent(new (t.indexOf('pointer')===0?PointerEvent:MouseEvent)(t,{{bubbles:true,cancelable:true,clientX:cx,clientY:cy,button:0}}));
-  }});
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-    )
+pub const SNAPSHOT: Helper = helper!("snapshot");
+pub const RESOLVE: Helper = helper!("resolve");
+pub const CLICK: Helper = helper!("click");
+pub const FILL: Helper = helper!("fill");
+pub const TYPE: Helper = helper!("type");
+pub const PRESS: Helper = helper!("press");
+pub const SCROLL: Helper = helper!("scroll");
+pub const HOVER: Helper = helper!("hover");
+pub const CONTAINS_TEXT: Helper = helper!("contains_text");
+pub const READY_STATE: Helper = helper!("ready_state");
+
+/// A helper with its parameters, ready for an engine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Script {
+    pub helper: Helper,
+    pub params: Value,
 }
 
-/// Set a form element's value with input/change events (React-compatible
-/// native setter trick).
-pub fn fill_ref(ref_id: &str, value: &str, epoch: u64) -> String {
-    let r = serde_json::to_string(ref_id).unwrap_or_default();
-    let v = serde_json::to_string(value).unwrap_or_default();
-    format!(
-        r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var fp=B.refs[{r}];
-  if(!fp) return {{error:'stale_ref: '+{r}+' not in this document'}};
-  var el; try{{el=document.querySelector(fp.sel);}}catch(e){{el=null;}}
-  if(!el||!B.visible(el)) return {{error:'stale_ref: '+{r}+' detached'}};
-  el.focus();
-  if(el.isContentEditable){{ el.textContent={v}; el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:{v}}})); }}
-  else {{
-    var proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
-    var setter=Object.getOwnPropertyDescriptor(proto,'value');
-    if(el.tagName==='SELECT'){{ el.value={v}; }}
-    else if(setter&&setter.set){{ setter.set.call(el,{v}); }} else {{ el.value={v}; }}
-    el.dispatchEvent(new Event('input',{{bubbles:true}}));
-    el.dispatchEvent(new Event('change',{{bubbles:true}}));
-  }}
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-    )
-}
-
-/// `type` (insert text into focused/resolved element), `press` (key event),
-/// `scroll` (by delta or to a ref), `hover` (move over a ref).
-pub fn interaction(action: &str, args: &Value, epoch: u64) -> String {
-    let ref_part = args
-        .get("ref")
-        .and_then(Value::as_str)
-        .map(|r| serde_json::to_string(r).unwrap_or_default())
-        .unwrap_or_else(|| "null".into());
-    match action {
-        "type" => {
-            let text =
-                serde_json::to_string(args.get("text").and_then(Value::as_str).unwrap_or_default())
-                    .unwrap_or_default();
-            format!(
-                r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var el=document.activeElement;
-  if({ref_part}){{
-    var fp=B.refs[{ref_part}];
-    if(!fp) return {{error:'stale_ref'}};
-    el=document.querySelector(fp.sel);
-    if(!el||!B.visible(el)) return {{error:'stale_ref: detached'}};
-    el.focus();
-  }}
-  if(!el||el===document.body) return {{error:'no focused element'}};
-  if(el.isContentEditable){{ el.textContent=(el.textContent||'')+{text}; }}
-  else {{ var proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
-    var setter=proto&&Object.getOwnPropertyDescriptor(proto,'value');
-    var cur=el.value||'';
-    if(setter&&setter.set) setter.set.call(el,cur+{text}); else el.value=cur+{text}; }}
-  el.dispatchEvent(new Event('input',{{bubbles:true}}));
-  el.dispatchEvent(new Event('change',{{bubbles:true}}));
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-            )
-        }
-        "press" => {
-            let key =
-                serde_json::to_string(args.get("key").and_then(Value::as_str).unwrap_or("Enter"))
-                    .unwrap_or_default();
-            format!(
-                r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var el=document.activeElement&&document.activeElement!==document.body?document.activeElement:null;
-  if({ref_part}){{
-    var fp=B.refs[{ref_part}];
-    if(!fp) return {{error:'stale_ref'}};
-    el=document.querySelector(fp.sel);
-    if(!el) return {{error:'stale_ref: detached'}};
-    el.focus();
-  }}
-  if(!el) el=document.body;
-  var key={key};
-  ['keydown','keypress','keyup'].forEach(function(t){{
-    el.dispatchEvent(new KeyboardEvent(t,{{key:key,bubbles:true,cancelable:true}}));
-  }});
-  if(key==='Enter'&&el.tagName==='BUTTON') el.click();
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-            )
-        }
-        "scroll" => {
-            let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
-            format!(
-                r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  if({ref_part}){{
-    var fp=B.refs[{ref_part}];
-    if(!fp) return {{error:'stale_ref'}};
-    var el=document.querySelector(fp.sel);
-    if(!el) return {{error:'stale_ref: detached'}};
-    el.scrollIntoView({{block:'center',inline:'center'}});
-  }} else {{ window.scrollBy(0,{dy}); }}
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-            )
-        }
-        _ => {
-            // hover
-            format!(
-                r#"(function(){{
-  {PRELUDE}
-  var B=window.__termulBrowser;
-  var fp=B.refs[{ref_part}];
-  if(!fp) return {{error:'stale_ref'}};
-  var el=document.querySelector(fp.sel);
-  if(!el) return {{error:'stale_ref: detached'}};
-  var rc=el.getBoundingClientRect();
-  el.dispatchEvent(new PointerEvent('pointerover',{{bubbles:true,clientX:rc.left+rc.width/2,clientY:rc.top+rc.height/2}}));
-  el.dispatchEvent(new MouseEvent('mouseover',{{bubbles:true,clientX:rc.left+rc.width/2,clientY:rc.top+rc.height/2}}));
-  return {{epoch:{epoch}, ok:true}};
-}})()"#
-            )
-        }
+impl Script {
+    fn new(helper: Helper, params: Value) -> Self {
+        Self { helper, params }
     }
 }
 
-/// Text-presence probe for `wait{text}`.
-pub fn contains_text(text: &str) -> String {
-    let t = serde_json::to_string(text).unwrap_or_default();
-    format!(
-        r#"(function(){{ var t={t}; return (document.body&&document.body.innerText||'').indexOf(t)>=0; }})()"#
-    )
+/// `document.readyState`, to settle after a navigation.
+pub fn ready_state() -> Script {
+    Script::new(READY_STATE, json!({}))
 }
+
+/// The page outline: structured items, with one `node` per actionable
+/// element carrying its role, name and structural path.
+pub fn snapshot() -> Script {
+    Script::new(SNAPSHOT, json!({}))
+}
+
+/// Scroll the element at `path` into view and report its centre, role and
+/// name.
+pub fn resolve(path: &str) -> Script {
+    Script::new(RESOLVE, json!({ "path": path }))
+}
+
+/// Synthetic pointer and click events on the element at `path`.
+pub fn click(path: &str) -> Script {
+    Script::new(CLICK, json!({ "path": path }))
+}
+
+/// Replace the value of the field at `path`, with input and change events.
+pub fn fill(path: &str, value: &str) -> Script {
+    Script::new(FILL, json!({ "path": path, "value": value }))
+}
+
+/// Append `text` to the field at `path`, or to the focused element.
+pub fn type_text(path: Option<&str>, text: &str) -> Script {
+    Script::new(TYPE, json!({ "path": path, "text": text }))
+}
+
+/// Key events for `key` on the element at `path`, or the focused element.
+pub fn press(path: Option<&str>, key: &str) -> Script {
+    Script::new(PRESS, json!({ "path": path, "key": key }))
+}
+
+/// Scroll the element at `path` into view, or the page by `dy` px.
+pub fn scroll(path: Option<&str>, dy: f64) -> Script {
+    Script::new(SCROLL, json!({ "path": path, "dy": dy }))
+}
+
+/// Synthetic hover events on the element at `path`.
+pub fn hover(path: &str) -> Script {
+    Script::new(HOVER, json!({ "path": path }))
+}
+
+/// Whether the page's visible text contains `text`.
+pub fn contains_text(text: &str) -> Script {
+    Script::new(CONTAINS_TEXT, json!({ "text": text }))
+}
+
+#[cfg(test)]
+#[path = "assets_tests.rs"]
+mod tests;

@@ -3,25 +3,6 @@ use crate::browser_tab_manager::{BrowserBounds, BrowserTabInfo, BrowserTabManage
 use std::sync::Arc;
 use tauri::{State, Webview};
 
-/// Validate that the caller webview matches the expected tab_id.
-/// This prevents cross-tab command injection where a malicious webview
-/// could emit events for other tabs.
-fn validate_browser_tab_caller(webview: &Webview, expected_tab_id: &str) -> Result<(), String> {
-    let caller_label = webview.label();
-    if caller_label != expected_tab_id {
-        log::warn!(
-            "[Security] Browser tab command rejected: caller '{}' does not match expected '{}'",
-            caller_label,
-            expected_tab_id
-        );
-        return Err(format!(
-            "Browser tab command rejected: caller '{}' does not match expected '{}'",
-            caller_label, expected_tab_id
-        ));
-    }
-    Ok(())
-}
-
 // ==================== Browser Tab Commands ====================
 
 /// Create a browser tab: the tab registry validates the label (a
@@ -193,22 +174,6 @@ pub async fn browser_tab_inject_agentation(
         Ok(()) => Ok(IpcResult::success(())),
         Err(e) => Ok(IpcResult::error(e, "BROWSER_TAB_INJECT_AGENTATION_FAILED")),
     }
-}
-
-/// Return channel for the agent eval bridge: injected scripts post their
-/// result back here. Caller-validated to the originating tab so a page in
-/// one tab can't resolve another tab's pending eval.
-#[tauri::command]
-pub async fn browser_agent_eval_result(
-    tab_id: String,
-    nonce: String,
-    ok: bool,
-    value: Option<String>,
-    webview: Webview,
-) -> Result<(), String> {
-    validate_browser_tab_caller(&webview, &tab_id)?;
-    crate::browser_automation::eval_resolved(&nonce, ok, value);
-    Ok(())
 }
 
 /// Only the `main` webview answers host consent and presses Stop: browser

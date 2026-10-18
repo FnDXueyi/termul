@@ -54,36 +54,84 @@ fn truncate_snapshot_cuts_on_a_char_boundary() {
     assert_eq!(kept, &long[..SNAPSHOT_MAX_CHARS - 1]);
 }
 
+fn no_refs(nodes: Vec<RefNode>) -> Vec<String> {
+    assert!(nodes.is_empty(), "no nodes expected");
+    Vec::new()
+}
+
 #[test]
-fn shape_snapshot_rejects_non_object_results() {
-    for bad in [Value::Null, json!("oops"), json!(7), json!(true)] {
-        let err = shape_snapshot(&bad).expect_err("non-object eval result must error, not read as empty");
+fn shape_snapshot_rejects_results_that_are_not_the_helpers_shape() {
+    for bad in [
+        Value::Null,
+        json!("oops"),
+        json!(7),
+        json!({ "url": 7 }),
+        json!({ "items": [{ "kind": "script", "depth": 0 }] }),
+    ] {
+        let err = shape_snapshot(bad, no_refs).expect_err("a malformed result must error, not read as empty");
         assert_eq!(err.code, ERR_INTERNAL);
     }
 }
 
 #[test]
-fn shape_snapshot_puts_page_text_under_page_and_counts_refs() {
-    let (page, refs) = shape_snapshot(&json!({
-        "url": "https://example.com/a",
-        "title": "Example",
-        "text": "- button \"x\" @e1",
-        "refs": 2
-    }))
-    .expect("object result shapes");
+fn shape_snapshot_formats_the_outline_with_host_refs_for_nodes_only() {
+    let mut seen = Vec::new();
+    let (page, refs) = shape_snapshot(
+        json!({
+            "url": "https://example.com/a",
+            "title": "Example",
+            "items": [
+                { "kind": "landmark", "depth": 0, "role": "heading", "name": "Title" },
+                { "kind": "node", "depth": 1, "role": "button", "name": "Sign in", "path": "html>body>button:nth-of-type(1)" },
+                { "kind": "text", "depth": 1, "text": "call @e7 now" },
+                { "kind": "node", "depth": 1, "role": "link", "name": "Docs", "path": "html>body>a:nth-of-type(1)", "href": "https://a.test/" },
+                { "kind": "node", "depth": 2, "role": "checkbox", "name": "Remember @e3", "path": "html>body>input:nth-of-type(1)", "inputType": "checkbox", "checked": true },
+                { "kind": "landmark", "depth": 1, "role": "iframe", "name": "" }
+            ],
+            "capped": true
+        }),
+        |nodes| {
+            seen = nodes;
+            vec!["@e10".to_string(), "@e11".to_string(), "@e12".to_string()]
+        },
+    )
+    .expect("helper result shapes");
+    let node = |role: &str, name: &str, path: &str| RefNode {
+        role: role.into(),
+        name: name.into(),
+        path: path.into(),
+        frame: String::new(),
+    };
+    assert_eq!(
+        seen,
+        [
+            node("button", "Sign in", "html>body>button:nth-of-type(1)"),
+            node("link", "Docs", "html>body>a:nth-of-type(1)"),
+            node("checkbox", "Remember @e3", "html>body>input:nth-of-type(1)"),
+        ]
+    );
+    assert_eq!(refs, 3);
     assert_eq!(
         page,
         PageData {
             url: "https://example.com/a".into(),
             title: "Example".into(),
-            snapshot: Some("- button \"x\" @e1".into()),
+            snapshot: Some(
+                [
+                    "- heading \"Title\"",
+                    "  - button \"Sign in\" @e10",
+                    "  - text \"call @ e7 now\"",
+                    "  - link \"Docs\" @e11 https://a.test/",
+                    "    - checkbox \"Remember @ e3\" @e12 type=checkbox checked",
+                    "  - iframe",
+                    "…[snapshot line cap]",
+                ]
+                .join("\n")
+            ),
             truncated: false,
-        }
+        },
+        "page text never carries a ref token"
     );
-    assert_eq!(refs, 2);
-
-    let (page, refs) = shape_snapshot(&json!({"url": 7, "refs": "many"})).unwrap();
-    assert_eq!((page.url.as_str(), page.title.as_str(), refs), ("", "", 0), "non-strings read as empty");
 }
 
 #[test]

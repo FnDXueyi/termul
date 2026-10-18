@@ -27,6 +27,7 @@ fn route(path: &str) -> Reply {
         "/form.html" => Reply::Page(include_str!("pages/form.html")),
         "/form-done.html" => Reply::Page(include_str!("pages/form-done.html")),
         "/delayed.html" => Reply::Page(include_str!("pages/delayed.html")),
+        "/tamper.html" => Reply::Page(include_str!("pages/tamper.html")),
         REDIRECT_TARGET_PATH => Reply::Page(include_str!("pages/redirect-target.html")),
         REDIRECT_PATH => Reply::Redirect(REDIRECT_TARGET_PATH),
         _ => Reply::NotFound,

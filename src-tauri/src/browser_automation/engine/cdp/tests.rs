@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::browser_automation::engine::EngineFuture;
+use crate::browser_automation::engine::{assets, EngineFuture};
 
 #[test]
 fn issue_timeout_cancels_queued_closure_only_before_it_issues() {
@@ -22,12 +22,18 @@ fn issue_timeout_cancels_queued_closure_only_before_it_issues() {
 }
 
 #[test]
-fn cdp_evaluate_params_pin_method_expression_and_flags() {
-    let params = evaluate_params("(function(){ return 1; })()");
-    assert_eq!(params["expression"], "(function(){ return 1; })()");
+fn a_helper_call_passes_agent_strings_as_a_by_value_argument() {
+    let script = assets::fill("html>body:nth-of-type(1)", "\"); leak(); (\"");
+    let params = call_params(&script, 7);
+    assert_eq!(params["executionContextId"], 7);
+    assert_eq!(
+        params["arguments"],
+        json!([{ "value": { "path": "html>body:nth-of-type(1)", "value": "\"); leak(); (\"" } }])
+    );
+    let declaration = params["functionDeclaration"].as_str().unwrap();
+    assert_eq!(declaration, format!("function (p) {{\n{}\n}}", assets::FILL.body));
     assert_eq!(params["returnByValue"], true, "value must ride the reply");
     assert_eq!(params["awaitPromise"], true, "promises must resolve first");
-    assert_eq!(CdpMethod::RuntimeEvaluate.as_str(), "Runtime.evaluate");
 }
 
 #[test]
@@ -39,7 +45,7 @@ fn cdp_parse_evaluate_result_returns_value_shapes() {
     assert_eq!(v, json!("complete"));
 
     let v = parse_evaluate_result(&json!({
-        "result": {"type": "object", "value": {"text": "- button \"x\" @e1", "refs": 1}}
+        "result": {"type": "object", "value": {"items": [], "refs": 1}}
     }))
     .expect("object value parses");
     assert_eq!(v["refs"], 1);
@@ -50,8 +56,7 @@ fn cdp_parse_evaluate_result_returns_value_shapes() {
     .expect("boolean value parses");
     assert_eq!(v, json!(true));
 
-    // `undefined` completion: no `value` key → null, parity with the
-    // bridge's `JSON.stringify(undefined → null)` reply.
+    // An `undefined` return has no `value` key and reads as null.
     let v = parse_evaluate_result(&json!({"result": {"type": "undefined"}}))
         .expect("undefined completion parses");
     assert!(v.is_null());
@@ -109,10 +114,11 @@ fn cdp_parse_evaluate_result_rejects_non_object_result() {
     assert_eq!(err.kind, EngineErrorKind::Malformed);
 }
 
-/// Records every call and answers from a fixed reply.
+/// Records every call and answers each method from its scripted reply
+/// (an empty object when none is scripted).
 struct RecordingTransport {
     calls: Mutex<Vec<(String, &'static str, Value)>>,
-    reply: Result<Value, EngineError>,
+    replies: Vec<(CdpMethod, Result<Value, EngineError>)>,
 }
 
 impl CdpTransport for RecordingTransport {
@@ -125,21 +131,39 @@ impl CdpTransport for RecordingTransport {
         self.calls
             .lock()
             .push((tab.to_string(), method.as_str(), params));
-        let out = self.reply.clone();
+        let out = self
+            .replies
+            .iter()
+            .find(|(m, _)| *m == method)
+            .map_or(Ok(json!({})), |(_, r)| r.clone());
         Box::pin(async move { out })
     }
 }
 
-fn transport(reply: Result<Value, EngineError>) -> RecordingTransport {
+fn transport(replies: Vec<(CdpMethod, Result<Value, EngineError>)>) -> RecordingTransport {
     RecordingTransport {
         calls: Mutex::new(Vec::new()),
-        reply,
+        replies,
     }
+}
+
+fn isolated_world_replies(call: Result<Value, EngineError>) -> Vec<(CdpMethod, Result<Value, EngineError>)> {
+    vec![
+        (
+            CdpMethod::PageGetFrameTree,
+            Ok(json!({ "frameTree": { "frame": { "id": "MAIN" } } })),
+        ),
+        (
+            CdpMethod::PageCreateIsolatedWorld,
+            Ok(json!({ "executionContextId": 42 })),
+        ),
+        (CdpMethod::RuntimeCallFunctionOn, call),
+    ]
 }
 
 #[tokio::test]
 async fn click_at_presses_then_releases_left_button_at_the_point() {
-    let t = transport(Ok(json!({})));
+    let t = transport(vec![]);
     click_at(&t, "agent-a", Point { x: 10.5, y: 20.0 })
         .await
         .expect("click succeeds");
@@ -156,29 +180,59 @@ async fn click_at_presses_then_releases_left_button_at_the_point() {
 }
 
 #[tokio::test]
-async fn evaluate_parses_the_transport_reply_and_propagates_transport_errors() {
-    let t = transport(Ok(json!({"result": {"type": "string", "value": "complete"}})));
+async fn evaluate_calls_the_helper_in_the_main_frames_isolated_world() {
+    let t = transport(isolated_world_replies(Ok(
+        json!({ "result": { "type": "string", "value": "complete" } }),
+    )));
     assert_eq!(
-        evaluate(&t, "agent-a", "document.readyState").await,
+        evaluate(&t, "agent-a", &assets::ready_state()).await,
         Ok(json!("complete"))
     );
-    assert_eq!(t.calls.lock()[0].1, "Runtime.evaluate");
+    let calls = t.calls.lock();
+    let methods: Vec<&str> = calls.iter().map(|c| c.1).collect();
+    assert_eq!(
+        methods,
+        ["Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.callFunctionOn"]
+    );
+    assert_eq!(calls[1].2, json!({ "frameId": "MAIN", "worldName": "termul_agent" }));
+    assert_eq!(calls[2].2["executionContextId"], 42);
+}
 
-    let undelivered = EngineError::new(EngineErrorKind::Dispatch, true);
-    let t = transport(Err(undelivered));
-    assert_eq!(evaluate(&t, "agent-a", "1").await, Err(undelivered));
+#[tokio::test]
+async fn a_failure_before_the_helper_call_is_retryable_and_never_calls_it() {
+    let lost = EngineError::new(EngineErrorKind::NoReply, false);
+    let mut replies = isolated_world_replies(Ok(json!({})));
+    replies[1].1 = Err(lost);
+    let t = transport(replies);
+    assert_eq!(
+        evaluate(&t, "agent-a", &assets::snapshot()).await,
+        Err(EngineError::new(EngineErrorKind::NoReply, true))
+    );
+    let t = transport(vec![(CdpMethod::PageGetFrameTree, Ok(json!({})))]);
+    assert_eq!(
+        evaluate(&t, "agent-a", &assets::snapshot()).await,
+        Err(EngineError::new(EngineErrorKind::Malformed, true))
+    );
+    assert!(t.calls.lock().iter().all(|c| c.1 != "Runtime.callFunctionOn"));
+
+    let ran = EngineError::new(EngineErrorKind::Timeout, false);
+    let t = transport(isolated_world_replies(Err(ran)));
+    assert_eq!(evaluate(&t, "agent-a", &assets::snapshot()).await, Err(ran));
 }
 
 #[tokio::test]
 async fn capture_screenshot_decodes_png_bytes_and_rejects_missing_data() {
-    let t = transport(Ok(json!({"data": "iVBORw=="})));
+    let t = transport(vec![(
+        CdpMethod::PageCaptureScreenshot,
+        Ok(json!({"data": "iVBORw=="})),
+    )]);
     assert_eq!(
         capture_screenshot(&t, "agent-a").await,
         Ok(vec![0x89, 0x50, 0x4e, 0x47])
     );
     assert_eq!(t.calls.lock()[0].2, json!({"format": "png"}));
 
-    let t = transport(Ok(json!({})));
+    let t = transport(vec![]);
     assert_eq!(
         capture_screenshot(&t, "agent-a").await,
         Err(EngineError::new(EngineErrorKind::Malformed, false))
