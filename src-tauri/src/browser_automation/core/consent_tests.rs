@@ -81,7 +81,7 @@ fn scripted(
 ) {
     let perms = Arc::new(ScriptedPermissions::answering(outcomes));
     let store = Arc::new(InMemoryPolicyStore::default());
-    let gate = ConsentGate::new(perms.clone(), Some(store.clone()));
+    let gate = ConsentGate::new(perms.clone(), store.clone());
     (perms, store, gate)
 }
 
@@ -157,7 +157,7 @@ async fn an_unlisted_origin_prompts_once_per_session() {
 #[tokio::test]
 async fn concurrent_calls_share_one_prompt() {
     let perms = Arc::new(ManualPermissions::default());
-    let gate = Arc::new(ConsentGate::new(perms.clone(), None));
+    let gate = Arc::new(ConsentGate::new(perms.clone(), Arc::new(InMemoryPolicyStore::default())));
     let calls: Vec<_> = (0..3)
         .map(|_| {
             let gate = gate.clone();
@@ -200,13 +200,40 @@ async fn always_allow_for_this_project_persists_through_the_policy_store() {
 }
 
 #[tokio::test]
+async fn always_allow_lands_in_the_project_policy_file_and_survives_a_restart() {
+    use crate::acp::browser_policy::test_support::fixture;
+    let root = tempfile::tempdir().unwrap();
+    let perms = Arc::new(ScriptedPermissions::answering([TicketOutcome::Answered(
+        ConsentOption::AllowProject,
+    )]));
+    let first = fixture(root.path(), Vec::new());
+    let gate = ConsentGate::new(perms.clone(), first.service.clone());
+    authorize(&gate, "session-a", "https://dashboard.example.net/home")
+        .await
+        .unwrap();
+    authorize(&gate, "session-b", "https://dashboard.example.net/other")
+        .await
+        .unwrap();
+    assert_eq!(perms.requests.lock().len(), 1, "session B of the project is not prompted");
+
+    let restarted = fixture(root.path(), Vec::new());
+    let gate = ConsentGate::new(perms.clone(), restarted.service.clone());
+    authorize(&gate, "session-c", "https://dashboard.example.net/")
+        .await
+        .unwrap();
+    assert_eq!(perms.requests.lock().len(), 1, "the grant outlives the app");
+    let view = restarted.service.project_policy("p1").await.unwrap();
+    assert_eq!(
+        view.allow_list,
+        vec![OriginPattern::parse("https://dashboard.example.net").unwrap()]
+    );
+}
+
+#[tokio::test]
 async fn always_allow_retries_a_concurrent_policy_edit() {
     let store = Arc::new(InMemoryPolicyStore::default());
     let perms_for_race = Arc::new(ManualPermissions::default());
-    let racing_gate = Arc::new(ConsentGate::new(
-        perms_for_race.clone(),
-        Some(store.clone()),
-    ));
+    let racing_gate = Arc::new(ConsentGate::new(perms_for_race.clone(), store.clone()));
     let racing = tokio::spawn({
         let gate = racing_gate.clone();
         async move { authorize(&gate, "s1", "https://a.example").await }
@@ -303,7 +330,7 @@ async fn a_denial_grants_nothing_and_the_next_call_asks_again() {
 #[tokio::test]
 async fn stop_denies_the_pending_prompt_revokes_grants_and_latches_until_the_next_turn() {
     let perms = Arc::new(ManualPermissions::default());
-    let gate = Arc::new(ConsentGate::new(perms.clone(), None));
+    let gate = Arc::new(ConsentGate::new(perms.clone(), Arc::new(InMemoryPolicyStore::default())));
 
     let granted = tokio::spawn({
         let gate = gate.clone();
@@ -364,7 +391,7 @@ async fn stop_denies_the_pending_prompt_revokes_grants_and_latches_until_the_nex
 async fn stop_wins_every_race_against_allow() {
     for round in 0..100 {
         let perms = Arc::new(ManualPermissions::default());
-        let gate = Arc::new(ConsentGate::new(perms.clone(), None));
+        let gate = Arc::new(ConsentGate::new(perms.clone(), Arc::new(InMemoryPolicyStore::default())));
         let call = tokio::spawn({
             let gate = gate.clone();
             async move { authorize(&gate, "s1", "https://race.example").await }
@@ -406,7 +433,7 @@ async fn stop_wins_every_race_against_allow() {
 #[tokio::test]
 async fn a_stop_that_lands_while_allow_is_in_flight_refuses_the_call() {
     let perms = Arc::new(ManualPermissions::default());
-    let gate = Arc::new(ConsentGate::new(perms.clone(), None));
+    let gate = Arc::new(ConsentGate::new(perms.clone(), Arc::new(InMemoryPolicyStore::default())));
     let token = gate.begin("s1").unwrap();
     let call = {
         let gate = gate.clone();

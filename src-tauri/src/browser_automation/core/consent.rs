@@ -60,7 +60,7 @@ pub struct ConsentGate {
     grants: SessionGrants,
     stop: StopLatch,
     permissions: Arc<dyn PermissionRequest>,
-    policy: Option<Arc<dyn PolicyStore>>,
+    policy: Arc<dyn PolicyStore>,
     /// One consent ticket per session at a time: a concurrent call for the
     /// same origin waits, then finds the grant instead of prompting again.
     prompts: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -69,7 +69,7 @@ pub struct ConsentGate {
 impl ConsentGate {
     pub fn new(
         permissions: Arc<dyn PermissionRequest>,
-        policy: Option<Arc<dyn PolicyStore>>,
+        policy: Arc<dyn PolicyStore>,
     ) -> Self {
         Self {
             grants: SessionGrants::default(),
@@ -118,13 +118,13 @@ impl ConsentGate {
     }
 
     async fn allow_list(&self, project_id: &str) -> Vec<OriginPattern> {
-        let Some(store) = &self.policy else {
-            return Vec::new();
-        };
-        match store.project(project_id).await {
+        match self.policy.project(project_id).await {
             Ok(policy) => policy.allow_list,
             Err(error) => {
-                log::warn!("[browser-agent] policy read failed reason={error:?}; using an empty allow-list");
+                log::warn!(
+                    "[browser-agent] policy read failed reason={}; using an empty allow-list",
+                    error.reason()
+                );
                 Vec::new()
             }
         }
@@ -197,24 +197,20 @@ impl ConsentGate {
     }
 
     async fn persist_origin(&self, project_id: &str, origin: &CanonicalOrigin) {
-        let Some(store) = &self.policy else {
-            log::warn!("[browser-agent] consent persist skipped reason=policy_store_missing; granted for the session only");
-            return;
-        };
         let op = || ProjectPolicyOp::AddOrigin(OriginPattern::Exact(origin.clone()));
-        let mut expected = match store.project(project_id).await {
+        let mut expected = match self.policy.project(project_id).await {
             Ok(policy) => policy.revision,
             Err(error) => {
-                log::warn!("[browser-agent] consent persist failed reason={error:?}");
+                log::warn!("[browser-agent] consent persist failed reason={}", error.reason());
                 return;
             }
         };
         for _ in 0..PERSIST_ATTEMPTS {
-            match store.apply_project(project_id, expected, op()).await {
+            match self.policy.apply_project(project_id, expected, op()).await {
                 Ok(_) => return,
                 Err(PolicyRefusal::RevisionConflict { current }) => expected = current,
                 Err(error) => {
-                    log::warn!("[browser-agent] consent persist failed reason={error:?}");
+                    log::warn!("[browser-agent] consent persist failed reason={}", error.reason());
                     return;
                 }
             }

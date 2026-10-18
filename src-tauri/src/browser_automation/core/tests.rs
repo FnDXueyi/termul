@@ -172,7 +172,7 @@ fn harness_answering(engine: FakeEngine, permissions: Arc<dyn PermissionRequest>
     let engine = Arc::new(engine);
     let services = HostServices {
         permissions,
-        policy: None,
+        policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
         project_of: Arc::new(|_| "p1".to_string()),
     };
     let host = DesktopBrowserHost::with_parts(pane, engine.clone(), vec![sink.clone()], services);

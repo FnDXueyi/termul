@@ -50,9 +50,9 @@ pub type ProjectResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// Host services the desktop browser host consumes.
 pub struct HostServices {
     pub permissions: Arc<dyn PermissionRequest>,
-    /// `None` until a persistent policy store is wired: the allow-list is
-    /// then empty and "always allow for this project" grants the session.
-    pub policy: Option<Arc<dyn PolicyStore>>,
+    /// The project allow-list the gate reads, and where "always allow for
+    /// this project" is written.
+    pub policy: Arc<dyn PolicyStore>,
     pub project_of: ProjectResolver,
 }
 

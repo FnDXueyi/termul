@@ -1627,6 +1627,44 @@ pub fn run() {
                 tauri::async_runtime::handle().inner(),
             )));
 
+            // Host-owned browser policy (allow-list, pre-approvals, global
+            // profile switch). The relay sink carries `browser_policy_changed`
+            // to the desktop renderer and every remote client; the web router
+            // reaches the same service through `browser_policy::installed`.
+            let policy_service = {
+                let owned_handle = handle.clone();
+                let owned_ports: acp::browser_policy::OwnedPorts = Arc::new(move || {
+                    let mut ports = Vec::new();
+                    if let Some(service) =
+                        owned_handle.try_state::<agentation::AgentationService>()
+                    {
+                        ports.push(service.http_port());
+                    }
+                    if let Some(remote) = owned_handle.try_state::<Arc<RemoteServerState>>() {
+                        ports.extend(remote.status().port);
+                    }
+                    if tauri::is_dev() {
+                        let dev_url = owned_handle.config().build.dev_url.as_ref();
+                        ports.extend(dev_url.and_then(|url| url.port_or_known_default()));
+                    }
+                    ports
+                });
+                let policy_root = handle
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| format!("browser policy: app_data_dir: {e}"))?
+                    .join("browser-policy");
+                let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
+                    policy_root,
+                    owned_ports,
+                    vec![ws_relay.clone()],
+                    Arc::new(acp::browser_policy::UnwiredProfileControl),
+                ));
+                acp::browser_policy::install(Arc::clone(&policy_service));
+                app.manage(Arc::clone(&policy_service));
+                policy_service
+            };
+
             // Desktop browser-automation host: drives the visible browser
             // pane via BrowserTabManager; registered globally so host_mcp
             // FrameKind::Browser frames dispatch here. Without registration
@@ -1662,48 +1700,11 @@ pub fn run() {
                     vec![ws_relay.clone()],
                     browser_automation::HostServices {
                         permissions: host_tickets,
-                        policy: None,
+                        policy: policy_service,
                         project_of,
                     },
                 ),
             );
-
-            // Host-owned browser policy (allow-list, pre-approvals, global
-            // profile switch). The relay sink carries `browser_policy_changed`
-            // to the desktop renderer and every remote client; the web router
-            // reaches the same service through `browser_policy::installed`.
-            {
-                let owned_handle = handle.clone();
-                let owned_ports: acp::browser_policy::OwnedPorts = Arc::new(move || {
-                    let mut ports = Vec::new();
-                    if let Some(service) =
-                        owned_handle.try_state::<agentation::AgentationService>()
-                    {
-                        ports.push(service.http_port());
-                    }
-                    if let Some(remote) = owned_handle.try_state::<Arc<RemoteServerState>>() {
-                        ports.extend(remote.status().port);
-                    }
-                    if tauri::is_dev() {
-                        let dev_url = owned_handle.config().build.dev_url.as_ref();
-                        ports.extend(dev_url.and_then(|url| url.port_or_known_default()));
-                    }
-                    ports
-                });
-                let policy_root = handle
-                    .path()
-                    .app_data_dir()
-                    .map_err(|e| format!("browser policy: app_data_dir: {e}"))?
-                    .join("browser-policy");
-                let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
-                    policy_root,
-                    owned_ports,
-                    vec![ws_relay.clone()],
-                    Arc::new(acp::browser_policy::UnwiredProfileControl),
-                ));
-                acp::browser_policy::install(Arc::clone(&policy_service));
-                app.manage(policy_service);
-            }
 
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));
