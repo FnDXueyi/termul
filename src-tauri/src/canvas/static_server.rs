@@ -32,8 +32,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::persistence::{
-    autosave_delay, canvas_mounts, crash_timeouts, lease_grace, mount_cap, CloseMode, CloseOutcome,
-    Eviction, LeaseChange, MountRequest, RendererId,
+    autosave_delay, autosave_max_wait, canvas_mounts, crash_timeouts, lease_grace, mount_cap,
+    CloseMode, CloseOutcome, Eviction, LeaseChange, MountRequest, RendererId,
 };
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
@@ -140,6 +140,8 @@ pub struct OpenRequest {
     pub client_instance_id: String,
     /// `canvas.autosave_ms`.
     pub autosave_ms: Option<u64>,
+    /// `canvas.autosave_max_ms`.
+    pub autosave_max_ms: Option<u64>,
     /// `canvas.lease_grace_ms`.
     pub lease_grace_ms: Option<u64>,
     /// `canvas.max_mounted`.
@@ -177,6 +179,7 @@ pub async fn open_canvas(
                 renderer: renderer_id,
                 doc_path: PathBuf::from(&doc_key),
                 autosave: autosave_delay(request.autosave_ms),
+                autosave_max: autosave_max_wait(request.autosave_max_ms),
                 lease_grace: lease_grace(request.lease_grace_ms),
                 crash_timeouts: crash_timeouts(request.crash_timeouts),
             },

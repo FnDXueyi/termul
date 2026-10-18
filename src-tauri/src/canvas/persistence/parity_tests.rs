@@ -67,6 +67,7 @@ async fn open(project_id: &str, dir: &tempfile::TempDir) -> u64 {
         OpenRequest {
             client_instance_id: "parity-tab".into(),
             autosave_ms: Some(100),
+            autosave_max_ms: None,
             lease_grace_ms: None,
             max_mounted: Some(16),
             crash_timeouts: None,

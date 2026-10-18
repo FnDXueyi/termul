@@ -245,6 +245,7 @@ describe('open and close', () => {
 
     expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, {
       autosaveMs: 1500,
+      autosaveMaxMs: 10000,
       leaseGraceMs: 5000,
       maxMounted: 2,
       crashTimeouts: 3

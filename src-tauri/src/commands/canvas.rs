@@ -42,7 +42,7 @@ fn persistence_result<T>(
     }
 }
 
-/// `canvas_open { docPath, projectId, request: { clientInstanceId, autosaveMs?,
+/// `canvas_open { docPath, projectId, request: { clientInstanceId, autosaveMs?, autosaveMaxMs?,
 /// leaseGraceMs?, maxMounted?, crashTimeouts? } }` — the loopback bundle base
 /// plus a minted `ct` token and a new `mountSeq` for the project's canvas,
 /// leased to this window (AD-30). Typed `BUNDLE_LISTENER_DOWN` while the

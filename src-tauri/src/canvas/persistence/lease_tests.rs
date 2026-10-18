@@ -74,6 +74,7 @@ fn request(tab: &str, doc: &Path) -> MountRequest {
         renderer: RendererId::new(tab),
         doc_path: doc.to_path_buf(),
         autosave: Duration::from_secs(60),
+        autosave_max: crate::canvas::persistence::autosave_max_wait(None),
         lease_grace: GRACE,
         crash_timeouts: super::DEFAULT_CRASH_TIMEOUTS,
     }

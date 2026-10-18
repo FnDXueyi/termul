@@ -177,6 +177,9 @@ export type CanvasLeaseLoss = 'elsewhere' | 'evicted' | 'expired'
 export interface CanvasOpenOptions {
   /** `canvas.autosave_ms`. */
   autosaveMs?: number
+  /** `canvas.autosave_max_ms`: a dirty document is saved at least this
+   * often while edits keep superseding the debounce. */
+  autosaveMaxMs?: number
   /** `canvas.lease_grace_ms`: how long this window keeps the canvas after
    * its connection drops, so a reload or reconnect keeps it. */
   leaseGraceMs?: number

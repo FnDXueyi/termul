@@ -538,10 +538,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
       } else if (resuming) {
         patchSession(projectId, { docPath, phase: { kind: 'opening' } })
       }
-      const { canvasAutosaveMs, canvasLeaseGraceMs, canvasMaxMounted, canvasCrashTimeouts } =
-        useAppSettingsStore.getState().settings
+      const {
+        canvasAutosaveMs,
+        canvasAutosaveMaxMs,
+        canvasLeaseGraceMs,
+        canvasMaxMounted,
+        canvasCrashTimeouts
+      } = useAppSettingsStore.getState().settings
       const result = await canvasApi.open(docPath, projectId, {
         autosaveMs: canvasAutosaveMs,
+        autosaveMaxMs: canvasAutosaveMaxMs,
         leaseGraceMs: canvasLeaseGraceMs,
         maxMounted: canvasMaxMounted,
         crashTimeouts: canvasCrashTimeouts

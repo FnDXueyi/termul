@@ -94,12 +94,28 @@ pub const DEFAULT_AUTOSAVE_MS: u64 = 1500;
 const MIN_AUTOSAVE_MS: u64 = 100;
 const MAX_AUTOSAVE_MS: u64 = 60_000;
 
+/// `canvas.autosave_max_ms` when the renderer sends none.
+pub const DEFAULT_AUTOSAVE_MAX_MS: u64 = 10_000;
+const MAX_AUTOSAVE_MAX_MS: u64 = 600_000;
+
 /// The debounce for a requested `canvas.autosave_ms`, clamped to a sane range.
 pub fn autosave_delay(requested_ms: Option<u64>) -> Duration {
     Duration::from_millis(
         requested_ms
             .unwrap_or(DEFAULT_AUTOSAVE_MS)
             .clamp(MIN_AUTOSAVE_MS, MAX_AUTOSAVE_MS),
+    )
+}
+
+/// The longest a dirty document waits for a save for a requested
+/// `canvas.autosave_max_ms`, clamped to a sane range: a steady stream of
+/// edits (an agent driving the canvas) supersedes the debounce forever
+/// otherwise.
+pub fn autosave_max_wait(requested_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        requested_ms
+            .unwrap_or(DEFAULT_AUTOSAVE_MAX_MS)
+            .clamp(MIN_AUTOSAVE_MS, MAX_AUTOSAVE_MAX_MS),
     )
 }
 
@@ -217,6 +233,10 @@ struct MountState {
     disk: Option<Expected>,
     /// Consecutive calls that timed out on this ready mount.
     timeouts: u32,
+    /// When the oldest edit no save was handed out for was reported; a save
+    /// is due `autosave_max` after it however often edits supersede the
+    /// debounce.
+    unsaved_wait_since: Option<tokio::time::Instant>,
 }
 
 /// One mounted document, leased to `holder`. `generation` is the debounce:
@@ -227,6 +247,7 @@ struct Mount {
     holder: RendererId,
     doc_path: PathBuf,
     autosave: Duration,
+    autosave_max: Duration,
     lease_grace: Duration,
     /// `canvas.crash_timeouts`: consecutive timeouts that mark it crashed.
     crash_timeouts: u32,
@@ -255,6 +276,7 @@ impl Mount {
             holder: request.renderer,
             doc_path: request.doc_path,
             autosave: request.autosave,
+            autosave_max: request.autosave_max,
             lease_grace: request.lease_grace,
             crash_timeouts: request.crash_timeouts,
             remounted_from,
@@ -268,6 +290,7 @@ impl Mount {
                 link: Link::Unattached,
                 disk: None,
                 timeouts: 0,
+                unsaved_wait_since: None,
             }),
             generation,
             write_lock: tokio::sync::Mutex::new(()),
@@ -281,6 +304,7 @@ impl Mount {
             renderer: self.holder.clone(),
             doc_path: self.doc_path.clone(),
             autosave: self.autosave,
+            autosave_max: self.autosave_max,
             lease_grace: self.lease_grace,
             crash_timeouts: self.crash_timeouts,
         }
@@ -515,14 +539,16 @@ impl CanvasPersistence {
                 ..Persisted::default()
             });
             state.timeouts = 0;
+            state.unsaved_wait_since = None;
         }
         mount.bump_generation();
         Ok(mount.view())
     }
 
     /// Record the engine's `{dirty, contentVersion}` and, when a save is due,
-    /// wait out the debounce. Ignored while `Loading` (AD-31: dirty cannot be
-    /// set before the document is loaded).
+    /// wait out the debounce, but never past `autosave_max` from the oldest
+    /// edit no save was handed out for. Ignored while `Loading` (AD-31: dirty
+    /// cannot be set before the document is loaded).
     pub async fn dirty_changed(
         &self,
         project_id: &str,
@@ -545,10 +571,19 @@ impl CanvasPersistence {
         }
         let mut generation = mount.bump_generation();
         let mine = *generation.borrow_and_update();
-        if !Self::due(&mount) {
-            return Ok(DirtyOutcome::Idle { view: mount.view() });
-        }
-        let settled = tokio::time::sleep(mount.autosave);
+        let settles_at = {
+            let mut state = mount.state.lock();
+            let due = matches!(&state.phase, Phase::Ready(persisted) if persisted.save_due());
+            if !due {
+                state.unsaved_wait_since = None;
+                drop(state);
+                return Ok(DirtyOutcome::Idle { view: mount.view() });
+            }
+            let now = tokio::time::Instant::now();
+            let waiting_since = *state.unsaved_wait_since.get_or_insert(now);
+            (now + mount.autosave).min(waiting_since + mount.autosave_max)
+        };
+        let settled = tokio::time::sleep_until(settles_at);
         tokio::pin!(settled);
         loop {
             tokio::select! {
@@ -563,19 +598,17 @@ impl CanvasPersistence {
         if mount.state.lock().lifecycle == Lifecycle::Closed {
             return Ok(DirtyOutcome::Superseded);
         }
+        let due = {
+            let mut state = mount.state.lock();
+            state.unsaved_wait_since = None;
+            matches!(&state.phase, Phase::Ready(persisted) if persisted.save_due())
+        };
         let view = mount.view();
-        Ok(if Self::due(&mount) {
+        Ok(if due {
             DirtyOutcome::SaveDue { view }
         } else {
             DirtyOutcome::Idle { view }
         })
-    }
-
-    fn due(mount: &Mount) -> bool {
-        match &mount.state.lock().phase {
-            Phase::Ready(persisted) => persisted.save_due(),
-            Phase::Loading => false,
-        }
     }
 
     /// Write a `host.snapshot` taken at `content_version`. Writes are

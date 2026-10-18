@@ -78,6 +78,8 @@ pub struct MountRequest {
     pub renderer: RendererId,
     pub doc_path: PathBuf,
     pub autosave: Duration,
+    /// `canvas.autosave_max_ms` ([`super::autosave_max_wait`]).
+    pub autosave_max: Duration,
     pub lease_grace: Duration,
     /// `canvas.crash_timeouts` ([`super::crash_timeouts`]).
     pub crash_timeouts: u32,
@@ -90,6 +92,7 @@ impl MountRequest {
             renderer: super::test_renderer(),
             doc_path,
             autosave,
+            autosave_max: super::autosave_max_wait(None),
             lease_grace: lease_grace(None),
             crash_timeouts: super::DEFAULT_CRASH_TIMEOUTS,
         }

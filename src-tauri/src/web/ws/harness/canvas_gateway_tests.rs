@@ -52,6 +52,7 @@ async fn open(host: &Host, doc: &tempfile::TempDir, tab: &str) -> u64 {
                 renderer: RendererId::new(tab),
                 doc_path: doc.path().join("design.figcraft"),
                 autosave: Duration::from_secs(60),
+                autosave_max: crate::canvas::persistence::autosave_max_wait(None),
                 lease_grace: GRACE,
                 crash_timeouts: DEFAULT_CRASH_TIMEOUTS,
             },
