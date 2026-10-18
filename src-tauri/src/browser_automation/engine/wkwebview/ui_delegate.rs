@@ -1,8 +1,9 @@
 //! The agent tab's `WKUIDelegate`: it answers the page's JavaScript
-//! panels (alert, confirm, prompt) by holding them for the core, and
-//! forwards every other delegate call to the delegate wry installed
-//! (new windows, media permissions, file panels). WKWebView has no public
-//! `beforeunload` panel, so pages unload without asking.
+//! panels (alert, confirm, prompt) by holding them for the core, answers
+//! file panels with the files an upload staged (cancelling any other), and
+//! forwards every other delegate call to the delegate wry installed (new
+//! windows, media permissions). WKWebView has no public `beforeunload`
+//! panel, so pages unload without asking.
 //!
 //! `UIDelegate` is a weak property: the webview keeps this proxy alive
 //! through an associated object, and the proxy keeps wry's delegate.
@@ -14,10 +15,11 @@ use block2::DynBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::NSString;
-use objc2_web_kit::{WKFrameInfo, WKUIDelegate, WKWebView};
+use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2_web_kit::{WKFrameInfo, WKOpenPanelParameters, WKUIDelegate, WKWebView};
 
 use crate::browser_automation::engine::dialogs::{self, HeldDialog};
+use crate::browser_automation::engine::file_chooser;
 use crate::browser_automation::engine::events::{DialogAnswer, DialogKind, TabEvents};
 
 pub struct Ivars {
@@ -92,6 +94,33 @@ define_class!(
                 }
                 DialogAnswer::Dismiss => completion.call((ptr::null_mut(),)),
             });
+        }
+
+        #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
+        fn open_panel(
+            &self,
+            _webview: &WKWebView,
+            _parameters: &WKOpenPanelParameters,
+            frame: &WKFrameInfo,
+            completion: &DynBlock<dyn Fn(*mut NSArray<NSURL>)>,
+        ) {
+            // Uploads open the main frame's chooser; a subframe's never
+            // takes their files.
+            // SAFETY: main thread; the frame info is WebKit's own.
+            let staged = unsafe { frame.isMainFrame() }
+                .then(|| file_chooser::answer(self.ivars().events.label()))
+                .flatten();
+            let Some(files) = staged else {
+                log::info!("[browser-tab] page file chooser cancelled on an agent tab");
+                completion.call((ptr::null_mut(),));
+                return;
+            };
+            let urls: Vec<Retained<NSURL>> = files
+                .iter()
+                .map(|file| NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy())))
+                .collect();
+            let urls = NSArray::from_retained_slice(&urls);
+            completion.call((Retained::as_ptr(&urls).cast_mut(),));
         }
     }
 );

@@ -1,12 +1,14 @@
 //! WKWebView adapter (macOS): isolated-world eval in a named
 //! `WKContentWorld` (macOS 11 and later), tab event hooks, JavaScript
-//! panels held for the core, and viewport snapshots.
+//! panels held for the core, file inputs set through the file panel, and
+//! viewport snapshots.
 
 mod eval;
 pub mod events;
 mod screenshot;
 mod ui_delegate;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use objc2_web_kit::WKWebView;
@@ -16,8 +18,8 @@ use tokio::sync::oneshot;
 use super::assets::Script;
 use super::events::DialogAnswer;
 use super::{
-    dialogs, string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
-    InputMode, Point,
+    dialogs, file_chooser, string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts,
+    EngineFuture, InputMode, Point,
 };
 use crate::browser_automation::budgets::EVAL_STEP;
 use crate::browser_tab_manager::BrowserTabManager;
@@ -96,5 +98,14 @@ impl BrowserEngine for WkWebViewEngine {
         answer: DialogAnswer,
     ) -> EngineFuture<'a, bool> {
         Box::pin(dialogs::answer(&self.tabs, tab, id, answer))
+    }
+
+    fn set_input_files<'a>(
+        &'a self,
+        tab: &'a str,
+        path: &'a str,
+        files: &'a [PathBuf],
+    ) -> EngineFuture<'a, ()> {
+        Box::pin(file_chooser::set_input_files(&self.tabs, tab, path, files, eval::call))
     }
 }

@@ -129,7 +129,11 @@ fn attach_platform(platform: &PlatformWebview, events: TabEvents) -> bool {
 /// behind the close settles only after the webview is destroyed.
 pub async fn close(webview: &Webview) {
     let label = webview.label().to_string();
-    let _ = webview.with_webview(move |_| dialogs::release_tab(&label));
+    let _ = webview.with_webview(move |_| {
+        dialogs::release_tab(&label);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        super::file_chooser::release_tab(&label);
+    });
     let _ = webview.close();
     let (tx, rx) = oneshot::channel::<()>();
     if webview.with_webview(move |_| drop(tx)).is_ok() {

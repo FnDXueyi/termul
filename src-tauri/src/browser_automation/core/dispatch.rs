@@ -339,7 +339,7 @@ pub static REGISTRY: [ActionSpec; 22] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::FileChooser],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_UPLOAD,
         summary: "set a project file on a file input. The user confirms every upload; secrets (.env, keys, credentials) and files outside the project are refused.",
     },
     ActionSpec {

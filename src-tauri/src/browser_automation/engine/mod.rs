@@ -15,6 +15,8 @@ pub mod assets;
 pub mod cdp;
 pub mod dialogs;
 pub mod events;
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+pub mod file_chooser;
 pub mod files;
 pub mod hooks;
 pub mod profile;
