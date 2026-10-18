@@ -19,7 +19,8 @@ import { useProjectClaudeAccountDraft } from '@/hooks/use-project-claude-account
 import { dialogApi, filesystemApi, shellApi, worktreeApi } from '@/lib/api'
 import { mergeEnvVars, parseEnvFile, resolveProjectEnvPath } from '@/lib/env-parser'
 import { cn } from '@/lib/utils'
-import { applyProjectClaudeAccount } from '@/stores/claude-account-switch'
+import { renewAgentCredentials } from '@/stores/acp-store'
+import { applyProjectClaudeAccount, CLAUDE_AGENT_CONFIG_ID } from '@/stores/claude-account-switch'
 import {
   useActiveProject,
   useActiveProjectId,
@@ -180,10 +181,13 @@ export function ProjectSettingsModal() {
         symlinkDirs: normalizedSymlinkDirs
       })
       const projectId = activeProject.id
+      // Before the host write, as the launcher chip does: a chat started while
+      // the save runs must not land on an agent of the old Account.
+      if (claudeAccountDraft.dirty) renewAgentCredentials(CLAUDE_AGENT_CONFIG_ID, projectId)
       void claudeAccountDraft
         .save()
         .then((changed) => {
-          if (changed) void applyProjectClaudeAccount(projectId)
+          if (changed) void applyProjectClaudeAccount(projectId, { credentialsRenewed: true })
         })
         .catch((err) => {
           toastAccountChoiceError(err, 'Could not save the Claude account')

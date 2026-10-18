@@ -64,7 +64,7 @@ import {
   type QueuedPrompt,
   sessionTurnBusy
 } from '../prompt-queue-orchestration'
-import { ephemeralSessionIds } from './ephemeral-ids'
+import { ephemeralSessionIds, stoppingAgentIds } from './ephemeral-ids'
 import { isIndexedRealSession } from './live-turn'
 import { modelCatalogFromOptions, persistModelCatalog } from './model-catalog'
 
@@ -1438,7 +1438,11 @@ export function cacheOptionsFromSession(set: AcpSet, get: AcpGet, sessionId: Ses
 }
 
 /** Best-effort tear-down for a session created by a cancelled/stale prepare. */
-export function reapOrphanPreparedSession(get: AcpGet, set: AcpSet, sessionId: SessionId): void {
+export function reapOrphanPreparedSession(
+  get: AcpGet,
+  set: AcpSet,
+  sessionId: SessionId
+): Promise<void> {
   // Index membership is the placeholder check. A host id may start with
   // `launch-`; that prefix is only a renderer tab convention.
   if (isIndexedRealSession(get().sessionIndex, sessionId)) {
@@ -1448,22 +1452,23 @@ export function reapOrphanPreparedSession(get: AcpGet, set: AcpSet, sessionId: S
       source: 'acp.reapOrphanPreparedSession',
       message: `Skipped teardown of indexed session ${sessionId}; orphan reap must not close or delete a persisted chat`
     })
-    return
+    return Promise.resolve()
   }
   // createSession may have set activeSessionId as a side effect; that must not
   // block reaping a session that never became a published preparedSessions entry.
   set((s) => (s.activeSessionId === sessionId ? { activeSessionId: null } : s))
   const agentId = get().sessions[sessionId]?.agentId
-  const disposed = agentId
-    ? acpApi.disposeEphemeralSession(agentId, sessionId).catch((error) => {
-        void logFrontendError({
-          level: 'warn',
-          source: 'acp.reapOrphanPreparedSession',
-          message: `Failed to dispose warm session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+  const disposed =
+    agentId && !stoppingAgentIds.has(agentId)
+      ? acpApi.disposeEphemeralSession(agentId, sessionId).catch((error) => {
+          void logFrontendError({
+            level: 'warn',
+            source: 'acp.reapOrphanPreparedSession',
+            message: `Failed to dispose warm session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+          })
         })
-      })
-    : Promise.resolve()
-  void disposed
+      : Promise.resolve()
+  return disposed
     .then(() => get().deleteHistorySession(sessionId))
     .finally(() => {
       ephemeralSessionIds.delete(sessionId)
