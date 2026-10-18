@@ -71,7 +71,35 @@ impl CanvasPersistence {
         project_id: &str,
         mode: CloseMode,
     ) -> Result<CloseOutcome, CanvasError> {
-        let Some(mount) = self.mounts.lock().get(project_id).cloned() else {
+        self.close_matching(project_id, None, mode).await
+    }
+
+    /// [`Self::close`] of the renderer's own mount `mount_seq` only. When a
+    /// newer open replaced it, the project's current mount is left alone and
+    /// the answer is `unmounted: false`, so a close that arrives late cannot
+    /// take down the mount that replaced it.
+    ///
+    /// # Errors
+    /// As [`Self::close`].
+    pub async fn close_mount(
+        &self,
+        project_id: &str,
+        mount_seq: u64,
+        mode: CloseMode,
+    ) -> Result<CloseOutcome, CanvasError> {
+        self.close_matching(project_id, Some(mount_seq), mode).await
+    }
+
+    async fn close_matching(
+        &self,
+        project_id: &str,
+        mount_seq: Option<u64>,
+        mode: CloseMode,
+    ) -> Result<CloseOutcome, CanvasError> {
+        let current = self.mounts.lock().get(project_id).cloned();
+        let Some(mount) =
+            current.filter(|mount| mount_seq.is_none_or(|seq| mount.mount_seq == seq))
+        else {
             return Ok(CloseOutcome::NOT_MOUNTED);
         };
         {

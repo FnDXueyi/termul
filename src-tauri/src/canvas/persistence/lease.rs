@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use super::{Admitted, CanvasPersistence, CloseMode, CloseOutcome, Mount, PersistenceView};
 use crate::acp::host_mcp::canvas::LeaseLostReason;
-use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE};
+use crate::canvas::{CanvasError, CODE_CANVAS_OPEN_ELSEWHERE, CODE_PATH_VALIDATION_FAILED};
 
 /// `canvas.lease_grace_ms` when the renderer sends none.
 pub const DEFAULT_LEASE_GRACE_MS: u64 = 5000;
@@ -152,10 +152,21 @@ impl CanvasPersistence {
     /// `cap` first ([`super::evict`]); when another renderer holds the lease, that
     /// mount is closed through AD-31 and its renderer is told.
     ///
-    /// `opened` is `EVICTION_BLOCKED` when a victim could not be saved, or
-    /// `CANVAS_OPEN_ELSEWHERE` when the holder's save failed or it was
-    /// already closing; the holder keeps the lease.
+    /// `opened` is `PATH_VALIDATION_FAILED` for a document that is not a
+    /// `.figcraft` file (nothing is evicted for it), `EVICTION_BLOCKED` when a
+    /// victim could not be saved, or `CANVAS_OPEN_ELSEWHERE` when the
+    /// holder's save failed or it was already closing; the holder keeps the
+    /// lease.
     pub async fn open(&self, project_id: &str, request: MountRequest, cap: usize) -> Admitted {
+        if !super::is_canvas_document(&request.doc_path) {
+            return Admitted {
+                evicted: Vec::new(),
+                opened: Err(CanvasError::new(
+                    CODE_PATH_VALIDATION_FAILED,
+                    "a canvas opens only .figcraft documents",
+                )),
+            };
+        }
         let _admitting = self.admission.lock().await;
         let mut evicted = Vec::new();
         let opened = match self.make_room(project_id, cap, &mut evicted).await {

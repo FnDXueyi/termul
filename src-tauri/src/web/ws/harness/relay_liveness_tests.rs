@@ -196,7 +196,7 @@ async fn start_host() -> StartedHost {
                 data_dir.path().join("store.json"),
                 crate::web::store::StorePolicy::default(),
             )
-                .expect("open the scratch store"),
+            .expect("open the scratch store"),
         ),
         data_dir: data_dir.path().to_path_buf(),
     };
@@ -281,4 +281,35 @@ async fn stop_with_an_open_terminal_socket_sends_close_1001() {
         .await
         .expect("the /ws socket was not closed by the same stop");
     assert_eq!(close, Some(1001));
+}
+
+/// A canvas reply can carry an export far past tungstenite's default 16 MiB
+/// frame: the socket must take a frame that size and answer it, instead of
+/// failing the read and ending the connection.
+#[tokio::test]
+async fn a_message_past_the_default_frame_limit_keeps_the_socket_open() {
+    let started = start_host().await;
+    let mut client = RawWsClient::connect(started.addr, "/ws").await;
+    client
+        .read_json_within(Duration::from_secs(5))
+        .await
+        .expect("auth_required event not delivered in time")
+        .expect("auth_required event");
+
+    let pad = "a".repeat(20 * 1024 * 1024);
+    let big = json!({ "id": "big", "type": "canvas_reply", "payload": { "pad": pad } });
+    client.send_text(&big.to_string()).await;
+    let reply = loop {
+        let frame = client
+            .read_json_within(Duration::from_secs(30))
+            .await
+            .expect("no reply to the large frame in time")
+            .expect("the socket closed on a large frame");
+        if frame["id"] == "big" {
+            break frame;
+        }
+    };
+    assert_eq!(reply["ok"], false, "{reply}");
+
+    started.host.stop().await.expect("stop succeeds");
 }

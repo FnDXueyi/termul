@@ -268,7 +268,7 @@ describe('open and close', () => {
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_B)
     expect(session()?.docPath).toBe(DOC_B)
     expect(currentMount().mountSeq).toBe(42)
-    expect(close).toHaveBeenCalledWith(PROJECT, false)
+    expect(close).toHaveBeenCalledWith(PROJECT, INFO.mountSeq, false)
     expect(canvasTabs()).toHaveLength(1)
   })
 
@@ -298,6 +298,7 @@ describe('open and close', () => {
     await expect(opening).resolves.toBe('superseded')
     expect(session()).toBeUndefined()
     expect(canvasTabs()).toHaveLength(0)
+    expect(close.mock.calls).toEqual([[PROJECT, INFO.mountSeq]])
   })
 
   it('an unmount the host ran drops the session: pending calls resolve CANVAS_CLOSED', async () => {
@@ -309,7 +310,7 @@ describe('open and close', () => {
     await useCanvasStore.getState().unmountCanvas(PROJECT)
 
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
-    expect(close).toHaveBeenCalledWith(PROJECT, false)
+    expect(close).toHaveBeenCalledWith(PROJECT, INFO.mountSeq, false)
     expect(session()).toBeUndefined()
     await expect(
       useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
@@ -340,7 +341,7 @@ describe('unmount refused by the host', () => {
     await expect(useCanvasStore.getState().unmountCanvas(PROJECT, true)).resolves.toMatchObject({
       success: true
     })
-    expect(close).toHaveBeenLastCalledWith(PROJECT, true)
+    expect(close).toHaveBeenLastCalledWith(PROJECT, INFO.mountSeq, true)
     expect(session()).toBeUndefined()
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
   })

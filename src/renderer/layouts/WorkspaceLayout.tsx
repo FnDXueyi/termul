@@ -254,10 +254,18 @@ export default function WorkspaceLayout(): React.JSX.Element {
   // `!isLoaded` branch above only covers boot. Preserves #854: the gate
   // screen stays the only interactive surface until a valid token is
   // submitted. The swap unmounts the workspace, so state remounts cold
-  // after re-entry — the accepted trade for a dead token. Sits BEFORE the
+  // after re-entry — the accepted trade for a dead token. The canvas mount
+  // layer stays: its iframes hold the editors' documents (AD-19), and a
+  // fresh iframe under a session the store still calls ready would show an
+  // empty document that autosave could write over the file. Sits BEFORE the
   // mobile branch so web/PWA users get the same re-surface.
   if (webAuthGate.status === 'unauthorized') {
-    return <WebTokenGateScreen />
+    return (
+      <>
+        <WebTokenGateScreen />
+        <CanvasMountLayer key="canvas-mount-layer" />
+      </>
+    )
   }
 
   if (isMobileWebShell) {

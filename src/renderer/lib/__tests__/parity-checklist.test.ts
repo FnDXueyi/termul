@@ -1554,6 +1554,34 @@ describe('Parity Checklist Automation', () => {
       for (const rust of [commands, routes]) {
         expect(rust).toMatch(/open_canvas\(/)
         expect(rust).toMatch(/close_canvas\(/)
+        expect(rust, 'one doc-path check against the opening project root').toMatch(
+          /resolve_doc_path\(&(\w+\.)?doc_path, &(\w+\.)?project_id, /
+        )
+      }
+    })
+
+    it('agent calls reach the lease holder through one gateway client on both transports', () => {
+      const ws = readFileSync(join(LIB_DIR, 'acp-transport', 'ws-transport.ts'), 'utf-8')
+      expect(ws).toMatch(/readonly canvas = new CanvasGatewayClient\(/)
+      expect(ws).toMatch(/this\.canvas\.handleFrame\(/)
+      expect(ws).toMatch(/this\.canvas\.handleLeaseLost\(/)
+      expect(ws, 're-reports its mounts on every (re)connect').toMatch(
+        /this\.canvas\.onConnected\(\)/
+      )
+      const desktop = readFileSync(join(LIB_DIR, 'acp-transport', 'desktop-transport.ts'), 'utf-8')
+      expect(desktop).toMatch(/class DesktopAcpTransport extends WsAcpTransport\b/)
+      expect(desktop).toMatch(/WebSocketImpl: ChannelSocket\b/)
+      const harness = readFileSync(
+        join(RustRoot, 'web', 'ws', 'harness', 'canvas_gateway_tests.rs'),
+        'utf-8'
+      )
+      for (const body of [
+        'a_gateway_call_reaches_the_holder_and_its_reply_answers_the_agent',
+        'a_holder_back_within_the_grace_takes_its_calls_again',
+        'a_holder_gone_past_the_grace_leaves_calls_closed',
+        'a_call_the_holder_never_answers_times_out'
+      ]) {
+        expect(harness, body).toContain(`on_both_carriers!(${body});`)
       }
     })
 
@@ -1594,7 +1622,8 @@ describe('Parity Checklist Automation', () => {
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasMountLayer.tsx'), 'utf-8')
       ).toMatch(/CanvasShell/)
       const layout = readFileSync(join(RENDERER, 'layouts', 'WorkspaceLayout.tsx'), 'utf-8')
-      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(2)
+      // Both shells and the mid-session token screen keep the layer.
+      expect(layout.match(/<CanvasMountLayer /g)?.length).toBe(3)
       expect(
         readFileSync(join(RENDERER, 'components', 'canvas', 'CanvasShell.tsx'), 'utf-8')
       ).toMatch(/createCanvasBridge/)
@@ -1620,10 +1649,10 @@ describe('Parity Checklist Automation', () => {
         readFileSync(join(RENDERER, 'layouts', 'workspace-layout', 'use-app-close.ts'), 'utf-8')
       ).toMatch(/unmountCanvases\(\)/)
       expect(readFileSync(join(LIB_DIR, 'tauri-canvas-api.ts'), 'utf-8')).toContain(
-        'IPC_COMMANDS.CLOSE, { projectId, discard }'
+        'IPC_COMMANDS.CLOSE, { projectId, mountSeq, discard }'
       )
       expect(readFileSync(join(LIB_DIR, 'web-canvas-api.ts'), 'utf-8')).toContain(
-        "'/canvas/close', { projectId, discard }"
+        "'/canvas/close', { projectId, mountSeq, discard }"
       )
       const tree = join(RENDERER, 'stores', 'workspace-store', 'tree.ts')
       expect(readFileSync(tree, 'utf-8')).toMatch(/export function canvasTabId/)

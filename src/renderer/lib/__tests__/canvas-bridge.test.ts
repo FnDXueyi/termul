@@ -53,7 +53,7 @@ function fakeEditor(): FakeEditor {
 }
 
 describe('buildCanvasEmbedUrl', () => {
-  it('builds the AD-22 kiosk URL with the host origin and mount sequence', () => {
+  it('builds the AD-22 kiosk URL with the token as a path segment', () => {
     expect(
       buildCanvasEmbedUrl(
         { baseUrl: 'http://127.0.0.1:5199', canvasId: 'cv0123456789abcdef', canvasToken: 'ab12' },
@@ -61,7 +61,7 @@ describe('buildCanvasEmbedUrl', () => {
         3
       )
     ).toBe(
-      'http://127.0.0.1:5199/canvas/cv0123456789abcdef/?embed=kiosk&ct=ab12&ho=http%3A%2F%2Ftauri.localhost&ms=3'
+      'http://127.0.0.1:5199/canvas/cv0123456789abcdef/ab12/?embed=kiosk&ho=http%3A%2F%2Ftauri.localhost&ms=3'
     )
   })
 
@@ -72,7 +72,7 @@ describe('buildCanvasEmbedUrl', () => {
         'https://termul.example',
         1
       )
-    ).toBe('/canvas/cv1/?embed=kiosk&ct=ff&ho=https%3A%2F%2Ftermul.example&ms=1')
+    ).toBe('/canvas/cv1/ff/?embed=kiosk&ho=https%3A%2F%2Ftermul.example&ms=1')
   })
 })
 

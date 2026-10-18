@@ -364,9 +364,10 @@ impl CanvasRouter {
         detached
     }
 
-    /// The holder's connection ended: its calls resolve `CANVAS_CLOSED`, and
-    /// each mount it ran is dropped unless its renderer takes it up again
-    /// within the mount's lease grace (AD-30).
+    /// The holder's connection ended: the calls it was handed resolve
+    /// `CANVAS_CLOSED`, and each mount it ran is dropped unless its renderer
+    /// takes it up again within the mount's lease grace (AD-30). Calls that
+    /// arrive within the grace wait for that.
     pub fn release_holder(&self, holder_id: &str) {
         let lost = self.mounts.release_holder(holder_id);
         if lost.is_empty() {

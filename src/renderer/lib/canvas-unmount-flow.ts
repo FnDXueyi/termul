@@ -23,24 +23,30 @@ interface PromptState {
   answer: (choice: CanvasUnmountChoice) => void
 }
 
-let resolveQuestion: ((choice: CanvasUnmountChoice) => void) | null = null
+interface Pending {
+  question: CanvasUnmountQuestion
+  resolve: (choice: CanvasUnmountChoice) => void
+}
+
+/** Unmount flows run concurrently (a group delete, a quit during an
+ * archive), so each question waits its turn for its own answer. The head is
+ * the one on screen. */
+const pending: Pending[] = []
 
 /** The open question, rendered by `CanvasUnmountDialog`. */
 export const useCanvasUnmountPrompt = create<PromptState>((set) => ({
   question: null,
   answer: (choice) => {
-    const resolve = resolveQuestion
-    resolveQuestion = null
-    set({ question: null })
-    resolve?.(choice)
+    const answered = pending.shift()
+    set({ question: pending[0]?.question ?? null })
+    answered?.resolve(choice)
   }
 }))
 
 function ask(question: CanvasUnmountQuestion): Promise<CanvasUnmountChoice> {
-  resolveQuestion?.('keep')
   return new Promise((resolve) => {
-    resolveQuestion = resolve
-    useCanvasUnmountPrompt.setState({ question })
+    pending.push({ question, resolve })
+    if (pending.length === 1) useCanvasUnmountPrompt.setState({ question })
   })
 }
 

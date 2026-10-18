@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -165,12 +165,23 @@ enum Link {
     Attached(gateway::Connection),
     /// The holder's connection ended at `since`. The holder keeps the lease
     /// for the mount's grace so a reconnect or reload can take it up again.
+    /// On the tokio clock, like the grace timer that reads it. Agent calls
+    /// that arrive meanwhile wait on `ended`, which is never sent on:
+    /// replacing this state drops it and wakes them.
     Lost {
-        since: Instant,
+        since: tokio::time::Instant,
+        ended: watch::Sender<()>,
     },
 }
 
 impl Link {
+    fn lost() -> Self {
+        Self::Lost {
+            since: tokio::time::Instant::now(),
+            ended: watch::channel(()).0,
+        }
+    }
+
     fn connection(&self) -> Option<&gateway::Connection> {
         match self {
             Self::Attached(connection) => Some(connection),
@@ -451,6 +462,16 @@ impl CanvasPersistence {
         mount.bump_generation();
     }
 
+    /// Run `release` only while the project has no mount, under the registry
+    /// lock, so an open cannot install a mount between the check and the
+    /// release.
+    pub fn when_unmounted(&self, project_id: &str, release: impl FnOnce()) {
+        let mounts = self.mounts.lock();
+        if !mounts.contains_key(project_id) {
+            release();
+        }
+    }
+
     /// Every project with a mount.
     pub fn mounted_projects(&self) -> Vec<String> {
         self.mounts.lock().keys().cloned().collect()
@@ -576,12 +597,6 @@ impl CanvasPersistence {
     ) -> Result<WriteOutcome, CanvasError> {
         let mount = self.mount_for(project_id, mount_seq)?;
         let _serialized = mount.write_lock.lock().await;
-        if !is_canvas_document(&mount.doc_path) {
-            return Err(CanvasError::new(
-                super::CODE_PATH_VALIDATION_FAILED,
-                "only .figcraft documents are written by the canvas",
-            ));
-        }
         let expected = {
             let state = mount.state.lock();
             match &state.phase {

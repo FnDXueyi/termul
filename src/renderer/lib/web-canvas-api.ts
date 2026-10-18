@@ -7,15 +7,16 @@
  *   ...CanvasOpenOptions }` → `CanvasOpenInfo` with an empty `baseUrl` (the
  *   bundle is same-origin); this tab takes the mount lease, after the least
  *   recently active canvases beyond `maxMounted` unloaded;
- * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
- *   unmount (save, verify, unmount), which also revokes the `ct` token;
+ * - `POST /canvas/close` body `{ projectId, mountSeq, discard }` — the
+ *   host's AD-31 unmount (save, verify, unmount) of that mount only, which
+ *   also revokes the canvas token once the project has no mount;
  * - `POST /canvas/set-visible` body `{ projectId, mountSeq, visible }` — the
  *   user-visibility half of the mount cap's activity ranking;
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
  *   — the persistence calls, keyed by `{ projectId, mountSeq }`.
  *
- * The bundle routes set their own HttpOnly per-canvas cookie on the first
- * `ct` request, so this adapter never touches `document.cookie`. Transport
+ * The bundle routes take the canvas token from their own path, so this
+ * adapter never touches cookies. Transport
  * failures map to `NETWORK_ERROR`; server failures keep their typed code.
  */
 
@@ -56,8 +57,12 @@ export const webCanvasApi: CanvasApi = {
     return postJson<void>('/canvas/set-visible', { projectId, mountSeq, visible })
   },
 
-  close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {
-    return postJson<CanvasCloseOutcome>('/canvas/close', { projectId, discard })
+  close(
+    projectId: string,
+    mountSeq: number,
+    discard = false
+  ): Promise<IpcResult<CanvasCloseOutcome>> {
+    return postJson<CanvasCloseOutcome>('/canvas/close', { projectId, mountSeq, discard })
   },
 
   readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {

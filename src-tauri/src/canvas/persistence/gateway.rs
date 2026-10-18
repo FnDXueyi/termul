@@ -14,15 +14,18 @@
 //! sent on; every waiting call holds a receiver, so dropping the connection
 //! (a newer connection or mountSeq replaced it, the renderer reported the
 //! unmount or disconnected, or the mount closed) resolves those calls
-//! `CANVAS_CLOSED` without a list to sweep.
+//! `CANVAS_CLOSED` without a list to sweep. An agent call that arrives while
+//! the holder's connection is lost but inside its grace waits for the holder
+//! to attach again, within the same call timeout.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
 use super::{CanvasPersistence, ExpiredLease, Lifecycle, Link, Mount, RendererId};
 use crate::acp::host_mcp::canvas::{
@@ -94,8 +97,37 @@ struct Route {
     _in_flight: Option<InFlight>,
 }
 
+/// Where a call can go right now.
+enum Routed {
+    Ready(Route),
+    /// The holder's connection dropped and its lease grace runs until
+    /// `grace_ends`; `ended` wakes when the holder attaches again or the
+    /// mount goes.
+    Reconnecting {
+        ended: watch::Receiver<()>,
+        grace_ends: Instant,
+    },
+}
+
 fn refused(code: CanvasErrorCode, message: &str) -> CanvasError {
     CanvasError::new(code, message)
+}
+
+fn not_running() -> CanvasError {
+    refused(
+        CanvasErrorCode::CanvasClosed,
+        "the canvas is not running in any window",
+    )
+}
+
+fn timed_out(timeout: Duration) -> CanvasError {
+    CanvasError::new(
+        CanvasErrorCode::CanvasTimeout,
+        format!(
+            "the canvas did not answer within {} ms",
+            timeout.as_millis()
+        ),
+    )
 }
 
 /// A mount whose holder's connection ended: the holder keeps the lease for
@@ -158,7 +190,7 @@ impl CanvasPersistence {
         true
     }
 
-    /// The connection `holder_id` ended. Calls waiting on it resolve
+    /// The connection `holder_id` ended. Calls it was handed resolve
     /// `CANVAS_CLOSED` now, but each mount it ran keeps its lease for the
     /// mount's grace; the caller schedules [`Self::expire_lease`] for each
     /// returned [`LostLease`].
@@ -177,12 +209,7 @@ impl CanvasPersistence {
                     continue;
                 }
                 state.activity.visible = false;
-                std::mem::replace(
-                    &mut state.link,
-                    Link::Lost {
-                        since: Instant::now(),
-                    },
-                )
+                std::mem::replace(&mut state.link, Link::lost())
             };
             drop(taken);
             lost.push(LostLease {
@@ -206,7 +233,7 @@ impl CanvasPersistence {
             .cloned()?;
         {
             let state = mount.state.lock();
-            let Link::Lost { since } = state.link else {
+            let Link::Lost { since, .. } = state.link else {
                 return None;
             };
             if state.lifecycle != Lifecycle::Open || since.elapsed() < mount.lease_grace {
@@ -236,7 +263,7 @@ impl CanvasPersistence {
         Some((mount.mount_seq, holder_id))
     }
 
-    fn route(&self, project_id: &str, caller: Caller) -> Result<Route, CanvasError> {
+    fn route(&self, project_id: &str, caller: Caller) -> Result<Routed, CanvasError> {
         let no_canvas = || {
             refused(
                 CanvasErrorCode::CanvasClosed,
@@ -268,28 +295,34 @@ impl CanvasPersistence {
             }
             _ => {}
         }
-        let connection = state.link.connection().ok_or_else(|| {
-            refused(
-                CanvasErrorCode::CanvasClosed,
-                "the canvas is not running in any window",
-            )
-        })?;
+        let connection = match &state.link {
+            Link::Attached(connection) => connection,
+            Link::Lost { since, ended } if since.elapsed() < mount.lease_grace => {
+                return Ok(Routed::Reconnecting {
+                    ended: ended.subscribe(),
+                    grace_ends: *since + mount.lease_grace,
+                });
+            }
+            Link::Lost { .. } | Link::Unattached => return Err(not_running()),
+        };
         let holder = connection.holder.clone();
         let gone = connection.gone.subscribe();
         if caller == Caller::Agent {
             state.activity.tick = self.tick();
         }
-        Ok(Route {
+        Ok(Routed::Ready(Route {
             mount_seq: mount.mount_seq,
             holder,
             gone,
             _in_flight: (caller == Caller::Agent).then(|| InFlight::enter(&mount)),
-        })
+        }))
     }
 
     /// An agent call: forwarded to the renderer holding the project's mount
-    /// and answered from its editor, or a typed refusal. Waits up to
-    /// `timeout`; nothing else times a canvas call out (AD-29).
+    /// and answered from its editor, or a typed refusal. A call that arrives
+    /// while the holder reconnects inside its lease grace waits for it to
+    /// attach again. Waits up to `timeout` in all; nothing else times a
+    /// canvas call out (AD-29).
     pub async fn call(
         &self,
         project_id: &str,
@@ -297,9 +330,28 @@ impl CanvasPersistence {
         params: String,
         timeout: Duration,
     ) -> CanvasOutcome {
-        let route = self.route(project_id, Caller::Agent)?;
-        self.forward(project_id, route, method, params, timeout)
-            .await
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.route(project_id, Caller::Agent)? {
+                Routed::Ready(route) => {
+                    return self
+                        .forward(project_id, route, method, params, (deadline, timeout))
+                        .await;
+                }
+                Routed::Reconnecting {
+                    mut ended,
+                    grace_ends,
+                } => {
+                    tokio::select! {
+                        _ = ended.changed() => {}
+                        () = tokio::time::sleep_until(grace_ends.min(deadline)) => {}
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(timed_out(timeout));
+                    }
+                }
+            }
+        }
     }
 
     /// The host's own editor call on the mount at `mount_seq`. It passes the
@@ -311,13 +363,18 @@ impl CanvasPersistence {
         method: &str,
         params: &str,
     ) -> CanvasOutcome {
-        let route = self.route(project_id, Caller::Host { mount_seq })?;
+        let Routed::Ready(route) = self.route(project_id, Caller::Host { mount_seq })? else {
+            return Err(not_running());
+        };
         self.forward(
             project_id,
             route,
             method,
             params.to_string(),
-            self.host_call_timeout,
+            (
+                Instant::now() + self.host_call_timeout,
+                self.host_call_timeout,
+            ),
         )
         .await
     }
@@ -328,7 +385,7 @@ impl CanvasPersistence {
         route: Route,
         method: &str,
         params: String,
-        timeout: Duration,
+        (deadline, timeout): (Instant, Duration),
     ) -> CanvasOutcome {
         let Route {
             mount_seq,
@@ -369,13 +426,10 @@ impl CanvasPersistence {
                 Err(_) => gone_before_answer(),
             },
             _ = gone.changed() => gone_before_answer(),
-            () = tokio::time::sleep(timeout) => {
+            () = tokio::time::sleep_until(deadline) => {
                 self.calls.waiting.lock().remove(&call_id);
                 self.call_timed_out(project_id, mount_seq);
-                Err(CanvasError::new(
-                    CanvasErrorCode::CanvasTimeout,
-                    format!("the canvas did not answer within {} ms", timeout.as_millis()),
-                ))
+                Err(timed_out(timeout))
             }
         };
         self.calls.waiting.lock().remove(&call_id);

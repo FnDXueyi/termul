@@ -100,6 +100,14 @@ pub(super) fn auth_required_event() -> SequencedEvent {
     SequencedEvent::new(None, 0, AUTH_REQUIRED_TYPE, json!({}))
 }
 
+/// The largest message a peer may send. A `canvas_reply` carries what the
+/// canvas bridge accepts back (rendered PNGs and exports as base64), far
+/// past tungstenite's default 16 MiB frame and 64 MiB message, so the
+/// limit is the bridge's plus room for the envelope. Over it, the read
+/// fails and the whole connection ends.
+pub(crate) const MAX_INBOUND_MESSAGE_BYTES: usize =
+    crate::acp::host_mcp::bridge::MAX_REPLY_BYTES as usize + 1024 * 1024;
+
 /// Axum WS upgrade handler for `/ws` (AC1).
 ///
 /// The upgrade itself always proceeds; the token gate lives in the
@@ -119,7 +127,9 @@ pub async fn ws_upgrade(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let lease = state.connections.shutdown.admit();
-    ws.on_upgrade(move |socket| serve_socket(lease, socket, state, peer, Carrier::Ws))
+    ws.max_frame_size(MAX_INBOUND_MESSAGE_BYTES)
+        .max_message_size(MAX_INBOUND_MESSAGE_BYTES)
+        .on_upgrade(move |socket| serve_socket(lease, socket, state, peer, Carrier::Ws))
 }
 
 /// Serve an upgraded socket under its shutdown `lease`: [`run_relay`] until it

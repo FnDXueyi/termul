@@ -227,7 +227,7 @@ async fn only_the_connection_a_call_went_to_can_answer_it() {
     assert_eq!(call.await.unwrap(), Ok(r#"{"ok":1}"#.to_string()));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_holder_disconnecting_closes_its_calls_and_its_mounts() {
     let router = Arc::new(CanvasRouter::default());
     let renderer = FakeRenderer::new("conn-a");
@@ -241,7 +241,8 @@ async fn the_holder_disconnecting_closes_its_calls_and_its_mounts() {
     router.release_holder("conn-a");
     assert_eq!(
         code_of(&call.await.unwrap()),
-        Some(CanvasErrorCode::CanvasClosed)
+        Some(CanvasErrorCode::CanvasClosed),
+        "a call the lost connection held cannot be answered"
     );
     for project in ["proj-1", "proj-2"] {
         let outcome = router.call(project, "document.inspect", "{}".into()).await;
