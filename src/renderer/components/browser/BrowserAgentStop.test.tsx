@@ -52,7 +52,7 @@ describe('BrowserAgentIndicator', () => {
     })
     render(<BrowserAgentIndicator sessionId="s1" />)
     expect(screen.getByRole('status')).toHaveTextContent(
-      'Browsing stopped. The agent can use the browser again after your next message.'
+      'Browsing stopped until your next message.'
     )
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })

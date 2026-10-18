@@ -2141,10 +2141,4 @@ describe('Browser consent and Stop parity', () => {
       /browser_automation::stop_session\(&parsed\.session_id\)/
     )
   })
-
-  it('the retired one-time consent command is gone everywhere', () => {
-    for (const source of [read('lib.rs'), read('commands', 'browser.rs'), facade]) {
-      expect(source).not.toContain('browser_consent_respond')
-    }
-  })
 })

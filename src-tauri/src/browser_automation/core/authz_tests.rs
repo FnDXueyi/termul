@@ -181,9 +181,15 @@ fn hop_checks_read_the_allow_list_snapshot_and_revocation_clears_grants() {
 
     let origin = CanonicalOrigin::parse("https://news.example").unwrap();
     grants.grant("s1", origin.clone());
-    assert!(grants.is_granted("s1", &origin));
+    assert_eq!(
+        grants.check_hop("s1", &url("https://news.example/a")),
+        HopVerdict::Allow
+    );
     grants.revoke_session("s1");
-    assert!(!grants.is_granted("s1", &origin));
+    assert_eq!(
+        grants.check_hop("s1", &url("https://news.example/a")),
+        HopVerdict::Ungranted(PromptKind::Unlisted, origin)
+    );
     assert_eq!(
         grants.check_hop("s1", &url("https://wiki.corp.example/x")),
         HopVerdict::Allow,
