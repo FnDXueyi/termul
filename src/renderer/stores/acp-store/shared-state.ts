@@ -262,8 +262,15 @@ export function persistSession(
  */
 export const inFlightWarms = new Map<string, Promise<AgentId | null>>()
 
-/** The same spawns, un-swallowed: what a joining caller judges by its own options. */
-const inFlightWarmOutcomes = new Map<string, Promise<AgentId | null>>()
+/**
+ * The same spawns, un-swallowed (what a joining caller judges by its own
+ * options), with the launch signature each was started for: a caller whose
+ * launch differs (new project env, new Claude account) never joins one.
+ */
+const inFlightWarmOutcomes = new Map<
+  string,
+  { outcome: Promise<AgentId | null>; signature: string }
+>()
 
 /**
  * Definite host spawn rejections (`agent_unavailable` / `invalid_agent_config`,
@@ -284,17 +291,53 @@ const definiteSpawnRejections = new Map<string, string>()
 const liveAgentSignatures = new Map<AgentId, string>()
 
 /**
- * The effective launch of a config in a working directory: the agent config
- * plus the env the project owning `cwd` adds underneath it.
+ * Credential epoch per `configId\0projectId`. The host binds a Claude account
+ * to an agent process when it spawns it, so after a Project's account changes
+ * every agent spawned before is on the old account: it may finish what it
+ * serves, but it must never take a new chat or a warm session.
  */
-function spawnSignature(config: AgentConfigLaunchFields, env: Record<string, string>): string {
-  return JSON.stringify([config.name, config.command, config.args, env, config.allowTerminal])
+const credentialEpochs = new Map<string, number>()
+
+const credentialEpochKey = (configId: string, projectId: string): string =>
+  `${configId}\0${projectId}`
+
+/**
+ * Mark every agent of `configId` already spawned for `projectId` as started
+ * with outdated credentials. Call it before the host write that changes them:
+ * from then on new chats and warm sessions only use agents spawned later.
+ */
+export function renewAgentCredentials(configId: string, projectId: string): void {
+  const key = credentialEpochKey(configId, projectId)
+  credentialEpochs.set(key, (credentialEpochs.get(key) ?? 0) + 1)
+}
+
+/**
+ * The effective launch of a config in a working directory: the agent config,
+ * the env the project owning `cwd` adds underneath it, and the project's
+ * credential epoch.
+ */
+function spawnSignature(
+  config: AgentConfigLaunchFields,
+  env: Record<string, string>,
+  configId: string,
+  projectId: string
+): string {
+  const epoch = credentialEpochs.get(credentialEpochKey(configId, projectId)) ?? 0
+  return JSON.stringify([
+    config.name,
+    config.command,
+    config.args,
+    env,
+    config.allowTerminal,
+    epoch
+  ])
 }
 
 /** Test-only: forget recorded definite spawn rejections between tests. */
 export function _resetDefiniteSpawnRejectionsForTesting(): void {
   definiteSpawnRejections.clear()
   liveAgentSignatures.clear()
+  credentialEpochs.clear()
 }
 
 /** In-flight `session/new` for a prepare key. */
@@ -684,6 +727,55 @@ type AgentConfigLaunchFields = Pick<
   'name' | 'command' | 'args' | 'env' | 'allowTerminal'
 >
 
+/** The launch a new agent of `configId` in `cwd` gets now, or `null` for an unknown config. */
+function currentLaunch(
+  state: Pick<AcpState, 'agentConfigs'>,
+  configId: string,
+  cwd: string,
+  projectId?: string | null
+): {
+  config: AcpState['agentConfigs'][number]
+  project: Pick<Project, 'id' | 'envVars'> | null
+  projectId: string
+  reuseKey: string
+  env: Record<string, string>
+  signature: string
+} | null {
+  const config = state.agentConfigs.find((c) => c.id === configId)
+  if (!config) return null
+  const project = resolveSpawnProject(cwd, projectId)
+  const resolvedProjectId = project?.id ?? ''
+  // The project contributes its env underneath the agent config, exactly as a
+  // terminal tab in that project gets it (`spawnTerminalInPane`) and as a
+  // terminal-native agent does (`launchAgentInPane`).
+  const env = resolveAgentSpawnEnv(project?.envVars, config.env)
+  return {
+    config,
+    project,
+    projectId: resolvedProjectId,
+    reuseKey: agentReuseKey(configId, cwd, resolvedProjectId || undefined),
+    env,
+    signature: spawnSignature(config, env, configId, resolvedProjectId)
+  }
+}
+
+/**
+ * Whether `agentId` runs the launch a new chat of `configId` in `cwd` for
+ * `projectId` would get now. An agent with no recorded launch (adopted from
+ * the host) counts as current.
+ */
+export function runsCurrentLaunch(
+  state: Pick<AcpState, 'agentConfigs'>,
+  agentId: AgentId,
+  configId: string,
+  cwd: string,
+  projectId?: string | null
+): boolean {
+  const recorded = liveAgentSignatures.get(agentId)
+  if (recorded === undefined) return true
+  return currentLaunch(state, configId, cwd.trim(), projectId)?.signature === recorded
+}
+
 /**
  * Return a connected agent process for `configId + cwd`, spawning at most one
  * in-flight process per reuse key. Registers `inFlightWarms` synchronously so
@@ -699,17 +791,9 @@ export function ensureLiveAgent(
 ): Promise<AgentId | null> {
   const trimmedCwd = cwd.trim()
   if (trimmedCwd.length === 0) return Promise.resolve(null)
-  const config = get().agentConfigs.find((c) => c.id === configId)
-  if (!config) return Promise.resolve(null)
-
-  const project = resolveSpawnProject(trimmedCwd, options.projectId)
-  const projectId = project?.id ?? ''
-  const reuseKey = agentReuseKey(configId, trimmedCwd, projectId || undefined)
-  // The project contributes its env underneath the agent config, exactly as a
-  // terminal tab in that project gets it (`spawnTerminalInPane`) and as a
-  // terminal-native agent does (`launchAgentInPane`).
-  const env = resolveAgentSpawnEnv(project?.envVars, config.env)
-  const signature = spawnSignature(config, env)
+  const launch = currentLaunch(get(), configId, trimmedCwd, options.projectId)
+  if (!launch) return Promise.resolve(null)
+  const { config, project, projectId, reuseKey, env, signature } = launch
   const currentAgentId = get().configToLiveAgent[reuseKey]
   const currentSignature = currentAgentId ? liveAgentSignatures.get(currentAgentId) : undefined
   const staleLaunch = currentSignature !== undefined && currentSignature !== signature
@@ -739,7 +823,7 @@ export function ensureLiveAgent(
       level: 'info',
       source: 'acp-store.ensureLiveAgent',
       message: staleLaunch
-        ? `Detached agent ${currentAgentId}: its launch env no longer matches the project`
+        ? `Detached agent ${currentAgentId}: its launch (env or Claude account) no longer matches the project`
         : `Detached agent ${currentAgentId} so the next Agent chat gets its own process`
     })
   }
@@ -750,12 +834,19 @@ export function ensureLiveAgent(
   }
 
   const inFlight = inFlightWarms.get(reuseKey)
-  if (inFlight) {
+  const running = inFlightWarmOutcomes.get(reuseKey)
+  if (inFlight && (!running || running.signature === signature)) {
     // Join the running spawn, but judge ITS failure by THIS caller's options: a
     // prewarm (silent) started it, yet a user-initiated caller that joins must
     // still see a definite rejection instead of a swallowed `null`.
-    const strict = inFlightWarmOutcomes.get(reuseKey)
-    return strict ? asCallerView(strict, reuseKey, configId, options) : inFlight
+    return running ? asCallerView(running.outcome, reuseKey, configId, options) : inFlight
+  }
+  if (inFlight) {
+    void logFrontendError({
+      level: 'info',
+      source: 'acp-store.ensureLiveAgent',
+      message: `Not joining the running spawn for ${reuseKey}: it started with an outdated launch`
+    })
   }
 
   if (
@@ -778,6 +869,7 @@ export function ensureLiveAgent(
     })
   }
 
+  let spawnPromise: Promise<AgentId | null> | undefined
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
       if (project?.envVars?.length) {
@@ -801,7 +893,13 @@ export function ensureLiveAgent(
       definiteSpawnRejections.delete(reuseKey)
       if (get().agentConfigs.some((c) => c.id === configId)) {
         liveAgentSignatures.set(agentId, signature)
-        set((s) => ({ configToLiveAgent: { ...s.configToLiveAgent, [reuseKey]: agentId } }))
+        // A newer launch took the key while this spawn ran (the project's
+        // Claude account changed): keep this agent for its own caller only.
+        const key =
+          inFlightWarms.get(reuseKey) === spawnPromise
+            ? reuseKey
+            : detachedReuseKey(reuseKey, agentId)
+        set((s) => ({ configToLiveAgent: { ...s.configToLiveAgent, [key]: agentId } }))
         return agentId
       }
       try {
@@ -814,8 +912,10 @@ export function ensureLiveAgent(
       if (isDefiniteSpawnRejection(err)) definiteSpawnRejections.set(reuseKey, signature)
       throw err
     } finally {
-      inFlightWarms.delete(reuseKey)
-      inFlightWarmOutcomes.delete(reuseKey)
+      if (inFlightWarms.get(reuseKey) === spawnPromise) {
+        inFlightWarms.delete(reuseKey)
+        inFlightWarmOutcomes.delete(reuseKey)
+      }
       if (options.registerWarmUi) {
         set((s) => {
           const warming = { ...s.warmingConfigs }
@@ -826,9 +926,9 @@ export function ensureLiveAgent(
     }
   })()
 
-  const spawnPromise = asCallerView(strictSpawn, reuseKey, configId, options)
+  spawnPromise = asCallerView(strictSpawn, reuseKey, configId, options)
   inFlightWarms.set(reuseKey, spawnPromise)
-  inFlightWarmOutcomes.set(reuseKey, strictSpawn)
+  inFlightWarmOutcomes.set(reuseKey, { outcome: strictSpawn, signature })
   // Joiners derive their own view; this handle must never be an unhandled rejection.
   strictSpawn.catch(() => undefined)
   return spawnPromise
