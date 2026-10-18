@@ -20,7 +20,12 @@ import {
 import { cn } from '@/lib/utils'
 import { switchProjectClaudeAccount } from '@/stores/claude-account-switch'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
-import { type AccountChoice, useChatClaudeAccount } from './use-chat-claude-account'
+import { type ChatClaudeAccount, useChatClaudeAccount } from './use-chat-claude-account'
+import {
+  type AccountChoice,
+  type ProjectClaudeAccount,
+  useProjectClaudeAccount
+} from './use-project-claude-account'
 
 const TONE_TEXT: Record<UsageTone, string> = {
   normal: 'text-secondary-foreground',
@@ -34,11 +39,7 @@ function percentOf(choice: AccountChoice): number | null {
   return choice.window ? Math.round(choice.window.percent) : null
 }
 
-/**
- * Composer chip for a Claude chat: which Account the Project uses and how
- * much of its tightest window is used. The menu switches the Project's
- * Account; open Claude chats of the Project restart on it.
- */
+/** Composer chip for a Claude chat. */
 export function ClaudeAccountChip({
   sessionId,
   compact = false
@@ -46,7 +47,32 @@ export function ClaudeAccountChip({
   sessionId: string
   compact?: boolean
 }): React.JSX.Element | null {
-  const ctx = useChatClaudeAccount(sessionId)
+  return <AccountChip ctx={useChatClaudeAccount(sessionId)} compact={compact} />
+}
+
+/** The same chip before a chat exists (the agent launcher). */
+export function ProjectClaudeAccountChip({
+  projectId,
+  compact = false
+}: {
+  projectId: string
+  compact?: boolean
+}): React.JSX.Element | null {
+  return <AccountChip ctx={useProjectClaudeAccount(projectId)} compact={compact} />
+}
+
+/**
+ * Which Account the Project uses and how much of its tightest window is used.
+ * The menu switches the Project's Account; open Claude chats of the Project
+ * restart on it.
+ */
+function AccountChip({
+  ctx,
+  compact
+}: {
+  ctx: (ProjectClaudeAccount & Partial<Pick<ChatClaudeAccount, 'rateLimit'>>) | null
+  compact: boolean
+}): React.JSX.Element | null {
   const openAppSettings = useSettingsModalStore((s) => s.openApp)
   const [switching, setSwitching] = useState(false)
   if (!ctx) return null

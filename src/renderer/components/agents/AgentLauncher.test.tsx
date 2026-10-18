@@ -4020,6 +4020,11 @@ describe('AgentLauncher Claude account chip', () => {
       sessionWindow('ab12', 5)
     ])
     mockSwitchProjectClaudeAccount.mockResolvedValue(undefined)
+    acpStateRef.current.agentConfigs = [ACP_CONFIG, OTHER_ACP_CONFIG]
+    mockPersistRead.mockResolvedValue({
+      success: true,
+      data: { agentId: 'acp-registry:claude-acp', mode: 'acp' }
+    })
   })
 
   afterEach(() => {
@@ -4061,11 +4066,6 @@ describe('AgentLauncher Claude account chip', () => {
   })
 
   it('hides the chip when the user picks an agent other than Claude', async () => {
-    acpStateRef.current.agentConfigs = [ACP_CONFIG, OTHER_ACP_CONFIG]
-    mockPersistRead.mockResolvedValue({
-      success: true,
-      data: { agentId: 'acp-registry:claude-acp', mode: 'acp' }
-    })
     renderLauncher()
 
     expect(await screen.findByRole('button', { name: /^Claude account: Personal/ })).toBeVisible()

@@ -16,7 +16,8 @@ import { formatUsageReset } from '@/lib/claude-usage-format'
 import { logFrontendError } from '@/lib/log-api'
 import { restartClaudeSession, switchProjectClaudeAccount } from '@/stores/claude-account-switch'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
-import { type AccountChoice, useChatClaudeAccount } from './use-chat-claude-account'
+import { useChatClaudeAccount } from './use-chat-claude-account'
+import type { AccountChoice } from './use-project-claude-account'
 
 /** Grace after a reset time before the prompt is sent again. */
 const RESUME_GRACE_MS = 15_000
