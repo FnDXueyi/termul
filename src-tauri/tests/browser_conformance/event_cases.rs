@@ -103,17 +103,20 @@ pub async fn dialog_alert(c: &Ctx<'_>) -> CaseResult {
     c.open("/dialogs.html", DIALOGS_READY).await?;
     let reply = c.click_reply("button", "Show alert").await?;
     expect_fidelity(&reply, c.engine.tiers().pointer_click, "click")?;
-    c.call("wait", json!({ "text": "Result: alert closed" }))
+    // A trusted click can reply before the page runs its handler, and an
+    // accepted alert is reported once, on the first reply after it opened.
+    let waited = c
+        .call("wait", json!({ "text": "Result: alert closed" }))
         .await?;
     let after = c.call("snapshot", json!({})).await?;
-    let reported = [&reply, &after].iter().any(|r| {
+    let reported = [&reply, &waited, &after].iter().any(|r| {
         r["page"]["dialog"]["kind"] == "alert" && r["page"]["dialog"]["state"] == "accepted"
     });
     if reported {
         Ok(())
     } else {
         Err(mismatch(format!(
-            "the accepted alert was never reported: {reply} then {after}"
+            "the accepted alert was never reported: {reply} then {waited} then {after}"
         )))
     }
 }
