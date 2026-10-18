@@ -1,10 +1,5 @@
 //! In-memory fakes of the host ports for core tests.
 
-#![expect(
-    dead_code,
-    reason = "the scripted approver is for the consent core tests, which land next"
-)]
-
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
