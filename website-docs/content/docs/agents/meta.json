@@ -1,0 +1,12 @@
+{
+  "title": "AI agents",
+  "pages": [
+    "index",
+    "start-a-chat",
+    "write-a-prompt",
+    "approvals",
+    "follow-the-work",
+    "chat-history",
+    "switch-agents"
+  ]
+}
