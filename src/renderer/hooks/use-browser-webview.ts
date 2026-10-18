@@ -8,8 +8,7 @@ import {
   browserTabNavigate,
   browserTabResize,
   browserTabShow,
-  onBrowserTabLoaded,
-  onBrowserTabNavigated
+  onBrowserTabUpdated
 } from '@/lib/browser-api'
 import { logFrontendError } from '@/lib/log-api'
 import { useBrowserSessionStore } from '@/stores/browser-session-store'
@@ -42,22 +41,6 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
   const mountTokenRef = useRef(0)
   const urlRef = useRef(url)
   const visibilityRef = useRef(isVisible)
-  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const clearLoadingTimeout = useCallback(() => {
-    if (loadingTimeoutRef.current) {
-      clearTimeout(loadingTimeoutRef.current)
-      loadingTimeoutRef.current = null
-    }
-  }, [])
-
-  const armLoadingTimeout = useCallback(() => {
-    clearLoadingTimeout()
-    loadingTimeoutRef.current = setTimeout(() => {
-      useBrowserSessionStore.getState().setLoading(browserTabId, false)
-      loadingTimeoutRef.current = null
-    }, 6000)
-  }, [browserTabId, clearLoadingTimeout])
 
   const updateBounds = useCallback((): Promise<void> => {
     const el = containerRef.current
@@ -89,9 +72,7 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
     const el = containerRef.current
     if (!el) return
 
-    // Set loading true before creating
     useBrowserSessionStore.getState().setLoading(browserTabId, true)
-    armLoadingTimeout()
 
     const bounds = measureLogicalBounds(el)
     browserTabCreate(browserTabId, urlRef.current, bounds)
@@ -199,7 +180,6 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
             message: `browserTabCreate failed for tab ${browserTabId}: ${result.error ?? 'unknown'} [${result.code ?? 'NO_CODE'}]`,
             source: 'useBrowserWebview'
           })
-          clearLoadingTimeout()
           useBrowserSessionStore.getState().setLoading(browserTabId, false)
         }
       })
@@ -210,14 +190,12 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
           }`,
           source: 'useBrowserWebview'
         })
-        clearLoadingTimeout()
         useBrowserSessionStore.getState().setLoading(browserTabId, false)
       })
 
     return () => {
       mountedRef.current = false
       mountTokenRef.current += 1
-      clearLoadingTimeout()
       browserTabDestroy(browserTabId)
         .then((result) => {
           if (!result.success) {
@@ -237,7 +215,7 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
         })
       createdRef.current = false
     }
-  }, [browserTabId, clearLoadingTimeout, armLoadingTimeout, updateBounds])
+  }, [browserTabId, updateBounds])
 
   // Show / hide on visibility change
   useEffect(() => {
@@ -289,7 +267,6 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
     urlRef.current = url
     if (!createdRef.current) return
     useBrowserSessionStore.getState().setLoading(browserTabId, true)
-    armLoadingTimeout()
     browserTabNavigate(browserTabId, url)
       .then((result) => {
         if (!result.success) {
@@ -297,7 +274,6 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
             message: `browserTabNavigate failed for tab ${browserTabId}: ${result.error}`,
             source: 'useBrowserWebview'
           })
-          clearLoadingTimeout()
           useBrowserSessionStore.getState().setLoading(browserTabId, false)
         }
       })
@@ -308,10 +284,9 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
           }`,
           source: 'useBrowserWebview'
         })
-        clearLoadingTimeout()
         useBrowserSessionStore.getState().setLoading(browserTabId, false)
       })
-  }, [url, browserTabId, clearLoadingTimeout, armLoadingTimeout])
+  }, [url, browserTabId])
 
   // Resize observer
   useEffect(() => {
@@ -328,27 +303,17 @@ export function useBrowserWebview(browserTabId: string, paneVisible: boolean, ur
     }
   }, [updateBounds])
 
-  // Listen for URL sync and loaded events from webview poller
+  // The host registry reports what the engine committed, whoever started
+  // it. Record the URL as current first so the url prop catching up does
+  // not navigate the webview again.
   useEffect(() => {
-    const navSubscription = onBrowserTabNavigated((payload) => {
-      if (payload.browserTabId === browserTabId) {
-        urlRef.current = payload.url
-        useBrowserSessionStore.getState().updateUrl(browserTabId, payload.url)
-      }
+    const subscription = onBrowserTabUpdated((view) => {
+      if (view.tabId !== browserTabId) return
+      urlRef.current = view.url
+      useBrowserSessionStore.getState().applyView(view)
     })
-    const loadedSubscription = onBrowserTabLoaded((payload) => {
-      if (payload.browserTabId === browserTabId) {
-        clearLoadingTimeout()
-        useBrowserSessionStore.getState().setLoading(browserTabId, false)
-      }
-    })
-
-    return () => {
-      navSubscription.unlisten()
-      loadedSubscription.unlisten()
-      clearLoadingTimeout()
-    }
-  }, [browserTabId, clearLoadingTimeout])
+    return () => subscription.unlisten()
+  }, [browserTabId])
 
   return { containerRef }
 }
