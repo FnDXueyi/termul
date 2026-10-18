@@ -118,7 +118,8 @@ impl BrowserHost for DesktopBrowserHost {
     {
         Box::pin(async move {
             let token = self.gate.begin(session_id)?;
-            let spec = dispatch::admit(&call.action, &call.args, self.engine.facts())?;
+            let mut call = call;
+            let spec = dispatch::admit(&call.action, &mut call.args, self.engine.facts())?;
             token
                 .guard(async {
                     self.authorize_call(&token, session_id, spec.verb, &call, deadline)

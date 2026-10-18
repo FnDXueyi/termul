@@ -418,3 +418,16 @@ async fn the_consent_wait_ends_at_the_call_deadline() {
     let (_, wait) = requests.first().expect("the unlisted origin raised a ticket");
     assert!(*wait <= budget, "the ticket waits no longer than the call has left");
 }
+
+#[tokio::test]
+async fn a_quoted_wait_duration_runs_as_a_number() {
+    let h = harness_with(FakeEngine::new(webview2_like()));
+    h.call("navigate", json!({ "url": "https://example.com" })).await;
+    let reply = h.call("wait", json!({ "ms": "10" })).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = h.call("wait", json!({ "ms": "ten" })).await;
+    assert_eq!(
+        (reply["code"].as_str(), reply["message"].as_str()),
+        (Some("invalid_params"), Some("wait: 'ms' must be a non-negative integer"))
+    );
+}

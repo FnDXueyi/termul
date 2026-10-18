@@ -70,20 +70,20 @@ fn expected_args_text_comes_from_the_registry() {
 
 #[test]
 fn validate_names_missing_required_keys_and_the_one_of_rule() {
-    let err = spec("fill").unwrap().validate(&json!({ "ref": "@e1" })).unwrap_err();
+    let err = spec("fill").unwrap().validate(&mut json!({ "ref": "@e1" })).unwrap_err();
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(err.message, "fill needs 'ref' and 'value' (optional 'tabId')");
     assert_eq!(err.arg_keys, vec!["value"]);
 
-    let err = spec("navigate").unwrap().validate(&Value::Null).unwrap_err();
+    let err = spec("navigate").unwrap().validate(&mut Value::Null).unwrap_err();
     assert_eq!(err.arg_keys, vec!["url"]);
 
-    let err = spec("wait").unwrap().validate(&json!({ "tabId": "agent-a" })).unwrap_err();
+    let err = spec("wait").unwrap().validate(&mut json!({ "tabId": "agent-a" })).unwrap_err();
     assert_eq!(err.message, "wait needs 'ms' or 'text' (optional 'tabId')");
     assert_eq!(err.arg_keys, vec!["ms", "text"]);
 
     // JSON null counts as absent.
-    let err = spec("navigate").unwrap().validate(&json!({ "url": null })).unwrap_err();
+    let err = spec("navigate").unwrap().validate(&mut json!({ "url": null })).unwrap_err();
     assert_eq!(err.arg_keys, vec!["url"]);
 }
 
@@ -92,11 +92,17 @@ fn validate_rejects_wrong_json_types_naming_the_key() {
     for (action, args, key, message) in [
         ("navigate", json!({ "url": 7 }), "url", "navigate: 'url' must be a string"),
         ("navigate", json!({ "url": "https://x", "tabId": 3 }), "tabId", "navigate: 'tabId' must be a string"),
-        ("wait", json!({ "ms": "500" }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("wait", json!({ "ms": "soon" }), "ms", "wait: 'ms' must be a non-negative integer"),
         ("wait", json!({ "ms": -1 }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("wait", json!({ "ms": "-1" }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("wait", json!({ "ms": "1.5" }), "ms", "wait: 'ms' must be a non-negative integer"),
+        ("wait", json!({ "ms": "" }), "ms", "wait: 'ms' must be a non-negative integer"),
         ("scroll", json!({ "dy": "down" }), "dy", "scroll: 'dy' must be a number"),
+        ("scroll", json!({ "dy": "NaN" }), "dy", "scroll: 'dy' must be a number"),
+        ("scroll", json!({ "dy": "inf" }), "dy", "scroll: 'dy' must be a number"),
     ] {
-        let err = spec(action).unwrap().validate(&args).unwrap_err();
+        let mut args = args;
+        let err = spec(action).unwrap().validate(&mut args).unwrap_err();
         assert_eq!((err.message.as_str(), err.arg_keys.clone()), (message, vec![key]));
     }
 }
@@ -112,34 +118,49 @@ fn validate_accepts_well_formed_calls_and_ignores_unknown_keys() {
         ("list_tabs", json!({ "foo": 1 })),
         ("press", json!({})),
     ] {
+        let mut args = args;
         spec(action)
             .unwrap()
-            .validate(&args)
+            .validate(&mut args)
             .unwrap_or_else(|e| panic!("{action} {args}: {}", e.message));
+    }
+}
+
+#[test]
+fn quoted_numbers_for_numeric_keys_are_read_as_numbers() {
+    let facts = EngineFacts::all_trusted();
+    for (action, args, folded) in [
+        ("wait", json!({ "ms": "30000" }), json!({ "ms": 30000 })),
+        ("scroll", json!({ "dy": "-250.5" }), json!({ "dy": -250.5 })),
+        ("scroll", json!({ "dy": "600", "ref": "@e3" }), json!({ "dy": 600.0, "ref": "@e3" })),
+    ] {
+        let mut args = args;
+        admit(action, &mut args, &facts).unwrap_or_else(|e| panic!("{action}: {}", e.message));
+        assert_eq!(args, folded, "{action}");
     }
 }
 
 #[test]
 fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     let facts = bridge_like();
-    let err = admit("teleport", &Value::Null, &facts).unwrap_err();
+    let err = admit("teleport", &mut Value::Null, &facts).unwrap_err();
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
         err.message,
         "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload"
     );
 
-    let err = admit("screenshot", &Value::Null, &facts).unwrap_err();
+    let err = admit("screenshot", &mut Value::Null, &facts).unwrap_err();
     assert_eq!((err.code, err.message.as_str()), (ERR_CAPABILITY, "no screenshots here"));
 
     // The capability pre-check runs before argument validation.
-    let err = admit("screenshot", &json!({ "tabId": 5 }), &facts).unwrap_err();
+    let err = admit("screenshot", &mut json!({ "tabId": 5 }), &facts).unwrap_err();
     assert_eq!(err.code, ERR_CAPABILITY);
 
-    let admitted = admit("click", &json!({ "ref": "@e1" }), &facts).expect("synthetic click is available");
+    let admitted = admit("click", &mut json!({ "ref": "@e1" }), &facts).expect("synthetic click is available");
     assert_eq!(admitted.verb, Verb::Click);
     assert_eq!(
-        admit("click", &Value::Null, &facts).unwrap_err().arg_keys,
+        admit("click", &mut Value::Null, &facts).unwrap_err().arg_keys,
         vec!["ref"]
     );
 }

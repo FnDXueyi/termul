@@ -128,6 +128,21 @@ impl ArgType {
             ArgType::Number => value.is_number(),
         }
     }
+
+    /// A JSON string spelling a value of this numeric type, as that number.
+    /// Agents often quote numbers.
+    fn parse_quoted(self, value: &Value) -> Option<Value> {
+        let text = value.as_str()?;
+        match self {
+            ArgType::String => None,
+            ArgType::Integer => text.parse::<u64>().ok().map(Value::from),
+            ArgType::Number => text
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -376,9 +391,20 @@ impl ActionSpec {
     }
 
     /// Check the folded args against the entry: JSON types, required keys
-    /// and the one-of rule. Semantic checks (url scheme, ref shape) stay in
-    /// the handlers.
-    pub fn validate(&self, args: &Value) -> Result<(), BrowserError> {
+    /// and the one-of rule. A quoted number for a numeric key is replaced by
+    /// the number. Semantic checks (url scheme, ref shape) stay in the
+    /// handlers.
+    pub fn validate(&self, args: &mut Value) -> Result<(), BrowserError> {
+        if let Some(map) = args.as_object_mut() {
+            for p in self.params {
+                if let Some(value) = map.get_mut(p.key.name()) {
+                    if let Some(number) = p.key.ty().parse_quoted(value) {
+                        *value = number;
+                    }
+                }
+            }
+        }
+        let args = &*args;
         let empty = Map::new();
         let map = args.as_object().unwrap_or(&empty);
         let present = |k: ArgKey| map.get(k.name()).is_some_and(|v| !v.is_null());
@@ -424,7 +450,7 @@ pub fn expected_args_text(action: &str) -> String {
 
 /// Resolve the verb and refuse it before any side effect: unknown verbs
 /// are `invalid_params`, withdrawn verbs `capability_unavailable`.
-pub fn admit(action: &str, args: &Value, facts: &EngineFacts) -> Result<&'static ActionSpec, BrowserError> {
+pub fn admit(action: &str, args: &mut Value, facts: &EngineFacts) -> Result<&'static ActionSpec, BrowserError> {
     let spec = spec(action).ok_or_else(|| {
         let valid: Vec<&str> = available(facts).map(|s| s.name).collect();
         BrowserError::invalid(format!("unknown action '{action}'; valid actions: {}", valid.join(", ")))
