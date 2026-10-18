@@ -7,7 +7,7 @@ import { describe, expect, test } from 'vitest'
 // @ts-expect-error Plain ESM helper shared with the workflow scripts.
 import { extractBundle, verifyChecksum } from './fetch-figcraft-bundle.mjs'
 // @ts-expect-error Plain ESM helper shared with the workflow scripts.
-import { cargoFigcraftMcpTag, parsePin } from './figcraft-pin.mjs'
+import { cargoFigcraftMcpRef, parsePin, readPin } from './figcraft-pin.mjs'
 
 const SHA = 'a'.repeat(64)
 
@@ -62,40 +62,66 @@ describe('figcraft.pin', () => {
   })
 })
 
-describe('figcraft-mcp tag check', () => {
-  test('reads the tag from the dependency line, or null while there is none', () => {
-    expect(cargoFigcraftMcpTag('[dependencies]\nserde = "1"\n')).toBeNull()
+describe('figcraft-mcp pin check', () => {
+  const pinPath = join(__dirname, '..', '..', 'canvas', 'figcraft.pin')
+
+  function checkWith(dependencyLine: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'figcraft-pin-check-'))
+    const cargo = join(dir, 'Cargo.toml')
+    writeFileSync(cargo, `[dependencies]\n${dependencyLine}\n`)
+    return spawnSync(
+      process.execPath,
+      [join(__dirname, 'check-figcraft-pin.mjs'), pinPath, cargo],
+      {
+        encoding: 'utf8'
+      }
+    )
+  }
+
+  test('reads a tag or a rev from the dependency line, or null while there is none', () => {
+    expect(cargoFigcraftMcpRef('[dependencies]\nserde = "1"\n')).toBeNull()
     expect(
-      cargoFigcraftMcpTag(
+      cargoFigcraftMcpRef(
         'figcraft-mcp = { git = "https://github.com/gnoviawan/figcraft", tag = "termul-0.6.0" }\n'
       )
-    ).toBe('termul-0.6.0')
-    expect(() => cargoFigcraftMcpTag('figcraft-mcp = { path = "../x" }\n')).toThrow(/no tag/)
+    ).toEqual({ kind: 'tag', value: 'termul-0.6.0' })
+    expect(
+      cargoFigcraftMcpRef('figcraft-mcp = { git = "https://x.test/f", rev = "d9256cc" }\n')
+    ).toEqual({ kind: 'rev', value: 'd9256cc' })
+    expect(() => cargoFigcraftMcpRef('figcraft-mcp = { path = "../x" }\n')).toThrow(/no tag or rev/)
   })
 
   test('the check script skips with a clear message while Cargo.toml has no figcraft-mcp', () => {
-    const run = spawnSync(process.execPath, [join(__dirname, 'check-figcraft-pin.mjs')], {
-      encoding: 'utf8'
-    })
+    const run = checkWith('serde = "1"')
     expect(run.status).toBe(0)
     expect(run.stdout).toMatch(/skipped.*no figcraft-mcp dependency/)
   })
 
   test('the check script fails when the Cargo tag differs from the pin', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'figcraft-pin-check-'))
-    const cargo = join(dir, 'Cargo.toml')
-    writeFileSync(cargo, 'figcraft-mcp = { git = "https://x.test/f", tag = "termul-9.9.9" }\n')
-    const run = spawnSync(
-      process.execPath,
-      [
-        join(__dirname, 'check-figcraft-pin.mjs'),
-        join(__dirname, '..', '..', 'canvas', 'figcraft.pin'),
-        cargo
-      ],
-      { encoding: 'utf8' }
-    )
+    const run = checkWith('figcraft-mcp = { git = "https://x.test/f", tag = "termul-9.9.9" }')
     expect(run.status).toBe(1)
     expect(run.stderr).toMatch(/pin mismatch/)
+  })
+
+  test('the check script passes when the Cargo tag equals the pin', () => {
+    const run = checkWith(
+      `figcraft-mcp = { git = "https://x.test/f", tag = "${readPin(pinPath).tag}" }`
+    )
+    expect(run.status).toBe(0)
+    expect(run.stdout).toMatch(/pin matches/)
+  })
+
+  test('a rev dependency warns that it cannot be compared and passes', () => {
+    const run = checkWith('figcraft-mcp = { git = "https://x.test/f", rev = "d9256cc" }')
+    expect(run.status).toBe(0)
+    expect(run.stderr).toMatch(/pinned by rev d9256cc, not a tag/)
+  })
+
+  test("the repository's own Cargo.toml passes the check", () => {
+    const run = spawnSync(process.execPath, [join(__dirname, 'check-figcraft-pin.mjs')], {
+      encoding: 'utf8'
+    })
+    expect(run.status).toBe(0)
   })
 })
 

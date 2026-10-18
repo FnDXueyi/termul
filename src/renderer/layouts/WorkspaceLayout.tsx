@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ShellFrame } from '@/components/shell/ShellFrame'
 import { WebTokenGateScreen } from '@/components/WebTokenGateScreen'
@@ -27,6 +27,7 @@ import { useWorkspaceKeyboard } from '@/layouts/workspace-layout/use-workspace-k
 import { WorkspaceLoadingScreen } from '@/layouts/workspace-layout/WorkspaceLoadingScreen'
 import { WorkspaceMain } from '@/layouts/workspace-layout/WorkspaceMain'
 import { WorkspaceModals } from '@/layouts/workspace-layout/WorkspaceModals'
+import { startCanvasGateway } from '@/lib/canvas-gateway'
 import { useWebAuthGate } from '@/lib/web-auth-gate'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useGitSheetStore } from '@/stores/git-sheet-store'
@@ -74,6 +75,8 @@ export default function WorkspaceLayout(): React.JSX.Element {
   const isMobileWebShell = useMobileWebShell()
   // The one agent-chat "Done" tracker for this renderer (AD-12).
   useShellUnreadTracker()
+  // This renderer's canvases answer agent canvas calls (spine AD-21).
+  useEffect(() => startCanvasGateway(), [])
   const { switchTo: switchProjectFromPalette } = useProjectSwitch('CommandPalette')
 
   const ssh = useSSHWorkspace()

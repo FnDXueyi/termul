@@ -127,6 +127,12 @@ rmcp = { version = "3.5.0", features = [
     "macros",
     "auth",
 ] }
+# figcraft's MCP crate (spine AD-18): its `Backend` trait is implemented by the
+# canvas `Bridge` in `src/acp/host_mcp/bridge.rs`. Nothing here constructs its
+# `Headless` or `Attached` backends or a figcraft `Session` (AD-17). Pinned by
+# `rev` until the fork publishes a `termul-*` tag; then switch to `tag` so
+# `scripts/canvas/check-figcraft-pin.mjs` compares it with canvas/figcraft.pin.
+figcraft-mcp = { git = "https://github.com/gnoviawan/figcraft", rev = "d9256cca186c0624eeb7c114ac375d159ddaa5ca" }
 # OAuth2 — needed for the `TokenResponse` trait used by the MCP OAuth flow
 # (rmcp's `auth` feature pulls this transitively, but we use it directly).
 oauth2 = "5.0"
