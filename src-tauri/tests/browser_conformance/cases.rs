@@ -15,6 +15,10 @@ use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
 #[path = "event_cases.rs"]
 mod events;
+#[path = "frame_cases.rs"]
+mod frames;
+#[path = "observe_cases.rs"]
+mod observe;
 
 const FORM_READY: &str = "Conformance form";
 const DELAYED_READY: &str = "Delayed element";
@@ -63,6 +67,12 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("check", &["click"]),
     cap("wait_semantic", &["navigate"]),
     cap("switch_tab", &["snapshot"]),
+    cap("console", &["navigate"]),
+    cap("network", &["navigate"]),
+    cap("iframe_same_origin", &["fill", "click"]),
+    cap("iframe_cross_origin", &["fill", "click"]),
+    cap("shadow_dom", &["fill", "click"]),
+    cap("csp_snapshot", &["click"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -105,6 +115,8 @@ struct Snapshot {
 struct Ctx<'a> {
     engine: &'a Engine,
     fixtures: &'a FixtureServer,
+    /// A second loopback port, for cross-origin content.
+    cross: &'a FixtureServer,
     session: String,
 }
 
@@ -439,6 +451,7 @@ pub struct Outcome {
 pub async fn run(
     engine: &Engine,
     fixtures: &FixtureServer,
+    cross: &FixtureServer,
     capability: &Capability,
     broken: &[&'static str],
 ) -> Outcome {
@@ -456,6 +469,7 @@ pub async fn run(
     let ctx = Ctx {
         engine,
         fixtures,
+        cross,
         session: format!("conformance-{}", capability.id),
     };
     let started = Instant::now();
@@ -486,6 +500,12 @@ pub async fn run(
         "check" => events::check(&ctx).await,
         "wait_semantic" => events::wait_semantic(&ctx).await,
         "switch_tab" => events::switch_tab(&ctx).await,
+        "console" => observe::console(&ctx).await,
+        "network" => observe::network(&ctx).await,
+        "iframe_same_origin" => frames::iframe_same_origin(&ctx).await,
+        "iframe_cross_origin" => frames::iframe_cross_origin(&ctx).await,
+        "shadow_dom" => frames::shadow_dom(&ctx).await,
+        "csp_snapshot" => frames::csp_snapshot(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

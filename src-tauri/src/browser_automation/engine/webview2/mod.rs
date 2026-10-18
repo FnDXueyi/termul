@@ -10,20 +10,22 @@
 mod dialogs;
 pub mod events;
 mod external_protocol;
+pub mod observe;
 
 use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::oneshot;
 use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
-use windows_core::HSTRING;
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_11;
+use windows_core::{Interface, HSTRING};
 
 use super::assets::Script;
 use super::cdp::{self, CdpMethod, CdpTransport};
 use super::events::DialogAnswer;
 use super::issue_gate::IssueGate;
 use super::{
-    BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
+    BrowserEngine, CapabilityId, ChildFrame, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
     EngineFuture, EngineTraits, InputMode, Point, Support,
 };
 use crate::browser_automation::budgets::{CDP_ISSUE, CDP_RESULT, EVAL_STEP};
@@ -41,7 +43,17 @@ impl CdpTransport for WebView2Transport {
         method: CdpMethod,
         params: Value,
     ) -> EngineFuture<'a, Value> {
-        Box::pin(call(&self.tabs, tab, method, params))
+        Box::pin(call(&self.tabs, tab, None, method, params))
+    }
+
+    fn call_in<'a>(
+        &'a self,
+        tab: &'a str,
+        frame: Option<&'a str>,
+        method: CdpMethod,
+        params: Value,
+    ) -> EngineFuture<'a, Value> {
+        Box::pin(call(&self.tabs, tab, frame, method, params))
     }
 }
 
@@ -51,6 +63,7 @@ impl CdpTransport for WebView2Transport {
 async fn call(
     tabs: &BrowserTabManager,
     tab_id: &str,
+    frame: Option<&str>,
     method: CdpMethod,
     params: Value,
 ) -> Result<Value, EngineError> {
@@ -61,8 +74,10 @@ async fn call(
     // Both are tokio oneshots: a blocking recv here would stall the
     // single-threaded host-MCP runtime while it waits on the UI thread.
     let (result_tx, result_rx) = oneshot::channel::<Result<String, ()>>();
-    let (issue_tx, issue_rx) = oneshot::channel::<Result<(), ()>>();
+    let (issue_tx, issue_rx) = oneshot::channel::<Result<(), EngineErrorKind>>();
     let params_json = params.to_string();
+    let label = tab_id.to_string();
+    let frame = frame.map(str::to_string);
     let gate = IssueGate::new();
     // Also stands the queued closure down when an outer deadline drops
     // this future.
@@ -75,9 +90,13 @@ async fn call(
             // (issuing the call synchronously) — WebView2 addrefs the
             // completion handler for the async round trip.
             let Ok(core) = (unsafe { platform.controller().CoreWebView2() }) else {
-                let _ = issue_tx.send(Err(()));
+                let _ = issue_tx.send(Err(EngineErrorKind::Dispatch));
                 return;
             };
+            // An out-of-process frame's session changes when it reloads,
+            // so it is looked up when the command goes out. Any other
+            // frame lives in the page's own session.
+            let session = frame.as_deref().and_then(|f| observe::session_of(&label, f));
             // The caller may already have given up and reported the command
             // as never issued.
             if !closure_gate.claim() {
@@ -88,14 +107,14 @@ async fn call(
                     let _ = result_tx.send(hr.map(|()| json).map_err(|_| ()));
                     Ok(())
                 }));
-            let issued = unsafe {
-                core.CallDevToolsProtocolMethod(
-                    &HSTRING::from(method.as_str()),
-                    &HSTRING::from(params_json),
-                    &handler,
-                )
+            let (method, params) = (HSTRING::from(method.as_str()), HSTRING::from(params_json));
+            let issued = match session {
+                None => unsafe { core.CallDevToolsProtocolMethod(&method, &params, &handler) },
+                Some(session) => core.cast::<ICoreWebView2_11>().and_then(|core| unsafe {
+                    core.CallDevToolsProtocolMethodForSession(&HSTRING::from(session), &method, &params, &handler)
+                }),
             };
-            let _ = issue_tx.send(issued.map_err(|_| ()));
+            let _ = issue_tx.send(issued.map_err(|_| EngineErrorKind::Dispatch));
         })
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?;
     // Issue phase: timing out here cancels the queued closure so it never
@@ -108,7 +127,7 @@ async fn call(
             EngineError::new(EngineErrorKind::Timeout)
         })?
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?
-        .map_err(|()| undelivered(EngineErrorKind::Dispatch))?;
+        .map_err(undelivered)?;
     // Result phase: the command was issued, so a timeout or dropped
     // completion means the page script may have run.
     let json = tokio::time::timeout(CDP_RESULT, result_rx)
@@ -117,6 +136,31 @@ async fn call(
         .map_err(|_| EngineError::new(EngineErrorKind::NoReply))?
         .map_err(|()| EngineError::new(EngineErrorKind::Protocol))?;
     serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed))
+}
+
+/// Frames a snapshot follows per tab; owner lookups cost four CDP calls each.
+const MAX_FRAMES: usize = 24;
+
+/// Run `read` on the UI thread that owns `tab`'s webview.
+async fn on_ui_thread<T: Send + 'static>(
+    tabs: &BrowserTabManager,
+    tab: &str,
+    read: fn(&str) -> T,
+) -> Result<T, EngineError> {
+    let webview = tabs
+        .webview(tab)
+        .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
+    let (tx, rx) = oneshot::channel();
+    let label = tab.to_string();
+    webview
+        .with_webview(move |_| {
+            let _ = tx.send(read(&label));
+        })
+        .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
+    tokio::time::timeout(CDP_ISSUE, rx)
+        .await
+        .map_err(|_| EngineError::new(EngineErrorKind::Timeout))?
+        .map_err(|_| EngineError::new(EngineErrorKind::NoReply))
 }
 
 /// WebView2 engine over in-process CDP.
@@ -134,7 +178,7 @@ impl WebView2Engine {
                 traits: EngineTraits {
                     isolated_world: true,
                     background_render: false,
-                    network_observe: false,
+                    network_observe: true,
                 },
             },
         }
@@ -157,6 +201,8 @@ pub fn capability_table() -> CapabilityTable {
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)
+        .with(CapabilityId::ConsoleObserve, Support::Trusted)
+        .with(CapabilityId::NetworkObserve, Support::Trusted)
 }
 
 impl BrowserEngine for WebView2Engine {
@@ -188,6 +234,32 @@ impl BrowserEngine for WebView2Engine {
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(cdp::capture_screenshot(&self.transport, tab))
+    }
+
+    fn child_frames<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<ChildFrame>> {
+        Box::pin(async move {
+            let mut listed = on_ui_thread(&self.transport.tabs, tab, observe::frames).await?;
+            let tree = self.transport.call(tab, CdpMethod::PageGetFrameTree, serde_json::json!({})).await?;
+            listed.extend(cdp::child_frames(&tree));
+            listed.truncate(MAX_FRAMES);
+            let mut frames = Vec::with_capacity(listed.len());
+            for (id, parent) in listed {
+                // A frame whose owner cannot be read is left out: it shows
+                // in the outline as unreachable.
+                if let Ok(owner_path) = cdp::owner_path(&self.transport, tab, parent.as_deref(), &id).await {
+                    frames.push(ChildFrame { id, parent, owner_path });
+                }
+            }
+            Ok(frames)
+        })
+    }
+
+    fn evaluate_in_frame<'a>(&'a self, tab: &'a str, frame: &'a str, script: Script) -> EngineFuture<'a, Value> {
+        Box::pin(async move {
+            tokio::time::timeout(EVAL_STEP, cdp::evaluate_in(&self.transport, tab, Some(frame), &script))
+                .await
+                .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout)))
+        })
     }
 
     fn answer_dialog<'a>(

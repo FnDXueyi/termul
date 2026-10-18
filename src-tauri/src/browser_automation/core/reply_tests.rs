@@ -233,6 +233,8 @@ fn shape_snapshot_formats_the_outline_with_host_refs_for_nodes_only() {
                 .join("\n")
             ),
             dialog: None,
+            console: None,
+            network: None,
             truncated: false,
         },
         "page text never carries a ref token"

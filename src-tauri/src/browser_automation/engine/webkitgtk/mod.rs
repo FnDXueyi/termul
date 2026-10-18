@@ -5,6 +5,7 @@
 mod dialogs;
 mod eval;
 pub mod events;
+mod observe;
 mod screenshot;
 
 use std::sync::Arc;
@@ -12,10 +13,11 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use super::assets::Script;
+use super::assets::{self, Script};
+use super::observe::{self, ConsoleEntry};
 use super::events::DialogAnswer;
 use super::{
-    string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
+    string_eval, BrowserEngine, CapabilityId, Support, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
     InputMode, Point,
 };
 use crate::browser_automation::budgets::EVAL_STEP;
@@ -28,10 +30,15 @@ pub struct WebKitGtkEngine {
 
 impl WebKitGtkEngine {
     pub fn new(tabs: Arc<BrowserTabManager>) -> Self {
-        Self {
-            tabs,
-            facts: string_eval::isolated_facts(),
-        }
+        let mut facts = string_eval::isolated_facts();
+        // The console through the page shim, requests through the
+        // engine's resource-load signals, which report no resource type.
+        facts.capabilities = facts
+            .capabilities
+            .with(CapabilityId::ConsoleObserve, Support::Synthetic)
+            .with(CapabilityId::NetworkObserve, Support::Synthetic);
+        facts.traits.network_observe = true;
+        Self { tabs, facts }
     }
 }
 
@@ -75,6 +82,13 @@ impl BrowserEngine for WebKitGtkEngine {
                 Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
                 Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
+        })
+    }
+
+    fn pull_console<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<ConsoleEntry>> {
+        Box::pin(async move {
+            let pulled = self.evaluate(tab, assets::console_pull()).await?;
+            Ok(observe::parse_console_batches(&pulled))
         })
     }
 

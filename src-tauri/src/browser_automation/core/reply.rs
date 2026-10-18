@@ -62,6 +62,12 @@ pub struct PageData {
     /// on its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialog: Option<DialogView>,
+    /// Console messages, oldest first (`console`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub console: Option<Vec<Value>>,
+    /// Requests the page made, oldest first (`network`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<Vec<Value>>,
     /// True when any field above was cut to its cap.
     pub truncated: bool,
 }
@@ -76,6 +82,8 @@ impl PageData {
             title: title.to_string(),
             snapshot: None,
             dialog: None,
+            console: None,
+            network: None,
             truncated: url_cut || title_cut,
         }
     }
@@ -188,6 +196,11 @@ pub(super) fn engine_error(err: EngineError, tab: &str) -> BrowserError {
             ERR_INTERNAL,
             "engine_malformed_reply",
             "the browser engine returned an unusable reply",
+        ),
+        EngineErrorKind::FrameGone => (
+            ERR_STALE_REF,
+            "frame_gone",
+            "the frame holding the element is gone; take a new snapshot",
         ),
     };
     BrowserError::new(code, message).with_reason(reason)
@@ -331,24 +344,28 @@ pub(super) fn truncate_snapshot(text: &str) -> (String, bool) {
 /// The page outline the snapshot helper returns. Every string in it is
 /// page-controlled; the structure is the helper's.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct PageSnapshot {
-    url: String,
-    title: String,
-    items: Vec<SnapshotItem>,
+pub(super) struct PageSnapshot {
+    pub url: String,
+    pub title: String,
+    pub items: Vec<SnapshotItem>,
     /// The helper stopped at its item cap.
-    capped: bool,
+    pub capped: bool,
 }
 
 /// One line of the outline. Only `Node` items are actionable.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum SnapshotItem {
+pub(super) enum SnapshotItem {
     Node {
         depth: usize,
         role: String,
         name: String,
         /// The helper's structural locator for the element.
         path: String,
+        /// The engine frame the helper ran in; empty for the main frame.
+        /// Set by the host, never read from the helper's reply.
+        #[serde(skip)]
+        frame: String,
         #[serde(default)]
         href: Option<String>,
         #[serde(default, rename = "inputType")]
@@ -365,10 +382,35 @@ enum SnapshotItem {
         depth: usize,
         text: String,
     },
+    /// A frame the helper could not enter (cross-origin). `path` locates
+    /// its frame element.
+    Frame {
+        depth: usize,
+        name: String,
+        path: String,
+    },
+}
+
+impl SnapshotItem {
+    pub fn depth_mut(&mut self) -> &mut usize {
+        match self {
+            SnapshotItem::Node { depth, .. }
+            | SnapshotItem::Landmark { depth, .. }
+            | SnapshotItem::Text { depth, .. }
+            | SnapshotItem::Frame { depth, .. } => depth,
+        }
+    }
+}
+
+/// Parse a snapshot helper result. A result that is not the helper's shape
+/// is an `internal` error rather than a silently empty snapshot.
+pub(super) fn parse_snapshot(out: Value) -> Result<PageSnapshot, BrowserError> {
+    serde_json::from_value(out).map_err(|_| BrowserError::internal("snapshot eval result was malformed"))
 }
 
 const SNAPSHOT_MAX_INDENT: usize = 32;
 const SNAPSHOT_CAP_LINE: &str = "…[snapshot line cap]";
+const UNREACHABLE_FRAME: &str = "(cross-origin frame, not readable on this engine)";
 
 /// Page text as one outline-safe line. Whitespace and control characters,
 /// line breaks included, collapse to one space, so page text can never
@@ -393,22 +435,28 @@ fn outline_text(text: &str) -> String {
     out
 }
 
-/// Shape a snapshot helper result into page data plus the ref count: one
-/// outline line per item, with host refs minted by `mint` for its nodes in
-/// document order. A result that is not the helper's shape is an
-/// `internal` error rather than a silently empty snapshot.
+/// Shape a snapshot helper result into page data plus the ref count.
+#[cfg(test)]
 pub(super) fn shape_snapshot(
     out: Value,
     mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
 ) -> Result<(PageData, usize), BrowserError> {
-    let snapshot: PageSnapshot = serde_json::from_value(out)
-        .map_err(|_| BrowserError::internal("snapshot eval result was malformed"))?;
+    parse_snapshot(out).map(|snapshot| shape_parsed(snapshot, mint))
+}
+
+/// Shape a snapshot into page data plus the ref count: one outline line
+/// per item, with host refs minted by `mint` for its nodes in document
+/// order.
+pub(super) fn shape_parsed(
+    snapshot: PageSnapshot,
+    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
+) -> (PageData, usize) {
     let (text, count) = format_snapshot(&snapshot, mint);
     let mut page = PageData::meta(&snapshot.url, &snapshot.title);
     let (text, cut) = truncate_snapshot(&text);
     page.snapshot = Some(text);
     page.truncated |= cut;
-    Ok((page, count))
+    (page, count)
 }
 
 fn format_snapshot(
@@ -419,11 +467,13 @@ fn format_snapshot(
         .items
         .iter()
         .filter_map(|item| match item {
-            SnapshotItem::Node { role, name, path, .. } => Some(RefNode {
+            SnapshotItem::Node {
+                role, name, path, frame, ..
+            } => Some(RefNode {
                 role: role.clone(),
                 name: name.clone(),
                 path: path.clone(),
-                frame: String::new(),
+                frame: frame.clone(),
             }),
             _ => None,
         })
@@ -465,6 +515,9 @@ fn format_snapshot(
             },
             SnapshotItem::Text { depth, text } => {
                 format!("{}- text \"{}\"", indent(*depth), outline_text(text))
+            }
+            SnapshotItem::Frame { depth, name, .. } => {
+                format!("{}- iframe \"{}\" {UNREACHABLE_FRAME}", indent(*depth), outline_text(name))
             }
         };
         lines.push(line);

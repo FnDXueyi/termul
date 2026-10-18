@@ -9,7 +9,8 @@ use super::dispatch::Verb;
 use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
 use super::reply::{
-    action_result, engine_error, resolve_result, shape_snapshot, Fidelity, PageData, ResolvedElement, Success, TabFacts,
+    action_result, engine_error, resolve_result, shape_parsed, Fidelity, PageData, PageSnapshot, ResolvedElement, Success,
+    TabFacts,
 };
 use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
@@ -153,7 +154,7 @@ impl DesktopBrowserHost {
     }
 
     /// Run a helper through the engine.
-    async fn eval(&self, tab_id: &str, script: Script) -> Result<Value, BrowserError> {
+    pub(super) async fn eval(&self, tab_id: &str, script: Script) -> Result<Value, BrowserError> {
         self.engine.evaluate(tab_id, script).await.map_err(|e| {
             // Tab id + kind only: eval failures can quote page content.
             log::warn!("[browser-agent] eval failed on tab {tab_id} ({:?})", e.kind);
@@ -255,8 +256,8 @@ impl DesktopBrowserHost {
             }
             Verb::Snapshot => {
                 let label = self.resolve_tab(session_id, args)?;
-                let out = self.eval(&label, assets::snapshot()).await?;
-                let (page, refs) = self.mint_snapshot(&label, out)?;
+                let snapshot = self.snapshot_page(&label).await?;
+                let (page, refs) = self.mint_snapshot(&label, snapshot)?;
                 Ok(Success {
                     tab: Some(self.tab_facts(&label)?),
                     page: Some(page),
@@ -289,7 +290,9 @@ impl DesktopBrowserHost {
                     .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
                 let resolved = self.resolve_ref(&label, token)?;
                 self.revalidate(&label, token, &resolved).await?;
-                let out = self.eval(&label, assets::fill(&resolved.node.path, value)).await?;
+                let out = self
+                    .eval_ref(&label, &resolved.node, assets::fill(&resolved.node.path, value))
+                    .await?;
                 action_result(out, Some(token))?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
@@ -301,13 +304,13 @@ impl DesktopBrowserHost {
                     Verb::Hover => Some(required_ref(args)?),
                     _ => ref_arg(args)?,
                 };
-                let mut path = None;
+                let mut node = None;
                 if let Some(token) = token {
                     let resolved = self.resolve_ref(&label, token)?;
                     self.revalidate(&label, token, &resolved).await?;
-                    path = Some(resolved.node.path);
+                    node = Some(resolved.node);
                 }
-                let path = path.as_deref();
+                let path = node.as_ref().map(|n| n.path.as_str());
                 let text = |key| args.get(key).and_then(Value::as_str);
                 let script = match verb {
                     Verb::Type => assets::type_text(path, text("text").unwrap_or_default()),
@@ -315,7 +318,10 @@ impl DesktopBrowserHost {
                     Verb::Scroll => assets::scroll(path, args.get("dy").and_then(Value::as_f64).unwrap_or(600.0)),
                     _ => assets::hover(path.unwrap_or_default()),
                 };
-                let out = self.eval(&label, script).await?;
+                let out = match &node {
+                    Some(node) => self.eval_ref(&label, node, script).await?,
+                    None => self.eval(&label, script).await?,
+                };
                 action_result(out, token)?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
@@ -329,6 +335,7 @@ impl DesktopBrowserHost {
                 self.set_checked(&label, args, verb == Verb::Check, deadline).await
             }
             Verb::SwitchTab => self.switch_tab(session_id, args),
+            Verb::Console | Verb::Network => self.observe(session_id, verb, args).await,
             Verb::HandleDialog => self.handle_dialog(session_id, args).await,
         }
     }
@@ -440,27 +447,34 @@ impl DesktopBrowserHost {
 
     /// Shape a snapshot helper result, with host refs minted for its
     /// nodes on the tab's current document.
-    fn mint_snapshot(&self, label: &str, out: Value) -> Result<(PageData, usize), BrowserError> {
+    fn mint_snapshot(&self, label: &str, snapshot: PageSnapshot) -> Result<(PageData, usize), BrowserError> {
         let mut registry = self.registry.lock();
         let record = registry
             .get_mut(label)
             .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?;
         let epoch = record.epoch;
-        shape_snapshot(out, |nodes| record.refs.mint_snapshot(epoch, nodes))
+        Ok(shape_parsed(snapshot, |nodes| record.refs.mint_snapshot(epoch, nodes)))
     }
 
     /// Check the page element behind `resolved` still has the role and
-    /// name its ref was minted for.
+    /// name its ref was minted for. Its centre is in main-frame CSS px.
     async fn revalidate(
         &self,
         label: &str,
         token: &str,
         resolved: &ResolvedRef,
     ) -> Result<ResolvedElement, BrowserError> {
-        let out = self.eval(label, assets::resolve(&resolved.node.path)).await?;
-        let element = resolve_result(out, Some(token))?;
+        let out = self
+            .eval_ref(label, &resolved.node, assets::resolve(&resolved.node.path))
+            .await?;
+        let mut element = resolve_result(out, Some(token))?;
         if element.role != resolved.node.role || element.name != resolved.node.name {
             return Err(stale_ref_error(token, RefStale::Gone));
+        }
+        if !resolved.node.frame.is_empty() {
+            let origin = self.frame_origin(label, &resolved.node.frame).await?;
+            element.rect.cx += origin.x;
+            element.rect.cy += origin.y;
         }
         Ok(element)
     }
@@ -513,7 +527,9 @@ impl DesktopBrowserHost {
                 ),
             }
         }
-        let out = self.eval(label, assets::click(&resolved.node.path)).await?;
+        let out = self
+            .eval_ref(label, &resolved.node, assets::click(&resolved.node.path))
+            .await?;
         action_result(out, Some(token))?;
         Ok(Fidelity::Synthetic)
     }

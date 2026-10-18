@@ -41,9 +41,10 @@ function checkState(el) {
 }
 function labelledText(el) {
   var ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/);
+  var root = el.getRootNode();
   var out = '';
   for (var i = 0; i < ids.length; i++) {
-    var t = document.getElementById(ids[i]);
+    var t = root.getElementById ? root.getElementById(ids[i]) : null;
     if (t) out += (t.innerText || '') + ' ';
   }
   return out.trim();
@@ -63,34 +64,123 @@ function visible(el) {
   if (!el.isConnected) return false;
   var r = el.getBoundingClientRect();
   if (r.width === 0 && r.height === 0) return false;
-  var s = getComputedStyle(el);
+  var s = styleOf(el);
   return s.visibility !== 'hidden' && s.display !== 'none';
 }
-function pathOf(el) {
+function styleOf(el) {
+  var view = el.ownerDocument.defaultView || window;
+  return view.getComputedStyle(el);
+}
+// A path names an element by tag:nth-of-type steps from its root. Roots
+// chain with '|': '|shadow|' enters an element's open shadow root and
+// '|frame:<doc>|' a same-origin frame's document, where <doc> pins the
+// document the snapshot saw. A leading 'frame:<doc>|' pins this frame's
+// own document.
+function docId(doc) {
+  var view = doc && doc.defaultView;
+  return view ? String(view.performance.timeOrigin) : '';
+}
+function localPath(el) {
   var segs = [];
-  while (el && el.nodeType === 1 && el.tagName !== 'HTML') {
-    var parent = el.parentElement;
-    if (!parent) break;
+  while (el && el.nodeType === 1) {
+    var parent = el.parentNode;
+    if (!parent) return '';
     var tag = el.tagName;
-    var same = Array.prototype.filter.call(parent.children, function (c) {
-      return c.tagName === tag;
-    });
-    segs.unshift(tag.toLowerCase() + ':nth-of-type(' + (same.indexOf(el) + 1) + ')');
-    el = parent;
+    if (parent.nodeType === 9) {
+      segs.unshift(tag.toLowerCase());
+      break;
+    }
+    var n = 1;
+    for (var c = parent.firstElementChild; c && c !== el; c = c.nextElementSibling) {
+      if (c.tagName === tag) n++;
+    }
+    segs.unshift(tag.toLowerCase() + ':nth-of-type(' + n + ')');
+    el = parent.nodeType === 1 ? parent : null;
   }
-  return 'html>' + segs.join('>');
+  return segs.join('>');
+}
+function pathOf(el) {
+  var root = el.getRootNode();
+  var local = localPath(el);
+  if (root.nodeType === 11 && root.host) return pathOf(root.host) + '|shadow|' + local;
+  var view = root.nodeType === 9 ? root.defaultView : null;
+  if (view && view !== window && view.frameElement) {
+    return pathOf(view.frameElement) + '|frame:' + docId(root) + '|' + local;
+  }
+  return local;
+}
+function stepInto(root, local) {
+  var node = root;
+  var segs = local.split('>');
+  for (var i = 0; i < segs.length && node; i++) {
+    var m = /^([a-z0-9._-]+)(?::nth-of-type\((\d+)\))?$/.exec(segs[i]);
+    if (!m) return null;
+    var want = m[1], n = m[2] ? Number(m[2]) : 1, next = null;
+    for (var c = node.nodeType === 9 ? node.documentElement : node.firstElementChild;
+      c; c = node.nodeType === 9 ? null : c.nextElementSibling) {
+      if (c.tagName.toLowerCase() === want && --n === 0) { next = c; break; }
+    }
+    node = next;
+  }
+  return node && node.nodeType === 1 ? node : null;
+}
+function locate(path) {
+  var parts = String(path).split('|');
+  var i = 0;
+  if (parts[0].indexOf('frame:') === 0) {
+    if (parts[0].slice(6) !== docId(document)) return null;
+    i = 1;
+  }
+  var el = stepInto(document, parts[i] || '');
+  for (i += 1; el && i + 1 < parts.length; i += 2) {
+    var root = null;
+    if (parts[i] === 'shadow') {
+      root = el.shadowRoot;
+    } else if (parts[i].indexOf('frame:') === 0) {
+      try { root = el.contentDocument; } catch (e) { root = null; }
+      if (root && docId(root) !== parts[i].slice(6)) root = null;
+    }
+    el = root ? stepInto(root, parts[i + 1]) : null;
+  }
+  return el;
 }
 function isInteractive(el) {
   try { return el.matches(INTERACTIVE); } catch (e) { return false; }
 }
 function byPath(path) {
-  var el;
-  try { el = document.querySelector(path); } catch (e) { el = null; }
+  var el = locate(path);
   return el && visible(el) ? el : null;
+}
+// The offset of el's frame viewport in this frame's viewport, through
+// every same-origin frame in between.
+function frameOffset(el) {
+  var x = 0, y = 0;
+  for (var view = el.ownerDocument.defaultView; view && view !== window; view = view.parent) {
+    var owner = view.frameElement;
+    if (!owner) break;
+    var r = owner.getBoundingClientRect(), s = styleOf(owner);
+    x += r.left + owner.clientLeft + parseFloat(s.paddingLeft || '0');
+    y += r.top + owner.clientTop + parseFloat(s.paddingTop || '0');
+  }
+  return { x: x, y: y };
 }
 function center(el) {
   var rc = el.getBoundingClientRect();
-  return { cx: rc.left + rc.width / 2, cy: rc.top + rc.height / 2, w: rc.width, h: rc.height };
+  var off = frameOffset(el);
+  return { cx: off.x + rc.left + rc.width / 2, cy: off.y + rc.top + rc.height / 2, w: rc.width, h: rc.height };
+}
+function deepActive() {
+  var a = document.activeElement;
+  for (;;) {
+    var inner = null;
+    if (a && a.shadowRoot && a.shadowRoot.activeElement) inner = a.shadowRoot.activeElement;
+    else if (a && a.tagName === 'IFRAME') {
+      try { inner = a.contentDocument && a.contentDocument.activeElement; } catch (e) { inner = null; }
+      if (inner && inner === inner.ownerDocument.body) inner = null;
+    }
+    if (!inner || inner === a) return a;
+    a = inner;
+  }
 }
 function setValue(el, value) {
   if (el.isContentEditable) {

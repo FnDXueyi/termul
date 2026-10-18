@@ -13,10 +13,11 @@ use objc2_web_kit::WKWebView;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use super::assets::Script;
+use super::assets::{self, Script};
+use super::observe::{self, ConsoleEntry};
 use super::events::DialogAnswer;
 use super::{
-    dialogs, string_eval, BrowserEngine, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
+    dialogs, string_eval, BrowserEngine, CapabilityId, Support, EngineError, EngineErrorKind, EngineFacts, EngineFuture,
     InputMode, Point,
 };
 use crate::browser_automation::budgets::EVAL_STEP;
@@ -30,7 +31,17 @@ pub struct WkWebViewEngine {
 impl WkWebViewEngine {
     pub fn new(tabs: Arc<BrowserTabManager>) -> Self {
         let facts = if eval::content_worlds_available() {
-            string_eval::isolated_facts()
+            // The console through the page shim; WebKit exposes no
+            // per-request hook, so network observation stays unavailable.
+            let mut facts = string_eval::isolated_facts();
+            facts.capabilities = facts
+                .capabilities
+                .with(CapabilityId::ConsoleObserve, Support::Synthetic)
+                .with(
+                    CapabilityId::NetworkObserve,
+                    Support::Unavailable("WKWebView has no request observation hook"),
+                );
+            facts
         } else {
             string_eval::no_world_facts("isolated eval needs macOS 11 or later")
         };
@@ -86,6 +97,13 @@ impl BrowserEngine for WkWebViewEngine {
                 Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
                 Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
+        })
+    }
+
+    fn pull_console<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<ConsoleEntry>> {
+        Box::pin(async move {
+            let pulled = self.evaluate(tab, assets::console_pull()).await?;
+            Ok(observe::parse_console_batches(&pulled))
         })
     }
 

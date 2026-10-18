@@ -4,7 +4,7 @@ use super::*;
 use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
 use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_CAPABILITY};
 
-const ALL_VERBS: [&str; 21] = [
+const ALL_VERBS: [&str; 23] = [
     "navigate",
     "snapshot",
     "screenshot",
@@ -26,6 +26,8 @@ const ALL_VERBS: [&str; 21] = [
     "uncheck",
     "switch_tab",
     "handle_dialog",
+    "console",
+    "network",
 ];
 
 fn no_screenshots() -> EngineFacts {
@@ -159,7 +161,7 @@ fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
         err.message,
-        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload, select_option, check, uncheck, switch_tab, handle_dialog"
+        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload, select_option, check, uncheck, switch_tab, handle_dialog, console, network"
     );
 
     let err = admit("screenshot", &mut Value::Null, &facts).unwrap_err();
@@ -206,6 +208,8 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         ("urlContains", "string"),
         ("loadState", "string"),
         ("accept", "boolean"),
+        ("cursor", "integer"),
+        ("limit", "integer"),
     ] {
         assert_eq!(props[key]["type"], ty, "flat {key}");
         assert_eq!(nested["properties"][key]["type"], ty, "nested {key}");
@@ -263,7 +267,7 @@ fn an_engine_without_an_isolated_world_advertises_no_page_verb_and_does_not_clai
         );
     }
     assert!(schema.description.contains(
-        "Not available on this host: navigate, snapshot, screenshot, click, fill, type, press, scroll, hover, wait, new_tab, back, forward, reload, select_option, check, uncheck, handle_dialog."
+        "Not available on this host: navigate, snapshot, screenshot, click, fill, type, press, scroll, hover, wait, new_tab, back, forward, reload, select_option, check, uncheck, handle_dialog, console, network."
     ));
     assert!(schema.description.contains("cannot run page helpers in an isolated script world"));
     assert!(!schema.description.contains("page's own script context"));

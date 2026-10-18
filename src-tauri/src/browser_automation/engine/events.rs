@@ -14,6 +14,8 @@ use std::sync::Arc;
 use tauri::Url;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::observe::{ConsoleEntry, NetworkEntry};
+
 /// How a main-frame commit changed the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitKind {
@@ -109,6 +111,10 @@ pub enum TabEvent {
     TitleChanged {
         title: String,
     },
+    /// The page logged a console message (page-derived).
+    Console(ConsoleEntry),
+    /// A request the page made completed or failed (page-derived).
+    Network(NetworkEntry),
     /// The engine destroyed the webview.
     Closed,
 }

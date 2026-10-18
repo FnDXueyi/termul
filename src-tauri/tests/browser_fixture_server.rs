@@ -51,6 +51,21 @@ fn redirect_points_at_the_target_page() {
 }
 
 #[test]
+fn the_csp_page_forbids_every_script_and_resources_carry_their_types() {
+    let server = FixtureServer::start(&[]).unwrap();
+    let (status, head, _) = get(&server, "/csp.html");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Security-Policy: default-src 'none'; form-action 'self'"), "{head}");
+    let (_, head, body) = get(&server, "/api/ping?token=x");
+    assert!(head.contains("Content-Type: application/json"));
+    assert_eq!(body, r#"{"ok":true}"#);
+    assert!(get(&server, "/pixel.svg").1.contains("Content-Type: image/svg+xml"));
+    let (status, head, _) = get(&server, "/redirect-api");
+    assert_eq!(status, 302);
+    assert!(head.contains("Location: /api/ping?from=redirect"));
+}
+
+#[test]
 fn unknown_paths_are_404_and_query_strings_are_ignored() {
     let server = FixtureServer::start(&[]).unwrap();
     assert_eq!(get(&server, "/missing").0, 404);

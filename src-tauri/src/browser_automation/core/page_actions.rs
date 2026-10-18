@@ -176,7 +176,7 @@ impl DesktopBrowserHost {
         let resolved = self.resolve_ref(label, token)?;
         self.revalidate(label, token, &resolved).await?;
         let out = self
-            .eval(label, assets::select_option(&resolved.node.path, value))
+            .eval_ref(label, &resolved.node, assets::select_option(&resolved.node.path, value))
             .await?;
         form_refusal(&out, token)?;
         action_result(out, Some(token))?;
@@ -238,7 +238,7 @@ impl DesktopBrowserHost {
         resolved: &ResolvedRef,
     ) -> Result<CheckState, BrowserError> {
         let out = self
-            .eval(label, assets::checked_state(&resolved.node.path))
+            .eval_ref(label, &resolved.node, assets::checked_state(&resolved.node.path))
             .await?;
         form_refusal(&out, token)?;
         check_result(out, Some(token))
