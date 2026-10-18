@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::actionability::{wait_until_actionable, Need, Target};
 use super::actions::{ref_arg, ResolvedRef};
-use super::reply::{engine_error, eval_gate, Fidelity};
+use super::reply::{action_result, engine_error, focused_editable_result, viewport_result, Fidelity};
 use super::{BrowserError, DesktopBrowserHost, ERR_TIMEOUT};
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::engine::assets::{self, Script};
@@ -51,12 +51,6 @@ async fn within<T>(
         })
 }
 
-fn not_focused() -> BrowserError {
-    BrowserError::new(ERR_TIMEOUT, "clicking the element did not focus it")
-        .with_reason("not_focused")
-        .with_arg_keys(&["ref"])
-}
-
 impl DesktopBrowserHost {
     fn input_mode(&self, id: CapabilityId) -> Result<InputMode, BrowserError> {
         mode_of(self.engine.facts().capabilities.get(id))
@@ -86,10 +80,10 @@ impl DesktopBrowserHost {
         })
     }
 
-    async fn helper(&self, tab: &str, token: Option<&str>, script: Script) -> Result<Value, BrowserError> {
+    /// Run a synthetic input helper; only `{ok: true}` is success.
+    async fn helper(&self, tab: &str, token: Option<&str>, script: Script) -> Result<(), BrowserError> {
         let out = self.eval(tab, script).await?;
-        eval_gate(&out, token)?;
-        Ok(out)
+        action_result(out, token)
     }
 
     async fn actionable(
@@ -116,11 +110,7 @@ impl DesktopBrowserHost {
     ) -> Result<(), BrowserError> {
         within(bound, self.input(tab, self.engine.pointer_click(tab, target.point, InputMode::Trusted))).await?;
         let script = assets::prepare_text(&resolved.node.path, replace);
-        let out = within(bound, self.eval(tab, script)).await?;
-        if out.get("error").and_then(Value::as_str) == Some("not_focused") {
-            return Err(not_focused());
-        }
-        eval_gate(&out, Some(token))
+        within(bound, self.helper(tab, Some(token), script)).await
     }
 
     pub(super) async fn click(
@@ -178,11 +168,10 @@ impl DesktopBrowserHost {
         let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
         match mode {
             InputMode::Trusted => {
-                let viewport = self.helper(tab, None, assets::viewport()).await?;
-                let half = |key: &str| viewport.get(key).and_then(Value::as_f64).unwrap_or(0.0) / 2.0;
+                let viewport = viewport_result(self.eval(tab, assets::viewport()).await?)?;
                 let at = Point {
-                    x: half("w"),
-                    y: half("h"),
+                    x: viewport.w / 2.0,
+                    y: viewport.h / 2.0,
                 };
                 self.input(tab, self.engine.wheel(tab, at, (0.0, dy), mode)).await?;
             }
@@ -245,8 +234,8 @@ impl DesktopBrowserHost {
     }
 
     async fn require_focused_editable(&self, tab: &str, bound: Deadline) -> Result<(), BrowserError> {
-        let out = within(bound, self.helper(tab, None, assets::focused_editable())).await?;
-        if out.get("editable").and_then(Value::as_bool) == Some(true) {
+        let out = within(bound, self.eval(tab, assets::focused_editable())).await?;
+        if focused_editable_result(out)? {
             Ok(())
         } else {
             Err(BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element"))

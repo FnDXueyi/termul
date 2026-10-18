@@ -18,7 +18,7 @@ fn key_names_parse_to_named_keys_or_one_character() {
 
 #[test]
 fn facts_parse_from_the_helper_reply() {
-    let facts = parse_facts(&json!({
+    let facts = parse_facts(json!({
         "state": "present", "role": "textbox", "name": "Email", "x": 10.5, "y": 20.0,
         "visible": true, "stable": false, "hit": true, "enabled": true, "kind": "text",
         "focusOnClick": true
@@ -38,9 +38,26 @@ fn facts_parse_from_the_helper_reply() {
             focus_on_click: true,
         })
     );
-    assert_eq!(parse_facts(&json!({ "state": "detached" })).unwrap(), ActionabilityFacts::Detached);
-    for bad in [json!({}), json!({ "state": "present", "role": "x" }), json!("stale_ref")] {
-        assert_eq!(parse_facts(&bad).unwrap_err().kind, EngineErrorKind::Malformed, "{bad}");
+    assert_eq!(parse_facts(json!({ "state": "detached" })).unwrap(), ActionabilityFacts::Detached);
+    let with_extra = json!({
+        "state": "present", "role": "textbox", "name": "Email", "x": 10.5, "y": 20.0,
+        "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "text",
+        "focusOnClick": true, "forged": true
+    });
+    let bad_kind = json!({
+        "state": "present", "role": "textbox", "name": "Email", "x": 10.5, "y": 20.0,
+        "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "button",
+        "focusOnClick": true
+    });
+    for bad in [
+        json!({}),
+        json!({ "state": "present", "role": "x" }),
+        json!("stale_ref"),
+        json!({ "error": "stale_ref" }),
+        with_extra,
+        bad_kind,
+    ] {
+        assert_eq!(parse_facts(bad.clone()).unwrap_err().kind, EngineErrorKind::Malformed, "{bad}");
     }
 }
 

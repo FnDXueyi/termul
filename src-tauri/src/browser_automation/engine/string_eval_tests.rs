@@ -1,5 +1,40 @@
-use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use parking_lot::Mutex;
 use serde_json::json;
+
+use super::*;
+
+type Job = Box<dyn FnOnce(&()) + Send>;
+
+/// A UI thread that runs queued closures only when the test lets it.
+#[derive(Clone, Default)]
+struct FakeUiQueue(Arc<Mutex<Vec<Job>>>);
+
+impl FakeUiQueue {
+    fn push(&self, job: Job) -> Result<(), ()> {
+        self.0.lock().push(job);
+        Ok(())
+    }
+
+    fn drain(&self) {
+        for job in std::mem::take(&mut *self.0.lock()) {
+            job(&());
+        }
+    }
+}
+
+const SHORT: Duration = Duration::from_millis(20);
+
+fn flag_issue(ran: &Arc<AtomicBool>) -> impl FnOnce(&(), Completion) + Send + 'static {
+    let ran = ran.clone();
+    move |_, done| {
+        ran.store(true, Ordering::SeqCst);
+        let _ = done.send(Ok("{\"ok\":true}".into()));
+    }
+}
 
 #[test]
 fn a_completed_call_yields_the_helpers_json_value() {
@@ -14,11 +49,11 @@ fn a_completed_call_yields_the_helpers_json_value() {
 fn engine_failures_and_unusable_text_are_terminal() {
     assert_eq!(
         parse(Err(EngineErrorKind::PageException)),
-        Err(EngineError::new(EngineErrorKind::PageException, false))
+        Err(EngineError::new(EngineErrorKind::PageException))
     );
     assert_eq!(
         parse(Ok("undefined".into())),
-        Err(EngineError::new(EngineErrorKind::Malformed, false))
+        Err(EngineError::new(EngineErrorKind::Malformed))
     );
 }
 
@@ -59,4 +94,60 @@ fn the_webkit_call_body_is_static_and_the_parameters_ride_one_string() {
         serde_json::from_str::<Value>(&params_json(&script)).unwrap(),
         json!({ "path": "html>body:nth-of-type(1)", "value": hostile })
     );
+}
+
+#[tokio::test]
+async fn a_queued_call_that_runs_in_time_returns_the_helpers_value() {
+    let queue = FakeUiQueue::default();
+    let ran = Arc::new(AtomicBool::new(false));
+    let pending = run(|job| queue.push(job), Duration::from_secs(5), flag_issue(&ran));
+    let (result, ()) = tokio::join!(pending, async { queue.drain() });
+    assert_eq!(result, Ok(json!({ "ok": true })));
+    assert!(ran.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn a_closure_the_ui_thread_reaches_after_the_timeout_does_not_issue() {
+    let queue = FakeUiQueue::default();
+    let ran = Arc::new(AtomicBool::new(false));
+    let result = run(|job| queue.push(job), SHORT, flag_issue(&ran)).await;
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Timeout)));
+    queue.drain();
+    assert!(!ran.load(Ordering::SeqCst), "the late closure ran its action");
+}
+
+#[tokio::test]
+async fn dropping_the_awaiting_future_also_stands_the_queued_closure_down() {
+    let queue = FakeUiQueue::default();
+    let ran = Arc::new(AtomicBool::new(false));
+    let outer = tokio::time::timeout(
+        SHORT,
+        run(|job| queue.push(job), Duration::from_secs(5), flag_issue(&ran)),
+    )
+    .await;
+    assert!(outer.is_err());
+    queue.drain();
+    assert!(!ran.load(Ordering::SeqCst), "the late closure ran its action");
+}
+
+#[tokio::test]
+async fn a_call_issued_before_the_deadline_but_unanswered_is_terminal() {
+    let queue = FakeUiQueue::default();
+    let ran = Arc::new(AtomicBool::new(false));
+    let issued = ran.clone();
+    let pending = run(
+        |job| queue.push(job),
+        SHORT,
+        move |_: &(), _done: Completion| issued.store(true, Ordering::SeqCst),
+    );
+    let (result, ()) = tokio::join!(pending, async { queue.drain() });
+    assert!(ran.load(Ordering::SeqCst));
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::NoReply)));
+}
+
+#[tokio::test]
+async fn a_queue_that_refuses_the_closure_is_a_dispatch_failure() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let result = run(|_job| Err(()), SHORT, flag_issue(&ran)).await;
+    assert_eq!(result, Err(EngineError::new(EngineErrorKind::Dispatch)));
 }

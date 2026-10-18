@@ -264,6 +264,8 @@ impl BrowserEngine for FakeEngine {
                 facts
             }
             "contains_text" => json!(true),
+            "viewport" => json!({ "w": 800.0, "h": 600.0 }),
+            "focused_editable" => json!({ "editable": true }),
             _ => json!({ "ok": true }),
         };
         Box::pin(async move { Ok(out) })
@@ -273,7 +275,7 @@ impl BrowserEngine for FakeEngine {
         let fail = self.fail_trusted_click;
         Box::pin(async move {
             if fail {
-                Err(EngineError::new(EngineErrorKind::Dispatch, true))
+                Err(EngineError::new(EngineErrorKind::Dispatch))
             } else {
                 Ok(())
             }

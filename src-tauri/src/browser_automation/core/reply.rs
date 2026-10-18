@@ -179,25 +179,122 @@ pub(super) fn engine_error(err: EngineError, tab: &str) -> BrowserError {
     BrowserError::new(code, message).with_reason(reason)
 }
 
-/// Map a helper script's `{error: "…"}` result to a wire code. Only the
-/// code reaches the reply, never the helper's text: a `stale_ref` prefix
-/// maps to `stale_ref` (take a fresh snapshot), anything else to
-/// `internal`.
-pub(super) fn eval_gate(out: &Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
-    let Some(e) = out.get("error").and_then(Value::as_str) else {
-        return Ok(());
-    };
+/// A helper that could not do its job: `{error: "…"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelperFailure {
+    error: String,
+}
+
+/// What an input helper (click, fill, type, press, scroll, hover) returns
+/// when it ran: exactly `{ok: true}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionDone {
+    ok: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ActionReply {
+    Done(ActionDone),
+    Failed(HelperFailure),
+}
+
+/// The centre of an element in main-frame CSS px.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub(super) struct Rect {
+    pub cx: f64,
+    pub cy: f64,
+}
+
+/// What the resolve helper reports for an element that still exists.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(super) struct ResolvedElement {
+    pub rect: Rect,
+    pub role: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResolveReply {
+    Found(ResolvedElement),
+    Failed(HelperFailure),
+}
+
+fn malformed_helper_result() -> BrowserError {
+    BrowserError::new(ERR_INTERNAL, "the page helper returned an unusable result")
+        .with_reason("page_helper_malformed")
+}
+
+/// Parse an input helper's result. Only `{ok: true}` is success: any other
+/// shape is `internal`, so an action that may not have happened never
+/// reports ok.
+pub(super) fn action_result(out: Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
+    match serde_json::from_value::<ActionReply>(out) {
+        Ok(ActionReply::Done(ActionDone { ok: true })) => Ok(()),
+        Ok(ActionReply::Failed(failure)) => Err(helper_failure(&failure.error, ref_id)),
+        Ok(ActionReply::Done(_)) | Err(_) => Err(malformed_helper_result()),
+    }
+}
+
+/// Parse the resolve helper's result: the element's centre, role and name,
+/// or the failure it reported.
+pub(super) fn resolve_result(out: Value, ref_id: Option<&str>) -> Result<ResolvedElement, BrowserError> {
+    match serde_json::from_value::<ResolveReply>(out) {
+        Ok(ResolveReply::Found(element)) => Ok(element),
+        Ok(ResolveReply::Failed(failure)) => Err(helper_failure(&failure.error, ref_id)),
+        Err(_) => Err(malformed_helper_result()),
+    }
+}
+
+/// What the focused-field helper reports.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FocusedEditable {
+    editable: bool,
+}
+
+/// Whether the focused element takes typed text.
+pub(super) fn focused_editable_result(out: Value) -> Result<bool, BrowserError> {
+    serde_json::from_value::<FocusedEditable>(out)
+        .map(|f| f.editable)
+        .map_err(|_| malformed_helper_result())
+}
+
+/// The viewport size in CSS px.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Viewport {
+    pub w: f64,
+    pub h: f64,
+}
+
+pub(super) fn viewport_result(out: Value) -> Result<Viewport, BrowserError> {
+    serde_json::from_value(out).map_err(|_| malformed_helper_result())
+}
+
+/// Map a helper's `{error: "…"}` to a wire code. Only the code reaches the
+/// reply, never the helper's text: a `stale_ref` prefix maps to
+/// `stale_ref` (take a fresh snapshot), anything else to `internal`.
+fn helper_failure(e: &str, ref_id: Option<&str>) -> BrowserError {
     if e.starts_with("stale_ref") {
         let message = match ref_id {
             Some(r) => format!("ref {r} no longer resolves; take a new snapshot"),
             None => "the ref no longer resolves; take a new snapshot".to_string(),
         };
-        return Err(BrowserError::new(ERR_STALE_REF, message).with_reason("ref_not_resolved"));
+        return BrowserError::new(ERR_STALE_REF, message).with_reason("ref_not_resolved");
     }
     if e == "no focused element" {
-        return Err(BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element"));
+        return BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element");
     }
-    Err(BrowserError::new(ERR_INTERNAL, "the page helper reported a failure").with_reason("page_helper_error"))
+    if e == "not_focused" {
+        return BrowserError::new(ERR_TIMEOUT, "clicking the element did not focus it")
+            .with_reason("not_focused")
+            .with_arg_keys(&["ref"]);
+    }
+    BrowserError::new(ERR_INTERNAL, "the page helper reported a failure").with_reason("page_helper_error")
 }
 
 /// Hard cut at `max` bytes on a UTF-8 char boundary; true when cut.
@@ -223,8 +320,7 @@ pub(super) fn truncate_snapshot(text: &str) -> (String, bool) {
 
 /// The page outline the snapshot helper returns. Every string in it is
 /// page-controlled; the structure is the helper's.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct PageSnapshot {
     url: String,
     title: String,
@@ -264,15 +360,23 @@ enum SnapshotItem {
 const SNAPSHOT_MAX_INDENT: usize = 32;
 const SNAPSHOT_CAP_LINE: &str = "…[snapshot line cap]";
 
-/// Page text that reads like a ref (`@e12`) gets a space after the `@`,
-/// so the refs the host minted are the only ref tokens in the outline.
-fn defang_refs(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
+/// Page text as one outline-safe line. Whitespace and control characters,
+/// line breaks included, collapse to one space, so page text can never
+/// start a line of its own. Text that reads like a ref (`@e12`, or `@e+12`,
+/// which ref parsing also accepts) gets a space after the `@`, so the refs
+/// the host minted are the only ref tokens in the outline.
+fn outline_text(text: &str) -> String {
+    let flat = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = String::with_capacity(flat.len());
+    let mut rest = flat.as_str();
     while let Some(at) = rest.find("@e") {
-        let digit_follows = rest[at + 2..].starts_with(|c: char| c.is_ascii_digit());
+        let ref_like = rest[at + 2..].starts_with(|c: char| c.is_ascii_digit() || c == '+');
         out.push_str(&rest[..at]);
-        out.push_str(if digit_follows { "@ e" } else { "@e" });
+        out.push_str(if ref_like { "@ e" } else { "@e" });
         rest = &rest[at + 2..];
     }
     out.push_str(rest);
@@ -329,14 +433,14 @@ fn format_snapshot(
                 ..
             } => {
                 let token = tokens.next().unwrap_or_default();
-                let mut line = format!("{}- {} \"{}\" {token}", indent(*depth), defang_refs(role), defang_refs(name));
+                let mut line = format!("{}- {} \"{}\" {token}", indent(*depth), outline_text(role), outline_text(name));
                 if let Some(href) = href {
                     line.push(' ');
-                    line.push_str(&defang_refs(href));
+                    line.push_str(&outline_text(href));
                 }
                 if let Some(t) = input_type {
                     line.push_str(" type=");
-                    line.push_str(&defang_refs(t));
+                    line.push_str(&outline_text(t));
                 }
                 match checked {
                     Some(true) => line.push_str(" checked"),
@@ -345,14 +449,12 @@ fn format_snapshot(
                 }
                 line
             }
-            SnapshotItem::Landmark { depth, role, name } if name.is_empty() => {
-                format!("{}- {}", indent(*depth), defang_refs(role))
-            }
-            SnapshotItem::Landmark { depth, role, name } => {
-                format!("{}- {} \"{}\"", indent(*depth), defang_refs(role), defang_refs(name))
-            }
+            SnapshotItem::Landmark { depth, role, name } => match outline_text(name).as_str() {
+                "" => format!("{}- {}", indent(*depth), outline_text(role)),
+                name => format!("{}- {} \"{}\"", indent(*depth), outline_text(role), name),
+            },
             SnapshotItem::Text { depth, text } => {
-                format!("{}- text \"{}\"", indent(*depth), defang_refs(text))
+                format!("{}- text \"{}\"", indent(*depth), outline_text(text))
             }
         };
         lines.push(line);

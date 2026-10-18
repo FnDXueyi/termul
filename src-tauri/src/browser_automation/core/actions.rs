@@ -8,7 +8,9 @@ use uuid::Uuid;
 use super::dispatch::Verb;
 use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
-use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, Success, TabFacts};
+use super::reply::{
+    engine_error, resolve_result, shape_snapshot, Fidelity, PageData, ResolvedElement, Success, TabFacts,
+};
 use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
@@ -414,15 +416,18 @@ impl DesktopBrowserHost {
 
     /// Check the page element behind `resolved` still has the role and
     /// name its ref was minted for.
-    pub(super) async fn revalidate(&self, label: &str, token: &str, resolved: &ResolvedRef) -> Result<Value, BrowserError> {
+    pub(super) async fn revalidate(
+        &self,
+        label: &str,
+        token: &str,
+        resolved: &ResolvedRef,
+    ) -> Result<ResolvedElement, BrowserError> {
         let out = self.eval(label, assets::resolve(&resolved.node.path)).await?;
-        eval_gate(&out, Some(token))?;
-        let role = out.get("role").and_then(Value::as_str);
-        let name = out.get("name").and_then(Value::as_str);
-        if role != Some(resolved.node.role.as_str()) || name != Some(resolved.node.name.as_str()) {
+        let element = resolve_result(out, Some(token))?;
+        if element.role != resolved.node.role || element.name != resolved.node.name {
             return Err(stale_ref_error(token, RefStale::Gone));
         }
-        Ok(out)
+        Ok(element)
     }
 
     async fn wait(&self, session_id: &str, args: &Value, deadline: Deadline) -> Result<Success, BrowserError> {

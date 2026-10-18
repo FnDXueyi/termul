@@ -11,11 +11,14 @@ var TAG_ROLE = {
   HEADER: 'banner', FOOTER: 'contentinfo', FORM: 'form', IMG: 'img',
   UL: 'list', OL: 'list', LI: 'listitem', TABLE: 'table'
 };
+function oneLine(value, max) {
+  return String(value).replace(/\s+/g, ' ').trim().slice(0, max);
+}
 function inputType(el) {
-  return (el.getAttribute('type') || 'text').toLowerCase();
+  return oneLine(el.getAttribute('type') || 'text', 32).toLowerCase();
 }
 function roleOf(el) {
-  var r = el.getAttribute('role');
+  var r = oneLine(el.getAttribute('role') || '', 64);
   if (r) return r;
   if (el.tagName === 'INPUT') {
     var t = inputType(el);
@@ -45,7 +48,7 @@ function nameOf(el) {
     el.getAttribute('title') || el.getAttribute('placeholder') ||
     el.getAttribute('alt') || el.innerText ||
     (secret ? (el.value ? '[redacted]' : '') : el.value) || '';
-  return String(raw).replace(/\s+/g, ' ').trim().slice(0, 100);
+  return oneLine(raw, 100);
 }
 function visible(el) {
   if (!el.isConnected) return false;

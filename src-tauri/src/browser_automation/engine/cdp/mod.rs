@@ -5,14 +5,8 @@
 //! Helpers run in an isolated world of the main frame: the page shares
 //! its DOM with that world but none of its globals, prototypes or
 //! wrappers, and their value comes back as the call's own return value.
-//!
-//! [`EngineError::retryable`] is true only for commands that provably
-//! never reached the page. A script that ran (page exception) or may have
-//! run (no reply) could double-apply side effects when re-executed: fill
-//! re-fires input/change events, press Enter re-clicks.
 
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::assets::{Script, WORLD_NAME};
 use super::{EngineError, EngineErrorKind, EngineFuture, Point};
@@ -52,22 +46,6 @@ pub trait CdpTransport: Send + Sync {
         -> EngineFuture<'a, Value>;
 }
 
-/// Issue-state for a UI-thread closure racing an issue-phase timeout
-/// (see [`issue_timeout_retryable`]).
-pub const CALL_PENDING: u8 = 0;
-pub const CALL_ISSUED: u8 = 1;
-pub const CALL_CANCELLED: u8 = 2;
-
-/// Classify an issue-phase timeout: the awaiting task races the queued
-/// closure for the pending state. Winning (PENDING → CANCELLED) proves the
-/// closure has not issued the command and now never will, so a retry is
-/// safe. Losing means the command is already out and may run.
-pub fn issue_timeout_retryable(state: &AtomicU8) -> bool {
-    state
-        .compare_exchange(CALL_PENDING, CALL_CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-
 /// `Runtime.callFunctionOn` params: the helper as a function of one
 /// argument, called in the isolated context with its parameters passed by
 /// value. `returnByValue` ships the result back as JSON.
@@ -87,15 +65,15 @@ pub fn call_params(script: &Script, context_id: i64) -> Value {
 /// replies all mean the command was processed, so the script may have run.
 pub fn parse_evaluate_result(out: &Value) -> Result<Value, EngineError> {
     if out.get("error").is_some_and(Value::is_object) {
-        return Err(EngineError::new(EngineErrorKind::Protocol, false));
+        return Err(EngineError::new(EngineErrorKind::Protocol));
     }
     // A JSON `null` exceptionDetails must not enter the exception branch.
     if out.get("exceptionDetails").is_some_and(Value::is_object) {
-        return Err(EngineError::new(EngineErrorKind::PageException, false));
+        return Err(EngineError::new(EngineErrorKind::PageException));
     }
     match out.get("result") {
         Some(r) if r.is_object() => Ok(r.get("value").cloned().unwrap_or(Value::Null)),
-        _ => Err(EngineError::new(EngineErrorKind::Malformed, false)),
+        _ => Err(EngineError::new(EngineErrorKind::Malformed)),
     }
 }
 
@@ -111,19 +89,16 @@ pub fn world_context_id(world: &Value) -> Option<i64> {
 
 /// Run `script` in the main frame's isolated world. The world is looked
 /// up per call: each new document gets a new context, and asking for the
-/// named world again returns the current document's one. A failure
-/// before the call itself never ran the helper, so it stays retryable.
+/// named world again returns the current document's one.
 pub async fn evaluate(
     transport: &dyn CdpTransport,
     tab: &str,
     script: &Script,
 ) -> Result<Value, EngineError> {
-    let not_run = |e: EngineError| EngineError::new(e.kind, true);
-    let malformed = EngineError::new(EngineErrorKind::Malformed, true);
+    let malformed = EngineError::new(EngineErrorKind::Malformed);
     let tree = transport
         .call(tab, CdpMethod::PageGetFrameTree, json!({}))
-        .await
-        .map_err(not_run)?;
+        .await?;
     let frame = main_frame_id(&tree).ok_or(malformed)?;
     let world = transport
         .call(
@@ -131,8 +106,7 @@ pub async fn evaluate(
             CdpMethod::PageCreateIsolatedWorld,
             json!({ "frameId": frame, "worldName": WORLD_NAME }),
         )
-        .await
-        .map_err(not_run)?;
+        .await?;
     let context = world_context_id(&world).ok_or(malformed)?;
     let out = transport
         .call(tab, CdpMethod::RuntimeCallFunctionOn, call_params(script, context))
@@ -181,10 +155,10 @@ pub fn decode_screenshot(out: &Value) -> Result<Vec<u8>, EngineError> {
     let b64 = out
         .get("data")
         .and_then(Value::as_str)
-        .ok_or(EngineError::new(EngineErrorKind::Malformed, false))?;
+        .ok_or(EngineError::new(EngineErrorKind::Malformed))?;
     base64::engine::general_purpose::STANDARD
         .decode(b64)
-        .map_err(|_| EngineError::new(EngineErrorKind::Malformed, false))
+        .map_err(|_| EngineError::new(EngineErrorKind::Malformed))
 }
 
 #[cfg(test)]

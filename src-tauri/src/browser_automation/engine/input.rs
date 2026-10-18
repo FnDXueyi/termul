@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::assets::{self, Script};
@@ -134,7 +135,8 @@ pub enum KeyKind {
 }
 
 /// What kind of form control an element is, for text entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ControlKind {
     /// Accepts typed text (`:read-write`).
     Text,
@@ -170,39 +172,50 @@ pub struct ElementState {
 }
 
 fn malformed() -> EngineError {
-    EngineError::new(EngineErrorKind::Malformed, false)
+    EngineError::new(EngineErrorKind::Malformed)
 }
 
-/// Parse the facts helper's reply ([`assets::facts`]).
-pub fn parse_facts(out: &Value) -> Result<ActionabilityFacts, EngineError> {
-    match out.get("state").and_then(Value::as_str) {
-        Some("detached") => return Ok(ActionabilityFacts::Detached),
-        Some("present") => {}
-        _ => return Err(malformed()),
-    }
-    let text = |key: &str| out.get(key).and_then(Value::as_str).map(str::to_string);
-    let num = |key: &str| out.get(key).and_then(Value::as_f64).ok_or_else(malformed);
-    let flag = |key: &str| out.get(key).and_then(Value::as_bool).ok_or_else(malformed);
-    let kind = match out.get("kind").and_then(Value::as_str) {
-        Some("text") => ControlKind::Text,
-        Some("select") => ControlKind::Select,
-        Some("other") => ControlKind::Other,
-        _ => return Err(malformed()),
-    };
-    Ok(ActionabilityFacts::Present(ElementState {
-        role: text("role").ok_or_else(malformed)?,
-        name: text("name").ok_or_else(malformed)?,
-        point: Point {
-            x: num("x")?,
-            y: num("y")?,
-        },
-        visible: flag("visible")?,
-        stable: flag("stable")?,
-        hit: flag("hit")?,
-        enabled: flag("enabled")?,
-        kind,
-        focus_on_click: flag("focusOnClick")?,
-    }))
+/// The facts helper's reply, exactly as the helper writes it.
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+enum FactsReply {
+    Detached,
+    Present(PresentFacts),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PresentFacts {
+    role: String,
+    name: String,
+    x: f64,
+    y: f64,
+    visible: bool,
+    stable: bool,
+    hit: bool,
+    enabled: bool,
+    kind: ControlKind,
+    focus_on_click: bool,
+}
+
+/// Parse the facts helper's reply ([`assets::facts`]). Any other shape is
+/// malformed.
+pub fn parse_facts(out: Value) -> Result<ActionabilityFacts, EngineError> {
+    let reply = serde_json::from_value::<FactsReply>(out).map_err(|_| malformed())?;
+    Ok(match reply {
+        FactsReply::Detached => ActionabilityFacts::Detached,
+        FactsReply::Present(f) => ActionabilityFacts::Present(ElementState {
+            role: f.role,
+            name: f.name,
+            point: Point { x: f.x, y: f.y },
+            visible: f.visible,
+            stable: f.stable,
+            hit: f.hit,
+            enabled: f.enabled,
+            kind: f.kind,
+            focus_on_click: f.focus_on_click,
+        }),
+    })
 }
 
 /// Element facts through the engine's isolated-world helper eval. The one
@@ -214,12 +227,12 @@ pub fn facts_via_eval<'a, E: BrowserEngine + ?Sized>(
 ) -> EngineFuture<'a, ActionabilityFacts> {
     Box::pin(async move {
         let out = engine.evaluate(tab, assets::facts(path)).await?;
-        parse_facts(&out)
+        parse_facts(out)
     })
 }
 
 pub(super) fn unsupported<'a, T: Send + 'a>() -> EngineFuture<'a, T> {
-    Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+    Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
 }
 
 /// An adapter's native (trusted) input. Every method may assume the

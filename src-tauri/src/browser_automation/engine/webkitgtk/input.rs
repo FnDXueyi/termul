@@ -128,7 +128,7 @@ impl GdkInput {
             let webview = self
                 .tabs
                 .webview(tab)
-                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
             let (tx, rx) = oneshot::channel::<Result<(), EngineErrorKind>>();
             let lock_epoch = self.lock_epoch.clone();
             webview
@@ -136,12 +136,12 @@ impl GdkInput {
                     let widget = platform.inner().upcast::<gtk::Widget>();
                     let _ = tx.send(dispatch(&widget, &steps, &lock_epoch));
                 })
-                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
             match tokio::time::timeout(NATIVE_INPUT, rx).await {
                 Ok(Ok(Ok(()))) => Ok(()),
-                Ok(Ok(Err(kind))) => Err(EngineError::new(kind, true)),
-                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
+                Ok(Ok(Err(kind))) => Err(EngineError::new(kind)),
+                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
+                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
         })
     }
