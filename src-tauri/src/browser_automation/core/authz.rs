@@ -24,8 +24,10 @@ const METADATA_HOSTS: [&str; 1] = ["metadata.google.internal"];
 const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
-/// Every port a termul listener is bound to. Registered by the listeners
-/// themselves at bind time; never removed, so a recycled port stays denied.
+/// Every port a termul listener is bound to: the one registry both the
+/// navigation hop check and browser policy edits read. Registered by the
+/// listeners themselves at bind time; never removed, so a recycled port
+/// stays denied.
 static OWNED_PORTS: RwLock<BTreeSet<u16>> = RwLock::new(BTreeSet::new());
 
 /// Record a port termul listens on (web server, MCP host bridge,
@@ -38,6 +40,11 @@ pub fn register_owned_port(port: u16) {
 
 pub fn is_owned_port(port: u16) -> bool {
     OWNED_PORTS.read().contains(&port)
+}
+
+/// The registered ports, for the policy service's reserved-origin check.
+pub fn owned_ports() -> Vec<u16> {
+    OWNED_PORTS.read().iter().copied().collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

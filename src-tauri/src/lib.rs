@@ -1632,23 +1632,6 @@ pub fn run() {
             // to the desktop renderer and every remote client; the web router
             // reaches the same service through `browser_policy::installed`.
             let policy_service = {
-                let owned_handle = handle.clone();
-                let owned_ports: acp::browser_policy::OwnedPorts = Arc::new(move || {
-                    let mut ports = Vec::new();
-                    if let Some(service) =
-                        owned_handle.try_state::<agentation::AgentationService>()
-                    {
-                        ports.push(service.http_port());
-                    }
-                    if let Some(remote) = owned_handle.try_state::<Arc<RemoteServerState>>() {
-                        ports.extend(remote.status().port);
-                    }
-                    if tauri::is_dev() {
-                        let dev_url = owned_handle.config().build.dev_url.as_ref();
-                        ports.extend(dev_url.and_then(|url| url.port_or_known_default()));
-                    }
-                    ports
-                });
                 let policy_root = handle
                     .path()
                     .app_data_dir()
@@ -1656,7 +1639,7 @@ pub fn run() {
                     .join("browser-policy");
                 let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
                     policy_root,
-                    owned_ports,
+                    Arc::new(browser_automation::core::authz::owned_ports),
                     vec![ws_relay.clone()],
                     Arc::new(acp::browser_policy::UnwiredProfileControl),
                 ));

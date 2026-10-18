@@ -208,3 +208,31 @@ fn owned_port_registry_records_listener_ports() {
         HopVerdict::Deny(DenyReason::TermulOwned)
     );
 }
+
+#[tokio::test]
+async fn the_hop_check_and_policy_edits_read_one_owned_port_registry() {
+    use crate::acp::browser_policy::{BrowserPolicyService, CallerScope, UnwiredProfileControl};
+    let dir = tempfile::tempdir().unwrap();
+    let policy = BrowserPolicyService::new(
+        dir.path().to_path_buf(),
+        std::sync::Arc::new(owned_ports),
+        Vec::new(),
+        std::sync::Arc::new(UnwiredProfileControl),
+    );
+    let add = |origin: &str| serde_json::json!({ "op": "add_origin", "origin": origin });
+    policy
+        .apply_project(&CallerScope::App, "p1", 0, &add("http://127.0.0.1:61377"))
+        .await
+        .expect("an unregistered loopback port can be allow-listed");
+
+    register_owned_port(61_378);
+    assert_eq!(
+        SessionGrants::default().check_hop("s1", &url("http://127.0.0.1:61378/")),
+        HopVerdict::Deny(DenyReason::TermulOwned)
+    );
+    let refusal = policy
+        .apply_project(&CallerScope::App, "p1", 1, &add("http://localhost:61378"))
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.reason(), "reserved_origin");
+}
