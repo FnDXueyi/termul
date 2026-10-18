@@ -379,10 +379,17 @@
      UI heard the click. Subtle scale (0.96) + custom ease-out keeps it
      snappy. Disabled buttons skip the press to avoid "dead element"
      feedback. We scope by [data-press-feedback] for opt-out flexibility,
-     but default it on for buttons / role=button / summary. */
+     but default it on for buttons / role=button / summary. Triggers that
+     open a menu, popover or list skip it: the surface that opens is the
+     feedback, and a shrinking trigger under a growing menu reads as a jolt.
+     Switches skip it too: the thumb moving is the feedback. */
   @media (hover: hover) and (pointer: fine) {
-    button:not(:disabled):not([data-press-feedback="off"]),
-    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]),
+    button:not(:disabled):not([data-press-feedback="off"]):not([aria-haspopup]):not(
+        [role="combobox"]
+      ):not([role="switch"]),
+    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):not(
+        [aria-haspopup]
+      ),
     summary:not([data-press-feedback="off"]) {
       /* Note: 'transition' here is shorthand and resets transition-property
          on the element. Components that rely on tailwind's transition-colors
@@ -398,8 +405,12 @@
       transition: transform 120ms var(--ease-out);
     }
 
-    button:not(:disabled):not([data-press-feedback="off"]):active,
-    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):active,
+    button:not(:disabled):not([data-press-feedback="off"]):not([aria-haspopup]):not(
+        [role="combobox"]
+      ):not([role="switch"]):active,
+    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):not(
+        [aria-haspopup]
+      ):active,
     summary:not([data-press-feedback="off"]):active {
       transform: scale(0.96);
     }
@@ -525,9 +536,10 @@
    * trigger. Radix exposes the correct origin via
    * --radix-*-content-transform-origin per primitive.
    *
-   * tailwindcss-animate defaults to 150ms ease-in-out. We
-   * override to a snappier 180ms with our --ease-out token so
-   * the entrance feels intentional. Modals (dialog) keep
+   * Timing is the transitions.dev "Menu dropdown" recipe on the
+   * motion tokens: open --duration-fast, close --duration-quick,
+   * both on --ease-smooth-out (scale lives in MENU_MOTION_CLASS).
+   * Modals (dialog) keep
    * transform-origin: center on purpose — they are not
    * anchored to a trigger.
    * ------------------------------------------------------------ */
@@ -559,14 +571,13 @@
         )
       )
     );
-    animation-duration: 180ms;
-    animation-timing-function: var(--ease-out);
+    animation-duration: var(--duration-fast);
+    animation-timing-function: var(--ease-smooth-out);
   }
 
-  /* Closing animation should be a touch faster than opening so
-     dismiss feels instant (asymmetric enter/exit timing). */
+  /* Closing is quicker than opening so dismiss feels instant. */
   [data-radix-popper-content-wrapper] > [data-state="closed"] {
-    animation-duration: 130ms;
+    animation-duration: var(--duration-quick);
   }
 
   /* ------------------------------------------------------------
