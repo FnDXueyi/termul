@@ -1,25 +1,8 @@
-use std::sync::atomic::AtomicU8;
-
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::*;
 use crate::browser_automation::engine::{assets, EngineFuture};
-
-#[test]
-fn issue_timeout_cancels_queued_closure_only_before_it_issues() {
-    // Timeout wins the race: the closure never issued the command, so the
-    // timeout cancels it and a retry is safe.
-    let pending = AtomicU8::new(CALL_PENDING);
-    assert!(issue_timeout_retryable(&pending));
-    // The cancelled state is now terminal for any later observer.
-    assert!(!issue_timeout_retryable(&pending));
-
-    // Closure wins the race (already issued): the command is out and may
-    // run, so the failure is terminal.
-    let issued = AtomicU8::new(CALL_ISSUED);
-    assert!(!issue_timeout_retryable(&issued));
-}
 
 #[test]
 fn a_helper_call_passes_agent_strings_as_a_by_value_argument() {
@@ -72,14 +55,14 @@ fn cdp_parse_evaluate_result_maps_exceptions_and_malformed_replies() {
         }
     }))
     .expect_err("page exceptions are errors");
-    assert_eq!(err, EngineError::new(EngineErrorKind::PageException, false));
+    assert_eq!(err, EngineError::new(EngineErrorKind::PageException));
 
     let err = parse_evaluate_result(&json!({"exceptionDetails": {"text": "Uncaught"}}))
         .expect_err("text-only exceptions are errors");
     assert_eq!(err.kind, EngineErrorKind::PageException);
 
     let err = parse_evaluate_result(&json!({})).expect_err("reply without result is malformed");
-    assert_eq!(err, EngineError::new(EngineErrorKind::Malformed, false));
+    assert_eq!(err, EngineError::new(EngineErrorKind::Malformed));
 }
 
 #[test]
@@ -88,7 +71,7 @@ fn cdp_parse_evaluate_result_maps_protocol_error_replies() {
         "error": {"code": -32601, "message": "Method not found"}
     }))
     .expect_err("protocol error replies are errors");
-    assert_eq!(err, EngineError::new(EngineErrorKind::Protocol, false));
+    assert_eq!(err, EngineError::new(EngineErrorKind::Protocol));
 
     // A non-object error body is not a protocol error: it falls through
     // to result parsing and surfaces as malformed.
@@ -199,23 +182,21 @@ async fn evaluate_calls_the_helper_in_the_main_frames_isolated_world() {
 }
 
 #[tokio::test]
-async fn a_failure_before_the_helper_call_is_retryable_and_never_calls_it() {
-    let lost = EngineError::new(EngineErrorKind::NoReply, false);
+async fn a_failure_before_the_helper_call_never_calls_it() {
+    let lost = EngineError::new(EngineErrorKind::NoReply);
     let mut replies = isolated_world_replies(Ok(json!({})));
     replies[1].1 = Err(lost);
     let t = transport(replies);
-    assert_eq!(
-        evaluate(&t, "agent-a", &assets::snapshot()).await,
-        Err(EngineError::new(EngineErrorKind::NoReply, true))
-    );
+    assert_eq!(evaluate(&t, "agent-a", &assets::snapshot()).await, Err(lost));
+    assert!(t.calls.lock().iter().all(|c| c.1 != "Runtime.callFunctionOn"));
     let t = transport(vec![(CdpMethod::PageGetFrameTree, Ok(json!({})))]);
     assert_eq!(
         evaluate(&t, "agent-a", &assets::snapshot()).await,
-        Err(EngineError::new(EngineErrorKind::Malformed, true))
+        Err(EngineError::new(EngineErrorKind::Malformed))
     );
     assert!(t.calls.lock().iter().all(|c| c.1 != "Runtime.callFunctionOn"));
 
-    let ran = EngineError::new(EngineErrorKind::Timeout, false);
+    let ran = EngineError::new(EngineErrorKind::Timeout);
     let t = transport(isolated_world_replies(Err(ran)));
     assert_eq!(evaluate(&t, "agent-a", &assets::snapshot()).await, Err(ran));
 }
@@ -235,6 +216,6 @@ async fn capture_screenshot_decodes_png_bytes_and_rejects_missing_data() {
     let t = transport(vec![]);
     assert_eq!(
         capture_screenshot(&t, "agent-a").await,
-        Err(EngineError::new(EngineErrorKind::Malformed, false))
+        Err(EngineError::new(EngineErrorKind::Malformed))
     );
 }

@@ -8,7 +8,9 @@ use uuid::Uuid;
 use super::dispatch::Verb;
 use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
-use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, Success, TabFacts};
+use super::reply::{
+    action_result, engine_error, resolve_result, shape_snapshot, Fidelity, PageData, ResolvedElement, Success, TabFacts,
+};
 use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
@@ -288,7 +290,7 @@ impl DesktopBrowserHost {
                 let resolved = self.resolve_ref(&label, token)?;
                 self.revalidate(&label, token, &resolved).await?;
                 let out = self.eval(&label, assets::fill(&resolved.node.path, value)).await?;
-                eval_gate(&out, Some(token))?;
+                action_result(out, Some(token))?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
             Verb::Type | Verb::Press | Verb::Scroll | Verb::Hover => {
@@ -314,7 +316,7 @@ impl DesktopBrowserHost {
                     _ => assets::hover(path.unwrap_or_default()),
                 };
                 let out = self.eval(&label, script).await?;
-                eval_gate(&out, token)?;
+                action_result(out, token)?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
             Verb::Wait => self.wait(session_id, args, deadline).await,
@@ -449,15 +451,18 @@ impl DesktopBrowserHost {
 
     /// Check the page element behind `resolved` still has the role and
     /// name its ref was minted for.
-    async fn revalidate(&self, label: &str, token: &str, resolved: &ResolvedRef) -> Result<Value, BrowserError> {
+    async fn revalidate(
+        &self,
+        label: &str,
+        token: &str,
+        resolved: &ResolvedRef,
+    ) -> Result<ResolvedElement, BrowserError> {
         let out = self.eval(label, assets::resolve(&resolved.node.path)).await?;
-        eval_gate(&out, Some(token))?;
-        let role = out.get("role").and_then(Value::as_str);
-        let name = out.get("name").and_then(Value::as_str);
-        if role != Some(resolved.node.role.as_str()) || name != Some(resolved.node.name.as_str()) {
+        let element = resolve_result(out, Some(token))?;
+        if element.role != resolved.node.role || element.name != resolved.node.name {
             return Err(stale_ref_error(token, RefStale::Gone));
         }
-        Ok(out)
+        Ok(element)
     }
 
     /// Click a ref and report the input actually used: a trusted click at
@@ -471,8 +476,8 @@ impl DesktopBrowserHost {
         deadline: Deadline,
     ) -> Result<Fidelity, BrowserError> {
         let mode = self.click_mode()?;
-        let out = self.revalidate(label, token, resolved).await?;
-        self.click_revalidated(label, token, resolved, &out, mode, deadline).await
+        let element = self.revalidate(label, token, resolved).await?;
+        self.click_revalidated(label, token, resolved, &element, mode, deadline).await
     }
 
     fn click_mode(&self) -> Result<InputMode, BrowserError> {
@@ -483,24 +488,21 @@ impl DesktopBrowserHost {
         }
     }
 
-    /// The press half of `click_ref`, at the point `out` (the resolve
-    /// helper's reply for `resolved`) reports.
+    /// The press half of `click_ref`, at the centre of `element`, the
+    /// resolve helper's reply for `resolved`.
     async fn click_revalidated(
         &self,
         label: &str,
         token: &str,
         resolved: &ResolvedRef,
-        out: &Value,
+        element: &ResolvedElement,
         mode: InputMode,
         deadline: Deadline,
     ) -> Result<Fidelity, BrowserError> {
         if mode == InputMode::Trusted {
-            let rect = out
-                .get("rect")
-                .ok_or_else(|| stale_ref_error(token, RefStale::Gone))?;
             let at = Point {
-                x: rect.get("cx").and_then(Value::as_f64).unwrap_or(0.0),
-                y: rect.get("cy").and_then(Value::as_f64).unwrap_or(0.0),
+                x: element.rect.cx,
+                y: element.rect.cy,
             };
             match self.engine.pointer_click(label, at, InputMode::Trusted).await {
                 Ok(()) => return Ok(Fidelity::Trusted),
@@ -512,7 +514,7 @@ impl DesktopBrowserHost {
             }
         }
         let out = self.eval(label, assets::click(&resolved.node.path)).await?;
-        eval_gate(&out, Some(token))?;
+        action_result(out, Some(token))?;
         Ok(Fidelity::Synthetic)
     }
 

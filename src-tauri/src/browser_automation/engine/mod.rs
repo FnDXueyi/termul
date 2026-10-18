@@ -17,6 +17,7 @@ pub mod dialogs;
 pub mod events;
 pub mod hooks;
 pub mod profile;
+mod issue_gate;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 mod string_eval;
 #[cfg(target_os = "windows")]
@@ -228,14 +229,11 @@ pub enum EngineErrorKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EngineError {
     pub kind: EngineErrorKind,
-    /// True only when the command provably never reached the page, so a
-    /// retry on another channel cannot repeat its side effects.
-    pub retryable: bool,
 }
 
 impl EngineError {
-    pub fn new(kind: EngineErrorKind, retryable: bool) -> Self {
-        Self { kind, retryable }
+    pub fn new(kind: EngineErrorKind) -> Self {
+        Self { kind }
     }
 }
 

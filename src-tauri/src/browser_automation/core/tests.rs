@@ -269,7 +269,7 @@ impl BrowserEngine for FakeEngine {
         }
         Box::pin(async move {
             if fail {
-                Err(EngineError::new(EngineErrorKind::Dispatch, true))
+                Err(EngineError::new(EngineErrorKind::Dispatch))
             } else {
                 Ok(())
             }

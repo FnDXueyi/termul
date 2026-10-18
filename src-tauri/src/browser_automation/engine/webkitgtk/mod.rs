@@ -57,7 +57,7 @@ impl BrowserEngine for WebKitGtkEngine {
         _at: Point,
         _mode: InputMode,
     ) -> EngineFuture<'a, ()> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
@@ -65,15 +65,15 @@ impl BrowserEngine for WebKitGtkEngine {
             let webview = self
                 .tabs
                 .webview(tab)
-                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
             let (tx, rx) = oneshot::channel();
             webview
                 .with_webview(move |platform| screenshot::capture(&platform.inner(), tx))
-                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
             match tokio::time::timeout(EVAL_STEP, rx).await {
-                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind, false)),
-                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
+                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind)),
+                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
+                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
         })
     }

@@ -28,12 +28,12 @@ const ALL_VERBS: [&str; 21] = [
     "handle_dialog",
 ];
 
-fn no_world_like() -> EngineFacts {
+fn no_screenshots() -> EngineFacts {
     EngineFacts {
         capabilities: CapabilityTable::uniform(Support::Synthetic)
             .with(CapabilityId::Screenshot, Support::Unavailable("no screenshots here")),
         traits: EngineTraits {
-            isolated_world: false,
+            isolated_world: true,
             background_render: false,
             network_observe: false,
         },
@@ -154,7 +154,7 @@ fn quoted_numbers_for_numeric_keys_are_read_as_numbers() {
 
 #[test]
 fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
-    let facts = no_world_like();
+    let facts = no_screenshots();
     let err = admit("teleport", &mut Value::Null, &facts).unwrap_err();
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
@@ -224,18 +224,49 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
     }
     assert!(schema.description.contains("never a string"));
     assert!(!schema.description.contains("Not available on this host"));
-    assert!(!schema.description.contains("page's own script context"));
+    assert!(!schema.description.contains("isolated script world"));
 }
 
 #[test]
-fn schema_omits_withdrawn_verbs_and_says_which_and_why_results_are_page_controlled() {
-    let schema = schema(Some(&no_world_like()));
+fn schema_omits_withdrawn_verbs_and_says_which() {
+    let schema = schema(Some(&no_screenshots()));
     let verbs = action_enum(&schema);
     assert!(!verbs.contains(&"screenshot".to_string()));
     assert_eq!(verbs.len(), ALL_VERBS.len() - 1);
     assert!(!schema.description.contains("- screenshot"));
     assert!(schema.description.contains("Not available on this host: screenshot."));
-    assert!(schema.description.contains("page's own script context"));
+    assert!(!schema.description.contains("isolated script world"));
+}
+
+fn no_isolated_world() -> EngineFacts {
+    EngineFacts {
+        capabilities: CapabilityTable::unavailable("isolated eval needs macOS 11 or later"),
+        traits: EngineTraits {
+            isolated_world: false,
+            background_render: false,
+            network_observe: false,
+        },
+    }
+}
+
+#[test]
+fn an_engine_without_an_isolated_world_advertises_no_page_verb_and_does_not_claim_helpers() {
+    let facts = no_isolated_world();
+    let schema = schema(Some(&facts));
+    assert_eq!(action_enum(&schema), ["list_tabs", "close_tab", "switch_tab"]);
+    for withdrawn in ["navigate", "new_tab", "back", "forward", "reload", "wait", "snapshot"] {
+        let err = admit(withdrawn, &mut json!({ "url": "https://a.test", "ms": 1 }), &facts).unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (ERR_CAPABILITY, "isolated eval needs macOS 11 or later"),
+            "{withdrawn}"
+        );
+    }
+    assert!(schema.description.contains(
+        "Not available on this host: navigate, snapshot, screenshot, click, fill, type, press, scroll, hover, wait, new_tab, back, forward, reload, select_option, check, uncheck, handle_dialog."
+    ));
+    assert!(schema.description.contains("cannot run page helpers in an isolated script world"));
+    assert!(!schema.description.contains("page's own script context"));
 }
 
 #[test]
@@ -257,7 +288,7 @@ fn schema_without_a_host_fails_closed() {
 fn schema_rev_tracks_the_served_content() {
     let trusted = EngineFacts::all_trusted();
     assert_eq!(schema(Some(&trusted)).schema_rev, schema(Some(&trusted)).schema_rev);
-    assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&no_world_like())).schema_rev);
+    assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&no_screenshots())).schema_rev);
     assert_ne!(schema(Some(&trusted)).schema_rev, schema(None).schema_rev);
 }
 
@@ -300,7 +331,7 @@ fn description_says_where_results_live_and_lists_every_failure_code() {
 
 #[test]
 fn a_withdrawn_verb_drops_its_result_line() {
-    let description = schema(Some(&no_world_like())).description;
+    let description = schema(Some(&no_screenshots())).description;
     assert!(!description.contains("data.path"), "{description}");
     assert!(description.contains("data.refs"));
 }

@@ -8,12 +8,14 @@ use serde_json::{json, Value};
 
 use super::{mutated, required_ref, ResolvedRef};
 use crate::browser_automation::budgets::{self, Deadline};
-use crate::browser_automation::core::reply::{eval_gate, Fidelity, Success};
+use crate::browser_automation::core::reply::{
+    action_result, check_result, CheckState, Fidelity, Success,
+};
 use crate::browser_automation::core::{
     BrowserError, DesktopBrowserHost, ERR_INTERNAL, ERR_TIMEOUT,
 };
 use crate::browser_automation::engine::assets::{self, Script};
-use crate::browser_automation::engine::{CapabilityId, InputMode, Support};
+use crate::browser_automation::engine::InputMode;
 
 /// What a `wait` call waits for: exactly one condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,27 +139,15 @@ impl WaitFor {
     }
 }
 
-/// Whether a checkable element is checked, as the state helper reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Checked {
-    checked: bool,
-    radio: bool,
-}
-
-fn parse_checked(out: &Value) -> Option<Checked> {
-    Some(Checked {
-        checked: out.get("checked")?.as_bool()?,
-        radio: out.get("radio")?.as_bool()?,
-    })
-}
-
 fn not_checkable(token: &str) -> BrowserError {
     BrowserError::invalid(format!("{token}: not a checkbox, switch or radio button"))
         .with_reason("not_checkable")
         .with_arg_keys(&["ref"])
 }
 
-fn form_helper_error(out: &Value, token: &str) -> Result<(), BrowserError> {
+/// A form helper's refusal that is the caller's mistake rather than a page
+/// failure: `invalid_params` with its reason.
+fn form_refusal(out: &Value, token: &str) -> Result<(), BrowserError> {
     let refused = |message: &str, reason: &'static str| {
         Err(BrowserError::invalid(format!("{token}: {message}"))
             .with_reason(reason)
@@ -168,7 +158,7 @@ fn form_helper_error(out: &Value, token: &str) -> Result<(), BrowserError> {
         Some("not_a_select") => refused("not a select element", "not_a_select"),
         Some("no_such_option") => refused("no option has that value or label", "no_such_option"),
         Some("option_disabled") => refused("that option is disabled", "option_disabled"),
-        _ => eval_gate(out, Some(token)),
+        _ => Ok(()),
     }
 }
 
@@ -188,7 +178,8 @@ impl DesktopBrowserHost {
         let out = self
             .eval(label, assets::select_option(&resolved.node.path, value))
             .await?;
-        form_helper_error(&out, token)?;
+        form_refusal(&out, token)?;
+        action_result(out, Some(token))?;
         Ok(mutated(Fidelity::Synthetic, self.tab_facts(label)?))
     }
 
@@ -205,8 +196,8 @@ impl DesktopBrowserHost {
         let token = required_ref(args)?;
         let resolved = self.resolve_ref(label, token)?;
         let mode = self.click_mode()?;
-        let out = self.revalidate(label, token, &resolved).await?;
-        let before = parse_checked(&out["check"]).ok_or_else(|| not_checkable(token))?;
+        let element = self.revalidate(label, token, &resolved).await?;
+        let before = element.check.ok_or_else(|| not_checkable(token))?;
         if !want && before.radio {
             return Err(BrowserError::invalid(format!(
                 "{token}: a radio button cannot be unchecked; check another option instead"
@@ -221,7 +212,7 @@ impl DesktopBrowserHost {
             }
         } else {
             let fidelity = self
-                .click_revalidated(label, token, &resolved, &out, mode, deadline)
+                .click_revalidated(label, token, &resolved, &element, mode, deadline)
                 .await?;
             if deadline.admits(budgets::EVAL_STEP)
                 && self.checked(label, token, &resolved).await?.checked != want
@@ -245,14 +236,12 @@ impl DesktopBrowserHost {
         label: &str,
         token: &str,
         resolved: &ResolvedRef,
-    ) -> Result<Checked, BrowserError> {
+    ) -> Result<CheckState, BrowserError> {
         let out = self
             .eval(label, assets::checked_state(&resolved.node.path))
             .await?;
-        form_helper_error(&out, token)?;
-        parse_checked(&out).ok_or_else(|| {
-            BrowserError::internal("the checked-state helper returned an unusable reply")
-        })
+        form_refusal(&out, token)?;
+        check_result(out, Some(token))
     }
 
     pub(super) async fn wait(
@@ -275,16 +264,6 @@ impl DesktopBrowserHost {
             }
             return done();
         };
-        if let Support::Unavailable(reason) = self
-            .engine
-            .facts()
-            .capabilities
-            .get(CapabilityId::IsolatedEval)
-        {
-            return Err(
-                BrowserError::capability(reason).with_reason(CapabilityId::IsolatedEval.as_str())
-            );
-        }
         let wait = Deadline::after(deadline.clamp(budgets::WAIT_MAX));
         loop {
             // A probe that fails (a navigation replaced the document) is

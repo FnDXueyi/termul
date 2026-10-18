@@ -11,7 +11,6 @@ mod dialogs;
 pub mod events;
 mod external_protocol;
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -20,8 +19,9 @@ use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
 use windows_core::HSTRING;
 
 use super::assets::Script;
+use super::cdp::{self, CdpMethod, CdpTransport};
 use super::events::DialogAnswer;
-use super::cdp::{self, CdpMethod, CdpTransport, CALL_ISSUED, CALL_PENDING};
+use super::issue_gate::IssueGate;
 use super::{
     BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
     EngineFuture, EngineTraits, InputMode, Point, Support,
@@ -46,15 +46,15 @@ impl CdpTransport for WebView2Transport {
 }
 
 /// Issue a CDP call on the UI thread; resolve with the raw JSON result.
-/// Issue-phase failures mean the command was never delivered (retryable);
-/// result-phase failures mean the page may have run the script (terminal).
+/// Issue-phase failures mean the command was never delivered;
+/// result-phase failures mean the page may have run the script.
 async fn call(
     tabs: &BrowserTabManager,
     tab_id: &str,
     method: CdpMethod,
     params: Value,
 ) -> Result<Value, EngineError> {
-    let undelivered = |kind| EngineError::new(kind, true);
+    let undelivered = EngineError::new;
     let webview = tabs
         .webview(tab_id)
         .map_err(|_| undelivered(EngineErrorKind::TabNotFound))?;
@@ -63,8 +63,11 @@ async fn call(
     let (result_tx, result_rx) = oneshot::channel::<Result<String, ()>>();
     let (issue_tx, issue_rx) = oneshot::channel::<Result<(), ()>>();
     let params_json = params.to_string();
-    let state = Arc::new(AtomicU8::new(CALL_PENDING));
-    let issue_state = state.clone();
+    let gate = IssueGate::new();
+    // Also stands the queued closure down when an outer deadline drops
+    // this future.
+    let _stand_down = gate.cancel_on_drop();
+    let closure_gate = gate.clone();
     webview
         .with_webview(move |platform| {
             // SAFETY: runs on the UI thread that owns the WebView2 object;
@@ -75,12 +78,9 @@ async fn call(
                 let _ = issue_tx.send(Err(()));
                 return;
             };
-            // The caller may already have given up (issue-phase timeout) and
-            // reported the command as never issued.
-            if issue_state
-                .compare_exchange(CALL_PENDING, CALL_ISSUED, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
+            // The caller may already have given up and reported the command
+            // as never issued.
+            if !closure_gate.claim() {
                 return;
             }
             let handler =
@@ -98,12 +98,14 @@ async fn call(
             let _ = issue_tx.send(issued.map_err(|_| ()));
         })
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?;
-    // Issue phase: a cancelled closure is retry-safe; a command that was
-    // already issued is terminal from this point on.
+    // Issue phase: timing out here cancels the queued closure so it never
+    // issues late; a command that was already issued is in flight from this
+    // point on.
     tokio::time::timeout(CDP_ISSUE, issue_rx)
         .await
         .map_err(|_| {
-            EngineError::new(EngineErrorKind::Timeout, cdp::issue_timeout_retryable(&state))
+            gate.cancel();
+            EngineError::new(EngineErrorKind::Timeout)
         })?
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?
         .map_err(|()| undelivered(EngineErrorKind::Dispatch))?;
@@ -111,10 +113,10 @@ async fn call(
     // completion means the page script may have run.
     let json = tokio::time::timeout(CDP_RESULT, result_rx)
         .await
-        .map_err(|_| EngineError::new(EngineErrorKind::Timeout, false))?
-        .map_err(|_| EngineError::new(EngineErrorKind::NoReply, false))?
-        .map_err(|()| EngineError::new(EngineErrorKind::Protocol, false))?;
-    serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed, false))
+        .map_err(|_| EngineError::new(EngineErrorKind::Timeout))?
+        .map_err(|_| EngineError::new(EngineErrorKind::NoReply))?
+        .map_err(|()| EngineError::new(EngineErrorKind::Protocol))?;
+    serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed))
 }
 
 /// WebView2 engine over in-process CDP.
@@ -166,7 +168,7 @@ impl BrowserEngine for WebView2Engine {
         Box::pin(async move {
             tokio::time::timeout(EVAL_STEP, cdp::evaluate(&self.transport, tab, &script))
                 .await
-                .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout, false)))
+                .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout)))
         })
     }
 
@@ -179,7 +181,7 @@ impl BrowserEngine for WebView2Engine {
         Box::pin(async move {
             match mode {
                 InputMode::Trusted => cdp::click_at(&self.transport, tab, at).await,
-                InputMode::Synthetic => Err(EngineError::new(EngineErrorKind::Unsupported, true)),
+                InputMode::Synthetic => Err(EngineError::new(EngineErrorKind::Unsupported)),
             }
         })
     }

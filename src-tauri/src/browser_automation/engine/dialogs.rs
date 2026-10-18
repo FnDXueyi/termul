@@ -89,18 +89,18 @@ mod ui {
     ) -> Result<bool, EngineError> {
         let webview = tabs
             .webview(tab)
-            .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+            .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
         let (tx, rx) = oneshot::channel();
         let label = tab.to_string();
         webview
             .with_webview(move |_| {
                 let _ = tx.send(answer_held(&label, id, &answer));
             })
-            .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
+            .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
         match tokio::time::timeout(TAB_CONFIRM, rx).await {
             Ok(Ok(answered)) => Ok(answered),
-            Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-            Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
+            Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
+            Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
         }
     }
 }

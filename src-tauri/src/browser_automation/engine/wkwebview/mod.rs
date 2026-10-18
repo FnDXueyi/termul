@@ -46,7 +46,7 @@ impl BrowserEngine for WkWebViewEngine {
     fn evaluate<'a>(&'a self, tab: &'a str, script: Script) -> EngineFuture<'a, Value> {
         Box::pin(async move {
             if !self.facts.traits.isolated_world {
-                return Err(EngineError::new(EngineErrorKind::Unsupported, true));
+                return Err(EngineError::new(EngineErrorKind::Unsupported));
             }
             let body = string_eval::call_body(&script);
             let params = string_eval::params_json(&script);
@@ -63,7 +63,7 @@ impl BrowserEngine for WkWebViewEngine {
         _at: Point,
         _mode: InputMode,
     ) -> EngineFuture<'a, ()> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
@@ -71,7 +71,7 @@ impl BrowserEngine for WkWebViewEngine {
             let webview = self
                 .tabs
                 .webview(tab)
-                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound))?;
             let (tx, rx) = oneshot::channel();
             webview
                 .with_webview(move |platform| {
@@ -80,11 +80,11 @@ impl BrowserEngine for WkWebViewEngine {
                     let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
                     screenshot::capture(webview, tx);
                 })
-                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
+                .map_err(|_| EngineError::new(EngineErrorKind::Dispatch))?;
             match tokio::time::timeout(EVAL_STEP, rx).await {
-                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind, false)),
-                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
+                Ok(Ok(shot)) => shot.map_err(|kind| EngineError::new(kind)),
+                Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply)),
+                Err(_) => Err(EngineError::new(EngineErrorKind::Timeout)),
             }
         })
     }

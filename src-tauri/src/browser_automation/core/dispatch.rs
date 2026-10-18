@@ -222,6 +222,8 @@ pub struct ActionSpec {
     /// When non-empty, at least one of these optional keys must be present.
     pub one_of: &'static [ArgKey],
     /// Every capability the verb needs; any `Unavailable` one withdraws it.
+    /// Navigation and `wait` need `IsolatedEval` because they settle or poll
+    /// the page through a helper.
     pub requires: &'static [CapabilityId],
     /// Mutating verbs report the `fidelity` of the input they used.
     pub mutating: bool,
@@ -239,7 +241,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
         name: "navigate",
         params: &[req(ArgKey::Url), opt(ArgKey::TabId)],
         one_of: &[],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: true,
         budget: budgets::ACTION_NAVIGATE,
         summary: "load url. Without tabId it reuses this session's agent tab, opening one only when the session owns none; an explicit tabId must be a tab this session owns or the call fails with tab_not_found (it never opens another tab).",
@@ -342,7 +344,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
             ArgKey::UrlContains,
             ArgKey::LoadState,
         ],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: false,
         budget: budgets::ACTION_WAIT,
         summary: "sleep ms, or wait up to 30s for one condition: text appears, textGone disappears, the URL contains urlContains, or the document reaches loadState. Pass exactly one.",
@@ -352,7 +354,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
         name: "new_tab",
         params: &[req(ArgKey::Url)],
         one_of: &[],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: true,
         budget: budgets::ACTION_NEW_TAB,
         summary: "open another agent tab at url; its id is tab.id in the reply.",
@@ -382,7 +384,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
         name: "back",
         params: &[opt(ArgKey::TabId)],
         one_of: &[],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: true,
         budget: budgets::ACTION_HISTORY,
         summary: "go back in the tab's history.",
@@ -392,7 +394,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
         name: "forward",
         params: &[opt(ArgKey::TabId)],
         one_of: &[],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: true,
         budget: budgets::ACTION_HISTORY,
         summary: "go forward in the tab's history.",
@@ -402,7 +404,7 @@ pub static REGISTRY: [ActionSpec; 21] = [
         name: "reload",
         params: &[opt(ArgKey::TabId)],
         one_of: &[],
-        requires: &[],
+        requires: &[Cap::IsolatedEval],
         mutating: true,
         budget: budgets::ACTION_HISTORY,
         summary: "reload the tab.",
@@ -721,7 +723,7 @@ fn describe(facts: &EngineFacts) -> String {
     }
     out.push_str(&reply_shape(facts));
     if !facts.traits.isolated_world {
-        out.push_str("\nPage helpers run in the page's own script context, so page-derived results can be altered by the page.");
+        out.push_str("\nThis host cannot run page helpers in an isolated script world, so every action that reads or settles a page is withdrawn.");
     }
     out
 }

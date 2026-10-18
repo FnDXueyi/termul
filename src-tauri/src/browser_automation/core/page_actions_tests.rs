@@ -84,13 +84,13 @@ fn form_helper_refusals_are_invalid_params_with_their_reason() {
         ("no_such_option", "no_such_option"),
         ("option_disabled", "option_disabled"),
     ] {
-        let err = form_helper_error(&json!({ "error": error }), "@e3").unwrap_err();
+        let err = form_refusal(&json!({ "error": error }), "@e3").unwrap_err();
         assert_eq!((err.code, err.reason), ("invalid_params", Some(reason)));
         assert_eq!(err.arg_keys, vec!["ref"]);
     }
-    let err = form_helper_error(&json!({ "error": "stale_ref" }), "@e3").unwrap_err();
-    assert_eq!(err.code, "stale_ref");
-    assert!(form_helper_error(&json!({ "ok": true }), "@e3").is_ok());
+    // Page failures are left to the result parsers.
+    assert!(form_refusal(&json!({ "error": "stale_ref" }), "@e3").is_ok());
+    assert!(form_refusal(&json!({ "ok": true }), "@e3").is_ok());
 }
 
 #[tokio::test]
