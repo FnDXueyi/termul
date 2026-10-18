@@ -184,7 +184,7 @@ pub async fn open_canvas(
         )
         .await;
     for eviction in &admitted.evicted {
-        bundle_tokens().revoke(&canvas_id_for_project(&eviction.project_id));
+        release_token(&eviction.project_id);
         log::info!(
             "[canvas] evicted project_id={} reason=\"{}\" max_mounted={cap} for project_id={}",
             crate::commands::sanitize_log_field(&eviction.project_id),
@@ -239,17 +239,45 @@ fn log_lease_change(project_id: &str, renderer: &str, mount_seq: u64, change: &L
     }
 }
 
-/// Unmount the project's canvas through the AD-31 sequence (quiesce, save,
-/// verify, unmount), then revoke its bundle token so the iframe URL stops
-/// authorizing. Shared by `canvas_close` and `POST /canvas/close`.
-/// Idempotent. A failed save keeps the mount and the token: the caller asks
-/// the user, who retries or closes again with [`CloseMode::Discard`].
+/// Unmount the renderer's mount `mount_seq` of the project through the AD-31
+/// sequence (quiesce, save, verify, unmount), then revoke the project's
+/// bundle token once no mount is left, so the iframe URL stops authorizing.
+/// A mount a newer open replaced is not the project's mount any more: the
+/// close leaves the newer one and its token alone. Shared by `canvas_close`
+/// and `POST /canvas/close`. Idempotent. A failed save keeps the mount and
+/// the token: the caller asks the user, who retries or closes again with
+/// [`CloseMode::Discard`].
 ///
 /// # Errors
 /// `SAVE_FAILED` or `CANVAS_CLOSING` from the sequence.
-pub async fn close_canvas(project_id: &str, mode: CloseMode) -> Result<CloseOutcome, CanvasError> {
+pub async fn close_canvas(
+    project_id: &str,
+    mount_seq: u64,
+    mode: CloseMode,
+) -> Result<CloseOutcome, CanvasError> {
+    let outcome = canvas_mounts()
+        .close_mount(project_id, mount_seq, mode)
+        .await?;
+    release_token(project_id);
+    Ok(outcome)
+}
+
+/// Revoke the project's bundle token unless it has a mount: an open reuses
+/// the token, so revoking it under a live mount would lock out its iframe.
+fn release_token(project_id: &str) {
+    canvas_mounts().when_unmounted(project_id, || {
+        bundle_tokens().revoke(&canvas_id_for_project(project_id));
+    });
+}
+
+/// Close whatever the project has mounted; test cleanup.
+#[cfg(test)]
+pub(crate) async fn close_current_canvas(
+    project_id: &str,
+    mode: CloseMode,
+) -> Result<CloseOutcome, CanvasError> {
     let outcome = canvas_mounts().close(project_id, mode).await?;
-    bundle_tokens().revoke(&canvas_id_for_project(project_id));
+    release_token(project_id);
     Ok(outcome)
 }
 
@@ -283,7 +311,7 @@ pub async fn close_all_canvases() -> usize {
     for (project_id, result) in &closed {
         match result {
             Ok(outcome) => {
-                bundle_tokens().revoke(&canvas_id_for_project(project_id));
+                release_token(project_id);
                 log::info!(
                     "[canvas] exit: closed project_id={} saved={} discarded={}",
                     crate::commands::sanitize_log_field(project_id),

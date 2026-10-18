@@ -9,8 +9,8 @@ use super::canvas_id_for_project;
 use super::persistence::CloseMode;
 use super::pin::pinned_tag;
 use super::static_server::{
-    bundle_router, bundle_tokens, close_canvas, open_canvas, same_origin_base, serve_bundle,
-    BundleTokens, CanvasBundleBase, OpenRequest, StaticServer,
+    bundle_router, bundle_tokens, close_canvas, close_current_canvas, open_canvas,
+    same_origin_base, serve_bundle, BundleTokens, CanvasBundleBase, OpenRequest, StaticServer,
 };
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
@@ -105,16 +105,63 @@ async fn open_canvas_mints_one_token_per_project_until_close() {
         "every open is a new mount with a new mountSeq"
     );
 
-    close_canvas(project, CloseMode::Save).await.unwrap();
+    let stale = close_canvas(project, first.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!stale.unmounted, "the replaced mount's close is a no-op");
+    assert!(
+        authorized(&again.canvas_token),
+        "the newer mount keeps the token"
+    );
+    close_canvas(project, again.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
     assert!(!authorized(&first.canvas_token), "close revokes the token");
-    close_canvas(project, CloseMode::Save).await.unwrap();
+    close_canvas(project, again.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
 
     let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), tab("tab-a"))
         .await
         .unwrap();
     assert_ne!(reopened.canvas_token, first.canvas_token);
     assert!(authorized(&reopened.canvas_token));
-    close_canvas(project, CloseMode::Save).await.unwrap();
+    close_canvas(project, reopened.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+}
+
+/// Another window took the canvas over while this window's close was on its
+/// way: the close lands after the takeover and must not unmount the new
+/// holder's canvas or revoke the token its iframe loads with.
+#[tokio::test]
+async fn a_close_that_lands_after_a_takeover_leaves_the_new_mount_and_its_token() {
+    let base = same_origin_base();
+    let project = "project-late-close";
+    let canvas_id = canvas_id_for_project(project);
+    let doc = "C:/p/design.figcraft";
+
+    let a = open_canvas(base.clone(), project, doc.into(), tab("tab-a"))
+        .await
+        .unwrap();
+    let b = open_canvas(base, project, doc.into(), tab("tab-b"))
+        .await
+        .unwrap();
+    assert_eq!(a.canvas_token, b.canvas_token);
+
+    let late = close_canvas(project, a.mount_seq, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!late.unmounted);
+    assert!(super::persistence::canvas_mounts()
+        .view(project, b.mount_seq)
+        .is_ok());
+    assert!(bundle_tokens().authorize(&canvas_id, &b.canvas_token));
+
+    close_current_canvas(project, CloseMode::Save)
+        .await
+        .unwrap();
+    assert!(!bundle_tokens().authorize(&canvas_id, &b.canvas_token));
 }
 
 #[test]

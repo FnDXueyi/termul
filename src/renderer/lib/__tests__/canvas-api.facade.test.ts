@@ -170,24 +170,28 @@ describe('canvasApi (web vs desktop branch)', () => {
     await expect(canvasApi.open(DOC, PROJECT)).resolves.toEqual(refused)
   })
 
-  it('close: web → POST /canvas/close with projectId and discard', async () => {
+  it('close: web → POST /canvas/close with projectId, mountSeq and discard', async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: true }))
-    await expect(canvasApi.close(PROJECT)).resolves.toEqual({ success: true, data: true })
+    await expect(canvasApi.close(PROJECT, 3)).resolves.toEqual({ success: true, data: true })
     expect(mockFetch).toHaveBeenCalledWith(
       `${window.location.origin}/canvas/close`,
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ projectId: PROJECT, discard: false })
+        body: JSON.stringify({ projectId: PROJECT, mountSeq: 3, discard: false })
       })
     )
     expect(mockInvoke).not.toHaveBeenCalled()
   })
 
-  it('close: desktop → invoke("canvas_close") with projectId and discard', async () => {
+  it('close: desktop → invoke("canvas_close") with projectId, mountSeq and discard', async () => {
     mockIsTauriContext.mockReturnValue(true)
     mockInvoke.mockResolvedValueOnce({ success: true, data: true })
-    await canvasApi.close(PROJECT)
-    expect(mockInvoke).toHaveBeenCalledWith('canvas_close', { projectId: PROJECT, discard: false })
+    await canvasApi.close(PROJECT, 3)
+    expect(mockInvoke).toHaveBeenCalledWith('canvas_close', {
+      projectId: PROJECT,
+      mountSeq: 3,
+      discard: false
+    })
     expect(mockFetch).not.toHaveBeenCalled()
   })
 
@@ -205,7 +209,7 @@ describe('canvasApi (web vs desktop branch)', () => {
   it('close stays available at phone width so a stray mount can still be released', async () => {
     matchesByQuery[NARROW_QUERY] = true
     mockFetch.mockResolvedValueOnce(jsonResponse({ success: true, data: true }))
-    await expect(canvasApi.close(PROJECT)).resolves.toEqual({ success: true, data: true })
+    await expect(canvasApi.close(PROJECT, 3)).resolves.toEqual({ success: true, data: true })
   })
 
   const PERSISTENCE_CASES = [

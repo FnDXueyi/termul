@@ -9,7 +9,9 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::canvas::static_server::{open_canvas, same_origin_base, OpenRequest};
+use crate::canvas::static_server::{
+    close_current_canvas, open_canvas, same_origin_base, OpenRequest,
+};
 use crate::commands::{
     canvas_close, canvas_crashed, canvas_dirty_changed, canvas_disk_changed,
     canvas_document_loaded, canvas_read_document, canvas_resolve_conflict, canvas_set_visible,
@@ -212,10 +214,10 @@ async fn desktop_commands_and_web_routes_answer_the_same_sequence_alike() {
 
     let desktop = run_sequence("parity-persist-tauri", tauri_seq, tauri_call).await;
     let web = run_sequence("parity-persist-web", web_seq, web_call).await;
-    tauri(canvas_close("parity-persist-tauri".into(), Some(true)).await);
+    tauri(canvas_close("parity-persist-tauri".into(), tauri_seq, Some(true)).await);
     web_call(
         "close",
-        json!({"projectId": "parity-persist-web", "discard": true}),
+        json!({"projectId": "parity-persist-web", "mountSeq": web_seq, "discard": true}),
     )
     .await;
 
@@ -330,6 +332,7 @@ async fn tauri_close_call(route: &'static str, body: Value) -> Value {
         return tauri(
             canvas_close(
                 body["projectId"].as_str().unwrap().to_string(),
+                body["mountSeq"].as_u64().unwrap(),
                 body["discard"].as_bool(),
             )
             .await,
@@ -458,12 +461,11 @@ async fn desktop_and_web_handle_disk_changes_and_crashes_alike() {
 
     let desktop = run_disk_and_crash("parity-disk-tauri", tauri_seq, &tauri_dir, tauri_call).await;
     let web = run_disk_and_crash("parity-disk-web", web_seq, &web_dir, web_call).await;
-    tauri(canvas_close("parity-disk-tauri".into(), Some(true)).await);
-    web_call(
-        "close",
-        json!({"projectId": "parity-disk-web", "discard": true}),
-    )
-    .await;
+    for project in ["parity-disk-tauri", "parity-disk-web"] {
+        close_current_canvas(project, crate::canvas::persistence::CloseMode::Discard)
+            .await
+            .unwrap();
+    }
 
     assert_eq!(desktop, web);
     let kinds: Vec<Value> = desktop[3..=6]

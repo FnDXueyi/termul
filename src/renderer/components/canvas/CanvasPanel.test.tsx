@@ -182,7 +182,12 @@ describe('CanvasPanel', () => {
   })
 
   it('shows why a mount failed instead of an iframe', () => {
-    setPhase({ kind: 'failed', code: 'BUNDLE_PIN_MISMATCH', message: 'Bundle mismatch.' })
+    setPhase({
+      kind: 'failed',
+      code: 'BUNDLE_PIN_MISMATCH',
+      message: 'Bundle mismatch.',
+      mountSeq: 4
+    })
     renderPanel()
 
     expect(screen.getByTestId('canvas-mount-failed').textContent).toBe('Bundle mismatch.')

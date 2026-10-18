@@ -73,8 +73,8 @@ describe('unmountCanvases', () => {
     close.mockResolvedValue(UNMOUNTED)
     await expect(unmountCanvases()).resolves.toBe(true)
     expect(close.mock.calls).toEqual([
-      ['a', false],
-      ['b', false]
+      ['a', 4, false],
+      ['b', 4, false]
     ])
     expect(useCanvasStore.getState().sessions).toEqual({})
   })
@@ -85,8 +85,8 @@ describe('unmountCanvases', () => {
     expect(await answerNext('retry')).toBe('design.figcraft')
     await expect(done).resolves.toBe(true)
     expect(close.mock.calls).toEqual([
-      ['a', false],
-      ['a', false]
+      ['a', 4, false],
+      ['a', 4, false]
     ])
   })
 
@@ -98,12 +98,12 @@ describe('unmountCanvases', () => {
     const done = unmountCanvases(['a'])
     await answerNext('discard')
     await expect(done).resolves.toBe(true)
-    expect(close).toHaveBeenLastCalledWith('a', true)
+    expect(close).toHaveBeenLastCalledWith('a', 4, true)
     expect(useCanvasStore.getState().sessions.a).toBeUndefined()
   })
 
   it('concurrent flows each get their own question and answer', async () => {
-    close.mockImplementation((projectId: string, discard: boolean) =>
+    close.mockImplementation((projectId: string, _mountSeq: number, discard: boolean) =>
       Promise.resolve(
         discard
           ? { success: true, data: { unmounted: true, savedVersion: null, discarded: true } }
@@ -122,10 +122,10 @@ describe('unmountCanvases', () => {
     await expect(first).resolves.toBe(true)
     await expect(second).resolves.toBe(true)
     expect(close.mock.calls).toEqual([
-      ['a', false],
-      ['b', false],
-      ['a', false],
-      ['b', true]
+      ['a', 4, false],
+      ['b', 4, false],
+      ['a', 4, false],
+      ['b', 4, true]
     ])
     expect(useCanvasUnmountPrompt.getState().question).toBeNull()
   })

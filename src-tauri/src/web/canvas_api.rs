@@ -84,11 +84,13 @@ struct CanvasOpenRequest {
     request: OpenRequest,
 }
 
-/// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
+/// `POST /canvas/close` body: `{ "projectId": "...", "mountSeq": n,
+/// "discard"?: bool }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasCloseRequest {
     project_id: String,
+    mount_seq: u64,
     #[serde(default)]
     discard: Option<bool>,
 }
@@ -164,8 +166,9 @@ async fn open(
     }
 }
 
-/// `POST /canvas/close` — unmount the project's canvas through the AD-31
-/// sequence (`static_server::close_canvas`, shared with `canvas_close`). A
+/// `POST /canvas/close` — unmount this tab's mount `mountSeq` through the
+/// AD-31 sequence (`static_server::close_canvas`, shared with
+/// `canvas_close`); a mount a newer open replaced is left alone. A
 /// failed save answers `SAVE_FAILED` and keeps the mount; `discard: true` is
 /// the user's explicit choice to drop unsaved changes. Idempotent.
 async fn close(
@@ -180,9 +183,10 @@ async fn close(
     let project_id = crate::commands::sanitize_log_field(&req.project_id);
     tracing::info!(
         target: "termul::web::canvas",
-        "canvas close (web) project_id={project_id} mode={mode:?}"
+        "canvas close (web) project_id={project_id} mount_seq={} mode={mode:?}",
+        req.mount_seq
     );
-    match close_canvas(&req.project_id, mode).await {
+    match close_canvas(&req.project_id, req.mount_seq, mode).await {
         Ok(outcome) => {
             if outcome.discarded {
                 tracing::warn!(

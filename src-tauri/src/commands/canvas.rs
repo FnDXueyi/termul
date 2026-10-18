@@ -97,19 +97,21 @@ pub async fn canvas_open(
     }
 }
 
-/// `canvas_close { projectId, discard? }` — unmount the project's canvas
-/// through the AD-31 sequence (quiesce, save, verify, unmount). A failed save
+/// `canvas_close { projectId, mountSeq, discard? }` — unmount this window's
+/// mount `mountSeq` through the AD-31 sequence (quiesce, save, verify,
+/// unmount); a mount a newer open replaced is left alone. A failed save
 /// answers `SAVE_FAILED` and keeps the mount; `discard: true` is the user's
 /// explicit choice to drop unsaved changes. Idempotent.
 #[tauri::command]
 pub async fn canvas_close(
     project_id: String,
+    mount_seq: u64,
     discard: Option<bool>,
 ) -> Result<IpcResult<CloseOutcome>, String> {
     let mode = close_mode(discard);
     let log_project_id = sanitize_log_field(&project_id);
-    log::info!("[canvas] close project_id={log_project_id} mode={mode:?}");
-    Ok(match close_canvas(&project_id, mode).await {
+    log::info!("[canvas] close project_id={log_project_id} mount_seq={mount_seq} mode={mode:?}");
+    Ok(match close_canvas(&project_id, mount_seq, mode).await {
         Ok(outcome) => {
             log_closed(&log_project_id, &outcome);
             IpcResult::success(outcome)

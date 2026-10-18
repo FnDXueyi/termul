@@ -462,6 +462,16 @@ impl CanvasPersistence {
         mount.bump_generation();
     }
 
+    /// Run `release` only while the project has no mount, under the registry
+    /// lock, so an open cannot install a mount between the check and the
+    /// release.
+    pub fn when_unmounted(&self, project_id: &str, release: impl FnOnce()) {
+        let mounts = self.mounts.lock();
+        if !mounts.contains_key(project_id) {
+            release();
+        }
+    }
+
     /// Every project with a mount.
     pub fn mounted_projects(&self) -> Vec<String> {
         self.mounts.lock().keys().cloned().collect()

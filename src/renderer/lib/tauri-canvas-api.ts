@@ -71,8 +71,12 @@ export function createTauriCanvasApi(): CanvasApi {
       return invokeCanvas(IPC_COMMANDS.SET_VISIBLE, { projectId, mountSeq, visible })
     },
 
-    close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {
-      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId, discard })
+    close(
+      projectId: string,
+      mountSeq: number,
+      discard = false
+    ): Promise<IpcResult<CanvasCloseOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.CLOSE, { projectId, mountSeq, discard })
     },
 
     readDocument(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDocumentBytes>> {

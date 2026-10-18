@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use super::canvas_id_for_project;
 use super::persistence::CloseMode;
-use super::static_server::close_canvas;
+use super::static_server::close_current_canvas;
 
 /// A temp `.figcraft` document (the web boundary canonicalizes real paths).
 fn temp_doc() -> (tempfile::TempDir, String) {
@@ -128,7 +128,7 @@ async fn web_open_mints_a_same_origin_bundle_mount() {
     assert!(data["docKey"]
         .as_str()
         .is_some_and(|key| key.ends_with("design.figcraft")));
-    close_canvas("proj-web-open", CloseMode::Save)
+    close_current_canvas("proj-web-open", CloseMode::Save)
         .await
         .unwrap();
     drop(dir);
@@ -143,7 +143,8 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
         |parsed: &serde_json::Value| parsed["data"]["canvasToken"].as_str().unwrap().to_string();
 
     let first = token_of(&web_open(app.clone(), &doc, project).await);
-    let second = token_of(&web_open(app.clone(), &doc, project).await);
+    let reopened = web_open(app.clone(), &doc, project).await;
+    let second = token_of(&reopened);
     assert_eq!(
         first, second,
         "a repeat open keeps the mounted iframe URL valid"
@@ -167,7 +168,11 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
                 .extension(axum::extract::ConnectInfo(web_test_peer()))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "projectId": project }).to_string(),
+                    serde_json::json!({
+                        "projectId": project,
+                        "mountSeq": reopened["data"]["mountSeq"],
+                    })
+                    .to_string(),
                 ))
                 .expect("build close request"),
         )
@@ -182,7 +187,9 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
 
     let third = token_of(&web_open(app, &doc, project).await);
     assert_ne!(first, third, "the next open mints a fresh token");
-    close_canvas(project, CloseMode::Save).await.unwrap();
+    close_current_canvas(project, CloseMode::Save)
+        .await
+        .unwrap();
     drop(dir);
 }
 
@@ -216,7 +223,9 @@ async fn web_canvas_bundle_requires_a_valid_canvas_token() {
         assert_eq!(status, StatusCode::UNAUTHORIZED, "uri {uri}");
         assert_eq!(body["code"], "UNAUTHORIZED", "uri {uri}");
     }
-    close_canvas(project, CloseMode::Save).await.unwrap();
+    close_current_canvas(project, CloseMode::Save)
+        .await
+        .unwrap();
     drop(dir);
 }
 
@@ -267,7 +276,7 @@ async fn web_canvas_write_routes_refuse_a_view_only_peer() {
                         .extension(axum::extract::ConnectInfo(peer))
                         .header("content-type", "application/json")
                         .body(Body::from(
-                            serde_json::json!({"docPath": doc, "projectId": "p", "clientInstanceId": "tab"})
+                            serde_json::json!({"docPath": doc, "projectId": "p", "mountSeq": 1, "clientInstanceId": "tab"})
                                 .to_string(),
                         ))
                         .expect("build request"),
@@ -317,7 +326,9 @@ async fn web_open_accepts_doc_path_inside_project_boundary() {
     let app = web_canvas_app_with_boundary(&[("proj-7", root.path())]);
     let parsed = web_open(app, &doc.to_string_lossy(), "proj-7").await;
     assert_eq!(parsed["success"], true, "doc inside the boundary opens");
-    close_canvas("proj-7", CloseMode::Discard).await.unwrap();
+    close_current_canvas("proj-7", CloseMode::Discard)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -332,7 +343,9 @@ async fn web_open_refuses_another_projects_doc_under_this_projects_id() {
     assert_eq!(parsed["code"], "PATH_VALIDATION_FAILED", "{parsed}");
     let parsed = web_open(app, &b_doc.to_string_lossy(), "proj-b").await;
     assert_eq!(parsed["success"], true, "{parsed}");
-    close_canvas("proj-b", CloseMode::Discard).await.unwrap();
+    close_current_canvas("proj-b", CloseMode::Discard)
+        .await
+        .unwrap();
 }
 
 /// The Windows project registry stores `\\?\D:\…` roots, and the renderer
@@ -373,7 +386,9 @@ async fn web_open_keys_a_verbatim_root_doc_by_its_plain_path() {
                 expected.as_str(),
                 "{doc}: {parsed}"
             );
-            close_canvas(project, CloseMode::Discard).await.unwrap();
+            close_current_canvas(project, CloseMode::Discard)
+                .await
+                .unwrap();
         }
     }
 }

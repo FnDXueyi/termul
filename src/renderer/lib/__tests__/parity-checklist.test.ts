@@ -1649,10 +1649,10 @@ describe('Parity Checklist Automation', () => {
         readFileSync(join(RENDERER, 'layouts', 'workspace-layout', 'use-app-close.ts'), 'utf-8')
       ).toMatch(/unmountCanvases\(\)/)
       expect(readFileSync(join(LIB_DIR, 'tauri-canvas-api.ts'), 'utf-8')).toContain(
-        'IPC_COMMANDS.CLOSE, { projectId, discard }'
+        'IPC_COMMANDS.CLOSE, { projectId, mountSeq, discard }'
       )
       expect(readFileSync(join(LIB_DIR, 'web-canvas-api.ts'), 'utf-8')).toContain(
-        "'/canvas/close', { projectId, discard }"
+        "'/canvas/close', { projectId, mountSeq, discard }"
       )
       const tree = join(RENDERER, 'stores', 'workspace-store', 'tree.ts')
       expect(readFileSync(tree, 'utf-8')).toMatch(/export function canvasTabId/)

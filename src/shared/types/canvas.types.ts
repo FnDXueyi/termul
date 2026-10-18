@@ -200,10 +200,16 @@ export interface CanvasApi {
     projectId: string,
     options?: CanvasOpenOptions
   ) => Promise<IpcResult<CanvasOpenInfo>>
-  /** Unmount through the host's AD-31 sequence. A failed save answers
+  /** Unmount `mountSeq` through the host's AD-31 sequence. A mount that is no
+   * longer the project's current one is left alone (`unmounted: false`), so
+   * a late close cannot take down a newer mount. A failed save answers
    * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit
    * choice to drop unsaved changes. */
-  close: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
+  close: (
+    projectId: string,
+    mountSeq: number,
+    discard?: boolean
+  ) => Promise<IpcResult<CanvasCloseOutcome>>
   /** The user started or stopped looking at the canvas: activity the host
    * ranks eviction by. `CANVAS_CLOSED` means the host no longer holds it. */
   setVisible: (projectId: string, mountSeq: number, visible: boolean) => Promise<IpcResult<void>>
