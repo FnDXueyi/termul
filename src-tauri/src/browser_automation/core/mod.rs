@@ -5,8 +5,11 @@
 pub mod boundary;
 mod consent;
 mod dispatch;
+pub mod ports;
 mod reply;
 mod tabs;
+#[cfg(test)]
+pub mod test_support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
