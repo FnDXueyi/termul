@@ -54,6 +54,7 @@ export function AppearanceSection({
           <SettingsRow
             id={rowId('terminal-font-size')}
             label="Font size"
+            describes="terminal-font-size"
             description={`Terminal text size, from ${FONT_SIZE_MIN} to ${FONT_SIZE_MAX} px.`}
           >
             <SettingsStepper

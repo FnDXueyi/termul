@@ -1,6 +1,6 @@
 # Preferences redesign — hand-off checklist
 
-Status: design checkpoint (2026-10-18). Not implemented yet.
+Status: implemented in pull request #1380 (2026-10-18). Items that are still open stay unchecked below.
 Design source: `termul-design.pen`, section **"Preferences — redesign (v2)"**. The canvas frame for this file is `Prefs v2 · Shared · Hand-off checklist`.
 
 Scope is the desktop Application Preferences modal (`src/renderer/pages/AppPreferences.tsx`). `AGENTS.md` asks to check every surface: the browser client renders the same React pages, so check it too. Keep each file under about 800 lines and split leaf components and hooks.
@@ -46,7 +46,7 @@ The as-built reference (rebuilt from the current code) is the section "Preferenc
 5. A dependent setting is indented under its switch. When it is off, it says why.
 6. Every Select and Switch has a bound label (fixes the unnamed native selects).
 7. Sentence case for all labels, groups and buttons. No section icons in the content.
-8. Settings save on change. No footer and no Save button (`docs/design/forms.md`).
+8. Application Preferences saves on change. That modal has no footer and no Save button. Project settings keeps the `SettingsModal` footer Save (`docs/design/forms.md`).
 9. Search shows the page path under each result and highlights the setting it jumps to. No results offers Clear search.
 10. Narrow layout: when the modal is under 768px wide, the sidebar becomes a top bar with a scrolling category strip (the next chip peeks out). When page content is under 560px, a Select, stepper, swatches or usage meter moves under its label; a switch stays on the right. MCP rows put status, tools and Connect on their own line.
 11. Field edges use a new `field-border` token (`#666a73` on canvas): 3.5:1 on card, 3.7:1 on bg, 3.3:1 on popover. `ui-border` stays for card dividers only.
@@ -64,7 +64,7 @@ The as-built reference (rebuilt from the current code) is the section "Preferenc
 - [ ] `src/renderer/pages/app-preferences/categories.tsx`: 14 pages in 4 groups (General, Terminal, Agents, App). Split Behavior into Interface (links move to Appearance), Editor and Notifications.
 - [ ] `src/renderer/components/settings/SettingsModal.tsx`: remove the header bar. The sidebar holds the title and search; each page has its own header with Close. Modal max height 85vh; page header pinned; body scrolls.
 - [ ] `src/renderer/lib/settings-search.ts`: results show the page path. Selecting one opens the page, scrolls to the setting and shows the 2px target bar for 2 seconds.
-- [ ] Settings save on change. No footer and no Save button.
+- [ ] Application Preferences saves on change. That modal has no footer and no Save button. Project settings keeps the `SettingsModal` footer Save.
 
 ### 2 · Tokens and type
 

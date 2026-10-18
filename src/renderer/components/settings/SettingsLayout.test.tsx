@@ -33,7 +33,12 @@ const categories: SettingsCategory[] = [
 ]
 
 const searchIndex: SettingsSearchEntry[] = [
-  { categoryId: 'appearance', label: 'Font family', description: 'monospace font' },
+  {
+    categoryId: 'appearance',
+    label: 'Font family',
+    description: 'monospace font',
+    anchorId: 'setting-font'
+  },
   { categoryId: 'shell', label: 'Default shell', keywords: ['bash'], anchorId: 'setting-shell' },
   {
     categoryId: 'mcp-servers',
@@ -48,7 +53,7 @@ function Pages(): React.JSX.Element {
   return (
     <>
       <SettingsSection id="appearance">
-        <p>Appearance body</p>
+        <div id="setting-font">Font row</div>
       </SettingsSection>
       <SettingsSection id="shell">
         <div id="setting-shell">Shell row</div>
@@ -96,7 +101,7 @@ describe('SettingsLayout', () => {
     )
     expect(screen.getByRole('heading', { name: 'Appearance', level: 2 })).toBeInTheDocument()
     expect(screen.getByText('How terminals look.')).toBeInTheDocument()
-    expect(screen.getByText('Appearance body')).toBeVisible()
+    expect(screen.getByText('Font row')).toBeVisible()
     expect(screen.getByText('Updates body')).not.toBeVisible()
   })
 
@@ -110,8 +115,8 @@ describe('SettingsLayout', () => {
       'page'
     )
     expect(screen.getByText('Shell row')).toBeVisible()
-    expect(screen.getByText('Appearance body')).not.toBeVisible()
-    expect(screen.getByText('Appearance body')).toBeInTheDocument()
+    expect(screen.getByText('Font row')).not.toBeVisible()
+    expect(screen.getByText('Font row')).toBeInTheDocument()
   })
 
   it('works controlled through page and onPageChange', () => {
@@ -183,6 +188,60 @@ describe('SettingsLayout', () => {
       vi.advanceTimersByTime(SETTINGS_TARGET_MS)
     })
     expect(target).not.toHaveAttribute('data-settings-target')
+  })
+
+  it('cancels a pending jump so the first row does not stay marked', () => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextId = 1
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++
+      frames.set(id, cb)
+      return id
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id)
+    })
+    renderLayout()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Default shell/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'font' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Font family/ }))
+
+    expect(frames.size).toBe(1)
+    act(() => {
+      for (const frame of frames.values()) frame(0)
+    })
+
+    expect(screen.getByText('Shell row')).not.toHaveAttribute('data-settings-target')
+    expect(screen.getByText('Font row')).toHaveAttribute('data-settings-target')
+  })
+
+  it('cancels a pending jump when the layout unmounts', () => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextId = 1
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++
+      frames.set(id, cb)
+      return id
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      frames.delete(id)
+    })
+    const view = renderLayout()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /search settings/i }), {
+      target: { value: 'bash' }
+    })
+    fireEvent.click(within(nav()).getByRole('button', { name: /Default shell/ }))
+    expect(frames.size).toBe(1)
+
+    view.unmount()
+    expect(frames.size).toBe(0)
   })
 
   it('clears the search when the clear button is pressed', () => {

@@ -113,6 +113,7 @@ export function SettingsLayout({
   const [query, setQuery] = useState('')
   const targetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const markedRef = useRef<HTMLElement | null>(null)
+  const rafRef = useRef<number | null>(null)
 
   const results = useMemo(() => searchSettings(query, searchIndex), [query, searchIndex])
   const isSearching = query.trim().length > 0
@@ -128,11 +129,23 @@ export function SettingsLayout({
 
   const clearMark = useCallback(() => {
     if (targetTimerRef.current) clearTimeout(targetTimerRef.current)
+    targetTimerRef.current = null
     markedRef.current?.removeAttribute('data-settings-target')
     markedRef.current = null
   }, [])
 
-  useEffect(() => clearMark, [clearMark])
+  const cancelJump = useCallback(() => {
+    if (rafRef.current === null) return
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      cancelJump()
+      clearMark()
+    }
+  }, [cancelJump, clearMark])
 
   // A new page starts at the top.
   useEffect(() => {
@@ -144,9 +157,12 @@ export function SettingsLayout({
     (categoryId: string, anchorId?: string) => {
       selectPage(categoryId)
       clearMark()
+      cancelJump()
       if (!anchorId) return
       // Wait one frame so the page is visible before measuring it.
-      requestAnimationFrame(() => {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        clearMark()
         const target = bodyRef.current?.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`)
         if (!target) return
         target.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -155,7 +171,7 @@ export function SettingsLayout({
         targetTimerRef.current = setTimeout(clearMark, SETTINGS_TARGET_MS)
       })
     },
-    [selectPage, clearMark]
+    [selectPage, clearMark, cancelJump]
   )
 
   const handleCategoryKeyDown = (

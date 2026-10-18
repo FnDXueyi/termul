@@ -15,6 +15,11 @@ interface SettingsRowProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'c
   /** Id of the control the label names. Without it the label is plain text. */
   htmlFor?: string
   /**
+   * Id stem for the description when the row has no `htmlFor` (a stepper
+   * group). The description id is `settingsDescriptionId(htmlFor ?? describes)`.
+   */
+  describes?: string
+  /**
    * `responsive` (default) moves the control under the label when the card is
    * narrow (Select, stepper, swatches). `inline` keeps it on the right (Switch).
    */
@@ -36,6 +41,7 @@ export const SettingsRow = forwardRef<HTMLDivElement, SettingsRowProps>(function
     label,
     description,
     htmlFor,
+    describes,
     layout = 'responsive',
     indent,
     disabled,
@@ -45,7 +51,8 @@ export const SettingsRow = forwardRef<HTMLDivElement, SettingsRowProps>(function
   },
   ref
 ) {
-  const descriptionId = htmlFor ? settingsDescriptionId(htmlFor) : undefined
+  const descriptionTarget = htmlFor ?? describes
+  const descriptionId = descriptionTarget ? settingsDescriptionId(descriptionTarget) : undefined
   return (
     <div
       ref={ref}

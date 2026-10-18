@@ -30,6 +30,7 @@ export function InterfaceSection({
           <SettingsRow
             id={rowId('ui-zoom')}
             label="Interface zoom"
+            describes="ui-zoom"
             description={`Make everything larger or smaller, from 50% to 300%. ${zoomKeys} also work.`}
           >
             <SettingsStepper

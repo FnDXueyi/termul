@@ -1,6 +1,16 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { type ReactNode, useEffect, useRef } from 'react'
 
+const FOCUSABLE_SELECTOR =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+
+/** Controls the user can reach. Hidden pages stay mounted, so skip them. */
+function renderedFocusables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => el.getClientRects().length > 0
+  )
+}
+
 interface SettingsModalProps {
   /** Whether the modal is visible. */
   isOpen: boolean
@@ -76,9 +86,7 @@ export function SettingsModal({
     if (!isOpen) return
     const handleTab = (e: globalThis.KeyboardEvent): void => {
       if (e.key !== 'Tab' || !cardRef.current) return
-      const focusables = cardRef.current.querySelectorAll<HTMLElement>(
-        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
-      )
+      const focusables = renderedFocusables(cardRef.current)
       if (focusables.length === 0) return
       const first = focusables[0]
       const last = focusables[focusables.length - 1]
