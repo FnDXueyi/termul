@@ -173,7 +173,7 @@ const CT_GATE_EXEMPT_PATHS: &[&str] = &[
 ];
 
 /// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
-/// "autosaveMs"?: n }`.
+/// "autosaveMs"?: n, "crashTimeouts"?: n }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CanvasOpenRequest {
@@ -181,6 +181,8 @@ struct CanvasOpenRequest {
     project_id: String,
     #[serde(default)]
     autosave_ms: Option<u64>,
+    #[serde(default)]
+    crash_timeouts: Option<u32>,
 }
 
 /// `POST /canvas/close` body: `{ "projectId": "...", "discard"?: bool }`.
@@ -381,6 +383,7 @@ async fn open(
         &req.project_id,
         doc_key,
         req.autosave_ms,
+        req.crash_timeouts,
     ) {
         Ok(info) => {
             tracing::info!(

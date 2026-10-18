@@ -18,10 +18,14 @@
 import type {
   CanvasApi,
   CanvasCloseOutcome,
+  CanvasConflictChoice,
   CanvasDirtyOutcome,
+  CanvasDiskOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
   CanvasPersistenceView,
+  CanvasRemount,
+  CanvasResolveOutcome,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
@@ -32,9 +36,15 @@ export const webCanvasApi: CanvasApi = {
   open(
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    autosaveMs?: number,
+    crashTimeouts?: number
   ): Promise<IpcResult<CanvasOpenInfo>> {
-    return postJson<CanvasOpenInfo>('/canvas/open', { docPath, projectId, autosaveMs })
+    return postJson<CanvasOpenInfo>('/canvas/open', {
+      docPath,
+      projectId,
+      autosaveMs,
+      crashTimeouts
+    })
   },
 
   close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {
@@ -81,5 +91,27 @@ export const webCanvasApi: CanvasApi = {
       mountSeq,
       snapshot
     })
+  },
+
+  diskChanged(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDiskOutcome>> {
+    return postJson<CanvasDiskOutcome>('/canvas/disk-changed', { projectId, mountSeq })
+  },
+
+  resolveConflict(
+    projectId: string,
+    mountSeq: number,
+    choice: CanvasConflictChoice,
+    snapshot?: string
+  ): Promise<IpcResult<CanvasResolveOutcome>> {
+    return postJson<CanvasResolveOutcome>('/canvas/resolve-conflict', {
+      projectId,
+      mountSeq,
+      choice,
+      snapshot
+    })
+  },
+
+  crashed(projectId: string, mountSeq: number, reason: string): Promise<IpcResult<CanvasRemount>> {
+    return postJson<CanvasRemount>('/canvas/crashed', { projectId, mountSeq, reason })
   }
 }

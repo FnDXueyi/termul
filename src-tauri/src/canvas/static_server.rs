@@ -29,7 +29,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::persistence::{autosave_delay, canvas_mounts, CloseMode, CloseOutcome};
+use super::persistence::{autosave_delay, canvas_mounts, crash_timeouts, CloseMode, CloseOutcome};
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
@@ -214,6 +214,7 @@ pub fn open_canvas(
     project_id: &str,
     doc_key: String,
     autosave_ms: Option<u64>,
+    crash_timeouts_requested: Option<u32>,
 ) -> Result<CanvasOpenInfo, CanvasError> {
     let canvas_id = canvas_id_for_project(project_id);
     let canvas_token = bundle_tokens().issue(&canvas_id).map_err(|reason| {
@@ -222,10 +223,11 @@ pub fn open_canvas(
             format!("failed to mint the canvas session token: {reason}"),
         )
     })?;
-    let mount_seq = canvas_mounts().mount(
+    let mount_seq = canvas_mounts().mount_configured(
         project_id,
         PathBuf::from(&doc_key),
         autosave_delay(autosave_ms),
+        crash_timeouts(crash_timeouts_requested),
     );
     Ok(CanvasOpenInfo {
         canvas_id,

@@ -89,6 +89,9 @@ export interface AppSettings {
   /** `canvas.autosave_ms`: quiet time before the host autosaves a dirty canvas
    * document (spine AD-23). Sent with each canvas open. */
   canvasAutosaveMs: number
+  /** `canvas.crash_timeouts`: consecutive timed-out canvas calls that mark the
+   * editor crashed and remount it (spine AD-31). Sent with each canvas open. */
+  canvasCrashTimeouts: number
   /** ACP per-turn idle timeout in seconds, or null = use the env var / Rust
    * default (unlimited by default). Set via App Preferences; pushed to the
    * Rust core. */
@@ -277,6 +280,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   editorAutoSave: false,
   editorAutoSaveDelayMs: 1000,
   canvasAutosaveMs: 1500,
+  canvasCrashTimeouts: 3,
   acpTurnIdleTimeoutSecs: null,
   acpSessionNewTimeoutSecs: null,
   acpSessionReopenTimeoutSecs: null,

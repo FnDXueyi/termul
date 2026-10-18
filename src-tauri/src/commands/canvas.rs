@@ -15,8 +15,8 @@ use tauri::State;
 use super::{sanitize_log_field, validate_project_path, IpcResult};
 use crate::canvas::mcp_proxy;
 use crate::canvas::persistence::{
-    self, canvas_mounts, CloseMode, CloseOutcome, DirtyOutcome, DocumentBytes, PersistenceView,
-    WriteOutcome,
+    self, canvas_mounts, CloseMode, CloseOutcome, ConflictChoice, DirtyOutcome, DiskOutcome,
+    DocumentBytes, PersistenceView, Remount, ResolveOutcome, WriteOutcome,
 };
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
@@ -67,7 +67,7 @@ fn persistence_result<T>(
     }
 }
 
-/// `canvas_open { docPath, projectId, autosaveMs? }` — the loopback bundle
+/// `canvas_open { docPath, projectId, autosaveMs?, crashTimeouts? }` — the loopback bundle
 /// base plus a minted `ct` token and a new `mountSeq` for the project's
 /// canvas. Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound.
 #[tauri::command]
@@ -75,6 +75,7 @@ pub async fn canvas_open(
     doc_path: String,
     project_id: String,
     autosave_ms: Option<u64>,
+    crash_timeouts: Option<u32>,
     server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
     let doc_key = match validate_canvas_doc_path(&doc_path) {
@@ -91,7 +92,7 @@ pub async fn canvas_open(
             CODE_BUNDLE_LISTENER_DOWN,
         ));
     };
-    match open_canvas(base, &project_id, doc_key, autosave_ms) {
+    match open_canvas(base, &project_id, doc_key, autosave_ms, crash_timeouts) {
         Ok(info) => {
             log::info!(
                 "[canvas] open project_id={log_project_id} canvas_id={} mount_seq={}",
@@ -234,6 +235,76 @@ fn log_write_outcome(project_id: &str, outcome: &WriteOutcome) {
         }
         (None, None) => {}
     }
+}
+
+/// `canvas_disk_changed { projectId, mountSeq }` — Termul's file watcher saw
+/// the mounted document change: `unchanged` (Termul's own write), `reload`
+/// with the bytes for a clean editor, or `conflict` (AD-27).
+#[tauri::command]
+pub async fn canvas_disk_changed(
+    project_id: String,
+    mount_seq: u64,
+) -> Result<IpcResult<DiskOutcome>, String> {
+    let result = canvas_mounts().disk_changed(&project_id, mount_seq).await;
+    if let Ok(outcome) = &result {
+        log_disk_outcome(&project_id, outcome);
+    }
+    Ok(persistence_result("disk changed", &project_id, result))
+}
+
+/// The one log line per external change both transports write.
+pub(crate) fn log_disk_outcome(project_id: &str, outcome: &DiskOutcome) {
+    let project_id = sanitize_log_field(project_id);
+    match outcome {
+        DiskOutcome::Unchanged { .. } => {}
+        DiskOutcome::Reload { .. } => {
+            log::info!("[canvas] reloaded from disk project_id={project_id}: changed outside Termul");
+        }
+        DiskOutcome::Conflict { view } => log::warn!(
+            "[canvas] conflict project_id={project_id}: changed on disk with unsaved edits deleted={}",
+            view.conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.disk_hash.is_none())
+        ),
+    }
+}
+
+/// `canvas_resolve_conflict { projectId, mountSeq, choice, snapshot? }` —
+/// the user's answer to a disk conflict; `snapshot` is the `host.snapshot`
+/// result text for `saveCopy`.
+#[tauri::command]
+pub async fn canvas_resolve_conflict(
+    project_id: String,
+    mount_seq: u64,
+    choice: ConflictChoice,
+    snapshot: Option<String>,
+) -> Result<IpcResult<ResolveOutcome>, String> {
+    log::info!(
+        "[canvas] conflict resolved project_id={} choice={choice:?}",
+        sanitize_log_field(&project_id)
+    );
+    let result = persistence::resolve_conflict(
+        canvas_mounts(),
+        &project_id,
+        mount_seq,
+        choice,
+        snapshot.as_deref(),
+    )
+    .await;
+    Ok(persistence_result("resolve conflict", &project_id, result))
+}
+
+/// `canvas_crashed { projectId, mountSeq, reason }` — the editor reported
+/// `event.crashed`: remount from the last saved bytes under a new
+/// `mountSeq` (AD-31).
+#[tauri::command]
+pub async fn canvas_crashed(
+    project_id: String,
+    mount_seq: u64,
+    reason: String,
+) -> Result<IpcResult<Remount>, String> {
+    let result = canvas_mounts().crashed(&project_id, mount_seq, &reason);
+    Ok(persistence_result("crashed", &project_id, result))
 }
 
 /// `canvas_save { docPath }` — save through the daemon (`POST

@@ -19,17 +19,27 @@
 //! This is also the one mount registry (AD-19): each mount records the
 //! renderer connection that holds it ([`gateway`]), so the agent gateway
 //! routes through it instead of keeping its own, and every unmount runs the
-//! AD-31 sequence ([`close`]).
+//! AD-31 sequence ([`close`]). A mount also remembers what Termul last read
+//! from or wrote to its file, so a change on disk is told apart from
+//! Termul's own write and never overwritten unseen ([`disk`], AD-27), and it
+//! counts timed-out calls to notice a dead editor and remount it ([`crash`]).
 //!
 //! Tauri-free so the desktop commands and termul-server's routes share it.
-//! Nothing here logs: the transports log at their boundary, never bytes.
+//! The transports log at their boundary, never bytes; a remount is logged
+//! where it happens, since a timeout-driven one has no transport call.
 
 mod close;
+mod crash;
+mod disk;
 mod gateway;
 mod wire;
 
 #[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod crash_tests;
+#[cfg(test)]
+mod disk_tests;
 #[cfg(test)]
 mod gateway_tests;
 #[cfg(test)]
@@ -48,12 +58,15 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use super::CanvasError;
+use crate::web::fs_api::{CheckedWrite, Expected};
 
 pub use close::{CloseMode, CloseOutcome};
+pub use crash::{crash_timeouts, LostChanges, Remount, DEFAULT_CRASH_TIMEOUTS, REMOUNTED_METHOD};
+pub use disk::{ConflictChoice, ConflictView, DiskOutcome, ResolveOutcome, CODE_DOCUMENT_DELETED};
 pub use gateway::ReplyMatch;
 pub use wire::{
-    dirty_changed, document_loaded, parse_version, read_document, write_snapshot, DocumentBytes,
-    CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD, CODE_READ_FAILED,
+    dirty_changed, document_loaded, parse_version, read_document, resolve_conflict, write_snapshot,
+    DocumentBytes, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD, CODE_READ_FAILED,
 };
 
 /// `canvas.autosave_ms` when the renderer sends none.
@@ -78,16 +91,33 @@ struct Persisted {
     saved_version: Option<u64>,
     dirty: bool,
     save_error: Option<String>,
+    /// The file changed on disk while the editor held unsaved work (AD-27).
+    /// Autosave is suppressed until the user resolves it.
+    conflict: Option<disk::Conflict>,
+    /// Wall-clock ms of the first edit not on disk; shown when a crash
+    /// loses it.
+    unsaved_since: Option<u64>,
 }
 
 impl Persisted {
     fn save_due(&self) -> bool {
-        self.dirty && self.content_version.is_some() && self.content_version != self.saved_version
+        self.dirty
+            && self.conflict.is_none()
+            && self.content_version.is_some()
+            && self.content_version != self.saved_version
     }
 
     /// The host knows of an edit that is not on disk.
     fn unsaved(&self) -> bool {
         self.dirty || (self.content_version.is_some() && self.content_version != self.saved_version)
+    }
+
+    fn track_unsaved_since(&mut self) {
+        if !self.unsaved() {
+            self.unsaved_since = None;
+        } else if self.unsaved_since.is_none() {
+            self.unsaved_since = Some(crash::now_ms());
+        }
     }
 }
 
@@ -113,6 +143,12 @@ struct MountState {
     /// The renderer connection the editor runs in, once it reported the
     /// mount; `None` until then and after it disconnected.
     connection: Option<gateway::Connection>,
+    /// The file as Termul last read or wrote it; `None` before the first
+    /// read. A write is checked against it, and a watcher event whose file
+    /// still matches it is Termul's own write.
+    disk: Option<Expected>,
+    /// Consecutive calls that timed out on this ready mount.
+    timeouts: u32,
 }
 
 /// One mounted document. `generation` is the debounce: every dirty
@@ -122,6 +158,11 @@ struct Mount {
     mount_seq: u64,
     doc_path: PathBuf,
     autosave: Duration,
+    /// `canvas.crash_timeouts`: consecutive timeouts that mark it crashed.
+    crash_timeouts: u32,
+    /// The crash this mount replaced, so a late report of it answers the
+    /// same remount instead of starting another.
+    remounted_from: Option<Remount>,
     state: Mutex<MountState>,
     generation: watch::Sender<u64>,
     write_lock: tokio::sync::Mutex<()>,
@@ -129,6 +170,35 @@ struct Mount {
 }
 
 impl Mount {
+    /// A fresh `Loading` mount.
+    fn new(
+        mount_seq: u64,
+        doc_path: PathBuf,
+        autosave: Duration,
+        crash_timeouts: u32,
+        remounted_from: Option<Remount>,
+    ) -> Arc<Self> {
+        let (generation, _) = watch::channel(0);
+        let (in_flight, _) = watch::channel(0);
+        Arc::new(Self {
+            mount_seq,
+            doc_path,
+            autosave,
+            crash_timeouts,
+            remounted_from,
+            state: Mutex::new(MountState {
+                phase: Phase::Loading,
+                lifecycle: Lifecycle::Open,
+                connection: None,
+                disk: None,
+                timeouts: 0,
+            }),
+            generation,
+            write_lock: tokio::sync::Mutex::new(()),
+            in_flight,
+        })
+    }
+
     fn view(&self) -> PersistenceView {
         let state = self.state.lock();
         PersistenceView::of(self.mount_seq, &state.phase)
@@ -151,6 +221,7 @@ pub struct PersistenceView {
     pub content_version: Option<String>,
     pub saved_version: Option<String>,
     pub save_error: Option<String>,
+    pub conflict: Option<ConflictView>,
 }
 
 impl PersistenceView {
@@ -166,6 +237,7 @@ impl PersistenceView {
             content_version: persisted.and_then(|p| p.content_version.map(|v| v.to_string())),
             saved_version: persisted.and_then(|p| p.saved_version.map(|v| v.to_string())),
             save_error: persisted.and_then(|p| p.save_error.clone()),
+            conflict: persisted.and_then(|p| p.conflict.as_ref().map(disk::Conflict::view)),
         }
     }
 }
@@ -192,11 +264,19 @@ pub struct WriteOutcome {
 }
 
 /// Writes `bytes` to `path` so a reader sees the old file or the new one,
-/// never a torn one. Injected so tests can fail a write.
-pub type WriteFn = fn(&Path, &[u8]) -> std::io::Result<()>;
+/// never a torn one, and only while the file is still `expected` (`None`:
+/// unchecked). Injected so tests can fail a write.
+pub type WriteFn = fn(&Path, &[u8], Option<&Expected>) -> std::io::Result<CheckedWrite>;
 
-fn write_document(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    crate::web::fs_api::write_unchecked(path, bytes)
+fn write_document(
+    path: &Path,
+    bytes: &[u8],
+    expected: Option<&Expected>,
+) -> std::io::Result<CheckedWrite> {
+    match expected {
+        Some(expected) => crate::web::fs_api::write_checked(path, bytes, expected, false),
+        None => crate::web::fs_api::write_unchecked(path, bytes).map(|()| CheckedWrite::Written),
+    }
 }
 
 fn closed() -> CanvasError {
@@ -239,37 +319,28 @@ impl CanvasPersistence {
     /// A fresh `Loading` mount for the project, replacing any previous one.
     /// The returned `mountSeq` is never reused within the process.
     pub fn mount(&self, project_id: &str, doc_path: PathBuf, autosave: Duration) -> u64 {
-        let mount_seq = self.next_mount_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.insert_mount(project_id, mount_seq, doc_path, autosave);
-        mount_seq
+        self.mount_configured(project_id, doc_path, autosave, DEFAULT_CRASH_TIMEOUTS)
     }
 
-    fn insert_mount(
+    /// [`Self::mount`] with `canvas.crash_timeouts`.
+    pub fn mount_configured(
         &self,
         project_id: &str,
-        mount_seq: u64,
         doc_path: PathBuf,
         autosave: Duration,
-    ) {
-        let (generation, _) = watch::channel(0);
-        let (in_flight, _) = watch::channel(0);
-        let mount = Arc::new(Mount {
-            mount_seq,
-            doc_path,
-            autosave,
-            state: Mutex::new(MountState {
-                phase: Phase::Loading,
-                lifecycle: Lifecycle::Open,
-                connection: None,
-            }),
-            generation,
-            write_lock: tokio::sync::Mutex::new(()),
-            in_flight,
-        });
+        crash_timeouts: u32,
+    ) -> u64 {
+        let mount_seq = self.next_mount_seq();
+        let mount = Mount::new(mount_seq, doc_path, autosave, crash_timeouts, None);
         let previous = self.mounts.lock().insert(project_id.to_string(), mount);
         if let Some(previous) = previous {
             Self::retire(&previous);
         }
+        mount_seq
+    }
+
+    fn next_mount_seq(&self) -> u64 {
+        self.next_mount_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Drop the project's mount without saving; waiting debounces resolve
@@ -334,9 +405,9 @@ impl CanvasPersistence {
             state.phase = Phase::Ready(Persisted {
                 content_version,
                 saved_version: content_version,
-                dirty: false,
-                save_error: None,
+                ..Persisted::default()
             });
+            state.timeouts = 0;
         }
         mount.bump_generation();
         Ok(mount.view())
@@ -357,6 +428,7 @@ impl CanvasPersistence {
             Phase::Ready(persisted) => {
                 persisted.dirty = dirty;
                 persisted.content_version = Some(content_version);
+                persisted.track_unsaved_since();
                 true
             }
             Phase::Loading => false,
@@ -404,6 +476,11 @@ impl CanvasPersistence {
     /// dropped, and `saved_version` advances only after the write returned
     /// `Ok`. A failed write keeps the previous saved version and reports
     /// `save_error` in the view.
+    ///
+    /// The write only replaces the file Termul last read or wrote (AD-27):
+    /// a file that changed on disk since is not overwritten, and the view
+    /// comes back with the conflict instead. Nothing is written while a
+    /// conflict is open.
     pub async fn write_snapshot(
         &self,
         project_id: &str,
@@ -419,7 +496,7 @@ impl CanvasPersistence {
                 "only .figcraft documents are written by the canvas",
             ));
         }
-        {
+        let expected = {
             let state = mount.state.lock();
             match &state.phase {
                 Phase::Loading => {
@@ -429,36 +506,51 @@ impl CanvasPersistence {
                     ))
                 }
                 Phase::Ready(persisted)
-                    if persisted
-                        .saved_version
-                        .is_some_and(|saved| content_version < saved) =>
+                    if persisted.conflict.is_some()
+                        || persisted
+                            .saved_version
+                            .is_some_and(|saved| content_version < saved) =>
                 {
                     return Ok(WriteOutcome {
                         view: PersistenceView::of(mount.mount_seq, &state.phase),
                         mark_saved: None,
                     });
                 }
-                Phase::Ready(_) => {}
+                Phase::Ready(_) => state.disk.clone(),
             }
-        }
+        };
         let write = self.write;
         let path = mount.doc_path.clone();
-        let written = tokio::task::spawn_blocking(move || write(&path, &bytes))
-            .await
-            .unwrap_or_else(|join| Err(std::io::Error::other(join.to_string())));
+        let written_hash = crate::web::fs_api::sha256_hex(&bytes);
+        let written = tokio::task::spawn_blocking(move || {
+            let written = write(&path, &bytes, expected.as_ref())?;
+            Ok(match written {
+                CheckedWrite::Written => None,
+                CheckedWrite::Stale => Some(disk::fingerprint(&path)?),
+            })
+        })
+        .await
+        .unwrap_or_else(|join| Err(std::io::Error::other(join.to_string())));
         let mut state = mount.state.lock();
-        let Phase::Ready(persisted) = &mut state.phase else {
+        let MountState { phase, disk, .. } = &mut *state;
+        let Phase::Ready(persisted) = phase else {
             return Err(closed());
         };
         let mark_saved = match written {
-            Ok(()) => {
+            Ok(None) => {
+                *disk = Some(Expected::Sha256(written_hash));
                 persisted.saved_version = Some(
                     persisted
                         .saved_version
                         .map_or(content_version, |saved| saved.max(content_version)),
                 );
                 persisted.save_error = None;
+                persisted.track_unsaved_since();
                 Some(content_version.to_string())
+            }
+            Ok(Some(on_disk)) => {
+                persisted.conflict = Some(disk::Conflict::new(on_disk, persisted.content_version));
+                None
             }
             Err(error) => {
                 persisted.save_error =
@@ -496,12 +588,16 @@ impl CanvasPersistence {
             .get(project_id)
             .map(|mount| mount.mount_seq);
         if current != Some(mount_seq) {
-            self.insert_mount(
-                project_id,
+            let mount = Mount::new(
                 mount_seq,
                 PathBuf::from(format!("{project_id}.figcraft")),
                 Duration::from_millis(DEFAULT_AUTOSAVE_MS),
+                DEFAULT_CRASH_TIMEOUTS,
+                None,
             );
+            if let Some(previous) = self.mounts.lock().insert(project_id.to_string(), mount) {
+                Self::retire(&previous);
+            }
         }
     }
 }

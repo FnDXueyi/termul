@@ -39,6 +39,45 @@ export interface CanvasPersistenceView {
   /** `null` until the document exists on disk. */
   savedVersion: string | null
   saveError: string | null
+  /** The file changed on disk while the editor held unsaved work (AD-27);
+   * autosave is suppressed until the user resolves it. */
+  conflict: CanvasConflict | null
+}
+
+/** `diskHash` is the sha256 of the file on disk, `null` when it was deleted;
+ * `version` is the editor's content version when the change was found. */
+export interface CanvasConflict {
+  diskHash: string | null
+  version: string | null
+}
+
+/** What Termul's file watcher seeing the document change meant. */
+export type CanvasDiskOutcome =
+  | { kind: 'unchanged'; view: CanvasPersistenceView }
+  | { kind: 'reload'; view: CanvasPersistenceView; bytes: string }
+  | { kind: 'conflict'; view: CanvasPersistenceView }
+
+/** The user's answer to a conflict: overwrite the disk with the editor,
+ * reload the disk, or write the editor to a `.conflict-<time>` copy and
+ * reload the disk. */
+export type CanvasConflictChoice = 'keepMine' | 'takeDisk' | 'saveCopy'
+
+export interface CanvasResolveOutcome {
+  view: CanvasPersistenceView
+  /** The disk's bytes to load with `host.openDocument`. */
+  reload: string | null
+  /** The conflict copy written by `saveCopy`. */
+  copyPath: string | null
+}
+
+/** A crashed mount replaced by a fresh one loading the last saved bytes
+ * (AD-31). */
+export interface CanvasRemount {
+  previousMountSeq: number
+  mountSeq: number
+  reason: string
+  /** Edits the crash lost: `count` is `contentVersion - savedVersion`. */
+  lost: { count: number; sinceMs: number | null } | null
 }
 
 /** The mounted document as base64, `null` when the file does not exist yet. */
@@ -83,6 +122,8 @@ export const CanvasErrorCodes = {
   CANVAS_NOT_READY: 'CANVAS_NOT_READY',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   READ_FAILED: 'READ_FAILED',
+  DOCUMENT_DELETED: 'DOCUMENT_DELETED',
+  COPY_FAILED: 'COPY_FAILED',
   UNSUPPORTED_SURFACE: 'UNSUPPORTED_SURFACE',
   NETWORK_ERROR: 'NETWORK_ERROR',
   INVOKE_ERROR: 'INVOKE_ERROR'
@@ -119,7 +160,8 @@ export interface CanvasApi {
   open: (
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    autosaveMs?: number,
+    crashTimeouts?: number
   ) => Promise<IpcResult<CanvasOpenInfo>>
   /** Unmount through the host's AD-31 sequence. A failed save answers
    * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit
@@ -145,4 +187,19 @@ export interface CanvasApi {
     mountSeq: number,
     snapshot: string
   ) => Promise<IpcResult<CanvasWriteOutcome>>
+  /** Termul's file watcher saw the document change (AD-27). */
+  diskChanged: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDiskOutcome>>
+  /** `snapshot` is the `host.snapshot` result text, needed for `saveCopy`. */
+  resolveConflict: (
+    projectId: string,
+    mountSeq: number,
+    choice: CanvasConflictChoice,
+    snapshot?: string
+  ) => Promise<IpcResult<CanvasResolveOutcome>>
+  /** The editor reported `event.crashed`: remount under a new `mountSeq`. */
+  crashed: (
+    projectId: string,
+    mountSeq: number,
+    reason: string
+  ) => Promise<IpcResult<CanvasRemount>>
 }

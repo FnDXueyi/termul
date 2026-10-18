@@ -472,6 +472,9 @@ fn is_canvas_proxy_path(path: &str) -> bool {
                     | "document-loaded"
                     | "dirty-changed"
                     | "write-snapshot"
+                    | "disk-changed"
+                    | "resolve-conflict"
+                    | "crashed"
             )
         )
     })

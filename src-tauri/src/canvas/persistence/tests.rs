@@ -11,6 +11,7 @@ use super::{
     CanvasPersistence, DirtyOutcome, CODE_CANVAS_NOT_READY, CODE_INVALID_PAYLOAD,
 };
 use crate::canvas::{CODE_CANVAS_CLOSED, CODE_PATH_VALIDATION_FAILED};
+use crate::web::fs_api::{CheckedWrite, Expected};
 
 const PROJECT: &str = "project-persist";
 const DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -164,7 +165,7 @@ async fn the_first_save_of_a_new_document_creates_the_file() {
     assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
 }
 
-fn failing_write(_: &Path, _: &[u8]) -> std::io::Result<()> {
+fn failing_write(_: &Path, _: &[u8], _: Option<&Expected>) -> std::io::Result<CheckedWrite> {
     Err(std::io::Error::other("disk full"))
 }
 
@@ -209,9 +210,13 @@ async fn a_failed_real_write_leaves_the_saved_version() {
 
 static COUNTED_WRITES: AtomicUsize = AtomicUsize::new(0);
 
-fn counting_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn counting_write(
+    path: &Path,
+    bytes: &[u8],
+    _: Option<&Expected>,
+) -> std::io::Result<CheckedWrite> {
     COUNTED_WRITES.fetch_add(1, Ordering::SeqCst);
-    std::fs::write(path, bytes)
+    std::fs::write(path, bytes).map(|()| CheckedWrite::Written)
 }
 
 #[tokio::test]

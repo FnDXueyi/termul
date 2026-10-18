@@ -633,6 +633,9 @@ fn requires_token_covers_api_prefixes_and_public_paths() {
         "/canvas/document-loaded",
         "/canvas/dirty-changed",
         "/canvas/write-snapshot",
+        "/canvas/disk-changed",
+        "/canvas/resolve-conflict",
+        "/canvas/crashed",
     ] {
         assert!(requires_token(gated), "{gated} must require the token");
     }

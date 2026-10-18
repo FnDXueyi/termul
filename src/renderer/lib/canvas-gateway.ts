@@ -8,8 +8,11 @@
  * `host.save` is the one call answered here instead of in the editor: the
  * agent's `save_file` is Termul's save of the project's document (AD-18,
  * AD-23), and it answers with the document's project-relative path.
+ * `host.remounted` is the host's own notice that it replaced a crashed mount
+ * (AD-31), answered by switching the store to the new mount.
  */
 
+import type { CanvasRemount } from '@shared/types/canvas.types'
 import { type AcpTransport, getAcpTransport } from '@/lib/acp-transport'
 import {
   answerGatewayCall,
@@ -21,6 +24,7 @@ import { type CanvasSession, useCanvasStore } from '@/stores/canvas-store'
 import { useProjectStore } from '@/stores/project-store'
 
 const HOST_SAVE = 'host.save'
+const HOST_REMOUNTED = 'host.remounted'
 
 function mountedSeqOf(session: CanvasSession | undefined): number | null {
   const phase = session?.phase
@@ -36,6 +40,18 @@ export function projectRelativePath(docPath: string, root: string | undefined): 
   const prefix = `${root.replace(/\\/g, '/').replace(/\/+$/, '')}/`
   const fold = (path: string): string => (/^[A-Za-z]:/.test(path) ? path.toLowerCase() : path)
   return fold(doc).startsWith(fold(prefix)) ? doc.slice(prefix.length) : doc
+}
+
+function hostRemounted(projectId: string, params: string): CanvasBridgeReply {
+  let remount: CanvasRemount
+  try {
+    remount = JSON.parse(params) as CanvasRemount
+  } catch {
+    return bridgeFailure('ENGINE_ERROR', 'malformed host.remounted notice')
+  }
+  return useCanvasStore.getState().applyRemount(projectId, remount)
+    ? { ok: true, result: asJsonText('{}') }
+    : bridgeFailure('CANVAS_CLOSED', 'this window does not hold that mount')
 }
 
 async function hostSave(projectId: string): Promise<CanvasBridgeReply> {
@@ -67,7 +83,9 @@ export function startCanvasGateway(transport: AcpTransport = getAcpTransport()):
     answerGatewayCall(call, mountedSeqOf(store().sessions[call.projectId]), (method, params) =>
       method === HOST_SAVE
         ? hostSave(call.projectId)
-        : store().callCanvas(call.projectId, method, params)
+        : method === HOST_REMOUNTED
+          ? Promise.resolve(hostRemounted(call.projectId, params))
+          : store().callCanvas(call.projectId, method, params)
     )
   )
 
