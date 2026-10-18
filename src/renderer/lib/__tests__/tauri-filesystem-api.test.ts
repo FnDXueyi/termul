@@ -237,6 +237,32 @@ describe('tauriFilesystemApi', () => {
       }
     })
 
+    describe('entry paths under a Windows verbatim or UNC root', () => {
+      const entries: DirEntry[] = [
+        { name: 'src', isDirectory: true, isFile: false, isSymlink: false },
+        { name: 'a.txt', isDirectory: false, isFile: true, isSymlink: false }
+      ]
+
+      it.each([
+        ['a backslash verbatim root', String.raw`\\?\D:\proj`, '//?/D:/proj'],
+        ['a forward-slash verbatim root', '//?/D:/proj', '//?/D:/proj'],
+        ['a verbatim root with a trailing separator', '//?/D:/proj/', '//?/D:/proj'],
+        ['a UNC root', '//srv/share', '//srv/share'],
+        ['a drive root', 'D:/', 'D:'],
+        ['a plain root', 'D:/proj', 'D:/proj']
+      ])('keeps entries joinable under %s', async (_label, root, parent) => {
+        vi.mocked(readDir).mockResolvedValue(entries)
+
+        const result = await tauriFilesystemApi.readDirectory(root)
+
+        expect(result.success).toBe(true)
+        if (!result.success) return
+        const expected = [`${parent}/src`, `${parent}/a.txt`]
+        expect(result.data.map((e) => e.path)).toEqual(expected)
+        expect(vi.mocked(stat).mock.calls.map(([p]) => p)).toEqual(expect.arrayContaining(expected))
+      })
+    })
+
     it('should handle errors', async () => {
       vi.mocked(readDir).mockRejectedValue(new Error('Permission denied'))
 

@@ -6831,7 +6831,7 @@ dependencies = [
 
 [[package]]
 name = "termul-manager"
-version = "0.4.21"
+version = "0.4.50"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
