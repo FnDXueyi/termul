@@ -117,16 +117,29 @@ pub(crate) fn check_tab_target<R: Runtime>(
     }
 }
 
+/// What the startup scrub did, for the caller to log once a logger exists.
+pub(crate) struct ScrubReport {
+    pub(crate) changed: Vec<&'static str>,
+    /// Debug builds only: the dev opt-in kept a WebView2 debug switch.
+    #[cfg(debug_assertions)]
+    pub(crate) engine_debug_kept: bool,
+}
+
 /// Remove engine debug and automation switches from this process's
-/// environment. Call before any webview is created. Returns the variable
-/// names it changed so the caller can log them once a logger exists.
-pub(crate) fn scrub_engine_debug_env() -> Vec<&'static str> {
-    let actions = env_scrub::plan(|key| std::env::var_os(key));
-    for action in &actions {
+/// environment. Call before any webview is created. A debug build can keep
+/// the WebView2 debug port through an explicit opt-in; release builds have
+/// no such path.
+pub(crate) fn scrub_engine_debug_env() -> ScrubReport {
+    let plan = env_scrub::plan(|key| std::env::var_os(key), cfg!(debug_assertions));
+    for action in &plan.actions {
         match action {
             env_scrub::EnvScrub::Remove(key) => std::env::remove_var(key),
             env_scrub::EnvScrub::Replace(key, value) => std::env::set_var(key, value),
         }
     }
-    actions.iter().map(env_scrub::EnvScrub::key).collect()
+    ScrubReport {
+        changed: plan.actions.iter().map(env_scrub::EnvScrub::key).collect(),
+        #[cfg(debug_assertions)]
+        engine_debug_kept: plan.engine_debug_kept,
+    }
 }

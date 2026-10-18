@@ -1089,7 +1089,7 @@ pub fn run() {
     // captured to the log file with a backtrace (issue #244).
     logging::install_panic_hook();
     // Before any webview exists: the engines read these at creation.
-    let scrubbed_engine_env = host_perimeter::scrub_engine_debug_env();
+    let engine_scrub = host_perimeter::scrub_engine_debug_env();
 
     let builder = tauri::Builder::default();
 
@@ -1185,8 +1185,14 @@ pub fn run() {
             // Startup diagnostic banner (issue #244): version, OS/arch, build
             // channel, session id, and resolved log path on a single line.
             logging::log_startup_banner(&handle);
-            for key in &scrubbed_engine_env {
+            for key in &engine_scrub.changed {
                 log::warn!("[perimeter] removed engine debug setting from the environment: {key}");
+            }
+            #[cfg(debug_assertions)]
+            if engine_scrub.engine_debug_kept {
+                log::warn!(
+                    "[perimeter] WebView2 debug port left enabled by the dev opt-in; any local process can drive this app. Debug builds only."
+                );
             }
 
             // AD-14: one host per durable path. Lock `app_data_dir` (and the
