@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, type RenderOptions, render as rtlRender, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import {
   CrashedMark,
   IdleAgentMark,
@@ -9,16 +10,21 @@ import {
   resolveProjectLiveState
 } from './indicators'
 
+/** The app root provides tooltips; tests render without it. */
+const render = (ui: React.ReactElement, options?: RenderOptions) =>
+  rtlRender(ui, { wrapper: TooltipProvider, ...options })
+
 // Issue #859: beside a long project name, the "N need you" badge and the
 // "Running" label squeezed the project name span to a single letter. The
 // redesign keeps both small and fixed: the needs-you pill shows only a dot +
-// count (full label on title/aria-label), and running is a 12px spinner.
+// count (full label on the tooltip and aria-label), and running is a 12px spinner.
 describe('sidebar indicators', () => {
   it('NeedsYouButton is a compact warning pill with dot + count and the full label for a11y', () => {
     render(<NeedsYouButton count={3} onOpen={() => {}} />)
 
     const button = screen.getByRole('button', { name: '3 need you' })
-    expect(button).toHaveAttribute('title', '3 need you')
+    // The full label is the name; the styled tooltip shows it, not a native title.
+    expect(button).not.toHaveAttribute('title')
     expect(button).toHaveTextContent(/^3$/)
     expect(button).toHaveClass('h-5', 'rounded-full', 'bg-warning/10', 'text-3xs', 'text-warning')
   })

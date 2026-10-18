@@ -37,3 +37,13 @@ export function describeFailure(failure: BrowserPolicyFailure): string {
   if (failure.code === 'UNAUTHORIZED') return 'Sign in again to change browser rules.'
   return failure.message
 }
+
+/** Row ids that settings search jumps to. */
+export const BROWSER_ANCHORS = {
+  appProfile: 'setting-browser-shared-profile',
+  appPreapprovals: 'setting-browser-app-preapprovals',
+  appClear: 'setting-browser-clear-profile',
+  projectEphemeral: 'setting-browser-ephemeral',
+  projectAllowList: 'setting-browser-allow-list',
+  projectPreapprovals: 'setting-browser-project-preapprovals'
+} as const

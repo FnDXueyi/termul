@@ -1,9 +1,8 @@
 import type { BrowserActionClass, BrowserPreapproval } from '@shared/types/browser-policy.types'
-import { useId, useState } from 'react'
+import { useState } from 'react'
 import { Plus, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -13,20 +12,110 @@ import {
 } from '@/components/ui/select'
 import type { BrowserPolicyFailure } from '@/lib/browser-policy-api'
 import { ACTION_LABELS, describeFailure } from './browser-policy-copy'
+import { SettingsCard, SettingsGroup } from './SettingsGroup'
+import { SettingsNotice } from './SettingsNotice'
 
-const ROW_CLASS =
-  'flex min-w-0 items-center gap-2 rounded-md border border-border bg-secondary/30 px-3 py-1.5'
+const ENTRY_CLASS = 'flex min-w-0 items-center gap-3 px-4 py-2.5'
+const FORM_CLASS = 'flex flex-col gap-2 px-4 py-3 sm:flex-row'
 
-function ErrorLine({ message }: { message: string | null }): React.JSX.Element | null {
-  if (!message) return null
+function EntryList({
+  label,
+  isEmpty,
+  children
+}: {
+  label: string
+  isEmpty: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  if (isEmpty) return <p className="px-4 py-3 text-xs text-muted-foreground">None yet.</p>
   return (
-    <p role="alert" className="text-xs text-destructive">
-      {message}
-    </p>
+    <ul aria-label={`${label} list`} className="divide-y divide-border">
+      {children}
+    </ul>
   )
 }
 
+function RemoveButton({
+  label,
+  disabled,
+  onClick
+}: {
+  label: string
+  disabled: boolean
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="ghost"
+      className="size-7 text-muted-foreground"
+      disabled={disabled}
+      onClick={onClick}
+      aria-label={label}
+    >
+      <X size={14} />
+    </Button>
+  )
+}
+
+function AddButton({ disabled }: { disabled: boolean }): React.JSX.Element {
+  return (
+    <Button type="submit" size="sm" variant="secondary" disabled={disabled}>
+      <Plus size={14} />
+      Add
+    </Button>
+  )
+}
+
+interface EditorShellProps {
+  id: string
+  label: string
+  description: string
+  error: string | null
+  children: React.ReactNode
+}
+
+function EditorShell({
+  id,
+  label,
+  description,
+  error,
+  children
+}: EditorShellProps): React.JSX.Element {
+  return (
+    <SettingsGroup id={id} title={label} footnote={description} className="scroll-mt-4">
+      <SettingsCard>{children}</SettingsCard>
+      {error && (
+        <SettingsNotice tone="danger" role="alert">
+          {error}
+        </SettingsNotice>
+      )}
+    </SettingsGroup>
+  )
+}
+
+/** Runs one list edit and tracks the busy flag and the failure sentence. */
+function useListEdit(): {
+  busy: boolean
+  error: string | null
+  run: (edit: () => Promise<BrowserPolicyFailure | null>) => Promise<boolean>
+} {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const run = async (edit: () => Promise<BrowserPolicyFailure | null>): Promise<boolean> => {
+    setBusy(true)
+    const failure = await edit()
+    setBusy(false)
+    setError(failure ? describeFailure(failure) : null)
+    return failure === null
+  }
+  return { busy, error, run }
+}
+
 interface OriginListEditorProps {
+  /** Anchor id for settings search. */
+  id: string
   label: string
   description: string
   placeholder: string
@@ -38,6 +127,7 @@ interface OriginListEditorProps {
 
 /** A list of origins with a field to add one. */
 export function OriginListEditor({
+  id,
   label,
   description,
   placeholder,
@@ -46,68 +136,40 @@ export function OriginListEditor({
   onAdd,
   onRemove
 }: OriginListEditorProps): React.JSX.Element {
-  const inputId = useId()
   const [draft, setDraft] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const { busy, error, run } = useListEdit()
 
   const submit = async (): Promise<void> => {
     const origin = draft.trim()
     if (!origin) return
-    setBusy(true)
-    const failure = await onAdd(origin)
-    setBusy(false)
-    setError(failure ? describeFailure(failure) : null)
-    if (!failure) setDraft('')
-  }
-
-  const remove = async (origin: string): Promise<void> => {
-    setBusy(true)
-    const failure = await onRemove(origin)
-    setBusy(false)
-    setError(failure ? describeFailure(failure) : null)
+    if (await run(() => onAdd(origin))) setDraft('')
   }
 
   return (
-    <div className="space-y-2">
-      <div>
-        <Label htmlFor={inputId} className="text-sm text-foreground">
-          {label}
-        </Label>
-        <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
-      </div>
-      {entries.length === 0 ? (
-        <p className="text-xs text-muted-foreground">None yet.</p>
-      ) : (
-        <ul className="space-y-1.5" aria-label={`${label} list`}>
-          {entries.map((origin) => (
-            <li key={origin} className={ROW_CLASS}>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
-                {origin}
-              </span>
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                disabled={disabled || busy}
-                onClick={() => void remove(origin)}
-                aria-label={`Remove ${origin}`}
-              >
-                <X size={14} />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+    <EditorShell id={id} label={label} description={description} error={error}>
+      <EntryList label={label} isEmpty={entries.length === 0}>
+        {entries.map((origin) => (
+          <li key={origin} className={ENTRY_CLASS}>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+              {origin}
+            </span>
+            <RemoveButton
+              label={`Remove ${origin}`}
+              disabled={disabled || busy}
+              onClick={() => void run(() => onRemove(origin))}
+            />
+          </li>
+        ))}
+      </EntryList>
       <form
-        className="flex flex-col gap-2 sm:flex-row"
+        className={FORM_CLASS}
         onSubmit={(event) => {
           event.preventDefault()
           void submit()
         }}
       >
         <Input
-          id={inputId}
+          aria-label={label}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           placeholder={placeholder}
@@ -117,22 +179,15 @@ export function OriginListEditor({
           spellCheck={false}
           className="h-9 min-w-0 flex-1 font-mono text-sm"
         />
-        <Button
-          type="submit"
-          size="sm"
-          variant="secondary"
-          disabled={disabled || busy || !draft.trim()}
-        >
-          <Plus size={14} className="mr-1" />
-          Add
-        </Button>
+        <AddButton disabled={disabled || busy || !draft.trim()} />
       </form>
-      <ErrorLine message={error} />
-    </div>
+    </EditorShell>
   )
 }
 
 interface PreapprovalEditorProps {
+  /** Anchor id for settings search. */
+  id: string
   label: string
   description: string
   /** Action classes the scope may pre-approve. */
@@ -145,6 +200,7 @@ interface PreapprovalEditorProps {
 
 /** Pre-approvals keyed by (action, origin), with a form to add one. */
 export function PreapprovalEditor({
+  id,
   label,
   description,
   actions,
@@ -153,64 +209,36 @@ export function PreapprovalEditor({
   onAdd,
   onRemove
 }: PreapprovalEditorProps): React.JSX.Element {
-  const originId = useId()
   const [action, setAction] = useState<BrowserActionClass>(actions[0])
   const [origin, setOrigin] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const { busy, error, run } = useListEdit()
 
   const submit = async (): Promise<void> => {
     const trimmed = origin.trim()
     if (!trimmed) return
-    setBusy(true)
-    const failure = await onAdd({ action, origin: trimmed })
-    setBusy(false)
-    setError(failure ? describeFailure(failure) : null)
-    if (!failure) setOrigin('')
-  }
-
-  const remove = async (entry: BrowserPreapproval): Promise<void> => {
-    setBusy(true)
-    const failure = await onRemove(entry)
-    setBusy(false)
-    setError(failure ? describeFailure(failure) : null)
+    if (await run(() => onAdd({ action, origin: trimmed }))) setOrigin('')
   }
 
   return (
-    <div className="space-y-2">
-      <div>
-        <Label htmlFor={originId} className="text-sm text-foreground">
-          {label}
-        </Label>
-        <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
-      </div>
-      {entries.length === 0 ? (
-        <p className="text-xs text-muted-foreground">None yet.</p>
-      ) : (
-        <ul className="space-y-1.5" aria-label={`${label} list`}>
-          {entries.map((entry) => (
-            <li key={`${entry.action}|${entry.origin}`} className={ROW_CLASS}>
-              <span className="min-w-0 flex-1 text-xs text-foreground">
-                <span>{ACTION_LABELS[entry.action]}</span>
-                <span className="text-muted-foreground"> on </span>
-                <span className="break-all font-mono">{entry.origin}</span>
-              </span>
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                disabled={disabled || busy}
-                onClick={() => void remove(entry)}
-                aria-label={`Remove ${ACTION_LABELS[entry.action]} on ${entry.origin}`}
-              >
-                <X size={14} />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+    <EditorShell id={id} label={label} description={description} error={error}>
+      <EntryList label={label} isEmpty={entries.length === 0}>
+        {entries.map((entry) => (
+          <li key={`${entry.action}|${entry.origin}`} className={ENTRY_CLASS}>
+            <span className="min-w-0 flex-1 text-xs text-foreground">
+              <span>{ACTION_LABELS[entry.action]}</span>
+              <span className="text-muted-foreground"> on </span>
+              <span className="break-all font-mono">{entry.origin}</span>
+            </span>
+            <RemoveButton
+              label={`Remove ${ACTION_LABELS[entry.action]} on ${entry.origin}`}
+              disabled={disabled || busy}
+              onClick={() => void run(() => onRemove(entry))}
+            />
+          </li>
+        ))}
+      </EntryList>
       <form
-        className="flex flex-col gap-2 sm:flex-row"
+        className={FORM_CLASS}
         onSubmit={(event) => {
           event.preventDefault()
           void submit()
@@ -233,7 +261,7 @@ export function PreapprovalEditor({
           </SelectContent>
         </Select>
         <Input
-          id={originId}
+          aria-label={label}
           value={origin}
           onChange={(event) => setOrigin(event.target.value)}
           placeholder="https://example.com"
@@ -243,17 +271,8 @@ export function PreapprovalEditor({
           spellCheck={false}
           className="h-9 min-w-0 flex-1 font-mono text-sm"
         />
-        <Button
-          type="submit"
-          size="sm"
-          variant="secondary"
-          disabled={disabled || busy || !origin.trim()}
-        >
-          <Plus size={14} className="mr-1" />
-          Add
-        </Button>
+        <AddButton disabled={disabled || busy || !origin.trim()} />
       </form>
-      <ErrorLine message={error} />
-    </div>
+    </EditorShell>
   )
 }
