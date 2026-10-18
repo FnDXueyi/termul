@@ -509,8 +509,8 @@ describe('MobileChatShell', () => {
         ['a browser tab', [{ type: 'browser', id: 'br1', browserTabId: 'b1' }], 'Example Site'],
         [
           'a canvas tab',
-          [{ type: 'canvas', id: 'c1', projectId: 'p1', docPath: '/proj/design.op' }],
-          'design.op'
+          [{ type: 'canvas', id: 'c1', projectId: 'p1', docPath: '/proj/design.figcraft' }],
+          'design.figcraft'
         ],
         [
           'an agent chat with a live title',

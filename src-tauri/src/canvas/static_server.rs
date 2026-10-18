@@ -37,8 +37,8 @@ use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
 
-/// Cookie-name prefix for the per-canvas session cookie: `op_canvas_ct_<id>`.
-pub const CANVAS_COOKIE_PREFIX: &str = "op_canvas_ct_";
+/// Cookie-name prefix for the per-canvas session cookie: `canvas_ct_<id>`.
+pub const CANVAS_COOKIE_PREFIX: &str = "canvas_ct_";
 
 /// Typed error for a renderer query while the desktop listener is not bound.
 pub const CODE_BUNDLE_LISTENER_DOWN: &str = "BUNDLE_LISTENER_DOWN";

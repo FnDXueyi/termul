@@ -4,8 +4,7 @@
 //! envelope, same typed codes) and share `canvas::static_server::open_canvas`.
 //! The `canvas_*document*` / `canvas_dirty_changed` / `canvas_write_snapshot`
 //! commands are the desktop transport of `canvas::persistence` and mirror the
-//! web routes of the same names. `canvas_save` / `canvas_status` still drive
-//! the OpenPencil daemon pool until it is removed.
+//! web routes of the same names.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,17 +12,14 @@ use std::sync::Arc;
 use tauri::State;
 
 use super::{sanitize_log_field, validate_project_path, IpcResult};
-use crate::canvas::mcp_proxy;
 use crate::canvas::persistence::{
     self, canvas_mounts, CloseMode, CloseOutcome, ConflictChoice, DirtyOutcome, DiskOutcome,
     DocumentBytes, PersistenceView, Remount, ResolveOutcome, WriteOutcome,
 };
-use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
-    close_canvas, open_canvas, CanvasBundleBase, CanvasOpenInfo, OpenRequest, StaticServer,
-    CODE_BUNDLE_LISTENER_DOWN,
+    close_canvas, open_canvas, CanvasOpenInfo, OpenRequest, StaticServer, CODE_BUNDLE_LISTENER_DOWN,
 };
-use crate::canvas::{CanvasError, CanvasStatus, CODE_DAEMON_DOWN};
+use crate::canvas::CanvasError;
 use crate::path_validation::client_path;
 
 const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -323,64 +319,4 @@ pub async fn canvas_crashed(
 ) -> Result<IpcResult<Remount>, String> {
     let result = canvas_mounts().crashed(&project_id, mount_seq, &reason);
     Ok(persistence_result("crashed", &project_id, result))
-}
-
-/// `canvas_save { docPath }` — save through the daemon (`POST
-/// /api/file/save`); the daemon is the `.op` document authority. No live
-/// daemon → typed `DAEMON_DOWN` (the "canvas closed" signal).
-#[tauri::command]
-pub async fn canvas_save(
-    doc_path: String,
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<serde_json::Value>, String> {
-    let validated = validate_and_stringify!(&doc_path);
-    let Some(daemon) = pool.daemon_for_doc(&validated) else {
-        log::warn!("[canvas] save with no live daemon");
-        return Ok(IpcResult::error(
-            "canvas daemon is not running",
-            CODE_DAEMON_DOWN,
-        ));
-    };
-    match mcp_proxy::daemon_save(daemon.as_ref()).await {
-        Ok(value) => {
-            log::info!("[canvas] save dispatched");
-            Ok(IpcResult::success(value))
-        }
-        Err(err) => {
-            log::warn!("[canvas] save failed code={}", err.code);
-            Ok(IpcResult::error(err.message, err.code))
-        }
-    }
-}
-
-/// `canvas_status` — pool snapshot (live daemons + active doc key).
-#[tauri::command]
-pub async fn canvas_status(
-    pool: State<'_, Arc<CanvasDaemonPool>>,
-) -> Result<IpcResult<CanvasStatus>, String> {
-    Ok(IpcResult::success(pool.status()))
-}
-
-/// `canvas_bundle_base` — the loopback base URL the figcraft bundle loads
-/// from plus the bundle tag this build pins. Waits briefly for the listener,
-/// which binds asynchronously at startup; typed `BUNDLE_LISTENER_DOWN` when
-/// it is down. The web twin is `GET /canvas/bundle-base` (same shape, empty
-/// same-origin base).
-#[tauri::command]
-pub async fn canvas_bundle_base(
-    server: State<'_, Arc<StaticServer>>,
-) -> Result<IpcResult<CanvasBundleBase>, String> {
-    match server
-        .wait_for_base(std::time::Duration::from_secs(5))
-        .await
-    {
-        Some(base) => Ok(IpcResult::success(base)),
-        None => {
-            log::warn!("[canvas] bundle base requested while the listener is down");
-            Ok(IpcResult::error(
-                "canvas bundle listener is not running",
-                CODE_BUNDLE_LISTENER_DOWN,
-            ))
-        }
-    }
 }

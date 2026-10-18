@@ -20,8 +20,6 @@ use crate::web::capabilities::WriteFlags;
 
 fn web_app() -> Router {
     canvas_router(CanvasState {
-        pool: None,
-        web_auth: None,
         boundary: None,
         write_flags: WriteFlags {
             allow_remote_writes: false,
@@ -261,8 +259,6 @@ async fn desktop_commands_and_web_routes_answer_the_same_sequence_alike() {
 #[tokio::test]
 async fn the_persistence_routes_refuse_a_view_only_peer() {
     let app = canvas_router(CanvasState {
-        pool: None,
-        web_auth: None,
         boundary: None,
         write_flags: WriteFlags {
             allow_remote_writes: false,

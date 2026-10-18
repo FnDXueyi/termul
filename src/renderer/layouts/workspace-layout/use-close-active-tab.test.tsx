@@ -142,7 +142,7 @@ describe('useCloseActiveTab (menu Close Tab)', () => {
       type: 'canvas',
       id: 'canvas-p1',
       projectId: 'p1',
-      docPath: '/p/Plan.op'
+      docPath: '/p/Plan.figcraft'
     })
 
     expect(mockUnmountCanvas).not.toHaveBeenCalled()

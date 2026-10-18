@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -13,7 +12,6 @@ use super::static_server::{
     bundle_router, bundle_tokens, canvas_cookie_name, close_canvas, open_canvas, same_origin_base,
     serve_bundle, Access, BundleTokens, CanvasBundleBase, CookiePolicy, OpenRequest, StaticServer,
 };
-use crate::web::auth::{WebAuth, WebAuthToken};
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
 
@@ -208,42 +206,8 @@ fn bundle_base_has_the_same_shape_on_both_surfaces() {
     assert_eq!(keys(&web), keys(&desktop));
 }
 
-#[tokio::test]
-async fn web_route_reports_the_same_origin_base_behind_the_bearer() {
-    let router = web_router(Some(Arc::new(WebAuth::new(
-        WebAuthToken::new("bundle-base-token").unwrap(),
-    ))));
-    let denied = router
-        .clone()
-        .oneshot(
-            Request::get("/canvas/bundle-base")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-
-    let allowed = router
-        .oneshot(
-            Request::get("/canvas/bundle-base")
-                .header(header::AUTHORIZATION, "Bearer bundle-base-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(allowed.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_str(&body_text(allowed).await).unwrap();
-    assert_eq!(body["success"], true);
-    assert_eq!(body["data"]["baseUrl"], "");
-    assert_eq!(body["data"]["pinTag"], pinned_tag());
-}
-
-fn web_router(web_auth: Option<Arc<WebAuth>>) -> axum::Router {
+fn web_router() -> axum::Router {
     canvas_router::<()>(CanvasState {
-        pool: None,
-        web_auth,
         boundary: None,
         write_flags: WriteFlags {
             allow_remote_writes: false,
@@ -525,7 +489,7 @@ mod served_from_dev_dir {
         let token = bundle_tokens().issue(id).unwrap();
         let uri = format!("/canvas/{id}/?embed=kiosk&ct={token}");
 
-        let web = web_router(None)
+        let web = web_router()
             .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -551,7 +515,7 @@ mod served_from_dev_dir {
             .contains("SameSite=None"));
         assert_eq!(body_text(web).await, body_text(desktop).await);
 
-        for router in [web_router(None), bundle_router()] {
+        for router in [web_router(), bundle_router()] {
             let denied = router
                 .oneshot(
                     Request::get(format!("/canvas/{id}/app.js"))
