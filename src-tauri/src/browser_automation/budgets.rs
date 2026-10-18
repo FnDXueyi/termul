@@ -43,11 +43,10 @@ pub const CDP_ISSUE: Duration = secs(5);
 pub const CDP_RESULT: Duration = secs(15);
 /// One CDP command, issue plus result.
 pub const CDP_CALL: Duration = CDP_ISSUE.saturating_add(CDP_RESULT);
-/// JS bridge: how long a page may take to post an eval result back.
-pub const BRIDGE_EVAL: Duration = secs(20);
-/// One helper-script round trip on any engine: on WebView2 an undelivered
-/// CDP command falls back to the bridge once.
-pub const EVAL_STEP: Duration = CDP_ISSUE.saturating_add(BRIDGE_EVAL);
+/// One helper round trip on any engine, from the first engine call to the
+/// helper's result. On WebView2 it covers the frame lookup, the isolated
+/// world and the helper call.
+pub const EVAL_STEP: Duration = CDP_CALL;
 
 /// Per-verb action budgets, referenced by the action registry. Each is the
 /// worst case of the steps the verb runs.

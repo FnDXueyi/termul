@@ -9,7 +9,8 @@
 //! Layout: `core` owns the tab registry, consent, verb dispatch and reply
 //! shaping and drives engines only through the `engine::BrowserEngine`
 //! port. Per-OS adapters live under `engine/`: WebView2 (Windows, in-process
-//! CDP) and the JS-eval bridge (macOS/Linux, and the Windows fallback).
+//! CDP), WKWebView (macOS) and WebKitGTK (Linux), each running page helpers
+//! in an isolated script world.
 //!
 //! Logging: boundary/failure lines only — never page contents, cookies, or
 //! typed values (CWE-532).
@@ -96,8 +97,6 @@ pub trait BrowserHost: Send + Sync {
     }
     /// The user submitted a prompt in the session: clears Stop.
     fn user_turn(&self, _session_id: &str) {}
-    /// Resolve a pending eval bridge reply from `browser_agent_eval_result`.
-    fn resolve_eval(&self, nonce: &str, ok: bool, value: Option<String>) -> bool;
     /// The registered engine's frozen capability table and traits.
     fn engine_facts(&self) -> EngineFacts;
 }
@@ -166,15 +165,6 @@ pub fn stop_session(session_id: &str) -> Option<bool> {
 pub fn user_turn(session_id: &str) {
     if let Some(host) = browser_host() {
         host.user_turn(session_id);
-    }
-}
-
-/// `browser_agent_eval_result` command → resolve the pending eval waiter.
-/// Returns false when the nonce is unknown (stale/unrelated page report).
-pub fn eval_resolved(nonce: &str, ok: bool, value: Option<String>) -> bool {
-    match browser_host() {
-        Some(host) => host.resolve_eval(nonce, ok, value),
-        None => false,
     }
 }
 

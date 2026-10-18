@@ -351,26 +351,3 @@ fn duplicate_role_and_name_never_resolve() {
         Some("ref_ambiguous")
     );
 }
-
-#[test]
-fn snapshot_text_gets_host_refs_in_place_of_page_handles() {
-    let text = "- heading \"Title\"\n  - button \"Sign in\" @e1\n  - text \"call @e7 now\"\n  - link \"A \\\" @e2\" @e2 https://a.test/";
-    let mut seen = Vec::new();
-    let (out, count) = rewrite_snapshot_refs(text, |nodes| {
-        seen = nodes;
-        vec!["@e10".to_string(), "@e11".to_string()]
-    });
-    assert_eq!(count, 2);
-    assert_eq!(
-        seen,
-        [
-            node("button", "Sign in", "@e1"),
-            node("link", "A \\\" @e2", "@e2")
-        ],
-        "page text that looks like a handle is not a node"
-    );
-    assert_eq!(
-        out,
-        "- heading \"Title\"\n  - button \"Sign in\" @e10\n  - text \"call @e7 now\"\n  - link \"A \\\" @e2\" @e11 https://a.test/"
-    );
-}

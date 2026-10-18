@@ -2,10 +2,11 @@
 //! on every mutating reply, host facts under `tab`, and page-derived text
 //! only under the closed, untrusted `page` object.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ports::{CanonicalOrigin, TabProfile};
+use super::tabs::RefNode;
 use super::BrowserError;
 use crate::browser_automation::engine::{EngineError, EngineErrorKind};
 
@@ -178,10 +179,10 @@ pub(super) fn engine_error(err: EngineError, tab: &str) -> BrowserError {
     BrowserError::new(code, message).with_reason(reason)
 }
 
-/// Map a helper script's `{error: "…"}` result to a wire code. The text
-/// comes from the page's main world, so it never reaches the reply: a
-/// `stale_ref` prefix maps to `stale_ref` (take a fresh snapshot),
-/// anything else to `internal`.
+/// Map a helper script's `{error: "…"}` result to a wire code. Only the
+/// code reaches the reply, never the helper's text: a `stale_ref` prefix
+/// maps to `stale_ref` (take a fresh snapshot), anything else to
+/// `internal`.
 pub(super) fn eval_gate(out: &Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
     let Some(e) = out.get("error").and_then(Value::as_str) else {
         return Ok(());
@@ -220,20 +221,150 @@ pub(super) fn truncate_snapshot(text: &str) -> (String, bool) {
     }
 }
 
-/// Guard and shape a snapshot eval result into page data plus the ref
-/// count. The result must be a JSON object — anything else (null, string,
-/// …) is an `internal` error rather than a silently empty snapshot.
-pub(super) fn shape_snapshot(out: &Value) -> Result<(PageData, u64), BrowserError> {
-    if !out.is_object() {
-        return Err(BrowserError::internal("snapshot eval result was not an object"));
+/// The page outline the snapshot helper returns. Every string in it is
+/// page-controlled; the structure is the helper's.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+struct PageSnapshot {
+    url: String,
+    title: String,
+    items: Vec<SnapshotItem>,
+    /// The helper stopped at its item cap.
+    capped: bool,
+}
+
+/// One line of the outline. Only `Node` items are actionable.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SnapshotItem {
+    Node {
+        depth: usize,
+        role: String,
+        name: String,
+        /// The helper's structural locator for the element.
+        path: String,
+        #[serde(default)]
+        href: Option<String>,
+        #[serde(default, rename = "inputType")]
+        input_type: Option<String>,
+        #[serde(default)]
+        checked: Option<bool>,
+    },
+    Landmark {
+        depth: usize,
+        role: String,
+        name: String,
+    },
+    Text {
+        depth: usize,
+        text: String,
+    },
+}
+
+const SNAPSHOT_MAX_INDENT: usize = 32;
+const SNAPSHOT_CAP_LINE: &str = "…[snapshot line cap]";
+
+/// Page text that reads like a ref (`@e12`) gets a space after the `@`,
+/// so the refs the host minted are the only ref tokens in the outline.
+fn defang_refs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("@e") {
+        let digit_follows = rest[at + 2..].starts_with(|c: char| c.is_ascii_digit());
+        out.push_str(&rest[..at]);
+        out.push_str(if digit_follows { "@ e" } else { "@e" });
+        rest = &rest[at + 2..];
     }
-    let field = |k: &str| out.get(k).and_then(Value::as_str).unwrap_or_default();
-    let mut page = PageData::meta(field("url"), field("title"));
-    let (text, cut) = truncate_snapshot(field("text"));
+    out.push_str(rest);
+    out
+}
+
+/// Shape a snapshot helper result into page data plus the ref count: one
+/// outline line per item, with host refs minted by `mint` for its nodes in
+/// document order. A result that is not the helper's shape is an
+/// `internal` error rather than a silently empty snapshot.
+pub(super) fn shape_snapshot(
+    out: Value,
+    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
+) -> Result<(PageData, usize), BrowserError> {
+    let snapshot: PageSnapshot = serde_json::from_value(out)
+        .map_err(|_| BrowserError::internal("snapshot eval result was malformed"))?;
+    let (text, count) = format_snapshot(&snapshot, mint);
+    let mut page = PageData::meta(&snapshot.url, &snapshot.title);
+    let (text, cut) = truncate_snapshot(&text);
     page.snapshot = Some(text);
     page.truncated |= cut;
-    let refs = out.get("refs").and_then(Value::as_u64).unwrap_or(0);
-    Ok((page, refs))
+    Ok((page, count))
+}
+
+fn format_snapshot(
+    snapshot: &PageSnapshot,
+    mint: impl FnOnce(Vec<RefNode>) -> Vec<String>,
+) -> (String, usize) {
+    let nodes: Vec<RefNode> = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Node { role, name, path, .. } => Some(RefNode {
+                role: role.clone(),
+                name: name.clone(),
+                path: path.clone(),
+                frame: String::new(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let mut tokens = mint(nodes).into_iter();
+    let count = tokens.len();
+    let mut lines = Vec::with_capacity(snapshot.items.len() + 1);
+    for item in &snapshot.items {
+        let line = match item {
+            SnapshotItem::Node {
+                depth,
+                role,
+                name,
+                href,
+                input_type,
+                checked,
+                ..
+            } => {
+                let token = tokens.next().unwrap_or_default();
+                let mut line = format!("{}- {} \"{}\" {token}", indent(*depth), defang_refs(role), defang_refs(name));
+                if let Some(href) = href {
+                    line.push(' ');
+                    line.push_str(&defang_refs(href));
+                }
+                if let Some(t) = input_type {
+                    line.push_str(" type=");
+                    line.push_str(&defang_refs(t));
+                }
+                match checked {
+                    Some(true) => line.push_str(" checked"),
+                    Some(false) => line.push_str(" unchecked"),
+                    None => {}
+                }
+                line
+            }
+            SnapshotItem::Landmark { depth, role, name } if name.is_empty() => {
+                format!("{}- {}", indent(*depth), defang_refs(role))
+            }
+            SnapshotItem::Landmark { depth, role, name } => {
+                format!("{}- {} \"{}\"", indent(*depth), defang_refs(role), defang_refs(name))
+            }
+            SnapshotItem::Text { depth, text } => {
+                format!("{}- text \"{}\"", indent(*depth), defang_refs(text))
+            }
+        };
+        lines.push(line);
+    }
+    if snapshot.capped {
+        lines.push(SNAPSHOT_CAP_LINE.to_string());
+    }
+    (lines.join("\n"), count)
+}
+
+fn indent(depth: usize) -> String {
+    "  ".repeat(depth.min(SNAPSHOT_MAX_INDENT))
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ fn a_call_that_waits_for_consent_still_answers_before_the_child_gives_up() {
     assert_eq!(max_action, ACTION_CLICK);
     assert!(CONSENT_WAIT + max_action + MARGIN < ROUND_TRIP);
     assert_eq!(FRAME_BUDGET + MARGIN, ROUND_TRIP);
-    assert!(EVAL_STEP >= CDP_CALL && EVAL_STEP >= CDP_ISSUE + BRIDGE_EVAL);
+    assert!(EVAL_STEP >= CDP_CALL);
 }
 
 #[tokio::test(start_paused = true)]
