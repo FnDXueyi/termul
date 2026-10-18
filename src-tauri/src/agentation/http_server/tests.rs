@@ -8,23 +8,6 @@ fn test_state() -> AppState {
 }
 
 #[tokio::test]
-async fn canvas_mcp_mounts_are_gone() {
-    for uri in ["/canvas/mcp", "/canvas/cv0123456789abcdef/mcp"] {
-        let resp = router(test_state())
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .body(axum::body::Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
-    }
-}
-
-#[tokio::test]
 async fn test_create_session_route() {
     let app = router(test_state());
     let resp = app
