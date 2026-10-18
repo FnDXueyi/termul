@@ -1,7 +1,9 @@
 import { ChevronsLeft, ChevronsRight } from '@/components/icons'
+import { useTopRow } from '@/components/shell/top-row-context'
 import { useShortcutLabel, withShortcut } from '@/components/shell/use-shortcut-label'
 import { useSidePanelToggle } from '@/components/shell/use-side-panel-toggle'
 import { PANEL_ICON_BUTTON_CLASS } from '@/components/ui/panel-styles'
+import { cn } from '@/lib/utils'
 import { useFileExplorerVisible } from '@/stores/file-explorer-store'
 import { useActiveProject } from '@/stores/project-store'
 
@@ -50,21 +52,35 @@ export function useShowSidePanelVisible(): boolean {
   return !visible && hasPath
 }
 
+/** Whether {@link ShowSidePanelSlot} renders: the button, the traffic-light inset, or both. */
+export function useShowSidePanelSlotVisible(): boolean {
+  const inset = useTopRow()?.mainStartInsetPx ?? 0
+  return useShowSidePanelVisible() || inset > 0
+}
+
 /**
  * Start of the top-row bar that owns the Show side panel button (the leftmost
  * top-edge tab bar, the SSH header or the fallback bar, see `showPanelOwner`):
- * the button and a hairline, while {@link useShowSidePanelVisible}. Renders
- * nothing otherwise.
+ * the button and a hairline, while {@link useShowSidePanelVisible}. Under the
+ * macOS traffic lights it also pads its start (`mainStartInsetPx`), with or
+ * without the button. Renders nothing otherwise.
  */
 export function ShowSidePanelSlot(): React.JSX.Element | null {
-  if (!useShowSidePanelVisible()) return null
+  const inset = useTopRow()?.mainStartInsetPx ?? 0
+  const showButton = useShowSidePanelVisible()
+  if (!showButton && inset === 0) return null
   return (
     <div
-      className="flex h-full shrink-0 items-center gap-1 pl-2"
+      className={cn('flex h-full shrink-0 items-center gap-1', inset === 0 && 'pl-2')}
+      style={inset > 0 ? { paddingLeft: inset } : undefined}
       data-testid="show-side-panel-slot"
     >
-      <SidePanelVisibilityButton action="show" />
-      <span aria-hidden className="ml-1 h-5 w-px shrink-0 bg-border/60" />
+      {showButton && (
+        <>
+          <SidePanelVisibilityButton action="show" />
+          <span aria-hidden className="ml-1 h-5 w-px shrink-0 bg-border/60" />
+        </>
+      )}
     </div>
   )
 }

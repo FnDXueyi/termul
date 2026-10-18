@@ -114,12 +114,12 @@ interface ProjectProviderSettingsProps {
   claude: ProjectClaudeAccountDraft
   /** The user changed a choice (marks the Project Settings form dirty). */
   onChange: () => void
-  /** Open Settings → Provider to add or sign in to accounts. */
+  /** Open Preferences → Accounts to add or sign in to accounts. */
   onManageAccounts: () => void
 }
 
 /**
- * Project Settings → Provider: one pick-one list per provider ("Follow
+ * Project settings → Accounts: one pick-one list per provider ("Follow
  * default" first, then each Account), and the one action that fixes a problem
  * with the chosen Account. Claude Code is the first provider.
  */

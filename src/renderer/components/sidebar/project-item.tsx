@@ -2,6 +2,7 @@ import type { GitDiffStat } from '@shared/types/ipc.types'
 import { type KeyboardEvent, memo, useEffect, useRef } from 'react'
 import { Settings } from '@/components/icons'
 import { ProjectIcon } from '@/components/ProjectIcon'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { Kbd } from '@/components/ui/kbd'
@@ -145,18 +146,19 @@ export const ProjectItem = memo(function ProjectItem({
                   )}
                   data-testid="project-row-actions"
                 >
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onSettingsClick()
-                    }}
-                    className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors duration-150 ease-out hover:bg-foreground/[0.03] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    title="Project settings"
-                    aria-label={`Settings for ${project.name}`}
-                  >
-                    <Settings size={12} />
-                  </button>
+                  <RailTooltip label="Project settings">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onSettingsClick()
+                      }}
+                      className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors duration-150 ease-out hover:bg-foreground/[0.03] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      aria-label={`Settings for ${project.name}`}
+                    >
+                      <Settings size={12} />
+                    </button>
+                  </RailTooltip>
                   {shortcut && (
                     <Kbd className="inline-flex h-4.5 shrink-0 items-center px-1">{shortcut}</Kbd>
                   )}

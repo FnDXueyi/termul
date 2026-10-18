@@ -61,7 +61,19 @@ export function useHomeDirectory(): string {
 }
 
 /**
+ * The project registry stores Windows roots in verbatim form (`\\?\D:\proj`,
+ * `\\?\UNC\srv\share`). The prefix is a Win32 API detail, so drop it for
+ * display and keep the separators the path came with.
+ */
+function stripVerbatimPrefix(path: string): string {
+  return path
+    .replace(/^[\\/]{2}\?[\\/]UNC[\\/]/i, (prefix) => prefix.slice(0, 2))
+    .replace(/^[\\/]{2}\?[\\/]/, '')
+}
+
+/**
  * Format a path for display in the status bar
+ * - Drops the Windows verbatim prefix
  * - Replaces home directory with ~
  * - Truncates long paths with ellipsis
  */
@@ -72,12 +84,12 @@ export function formatPath(
 ): string {
   if (!fullPath) return ''
 
-  let formatted = fullPath
+  let formatted = stripVerbatimPrefix(fullPath)
 
   if (homeDir) {
     // Normalize both paths to use forward slashes for comparison
     const normalizedHome = homeDir.replace(/\\/g, '/')
-    const normalizedPath = fullPath.replace(/\\/g, '/')
+    const normalizedPath = formatted.replace(/\\/g, '/')
 
     // Check if path starts with home dir followed by a separator or is exactly home dir
     if (normalizedPath === normalizedHome || normalizedPath.startsWith(`${normalizedHome}/`)) {
