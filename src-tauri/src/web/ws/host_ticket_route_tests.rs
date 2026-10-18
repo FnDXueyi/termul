@@ -257,9 +257,6 @@ impl crate::browser_automation::BrowserHost for StopHost {
         Box::pin(async { Ok(crate::browser_automation::Success::default()) })
     }
     fn end_session(&self, _session_id: &str) {}
-    fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
-        false
-    }
     fn engine_facts(&self) -> crate::browser_automation::engine::EngineFacts {
         crate::browser_automation::engine::EngineFacts::all_trusted()
     }

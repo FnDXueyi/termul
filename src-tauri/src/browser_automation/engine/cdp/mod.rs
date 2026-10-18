@@ -2,21 +2,27 @@
 //! `CallDevToolsProtocolMethod` is the only transport today; a future
 //! CDP-speaking runtime reuses this module unchanged.
 //!
-//! Only commands that never reached the page may be retried on another
-//! channel. A script that ran (page exception) or may have run (no
-//! reply) could double-apply side effects when re-executed: fill re-fires
-//! input/change events, press Enter re-clicks. So only
-//! [`EngineError::retryable`] failures are retried.
+//! Helpers run in an isolated world of the main frame: the page shares
+//! its DOM with that world but none of its globals, prototypes or
+//! wrappers, and their value comes back as the call's own return value.
+//!
+//! [`EngineError::retryable`] is true only for commands that provably
+//! never reached the page. A script that ran (page exception) or may have
+//! run (no reply) could double-apply side effects when re-executed: fill
+//! re-fires input/change events, press Enter re-clicks.
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use super::assets::{Script, WORLD_NAME};
 use super::{EngineError, EngineErrorKind, EngineFuture, Point};
 
 /// Closed CDP method allow-list: a transport can issue nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CdpMethod {
-    RuntimeEvaluate,
+    PageGetFrameTree,
+    PageCreateIsolatedWorld,
+    RuntimeCallFunctionOn,
     InputDispatchMouseEvent,
     PageCaptureScreenshot,
 }
@@ -24,7 +30,9 @@ pub enum CdpMethod {
 impl CdpMethod {
     pub fn as_str(self) -> &'static str {
         match self {
-            CdpMethod::RuntimeEvaluate => "Runtime.evaluate",
+            CdpMethod::PageGetFrameTree => "Page.getFrameTree",
+            CdpMethod::PageCreateIsolatedWorld => "Page.createIsolatedWorld",
+            CdpMethod::RuntimeCallFunctionOn => "Runtime.callFunctionOn",
             CdpMethod::InputDispatchMouseEvent => "Input.dispatchMouseEvent",
             CdpMethod::PageCaptureScreenshot => "Page.captureScreenshot",
         }
@@ -54,18 +62,21 @@ pub fn issue_timeout_retryable(state: &AtomicU8) -> bool {
         .is_ok()
 }
 
-/// `Runtime.evaluate` params. `returnByValue` ships the completion value
-/// back as JSON; `awaitPromise` resolves promise results before replying.
-pub fn evaluate_params(expression: &str) -> Value {
+/// `Runtime.callFunctionOn` params: the helper as a function of one
+/// argument, called in the isolated context with its parameters passed by
+/// value. `returnByValue` ships the result back as JSON.
+pub fn call_params(script: &Script, context_id: i64) -> Value {
     json!({
-        "expression": expression,
+        "functionDeclaration": format!("function (p) {{\n{}\n}}", script.helper.body),
+        "executionContextId": context_id,
+        "arguments": [{ "value": script.params }],
         "returnByValue": true,
         "awaitPromise": true,
     })
 }
 
-/// Parse a `Runtime.evaluate` reply: the completion value (an absent
-/// `value` key means `undefined` → null, parity with the JS bridge), or a
+/// Parse a `Runtime.callFunctionOn` reply: the return value (an absent
+/// `value` key means `undefined`, read as null), or a
 /// terminal failure. Protocol errors, page exceptions and malformed
 /// replies all mean the command was processed, so the script may have run.
 pub fn parse_evaluate_result(out: &Value) -> Result<Value, EngineError> {
@@ -82,14 +93,43 @@ pub fn parse_evaluate_result(out: &Value) -> Result<Value, EngineError> {
     }
 }
 
-/// `Runtime.evaluate` through `transport`.
+/// The main frame's id from a `Page.getFrameTree` reply.
+pub fn main_frame_id(tree: &Value) -> Option<&str> {
+    tree.pointer("/frameTree/frame/id").and_then(Value::as_str)
+}
+
+/// The isolated world's context id from a `Page.createIsolatedWorld` reply.
+pub fn world_context_id(world: &Value) -> Option<i64> {
+    world.get("executionContextId").and_then(Value::as_i64)
+}
+
+/// Run `script` in the main frame's isolated world. The world is looked
+/// up per call: each new document gets a new context, and asking for the
+/// named world again returns the current document's one. A failure
+/// before the call itself never ran the helper, so it stays retryable.
 pub async fn evaluate(
     transport: &dyn CdpTransport,
     tab: &str,
-    expression: &str,
+    script: &Script,
 ) -> Result<Value, EngineError> {
+    let not_run = |e: EngineError| EngineError::new(e.kind, true);
+    let malformed = EngineError::new(EngineErrorKind::Malformed, true);
+    let tree = transport
+        .call(tab, CdpMethod::PageGetFrameTree, json!({}))
+        .await
+        .map_err(not_run)?;
+    let frame = main_frame_id(&tree).ok_or(malformed)?;
+    let world = transport
+        .call(
+            tab,
+            CdpMethod::PageCreateIsolatedWorld,
+            json!({ "frameId": frame, "worldName": WORLD_NAME }),
+        )
+        .await
+        .map_err(not_run)?;
+    let context = world_context_id(&world).ok_or(malformed)?;
     let out = transport
-        .call(tab, CdpMethod::RuntimeEvaluate, evaluate_params(expression))
+        .call(tab, CdpMethod::RuntimeCallFunctionOn, call_params(script, context))
         .await?;
     parse_evaluate_result(&out)
 }

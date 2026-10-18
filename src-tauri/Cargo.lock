@@ -6831,7 +6831,7 @@ dependencies = [
 
 [[package]]
 name = "termul-manager"
-version = "0.4.21"
+version = "0.4.50"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -6839,6 +6839,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "block2",
  "chrono",
  "flate2",
  "futures",
@@ -6847,6 +6848,7 @@ dependencies = [
  "getrandom 0.2.17",
  "gtk",
  "hmac 0.13.0",
+ "javascriptcore-rs",
  "keyring",
  "lazy_static",
  "libc",
@@ -6856,6 +6858,9 @@ dependencies = [
  "notify",
  "notify-rust",
  "oauth2",
+ "objc2",
+ "objc2-foundation",
+ "objc2-web-kit",
  "parking_lot",
  "portable-pty",
  "regex",
@@ -6895,6 +6900,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webkit2gtk",
  "webview2-com",
  "winapi",
  "windows-core 0.62.2",

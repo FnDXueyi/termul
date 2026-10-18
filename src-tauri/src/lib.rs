@@ -184,7 +184,7 @@ pub mod conformance_support {
         PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
     };
     pub use crate::browser_automation::{
-        budgets, create_tab, dispatch, eval_resolved, session_ended, set_browser_host,
+        budgets, create_tab, dispatch, session_ended, set_browser_host,
         BrowserCall, DesktopBrowserHost, HostServices,
     };
     pub use crate::browser_automation::engine::events::{NavPolicy, NavVerdict, TabEvents};
@@ -1947,9 +1947,7 @@ pub fn run() {
             commands::browser_tab_open_devtools,
             // Agentation toolbar injection (on-demand)
             commands::browser_tab_inject_agentation,
-            // Agent browser automation (eval bridge reply, host consent
-            // tickets, Stop)
-            commands::browser_agent_eval_result,
+            // Agent browser automation (host consent tickets, Stop)
             commands::browser_ticket_respond,
             commands::browser_stop,
             // Worktree commands

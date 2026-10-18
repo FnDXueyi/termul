@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedPrompt } from '@/stores/acp-store'
 
@@ -105,14 +105,12 @@ describe('PromptQueuePanel', () => {
       const removeSecond = screen.getByRole('button', {
         name: 'Remove from queue: Then update the docs'
       })
-      // Role queries skip hidden elements, so a match is already exposed to a
-      // screen reader. `toBeVisible` would also read the 150ms fade-in opacity.
-      expect(
-        screen.getByRole('button', { name: 'Send now: Then update the docs' })
-      ).toBeInTheDocument()
-      expect(
-        screen.getByRole('button', { name: 'Remove from queue: Fix the lint errors' })
-      ).toBeInTheDocument()
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Send now: Then update the docs' })).toBeVisible()
+        expect(
+          screen.getByRole('button', { name: 'Remove from queue: Fix the lint errors' })
+        ).toBeVisible()
+      })
 
       fireEvent.click(sendFirst)
       expect(onSendNow).toHaveBeenCalledWith('q1')

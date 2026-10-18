@@ -23,7 +23,7 @@ const ALL_VERBS: [&str; 16] = [
     "reload",
 ];
 
-fn bridge_like() -> EngineFacts {
+fn no_world_like() -> EngineFacts {
     EngineFacts {
         capabilities: CapabilityTable::uniform(Support::Synthetic)
             .with(CapabilityId::Screenshot, Support::Unavailable("no screenshots here")),
@@ -142,7 +142,7 @@ fn quoted_numbers_for_numeric_keys_are_read_as_numbers() {
 
 #[test]
 fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
-    let facts = bridge_like();
+    let facts = no_world_like();
     let err = admit("teleport", &mut Value::Null, &facts).unwrap_err();
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
@@ -211,7 +211,7 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
 
 #[test]
 fn schema_omits_withdrawn_verbs_and_says_which_and_why_results_are_page_controlled() {
-    let schema = schema(Some(&bridge_like()));
+    let schema = schema(Some(&no_world_like()));
     let verbs = action_enum(&schema);
     assert!(!verbs.contains(&"screenshot".to_string()));
     assert_eq!(verbs.len(), ALL_VERBS.len() - 1);
@@ -239,7 +239,7 @@ fn schema_without_a_host_fails_closed() {
 fn schema_rev_tracks_the_served_content() {
     let trusted = EngineFacts::all_trusted();
     assert_eq!(schema(Some(&trusted)).schema_rev, schema(Some(&trusted)).schema_rev);
-    assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&bridge_like())).schema_rev);
+    assert_ne!(schema(Some(&trusted)).schema_rev, schema(Some(&no_world_like())).schema_rev);
     assert_ne!(schema(Some(&trusted)).schema_rev, schema(None).schema_rev);
 }
 
@@ -282,7 +282,7 @@ fn description_says_where_results_live_and_lists_every_failure_code() {
 
 #[test]
 fn a_withdrawn_verb_drops_its_result_line() {
-    let description = schema(Some(&bridge_like())).description;
+    let description = schema(Some(&no_world_like())).description;
     assert!(!description.contains("data.path"), "{description}");
     assert!(description.contains("data.refs"));
 }

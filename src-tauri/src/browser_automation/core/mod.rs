@@ -362,10 +362,6 @@ impl BrowserHost for DesktopBrowserHost {
             );
         }
     }
-
-    fn resolve_eval(&self, nonce: &str, ok: bool, value: Option<String>) -> bool {
-        self.engine.deliver_script_reply(nonce, ok, value)
-    }
 }
 
 #[cfg(test)]

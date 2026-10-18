@@ -16,6 +16,7 @@ use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 const FORM_READY: &str = "Conformance form";
 const DELAYED_READY: &str = "Delayed element";
 const REDIRECT_READY: &str = "Redirect target reached";
+const TAMPER_READY: &str = "Tamper fixture ready";
 
 /// How long a screenshot is retried while the new tab has nothing to capture.
 const SCREENSHOT_RETRY: Duration = Duration::from_secs(10);
@@ -47,6 +48,7 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("back", &["snapshot"]),
     cap("reload", &["snapshot"]),
     cap("stale_ref", &["snapshot"]),
+    cap("tamper", &["snapshot"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -346,6 +348,39 @@ async fn stale_ref(c: &Ctx<'_>) -> CaseResult {
     )
 }
 
+/// A page that overrides the prototypes and globals helpers would use, and
+/// traps any helper state that reaches its world, changes no result.
+async fn tamper(c: &Ctx<'_>) -> CaseResult {
+    c.open("/tamper.html", TAMPER_READY).await?;
+    let snap = c.snapshot().await?;
+    if snap.title != "Tamper fixture" {
+        return Err(mismatch(format!("snapshot title is {}", snap.title)));
+    }
+    for line in [
+        "- textbox \"Secret field\" @e",
+        "- button \"Real button\" @e",
+        "Leaks: none",
+    ] {
+        if !snap.text.contains(line) {
+            return Err(mismatch(format!("snapshot lacks `{line}`: {}", snap.text)));
+        }
+    }
+    if snap.text.contains("FORGED") {
+        return Err(mismatch(format!("snapshot read forged values: {}", snap.text)));
+    }
+    let field = find_ref(&snap.text, "textbox", "Secret field")
+        .ok_or_else(|| mismatch("no Secret field ref"))?;
+    c.call("fill", json!({ "ref": field, "value": "Ada" })).await?;
+    c.click("button", "Real button").await?;
+    let after = c.snapshot().await?;
+    for line in ["Result: clicked real [Ada]", "Leaks: none"] {
+        if !after.text.contains(line) {
+            return Err(mismatch(format!("after fill and click, snapshot lacks `{line}`: {}", after.text)));
+        }
+    }
+    Ok(())
+}
+
 async fn screenshot(c: &Ctx<'_>) -> CaseResult {
     c.call("new_tab", json!({ "url": c.fixtures.url("/form.html") }))
         .await?;
@@ -424,6 +459,7 @@ pub async fn run(
         "back" => back(&ctx).await,
         "reload" => reload(&ctx).await,
         "stale_ref" => stale_ref(&ctx).await,
+        "tamper" => tamper(&ctx).await,
         "screenshot" => screenshot(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };

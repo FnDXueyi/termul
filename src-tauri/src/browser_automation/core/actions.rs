@@ -10,12 +10,11 @@ use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
 use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, Success, TabFacts};
 use super::surface::HistoryStep;
-use super::tabs::{
-    mint_agent_label, rewrite_snapshot_refs, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale,
-};
+use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
 use crate::browser_automation::budgets::{self, Deadline};
-use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
+use crate::browser_automation::engine::assets::{self, Script};
+use crate::browser_automation::engine::{CapabilityId, InputMode, Point, Support};
 use crate::browser_automation::BrowserCall;
 
 /// Validate + normalize a navigation target. http(s) only.
@@ -90,10 +89,9 @@ fn mutated(fidelity: Fidelity, tab: TabFacts) -> Success {
 }
 
 /// A ref resolved against the tab's current document. `node.path` is the
-/// page helper's handle for the element.
+/// page helper's locator for the element.
 struct ResolvedRef {
     node: RefNode,
-    epoch: u64,
 }
 
 impl DesktopBrowserHost {
@@ -143,16 +141,12 @@ impl DesktopBrowserHost {
             .resolve(token, record.epoch)
             .map_err(|why| stale_ref_error(token, why))?
             .clone();
-        Ok(ResolvedRef {
-            node,
-            epoch: record.epoch,
-        })
+        Ok(ResolvedRef { node })
     }
 
-    /// Run a helper script through the engine. A failure is the eval's
-    /// final outcome (the engine already applied its one safe fallback).
-    async fn eval(&self, tab_id: &str, expr: &str) -> Result<Value, BrowserError> {
-        self.engine.evaluate(tab_id, expr).await.map_err(|e| {
+    /// Run a helper through the engine.
+    async fn eval(&self, tab_id: &str, script: Script) -> Result<Value, BrowserError> {
+        self.engine.evaluate(tab_id, script).await.map_err(|e| {
             // Tab id + kind only: eval failures can quote page content.
             log::warn!("[browser-agent] eval failed on tab {tab_id} ({:?})", e.kind);
             engine_error(e, tab_id)
@@ -199,7 +193,7 @@ impl DesktopBrowserHost {
     /// slow SPA still settles Ok; the agent retries reads on demand.
     async fn settle(&self, tab_id: &str, settle: Deadline) {
         loop {
-            let state = self.eval(tab_id, assets::READY_STATE).await.ok();
+            let state = self.eval(tab_id, assets::ready_state()).await.ok();
             if matches!(state.as_ref().and_then(Value::as_str), Some("complete" | "interactive")) {
                 return;
             }
@@ -253,9 +247,8 @@ impl DesktopBrowserHost {
             }
             Verb::Snapshot => {
                 let label = self.resolve_tab(session_id, args)?;
-                let out = self.eval(&label, &assets::snapshot_script()).await?;
-                let out = self.mint_snapshot_refs(&label, out)?;
-                let (page, refs) = shape_snapshot(&out)?;
+                let out = self.eval(&label, assets::snapshot()).await?;
+                let (page, refs) = self.mint_snapshot(&label, out)?;
                 Ok(Success {
                     tab: Some(self.tab_facts(&label)?),
                     page: Some(page),
@@ -288,8 +281,7 @@ impl DesktopBrowserHost {
                     .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
                 let resolved = self.resolve_ref(&label, token)?;
                 self.revalidate(&label, token, &resolved).await?;
-                let script = assets::fill_ref(&resolved.node.path, value, resolved.epoch);
-                let out = self.eval(&label, &script).await?;
+                let out = self.eval(&label, assets::fill(&resolved.node.path, value)).await?;
                 eval_gate(&out, Some(token))?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
@@ -297,18 +289,25 @@ impl DesktopBrowserHost {
                 let label = self.resolve_tab(session_id, args)?;
                 // `ref` is optional for type/press/scroll (they fall back to
                 // the focused element or the page).
-                let token = ref_arg(args)?;
-                let mut page_args = args.clone();
-                let mut epoch = self.tab_facts(&label)?.epoch;
+                let token = match verb {
+                    Verb::Hover => Some(required_ref(args)?),
+                    _ => ref_arg(args)?,
+                };
+                let mut path = None;
                 if let Some(token) = token {
                     let resolved = self.resolve_ref(&label, token)?;
                     self.revalidate(&label, token, &resolved).await?;
-                    page_args["ref"] = Value::String(resolved.node.path.clone());
-                    epoch = resolved.epoch;
+                    path = Some(resolved.node.path);
                 }
-                let out = self
-                    .eval(&label, &assets::interaction(&call.action, &page_args, epoch))
-                    .await?;
+                let path = path.as_deref();
+                let text = |key| args.get(key).and_then(Value::as_str);
+                let script = match verb {
+                    Verb::Type => assets::type_text(path, text("text").unwrap_or_default()),
+                    Verb::Press => assets::press(path, text("key").unwrap_or("Enter")),
+                    Verb::Scroll => assets::scroll(path, args.get("dy").and_then(Value::as_f64).unwrap_or(600.0)),
+                    _ => assets::hover(path.unwrap_or_default()),
+                };
+                let out = self.eval(&label, script).await?;
                 eval_gate(&out, token)?;
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
@@ -418,29 +417,21 @@ impl DesktopBrowserHost {
         }
     }
 
-    /// Mint host refs for a snapshot and put them into its text in place
-    /// of the page helper's own handles.
-    fn mint_snapshot_refs(&self, label: &str, mut out: Value) -> Result<Value, BrowserError> {
-        let Some(text) = out.get("text").and_then(Value::as_str) else {
-            return Ok(out);
-        };
+    /// Shape a snapshot helper result, with host refs minted for its
+    /// nodes on the tab's current document.
+    fn mint_snapshot(&self, label: &str, out: Value) -> Result<(PageData, usize), BrowserError> {
         let mut registry = self.registry.lock();
         let record = registry
             .get_mut(label)
             .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?;
         let epoch = record.epoch;
-        let (text, minted) = rewrite_snapshot_refs(text, |nodes| record.refs.mint_snapshot(epoch, nodes));
-        out["text"] = Value::String(text);
-        out["refs"] = json!(minted);
-        Ok(out)
+        shape_snapshot(out, |nodes| record.refs.mint_snapshot(epoch, nodes))
     }
 
     /// Check the page element behind `resolved` still has the role and
     /// name its ref was minted for.
     async fn revalidate(&self, label: &str, token: &str, resolved: &ResolvedRef) -> Result<Value, BrowserError> {
-        let out = self
-            .eval(label, &assets::resolve_ref(&resolved.node.path, resolved.epoch))
-            .await?;
+        let out = self.eval(label, assets::resolve(&resolved.node.path)).await?;
         eval_gate(&out, Some(token))?;
         let role = out.get("role").and_then(Value::as_str);
         let name = out.get("name").and_then(Value::as_str);
@@ -466,7 +457,7 @@ impl DesktopBrowserHost {
         let wait = Deadline::after(deadline.clamp(budgets::WAIT_MAX));
         loop {
             let found = self
-                .eval(&label, &assets::contains_text(text))
+                .eval(&label, assets::contains_text(text))
                 .await
                 .ok()
                 .and_then(|v| v.as_bool())
@@ -519,9 +510,7 @@ impl DesktopBrowserHost {
                 ),
             }
         }
-        let out = self
-            .eval(label, &assets::dom_click(&resolved.node.path, resolved.epoch))
-            .await?;
+        let out = self.eval(label, assets::click(&resolved.node.path)).await?;
         eval_gate(&out, Some(token))?;
         Ok(Fidelity::Synthetic)
     }

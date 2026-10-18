@@ -3,7 +3,6 @@ use super::*;
 /// Alias for the shared test lock (see `TEST_HOST_LOCK`).
 use super::TEST_HOST_LOCK as HOST_LOCK;
 use serde_json::json;
-use uuid::Uuid;
 
 fn call(action: &str, args: Value) -> BrowserCall {
     BrowserCall {
@@ -39,9 +38,6 @@ fn dispatch_without_host_fails_closed() {
 fn hooks_without_host_are_noops() {
     let _g = HOST_LOCK.lock().unwrap();
     clear_browser_host();
-    // Real nonces/request ids are `Uuid`s — keep the test values in the
-    // same shape (and avoid hard-coded literal nonces).
-    assert!(!eval_resolved(&Uuid::new_v4().to_string(), true, None));
     assert_eq!(stop_session("s1"), None, "no host means no stop to apply");
     user_turn("s1");
     session_ended("s1");
@@ -84,9 +80,6 @@ fn registered_host_routes_dispatch_and_session_end() {
         }
         fn user_turn(&self, session_id: &str) {
             self.turns.lock().push(session_id.to_string());
-        }
-        fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
-            false
         }
         fn engine_facts(&self) -> engine::EngineFacts {
             engine::EngineFacts::all_trusted()
@@ -163,7 +156,8 @@ fn layering_keeps_platform_code_inside_engine_adapters() {
         ("core", &platform_markers[..]),
         ("engine/cdp", &platform_markers[..]),
         ("engine/webview2", &adapter_markers[..]),
-        ("engine/jsbridge", &adapter_markers[..]),
+        ("engine/wkwebview", &adapter_markers[..]),
+        ("engine/webkitgtk", &adapter_markers[..]),
     ] {
         for entry in std::fs::read_dir(root.join(dir)).expect("layer dir exists") {
             let path = entry.expect("dir entry").path();

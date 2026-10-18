@@ -2,18 +2,22 @@
 //! capability, trait and error types every adapter reports in.
 //!
 //! Dependency direction: the core depends on this module; adapters
-//! (`webview2`, `webkitgtk`, `wkwebview`, `jsbridge`) implement it and
-//! never import core types. Tab events flow back through [`events`].
-//! Platform crates and per-OS code live only inside the adapter
-//! directories; `cdp` holds engine-neutral CDP logic over `CdpTransport`.
+//! (`webview2`, `webkitgtk`, `wkwebview`) implement it and never import
+//! core types. Tab events flow back through [`events`]. Platform crates
+//! and per-OS code live only inside the adapter directories; `cdp` holds
+//! engine-neutral CDP logic over `CdpTransport`.
+//!
+//! Helper results reach the host only as engine eval return values from
+//! an isolated script world. No page-callable channel carries them.
 
 pub mod assets;
 #[cfg(any(test, target_os = "windows"))]
 pub mod cdp;
 pub mod events;
 pub mod hooks;
-mod jsbridge;
 pub mod profile;
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+mod string_eval;
 #[cfg(target_os = "windows")]
 mod webview2;
 #[cfg(target_os = "linux")]
@@ -29,6 +33,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::browser_tab_manager::BrowserTabManager;
+use assets::Script;
 
 /// Closed set of engine capabilities. Verbs name the capabilities they
 /// need; adapters declare a tier for each one.
@@ -107,10 +112,6 @@ impl CapabilityId {
 
 /// How an engine supports one capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "only the WebView2 adapter declares Trusted tiers")
-)]
 pub enum Support {
     /// Real engine input or a native engine API.
     Trusted,
@@ -202,7 +203,7 @@ pub struct Point {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(target_os = "windows"),
-    allow(dead_code, reason = "Protocol and Malformed come from the CDP adapter")
+    allow(dead_code, reason = "Protocol comes from the CDP adapter")
 )]
 pub enum EngineErrorKind {
     /// The tab label resolves to no webview.
@@ -243,19 +244,15 @@ pub type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EngineError
 pub trait BrowserEngine: Send + Sync {
     /// Frozen at construction, before the host registers.
     fn facts(&self) -> &EngineFacts;
-    /// Run a helper script from [`assets`] and return its JSON completion
-    /// value (`isolated_eval`; [`EngineTraits::isolated_world`] says which
-    /// world it runs in).
-    fn evaluate<'a>(&'a self, tab: &'a str, script: &'a str) -> EngineFuture<'a, Value>;
+    /// Run a helper from [`assets`] with its parameters in the isolated
+    /// world and return its JSON value (`isolated_eval`).
+    fn evaluate<'a>(&'a self, tab: &'a str, script: Script) -> EngineFuture<'a, Value>;
     /// Click at a main-frame point (`pointer_click`). Adapters honour the
     /// mode or return `Unsupported`; they never substitute another mode.
     fn pointer_click<'a>(&'a self, tab: &'a str, at: Point, mode: InputMode)
         -> EngineFuture<'a, ()>;
     /// PNG bytes of the visible viewport (`screenshot`).
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>>;
-    /// Deliver a page-invoked eval reply (`browser_agent_eval_result`).
-    /// Returns false when the nonce is unknown.
-    fn deliver_script_reply(&self, nonce: &str, ok: bool, value: Option<String>) -> bool;
 }
 
 /// The engine adapter for this desktop OS.
@@ -264,9 +261,13 @@ pub fn desktop_engine(tabs: Arc<BrowserTabManager>) -> Arc<dyn BrowserEngine> {
     {
         Arc::new(webview2::WebView2Engine::new(tabs))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        Arc::new(jsbridge::JsBridgeEngine::new(tabs))
+        Arc::new(wkwebview::WkWebViewEngine::new(tabs))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(webkitgtk::WebKitGtkEngine::new(tabs))
     }
 }
 

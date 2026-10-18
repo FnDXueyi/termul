@@ -35,21 +35,6 @@ const MAIN_WEBVIEW_READY_BUDGET: Duration = Duration::from_secs(20);
 const EXIT_UNEXPECTED: i32 = 1;
 const EXIT_HARNESS: i32 = 2;
 
-#[tauri::command]
-async fn browser_agent_eval_result(
-    tab_id: String,
-    nonce: String,
-    ok: bool,
-    value: Option<String>,
-    webview: tauri::Webview,
-) -> Result<(), String> {
-    if webview.label() != tab_id {
-        return Err(format!("caller {} is not tab {tab_id}", webview.label()));
-    }
-    termul_manager_lib::conformance_support::eval_resolved(&nonce, ok, value);
-    Ok(())
-}
-
 fn expected_for(os: &str) -> &'static str {
     match os {
         "windows" => include_str!("expected/windows.json"),
@@ -177,7 +162,6 @@ fn main() {
     let shell_url = fixtures.url("/");
 
     let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![browser_agent_eval_result])
         .setup(move |app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(shell_url.parse()?))
                 .title("Browser conformance")

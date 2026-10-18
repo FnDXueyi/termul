@@ -1,7 +1,6 @@
 //! WebView2 adapter (Windows): in-process CDP through
 //! `ICoreWebView2.CallDevToolsProtocolMethod` (no debug port, no sockets)
-//! for eval, trusted input and screenshots, with the JS bridge as the one
-//! fallback for eval commands that never reached the page.
+//! for isolated-world eval, trusted input and screenshots.
 //!
 //! `ICoreWebView2` is !Send/!Sync, so every call is issued inside
 //! `with_webview` (the closure runs on the UI thread that owns the COM
@@ -18,13 +17,13 @@ use tokio::sync::oneshot;
 use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
 use windows_core::HSTRING;
 
+use super::assets::Script;
 use super::cdp::{self, CdpMethod, CdpTransport, CALL_ISSUED, CALL_PENDING};
-use super::jsbridge::{self, JsBridge};
 use super::{
     BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
-    EngineFuture, InputMode, Point, Support,
+    EngineFuture, EngineTraits, InputMode, Point, Support,
 };
-use crate::browser_automation::budgets::{CDP_ISSUE, CDP_RESULT};
+use crate::browser_automation::budgets::{CDP_ISSUE, CDP_RESULT, EVAL_STEP};
 use crate::browser_tab_manager::BrowserTabManager;
 
 /// The WebView2 CDP transport over the pane's tab webviews.
@@ -74,8 +73,7 @@ async fn call(
                 return;
             };
             // The caller may already have given up (issue-phase timeout) and
-            // run the bridge fallback — issuing now would execute the script
-            // a second time.
+            // reported the command as never issued.
             if issue_state
                 .compare_exchange(CALL_PENDING, CALL_ISSUED, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
@@ -116,34 +114,33 @@ async fn call(
     serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed, false))
 }
 
-/// WebView2 engine: CDP first, one JS-bridge fallback for undelivered
-/// eval commands.
+/// WebView2 engine over in-process CDP.
 pub struct WebView2Engine {
     transport: WebView2Transport,
-    bridge: JsBridge,
     facts: EngineFacts,
 }
 
 impl WebView2Engine {
     pub fn new(tabs: Arc<BrowserTabManager>) -> Self {
         Self {
-            transport: WebView2Transport { tabs: tabs.clone() },
-            bridge: JsBridge::new(tabs),
+            transport: WebView2Transport { tabs },
             facts: EngineFacts {
                 capabilities: capability_table(),
-                traits: jsbridge::MAIN_WORLD_TRAITS,
+                traits: EngineTraits {
+                    isolated_world: true,
+                    background_render: false,
+                    network_observe: false,
+                },
             },
         }
     }
 }
 
-/// What this adapter implements today. Eval rides CDP `Runtime.evaluate`
-/// in the page's main world, so it is declared with the same tier as the
-/// bridge engine until an isolated world exists; DOM-event verbs are
-/// synthetic.
+/// What this adapter implements today: isolated-world eval, trusted
+/// clicks and screenshots; the DOM-event verbs are synthetic.
 pub fn capability_table() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented on the WebView2 engine yet")
-        .with(CapabilityId::IsolatedEval, Support::Synthetic)
+        .with(CapabilityId::IsolatedEval, Support::Trusted)
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
@@ -156,21 +153,11 @@ impl BrowserEngine for WebView2Engine {
         &self.facts
     }
 
-    fn evaluate<'a>(&'a self, tab: &'a str, script: &'a str) -> EngineFuture<'a, Value> {
+    fn evaluate<'a>(&'a self, tab: &'a str, script: Script) -> EngineFuture<'a, Value> {
         Box::pin(async move {
-            match cdp::evaluate(&self.transport, tab, script).await {
-                Ok(v) => Ok(v),
-                Err(e) if e.retryable => {
-                    // Never delivered, so one bridge attempt is side-effect
-                    // safe. Tab id + kind only: never messages (CWE-532).
-                    log::warn!(
-                        "[browser-agent] CDP eval transport failed on tab {tab} ({:?}), JS-eval bridge fallback",
-                        e.kind
-                    );
-                    self.bridge.evaluate(tab, script).await
-                }
-                Err(e) => Err(e),
-            }
+            tokio::time::timeout(EVAL_STEP, cdp::evaluate(&self.transport, tab, &script))
+                .await
+                .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout, false)))
         })
     }
 
@@ -190,9 +177,5 @@ impl BrowserEngine for WebView2Engine {
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(cdp::capture_screenshot(&self.transport, tab))
-    }
-
-    fn deliver_script_reply(&self, nonce: &str, ok: bool, value: Option<String>) -> bool {
-        self.bridge.resolve(nonce, ok, value)
     }
 }
