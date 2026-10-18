@@ -123,6 +123,22 @@ pub async fn frame_password_submit(c: &Ctx<'_>) -> CaseResult {
     expect_tickets(c, &[ActionClass::PasswordSubmit], "frame password submit")
 }
 
+/// Enter without a ref goes to whatever has focus, here a field of a
+/// cross-origin frame the page's own helpers cannot read: it is
+/// confirmed as a credential submit.
+pub async fn frame_focused_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let outline = cross_frame(c, "password.html", "Sign in").await?;
+    let user = ref_in(&outline, "textbox", "User")?;
+    c.call("fill", json!({ "ref": user, "value": "ada" })).await?;
+    expect_refusal(
+        c.call("press", json!({ "key": "Enter" })).await,
+        "confirmation_required",
+        "unattended",
+        "Enter on a field focused in a cross-origin frame",
+    )?;
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "focused password submit in a cross-origin frame")
+}
+
 /// An upload pre-approved for the frame's origin runs without a prompt and
 /// lands on the frame's own file input.
 pub async fn frame_upload(c: &Ctx<'_>) -> CaseResult {

@@ -11,6 +11,16 @@ var facts = {
   linkTarget: null
 };
 if (!target || target === target.ownerDocument.body) return facts;
+// Keys without a ref reach focus inside a frame these helpers cannot read;
+// what is focused there is unknown, so it counts as a credential form.
+var opaque = false;
+if (!p.path && (target.tagName === 'IFRAME' || target.tagName === 'FRAME')) {
+  try { opaque = !target.contentDocument; } catch (e) { opaque = true; }
+}
+if (opaque) {
+  facts.targetInForm = facts.formHasPassword = facts.formHasPayment = facts.isSubmitter = true;
+  return facts;
+}
 var doc = target.ownerDocument;
 function absolute(href) {
   try { return new URL(href, doc.baseURI).href; } catch (e) { return null; }

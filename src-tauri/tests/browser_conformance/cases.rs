@@ -95,6 +95,7 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("download", &["snapshot"]),
     cap("download_preapproved", &["snapshot"]),
     cap("frame_password_submit", &["click"]),
+    cap("frame_focused_password_submit", &["fill"]),
     cap("frame_upload", &["snapshot"]),
     cap("frame_file_chooser", &["click"]),
 ];
@@ -591,6 +592,7 @@ pub async fn run(
         "download" => sensitive_cases::download(&ctx).await,
         "download_preapproved" => sensitive_cases::download_preapproved(&ctx).await,
         "frame_password_submit" => frames::frame_password_submit(&ctx).await,
+        "frame_focused_password_submit" => frames::frame_focused_password_submit(&ctx).await,
         "frame_upload" => frames::frame_upload(&ctx).await,
         "frame_file_chooser" => frames::frame_file_chooser(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
