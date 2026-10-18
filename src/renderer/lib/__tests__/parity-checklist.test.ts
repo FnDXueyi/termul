@@ -1622,17 +1622,6 @@ describe('Parity Checklist Automation', () => {
       expect(readFileSync(workspaceStoreIndex, 'utf-8')).toMatch(/canvasTabId/)
     })
 
-    it('MCP upsert goes through the serialized acp-store mcp slice (never the persistence key)', () => {
-      const slice = join(LIB_DIR, '..', 'stores', 'acp-store', 'slices', 'mcp.ts')
-      expect(existsSync(slice), 'acp-store/slices/mcp.ts should exist').toBe(true)
-      const content = readFileSync(slice, 'utf-8')
-      expect(content).toMatch(/upsertCanvasMcpServer/)
-      // Serialized through the registry mutation queue + preserves enabled.
-      expect(content).toMatch(/runSerializedMcpRegistryMutation/)
-      // Web entries carry the bearer header for the gated /canvas/mcp route.
-      expect(content).toMatch(/Authorization/)
-    })
-
     it('Rust hosts both transports (commands/canvas.rs + web/canvas_api.rs)', () => {
       const root = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
       const commands = join(root, 'commands', 'canvas.rs')

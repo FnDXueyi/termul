@@ -3,9 +3,9 @@
  *
  * One canvas per project (AD-7): `sessions` is keyed by projectId; the
  * workspace-store's `addCanvasTab` owns the singleton tab + doc re-binding,
- * this store owns the daemon/bridge runtime: open (facade open → MCP entry
- * upsert → focus tab), close (facade close evicts the daemon — daemon
- * lifetime = canvas lifetime), save (facade save through the daemon, THEN
+ * this store owns the daemon/bridge runtime: open (facade open → focus tab),
+ * close (facade close evicts the daemon — daemon lifetime = canvas lifetime),
+ * save (facade save through the daemon, THEN
  * the bridge's `save-committed` ack with the last generation/revision the
  * editor reported), and theme/locale pushes.
  *
@@ -27,7 +27,6 @@ import type {
   CanvasBridgeEvent
 } from '@/lib/canvas-bridge'
 import { logFrontendError } from '@/lib/log-api'
-import { useAcpStore } from '@/stores/acp-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 
 export type CanvasSessionStatus = 'opening' | 'open' | 'error'
@@ -168,7 +167,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     const result = await canvasApi.open(docPath, projectId)
     // A close or a NEWER open for this project landed while the open was in
     // flight: this flow no longer owns the project — apply nothing (no
-    // session, no tab, no MCP upsert, no old-doc eviction).
+    // session, no tab, no old-doc eviction).
     if (isStaleLifecycle(projectId, generation)) {
       void logFrontendError({
         level: 'info',
@@ -244,38 +243,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
           message: `old-doc canvas close failed during doc re-bind for project ${projectId}: ${closeResult?.code} ${closeResult?.error ?? 'unknown error'}`
         })
       }
-    }
-    if (result.data.mcpUrl) {
-      try {
-        // canvasToken: web → the canvas session token, desktop → the managed
-        // token (the agentation MCP routes now require it as the bearer).
-        // The mcp slice picks the credential per surface; never logged.
-        await useAcpStore
-          .getState()
-          .upsertCanvasMcpServer(projectId, result.data.mcpUrl, result.data.canvasToken)
-      } catch (err) {
-        void logFrontendError({
-          level: 'warn',
-          source: 'canvas-store.openCanvas',
-          message: `canvas MCP entry upsert failed for project ${projectId} (${String(err)})`
-        })
-      }
-    } else {
-      void logFrontendError({
-        level: 'info',
-        source: 'canvas-store.openCanvas',
-        message: `canvas open without an MCP url (agentation unavailable); skipping MCP upsert for project ${projectId}`
-      })
-    }
-    // One more ownership check before the tab update: a close that landed
-    // during the upsert must not get its closed canvas tab re-added.
-    if (isStaleLifecycle(projectId, generation)) {
-      void logFrontendError({
-        level: 'info',
-        source: 'canvas-store.openCanvas',
-        message: `aborting a stale canvas open for project ${projectId} before the tab update: the canvas lifecycle moved on`
-      })
-      return 'superseded'
     }
     useWorkspaceStore.getState().addCanvasTab(projectId, docPath)
     return true

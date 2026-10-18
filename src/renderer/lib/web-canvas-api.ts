@@ -31,8 +31,8 @@ import type { IpcResult } from '@shared/types/ipc.types'
 import { postJson } from './ipc/http'
 
 /** Per-canvas cookie prefix carrying the canvas session token for the
- * editor iframe's root-relative `/pkg|/canvaskit|/api` traffic and the
- * `/canvas/mcp` cookie path. The full name is `op_canvas_ct_<canvasId>` so
+ * editor iframe's root-relative `/pkg|/canvaskit|/api` traffic. The full name
+ * is `op_canvas_ct_<canvasId>` so
  * one web canvas cannot overwrite another's credential; mirrors
  * `web::canvas_api`'s per-canvas cookie name. Never logged. */
 export const CANVAS_COOKIE_NAME = 'op_canvas_ct'

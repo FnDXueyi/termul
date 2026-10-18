@@ -2,29 +2,22 @@
  * Canvas store tests (OpenPencil canvas mode, task 22).
  *
  * Drives the open / close / save / conflict flows against a mocked canvas
- * facade + MCP upsert, using the REAL workspace-store so the singleton tab
+ * facade, using the REAL workspace-store so the singleton tab
  * wiring (session → tab → focus) is exercised end to end.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { open, close, save, upsertCanvasMcpServer, toastError, logFrontendError } = vi.hoisted(
-  () => ({
-    open: vi.fn(),
-    close: vi.fn(),
-    save: vi.fn(),
-    upsertCanvasMcpServer: vi.fn(async () => {}),
-    toastError: vi.fn(),
-    logFrontendError: vi.fn()
-  })
-)
+const { open, close, save, toastError, logFrontendError } = vi.hoisted(() => ({
+  open: vi.fn(),
+  close: vi.fn(),
+  save: vi.fn(),
+  toastError: vi.fn(),
+  logFrontendError: vi.fn()
+}))
 
 vi.mock('@/lib/canvas-api', () => ({
   canvasApi: { open, close, save, status: vi.fn() }
-}))
-
-vi.mock('@/stores/acp-store', () => ({
-  useAcpStore: { getState: () => ({ upsertCanvasMcpServer }) }
 }))
 
 vi.mock('@/lib/log-api', () => ({
@@ -108,7 +101,7 @@ describe('canvas-store open flow', () => {
     resetStores()
   })
 
-  it('open success records the session, upserts the MCP entry, and adds the canvas tab', async () => {
+  it('open success records the session and adds the canvas tab', async () => {
     open.mockResolvedValueOnce(openInfo('http://127.0.0.1:5199/?embed=vscode', DOC_A))
 
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
@@ -124,7 +117,6 @@ describe('canvas-store open flow', () => {
       bridgeReady: false,
       dirty: false
     })
-    expect(upsertCanvasMcpServer).toHaveBeenCalledWith(PROJECT, MCP_URL, 'managed-t0k')
     const canvasTabs = activeLeafTabs().filter((t) => t.type === 'canvas')
     expect(canvasTabs).toHaveLength(1)
     expect(canvasTabs[0]).toMatchObject({
@@ -189,13 +181,12 @@ describe('canvas-store open flow', () => {
     )
   })
 
-  it('open failure leaves no session, no tab, and no MCP upsert', async () => {
+  it('open failure leaves no session and no tab', async () => {
     open.mockResolvedValueOnce(failure('BINARY_NOT_FOUND'))
 
     await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
 
     expect(useCanvasStore.getState().sessions[PROJECT]).toBeUndefined()
-    expect(upsertCanvasMcpServer).not.toHaveBeenCalled()
     expect(activeLeafTabs().filter((t) => t.type === 'canvas')).toHaveLength(0)
     expect(logFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -223,25 +214,7 @@ describe('canvas-store open flow', () => {
     expect(activeLeafTabs().filter((t) => t.type === 'canvas')).toHaveLength(1)
   })
 
-  it('skips the MCP upsert (and logs info) when the open response has no mcpUrl', async () => {
-    open.mockResolvedValueOnce({
-      success: true,
-      data: {
-        embedUrl: 'http://127.0.0.1:5199/?embed=vscode',
-        mcpUrl: null,
-        docKey: DOC_A
-      }
-    })
-
-    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
-
-    expect(upsertCanvasMcpServer).not.toHaveBeenCalled()
-    expect(logFrontendError).toHaveBeenCalledWith(
-      expect.objectContaining({ level: 'info', source: 'canvas-store.openCanvas' })
-    )
-  })
-
-  it('a close landing while an open is in flight aborts the late open (no session, no tab, no upsert)', async () => {
+  it('a close landing while an open is in flight aborts the late open (no session, no tab)', async () => {
     let resolveOpen: (value: ReturnType<typeof openInfo>) => void = () => {}
     open.mockImplementationOnce(
       () =>
@@ -259,10 +232,8 @@ describe('canvas-store open flow', () => {
     resolveOpen(openInfo('http://127.0.0.1:5199/?embed=vscode', DOC_A))
     await expect(opening).resolves.toBe('superseded')
 
-    // The late open applies NOTHING: no restored session, no re-added tab,
-    // no MCP upsert.
+    // The late open applies NOTHING: no restored session, no re-added tab.
     expect(useCanvasStore.getState().sessions[PROJECT]).toBeUndefined()
-    expect(upsertCanvasMcpServer).not.toHaveBeenCalled()
     expect(activeLeafTabs().filter((t) => t.type === 'canvas')).toHaveLength(0)
     expect(logFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -305,7 +276,6 @@ describe('canvas-store open flow', () => {
     expect(canvasTabs).toHaveLength(1)
     expect(canvasTabs[0]).toMatchObject({ docPath: DOC_B })
     expect(close).not.toHaveBeenCalled()
-    expect(upsertCanvasMcpServer).toHaveBeenCalledTimes(1)
     expect(logFrontendError).toHaveBeenCalledWith(
       expect.objectContaining({
         level: 'info',
