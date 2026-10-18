@@ -116,6 +116,10 @@ Log every frame to `goal-routine-runs/<run>/chat-agent-qa.jsonl`. Assertions are
 
 Findings file as issues per Pass 3 rules. Two failure classes deserve a second look before filing: greeting-turn latency at `create_session` (known opencode behavior, see the QA report's P2) and idle-agent CPU pinning (open issue #1391) — both already have issues. Do not file duplicates of known findings.
 
+## Unattended runs
+
+`scripts/routine/run-routine.sh` runs this whole skill headless: omp in print mode, `sepintu/zai/glm-5.3`, thinking high, auto-approve, in a dedicated clone at `/root/termul-routine-automation` pinned to dev. Cron fires it daily at 18:30 UTC (01:30 Jakarta), after the 17:00 UTC nightly build, so the QA target is the finished nightly of that Jakarta date. The runner syncs the clone, refuses to run while this skill is not yet on dev, kills any leaked audit servers first (a leaked agent pins a core, see `#1391`), and writes logs to `goal-routine-runs/_automation/<run-id>.log`, keeping the last 14. Run artifacts land under `goal-routine-runs/` as in interactive runs.
+
 ## Report shape
 
 Every pass ends its section of the reply the same way: one line per issue or check, state, and the action taken. GitHub mutations name the issue number and the exact mutation. A pass that changed nothing says so and why.
