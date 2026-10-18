@@ -242,14 +242,19 @@ impl crate::browser_automation::BrowserHost for StopHost {
         _session_id: &'a str,
         _agent_id: &'a str,
         _call: crate::browser_automation::BrowserCall,
+        _deadline: crate::browser_automation::budgets::Deadline,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<Value, crate::browser_automation::BrowserError>>
-                + Send
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::browser_automation::Success,
+                        crate::browser_automation::BrowserError,
+                    >,
+                > + Send
                 + 'a,
         >,
     > {
-        Box::pin(async { Ok(Value::Null) })
+        Box::pin(async { Ok(crate::browser_automation::Success::default()) })
     }
     fn end_session(&self, _session_id: &str) {}
     fn notify_tab_created(&self, _tab_id: &str) -> bool {
