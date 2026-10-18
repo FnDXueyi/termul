@@ -251,23 +251,29 @@ fn browser_frame_without_host_fails_closed_with_typed_code() {
 }
 
 #[test]
-fn browser_frame_missing_action_is_rejected() {
+fn browser_frame_missing_action_is_invalid_with_a_host_and_fails_closed_without() {
+    let _guard = crate::browser_automation::TEST_HOST_LOCK.lock().unwrap();
     let server = HostPlanServer::start(vec![], None);
     let (port, token, provisional) = server.register_session("agent-1");
     server.bind_session(&token, "sess-real");
     server.begin_turn("agent-1", "sess-real");
-    let runtime = Runtime::new().unwrap();
-    runtime.block_on(async move {
-        let frame = serde_json::json!({
-            "token": token,
-            "session_id": provisional,
-            "kind": "browser",
-        });
-        let reply = connect_and_send(port, &frame).await;
-        assert_eq!(reply["ok"], false);
-        assert_eq!(reply["code"], "invalid_params");
-        assert_eq!(reply["error"], "missing 'action'");
+    let frame = serde_json::json!({
+        "token": token,
+        "session_id": provisional,
+        "kind": "browser",
     });
+    let runtime = Runtime::new().unwrap();
+
+    crate::browser_automation::set_browser_host(std::sync::Arc::new(EchoHost));
+    let reply = runtime.block_on(connect_and_send(port, &frame));
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["code"], "invalid_params");
+    assert_eq!(reply["error"], "missing 'action'");
+
+    crate::browser_automation::clear_browser_host();
+    let reply = runtime.block_on(connect_and_send(port, &frame));
+    assert_eq!(reply["code"], "capability_unavailable");
+    assert_eq!(reply["result"]["reason"], "no_automation_host");
 }
 
 #[test]
@@ -566,41 +572,6 @@ fn browser_frame_from_flat_call_carries_folded_args_to_dispatch() {
     // Serialize on the shared host lock — sibling tests touch the host.
     let _guard = crate::browser_automation::TEST_HOST_LOCK.lock().unwrap();
     crate::browser_automation::clear_browser_host();
-    use crate::browser_automation::{BrowserCall, BrowserError, BrowserHost};
-    struct EchoHost;
-    impl BrowserHost for EchoHost {
-        fn execute<'a>(
-            &'a self,
-            _session_id: &'a str,
-            _agent_id: &'a str,
-            call: BrowserCall,
-            _deadline: crate::browser_automation::budgets::Deadline,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, BrowserError>> + Send + 'a>,
-        > {
-            Box::pin(async move {
-                Ok(crate::browser_automation::Success {
-                    data: Some(call.args),
-                    ..Default::default()
-                })
-            })
-        }
-        fn end_session(&self, _session_id: &str) {}
-        fn notify_tab_created(&self, _tab_id: &str) -> bool {
-            false
-        }
-        fn notify_tab_closed(&self, _tab_id: &str) {}
-        fn notify_tab_navigated(&self, _tab_id: &str) {}
-        fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
-            false
-        }
-        fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
-            false
-        }
-        fn engine_facts(&self) -> crate::browser_automation::engine::EngineFacts {
-            crate::browser_automation::engine::EngineFacts::all_trusted()
-        }
-    }
     crate::browser_automation::set_browser_host(std::sync::Arc::new(EchoHost));
 
     let frame = FrameRequest {
@@ -1428,4 +1399,40 @@ fn ask_idle_heartbeat_is_a_third_of_the_idle_timeout_within_bounds() {
         ask_idle_heartbeat(Some(Duration::from_secs(3600))),
         Duration::from_secs(30)
     );
+}
+
+/// Stub host that echoes the args it received as the reply data.
+struct EchoHost;
+impl crate::browser_automation::BrowserHost for EchoHost {
+    fn execute<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _agent_id: &'a str,
+        call: crate::browser_automation::BrowserCall,
+        _deadline: crate::browser_automation::budgets::Deadline,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::browser_automation::Success, crate::browser_automation::BrowserError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            Ok(crate::browser_automation::Success {
+                data: Some(call.args),
+                ..Default::default()
+            })
+        })
+    }
+    fn end_session(&self, _session_id: &str) {}
+    fn notify_tab_created(&self, _tab_id: &str) -> bool {
+        false
+    }
+    fn notify_tab_closed(&self, _tab_id: &str) {}
+    fn notify_tab_navigated(&self, _tab_id: &str) {}
+    fn resolve_consent(&self, _request_id: &str, _allowed: bool) -> bool {
+        false
+    }
+    fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
+        false
+    }
+    fn engine_facts(&self) -> crate::browser_automation::engine::EngineFacts {
+        crate::browser_automation::engine::EngineFacts::all_trusted()
+    }
 }

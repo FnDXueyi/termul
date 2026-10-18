@@ -461,8 +461,11 @@ impl HostPlanServer {
                 let raw = req.browser_input.unwrap_or(serde_json::Value::Null);
                 let input = match crate::acp::host_mcp::TermulBrowserInput::parse(raw) {
                     Ok(input) => input,
-                    // The parser already logged code, action and expected
-                    // key names (never values).
+                    // Without a host every call fails closed, malformed or
+                    // not. The parser already logged the rejection.
+                    Err(_) if crate::browser_automation::browser_host().is_none() => {
+                        return browser_failure(&crate::browser_automation::no_host_error());
+                    }
                     Err(message) => {
                         return browser_failure(&crate::browser_automation::BrowserError::invalid(
                             message,
