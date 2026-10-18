@@ -1,4 +1,5 @@
 import { ChevronDown, ChevronRight, Folder, MoreHorizontal } from '@/components/icons'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { RAIL_ICON_BOX_CLASS, RAIL_ROW_INSET_CLASS } from '@/components/shell/rail-layout'
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { FIELD_FOCUS_CLASS, FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
@@ -127,32 +128,34 @@ export function RailGroupRow({
             </button>
           )}
           {!isEditing && (
-            <button
-              type="button"
-              aria-label={`Group actions for ${group.name}`}
-              aria-haspopup="menu"
-              onClick={(e) => {
-                // Same menu as a right-click, anchored under this button.
-                e.stopPropagation()
-                const rect = e.currentTarget.getBoundingClientRect()
-                e.currentTarget.closest('[data-group-id]')?.dispatchEvent(
-                  new MouseEvent('contextmenu', {
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: rect.left,
-                    clientY: rect.bottom
-                  })
-                )
-              }}
-              className={cn(
-                'absolute right-1.5 top-1/2 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground',
-                'opacity-0 transition-colors duration-150 ease-out hover:bg-foreground/[0.03] hover:text-foreground',
-                'group-hover:opacity-100 group-focus-within:opacity-100',
-                FOCUS_RING_CLASS
-              )}
-            >
-              <MoreHorizontal size={14} />
-            </button>
+            <RailTooltip label="Group actions">
+              <button
+                type="button"
+                aria-label={`Group actions for ${group.name}`}
+                aria-haspopup="menu"
+                onClick={(e) => {
+                  // Same menu as a right-click, anchored under this button.
+                  e.stopPropagation()
+                  const rect = e.currentTarget.getBoundingClientRect()
+                  e.currentTarget.closest('[data-group-id]')?.dispatchEvent(
+                    new MouseEvent('contextmenu', {
+                      bubbles: true,
+                      cancelable: true,
+                      clientX: rect.left,
+                      clientY: rect.bottom
+                    })
+                  )
+                }}
+                className={cn(
+                  'absolute right-1.5 top-1/2 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground',
+                  'opacity-0 transition-colors duration-150 ease-out hover:bg-foreground/[0.03] hover:text-foreground',
+                  'group-hover:opacity-100 group-focus-within:opacity-100',
+                  FOCUS_RING_CLASS
+                )}
+              >
+                <MoreHorizontal size={14} />
+              </button>
+            </RailTooltip>
           )}
         </div>
       </ContextMenuTrigger>

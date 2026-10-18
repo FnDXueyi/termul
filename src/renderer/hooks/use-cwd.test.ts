@@ -1,40 +1,9 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
-// Constants matching the implementation
-const TRUNCATE_START_LENGTH = 15
-const TRUNCATE_ELLIPSIS_LENGTH = 3
+vi.mock('@/lib/api', () => ({ systemApi: {}, terminalApi: {} }))
+vi.mock('@/stores/terminal-store', () => ({ useTerminalStore: vi.fn() }))
 
-// Test the pure utility functions directly without React dependencies
-// We copy the function implementations here to test them in isolation
-function formatPath(fullPath: string, homeDir: string | undefined, maxLength: number = 50): string {
-  if (!fullPath) return ''
-
-  let formatted = fullPath
-
-  if (homeDir) {
-    // Normalize both paths to use forward slashes for comparison
-    const normalizedHome = homeDir.replace(/\\/g, '/')
-    const normalizedPath = fullPath.replace(/\\/g, '/')
-
-    // Check if path starts with home dir followed by a separator or is exactly home dir
-    if (normalizedPath === normalizedHome || normalizedPath.startsWith(`${normalizedHome}/`)) {
-      formatted = `~${normalizedPath.slice(normalizedHome.length)}`
-    } else {
-      // Keep original path but normalize slashes for display consistency
-      formatted = normalizedPath
-    }
-  }
-
-  // Truncate if too long
-  if (formatted.length > maxLength) {
-    const start = formatted.slice(0, TRUNCATE_START_LENGTH)
-    const endLength = maxLength - TRUNCATE_START_LENGTH - TRUNCATE_ELLIPSIS_LENGTH
-    const end = formatted.slice(-endLength)
-    return `${start}...${end}`
-  }
-
-  return formatted
-}
+import { formatPath } from './use-cwd'
 
 describe('formatPath', () => {
   test('returns empty string for empty path', () => {
@@ -90,5 +59,28 @@ describe('formatPath', () => {
   test('normalizes Windows paths to forward slashes', () => {
     const result = formatPath('C:\\Users\\Other\\Documents', 'C:\\Users\\John')
     expect(result).toBe('C:/Users/Other/Documents')
+  })
+
+  describe('Windows verbatim prefix', () => {
+    test('drops the backslash verbatim prefix and keeps the separators', () => {
+      expect(formatPath(String.raw`\\?\D:\proj`, undefined)).toBe(String.raw`D:\proj`)
+    })
+
+    test('drops the forward-slash verbatim prefix and keeps the separators', () => {
+      expect(formatPath('//?/D:/proj', undefined)).toBe('D:/proj')
+    })
+
+    test('shows a verbatim UNC path as a plain UNC path', () => {
+      expect(formatPath(String.raw`\\?\UNC\srv\share\proj`, undefined)).toBe(
+        String.raw`\\srv\share\proj`
+      )
+      expect(formatPath('//?/UNC/srv/share/proj', undefined)).toBe('//srv/share/proj')
+    })
+
+    test('still abbreviates the home directory under a verbatim path', () => {
+      expect(formatPath(String.raw`\\?\C:\Users\John\proj`, String.raw`C:\Users\John`)).toBe(
+        '~/proj'
+      )
+    })
   })
 })

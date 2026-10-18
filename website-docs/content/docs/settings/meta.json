@@ -1,0 +1,12 @@
+{
+  "title": "Settings",
+  "pages": [
+    "index",
+    "app-settings",
+    "project-settings",
+    "themes",
+    "keyboard-shortcuts",
+    "notifications",
+    "updates"
+  ]
+}

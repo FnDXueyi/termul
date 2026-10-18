@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RotateCcw } from '@/components/icons'
+import { SettingsNotice } from '@/components/settings/SettingsNotice'
+import { Button } from '@/components/ui/button'
+import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
 import { beginShortcutCapture, endShortcutCapture } from '@/lib/shortcut-capture'
 import {
   findConflictingShortcut,
@@ -13,7 +16,8 @@ interface ShortcutRecorderProps {
   allShortcuts: KeyboardShortcutsConfig
   onUpdate: (id: string, customKey: string) => void
   onReset: (id: string) => void
-  variant?: 'default' | 'compact'
+  /** `row` is the Preferences settings row (label left, keycaps right). */
+  variant?: 'default' | 'compact' | 'row'
 }
 
 export function ShortcutRecorder({
@@ -134,6 +138,85 @@ export function ShortcutRecorder({
     }
   }, [isRecording, handleKeyDown])
 
+  if (variant === 'row') {
+    const keys = (isRecording && !pendingKey ? '' : displayKey).split('+').filter(Boolean)
+    return (
+      <div data-settings-row="" className="flex flex-col gap-2 px-4 py-3">
+        <div className="flex items-center gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-foreground">{shortcut.label}</div>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+              {shortcut.description}
+              {isCustomized && ` Default: ${formatKeyForDisplay(shortcut.defaultKey)}`}
+            </p>
+          </div>
+          {isCustomized && (
+            <button
+              type="button"
+              onClick={handleReset}
+              className={`flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground ${FOCUS_RING_CLASS}`}
+              title="Reset to default"
+              aria-label={`Reset ${shortcut.label} shortcut to default`}
+            >
+              <RotateCcw size={13} />
+            </button>
+          )}
+          <div
+            ref={inputRef}
+            tabIndex={0}
+            role="button"
+            data-shortcut-recorder="true"
+            aria-label={`Record ${shortcut.label} shortcut`}
+            onClick={handleClick}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyboardActivate}
+            className={`flex min-h-7 shrink-0 cursor-pointer items-center gap-1 rounded-md border px-1 py-0.5 transition-colors duration-150 ease-out ${FOCUS_RING_CLASS} ${
+              isRecording
+                ? 'border-ring bg-background px-2'
+                : conflict
+                  ? 'border-destructive'
+                  : 'border-transparent hover:bg-foreground/[0.03]'
+            }`}
+          >
+            {keys.length === 0 ? (
+              <span className="text-xs text-muted-foreground">Press keys…</span>
+            ) : (
+              keys.map((part, index) => (
+                <kbd
+                  // A part can repeat only in theory; the index keeps keys unique.
+                  key={`${part}-${index}`}
+                  className={`keycap inline-flex h-5 min-w-5 items-center justify-center rounded px-1.5 font-sans text-xs font-medium ${
+                    isCustomized ? 'text-foreground' : 'text-secondary-foreground'
+                  }`}
+                >
+                  {formatKeyForDisplay(part)}
+                </kbd>
+              ))
+            )}
+          </div>
+        </div>
+        {conflict && (
+          <SettingsNotice
+            tone="danger"
+            action={
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={handleConfirmWithConflict}
+              >
+                Use anyway
+              </Button>
+            }
+          >
+            Conflicts with "{conflict.label}". Both commands keep these keys if you use it anyway.
+          </SettingsNotice>
+        )}
+      </div>
+    )
+  }
+
   if (variant === 'compact') {
     return (
       <div className="rounded-md px-2 py-1.5 hover:bg-secondary/40">
@@ -167,7 +250,7 @@ export function ShortcutRecorder({
             onBlur={handleBlur}
             onKeyDown={handleKeyboardActivate}
             className={`
-              min-w-[88px] shrink-0 rounded-md border px-2 py-1 text-center font-mono text-2xs transition-all cursor-pointer
+              min-w-[88px] shrink-0 rounded-md border px-2 py-1 text-center font-mono text-2xs transition-[color,background-color,border-color,box-shadow] duration-150 ease-out cursor-pointer
               ${
                 isRecording
                   ? 'border-primary bg-primary/10 ring-2 ring-primary/30'
@@ -178,7 +261,7 @@ export function ShortcutRecorder({
             `}
           >
             {isRecording && !pendingKey ? (
-              <span className="text-muted-foreground">Press keys...</span>
+              <span className="text-muted-foreground">Press keys…</span>
             ) : (
               formatKeyForDisplay(displayKey)
             )}
@@ -231,7 +314,7 @@ export function ShortcutRecorder({
           onBlur={handleBlur}
           onKeyDown={handleKeyboardActivate}
           className={`
-            px-3 py-2 rounded-md border text-sm font-mono cursor-pointer transition-all
+            px-3 py-2 rounded-md border text-sm font-mono cursor-pointer transition-[color,background-color,border-color,box-shadow] duration-150 ease-out
             ${
               isRecording
                 ? 'border-primary bg-primary/10 ring-2 ring-primary/30'
@@ -242,7 +325,7 @@ export function ShortcutRecorder({
           `}
         >
           {isRecording && !pendingKey ? (
-            <span className="text-muted-foreground">Press keys...</span>
+            <span className="text-muted-foreground">Press keys…</span>
           ) : (
             formatKeyForDisplay(displayKey)
           )}

@@ -1,0 +1,98 @@
+---
+title: Install Termul
+description: Install the Termul desktop app on macOS, Windows, or Linux.
+---
+
+The desktop app is called **Termul Manager**. Every release has builds for macOS, Windows, and Linux on the [GitHub releases page](https://github.com/gnoviawan/termul/releases/latest).
+
+If you want to run Termul on a server and open it in a browser or on your phone, install `termul-server` instead. See [Browser and phone](/docs/remote).
+
+## macOS
+
+You can install Termul with Homebrew, with the install script, or from a disk image. All three give you the same app.
+
+### Homebrew
+
+```bash
+brew tap gnoviawan/termul
+brew install --cask termul
+```
+
+### Install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gnoviawan/termul/v0.4.21/scripts/install.sh | bash
+```
+
+The link points to the script from a fixed release, so it can't change under you. The script still installs the newest Termul release.
+
+The script does these things:
+
+1. It finds the latest release and the disk image for your Mac (Apple silicon or Intel).
+2. It asks `Install Termul Manager <version> (...) to /Applications? [y/N]`. Type `y` and press Enter.
+3. It downloads the disk image and checks it against the release checksums. If the check fails, it installs nothing.
+4. It copies **Termul Manager.app** to `/Applications`.
+
+To skip the question, run the script with `TERMUL_INSTALL_YES=1`. To install somewhere other than `/Applications`, set `TERMUL_INSTALL_APPLICATIONS_DIR`.
+
+### Disk image
+
+1. Open the [latest release](https://github.com/gnoviawan/termul/releases/latest).
+2. Download the `.dmg` for your Mac. The file ending in `_aarch64.dmg` is for Apple silicon. The file ending in `_x64.dmg` is for Intel.
+3. Open the `.dmg` and drag **Termul Manager** into **Applications**.
+
+## Windows
+
+1. Open the [latest release](https://github.com/gnoviawan/termul/releases/latest).
+2. Download the file ending in `_x64-setup.exe` or the file ending in `_x64_en-US.msi`. Both install the same app. Builds are for 64-bit x86 Windows.
+3. Run the installer.
+
+The install script does not work on Windows.
+
+## Linux
+
+Linux builds are for 64-bit x86 (`x86_64`) only.
+
+### Install script (AppImage)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gnoviawan/termul/v0.4.21/scripts/install.sh | bash
+```
+
+The script downloads the latest AppImage and checks it against the release checksums. Then it does these things:
+
+- It saves the app as `~/.local/bin/termul-manager`.
+- It adds a **Termul Manager** entry to your application menu.
+- It warns you if `~/.local/bin` is not on your `PATH`. Add that folder to your `PATH` to start Termul from a shell with `termul-manager`.
+
+Before it installs, the script asks you to confirm. To skip the question, run it with `TERMUL_INSTALL_YES=1`. To use a different folder, set `TERMUL_INSTALL_BIN_DIR`.
+
+### Debian, Ubuntu, Fedora, and other packages
+
+The [latest release](https://github.com/gnoviawan/termul/releases/latest) also has these files:
+
+- A `.deb` package (`Termul.Manager_<version>_amd64.deb`) for Debian, Ubuntu, and similar systems.
+- An `.rpm` package (`Termul.Manager-<version>-1.x86_64.rpm`) for Fedora and similar systems.
+- The `.AppImage` file, if you want to manage it yourself.
+
+Install the package with your system's package manager. For example, on Ubuntu:
+
+```bash
+sudo apt install ./Termul.Manager_<version>_amd64.deb
+```
+
+### Arch Linux (AUR)
+
+Termul is in the AUR as `termul-manager`. Install it with your AUR helper. For example:
+
+```bash
+yay -S termul-manager
+```
+
+## Updates
+
+The desktop app checks for new versions and can install them for you. You can pick the **Stable**, **Insider**, or **Nightly** channel. See [Settings](/docs/settings) for details.
+
+## Next step
+
+[Create your first project](/docs/getting-started/first-project).

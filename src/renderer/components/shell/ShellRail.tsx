@@ -115,6 +115,10 @@ export function ShellRail({
               onSSHConnect={onSSHConnect}
               onSelectSSHProfile={onSelectSSHProfile}
               activeSSHProfileId={activeSSHProfileId}
+              isShortcutsOpen={isShortcutsOpen}
+              onShortcutsOpenChange={onShortcutsOpenChange}
+              isThemePickerOpen={isThemePickerOpen}
+              onToggleThemePicker={onToggleThemePicker}
             />
           )}
         </div>

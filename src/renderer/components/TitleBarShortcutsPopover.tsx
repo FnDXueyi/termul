@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Keyboard } from '@/components/icons'
 import { ShortcutRecorder } from '@/components/ShortcutRecorder'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { useResetShortcut, useUpdateShortcut } from '@/hooks/use-keyboard-shortcuts'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
@@ -119,22 +120,23 @@ export function TitleBarShortcutsPopover({
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={buttonClassName}
-        title="Keyboard shortcuts"
-        aria-label="Open keyboard shortcuts menu"
-        aria-expanded={isOpen}
-        onClick={(event) => {
-          event.stopPropagation()
-          setOpen(!isOpen)
-        }}
-      >
-        {/* The keyboard body sits low in its 24px box (a cable runs to the
-            top): 1px up lines it up with the Palette glyph beside it. */}
-        <Keyboard size={16} className="-translate-y-px" />
-      </button>
+      <RailTooltip label="Keyboard shortcuts">
+        <button
+          ref={triggerRef}
+          type="button"
+          className={buttonClassName}
+          aria-label="Open keyboard shortcuts menu"
+          aria-expanded={isOpen}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen(!isOpen)
+          }}
+        >
+          {/* The keyboard body sits low in its 24px box (a cable runs to the
+              top): 1px up lines it up with the Palette glyph beside it. */}
+          <Keyboard size={16} className="-translate-y-px" />
+        </button>
+      </RailTooltip>
 
       <AnimatePresence onExitComplete={handleExitComplete}>
         {isOpen && (

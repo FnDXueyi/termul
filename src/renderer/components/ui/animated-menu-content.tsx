@@ -10,7 +10,6 @@ const FALLBACK = {
   open: 250,
   close: 150,
   preScale: 0.97,
-  closingScale: 0.99,
   ease: [0.22, 1, 0.36, 1] as CubicBezier,
   reducedFade: 150
 }
@@ -40,10 +39,10 @@ function bezierToken(name: string, fallback: CubicBezier): CubicBezier {
 
 /**
  * The transitions.dev "Menu dropdown" motion on the app's motion tokens:
- * open `--duration-fast` from `--scale-medium`, close `--duration-quick` to
- * `--scale-tiny`, both on `--ease-smooth-out`, no travel. Reduced motion is a
- * 150ms fade (the app rule for anchored menus). Values are read from the CSS
- * variables so CSS and JS stay in step.
+ * open `--duration-fast` from `--scale-medium`, close `--duration-quick` as a
+ * fade only (no scale-down), both on `--ease-smooth-out`, no travel. Reduced
+ * motion is a 150ms fade (the app rule for anchored menus). Values are read
+ * from the CSS variables so CSS and JS stay in step with the Radix menus.
  */
 export function menuMotion(reduced: boolean): {
   initial: { opacity: number; scale?: number }
@@ -66,7 +65,7 @@ export function menuMotion(reduced: boolean): {
   return {
     initial: { opacity: 0, scale: numberToken('--scale-medium', FALLBACK.preScale) },
     open: { opacity: 1, scale: 1 },
-    closed: { opacity: 0, scale: numberToken('--scale-tiny', FALLBACK.closingScale) },
+    closed: { opacity: 0, scale: 1 },
     openTransition: { duration: msToken('--duration-fast', FALLBACK.open) / 1000, ease },
     closeTransition: { duration: msToken('--duration-quick', FALLBACK.close) / 1000, ease }
   }
