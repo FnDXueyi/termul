@@ -46,8 +46,8 @@ fn persistence_result<T>(
 /// leaseGraceMs?, maxMounted?, crashTimeouts? } }` — the loopback bundle base
 /// plus a minted `ct` token and a new `mountSeq` for the project's canvas,
 /// leased to this window (AD-30). Typed `BUNDLE_LISTENER_DOWN` while the
-/// listener is not bound; `PATH_VALIDATION_FAILED` for a doc outside every
-/// registered project root, as on the web route; `CANVAS_OPEN_ELSEWHERE`
+/// listener is not bound; `PATH_VALIDATION_FAILED` for a doc outside the
+/// opening project's registered root, as on the web route; `CANVAS_OPEN_ELSEWHERE`
 /// when the renderer holding the lease could not save; `EVICTION_BLOCKED`
 /// when a canvas that must make room (AD-26) could not be saved.
 #[tauri::command]
@@ -59,7 +59,7 @@ pub async fn canvas_open(
     registry: State<'_, Arc<ProjectRegistry>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
     let log_project_id = sanitize_log_field(&project_id);
-    let doc_key = match resolve_doc_path(&doc_path, Some(&registry)) {
+    let doc_key = match resolve_doc_path(&doc_path, &project_id, Some(&registry)) {
         Ok(doc_key) => doc_key,
         Err(err) => {
             log::warn!(

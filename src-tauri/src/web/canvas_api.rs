@@ -4,8 +4,8 @@
 //! `/canvas/<id>/*` figcraft bundle.
 //!
 //! Registered AHEAD of the static fallback, so the SPA mount cannot shadow
-//! any of it. Doc paths on `/canvas/open` are validated against the
-//! project-root boundary exactly like the fs/git routes (`canvas::doc_path`).
+//! any of it. Doc paths on `/canvas/open` must lie inside the opening
+//! project's own registered root (`canvas::doc_path`).
 //! Auth split (browser iframes cannot send `Authorization: Bearer` headers):
 //! - the API routes stay behind the outer bearer `web_auth_gate`
 //!   (`"/canvas/"` in `GATED_PREFIXES` — the renderer facades already hold
@@ -51,10 +51,9 @@ pub struct CanvasState {
     pub write_flags: WriteFlags,
 }
 
-/// Project-root boundary for the web doc-path validation on open — the SAME
-/// containment semantics the fs/git routes enforce (`git_api::
-/// ensure_within_project_boundary`): the path is accepted when it is within
-/// any registered, non-archived project root.
+/// Project-root boundary for the web doc-path validation on open: the path
+/// is accepted when it is within the opening project's registered,
+/// non-archived root (`canvas::doc_path`).
 #[derive(Clone)]
 pub struct CanvasProjectBoundary {
     pub registry: Arc<ProjectRegistry>,
@@ -123,7 +122,7 @@ async fn bundle(request: Request) -> Response {
     )
 }
 
-/// `POST /canvas/open` — validate the doc path against the project boundary,
+/// `POST /canvas/open` — validate the doc path against the project's root,
 /// then return the same-origin bundle base plus the project's minted `ct`
 /// token (the twin of the `canvas_open` Tauri command).
 async fn open(
@@ -139,7 +138,7 @@ async fn open(
         .boundary
         .as_ref()
         .map(|boundary| boundary.registry.as_ref());
-    let doc_key = match resolve_doc_path(&req.doc_path, registry) {
+    let doc_key = match resolve_doc_path(&req.doc_path, &req.project_id, registry) {
         Ok(path) => path,
         Err(err) => {
             tracing::warn!(

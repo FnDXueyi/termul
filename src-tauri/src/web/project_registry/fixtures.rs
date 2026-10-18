@@ -19,6 +19,23 @@ impl ProjectRegistry {
         registry
     }
 
+    /// A shared registry with each `(id, root)` registered as a project.
+    #[must_use]
+    pub(crate) fn with_roots_for_test(roots: &[(&str, &Path)]) -> Arc<Self> {
+        let registry = Arc::new(Self::new());
+        for (id, root) in roots {
+            registry.upsert(ProjectSummary {
+                id: (*id).to_string(),
+                name: (*id).to_string(),
+                color: "blue".to_string(),
+                path: Some(root.to_string_lossy().into_owned()),
+                is_archived: false,
+                is_default: false,
+            });
+        }
+        registry
+    }
+
     /// Replace the whole list.
     /// The new default is chosen by `derive(projects, current default)` under
     /// the commit lock, so a concurrent explicit default change is never

@@ -58,7 +58,7 @@ The iframe cannot send an `Authorization` header, so the bundle has its own cred
 - The desktop cookie is `SameSite=None; Secure` (the iframe is a third-party context on a loopback origin). The same-origin web cookie is `HttpOnly; SameSite=Lax`.
 - `close` revokes the token, so stale URLs and cookies stop working.
 - Neither the token nor the cookie value is ever logged.
-- The `/canvas/open`, `/canvas/close` and persistence routes stay behind the web auth bearer. They are write routes: a view-only peer (remote peer without write access, or the desktop shared-live host) is refused with `FORBIDDEN`. Doc paths must lie inside a registered, non-archived project root.
+- The `/canvas/open`, `/canvas/close` and persistence routes stay behind the web auth bearer. They are write routes: a view-only peer (remote peer without write access, or the desktop shared-live host) is refused with `FORBIDDEN`. A doc path must lie inside the root of the project that opens it (a registered, non-archived project), on the web routes and the desktop commands alike.
 
 ## Agents
 
