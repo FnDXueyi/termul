@@ -45,7 +45,7 @@ use consent::ConsentGate;
 use events::TabProjection;
 use ports::{PermissionRequest, PolicyStore};
 use surface::{PaneSurface, TabSurface};
-use tabs::{parse_label, LabelKind, TabRegistry};
+use tabs::TabRegistry;
 
 const EVENT_STOP_CHANGED: &str = "acp:browser_stop_changed";
 
@@ -212,25 +212,24 @@ impl NavPolicy for HopPolicy {
 }
 
 impl DesktopBrowserHost {
-    /// Agent authorization for one hop. A user tab has none to pass; an
-    /// agent label the registry does not know has no session to pass it.
+    /// Agent authorization for one hop. A user tab has none to pass; a
+    /// label the registry no longer knows passes nothing.
     fn agent_hop_allowed(&self, tab_id: &str, url: &Url) -> bool {
-        let session_id = {
-            let registry = self.registry.lock();
-            match registry.get(tab_id) {
-                Some(record) => record.session_id().map(str::to_string),
-                None if parse_label(tab_id) == Some(LabelKind::Agent) => {
-                    log::info!(
-                        "[browser-agent] navigation hop cancelled tab={} reason=unknown_tab",
-                        events::label_prefix(tab_id)
-                    );
-                    return false;
-                }
-                None => None,
+        let owner = self
+            .registry
+            .lock()
+            .get(tab_id)
+            .map(|record| record.session_id().map(str::to_string));
+        let session_id = match owner {
+            Some(Some(session_id)) => session_id,
+            Some(None) => return true,
+            None => {
+                log::info!(
+                    "[browser-agent] navigation hop cancelled tab={} reason=unknown_tab",
+                    events::label_prefix(tab_id)
+                );
+                return false;
             }
-        };
-        let Some(session_id) = session_id else {
-            return true;
         };
         let tab = events::label_prefix(tab_id);
         if self.gate.is_stopped(&session_id) {
