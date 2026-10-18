@@ -84,7 +84,7 @@ fn boundary_failure_line_covers_every_wire_code_with_key_names() {
             "click",
             BrowserError::tab_not_found("agent-x").with_arg_keys(&["tabId"]),
         ),
-        // stale_ref — eval_gate deep site (no keys) → action table.
+        // stale_ref — helper-failure deep site (no keys) → action table.
         (
             ERR_STALE_REF,
             "click",
