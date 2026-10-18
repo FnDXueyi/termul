@@ -11,11 +11,10 @@ interface RowMenuProps {
   label: string
   /** `DropdownMenuItem`s. */
   children: React.ReactNode
-  disabled?: boolean
 }
 
 /** The … menu at the end of a list row. Items are composed by the caller. */
-export function RowMenu({ label, children, disabled }: RowMenuProps): React.JSX.Element {
+export function RowMenu({ label, children }: RowMenuProps): React.JSX.Element {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -24,7 +23,6 @@ export function RowMenu({ label, children, disabled }: RowMenuProps): React.JSX.
           size="icon-sm"
           variant="ghost"
           aria-label={label}
-          disabled={disabled}
           className="size-7 text-muted-foreground data-[state=open]:bg-foreground/[0.06] data-[state=open]:text-foreground"
         >
           <MoreHorizontal size={14} />

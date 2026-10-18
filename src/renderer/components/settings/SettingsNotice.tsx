@@ -17,15 +17,13 @@ const TONE: Record<NoticeTone, { box: string; icon: string; Glyph: typeof Info }
 
 interface SettingsNoticeProps extends React.HTMLAttributes<HTMLDivElement> {
   tone?: NoticeTone
-  /** Replaces the tone's default icon. */
-  icon?: React.ReactNode
   /** A button that resolves the notice, e.g. Try again. */
   action?: React.ReactNode
 }
 
 /** A boxed message on a settings page. Errors must say how to recover. */
 export const SettingsNotice = forwardRef<HTMLDivElement, SettingsNoticeProps>(
-  function SettingsNotice({ tone = 'info', icon, action, className, children, ...props }, ref) {
+  function SettingsNotice({ tone = 'info', action, className, children, ...props }, ref) {
     const { box, icon: iconClass, Glyph } = TONE[tone]
     return (
       <div
@@ -34,7 +32,7 @@ export const SettingsNotice = forwardRef<HTMLDivElement, SettingsNoticeProps>(
         {...props}
       >
         <span aria-hidden="true" className={cn('mt-0.5 shrink-0', iconClass)}>
-          {icon ?? <Glyph size={14} />}
+          <Glyph size={14} />
         </span>
         <div className="min-w-0 flex-1 text-xs leading-relaxed text-secondary-foreground">
           {children}

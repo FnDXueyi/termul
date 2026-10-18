@@ -63,7 +63,7 @@ export function AppPreferencesModal(): React.JSX.Element {
   const isOpen = useSettingsModalStore((state) => state.view === 'app')
   const close = useSettingsModalStore((state) => state.close)
   const appPage = useSettingsModalStore((state) => state.appPage)
-  // Computed per render so the web/desktop split follows the live runtime.
+  // Read on mount, not at import, so the web/desktop split follows the live runtime.
   const categories = useMemo(() => appPrefCategories(), [])
   const searchIndex = useMemo(() => appPrefSearchIndex(), [])
   const setAppPage = useSettingsModalStore((state) => state.setAppPage)

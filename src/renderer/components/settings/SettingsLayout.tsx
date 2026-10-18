@@ -137,7 +137,7 @@ export function SettingsLayout({
   // A new page starts at the top.
   useEffect(() => {
     if (activeId === undefined) return
-    bodyRef.current?.scrollTo?.({ top: 0 })
+    bodyRef.current?.scrollTo({ top: 0 })
   }, [activeId])
 
   const openResult = useCallback(

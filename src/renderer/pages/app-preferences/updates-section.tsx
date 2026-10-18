@@ -37,7 +37,6 @@ const CHANNELS: Array<{ value: UpdateChannel; label: string; description: string
 const formatLastChecked = (date: Date): string =>
   new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 
-/** The app version the bundle was built with. */
 export const APP_VERSION = `v${import.meta.env.PACKAGE_VERSION || '0.1.0'}`
 
 /**

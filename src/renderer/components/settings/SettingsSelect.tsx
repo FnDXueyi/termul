@@ -17,7 +17,6 @@ interface SettingsSelectProps
   extends Omit<React.ComponentPropsWithoutRef<typeof Select>, 'children'> {
   options: readonly SettingsSelectOption[]
   id?: string
-  placeholder?: string
   className?: string
   'aria-label'?: string
   'aria-describedby'?: string
@@ -33,7 +32,6 @@ export const SettingsSelect = forwardRef<HTMLButtonElement, SettingsSelectProps>
     {
       options,
       id,
-      placeholder,
       className,
       'aria-label': ariaLabel,
       'aria-describedby': ariaDescribedBy,
@@ -50,7 +48,7 @@ export const SettingsSelect = forwardRef<HTMLButtonElement, SettingsSelectProps>
           aria-describedby={ariaDescribedBy}
           className={cn('h-8 w-full text-xs @[35rem]:w-60', className)}
         >
-          <SelectValue placeholder={placeholder} />
+          <SelectValue />
         </SelectTrigger>
         <SelectContent>
           {options.map((option) => (

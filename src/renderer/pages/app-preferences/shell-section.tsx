@@ -12,7 +12,7 @@ interface ShellSectionProps {
 }
 
 /** Radix Select reserves the empty string; the system default needs its own value. */
-export const SYSTEM_DEFAULT_SHELL = '__system_default__'
+const SYSTEM_DEFAULT_SHELL = '__system_default__'
 
 /** Stored value may be a name or a path; show the matching detected shell's path. */
 function displayValue(defaultShell: string, availableShells: DetectedShells | null): string {

@@ -23,7 +23,6 @@ interface SettingsRowProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'c
   indent?: boolean
   /** Dims the label; the description should say why it is off. */
   disabled?: boolean
-  /** The control. */
   children?: React.ReactNode
 }
 
