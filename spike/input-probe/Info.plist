@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.termul.spike.inputprobe</string>
+  <key>CFBundleName</key><string>input-probe</string>
+  <key>NSCameraUsageDescription</key><string>spike</string>
+  <key>NSMicrophoneUsageDescription</key><string>spike</string>
+  <key>NSLocationUsageDescription</key><string>spike</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>spike</string>
+</dict>
+</plist>

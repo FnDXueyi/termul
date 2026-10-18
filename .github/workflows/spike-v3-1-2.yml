@@ -1,0 +1,42 @@
+name: spike-v3-1-2
+
+on:
+  push:
+    branches: [spike/v3-1-2]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, ubuntu-22.04, ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: --use-fake-device-for-media-stream
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev xvfb weston
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: spike/input-probe
+      - name: Build
+        run: cargo build --release --manifest-path spike/input-probe/Cargo.toml
+      - name: Probe
+        shell: bash
+        run: bash spike/input-probe/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.os }}
+          path: spike/input-probe/results
