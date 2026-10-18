@@ -1,6 +1,6 @@
-//! Page-side scripts for the eval bridge. All scripts are self-contained
-//! IIFEs evaluated via `webview.eval`; results post back through
-//! `browser_agent_eval_result` (see `wrap_eval`).
+//! Page helper scripts the core hands to [`super::BrowserEngine::evaluate`].
+//! All are self-contained expressions; agent strings enter only as JSON
+//! literals, never concatenated script.
 //!
 //! Ref model: `snapshot` registers interactive elements as `@eN` in
 //! `window.__termulBrowserRefs` with a structural `sel` fingerprint +
@@ -12,34 +12,8 @@
 
 use serde_json::Value;
 
-/// Wrap `expr` so its completion value posts back via the tab-scoped result
-/// command. The expression runs in the page main world. `__TAURI_INTERNALS__`
-/// is installed in every Termul child webview (same mechanism the URL poller
-/// uses), but in the 2026-10-03 field session this reply path failed for
-/// every observation call on mounted agent tabs — the failure is specific to
-/// the agent-tab context/timing and the root cause is unconfirmed (see
-/// spec-acp-browser-automation-v2/bug-evidence.md), so Windows eval now
-/// prefers CDP `Runtime.evaluate`. Returns the full script string for
-/// `webview.eval`.
-pub fn wrap_eval(tab_id: &str, nonce: &str, expr: &str) -> String {
-    let tab = serde_json::to_string(tab_id).unwrap_or_else(|_| "\"\"".into());
-    let n = serde_json::to_string(nonce).unwrap_or_else(|_| "\"\"".into());
-    format!(
-        r#"(function(){{
-  var __done=function(ok,val){{try{{
-    var inv=null;
-    if(window.__TAURI_INTERNALS__&&window.__TAURI_INTERNALS__.invoke)inv=window.__TAURI_INTERNALS__.invoke;
-    else if(window.__TAURI__&&window.__TAURI__.invoke)inv=window.__TAURI__.invoke;
-    else if(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)inv=window.__TAURI__.core.invoke;
-    if(inv){{inv('browser_agent_eval_result',{{tabId:{tab},nonce:{n},ok:ok,value:JSON.stringify(val===undefined?null:val)}}).catch(function(){{}});return;}}
-  }}catch(e){{}}}};
-  try{{
-    var __r=(function(){{ return ({expr}); }})();
-    Promise.resolve(__r).then(function(v){{__done(true,v)}},function(e){{__done(false,String(e&&e.message||e))}});
-  }}catch(e){{__done(false,String(e&&e.message||e))}}
-}})();"#
-    )
-}
+/// Document readiness probe used to settle after navigation.
+pub const READY_STATE: &str = "document.readyState";
 
 /// Shared prelude installed on demand: ref registry + helpers. Idempotent —
 /// `__termulBrowser` is created once per document.

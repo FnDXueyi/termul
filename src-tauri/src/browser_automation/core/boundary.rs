@@ -8,7 +8,7 @@
 //! keeps the full message (it is the tool result, values allowed there).
 //!
 //! Pure module: every helper is headless-testable and pinned by unit
-//! tests in `super::tests`.
+//! tests in `boundary_tests`.
 
 use super::{ERR_CAPABILITY, ERR_INTERNAL, ERR_INVALID_PARAMS, ERR_TAB_NOT_FOUND};
 
@@ -38,7 +38,7 @@ impl std::fmt::Display for BrowserError {
 }
 
 impl BrowserError {
-    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -47,20 +47,20 @@ impl BrowserError {
     }
     /// Attach the argument key names implicated in this failure (key
     /// names only — never values; CWE-532).
-    pub(super) fn with_arg_keys(mut self, keys: &[&'static str]) -> Self {
+    pub(crate) fn with_arg_keys(mut self, keys: &[&'static str]) -> Self {
         self.arg_keys = keys.to_vec();
         self
     }
-    pub(super) fn capability(msg: impl Into<String>) -> Self {
+    pub(crate) fn capability(msg: impl Into<String>) -> Self {
         Self::new(ERR_CAPABILITY, msg)
     }
-    pub(super) fn invalid(msg: impl Into<String>) -> Self {
+    pub(crate) fn invalid(msg: impl Into<String>) -> Self {
         Self::new(ERR_INVALID_PARAMS, msg)
     }
-    pub(super) fn tab_not_found(tab_id: &str) -> Self {
+    pub(crate) fn tab_not_found(tab_id: &str) -> Self {
         Self::new(ERR_TAB_NOT_FOUND, format!("tab '{tab_id}' not found"))
     }
-    pub(super) fn internal(msg: impl Into<String>) -> Self {
+    pub(crate) fn internal(msg: impl Into<String>) -> Self {
         Self::new(ERR_INTERNAL, msg)
     }
 }
@@ -163,3 +163,7 @@ pub fn boundary_failure_line(
         arg_keys.join(", ")
     )
 }
+
+#[cfg(test)]
+#[path = "boundary_tests.rs"]
+mod tests;
