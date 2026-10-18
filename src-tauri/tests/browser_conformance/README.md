@@ -13,7 +13,11 @@ must own the main thread on macOS. It:
 2. starts a Tauri app with one main window;
 3. installs the real `DesktopBrowserHost` and stands in for the renderer
    (`adapter.rs`): it opens the webview when the host asks for an agent tab.
-   Loopback fixtures never raise a consent ticket, so nobody answers one;
+   Loopback fixtures never raise an origin consent ticket. Sensitive actions
+   on them (password submits, uploads, downloads, tainted navigation) do:
+   the adapter records each ticket and answers it as unattended unless a case
+   scripts an answer. Each case's session is its own project, and upload
+   cases read from a temp project folder of fake files;
 4. runs each case in `cases.rs` through `dispatch`, the same entry point the
    host MCP parent uses.
 

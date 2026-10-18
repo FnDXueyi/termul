@@ -15,6 +15,7 @@ mod expected;
 mod fixture_server;
 mod profile;
 mod report;
+mod sensitive_cases;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

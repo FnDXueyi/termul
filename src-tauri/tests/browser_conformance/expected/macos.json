@@ -1,10 +1,20 @@
 {
-  "note": "Screenshots have no engine path on this OS yet and say so directly.",
+  "note": "Screenshots and file inputs have no engine path on this OS yet and say so directly.",
   "knownFailing": [
     {
       "capability": "screenshot",
       "code": "capability_unavailable",
       "observed": "screenshots are not implemented on this engine yet"
+    },
+    {
+      "capability": "upload",
+      "code": "capability_unavailable",
+      "observed": "file inputs are set only through the engine's file chooser, which is not wired on this engine yet"
+    },
+    {
+      "capability": "upload_refusals",
+      "code": "capability_unavailable",
+      "observed": "the upload verb is withdrawn on this engine; its refusals are unit-tested"
     }
   ]
 }

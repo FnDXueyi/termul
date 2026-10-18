@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::adapter::{Engine, StepError};
+use crate::sensitive_cases;
 use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
 const FORM_READY: &str = "Conformance form";
@@ -49,6 +50,13 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("reload", &["snapshot"]),
     cap("stale_ref", &["snapshot"]),
     cap("tamper", &["snapshot"]),
+    cap("password_submit", &["snapshot"]),
+    cap("password_submit_global", &["snapshot"]),
+    cap("tainted_navigation", &["snapshot"]),
+    cap("upload", &["snapshot"]),
+    cap("upload_refusals", &["snapshot"]),
+    cap("download", &["snapshot"]),
+    cap("download_preapproved", &["snapshot"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -72,7 +80,7 @@ impl From<StepError> for Failure {
     }
 }
 
-fn mismatch(message: impl Into<String>) -> Failure {
+pub(crate) fn mismatch(message: impl Into<String>) -> Failure {
     Failure {
         code: "assertion".into(),
         reason: None,
@@ -80,18 +88,18 @@ fn mismatch(message: impl Into<String>) -> Failure {
     }
 }
 
-type CaseResult = Result<(), Failure>;
+pub(crate) type CaseResult = Result<(), Failure>;
 
-struct Snapshot {
+pub(crate) struct Snapshot {
     text: String,
     url: String,
     title: String,
 }
 
-struct Ctx<'a> {
-    engine: &'a Engine,
-    fixtures: &'a FixtureServer,
-    session: String,
+pub(crate) struct Ctx<'a> {
+    pub engine: &'a Engine,
+    pub fixtures: &'a FixtureServer,
+    pub session: String,
 }
 
 fn tab_id(reply: &Value) -> Result<String, Failure> {
@@ -109,11 +117,11 @@ fn expect_fidelity(reply: &Value, what: &str) -> CaseResult {
 }
 
 impl Ctx<'_> {
-    async fn call(&self, action: &str, args: Value) -> Result<Value, Failure> {
+    pub(crate) async fn call(&self, action: &str, args: Value) -> Result<Value, Failure> {
         Ok(self.engine.call(&self.session, action, args).await?)
     }
 
-    async fn navigate(&self, path: &str) -> Result<Value, Failure> {
+    pub(crate) async fn navigate(&self, path: &str) -> Result<Value, Failure> {
         self.call("navigate", json!({ "url": self.fixtures.url(path) }))
             .await
     }
@@ -121,13 +129,13 @@ impl Ctx<'_> {
     /// Navigate, then wait until the page's own text is visible. A call that
     /// returns before the new document commits would otherwise race the next
     /// snapshot.
-    async fn open(&self, path: &str, ready_text: &str) -> CaseResult {
+    pub(crate) async fn open(&self, path: &str, ready_text: &str) -> CaseResult {
         self.navigate(path).await?;
         self.call("wait", json!({ "text": ready_text })).await?;
         Ok(())
     }
 
-    async fn snapshot(&self) -> Result<Snapshot, Failure> {
+    pub(crate) async fn snapshot(&self) -> Result<Snapshot, Failure> {
         let reply = self.call("snapshot", json!({})).await?;
         let field = |name: &str| reply["page"][name].as_str().unwrap_or_default().to_string();
         Ok(Snapshot {
@@ -137,19 +145,19 @@ impl Ctx<'_> {
         })
     }
 
-    async fn ref_of(&self, role: &str, name: &str) -> Result<String, Failure> {
+    pub(crate) async fn ref_of(&self, role: &str, name: &str) -> Result<String, Failure> {
         let snap = self.snapshot().await?;
         find_ref(&snap.text, role, name)
             .ok_or_else(|| mismatch(format!("snapshot has no {role} \"{name}\" ref")))
     }
 
-    async fn click(&self, role: &str, name: &str) -> CaseResult {
+    pub(crate) async fn click(&self, role: &str, name: &str) -> CaseResult {
         let target = self.ref_of(role, name).await?;
         let reply = self.call("click", json!({ "ref": target })).await?;
         expect_fidelity(&reply, "click")
     }
 
-    async fn expect_text(&self, needle: &str) -> CaseResult {
+    pub(crate) async fn expect_text(&self, needle: &str) -> CaseResult {
         let snap = self.snapshot().await?;
         if snap.text.contains(needle) {
             Ok(())
@@ -158,7 +166,7 @@ impl Ctx<'_> {
         }
     }
 
-    async fn expect_url(&self, path: &str, what: &str) -> CaseResult {
+    pub(crate) async fn expect_url(&self, path: &str, what: &str) -> CaseResult {
         let snap = self.snapshot().await?;
         if snap.url == self.fixtures.url(path) {
             Ok(())
@@ -461,6 +469,13 @@ pub async fn run(
         "stale_ref" => stale_ref(&ctx).await,
         "tamper" => tamper(&ctx).await,
         "screenshot" => screenshot(&ctx).await,
+        "password_submit" => sensitive_cases::password_submit(&ctx).await,
+        "password_submit_global" => sensitive_cases::password_submit_global(&ctx).await,
+        "tainted_navigation" => sensitive_cases::tainted_navigation(&ctx).await,
+        "upload" => sensitive_cases::upload(&ctx).await,
+        "upload_refusals" => sensitive_cases::upload_refusals(&ctx).await,
+        "download" => sensitive_cases::download(&ctx).await,
+        "download_preapproved" => sensitive_cases::download_preapproved(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

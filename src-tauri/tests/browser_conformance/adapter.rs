@@ -3,15 +3,19 @@
 //! It stands in for the renderer (opens the webview when the host asks for an
 //! agent tab) and exposes one `call` that goes through the same entry point
 //! the host MCP parent uses, with the deadline the parent stamps on a frame.
-//! Fixtures are loopback pages, which never raise a consent ticket; a ticket
-//! means a case left loopback, and is answered as unattended. Switching the
-//! runner to another host API means editing this file.
+//! Fixtures are loopback pages, which never raise an origin consent ticket.
+//! Sensitive actions on them do: every ticket is recorded for the cases to
+//! inspect and answered as unattended unless the case scripted an answer.
+//! The session's project folder is a temp dir of fake files. Switching the runner to another host API means
+//! editing this file.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use termul_manager_lib::conformance_support as host;
 use termul_manager_lib::web::sink::{AcpEvent, EventSink};
 use tokio::sync::mpsc;
@@ -56,24 +60,107 @@ impl EventSink for RendererSink {
     }
 }
 
-/// No one answers consent tickets.
-struct Unattended;
+/// One raised consent ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ticket {
+    pub session: String,
+    pub action: host::ActionClass,
+    pub origin: String,
+}
 
-impl host::PermissionRequest for Unattended {
+type Answer = Box<dyn Fn(&host::TicketRequest) -> host::TicketOutcome + Send + Sync>;
+
+/// Records every consent ticket. A session's tickets are answered as
+/// unattended unless the case installed an answer for it.
+#[derive(Default)]
+struct Approver {
+    raised: Mutex<Vec<Ticket>>,
+    answers: Mutex<HashMap<String, Answer>>,
+}
+
+impl host::PermissionRequest for Approver {
     fn request(
         &self,
-        _ticket: host::TicketRequest,
+        ticket: host::TicketRequest,
         _wait: Duration,
     ) -> host::PortFuture<'_, host::TicketOutcome> {
-        Box::pin(async { host::TicketOutcome::Unattended })
+        let outcome = self
+            .answers
+            .lock()
+            .unwrap()
+            .get(&ticket.session_id)
+            .map_or(host::TicketOutcome::Unattended, |answer| answer(&ticket));
+        self.raised.lock().unwrap().push(Ticket {
+            session: ticket.session_id,
+            action: ticket.action,
+            origin: ticket.origin.as_str().to_string(),
+        });
+        Box::pin(async move { outcome })
     }
 
     fn cancel_session(&self, _session_id: &str) {}
 }
 
+/// Which pre-approvals a case writes: the session's project's, or the
+/// app-wide ones global-profile tabs honour.
+#[derive(Debug, Clone, Copy)]
+pub enum Scope {
+    Project,
+    App,
+}
+
+/// The project folder upload cases read from: fake files only.
+pub const UPLOAD_FILE: &str = "fixture-upload.txt";
+pub const UPLOAD_BODY: &str = "fake upload for the conformance suite
+";
+pub const SECRET_FILE: &str = ".env";
+pub const LINKED_FILE: &str = "linked.txt";
+/// Swapped for a link out of the project while its upload awaits consent.
+pub const SWAPPED_FILE: &str = "swapped.txt";
+
+struct Project {
+    root: tempfile::TempDir,
+    _outside: tempfile::TempDir,
+    outside_file: PathBuf,
+    linked: bool,
+}
+
+fn project() -> Project {
+    let root = tempfile::tempdir().expect("project dir");
+    let outside = tempfile::tempdir().expect("outside dir");
+    std::fs::write(root.path().join(UPLOAD_FILE), UPLOAD_BODY).expect("upload file");
+    std::fs::write(root.path().join(SWAPPED_FILE), UPLOAD_BODY).expect("swapped file");
+    std::fs::write(root.path().join(SECRET_FILE), "FAKE_TOKEN=not-a-real-secret
+").expect("secret file");
+    let outside_file = outside.path().join("outside.txt");
+    std::fs::write(&outside_file, "fake file outside the project
+").expect("outside file");
+    let linked = symlink(&outside_file, &root.path().join(LINKED_FILE));
+    Project {
+        root,
+        _outside: outside,
+        outside_file,
+        linked,
+    }
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn symlink(target: &Path, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
 pub struct Engine {
     _tabs: Arc<host::BrowserTabManager>,
     _policy_root: tempfile::TempDir,
+    policy: Arc<host::BrowserPolicyService>,
+    tickets: Arc<Approver>,
+    project: Project,
+    sessions_root: PathBuf,
 }
 
 impl Engine {
@@ -89,22 +176,107 @@ impl Engine {
             Vec::new(),
             Arc::new(host::UnwiredProfileControl),
         ));
+        let tickets = Arc::new(Approver::default());
+        let project = project();
+        let root = project.root.path().to_path_buf();
         host::set_browser_host(host::DesktopBrowserHost::new(
             app.clone(),
             tabs.clone(),
             vec![sink],
             host::HostServices {
-                permissions: Arc::new(Unattended),
-                policy,
-                project_of: Arc::new(|_| "conformance".to_string()),
-                root_of: Arc::new(|_| None),
+                permissions: tickets.clone(),
+                policy: policy.clone(),
+                // Each case's session is its own project, so the profile
+                // mode and pre-approvals one case sets reach no other.
+                project_of: Arc::new(|session: &str| session.to_string()),
+                root_of: Arc::new(move |_| Some(root.clone())),
             },
         ));
         tauri::async_runtime::spawn(renderer_stand_in(rx));
+        let sessions_root = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join("browser-sessions");
         Self {
             _tabs: tabs,
             _policy_root: policy_root,
+            policy,
+            tickets,
+            project,
+            sessions_root,
         }
+    }
+
+    /// Every ticket `session` raised so far.
+    pub fn tickets(&self, session: &str) -> Vec<Ticket> {
+        let raised = self.tickets.raised.lock().unwrap();
+        raised.iter().filter(|t| t.session == session).cloned().collect()
+    }
+
+    /// Run `session`'s agent tabs on per-session ephemeral profiles.
+    pub async fn go_ephemeral(&self, session: &str) -> Result<(), String> {
+        let current = self.policy.project_policy(session).await.map_err(|e| format!("{e:?}"))?;
+        self.policy
+            .apply_project_op(session, current.revision, host::ProjectPolicyOp::SetEphemeral(true))
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Pre-approve `action` on `origin` at `scope`.
+    pub async fn preapprove(
+        &self,
+        session: &str,
+        scope: Scope,
+        action: host::ActionClass,
+        origin: &str,
+    ) -> Result<(), String> {
+        let origin = host::CanonicalOrigin::parse(origin).map_err(|e| format!("{e:?}"))?;
+        let applied = match scope {
+            Scope::Project => {
+                let item = host::ProjectPreapproval::new(action, origin).map_err(|e| format!("{e:?}"))?;
+                let current = self.policy.project_policy(session).await.map_err(|e| format!("{e:?}"))?;
+                self.policy
+                    .apply_project_op(session, current.revision, host::ProjectPolicyOp::AddPreapproval(item))
+                    .await
+                    .map(|_| ())
+            }
+            Scope::App => {
+                let item = host::AppPreapproval::new(action, origin).map_err(|e| format!("{e:?}"))?;
+                let current = self.policy.app_policy().await.map_err(|e| format!("{e:?}"))?;
+                self.policy
+                    .apply_app_op(current.revision, host::AppPolicyOp::AddPreapproval(item))
+                    .await
+                    .map(|_| ())
+            }
+        };
+        applied.map_err(|e| format!("{e:?}"))
+    }
+
+    /// Allow `session`'s uploads, but first swap [`SWAPPED_FILE`] for a link
+    /// to a file outside the project, as a racing process would.
+    pub fn swap_upload_while_asking(&self, session: &str) {
+        let swapped = self.project.root.path().join(SWAPPED_FILE);
+        let outside = self.project.outside_file.clone();
+        let answer: Answer = Box::new(move |ticket| {
+            if ticket.action == host::ActionClass::Upload {
+                let _ = std::fs::remove_file(&swapped);
+                symlink(&outside, &swapped);
+            }
+            host::TicketOutcome::Answered(host::ConsentOption::AllowSession)
+        });
+        self.tickets.answers.lock().unwrap().insert(session.to_string(), answer);
+    }
+
+    /// Whether the outside-the-project symlink could be created here.
+    pub fn has_symlink(&self) -> bool {
+        self.project.linked
+    }
+
+    /// Where the host writes `session`'s downloads.
+    pub fn downloads_dir(&self, session: &str) -> PathBuf {
+        self.sessions_root.join(session).join("downloads")
     }
 
     /// One tool call, as the wire reply an agent would read. A reply that
