@@ -254,6 +254,15 @@ impl SessionGrants {
             .allow_list = allow_list;
     }
 
+    /// The origin class of `url` against the session's allow-list snapshot.
+    pub fn class_of(&self, session_id: &str, url: &Url) -> OriginClass {
+        let sessions = self.sessions.lock();
+        let allow_list = sessions
+            .get(session_id)
+            .map_or(&[][..], |s| s.allow_list.as_slice());
+        classify(url, crate::host_perimeter::is_owned_port, allow_list)
+    }
+
     /// The verdict for one navigation hop of a session-owned tab, from the
     /// grants and allow-list snapshot alone (no I/O: the engine hook that
     /// calls this cannot wait). `about:blank` is the engine's own empty

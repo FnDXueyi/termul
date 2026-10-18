@@ -47,6 +47,7 @@ fn ticket(session: &str, url: &str) -> TicketRequest {
         action: ActionClass::Navigate,
         element: Some("Docs link".into()),
         profile: TabProfile::Global,
+        options: &ConsentOption::ALL,
     }
 }
 
@@ -251,6 +252,45 @@ async fn an_answer_faster_than_the_floor_is_refused() {
         ANSWER_FLOOR,
         Duration::from_millis(750),
         "the production floor"
+    );
+}
+
+#[tokio::test]
+async fn a_sensitive_ticket_offers_only_its_options_and_names_them_for_one_action() {
+    let (recorder, tickets) = tickets(Duration::ZERO);
+    let request = TicketRequest {
+        action: ActionClass::PasswordSubmit,
+        options: &ConsentOption::ONCE_OR_DENY,
+        ..ticket("s1", "https://bank.example/login")
+    };
+    let waiting = tokio::spawn({
+        let tickets = tickets.clone();
+        async move { tickets.request(request, Duration::from_secs(5)).await }
+    });
+    let id = raised(&tickets, &recorder).await;
+    let payload = recorder.0.lock()[0].2.clone();
+    assert_eq!(payload["toolCall"]["title"], "Submit a password on https://bank.example");
+    assert_eq!(payload["_meta"]["termul"]["browser"]["action"], "password_submit");
+    assert_eq!(
+        payload["options"],
+        json!([
+            { "optionId": "allow_session", "name": "Allow once", "kind": "allow_once",
+              "_meta": { "termul": { "scope": "once" } } },
+            { "optionId": "deny", "name": "Deny", "kind": "reject_once" },
+        ])
+    );
+    assert_eq!(
+        tickets.answer(Approver::Desktop, &id, Some("allow_project")),
+        Err(AnswerError::InvalidOption),
+        "an option the ticket never offered cannot answer it"
+    );
+    assert_eq!(
+        tickets.answer(Approver::Desktop, &id, Some("allow_session")),
+        Ok(ConsentOption::AllowSession)
+    );
+    assert_eq!(
+        waiting.await.unwrap(),
+        TicketOutcome::Answered(ConsentOption::AllowSession)
     );
 }
 

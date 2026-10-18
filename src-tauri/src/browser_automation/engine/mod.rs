@@ -15,6 +15,9 @@ pub mod assets;
 pub mod cdp;
 pub mod dialogs;
 pub mod events;
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+pub mod file_chooser;
+pub mod files;
 pub mod hooks;
 pub mod observe;
 pub mod profile;
@@ -276,6 +279,16 @@ pub trait BrowserEngine: Send + Sync {
     }
     /// Run a helper in `frame`'s isolated world (`isolated_eval`).
     fn evaluate_in_frame<'a>(&'a self, _tab: &'a str, _frame: &'a str, _script: Script) -> EngineFuture<'a, Value> {
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
+    }
+    /// Set `files` (host-staged paths) on the file input at `path`
+    /// (`file_chooser`).
+    fn set_input_files<'a>(
+        &'a self,
+        _tab: &'a str,
+        _path: &'a str,
+        _files: &'a [std::path::PathBuf],
+    ) -> EngineFuture<'a, ()> {
         Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 }

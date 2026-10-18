@@ -8,6 +8,7 @@ mod consent;
 mod actions;
 mod dialogs;
 pub(crate) mod dispatch;
+mod downloads;
 mod events;
 mod frames;
 mod observe;
@@ -15,13 +16,17 @@ mod page_events;
 pub mod ports;
 mod profile;
 mod reply;
+mod sensitive_gate;
+pub mod sensitivity;
 mod stop;
 mod surface;
 mod tabs;
 mod teardown;
+mod uploads;
 #[cfg(test)]
 pub mod test_support;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -57,6 +62,9 @@ const EVENT_STOP_CHANGED: &str = "acp:browser_stop_changed";
 /// The session's host-stamped project id.
 pub type ProjectResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
+/// The folder a session works in: the only tree its uploads come from.
+pub type RootResolver = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
 /// Host services the desktop browser host consumes.
 pub struct HostServices {
     pub permissions: Arc<dyn PermissionRequest>,
@@ -64,6 +72,7 @@ pub struct HostServices {
     /// this project" is written.
     pub policy: Arc<dyn PolicyStore>,
     pub project_of: ProjectResolver,
+    pub root_of: RootResolver,
 }
 
 /// Desktop host: owns the tab registry and drives the pane's webviews
@@ -76,6 +85,8 @@ pub struct DesktopBrowserHost {
     gate: ConsentGate,
     policy: Arc<dyn PolicyStore>,
     project_of: ProjectResolver,
+    root_of: RootResolver,
+    downloads: downloads::Downloads,
     registry: Arc<Mutex<TabRegistry>>,
     events: UnboundedSender<(String, TabEvent)>,
     nav_policy: Arc<dyn NavPolicy>,
@@ -121,6 +132,8 @@ impl DesktopBrowserHost {
             gate: ConsentGate::new(services.permissions, services.policy.clone()),
             policy: services.policy,
             project_of: services.project_of,
+            root_of: services.root_of,
+            downloads: downloads::Downloads::default(),
             registry,
             events: tx,
         });
@@ -231,6 +244,25 @@ impl NavPolicy for HopPolicy {
             NavVerdict::Deny
         }
     }
+
+    fn holds_downloads(&self, tab: &str) -> bool {
+        self.host.upgrade().is_some_and(|host| {
+            host.registry
+                .lock()
+                .get(tab)
+                .is_some_and(|record| record.session_id().is_some())
+        })
+    }
+
+    fn download_starting(&self, tab: &str, url: &Url, suggested: &Path) -> Option<PathBuf> {
+        self.host.upgrade()?.download_starting(tab, url, suggested)
+    }
+
+    fn download_finished(&self, tab: &str, url: &Url, success: bool) {
+        if let Some(host) = self.host.upgrade() {
+            host.download_finished(tab, url, success);
+        }
+    }
 }
 
 impl DesktopBrowserHost {
@@ -310,6 +342,8 @@ impl BrowserHost for DesktopBrowserHost {
                 .guard(async {
                     self.authorize_call(&token, session_id, spec.verb, &call, deadline)
                         .await?;
+                    self.confirm_sensitive_call(&token, session_id, spec.verb, &call, deadline)
+                        .await?;
                     // After a consent wait the call may no longer have time to
                     // run the verb: refuse it now rather than act after the
                     // agent gave up.
@@ -323,7 +357,13 @@ impl BrowserHost for DesktopBrowserHost {
                         )
                         .with_reason("deadline"));
                     }
-                    self.act_watched(session_id, spec, call, deadline).await
+                    let reads_page =
+                        matches!(spec.verb, dispatch::Verb::Snapshot | dispatch::Verb::Screenshot);
+                    let done = self.act_watched(session_id, spec, call, deadline).await;
+                    if done.is_ok() && reads_page {
+                        self.gate.taint(session_id);
+                    }
+                    done
                 })
                 .await
         })

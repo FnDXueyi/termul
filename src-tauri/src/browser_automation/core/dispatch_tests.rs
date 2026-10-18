@@ -4,7 +4,7 @@ use super::*;
 use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
 use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_CAPABILITY};
 
-const ALL_VERBS: [&str; 23] = [
+const ALL_VERBS: [&str; 24] = [
     "navigate",
     "snapshot",
     "screenshot",
@@ -14,6 +14,7 @@ const ALL_VERBS: [&str; 23] = [
     "press",
     "scroll",
     "hover",
+    "upload",
     "wait",
     "new_tab",
     "list_tabs",
@@ -64,6 +65,7 @@ fn expected_args_text_comes_from_the_registry() {
         ("press", "optional 'key', 'ref', 'tabId'"),
         ("scroll", "optional 'dy', 'ref', 'tabId'"),
         ("hover", "'ref' (optional 'tabId')"),
+        ("upload", "'ref' and 'path' (optional 'tabId')"),
         ("wait", "'ms' or 'text' or 'textGone' or 'urlContains' or 'loadState' (optional 'tabId')"),
         ("select_option", "'ref' and 'value' (optional 'tabId')"),
         ("check", "'ref' (optional 'tabId')"),
@@ -161,7 +163,7 @@ fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
         err.message,
-        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload, select_option, check, uncheck, switch_tab, handle_dialog, console, network"
+        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, upload, wait, new_tab, list_tabs, close_tab, back, forward, reload, select_option, check, uncheck, switch_tab, handle_dialog, console, network"
     );
 
     let err = admit("screenshot", &mut Value::Null, &facts).unwrap_err();
@@ -210,6 +212,7 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         ("accept", "boolean"),
         ("cursor", "integer"),
         ("limit", "integer"),
+        ("path", "string"),
     ] {
         assert_eq!(props[key]["type"], ty, "flat {key}");
         assert_eq!(nested["properties"][key]["type"], ty, "nested {key}");
@@ -223,6 +226,7 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         "- select_option {ref, value, tabId?}:",
         "- switch_tab {tabId}:",
         "- list_tabs {}:",
+        "- upload {ref, path, tabId?}:",
     ] {
         assert!(schema.description.contains(line), "missing {line:?}: {}", schema.description);
     }
@@ -267,7 +271,7 @@ fn an_engine_without_an_isolated_world_advertises_no_page_verb_and_does_not_clai
         );
     }
     assert!(schema.description.contains(
-        "Not available on this host: navigate, snapshot, screenshot, click, fill, type, press, scroll, hover, wait, new_tab, back, forward, reload, select_option, check, uncheck, handle_dialog, console, network."
+        "Not available on this host: navigate, snapshot, screenshot, click, fill, type, press, scroll, hover, upload, wait, new_tab, back, forward, reload, select_option, check, uncheck, handle_dialog, console, network."
     ));
     assert!(schema.description.contains("cannot run page helpers in an isolated script world"));
     assert!(!schema.description.contains("page's own script context"));
@@ -338,4 +342,18 @@ fn a_withdrawn_verb_drops_its_result_line() {
     let description = schema(Some(&no_screenshots())).description;
     assert!(!description.contains("data.path"), "{description}");
     assert!(description.contains("data.refs"));
+}
+
+#[test]
+fn the_agent_tab_floor_needs_native_download_and_file_chooser_hooks() {
+    assert_eq!(floor_gap(&EngineFacts::all_trusted()), None);
+    for hook in [CapabilityId::DownloadIntercept, CapabilityId::FileChooser] {
+        let facts = EngineFacts {
+            capabilities: EngineFacts::all_trusted()
+                .capabilities
+                .with(hook, Support::Synthetic),
+            ..EngineFacts::all_trusted()
+        };
+        assert_eq!(floor_gap(&facts), Some(hook), "{hook:?}");
+    }
 }

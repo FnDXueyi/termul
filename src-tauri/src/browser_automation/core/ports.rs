@@ -65,6 +65,10 @@ impl ConsentOption {
         ConsentOption::Deny,
     ];
 
+    /// What a sensitive action is offered when no project pre-approval
+    /// could cover it: this once, or not at all.
+    pub const ONCE_OR_DENY: [ConsentOption; 2] = [ConsentOption::AllowSession, ConsentOption::Deny];
+
     pub fn acp_kind(self) -> &'static str {
         match self {
             ConsentOption::AllowSession => "allow_once",
@@ -96,6 +100,8 @@ pub struct TicketRequest {
     /// Agent-supplied intent, displayed as such and never classified.
     pub element: Option<String>,
     pub profile: TabProfile,
+    /// The options offered, in display order.
+    pub options: &'static [ConsentOption],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

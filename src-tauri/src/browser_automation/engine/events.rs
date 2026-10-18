@@ -8,6 +8,7 @@
 //! decision a tab's navigation gets, and it is reported with the
 //! `NavStarting` event it applied to.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -119,10 +120,21 @@ pub enum TabEvent {
     Closed,
 }
 
-/// The core's per-hop navigation decision, consulted synchronously on the
-/// UI thread. Implementations must not block.
+/// The core's per-hop navigation and download decisions, consulted
+/// synchronously on the UI thread. Implementations must not block.
 pub trait NavPolicy: Send + Sync {
     fn decide(&self, tab: &str, url: &Url) -> NavVerdict;
+    /// Whether the tab's downloads go through [`NavPolicy::download_starting`].
+    /// Tabs that answer false keep the engine's own download handling.
+    fn holds_downloads(&self, _tab: &str) -> bool {
+        false
+    }
+    /// Where a download the tab starts may be written, or `None` to cancel
+    /// it. `suggested` is the engine's own choice of path.
+    fn download_starting(&self, _tab: &str, _url: &Url, _suggested: &Path) -> Option<PathBuf> {
+        None
+    }
+    fn download_finished(&self, _tab: &str, _url: &Url, _success: bool) {}
 }
 
 /// What the core gives an adapter for one tab: its label, the event
@@ -215,6 +227,18 @@ impl TabEvents {
             kind: CommitKind::SameDocument,
             url: url.to_string(),
         });
+    }
+
+    pub fn holds_downloads(&self) -> bool {
+        self.policy.holds_downloads(&self.label)
+    }
+
+    pub fn download_starting(&self, url: &Url, suggested: &Path) -> Option<PathBuf> {
+        self.policy.download_starting(&self.label, url, suggested)
+    }
+
+    pub fn download_finished(&self, url: &Url, success: bool) {
+        self.policy.download_finished(&self.label, url, success);
     }
 
     pub fn publish(&self, event: TabEvent) {

@@ -245,8 +245,8 @@ notify-rust = "4.18"
 # PlatformWebview is the type these crates name.
 objc2 = "0.6.4"
 block2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSDictionary", "NSError", "NSData"] }
-objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKFrameInfo", "WKContentWorld", "WKNavigation", "WKUIDelegate", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKPreferences"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSDictionary", "NSError", "NSData", "NSArray", "NSURL"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKFrameInfo", "WKContentWorld", "WKNavigation", "WKUIDelegate", "WKOpenPanelParameters", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKPreferences"] }
 # Agent-tab screenshots: NSImage to PNG (browser_automation::engine::wkwebview).
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSImage", "NSBitmapImageRep", "NSImageRep"] }
 

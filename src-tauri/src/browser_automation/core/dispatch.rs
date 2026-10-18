@@ -42,6 +42,7 @@ pub enum Verb {
     HandleDialog,
     Console,
     Network,
+    Upload,
 }
 
 impl Verb {
@@ -72,7 +73,8 @@ impl Verb {
             | Verb::Reload
             | Verb::SelectOption
             | Verb::Check
-            | Verb::Uncheck => true,
+            | Verb::Uncheck
+            | Verb::Upload => true,
         }
     }
 }
@@ -94,6 +96,7 @@ pub enum ArgKey {
     Accept,
     Cursor,
     Limit,
+    Path,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +108,7 @@ enum ArgType {
 }
 
 impl ArgKey {
-    const ALL: [ArgKey; 14] = [
+    const ALL: [ArgKey; 15] = [
         ArgKey::Url,
         ArgKey::TabId,
         ArgKey::Ref,
@@ -120,6 +123,7 @@ impl ArgKey {
         ArgKey::Accept,
         ArgKey::Cursor,
         ArgKey::Limit,
+        ArgKey::Path,
     ];
 
     pub fn name(self) -> &'static str {
@@ -138,6 +142,7 @@ impl ArgKey {
             ArgKey::Accept => "accept",
             ArgKey::Cursor => "cursor",
             ArgKey::Limit => "limit",
+            ArgKey::Path => "path",
         }
     }
 
@@ -166,6 +171,7 @@ impl ArgKey {
             ArgKey::Accept => "true for OK, false for Cancel (handle_dialog).",
             ArgKey::Cursor => "data.cursor from the previous console or network reply; omit to start at the oldest kept entry.",
             ArgKey::Limit => "Most entries to return (default 50, max 200).",
+            ArgKey::Path => "File to upload, relative to the project folder.",
         }
     }
 }
@@ -251,7 +257,7 @@ pub struct ActionSpec {
 
 use CapabilityId as Cap;
 
-pub static REGISTRY: [ActionSpec; 23] = [
+pub static REGISTRY: [ActionSpec; 24] = [
     ActionSpec {
         verb: Verb::Navigate,
         name: "navigate",
@@ -341,6 +347,16 @@ pub static REGISTRY: [ActionSpec; 23] = [
         mutating: true,
         budget: budgets::ACTION_EVAL,
         summary: "move the pointer over the element.",
+    },
+    ActionSpec {
+        verb: Verb::Upload,
+        name: "upload",
+        params: &[req(ArgKey::Ref), req(ArgKey::Path), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::FileChooser],
+        mutating: true,
+        budget: budgets::ACTION_UPLOAD,
+        summary: "set a project file on a file input. The user confirms every upload; secrets (.env, keys, credentials) and files outside the project are refused.",
     },
     ActionSpec {
         verb: Verb::Wait,
@@ -497,31 +513,22 @@ pub static REGISTRY: [ActionSpec; 23] = [
     },
 ];
 
-/// `download_intercept` and `file_chooser` join the agent-tab floor once
-/// their engine hooks ship; flip this then.
-pub const FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER: bool = false;
-
 /// The tab-policy hooks that must all be `Trusted` before any agent tab
 /// opens.
-const FLOOR: [Cap; 5] = [
+const FLOOR: [Cap; 7] = [
     Cap::NavigationIntercept,
     Cap::NewWindowIntercept,
+    Cap::DownloadIntercept,
     Cap::DialogIntercept,
+    Cap::FileChooser,
     Cap::PermissionIntercept,
     Cap::ExternalProtocolIntercept,
 ];
-const FLOOR_PENDING: [Cap; 2] = [Cap::DownloadIntercept, Cap::FileChooser];
 
 /// The first floor capability this engine does not enforce natively.
 pub fn floor_gap(facts: &EngineFacts) -> Option<CapabilityId> {
-    let pending: &[Cap] = if FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER {
-        &FLOOR_PENDING
-    } else {
-        &[]
-    };
     FLOOR
         .iter()
-        .chain(pending)
         .copied()
         .find(|id| facts.capabilities.get(*id) != Support::Trusted)
 }
@@ -700,7 +707,7 @@ fn available(facts: &EngineFacts) -> impl Iterator<Item = &'static ActionSpec> +
 
 /// Failure codes an agent can match on, with what to do about each.
 const FAILURE_CODES: [(&str, &str); 7] = [
-    (ERR_CONFIRMATION, "the user has not allowed browser access (refused, or no answer in time); the first call in a session may wait for their answer, so ask them instead of retrying blindly"),
+    (ERR_CONFIRMATION, "the user has not allowed browser access or a sensitive action such as a password submit, upload or download (refused, or no answer in time); the first call in a session may wait for their answer, and so may a sensitive action, so ask them instead of retrying blindly"),
     (ERR_CAPABILITY, "this host cannot do it; use another action"),
     (ERR_TAB_NOT_FOUND, "no such agent tab; use list_tabs or new_tab"),
     (ERR_STALE_REF, "the page changed; take a new snapshot"),

@@ -24,6 +24,7 @@ pub fn install(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuild
             PageLoadEvent::Finished => load.publish(TabEvent::LoadFinished),
         })
         .on_document_title_changed(move |_, t| title.publish(TabEvent::TitleChanged { title: t }));
+    let builder = install_downloads(builder, events);
     if events.role() != TabRole::Agent {
         return builder;
     }
@@ -37,6 +38,40 @@ pub fn install(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuild
         popup.publish(TabEvent::NewWindowRequested { url: url.to_string() });
         NewWindowResponse::Deny
     })
+}
+
+/// WebView2 and WKWebView raise downloads per webview through tauri's hook.
+#[cfg(not(target_os = "linux"))]
+fn install_downloads(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuilder<Wry> {
+    use tauri::webview::DownloadEvent;
+
+    if !events.holds_downloads() {
+        return builder;
+    }
+    let downloads = events.clone();
+    builder.on_download(move |_, event| match event {
+        DownloadEvent::Requested { url, destination } => {
+            match downloads.download_starting(&url, destination) {
+                Some(path) => {
+                    *destination = path;
+                    true
+                }
+                None => false,
+            }
+        }
+        DownloadEvent::Finished { url, success, .. } => {
+            downloads.download_finished(&url, success);
+            true
+        }
+        _ => true,
+    })
+}
+
+/// WebKitGTK raises downloads on the web context every tab shares, so the
+/// adapter attaches its own handler per webview (`webkitgtk::events`).
+#[cfg(target_os = "linux")]
+fn install_downloads(builder: WebviewBuilder<Wry>, _events: &TabEvents) -> WebviewBuilder<Wry> {
+    builder
 }
 
 /// Why a built webview is refused.
@@ -101,6 +136,8 @@ pub async fn close(webview: &Webview) {
         dialogs::release_tab(&label);
         #[cfg(target_os = "windows")]
         super::webview2::observe::release_tab(&label);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        super::file_chooser::release_tab(&label);
     });
     let _ = webview.close();
     let (tx, rx) = oneshot::channel::<()>();

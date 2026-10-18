@@ -186,8 +186,8 @@ impl WebView2Engine {
 }
 
 /// What this adapter implements today: isolated-world eval, trusted
-/// clicks and screenshots, the tab-policy hooks; the DOM-event verbs are
-/// synthetic.
+/// clicks, screenshots and file inputs, the tab-policy hooks (downloads
+/// and file choosers among them); the DOM-event verbs are synthetic.
 pub fn capability_table() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented on the WebView2 engine yet")
         .with(CapabilityId::IsolatedEval, Support::Trusted)
@@ -198,6 +198,8 @@ pub fn capability_table() -> CapabilityTable {
         .with(CapabilityId::DialogIntercept, Support::Trusted)
         .with(CapabilityId::PermissionIntercept, Support::Trusted)
         .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted)
+        .with(CapabilityId::FileChooser, Support::Trusted)
+        .with(CapabilityId::DownloadIntercept, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)
@@ -269,5 +271,18 @@ impl BrowserEngine for WebView2Engine {
         answer: DialogAnswer,
     ) -> EngineFuture<'a, bool> {
         Box::pin(super::dialogs::answer(&self.transport.tabs, tab, id, answer))
+    }
+
+    fn set_input_files<'a>(
+        &'a self,
+        tab: &'a str,
+        path: &'a str,
+        files: &'a [std::path::PathBuf],
+    ) -> EngineFuture<'a, ()> {
+        Box::pin(async move {
+            tokio::time::timeout(EVAL_STEP, cdp::set_input_files(&self.transport, tab, path, files))
+                .await
+                .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout)))
+        })
     }
 }

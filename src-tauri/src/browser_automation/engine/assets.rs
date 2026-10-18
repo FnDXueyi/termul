@@ -51,6 +51,13 @@ pub const FRAME_ORIGIN: Helper = helper!("frame_origin");
 pub const OWNER_PATH: Helper = helper!("owner_path");
 #[cfg_attr(target_os = "windows", allow(dead_code, reason = "WebView2 reads the console through CDP"))]
 pub const CONSOLE_PULL: Helper = helper!("console_pull");
+pub const SENSITIVITY: Helper = helper!("sensitivity");
+/// Only CDP engines set a file input through the element itself.
+#[cfg(any(test, target_os = "windows"))]
+pub const FILE_INPUT: Helper = helper!("file_input");
+/// WebKit engines set a file input by answering the chooser it opens.
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+pub const OPEN_FILE_CHOOSER: Helper = helper!("open_file_chooser");
 
 /// Main-world script every agent tab frame runs at document start on
 /// engines whose console is observed by page script: it buffers console
@@ -143,6 +150,26 @@ pub fn scroll(path: Option<&str>, dy: f64) -> Script {
 /// Synthetic hover events on the element at `path`.
 pub fn hover(path: &str) -> Script {
     Script::new(HOVER, json!({ "path": path }))
+}
+
+/// The closed sensitivity facts about the element at `path`, or about the
+/// focused element without one.
+pub fn sensitivity(path: Option<&str>) -> Script {
+    Script::new(SENSITIVITY, json!({ "path": path }))
+}
+
+/// The file input at `path` itself, for engines that set its files by
+/// element handle; null when `path` names anything else.
+#[cfg(any(test, target_os = "windows"))]
+pub fn file_input(path: &str) -> Script {
+    Script::new(FILE_INPUT, json!({ "path": path }))
+}
+
+/// Have the file input at `path` open its chooser; false when `path`
+/// names anything else.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn open_file_chooser(path: &str) -> Script {
+    Script::new(OPEN_FILE_CHOOSER, json!({ "path": path }))
 }
 
 /// Whether the page's visible text contains `text`.

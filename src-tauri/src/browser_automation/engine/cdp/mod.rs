@@ -27,6 +27,9 @@ pub enum CdpMethod {
     LogEnable,
     NetworkEnable,
     TargetSetAutoAttach,
+    DomSetFileInputFiles,
+    PageEnable,
+    PageSetInterceptFileChooserDialog,
 }
 
 impl CdpMethod {
@@ -43,6 +46,9 @@ impl CdpMethod {
             CdpMethod::LogEnable => "Log.enable",
             CdpMethod::NetworkEnable => "Network.enable",
             CdpMethod::TargetSetAutoAttach => "Target.setAutoAttach",
+            CdpMethod::DomSetFileInputFiles => "DOM.setFileInputFiles",
+            CdpMethod::PageEnable => "Page.enable",
+            CdpMethod::PageSetInterceptFileChooserDialog => "Page.setInterceptFileChooserDialog",
         }
     }
 }
@@ -230,6 +236,63 @@ pub async fn owner_path(
     match parse_evaluate_result(&out)? {
         Value::String(path) if !path.is_empty() => Ok(path),
         _ => Err(malformed),
+    }
+}
+
+/// The calls that cancel every file chooser a session's documents open,
+/// so the native dialog never shows and the page sees a cancel. Each
+/// out-of-process frame's session needs its own: the engine asks the
+/// session hosting the frame. The interception is consulted only while
+/// the Page domain is enabled on that session.
+pub fn file_chooser_calls() -> [(CdpMethod, Value); 2] {
+    [
+        (CdpMethod::PageEnable, json!({})),
+        (
+            CdpMethod::PageSetInterceptFileChooserDialog,
+            json!({ "enabled": true, "cancel": true }),
+        ),
+    ]
+}
+
+/// Set `files` on the file input at `path` through `DOM.setFileInputFiles`:
+/// the isolated-world helper hands back the element itself, by reference.
+pub async fn set_input_files(
+    transport: &dyn CdpTransport,
+    tab: &str,
+    path: &str,
+    files: &[std::path::PathBuf],
+) -> Result<(), EngineError> {
+    let context = isolated_context(transport, tab, None).await?;
+    let mut params = call_params(&assets::file_input(path), context);
+    params["returnByValue"] = Value::Bool(false);
+    let out = transport
+        .call(tab, CdpMethod::RuntimeCallFunctionOn, params)
+        .await?;
+    let element = file_input_object(&out)?;
+    let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+    transport
+        .call(
+            tab,
+            CdpMethod::DomSetFileInputFiles,
+            json!({ "files": files, "objectId": element }),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The element handle a by-reference helper call returned. Anything but a
+/// DOM node means the path named no file input.
+pub fn file_input_object(out: &Value) -> Result<String, EngineError> {
+    if out.get("exceptionDetails").is_some_and(Value::is_object) {
+        return Err(EngineError::new(EngineErrorKind::PageException));
+    }
+    let result = out.get("result");
+    match (
+        result.and_then(|r| r.get("subtype")).and_then(Value::as_str),
+        result.and_then(|r| r.get("objectId")).and_then(Value::as_str),
+    ) {
+        (Some("node"), Some(id)) => Ok(id.to_string()),
+        _ => Err(EngineError::new(EngineErrorKind::PageException)),
     }
 }
 

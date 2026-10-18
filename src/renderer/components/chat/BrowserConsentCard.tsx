@@ -23,11 +23,11 @@
 
 import { useEffect, useRef } from 'react'
 import {
-  BROWSER_CONSENT_OPTION_LABELS,
-  BROWSER_CONSENT_TITLE,
+  browserConsentOptionLabel,
   browserConsentProfileLabel,
   browserConsentSummary,
   browserConsentTargetLine,
+  browserConsentTitle,
   browserConsentTitleId,
   useConsentArmed
 } from '@/components/browser/consent-intent'
@@ -85,7 +85,7 @@ export function BrowserConsentCard({ consent }: BrowserConsentCardProps): React.
         </span>
         <div className="min-w-0 flex-1">
           <h2 id={titleId} className="text-xs font-semibold leading-5 text-foreground">
-            {BROWSER_CONSENT_TITLE}
+            {browserConsentTitle(consent.action)}
           </h2>
           <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
             {browserConsentSummary(agentName, consent)} You'll watch it work in a visible tab.
@@ -129,7 +129,7 @@ export function BrowserConsentCard({ consent }: BrowserConsentCardProps): React.
             ) : (
               <ShieldCheck size={14} className="shrink-0" aria-hidden="true" />
             )}
-            <span className="truncate">{BROWSER_CONSENT_OPTION_LABELS[optionId]}</span>
+            <span className="truncate">{browserConsentOptionLabel(optionId, consent.action)}</span>
           </Button>
         ))}
       </fieldset>

@@ -1,8 +1,8 @@
 //! WebView2 tab events tauri does not expose: same-document URL changes
 //! (`pushState`, fragments, same-document history steps) through
 //! `SourceChanged`, which reports whether a new document came with them;
-//! external-app launches on every tab; script dialogs, the console,
-//! requests and out-of-process frame sessions on agent tabs.
+//! external-app launches on every tab; script dialogs, file choosers, the
+//! console, requests and out-of-process frame sessions on agent tabs.
 
 use tauri::webview::PlatformWebview;
 use webview2_com::{take_pwstr, SourceChangedEventHandler};

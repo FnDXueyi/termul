@@ -4,8 +4,9 @@
 //! A tab has its page session plus one session per out-of-process frame,
 //! which auto-attach announces, and announces again with a new session
 //! after the frame reloads or navigates. Every session gets the same
-//! domains enabled when it appears. The table lives on the UI thread that
-//! raises the events and issues the calls.
+//! domains enabled, and its file choosers cancelled, when it appears. The
+//! table lives on the UI thread that raises the events and issues the
+//! calls.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use webview2_com::{take_pwstr, CallDevToolsProtocolMethodCompletedHandler, DevTo
 use windows_core::{Interface, HSTRING, PWSTR};
 
 use crate::browser_automation::engine::cdp::observe::{self as cdp_observe, NetworkTracker, Observed};
-use crate::browser_automation::engine::cdp::CdpMethod;
+use crate::browser_automation::engine::cdp::{self, CdpMethod};
 use crate::browser_automation::engine::events::{TabEvent, TabEvents};
 
 struct FrameSession {
@@ -74,17 +75,24 @@ pub fn attach(core: &ICoreWebView2, events: &TabEvents) -> bool {
     enable(core, None)
 }
 
-/// Fire the enable calls on `session` (`None`: the page). Their replies
-/// carry nothing the adapter needs.
+/// Fire the enable and file-chooser calls on `session` (`None`: the
+/// page). Their replies carry nothing the adapter needs.
 fn enable(core: &ICoreWebView2, session: Option<&str>) -> bool {
     cdp_observe::enable_calls()
         .into_iter()
+        .chain(cdp::file_chooser_calls())
         .all(|(method, params)| issue(core, session, method, &params))
 }
 
 fn issue(core: &ICoreWebView2, session: Option<&str>, method: CdpMethod, params: &Value) -> bool {
-    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
-    let method = HSTRING::from(method.as_str());
+    let name = method.as_str();
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |hr, _| {
+        if hr.is_err() {
+            log::warn!("[browser-tab] WebView2 refused {name} on an agent tab session");
+        }
+        Ok(())
+    }));
+    let method = HSTRING::from(name);
     let params = HSTRING::from(params.to_string());
     // SAFETY: UI thread, on the tab's own live `ICoreWebView2`; WebView2
     // addrefs the completion handler for the round trip.

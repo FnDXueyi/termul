@@ -303,6 +303,15 @@ pub(super) fn check_result(out: Value, ref_id: Option<&str>) -> Result<CheckStat
     }
 }
 
+/// The wire error of a helper that reported `{error: "…"}`. Any other
+/// shape is left to the parser of that helper's own result.
+pub(super) fn reported_failure(out: &Value, ref_id: Option<&str>) -> Result<(), BrowserError> {
+    match HelperFailure::deserialize(out) {
+        Ok(failure) => Err(helper_failure(&failure.error, ref_id)),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Map a helper's `{error: "…"}` to a wire code. Only the code reaches the
 /// reply, never the helper's text: a `stale_ref` prefix maps to
 /// `stale_ref` (take a fresh snapshot), anything else to `internal`.

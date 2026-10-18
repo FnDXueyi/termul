@@ -77,6 +77,8 @@ fn webkit_engines_declare_isolated_eval_the_policy_hooks_and_synthetic_input() {
         CapabilityId::DialogIntercept,
         CapabilityId::PermissionIntercept,
         CapabilityId::ExternalProtocolIntercept,
+        CapabilityId::DownloadIntercept,
+        CapabilityId::FileChooser,
     ] {
         assert_eq!(facts.capabilities.get(id), Support::Trusted, "{id:?}");
     }

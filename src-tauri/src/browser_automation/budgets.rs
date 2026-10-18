@@ -50,6 +50,9 @@ pub const CDP_CALL: Duration = CDP_ISSUE.saturating_add(CDP_RESULT);
 /// helper's result. On WebView2 it covers the frame lookup, the isolated
 /// world and the helper call.
 pub const EVAL_STEP: Duration = CDP_CALL;
+/// WebKit: how long a file input may take to open its chooser after the
+/// helper clicked it.
+pub const FILE_CHOOSER: Duration = secs(5);
 
 /// Per-verb action budgets, referenced by the action registry. Each is the
 /// worst case of the steps the verb runs.
@@ -69,6 +72,9 @@ pub const ACTION_SELECT: Duration = EVAL_STEP.saturating_add(EVAL_STEP);
 /// The click path, whose resolve step also reads the checked state. The
 /// confirming read after the click runs only if it still fits.
 pub const ACTION_TOGGLE: Duration = ACTION_CLICK;
+/// Revalidate the ref, then set the staged file: one helper call, plus the
+/// chooser round trip on WebKit.
+pub const ACTION_UPLOAD: Duration = EVAL_STEP.saturating_add(EVAL_STEP).saturating_add(FILE_CHOOSER);
 
 /// An absolute point in time a call must finish by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

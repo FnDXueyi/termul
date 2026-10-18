@@ -73,6 +73,7 @@ fn raise(rig: &Rig) -> (String, tokio::task::JoinHandle<TicketOutcome>) {
         action: ActionClass::Navigate,
         element: None,
         profile: TabProfile::Global,
+        options: &ConsentOption::ALL,
     };
     let tickets = rig.tickets.clone();
     let waiter =
