@@ -309,12 +309,43 @@ async fn a_report_for_a_mount_the_host_does_not_hold_is_refused() {
 
 #[test]
 fn typed_errors_encode_as_the_json_of_code_and_message() {
-    let encoded = CanvasError::new(CanvasErrorCode::CanvasTimeout, "late").to_backend_string();
+    let encoded = CanvasError::new(CanvasErrorCode::EngineError, "late").to_backend_string();
     let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({"code": "CANVAS_TIMEOUT", "message": "late"})
+        serde_json::json!({"code": "ENGINE_ERROR", "message": "late"})
     );
+}
+
+#[test]
+fn errors_an_agent_can_recover_from_tell_it_the_next_step() {
+    let actionable = [
+        (CanvasErrorCode::CanvasClosed, "Canvas button"),
+        (CanvasErrorCode::CanvasClosing, "Canvas button"),
+        (CanvasErrorCode::CanvasHidden, "Canvas tab"),
+        (
+            CanvasErrorCode::CanvasOpenElsewhere,
+            "another Termul window",
+        ),
+        (CanvasErrorCode::CanvasTimeout, "retry once"),
+        (CanvasErrorCode::UnsupportedInKiosk, "save_file"),
+    ];
+    for (code, step) in actionable {
+        let encoded = CanvasError::new(code, "no canvas is mounted").to_backend_string();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["code"], code.as_str());
+        let message = value["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("no canvas is mounted. ") && message.contains(step),
+            "{message}"
+        );
+    }
+    let ended = CanvasError::new(CanvasErrorCode::CanvasTimeout, "late.").to_backend_string();
+    assert!(ended.contains(r#""late. The canvas"#), "{ended}");
+    for code in [CanvasErrorCode::UnknownMethod, CanvasErrorCode::EngineError] {
+        let encoded = CanvasError::new(code, "bad").to_backend_string();
+        assert!(encoded.ends_with(r#""message":"bad"}"#), "{encoded}");
+    }
 }
 
 #[test]

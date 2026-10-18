@@ -643,7 +643,7 @@ fn create_node_over_stdio_reaches_the_renderer_and_returns_its_result() {
 }
 
 #[tokio::test]
-async fn canvas_tools_answer_canvas_closed_from_session_start() {
+async fn canvas_tools_answer_canvas_closed_with_the_way_to_open_it() {
     let parent = crate::acp::host_mcp::parent::HostPlanServer::start(vec![], None);
     let (port, token, provisional) = parent.register_session("agent-1");
     parent.bind_session(&token, "sess-real");
@@ -666,6 +666,10 @@ async fn canvas_tools_answer_canvas_closed_from_session_start() {
             .as_str()
             .unwrap_or_default();
         assert!(text.contains("CANVAS_CLOSED"), "{text}");
+        assert!(
+            text.contains("ask the user to open it with the Canvas button"),
+            "{text}"
+        );
         drop(writer);
     })
     .await;
