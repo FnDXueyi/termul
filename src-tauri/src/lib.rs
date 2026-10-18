@@ -184,7 +184,7 @@ pub mod conformance_support {
         PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
     };
     pub use crate::browser_automation::{
-        budgets, dispatch, eval_resolved, session_ended, set_browser_host, tab_created,
+        budgets, create_tab, dispatch, eval_resolved, session_ended, set_browser_host,
         BrowserCall, DesktopBrowserHost, HostServices,
     };
     pub use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
@@ -1149,9 +1149,9 @@ pub fn run() {
 
     // Defense-in-depth: reject top-level navigation on the main app webview so
     // a stray chat-link click (or any external anchor) can never tear down the
-    // SPA (issue #406). Browser-tab webviews load external URLs by design;
-    // for agent tabs every top-level request, redirect hops included, must
-    // pass the agent's origin authorization.
+    // SPA (issue #406). Browser-tab webviews decide each hop, redirects
+    // included, in the navigation hook they are built with: the host
+    // perimeter, then the agent's origin authorization.
     builder = builder.plugin(
         tauri::plugin::Builder::<_, ()>::new("main-navigation-guard")
             .on_navigation(|webview, url| {
@@ -1170,8 +1170,7 @@ pub fn run() {
                     }
                     allow
                 } else {
-                    host_perimeter::allow_tab_navigation(webview, url)
-                        && browser_automation::navigation_allowed(webview.label(), url)
+                    true
                 }
             })
             .build(),
@@ -1941,10 +1940,6 @@ pub fn run() {
             commands::browser_tab_go_forward,
             commands::browser_tab_reload,
             commands::browser_tab_open_devtools,
-            // Browser tab URL sync commands (called by injected JS)
-            commands::browser_tab_report_url,
-            commands::browser_tab_report_loaded,
-            commands::browser_tab_report_title,
             // Agentation toolbar injection (on-demand)
             commands::browser_tab_inject_agentation,
             // Agent browser automation (eval bridge reply, host consent

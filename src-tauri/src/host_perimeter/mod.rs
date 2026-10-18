@@ -30,7 +30,7 @@ pub(crate) use owned_ports::owned_list as owned_ports;
 pub(crate) use owned_ports::{claim_for_process, OwnedPort};
 
 use tauri::ipc::Invoke;
-use tauri::{Manager, Runtime, Url, Webview};
+use tauri::{Manager, Runtime, Url};
 
 /// The only webview that may invoke app commands. Capability files target it
 /// by the same label.
@@ -92,11 +92,15 @@ fn tab_denial<R: Runtime>(
     Some(denial)
 }
 
-/// Navigation verdict for a tab webview, from the engine's navigation hook.
-/// Denials are silent to the page and never prompt; the log line names the
-/// reason, label and port only.
-pub(crate) fn allow_tab_navigation<R: Runtime>(webview: &Webview<R>, url: &Url) -> bool {
-    tab_denial(webview, webview.label(), url).is_none()
+/// Navigation verdict for one hop of a tab webview, from the engine's
+/// navigation hook. Denials are silent to the page and never prompt; the
+/// log line names the reason, label and port only.
+pub(crate) fn allow_tab_navigation<R: Runtime>(
+    manager: &impl Manager<R>,
+    label: &str,
+    url: &Url,
+) -> bool {
+    tab_denial(manager, label, url).is_none()
 }
 
 /// The same verdict for a target termul loads itself (tab creation and

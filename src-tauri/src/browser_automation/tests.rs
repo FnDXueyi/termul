@@ -39,16 +39,11 @@ fn dispatch_without_host_fails_closed() {
 fn hooks_without_host_are_noops() {
     let _g = HOST_LOCK.lock().unwrap();
     clear_browser_host();
-    assert!(!tab_created("t1"));
     // Real nonces/request ids are `Uuid`s — keep the test values in the
     // same shape (and avoid hard-coded literal nonces).
     assert!(!eval_resolved(&Uuid::new_v4().to_string(), true, None));
     assert_eq!(stop_session("s1"), None, "no host means no stop to apply");
-    let page: tauri::Url = "https://example.com".parse().unwrap();
-    assert!(navigation_allowed("tab-1", &page), "without a host the hook never cancels");
     user_turn("s1");
-    tab_closed("t1");
-    tab_navigated("t1");
     session_ended("s1");
 }
 
@@ -83,20 +78,12 @@ fn registered_host_routes_dispatch_and_session_end() {
         fn end_session(&self, session_id: &str) {
             self.ended.lock().push(session_id.to_string());
         }
-        fn notify_tab_created(&self, _tab_id: &str) -> bool {
-            false
-        }
-        fn notify_tab_closed(&self, _tab_id: &str) {}
-        fn notify_tab_navigated(&self, _tab_id: &str) {}
         fn stop(&self, session_id: &str) -> bool {
             self.stopped.lock().push(session_id.to_string());
             true
         }
         fn user_turn(&self, session_id: &str) {
             self.turns.lock().push(session_id.to_string());
-        }
-        fn navigation_allowed(&self, tab_id: &str, _url: &tauri::Url) -> bool {
-            tab_id != "agent-blocked"
         }
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
@@ -125,9 +112,6 @@ fn registered_host_routes_dispatch_and_session_end() {
     assert_eq!(data["action"], "list_tabs");
     assert_eq!(stop_session("sess-1"), Some(true));
     user_turn("sess-1");
-    let page: tauri::Url = "https://example.com".parse().unwrap();
-    assert!(!navigation_allowed("agent-blocked", &page));
-    assert!(navigation_allowed("tab-user", &page));
     session_ended("sess-1");
     assert_eq!(stub.ended.lock().as_slice(), &["sess-1".to_string()]);
     assert_eq!(stub.stopped.lock().as_slice(), &["sess-1".to_string()]);

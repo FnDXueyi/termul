@@ -263,9 +263,8 @@ impl DesktopBrowserHost {
                 .map(str::to_string),
             Verb::ListTabs | Verb::CloseTab => None,
             _ => {
-                let tab = call.args.get("tabId").and_then(Value::as_str);
-                let (tab_id, _) = self.resolve_tab(session_id, tab).ok()?;
-                self.surface.info(&tab_id).ok().map(|info| info.url)
+                let label = self.resolve_tab(session_id, &call.args).ok()?;
+                self.registry.lock().get(&label).map(|record| record.url.clone())
             }
         }
     }
