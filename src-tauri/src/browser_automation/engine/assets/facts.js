@@ -8,7 +8,8 @@ function local() { var r = el.getBoundingClientRect(); return [r.left, r.top, r.
 // The box in this frame's viewport, through any same-origin frames.
 function box() { var l = local(), off = frameOffset(el); return [off.x + l[0], off.y + l[1], l[2], l[3]]; }
 function same(a, b) { return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]; }
-function inside(b, w, h) { return b[0] + b[2] > 0 && b[1] + b[3] > 0 && b[0] < w && b[1] < h; }
+// The action lands on the centre, so that is what must be in view.
+function inside(b, w, h) { var x = b[0] + b[2] / 2, y = b[1] + b[3] / 2; return x >= 0 && y >= 0 && x < w && y < h; }
 function shown() { var l = local(); return inside(l, view.innerWidth, view.innerHeight) && inside(box(), innerWidth, innerHeight); }
 // The element under (x, y) of this frame's viewport, through open shadow
 // roots and into same-origin frames.
