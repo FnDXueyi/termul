@@ -20,6 +20,14 @@ must own the main thread on macOS. It:
 The runner reaches the host only through `termul_manager_lib::conformance_support`
 and `adapter.rs`.
 
+The main webview loads `chat.html`, a stand-in for the chat pane with a focused
+text box. Input cases (`input_cases.rs`) drive the engine adapter directly
+against `input.html` with trusted input, for every tier the adapter declares,
+and read what the page saw from the reports it posts to the fixture server.
+They need no eval channel, so they run on every engine. Each one also checks
+that the chat stand-in kept focus and received nothing. A capability the
+adapter declares synthetic must refuse trusted input.
+
 It skips unless `TERMUL_BROWSER_CONFORMANCE` is set, so plain `cargo test`
 stays headless. `TERMUL_BROWSER_CONFORMANCE_OUT` sets where the JSON summary
 goes.

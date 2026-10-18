@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use termul_manager_lib::conformance_support as host;
 use termul_manager_lib::web::sink::{AcpEvent, EventSink};
 use tokio::sync::mpsc;
@@ -41,7 +41,8 @@ fn action_budget(action: &str) -> Duration {
         "navigate" => ACTION_NAVIGATE,
         "new_tab" => ACTION_NEW_TAB,
         "back" | "forward" | "reload" => ACTION_HISTORY,
-        "click" => ACTION_CLICK,
+        "click" | "hover" | "scroll" => ACTION_CLICK,
+        "fill" | "type" | "press" => ACTION_TEXT,
         "wait" => ACTION_WAIT,
         "list_tabs" | "close_tab" => ACTION_INSTANT,
         _ => ACTION_EVAL,
@@ -71,8 +72,24 @@ impl host::PermissionRequest for Unattended {
     fn cancel_session(&self, _session_id: &str) {}
 }
 
+/// The tier the engine declares for each input the cases exercise.
+pub struct Tiers {
+    pub pointer_click: host::Support,
+    pub text: host::Support,
+    pub press: host::Support,
+    pub pointer_move: host::Support,
+    pub wheel: host::Support,
+    pub drag: host::Support,
+    /// Focusing an element moves native focus to the tab, so the core
+    /// never sends a trusted click that would focus one.
+    pub focus_moves: bool,
+}
+
 pub struct Engine {
-    _tabs: Arc<host::BrowserTabManager>,
+    app: AppHandle,
+    /// A second engine on the host's tab manager, for input cases that
+    /// drive the adapter directly.
+    input: Arc<dyn host::BrowserEngine>,
     _policy_root: tempfile::TempDir,
 }
 
@@ -101,8 +118,37 @@ impl Engine {
         ));
         tauri::async_runtime::spawn(renderer_stand_in(rx));
         Self {
-            _tabs: tabs,
+            app: app.clone(),
+            input: host::desktop_engine(tabs),
             _policy_root: policy_root,
+        }
+    }
+
+    pub fn input(&self) -> &dyn host::BrowserEngine {
+        &*self.input
+    }
+
+    pub fn tiers(&self) -> Tiers {
+        let caps = &self.input.facts().capabilities;
+        Tiers {
+            pointer_click: caps.get(host::CapabilityId::PointerClick),
+            text: self.input.key_support(host::KeyKind::Text),
+            press: self.input.key_support(host::KeyKind::Press),
+            pointer_move: caps.get(host::CapabilityId::PointerMove),
+            wheel: caps.get(host::CapabilityId::Wheel),
+            drag: caps.get(host::CapabilityId::Drag),
+            focus_moves: self.input.element_focus_moves_tab_focus(),
+        }
+    }
+
+    /// Give the chat stand-in (the main webview) native and page focus.
+    pub fn focus_chat(&self) {
+        if let Some(window) = self.app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+        if let Some(main) = self.app.get_webview("main") {
+            let _ = main.set_focus();
+            let _ = main.eval("document.getElementById('chat').focus()");
         }
     }
 

@@ -3,6 +3,7 @@
 
 mod eval;
 pub mod events;
+pub mod input;
 
 use std::sync::Arc;
 

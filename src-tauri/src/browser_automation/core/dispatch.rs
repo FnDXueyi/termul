@@ -97,7 +97,7 @@ impl ArgKey {
             ArgKey::Ref => "Element ref (@eN) from the latest snapshot.",
             ArgKey::Value => "Value to set on the element.",
             ArgKey::Text => "Text to type (type) or to wait for (wait).",
-            ArgKey::Key => "Key name to press, e.g. Enter (the default).",
+            ArgKey::Key => "Key to press: one character, or Enter (the default), Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown or Space.",
             ArgKey::Ms => "Milliseconds to wait (max 30000).",
             ArgKey::Dy => "Pixels to scroll vertically (default 600).",
         }
@@ -227,7 +227,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_TEXT,
         summary: "replace a form field's value.",
     },
     ActionSpec {
@@ -237,7 +237,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_TEXT,
         summary: "append text to the element, or to the focused element without ref.",
     },
     ActionSpec {
@@ -247,7 +247,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::TrustedKey],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_TEXT,
         summary: "press a key on the element, or on the focused element without ref.",
     },
     ActionSpec {
@@ -257,7 +257,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::Wheel],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_CLICK,
         summary: "scroll the element into view, or the page by dy.",
     },
     ActionSpec {
@@ -267,7 +267,7 @@ pub static REGISTRY: [ActionSpec; 16] = [
         one_of: &[],
         requires: &[Cap::IsolatedEval, Cap::PointerMove],
         mutating: true,
-        budget: budgets::ACTION_EVAL,
+        budget: budgets::ACTION_CLICK,
         summary: "move the pointer over the element.",
     },
     ActionSpec {

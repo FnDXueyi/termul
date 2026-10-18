@@ -2,12 +2,14 @@
 //! shaping and boundary logging. Drives engines only through the
 //! [`BrowserEngine`] port; never touches platform crates.
 
+mod actionability;
+mod actions;
 pub mod authz;
 pub mod boundary;
 mod consent;
-mod actions;
 pub(crate) mod dispatch;
 mod events;
+mod input_actions;
 pub mod ports;
 mod profile;
 mod reply;

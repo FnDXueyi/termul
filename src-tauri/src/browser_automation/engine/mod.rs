@@ -15,6 +15,7 @@ pub mod assets;
 pub mod cdp;
 pub mod events;
 pub mod hooks;
+pub mod input;
 pub mod profile;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 mod string_eval;
@@ -34,6 +35,11 @@ use serde_json::Value;
 
 use crate::browser_tab_manager::BrowserTabManager;
 use assets::Script;
+
+pub use input::{
+    ActionabilityFacts, ControlKind, ElementState, InputMode, Key, KeyInput, KeyKind, NamedKey,
+    Point,
+};
 
 /// Closed set of engine capabilities. Verbs name the capabilities they
 /// need; adapters declare a tier for each one.
@@ -184,20 +190,6 @@ impl EngineFacts {
     }
 }
 
-/// The input mode the core picks from the capability tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Trusted,
-    Synthetic,
-}
-
-/// A point in main-frame CSS px.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Point {
-    pub x: f64,
-    pub y: f64,
-}
-
 /// Why an engine step failed. Carries no engine message: messages can
 /// quote page or protocol content, so only the core writes reply text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +243,43 @@ pub trait BrowserEngine: Send + Sync {
     /// mode or return `Unsupported`; they never substitute another mode.
     fn pointer_click<'a>(&'a self, tab: &'a str, at: Point, mode: InputMode)
         -> EngineFuture<'a, ()>;
+    /// Move the pointer to a main-frame point (`pointer_move`).
+    fn pointer_move<'a>(&'a self, _tab: &'a str, _at: Point, _mode: InputMode) -> EngineFuture<'a, ()> {
+        input::unsupported()
+    }
+    /// Scroll by `(dx, dy)` CSS px with the pointer at `at` (`wheel`).
+    fn wheel<'a>(
+        &'a self,
+        _tab: &'a str,
+        _at: Point,
+        _delta: (f64, f64),
+        _mode: InputMode,
+    ) -> EngineFuture<'a, ()> {
+        input::unsupported()
+    }
+    /// Press at `from`, move to `to` with the button held, release (`drag`).
+    fn drag<'a>(&'a self, _tab: &'a str, _from: Point, _to: Point, _mode: InputMode) -> EngineFuture<'a, ()> {
+        input::unsupported()
+    }
+    /// True when an element taking focus in the tab, by click or by
+    /// script, moves native focus to the tab and away from the chat. The
+    /// core then sends no trusted click that would focus an element and
+    /// never focuses one by script.
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        false
+    }
+    /// The `trusted_key` tier for one kind of keyboard input.
+    fn key_support(&self, _kind: KeyKind) -> Support {
+        self.facts().capabilities.get(CapabilityId::TrustedKey)
+    }
+    /// Keyboard input into the tab's focused element (`trusted_key`).
+    fn key<'a>(&'a self, _tab: &'a str, _input: KeyInput<'a>, _mode: InputMode) -> EngineFuture<'a, ()> {
+        input::unsupported()
+    }
+    /// Actionability facts for the element behind a ref's page locator.
+    fn element_facts<'a>(&'a self, tab: &'a str, path: &'a str) -> EngineFuture<'a, ActionabilityFacts> {
+        input::facts_via_eval(self, tab, path)
+    }
     /// PNG bytes of the visible viewport (`screenshot`).
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>>;
 }
@@ -259,15 +288,18 @@ pub trait BrowserEngine: Send + Sync {
 pub fn desktop_engine(tabs: Arc<BrowserTabManager>) -> Arc<dyn BrowserEngine> {
     #[cfg(target_os = "windows")]
     {
-        Arc::new(webview2::WebView2Engine::new(tabs))
+        let native = Arc::new(webview2::input::CdpInput::new(tabs.clone()));
+        Arc::new(input::WithNativeInput::new(webview2::WebView2Engine::new(tabs), native))
     }
     #[cfg(target_os = "macos")]
     {
-        Arc::new(wkwebview::WkWebViewEngine::new(tabs))
+        let native = Arc::new(wkwebview::input::AppKitInput::new(tabs.clone()));
+        Arc::new(input::WithNativeInput::new(wkwebview::WkWebViewEngine::new(tabs), native))
     }
     #[cfg(target_os = "linux")]
     {
-        Arc::new(webkitgtk::WebKitGtkEngine::new(tabs))
+        let native = Arc::new(webkitgtk::input::GdkInput::new(tabs.clone()));
+        Arc::new(input::WithNativeInput::new(webkitgtk::WebKitGtkEngine::new(tabs), native))
     }
 }
 
