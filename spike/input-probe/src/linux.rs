@@ -14,6 +14,7 @@ use wry::WebViewExtUnix;
 enum Route {
   MainDoEvent,
   WidgetEvent,
+  NoFocus,
 }
 
 pub struct GtkSynth {
@@ -26,7 +27,11 @@ pub struct GtkSynth {
 
 impl GtkSynth {
   pub fn new(window: &tao::window::Window, a: &wry::WebView, b: &wry::WebView, variant: &str) -> Self {
-    let route = if variant == "widget" { Route::WidgetEvent } else { Route::MainDoEvent };
+    let route = match variant {
+      "widget" => Route::WidgetEvent,
+      "nofocus" => Route::NoFocus,
+      _ => Route::MainDoEvent,
+    };
     Self {
       window: window.gtk_window().clone().upcast::<gtk::Widget>(),
       a: a.webview().upcast::<gtk::Widget>(),
@@ -77,13 +82,25 @@ impl GtkSynth {
     (win, wx, wy, wx + ox as f64, wy + oy as f64, own)
   }
 
-  unsafe fn dispatch(&self, ev: *mut gs::GdkEvent) -> bool {
+  unsafe fn dispatch(&self, ev: *mut gs::GdkEvent, is_key: bool, is_press: bool) -> bool {
+    let b: *mut gts::GtkWidget = self.b.to_glib_none().0;
     let handled = match self.route {
       Route::MainDoEvent => {
         gts::gtk_main_do_event(ev);
         true
       }
-      Route::WidgetEvent => gts::gtk_widget_event(self.b.to_glib_none().0, ev) != 0,
+      Route::WidgetEvent => gts::gtk_widget_event(b, ev) != 0,
+      Route::NoFocus if is_key => gts::gtk_widget_event(b, ev) != 0,
+      Route::NoFocus => {
+        if is_press {
+          gts::gtk_widget_set_can_focus(b, 0);
+        }
+        gts::gtk_main_do_event(ev);
+        if is_press {
+          gts::gtk_widget_set_can_focus(b, 1);
+        }
+        true
+      }
     };
     gs::gdk_event_free(ev);
     handled
@@ -157,7 +174,7 @@ impl Synth for GtkSynth {
       m.state = if button1 { gs::GDK_BUTTON1_MASK } else { 0 };
       m.is_hint = 0;
       self.set_device(ev, &self.pointer());
-      let handled = self.dispatch(ev);
+      let handled = self.dispatch(ev, false, false);
       json!({ "x": wx, "y": wy, "own_window": own, "handled": handled })
     }
   }
@@ -177,7 +194,7 @@ impl Synth for GtkSynth {
       bt.button = 1;
       bt.state = if press { 0 } else { gs::GDK_BUTTON1_MASK };
       self.set_device(ev, &self.pointer());
-      let handled = self.dispatch(ev);
+      let handled = self.dispatch(ev, false, press);
       json!({ "press": press, "x": wx, "y": wy, "own_window": own, "handled": handled })
     }
   }
@@ -209,7 +226,7 @@ impl Synth for GtkSynth {
         k.hardware_keycode = code as u16;
         k.group = 0;
         self.set_device(ev, &self.keyboard());
-        out.push(self.dispatch(ev));
+        out.push(self.dispatch(ev, true, false));
       }
       json!({ "keyval": keyval, "keycode": code, "handled": out })
     }
@@ -238,7 +255,7 @@ impl Synth for GtkSynth {
           s.direction = gs::GDK_SCROLL_DOWN;
         }
         self.set_device(ev, &self.pointer());
-        out.push(self.dispatch(ev));
+        out.push(self.dispatch(ev, false, false));
       }
       json!({ "handled": out })
     }
@@ -247,6 +264,11 @@ impl Synth for GtkSynth {
 
 pub fn enable_mock_media(b: &wry::WebView) -> Value {
   let wv = b.webview();
+  wv.connect_local("web-process-terminated", false, |args| {
+    let reason = args.get(1).and_then(|v| v.get::<webkit2gtk::WebProcessTerminationReason>().ok());
+    crate::emit("web_process_terminated", "host", json!(format!("{reason:?}")));
+    None
+  });
   match wv.settings() {
     Some(s) => {
       let read = |s: &webkit2gtk::Settings| {

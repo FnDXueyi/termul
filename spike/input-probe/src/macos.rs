@@ -211,10 +211,11 @@ impl Synth for MacSynth {
 
   fn key(&self, ch: char) -> Value {
     let s = NSString::from_str(&ch.to_string());
+    let code: u16 = if ch == 'b' { 11 } else { 0 };
     let mut out = Vec::new();
     for (ty, method) in [(KEY_DOWN, sel!(keyDown:)), (KEY_UP, sel!(keyUp:))] {
       let ev: Option<Retained<AnyObject>> = unsafe {
-        msg_send![class!(NSEvent), keyEventWithType: ty, location: NSPoint::new(0.0, 0.0), modifierFlags: 0usize, timestamp: uptime(), windowNumber: self.window_number(), context: std::ptr::null_mut::<AnyObject>(), characters: &*s, charactersIgnoringModifiers: &*s, isARepeat: Bool::NO, keyCode: 0u16]
+        msg_send![class!(NSEvent), keyEventWithType: ty, location: NSPoint::new(0.0, 0.0), modifierFlags: 0usize, timestamp: uptime(), windowNumber: self.window_number(), context: std::ptr::null_mut::<AnyObject>(), characters: &*s, charactersIgnoringModifiers: &*s, isARepeat: Bool::NO, keyCode: code]
       };
       out.push(match ev {
         Some(ev) => json!(self.deliver(method, &ev)),
@@ -227,7 +228,6 @@ impl Synth for MacSynth {
   fn wheel(&self, x: f64, y: f64) -> Value {
     unsafe {
       let wp = self.window_point(x, y);
-      let sp: NSPoint = msg_send![&*self.window, convertPointToScreen: wp];
       let screens: Retained<AnyObject> = msg_send![class!(NSScreen), screens];
       let s0: Retained<AnyObject> = msg_send![&*screens, objectAtIndex: 0usize];
       let frame: NSRect = msg_send![&*s0, frame];
@@ -239,7 +239,7 @@ impl Synth for MacSynth {
           out.push(json!("cg_event_null"));
           continue;
         }
-        CGEventSetLocation(e, CgPoint { x: sp.x, y: frame.size.height - sp.y });
+        CGEventSetLocation(e, CgPoint { x: wp.x, y: frame.size.height - wp.y });
         CGEventSetIntegerValueField(e, 91, wn);
         CGEventSetIntegerValueField(e, 92, wn);
         let ev: Option<Retained<AnyObject>> = msg_send![class!(NSEvent), eventWithCGEvent: e];

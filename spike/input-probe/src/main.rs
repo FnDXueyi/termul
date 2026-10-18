@@ -103,6 +103,8 @@ fn child(window: &Window, url: &str, top: f64, height: f64, perm: Option<PermHan
   }
 }
 
+const RESET_SCROLL: &str = "window.scrollTo(0,0);document.getElementById('scroller').scrollTop=0";
+
 fn input_steps() -> Vec<Step> {
   use Step::*;
   let mut v: Vec<Step> = (0..8).map(|_| Wait).collect();
@@ -124,17 +126,29 @@ fn input_steps() -> Vec<Step> {
     Read("b_inp_script_focus"),
     Key('a'),
     Wait,
-    Read("trusted_key"),
+    Read("trusted_key_b_focused"),
+    Focus,
+    Wait,
+    Read("refocus_a"),
+    Key('b'),
+    Wait,
+    Read("trusted_key_a_focused"),
+    EvalB(RESET_SCROLL),
+    Wait,
     Wheel(120.0, 195.0),
     Wait,
     Wait,
     Read("wheel"),
+    EvalB(RESET_SCROLL),
+    Wait,
     Down(300.0, 150.0),
     Move(320.0, 160.0, true),
     Move(360.0, 180.0, true),
     Up(360.0, 180.0),
     Wait,
     Read("drag_mouse"),
+    EvalB(RESET_SCROLL),
+    Wait,
     Down(640.0, 150.0),
     Move(645.0, 155.0, true),
     Move(645.0, 200.0, true),
