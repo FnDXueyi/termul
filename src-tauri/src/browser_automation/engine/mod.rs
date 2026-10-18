@@ -16,6 +16,7 @@ pub mod cdp;
 pub mod events;
 pub mod hooks;
 pub mod profile;
+mod issue_gate;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 mod string_eval;
 #[cfg(target_os = "windows")]
