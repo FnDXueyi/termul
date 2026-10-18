@@ -106,6 +106,10 @@ impl CapabilityId {
 
 /// How an engine supports one capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(dead_code, reason = "only the WebView2 adapter declares Trusted tiers")
+)]
 pub enum Support {
     /// Real engine input or a native engine API.
     Trusted,
@@ -195,6 +199,10 @@ pub struct Point {
 /// Why an engine step failed. Carries no engine message: messages can
 /// quote page or protocol content, so only the core writes reply text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_os = "windows"),
+    allow(dead_code, reason = "Protocol and Malformed come from the CDP adapter")
+)]
 pub enum EngineErrorKind {
     /// The tab label resolves to no webview.
     TabNotFound,
