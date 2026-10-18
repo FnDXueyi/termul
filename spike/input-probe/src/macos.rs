@@ -39,6 +39,7 @@ enum Route {
   Direct,
   Window,
   Spi,
+  Tracking,
 }
 
 pub struct MacSynth {
@@ -60,6 +61,7 @@ impl MacSynth {
     let route = match variant {
       "window" => Route::Window,
       "spi" => Route::Spi,
+      "tracking" => Route::Tracking,
       _ => Route::Direct,
     };
     Self { window: b.ns_window(), a: a.webview(), b: b.webview(), route }
@@ -99,6 +101,25 @@ impl MacSynth {
         Route::Spi if method == sel!(mouseMoved:) && self.responds(&self.b, sel!(_simulateMouseMove:)) => {
           let _: () = msg_send![&*self.b, _simulateMouseMove: ev];
           "_simulateMouseMove".into()
+        }
+        Route::Tracking if method == sel!(mouseMoved:) => {
+          let areas: Retained<AnyObject> = msg_send![&*self.b, trackingAreas];
+          let n: usize = msg_send![&*areas, count];
+          let mut owners = Vec::new();
+          for i in 0..n {
+            let area: *mut AnyObject = msg_send![&*areas, objectAtIndex: i];
+            let owner: *mut AnyObject = msg_send![area, owner];
+            if owner.is_null() {
+              continue;
+            }
+            let name = format!("{:?}", (*owner).class());
+            if name.contains("WKMouseTrackingObserver") {
+              let _: () = msg_send![owner, mouseMoved: ev];
+              return format!("tracking_owner {name}");
+            }
+            owners.push(name);
+          }
+          format!("no_tracking_owner {owners:?}")
         }
         _ => {
           let _: *mut AnyObject = msg_send![&*self.b, performSelector: method, withObject: ev];

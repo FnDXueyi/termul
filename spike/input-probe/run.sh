@@ -45,7 +45,7 @@ Linux)
 Darwin)
   sw_vers >"$OUT/os-version.txt" 2>&1
   defaults read /System/Library/Frameworks/WebKit.framework/Resources/Info.plist CFBundleVersion >>"$OUT/os-version.txt" 2>&1
-  for v in direct window spi; do run "mac-input-$v" "$BIN" input "$v"; done
+  for v in direct window spi tracking; do run "mac-input-$v" "$BIN" input "$v"; done
   for m in deny allow none; do run "mac-perm-$m" "$BIN" perm "$m"; done
   ;;
 *)

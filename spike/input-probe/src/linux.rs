@@ -1,5 +1,6 @@
 use crate::Synth;
 use gdk::ffi as gs;
+use gdk::prelude::SeatExt;
 use glib::prelude::*;
 use glib::translate::{from_glib_none, ToGlibPtr};
 use gtk::ffi as gts;
@@ -33,6 +34,11 @@ impl GtkSynth {
       route,
       time: Cell::new((glib::monotonic_time() / 1000) as u32),
     }
+  }
+
+  fn gtk_window(&self) -> *mut gts::GtkWindow {
+    let p: *mut gts::GtkWidget = self.window.to_glib_none().0;
+    p as *mut gts::GtkWindow
   }
 
   fn tick(&self) -> u32 {
@@ -112,7 +118,7 @@ unsafe fn gobject_ref(win: *mut gs::GdkWindow) {
 impl Synth for GtkSynth {
   fn setup_focus(&self) -> Value {
     unsafe {
-      let w: *mut gts::GtkWindow = self.window.to_glib_none().0 as *mut gts::GtkWindow;
+      let w = self.gtk_window();
       gts::gtk_window_present(w);
       gts::gtk_widget_grab_focus(self.a.to_glib_none().0);
     }
@@ -121,7 +127,7 @@ impl Synth for GtkSynth {
 
   fn native_state(&self) -> Value {
     unsafe {
-      let w: *mut gts::GtkWindow = self.window.to_glib_none().0 as *mut gts::GtkWindow;
+      let w = self.gtk_window();
       let focus = gts::gtk_window_get_focus(w);
       json!({
         "backend": self.display().type_().name(),
