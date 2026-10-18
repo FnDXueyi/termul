@@ -9,7 +9,6 @@
 
 pub mod events;
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -18,7 +17,8 @@ use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
 use windows_core::HSTRING;
 
 use super::assets::Script;
-use super::cdp::{self, CdpMethod, CdpTransport, CALL_ISSUED, CALL_PENDING};
+use super::cdp::{self, CdpMethod, CdpTransport};
+use super::issue_gate::IssueGate;
 use super::{
     BrowserEngine, CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts,
     EngineFuture, EngineTraits, InputMode, Point, Support,
@@ -60,8 +60,11 @@ async fn call(
     let (result_tx, result_rx) = oneshot::channel::<Result<String, ()>>();
     let (issue_tx, issue_rx) = oneshot::channel::<Result<(), ()>>();
     let params_json = params.to_string();
-    let state = Arc::new(AtomicU8::new(CALL_PENDING));
-    let issue_state = state.clone();
+    let gate = IssueGate::new();
+    // Also stands the queued closure down when an outer deadline drops
+    // this future.
+    let _stand_down = gate.cancel_on_drop();
+    let closure_gate = gate.clone();
     webview
         .with_webview(move |platform| {
             // SAFETY: runs on the UI thread that owns the WebView2 object;
@@ -72,12 +75,9 @@ async fn call(
                 let _ = issue_tx.send(Err(()));
                 return;
             };
-            // The caller may already have given up (issue-phase timeout) and
-            // reported the command as never issued.
-            if issue_state
-                .compare_exchange(CALL_PENDING, CALL_ISSUED, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
+            // The caller may already have given up and reported the command
+            // as never issued.
+            if !closure_gate.claim() {
                 return;
             }
             let handler =
@@ -100,7 +100,7 @@ async fn call(
     tokio::time::timeout(CDP_ISSUE, issue_rx)
         .await
         .map_err(|_| {
-            EngineError::new(EngineErrorKind::Timeout, cdp::issue_timeout_retryable(&state))
+            EngineError::new(EngineErrorKind::Timeout, gate.cancel())
         })?
         .map_err(|_| undelivered(EngineErrorKind::Dispatch))?
         .map_err(|()| undelivered(EngineErrorKind::Dispatch))?;

@@ -1,25 +1,8 @@
-use std::sync::atomic::AtomicU8;
-
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use super::*;
 use crate::browser_automation::engine::{assets, EngineFuture};
-
-#[test]
-fn issue_timeout_cancels_queued_closure_only_before_it_issues() {
-    // Timeout wins the race: the closure never issued the command, so the
-    // timeout cancels it and a retry is safe.
-    let pending = AtomicU8::new(CALL_PENDING);
-    assert!(issue_timeout_retryable(&pending));
-    // The cancelled state is now terminal for any later observer.
-    assert!(!issue_timeout_retryable(&pending));
-
-    // Closure wins the race (already issued): the command is out and may
-    // run, so the failure is terminal.
-    let issued = AtomicU8::new(CALL_ISSUED);
-    assert!(!issue_timeout_retryable(&issued));
-}
 
 #[test]
 fn a_helper_call_passes_agent_strings_as_a_by_value_argument() {

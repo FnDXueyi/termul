@@ -12,7 +12,6 @@
 //! re-fires input/change events, press Enter re-clicks.
 
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::assets::{Script, WORLD_NAME};
 use super::{EngineError, EngineErrorKind, EngineFuture, Point};
@@ -44,22 +43,6 @@ impl CdpMethod {
 pub trait CdpTransport: Send + Sync {
     fn call<'a>(&'a self, tab: &'a str, method: CdpMethod, params: Value)
         -> EngineFuture<'a, Value>;
-}
-
-/// Issue-state for a UI-thread closure racing an issue-phase timeout
-/// (see [`issue_timeout_retryable`]).
-pub const CALL_PENDING: u8 = 0;
-pub const CALL_ISSUED: u8 = 1;
-pub const CALL_CANCELLED: u8 = 2;
-
-/// Classify an issue-phase timeout: the awaiting task races the queued
-/// closure for the pending state. Winning (PENDING → CANCELLED) proves the
-/// closure has not issued the command and now never will, so a retry is
-/// safe. Losing means the command is already out and may run.
-pub fn issue_timeout_retryable(state: &AtomicU8) -> bool {
-    state
-        .compare_exchange(CALL_PENDING, CALL_CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
 }
 
 /// `Runtime.callFunctionOn` params: the helper as a function of one

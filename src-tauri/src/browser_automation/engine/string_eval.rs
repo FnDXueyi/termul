@@ -3,9 +3,13 @@
 //! the UI thread, and answer through a native completion callback. The
 //! helper's value comes back as JSON text (see [`call_body`]).
 
+use std::time::Duration;
+
 use serde_json::Value;
+use tokio::sync::oneshot;
 
 use super::assets::Script;
+use super::issue_gate::IssueGate;
 use super::{
     CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFacts, EngineTraits,
     Support,
@@ -76,26 +80,50 @@ pub fn parse(result: CallResult) -> Result<Value, EngineError> {
     serde_json::from_str(&json).map_err(|_| EngineError::new(EngineErrorKind::Malformed, false))
 }
 
+/// Where an adapter's completion callback sends its [`CallResult`].
+pub type Completion = oneshot::Sender<CallResult>;
+
+/// Queue `issue` on the UI thread through `queue` and await the completion
+/// it hands to the engine. A tokio oneshot, so the wait never blocks the
+/// host-MCP runtime. When `deadline` passes or this future is dropped
+/// first, the queued closure stands down: it must not run an action the
+/// host has already reported as timed out.
+pub async fn run<P, Q, F>(queue: Q, deadline: Duration, issue: F) -> Result<Value, EngineError>
+where
+    Q: FnOnce(Box<dyn FnOnce(&P) + Send>) -> Result<(), ()>,
+    F: FnOnce(&P, Completion) + Send + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    let gate = IssueGate::new();
+    let _stand_down = gate.cancel_on_drop();
+    let closure_gate = gate.clone();
+    queue(Box::new(move |platform: &P| {
+        if closure_gate.claim() {
+            issue(platform, tx);
+        }
+    }))
+    .map_err(|()| EngineError::new(EngineErrorKind::Dispatch, true))?;
+    match tokio::time::timeout(deadline, rx).await {
+        Ok(Ok(result)) => parse(result),
+        Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
+        Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, gate.cancel())),
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub use ui::{call, Completion};
+pub use ui::call;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod ui {
     use serde_json::Value;
     use tauri::webview::PlatformWebview;
-    use tokio::sync::oneshot;
 
-    use super::{parse, CallResult};
+    use super::{run, Completion};
     use crate::browser_automation::budgets::EVAL_STEP;
     use crate::browser_automation::engine::{EngineError, EngineErrorKind};
     use crate::browser_tab_manager::BrowserTabManager;
 
-    /// Where an adapter's completion callback sends its [`CallResult`].
-    pub type Completion = oneshot::Sender<CallResult>;
-
-    /// Run `issue` on the UI thread that owns `tab`'s webview and await the
-    /// completion it hands to the engine. A tokio oneshot, so the wait never
-    /// blocks the host-MCP runtime.
+    /// Run `issue` on the UI thread that owns `tab`'s webview.
     pub async fn call<F>(tabs: &BrowserTabManager, tab: &str, issue: F) -> Result<Value, EngineError>
     where
         F: FnOnce(&PlatformWebview, Completion) + Send + 'static,
@@ -103,15 +131,12 @@ mod ui {
         let webview = tabs
             .webview(tab)
             .map_err(|_| EngineError::new(EngineErrorKind::TabNotFound, true))?;
-        let (tx, rx) = oneshot::channel();
-        webview
-            .with_webview(move |platform| issue(&platform, tx))
-            .map_err(|_| EngineError::new(EngineErrorKind::Dispatch, true))?;
-        match tokio::time::timeout(EVAL_STEP, rx).await {
-            Ok(Ok(result)) => parse(result),
-            Ok(Err(_)) => Err(EngineError::new(EngineErrorKind::NoReply, false)),
-            Err(_) => Err(EngineError::new(EngineErrorKind::Timeout, false)),
-        }
+        run(
+            |job| webview.with_webview(move |platform| job(&platform)).map_err(|_| ()),
+            EVAL_STEP,
+            issue,
+        )
+        .await
     }
 }
 

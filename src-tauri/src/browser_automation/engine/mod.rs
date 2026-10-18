@@ -15,6 +15,7 @@ pub mod assets;
 pub mod cdp;
 pub mod events;
 pub mod hooks;
+mod issue_gate;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 mod string_eval;
 #[cfg(target_os = "windows")]
