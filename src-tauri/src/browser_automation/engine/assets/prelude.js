@@ -71,9 +71,14 @@ function pathOf(el) {
 function isInteractive(el) {
   try { return el.matches(INTERACTIVE); } catch (e) { return false; }
 }
+function nodeRole(el) {
+  return roleOf(el) || el.tagName.toLowerCase();
+}
+function locate(path) {
+  try { return document.querySelector(path); } catch (e) { return null; }
+}
 function byPath(path) {
-  var el;
-  try { el = document.querySelector(path); } catch (e) { el = null; }
+  var el = locate(path);
   return el && visible(el) ? el : null;
 }
 function center(el) {

@@ -16,11 +16,12 @@ pub const PARAMS_ARG: &str = "termulParams";
 
 /// The function body a WebKit engine runs for `script`: it decodes the
 /// parameters and returns the helper's value as JSON text, all inside the
-/// isolated world. The body is static; the parameters travel as
-/// [`params_json`] under [`PARAMS_ARG`].
+/// isolated world. A helper may return a promise; both engines await the
+/// body's promise before they complete the call. The body is static; the
+/// parameters travel as [`params_json`] under [`PARAMS_ARG`].
 pub fn call_body(script: &Script) -> String {
     format!(
-        "var r = (function (p) {{\n{}\n}})(JSON.parse({PARAMS_ARG}));\nreturn r === undefined ? 'null' : JSON.stringify(r);",
+        "return Promise.resolve((function (p) {{\n{}\n}})(JSON.parse({PARAMS_ARG}))).then(function (r) {{\n  return r === undefined ? 'null' : JSON.stringify(r);\n}});",
         script.helper.body
     )
 }

@@ -6,21 +6,21 @@
 //! Trusted text goes into an element focused by a trusted click. Where
 //! focusing an element moves native focus to the tab (WKWebView makes it
 //! first responder and blurs the chat), nothing focuses one: a click that
-//! would is synthetic, and so is text entry, which writes the value
-//! without `element.focus()`.
+//! would is synthetic, and so is text entry, which writes the value with
+//! input and change events. No helper calls `element.focus()`.
 
 use std::future::Future;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::actionability::{wait_until_actionable, Need, Target};
 use super::actions::{ref_arg, ResolvedRef};
 use super::reply::{engine_error, eval_gate, Fidelity};
 use super::{BrowserError, DesktopBrowserHost, ERR_TIMEOUT};
 use crate::browser_automation::budgets::{self, Deadline};
+use crate::browser_automation::engine::assets::{self, Script};
 use crate::browser_automation::engine::{
-    assets, input_assets, CapabilityId, ControlKind, EngineFuture, InputMode, Key, KeyInput,
-    KeyKind, Point, Support,
+    CapabilityId, ControlKind, EngineFuture, InputMode, Key, KeyInput, KeyKind, Point, Support,
 };
 
 fn mode_of(support: Support) -> Result<InputMode, BrowserError> {
@@ -86,7 +86,7 @@ impl DesktopBrowserHost {
         })
     }
 
-    async fn helper(&self, tab: &str, token: Option<&str>, script: &str) -> Result<Value, BrowserError> {
+    async fn helper(&self, tab: &str, token: Option<&str>, script: Script) -> Result<Value, BrowserError> {
         let out = self.eval(tab, script).await?;
         eval_gate(&out, token)?;
         Ok(out)
@@ -115,8 +115,8 @@ impl DesktopBrowserHost {
         bound: Deadline,
     ) -> Result<(), BrowserError> {
         within(bound, self.input(tab, self.engine.pointer_click(tab, target.point, InputMode::Trusted))).await?;
-        let script = input_assets::prepare_text(&resolved.node.path, replace);
-        let out = within(bound, self.eval(tab, &script)).await?;
+        let script = assets::prepare_text(&resolved.node.path, replace);
+        let out = within(bound, self.eval(tab, script)).await?;
         if out.get("error").and_then(Value::as_str) == Some("not_focused") {
             return Err(not_focused());
         }
@@ -140,8 +140,7 @@ impl DesktopBrowserHost {
                 self.input(tab, self.engine.pointer_click(tab, target.point, mode)).await?;
             }
             InputMode::Synthetic => {
-                let script = assets::dom_click(&resolved.node.path, resolved.epoch);
-                self.helper(tab, Some(token), &script).await?;
+                self.helper(tab, Some(token), assets::click(&resolved.node.path)).await?;
             }
         }
         Ok(fidelity(mode))
@@ -161,9 +160,7 @@ impl DesktopBrowserHost {
                 self.input(tab, self.engine.pointer_move(tab, target.point, mode)).await?;
             }
             InputMode::Synthetic => {
-                let args = json!({ "ref": resolved.node.path });
-                let script = assets::interaction("hover", &args, resolved.epoch);
-                self.helper(tab, Some(token), &script).await?;
+                self.helper(tab, Some(token), assets::hover(&resolved.node.path)).await?;
             }
         }
         Ok(fidelity(mode))
@@ -171,17 +168,17 @@ impl DesktopBrowserHost {
 
     /// Scroll the page by `dy` with the wheel, or a ref into view (a
     /// programmatic scroll, so synthetic on every engine).
-    pub(super) async fn scroll(&self, tab: &str, args: &Value, epoch: u64) -> Result<Fidelity, BrowserError> {
+    pub(super) async fn scroll(&self, tab: &str, args: &Value) -> Result<Fidelity, BrowserError> {
         if let Some(token) = ref_arg(args)? {
             let resolved = self.resolve_ref(tab, token)?;
             self.revalidate(tab, token, &resolved).await?;
             return Ok(Fidelity::Synthetic);
         }
         let mode = self.input_mode(CapabilityId::Wheel)?;
+        let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
         match mode {
             InputMode::Trusted => {
-                let dy = args.get("dy").and_then(Value::as_f64).unwrap_or(600.0);
-                let viewport = self.helper(tab, None, input_assets::VIEWPORT).await?;
+                let viewport = self.helper(tab, None, assets::viewport()).await?;
                 let half = |key: &str| viewport.get(key).and_then(Value::as_f64).unwrap_or(0.0) / 2.0;
                 let at = Point {
                     x: half("w"),
@@ -190,26 +187,10 @@ impl DesktopBrowserHost {
                 self.input(tab, self.engine.wheel(tab, at, (0.0, dy), mode)).await?;
             }
             InputMode::Synthetic => {
-                self.helper(tab, None, &assets::interaction("scroll", args, epoch)).await?;
+                self.helper(tab, None, assets::scroll(None, dy)).await?;
             }
         }
         Ok(fidelity(mode))
-    }
-
-    /// Script text entry into the ref: replace its value, or `append`.
-    /// It focuses the element first only where that leaves native focus
-    /// with the chat.
-    fn synthetic_text(&self, resolved: &ResolvedRef, text: &str, append: bool) -> String {
-        let path = &resolved.node.path;
-        if self.engine.element_focus_moves_tab_focus() {
-            return input_assets::synthetic_set_value(path, text, append);
-        }
-        if append {
-            let args = json!({ "ref": path, "text": text });
-            assets::interaction("type", &args, resolved.epoch)
-        } else {
-            assets::fill_ref(path, text, resolved.epoch)
-        }
     }
 
     pub(super) async fn fill(
@@ -223,14 +204,9 @@ impl DesktopBrowserHost {
         let (_, by_click) = self.key_modes(KeyKind::Text)?;
         let bound = Deadline::after(deadline.clamp(budgets::ACTION_TEXT));
         let target = self.actionable(tab, token, resolved, Need::Fill, bound).await?;
-        if target.kind == ControlKind::Select || value.is_empty() {
-            let script = input_assets::synthetic_set_value(&resolved.node.path, value, false);
-            within(bound, self.helper(tab, Some(token), &script)).await?;
-            return Ok(Fidelity::Synthetic);
-        }
-        if !by_click {
-            let script = self.synthetic_text(resolved, value, false);
-            within(bound, self.helper(tab, Some(token), &script)).await?;
+        if target.kind == ControlKind::Select || value.is_empty() || !by_click {
+            let script = assets::fill(&resolved.node.path, value);
+            within(bound, self.helper(tab, Some(token), script)).await?;
             return Ok(Fidelity::Synthetic);
         }
         self.focus_text(tab, token, resolved, target, true, bound).await?;
@@ -251,15 +227,14 @@ impl DesktopBrowserHost {
                 let resolved = self.resolve_ref(tab, token)?;
                 let target = self.actionable(tab, token, &resolved, Need::Type, bound).await?;
                 if !by_click {
-                    let script = self.synthetic_text(&resolved, text, true);
-                    within(bound, self.helper(tab, Some(token), &script)).await?;
+                    let script = assets::type_text(Some(&resolved.node.path), text);
+                    within(bound, self.helper(tab, Some(token), script)).await?;
                     return Ok(Fidelity::Synthetic);
                 }
                 self.focus_text(tab, token, &resolved, target, false, bound).await?;
             }
             None if mode == InputMode::Synthetic => {
-                let script = assets::interaction("type", args, self.tab_facts(tab)?.epoch);
-                within(bound, self.helper(tab, None, &script)).await?;
+                within(bound, self.helper(tab, None, assets::type_text(None, text))).await?;
                 return Ok(Fidelity::Synthetic);
             }
             None => self.require_focused_editable(tab, bound).await?,
@@ -270,7 +245,7 @@ impl DesktopBrowserHost {
     }
 
     async fn require_focused_editable(&self, tab: &str, bound: Deadline) -> Result<(), BrowserError> {
-        let out = within(bound, self.helper(tab, None, input_assets::FOCUSED_EDITABLE)).await?;
+        let out = within(bound, self.helper(tab, None, assets::focused_editable())).await?;
         if out.get("editable").and_then(Value::as_bool) == Some(true) {
             Ok(())
         } else {
@@ -312,8 +287,8 @@ impl DesktopBrowserHost {
                 Ok(Fidelity::Trusted)
             }
             _ => {
-                let script = input_assets::synthetic_press(path.as_deref(), name);
-                within(bound, self.helper(tab, token, &script)).await?;
+                let script = assets::press(path.as_deref(), name);
+                within(bound, self.helper(tab, token, script)).await?;
                 Ok(Fidelity::Synthetic)
             }
         }

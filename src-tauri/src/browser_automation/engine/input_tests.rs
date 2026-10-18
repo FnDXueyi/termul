@@ -50,7 +50,8 @@ impl BrowserEngine for Inner {
     fn facts(&self) -> &EngineFacts {
         &self.0
     }
-    fn evaluate<'a>(&'a self, _tab: &'a str, _script: &'a str) -> EngineFuture<'a, Value> {
+    fn evaluate<'a>(&'a self, _tab: &'a str, script: Script) -> EngineFuture<'a, Value> {
+        assert_eq!(script, assets::facts("html>body>button:nth-of-type(1)"));
         Box::pin(async { Ok(json!({ "state": "detached" })) })
     }
     fn pointer_click<'a>(&'a self, _tab: &'a str, _at: Point, _mode: InputMode) -> EngineFuture<'a, ()> {
@@ -58,9 +59,6 @@ impl BrowserEngine for Inner {
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         unreachable!()
-    }
-    fn deliver_script_reply(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
-        false
     }
 }
 
@@ -96,11 +94,11 @@ impl NativeInput for Recorded {
 
 fn layered() -> (WithNativeInput<Inner>, Arc<Recorded>) {
     let inner = Inner(EngineFacts {
-        capabilities: CapabilityTable::unavailable("bridge only")
-            .with(CapabilityId::IsolatedEval, Support::Synthetic)
+        capabilities: CapabilityTable::unavailable("eval only")
+            .with(CapabilityId::IsolatedEval, Support::Trusted)
             .with(CapabilityId::PointerClick, Support::Synthetic),
         traits: EngineTraits {
-            isolated_world: false,
+            isolated_world: true,
             background_render: false,
             network_observe: false,
         },
@@ -115,7 +113,7 @@ async fn the_layer_raises_declared_tiers_and_refuses_trusted_input_elsewhere() {
     let caps = &engine.facts().capabilities;
     assert_eq!(caps.get(CapabilityId::PointerClick), Support::Trusted);
     assert_eq!(caps.get(CapabilityId::PointerMove), Support::Synthetic);
-    assert_eq!(caps.get(CapabilityId::IsolatedEval), Support::Synthetic, "eval tier is the inner engine's");
+    assert_eq!(caps.get(CapabilityId::IsolatedEval), Support::Trusted, "eval tier is the inner engine's");
     assert!(matches!(caps.get(CapabilityId::Wheel), Support::Unavailable(_)));
     assert_eq!(engine.key_support(KeyKind::Text), Support::Trusted);
     assert_eq!(engine.key_support(KeyKind::Press), Support::Synthetic);
@@ -134,7 +132,7 @@ async fn the_layer_raises_declared_tiers_and_refuses_trusted_input_elsewhere() {
     }
     assert_eq!(input.0.lock().as_slice(), ["click 1 2", "Text(\"hi\")"]);
     assert_eq!(
-        engine.element_facts("agent-1", "@e1").await.unwrap(),
+        engine.element_facts("agent-1", "html>body>button:nth-of-type(1)").await.unwrap(),
         ActionabilityFacts::Detached,
         "facts come through the inner engine's eval"
     );

@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use super::*;
+use crate::browser_automation::engine::assets::Script;
 use crate::browser_automation::engine::{
     CapabilityTable, EngineFacts, EngineFuture, EngineTraits, InputMode, Support,
 };
@@ -37,7 +38,7 @@ impl BrowserEngine for ScriptedFacts {
     fn facts(&self) -> &EngineFacts {
         &self.facts
     }
-    fn evaluate<'a>(&'a self, _tab: &'a str, _script: &'a str) -> EngineFuture<'a, Value> {
+    fn evaluate<'a>(&'a self, _tab: &'a str, _script: Script) -> EngineFuture<'a, Value> {
         unreachable!("facts come from element_facts")
     }
     fn element_facts<'a>(&'a self, _tab: &'a str, _path: &'a str) -> EngineFuture<'a, ActionabilityFacts> {
@@ -55,9 +56,6 @@ impl BrowserEngine for ScriptedFacts {
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         unreachable!()
-    }
-    fn deliver_script_reply(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
-        false
     }
 }
 

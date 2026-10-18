@@ -43,6 +43,10 @@ pub const SCROLL: Helper = helper!("scroll");
 pub const HOVER: Helper = helper!("hover");
 pub const CONTAINS_TEXT: Helper = helper!("contains_text");
 pub const READY_STATE: Helper = helper!("ready_state");
+pub const FACTS: Helper = helper!("facts");
+pub const PREPARE_TEXT: Helper = helper!("prepare_text");
+pub const FOCUSED_EDITABLE: Helper = helper!("focused_editable");
+pub const VIEWPORT: Helper = helper!("viewport");
 
 /// A helper with its parameters, ready for an engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +111,32 @@ pub fn hover(path: &str) -> Script {
 /// Whether the page's visible text contains `text`.
 pub fn contains_text(text: &str) -> Script {
     Script::new(CONTAINS_TEXT, json!({ "text": text }))
+}
+
+/// Actionability facts for the element at `path`, measured over two
+/// animation frames; parsed by [`super::input::parse_facts`]. It finds the
+/// element whether or not it is shown, so a hidden target reports
+/// `visible: false` instead of reading as gone. An element outside the
+/// viewport is scrolled into view, and that round reports it unstable.
+pub fn facts(path: &str) -> Script {
+    Script::new(FACTS, json!({ "path": path }))
+}
+
+/// After a trusted click focused the text control at `path`: select its
+/// whole content (`replace`) or put the caret at its end. Fails with
+/// `not_focused` when the click did not focus it.
+pub fn prepare_text(path: &str, replace: bool) -> Script {
+    Script::new(PREPARE_TEXT, json!({ "path": path, "replace": replace }))
+}
+
+/// Whether the focused element takes typed text.
+pub fn focused_editable() -> Script {
+    Script::new(FOCUSED_EDITABLE, json!({}))
+}
+
+/// The viewport size, for page-level wheel input.
+pub fn viewport() -> Script {
+    Script::new(VIEWPORT, json!({}))
 }
 
 #[cfg(test)]

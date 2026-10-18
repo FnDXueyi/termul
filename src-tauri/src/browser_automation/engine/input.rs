@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use super::assets::{self, Script};
 use super::{
-    input_assets, BrowserEngine, CapabilityId, EngineError, EngineErrorKind, EngineFacts,
+    BrowserEngine, CapabilityId, EngineError, EngineErrorKind, EngineFacts,
     EngineFuture, Support,
 };
 
@@ -172,7 +173,7 @@ fn malformed() -> EngineError {
     EngineError::new(EngineErrorKind::Malformed, false)
 }
 
-/// Parse the facts helper's reply ([`input_assets::facts`]).
+/// Parse the facts helper's reply ([`assets::facts`]).
 pub fn parse_facts(out: &Value) -> Result<ActionabilityFacts, EngineError> {
     match out.get("state").and_then(Value::as_str) {
         Some("detached") => return Ok(ActionabilityFacts::Detached),
@@ -204,16 +205,15 @@ pub fn parse_facts(out: &Value) -> Result<ActionabilityFacts, EngineError> {
     }))
 }
 
-/// Element facts through the engine's helper eval. The one place facts
-/// are read from the page, so moving them to another channel changes only
-/// this function.
+/// Element facts through the engine's isolated-world helper eval. The one
+/// place facts are read from the page.
 pub fn facts_via_eval<'a, E: BrowserEngine + ?Sized>(
     engine: &'a E,
     tab: &'a str,
     path: &'a str,
 ) -> EngineFuture<'a, ActionabilityFacts> {
     Box::pin(async move {
-        let out = engine.evaluate(tab, &input_assets::facts(path)).await?;
+        let out = engine.evaluate(tab, assets::facts(path)).await?;
         parse_facts(&out)
     })
 }
@@ -284,7 +284,7 @@ impl<E: BrowserEngine> BrowserEngine for WithNativeInput<E> {
         &self.facts
     }
 
-    fn evaluate<'a>(&'a self, tab: &'a str, script: &'a str) -> EngineFuture<'a, Value> {
+    fn evaluate<'a>(&'a self, tab: &'a str, script: Script) -> EngineFuture<'a, Value> {
         self.inner.evaluate(tab, script)
     }
 
@@ -351,10 +351,6 @@ impl<E: BrowserEngine> BrowserEngine for WithNativeInput<E> {
 
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         self.inner.screenshot(tab)
-    }
-
-    fn deliver_script_reply(&self, nonce: &str, ok: bool, value: Option<String>) -> bool {
-        self.inner.deliver_script_reply(nonce, ok, value)
     }
 }
 
