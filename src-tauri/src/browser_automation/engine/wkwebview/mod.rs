@@ -39,7 +39,7 @@ impl BrowserEngine for WkWebViewEngine {
     fn evaluate<'a>(&'a self, tab: &'a str, script: Script) -> EngineFuture<'a, Value> {
         Box::pin(async move {
             if !self.facts.traits.isolated_world {
-                return Err(EngineError::new(EngineErrorKind::Unsupported, true));
+                return Err(EngineError::new(EngineErrorKind::Unsupported));
             }
             let body = string_eval::call_body(&script);
             let params = string_eval::params_json(&script);
@@ -56,10 +56,10 @@ impl BrowserEngine for WkWebViewEngine {
         _at: Point,
         _mode: InputMode,
     ) -> EngineFuture<'a, ()> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
-        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
 }

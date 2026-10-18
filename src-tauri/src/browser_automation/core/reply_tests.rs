@@ -235,7 +235,7 @@ fn replies_serialize_the_closed_wire_shape() {
 
 #[test]
 fn engine_errors_map_to_wire_codes_with_host_templates_only() {
-    let err = engine_error(EngineError::new(EngineErrorKind::TabNotFound, true), "agent-x");
+    let err = engine_error(EngineError::new(EngineErrorKind::TabNotFound), "agent-x");
     assert_eq!(err.reason, None);
     assert_eq!(err.code, ERR_TAB_NOT_FOUND);
     assert_eq!(err.message, "tab 'agent-x' not found");
@@ -277,7 +277,7 @@ fn engine_errors_map_to_wire_codes_with_host_templates_only() {
             "the browser engine returned an unusable reply",
         ),
     ] {
-        let err = engine_error(EngineError::new(kind, false), "agent-x");
+        let err = engine_error(EngineError::new(kind), "agent-x");
         assert_eq!((err.code, err.message.as_str()), (code, message), "{kind:?}");
         assert!(err.reason.is_some(), "{kind:?} names its cause");
     }
