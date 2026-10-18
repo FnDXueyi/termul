@@ -1,0 +1,12 @@
+{
+  "title": "Browser and phone",
+  "pages": [
+    "index",
+    "share-desktop",
+    "server",
+    "server-options",
+    "web-browser",
+    "phone",
+    "install-app"
+  ]
+}

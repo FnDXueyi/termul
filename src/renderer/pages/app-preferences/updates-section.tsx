@@ -1,11 +1,15 @@
-import { AlertCircle, CheckCircle2, Download, ExternalLink } from '@/components/icons'
+import { ExternalLink, RefreshCw, RotateCcw } from '@/components/icons'
+import { SettingsCard, SettingsGroup } from '@/components/settings/SettingsGroup'
 import { SettingsSection } from '@/components/settings/SettingsLayout'
-import { SettingsSwitchRow } from '@/components/settings/SettingsSwitchRow'
+import { SettingsNotice } from '@/components/settings/SettingsNotice'
+import { SettingsRow, settingsDescriptionId } from '@/components/settings/SettingsRow'
+import { SettingsSelect } from '@/components/settings/SettingsSelect'
 import { Button } from '@/components/ui/button'
-import { FOCUS_RING_CLASS } from '@/components/ui/panel-styles'
+import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import type { UpdateChannel } from '@/lib/tauri-updater-api'
-import { cn } from '@/lib/utils'
+import { rowId } from './categories'
 
 interface UpdatesSectionProps {
   isAurUpdater: boolean
@@ -24,6 +28,21 @@ interface UpdatesSectionProps {
   setUpdateChannel: (channel: UpdateChannel) => void
 }
 
+const CHANNELS: Array<{ value: UpdateChannel; label: string; description: string }> = [
+  { value: 'stable', label: 'Stable', description: 'Production releases. Most reliable.' },
+  { value: 'insider', label: 'Insider', description: 'Release candidates (rc) before stable.' },
+  { value: 'nightly', label: 'Nightly', description: 'Automated main-branch builds.' }
+]
+
+const formatLastChecked = (date: Date): string =>
+  new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+
+export const APP_VERSION = `v${import.meta.env.PACKAGE_VERSION || '0.1.0'}`
+
+/**
+ * Desktop-only page (issue #843). On web the page is hidden and the server
+ * version note lives on the Logs page.
+ */
 export function UpdatesSection({
   isAurUpdater,
   isChecking,
@@ -39,254 +58,138 @@ export function UpdatesSection({
   installAndRestart,
   handleAutoUpdateToggle,
   setUpdateChannel
-}: UpdatesSectionProps): React.JSX.Element {
-  const formatLastChecked = (date: Date | null): string => {
-    if (!date) return 'Never'
-    return new Intl.DateTimeFormat('en-US', {
-      dateStyle: 'medium',
-      timeStyle: 'short'
-    }).format(date)
-  }
+}: UpdatesSectionProps): React.JSX.Element | null {
+  if (!isTauriContext()) return null
 
-  // Web (#843): the desktop updater is a desktop-only surface. Hide the
-  // whole category's controls and show the web client's actual version
-  // source instead — the bundle served by (and updated with) the server.
-  if (!isTauriContext()) {
-    return (
-      <SettingsSection id="updates">
-        <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-          <div className="w-full pt-1 md:w-1/3">
-            <div className="flex items-center gap-2">
-              <Download size={18} className="text-primary" />
-              <h2 className="text-lg font-medium text-foreground">Updates</h2>
-            </div>
-            <p className="text-sm text-muted-foreground mt-1">
-              Server version and update policy for the web client.
-            </p>
-          </div>
-          <div className="w-full space-y-4 md:w-full md:w-2/3">
-            <div>
-              <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                Server Version
-              </label>
-              <div className="bg-secondary/30 border border-border rounded-md px-4 py-3">
-                <span className="text-sm font-mono text-foreground">
-                  v{import.meta.env.PACKAGE_VERSION || '0.1.0'}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                The web client is served by the termul-server and updates together with it — reload
-                the page after the server updates to pick up the new bundle. Desktop-only update
-                controls (channels, auto-update, install) are hidden here.
-              </p>
-            </div>
-          </div>
-        </div>
-      </SettingsSection>
-    )
-  }
+  const channel = CHANNELS.find((option) => option.value === updateChannel) ?? CHANNELS[0]
+  const versionDescription = [
+    isAurUpdater ? 'Installed from the AUR' : `${channel.label} channel`,
+    isChecking
+      ? 'checking now'
+      : lastChecked
+        ? `last checked ${formatLastChecked(lastChecked)}`
+        : 'not checked yet'
+  ].join(' · ')
 
   return (
     <SettingsSection id="updates">
-      <div className="flex flex-col items-start gap-6 border-b border-border pb-6 md:flex-row">
-        <div className="w-full pt-1 md:w-1/3">
-          <div className="flex items-center gap-2">
-            <Download size={18} className="text-primary" />
-            <h2 className="text-lg font-medium text-foreground">Updates</h2>
-          </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage application updates and version information.
-          </p>
-        </div>
-        <div className="w-full space-y-4 md:w-full md:w-2/3">
-          {/* Current Version */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Current Version
-            </label>
-            <div className="bg-secondary/30 border border-border rounded-md px-4 py-3">
-              <span className="text-sm font-mono text-foreground">
-                v{import.meta.env.PACKAGE_VERSION || '0.1.0'}
-              </span>
-            </div>
-          </div>
-
-          {/* Release Channel */}
-          {!isAurUpdater && (
-            <div>
-              <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                Release Channel
-              </label>
-              <div className="space-y-2">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  {(
-                    [
-                      {
-                        id: 'stable',
-                        label: 'Stable',
-                        description: 'Production releases. Most reliable.'
-                      },
-                      {
-                        id: 'insider',
-                        label: 'Insider',
-                        description: 'Release candidates (rc) before stable.'
-                      },
-                      {
-                        id: 'nightly',
-                        label: 'Nightly',
-                        description: 'Automated main-branch builds.'
-                      }
-                    ] as const
-                  ).map((option) => {
-                    const active = updateChannel === option.id
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        onClick={() => setUpdateChannel(option.id)}
-                        aria-pressed={active}
-                        disabled={isChecking}
-                        className={cn(
-                          'flex flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-50',
-                          FOCUS_RING_CLASS,
-                          active
-                            ? 'keycap text-foreground'
-                            : 'text-secondary-foreground hover:bg-foreground/[0.03]'
-                        )}
-                      >
-                        <span className="text-sm font-medium">{option.label}</span>
-                        <span className="text-3xs text-muted-foreground font-normal">
-                          {option.description}
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-                {updateChannel !== 'stable' && (
-                  <div className="flex items-start gap-2 bg-warning/10 border border-warning/20 rounded-md px-3 py-2.5">
-                    <AlertCircle size={14} className="text-warning flex-shrink-0 mt-0.5" />
-                    <div className="text-xs text-foreground">
-                      {updateChannel === 'nightly'
-                        ? 'Nightly builds are automated from the latest commit and may be unstable. Updates are offered as a manual download from the nightly release page.'
-                        : 'Insider release candidates may be unfinished. Updates are offered as a manual download from the insider release page.'}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Update Status */}
-          {updateAvailable && version && (
-            <div>
-              <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                Update Available
-              </label>
-              <div
-                className={cn(
-                  'border rounded-md px-4 py-3 flex items-center gap-3',
-                  isManualUpdateMode
-                    ? 'bg-warning/10 border-warning/20'
-                    : 'bg-success/10 border-success/20'
-                )}
+      <SettingsGroup title="Version">
+        {updateAvailable && version && (
+          <SettingsNotice
+            tone={isManualUpdateMode ? 'warning' : 'success'}
+            action={
+              !isAurUpdater && isManualUpdateMode ? (
+                <Button type="button" size="xs" onClick={installAndRestart}>
+                  <ExternalLink size={13} />
+                  Open download page
+                </Button>
+              ) : null
+            }
+          >
+            <span className="font-medium text-foreground">Version {version} is available.</span>{' '}
+            {isAurUpdater
+              ? 'Update through the AUR with: yay -S termul-manager'
+              : isManualUpdateMode
+                ? 'Automatic update is not available. Download and install it from the release page.'
+                : 'A new version is ready to download.'}
+          </SettingsNotice>
+        )}
+        {updateError && (
+          <SettingsNotice
+            tone="danger"
+            action={
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={isChecking}
+                onClick={checkForUpdates}
               >
-                <CheckCircle2
-                  size={18}
-                  className={cn(
-                    'flex-shrink-0',
-                    isManualUpdateMode ? 'text-warning' : 'text-success'
-                  )}
-                />
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-foreground">
-                    Version {version} is available!
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    {isAurUpdater
-                      ? 'Update through AUR with: yay -S termul-manager'
-                      : isManualUpdateMode
-                        ? 'Automatic update is unavailable. Please download and install the latest version manually.'
-                        : 'A new version is ready to download.'}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Update Error */}
-          {updateError && (
-            <div>
-              <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                Update Error
-              </label>
-              <div className="bg-destructive/10 border border-destructive/20 rounded-md px-4 py-3 flex items-center gap-3">
-                <AlertCircle size={18} className="text-destructive flex-shrink-0" />
-                <div className="flex-1">
-                  <div className="text-sm text-foreground">{updateError}</div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Check for Updates Button */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Check for Updates
-            </label>
-            <div className="flex items-center gap-2">
-              <Button type="button" size="sm" onClick={checkForUpdates} disabled={isChecking}>
-                <Download />
-                {isChecking ? 'Checking for updates...' : 'Check for Updates'}
+                <RotateCcw size={13} />
+                Try again
               </Button>
-              {updateAvailable && isManualUpdateMode && (
-                <button
-                  onClick={installAndRestart}
-                  className="flex h-9 items-center gap-2 rounded-lg border border-warning bg-warning px-3 text-sm text-warning-foreground transition-colors hover:bg-warning/90"
-                >
-                  <ExternalLink size={16} />
-                  Open Download Page
-                </button>
-              )}
-            </div>
-            {lastChecked && (
-              <p className="text-xs text-muted-foreground mt-1">
-                Last checked: {formatLastChecked(lastChecked)}
-              </p>
-            )}
-          </div>
+            }
+          >
+            Termul could not check for updates. Check your connection, then try again.
+            <span className="mt-1 block break-words font-mono text-muted-foreground">
+              {updateError}
+            </span>
+          </SettingsNotice>
+        )}
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('check-updates')}
+            label={`Termul ${APP_VERSION}`}
+            description={versionDescription}
+            layout="inline"
+          >
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={checkForUpdates}
+              disabled={isChecking}
+            >
+              {isChecking ? <Spinner size={13} decorative /> : <RefreshCw size={13} />}
+              {isChecking ? 'Checking for updates…' : 'Check for updates'}
+            </Button>
+          </SettingsRow>
+        </SettingsCard>
+        {skippedVersion && (
+          <SettingsNotice>
+            You skipped version <span className="font-mono">{skippedVersion}</span>. Termul offers
+            updates again when a newer version is out.
+          </SettingsNotice>
+        )}
+      </SettingsGroup>
 
-          {/* Auto-update Toggle */}
-          <div>
-            <label className="block text-sm font-medium text-secondary-foreground mb-2">
-              Auto-update
-            </label>
-            <SettingsSwitchRow
-              label="Automatically check for updates"
-              description="When enabled, the app will periodically check for new versions"
-              checked={autoUpdateEnabled}
-              onToggle={handleAutoUpdateToggle}
-            />
-          </div>
-
-          {/* Skipped Version */}
-          {skippedVersion && (
-            <div>
-              <label className="block text-sm font-medium text-secondary-foreground mb-2">
-                Skipped Version
-              </label>
-              <div className="bg-secondary/30 border border-border rounded-md px-4 py-3">
-                <div className="text-sm text-foreground">
-                  You are currently skipping version{' '}
-                  <span className="font-mono">{skippedVersion}</span>
-                </div>
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  This version will not be offered again until a newer version is available.
-                </div>
-              </div>
-            </div>
+      {!isAurUpdater && (
+        <SettingsGroup title="Channel">
+          <SettingsCard>
+            <SettingsRow
+              id={rowId('release-channel')}
+              htmlFor="release-channel"
+              label="Release channel"
+              description={`${channel.label}: ${channel.description}`}
+            >
+              <SettingsSelect
+                id="release-channel"
+                aria-describedby={settingsDescriptionId('release-channel')}
+                options={CHANNELS}
+                value={updateChannel}
+                disabled={isChecking}
+                onValueChange={(value) => setUpdateChannel(value as UpdateChannel)}
+              />
+            </SettingsRow>
+          </SettingsCard>
+          {updateChannel !== 'stable' && (
+            <SettingsNotice tone="warning">
+              {updateChannel === 'nightly'
+                ? 'Nightly builds are automated from the latest commit and may be unstable. Updates are offered as a manual download from the nightly release page.'
+                : 'Insider release candidates may be unfinished. Updates are offered as a manual download from the insider release page.'}
+            </SettingsNotice>
           )}
-        </div>
-      </div>
+        </SettingsGroup>
+      )}
+
+      <SettingsGroup title="Automatic updates">
+        <SettingsCard>
+          <SettingsRow
+            id={rowId('auto-update')}
+            htmlFor="auto-update"
+            label="Check for updates automatically"
+            description="Termul checks for a new version from time to time."
+            layout="inline"
+          >
+            <Switch
+              id="auto-update"
+              aria-describedby={settingsDescriptionId('auto-update')}
+              checked={autoUpdateEnabled}
+              onCheckedChange={handleAutoUpdateToggle}
+            />
+          </SettingsRow>
+        </SettingsCard>
+      </SettingsGroup>
     </SettingsSection>
   )
 }

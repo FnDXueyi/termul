@@ -1,7 +1,12 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, type RenderOptions, render as rtlRender, screen } from '@testing-library/react'
 import * as React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { TitleBarShortcutsPopover } from './TitleBarShortcutsPopover'
+
+/** The app root provides tooltips; tests render without it. */
+const render = (ui: React.ReactElement, options?: RenderOptions) =>
+  rtlRender(ui, { wrapper: TooltipProvider, ...options })
 
 // Issue #843: the quick-shortcuts popover must not list the desktop-only
 // "New Browser Tab" entry on web (it would show an unbindable shortcut for a

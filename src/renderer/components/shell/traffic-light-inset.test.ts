@@ -20,8 +20,4 @@ describe('getTrafficLightInset', () => {
     // 80 - 48 (collapsed Rail) - 8 (shell gap)
     expect(getTrafficLightInset(platform(true), false)?.panelHeaderStartPx).toBe(24)
   })
-
-  it('starts the main card 36px down', () => {
-    expect(getTrafficLightInset(platform(true), false)?.mainTopPx).toBe(36)
-  })
 })

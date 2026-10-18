@@ -19,6 +19,37 @@ export function railButtonClass(active: boolean, size: RailButtonSize = 'md'): s
   )
 }
 
+interface RailTooltipProps {
+  label: string
+  /** Muted second line (a shortcut, or why the action is off). */
+  hint?: string
+  /** Defaults to `right`, away from the Rail. */
+  side?: 'top' | 'right' | 'bottom' | 'left'
+  /** The trigger: one focusable element that accepts a ref. */
+  children: React.ReactElement
+}
+
+/**
+ * The one tooltip for every Rail control: the name, and an optional muted
+ * hint under it. Use it instead of a native `title`.
+ */
+export function RailTooltip({
+  label,
+  hint,
+  side = 'right',
+  children
+}: RailTooltipProps): React.JSX.Element {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side={side} className="flex flex-col gap-0.5 px-2.5 py-1.5 text-xs">
+        <span className="text-popover-foreground">{label}</span>
+        {hint && <span className="text-muted-foreground">{hint}</span>}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 interface RailButtonProps {
   label: string
   /** Muted second line in the tooltip (e.g. why the action is disabled). */
@@ -69,16 +100,10 @@ export function RailButton({
   )
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        {/* A disabled button gets no pointer events, so the wrapper carries
-            the tooltip that explains why the action is off. */}
-        {disabled ? <span className="inline-flex">{button}</span> : button}
-      </TooltipTrigger>
-      <TooltipContent side="right" className="flex flex-col gap-0.5 px-2.5 py-1.5 text-xs">
-        <span className="text-popover-foreground">{label}</span>
-        {hint && <span className="text-muted-foreground">{hint}</span>}
-      </TooltipContent>
-    </Tooltip>
+    <RailTooltip label={label} hint={hint}>
+      {/* A disabled button gets no pointer events, so the wrapper carries
+          the tooltip that explains why the action is off. */}
+      {disabled ? <span className="inline-flex">{button}</span> : button}
+    </RailTooltip>
   )
 }

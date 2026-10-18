@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { lazy, type ReactNode, Suspense } from 'react'
+import { getExplorerColumnBlocks } from '@/layouts/workspace-layout/explorer-column-blocks'
 import { panelRevealMotion } from '@/layouts/workspace-layout/panel-motion'
 import { ShellSkeleton } from '@/layouts/workspace-layout/ShellSkeleton'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
@@ -34,15 +35,13 @@ export function ExplorerColumn({
 }: ExplorerColumnProps): React.JSX.Element {
   const reducedMotion = useReducedMotion() ?? false
   const isExplorerVisible = useFileExplorerVisible()
-  const { workspaceOpen, activeSSHProfile, activeSSHSession } = ssh
-  const showFileColumn = Boolean(
-    isExplorerVisible && activeProject?.path && !(sidePanel && workspaceOpen)
-  )
-  // Remote files of the active, connected session tab.
-  const sftpSession =
-    workspaceOpen && isExplorerVisible && activeSSHSession?.status === 'connected'
-      ? activeSSHSession
-      : null
+  const { activeSSHProfile } = ssh
+  const { showFileColumn, sftpSession } = getExplorerColumnBlocks({
+    isExplorerVisible,
+    activeProject,
+    ssh,
+    hasSidePanel: Boolean(sidePanel)
+  })
 
   return (
     <AnimatePresence initial={false}>

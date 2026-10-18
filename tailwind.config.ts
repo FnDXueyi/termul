@@ -18,6 +18,7 @@ export default {
       colors: {
         border: 'oklch(var(--border) / <alpha-value>)',
         input: 'oklch(var(--input) / <alpha-value>)',
+        'field-border': 'oklch(var(--field-border) / <alpha-value>)',
         ring: 'oklch(var(--ring) / <alpha-value>)',
         background: 'oklch(var(--background) / <alpha-value>)',
         foreground: 'oklch(var(--foreground) / <alpha-value>)',

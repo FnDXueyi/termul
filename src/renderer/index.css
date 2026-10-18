@@ -172,6 +172,9 @@
     /* Borders - subtle dark borders */
     --border: 0.264 0.002 247.9;
     --input: 0.264 0.002 247.9;
+    /* Edge of text fields and select triggers: 3:1 against card, background
+       and popover (WCAG 1.4.11). --input stays the quieter Switch track. */
+    --field-border: 0.503 0.002 247.9;
     --ring: 0.922 0.001 286.4;
 
     --radius: 0.5rem; /* 8px - rounded corners */
@@ -376,10 +379,17 @@
      UI heard the click. Subtle scale (0.96) + custom ease-out keeps it
      snappy. Disabled buttons skip the press to avoid "dead element"
      feedback. We scope by [data-press-feedback] for opt-out flexibility,
-     but default it on for buttons / role=button / summary. */
+     but default it on for buttons / role=button / summary. Triggers that
+     open a menu, popover or list skip it: the surface that opens is the
+     feedback, and a shrinking trigger under a growing menu reads as a jolt.
+     Switches skip it too: the thumb moving is the feedback. */
   @media (hover: hover) and (pointer: fine) {
-    button:not(:disabled):not([data-press-feedback="off"]),
-    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]),
+    button:not(:disabled):not([data-press-feedback="off"]):not([aria-haspopup]):not(
+        [role="combobox"]
+      ):not([role="switch"]),
+    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):not(
+        [aria-haspopup]
+      ),
     summary:not([data-press-feedback="off"]) {
       /* Note: 'transition' here is shorthand and resets transition-property
          on the element. Components that rely on tailwind's transition-colors
@@ -395,8 +405,12 @@
       transition: transform 120ms var(--ease-out);
     }
 
-    button:not(:disabled):not([data-press-feedback="off"]):active,
-    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):active,
+    button:not(:disabled):not([data-press-feedback="off"]):not([aria-haspopup]):not(
+        [role="combobox"]
+      ):not([role="switch"]):active,
+    [role="button"]:not([aria-disabled="true"]):not([data-press-feedback="off"]):not(
+        [aria-haspopup]
+      ):active,
     summary:not([data-press-feedback="off"]):active {
       transform: scale(0.96);
     }
@@ -522,9 +536,10 @@
    * trigger. Radix exposes the correct origin via
    * --radix-*-content-transform-origin per primitive.
    *
-   * tailwindcss-animate defaults to 150ms ease-in-out. We
-   * override to a snappier 180ms with our --ease-out token so
-   * the entrance feels intentional. Modals (dialog) keep
+   * Timing is the transitions.dev "Menu dropdown" recipe on the
+   * motion tokens: open --duration-fast, close --duration-quick,
+   * both on --ease-smooth-out (scale lives in MENU_MOTION_CLASS).
+   * Modals (dialog) keep
    * transform-origin: center on purpose — they are not
    * anchored to a trigger.
    * ------------------------------------------------------------ */
@@ -556,14 +571,13 @@
         )
       )
     );
-    animation-duration: 180ms;
-    animation-timing-function: var(--ease-out);
+    animation-duration: var(--duration-fast);
+    animation-timing-function: var(--ease-smooth-out);
   }
 
-  /* Closing animation should be a touch faster than opening so
-     dismiss feels instant (asymmetric enter/exit timing). */
+  /* Closing is quicker than opening so dismiss feels instant. */
   [data-radix-popper-content-wrapper] > [data-state="closed"] {
-    animation-duration: 130ms;
+    animation-duration: var(--duration-quick);
   }
 
   /* ------------------------------------------------------------
@@ -753,8 +767,8 @@
 /* ------------------------------------------------------------
  * Uppercase label scale.
  *
- * Two canonical typography-only roles for the uppercase tracked
- * label element that previously drifted across ~25 call sites
+ * Two canonical typography-only roles for the small label element
+ * (eyebrow) that previously drifted across ~25 call sites
  * (sizes 10/12px, weights normal/medium/semibold/bold, tracking
  * wide/wider). The two classes intentionally NORMALIZE weight and
  * tracking to a single value per role — this is a deliberate
@@ -766,8 +780,11 @@
  *   .label-group   -> 12px menu / group / field micro-labels
  *                     (command palette groups, dialog field labels)
  *
- * These set size / weight / tracking / transform / line-height
- * ONLY. Color and opacity stay at the call site because sidebar
+ * All label roles use sentence case with no tracking, the same as
+ * the Preferences group headings. Write the label text in sentence
+ * case; do not add `uppercase`.
+ *
+ * These set size / weight / line-height ONLY. Color and opacity stay at the call site because sidebar
  * chrome (text-sidebar-foreground) and content surfaces
  * (text-muted-foreground) legitimately differ. Behavioral classes
  * (padding, hover, focus, truncate, cmdk selectors) also stay at
@@ -775,18 +792,18 @@
  * ------------------------------------------------------------ */
 @layer components {
   .label-section {
-    @apply text-xs font-normal uppercase tracking-wider;
+    @apply text-xs font-medium;
     line-height: 1.4;
   }
   .label-group {
-    @apply text-xs font-semibold uppercase tracking-wider;
+    @apply text-xs font-medium;
     line-height: 1.4;
   }
-  /* 11px panel / list-section / menu-group label (Projects, Explorer,
+  /* 12px panel / list-section / menu-group label (Projects, Explorer,
      SSH, On this page, picker and menu groups). Unlike the two above it
      carries its colour, muted; a text-* utility at the call site wins. */
   .label-panel {
-    @apply text-2xs font-semibold uppercase tracking-wider text-muted-foreground;
+    @apply text-xs font-medium text-muted-foreground;
     line-height: 1.4;
   }
 }

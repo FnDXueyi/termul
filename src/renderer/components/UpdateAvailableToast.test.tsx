@@ -194,14 +194,14 @@ describe('UpdateAvailableToast channel-aware labeling', () => {
       string,
       { description: string; action: { label: ReactElement } }
     ]
-    expect(title).toBe('Update available: version 0.4.8')
-    expect(opts.description).toBe('A new version is available for download.')
+    expect(title).toBe('Update available')
+    expect(opts.description).toBe('Version 0.4.8 is ready to download.')
     expect(renderToStaticMarkup(opts.action.label)).toContain('Download')
     // The stable action label must NOT show the manual-download CTA.
-    expect(renderToStaticMarkup(opts.action.label)).not.toContain('Open Download Page')
+    expect(renderToStaticMarkup(opts.action.label)).not.toContain('Open download page')
   })
 
-  it('prefixes the title with "Insider" and uses the manual-download action label for insider', () => {
+  it('names the insider channel in the title and uses the manual-download action label for insider', () => {
     storeChannel = 'insider'
     showUpdateToast('0.5.0-rc.1')
     const calls = vi.mocked(toast.success).mock.calls
@@ -209,21 +209,26 @@ describe('UpdateAvailableToast channel-aware labeling', () => {
       string,
       { description: string; action: { label: ReactElement } }
     ]
-    expect(title).toBe('Insider Update available: version 0.5.0-rc.1')
+    expect(title).toBe('Insider update available')
     expect(opts.description).toBe(
-      'A new insider build is available. Open the download page to install it manually.'
+      'Version 0.5.0-rc.1. Open the download page to install it manually.'
     )
-    expect(renderToStaticMarkup(opts.action.label)).toContain('Open Download Page')
+    expect(renderToStaticMarkup(opts.action.label)).toContain('Open download page')
   })
 
-  it('prefixes the title with "Nightly" for the nightly channel', () => {
+  it('names the nightly channel in the title, with the version in the description', () => {
     storeChannel = 'nightly'
     showUpdateToast('0.0.0-nightly.20260808.abc')
     const calls = vi.mocked(toast.success).mock.calls
-    const [title, opts] = calls[calls.length - 1] as [string, { description: string }]
-    expect(title).toBe('Nightly Update available: version 0.0.0-nightly.20260808.abc')
+    const [title, opts] = calls[calls.length - 1] as [
+      string,
+      { description: string; classNames: { toast: string } }
+    ]
+    expect(title).toBe('Nightly update available')
+    // The text keeps the full width: buttons wrap to their own row.
+    expect(opts.classNames.toast).toContain('flex-wrap')
     expect(opts.description).toBe(
-      'A new nightly build is available. Open the download page to install it manually.'
+      'Version 0.0.0-nightly.20260808.abc. Open the download page to install it manually.'
     )
   })
 })

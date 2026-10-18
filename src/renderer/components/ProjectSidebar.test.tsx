@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { useGitStatusStore } from '@/stores/git-status-store'
 import { useProjectStore } from '@/stores/project-store'
 import type { Project } from '@/types/project'
@@ -111,7 +112,9 @@ const defaultProps = {
 const renderWithRouter = (props = {}) => {
   return render(
     <MemoryRouter>
-      <ProjectSidebar {...defaultProps} {...props} />
+      <TooltipProvider>
+        <ProjectSidebar {...defaultProps} {...props} />
+      </TooltipProvider>
     </MemoryRouter>
   )
 }
