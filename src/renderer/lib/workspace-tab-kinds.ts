@@ -7,7 +7,7 @@ export type WorkspaceTabKind = WorkspaceTab['type']
  * Per tab kind: whether it is written to the project's workspace record
  * (`persisted`). `satisfies Record<WorkspaceTabKind, …>` makes a new
  * `WorkspaceTab['type']` member a compile error here until its persistence
- * story is declared. Canvas is not persisted: its daemon/iframe runtime is
+ * story is declared. Canvas is not persisted: its mount/iframe runtime is
  * host-local state and the canvas re-opens user-initiated, never
  * auto-restored.
  */

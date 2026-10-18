@@ -50,8 +50,8 @@ interface CommandPaletteProps {
   onLaunchAgent?: () => void
   onSaveSnapshot?: () => void
   onNewBrowserTab?: () => void
-  /** OpenPencil canvas mode: opens the active project's `.op` document as
-   * the canvas tab. Hidden on the mobile web shell (no canvas on phones). */
+  /** Opens the active project's `.figcraft` document as the canvas tab.
+   * Hidden on the mobile web shell (no canvas on phones). */
   onOpenCanvas?: () => void
   /** Story 7: opens the New Project modal (mobile creation entry + desktop). */
   onNewProject?: () => void
@@ -238,8 +238,8 @@ export function CommandPalette({
               category: 'workspace' as const,
               icon: <Edit2 aria-hidden="true" size={16} />,
               label: 'Open Canvas',
-              description: "Open the project's .op design document as a canvas tab",
-              keywords: ['canvas', 'openpencil', 'design', 'op', 'drawing', 'vector'],
+              description: "Open the project's .figcraft design document as a canvas tab",
+              keywords: ['canvas', 'figcraft', 'design', 'drawing', 'vector'],
               execute: onOpenCanvas
             }
           ]

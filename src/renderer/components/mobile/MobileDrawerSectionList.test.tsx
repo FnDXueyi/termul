@@ -172,7 +172,7 @@ function seedAllTabTypes(): void {
         path: 'src/c.ts'
       },
       { type: 'browser', id: 'browser-b1', browserTabId: 'b1' },
-      { type: 'canvas', id: 'canvas-p1', projectId: 'p1', docPath: '/proj/docs/Plan.op' },
+      { type: 'canvas', id: 'canvas-p1', projectId: 'p1', docPath: '/proj/docs/Plan.figcraft' },
       CHAT_TAB
     ],
     'tab-1'
@@ -300,7 +300,13 @@ describe('MobileDrawerSectionList editors', () => {
     renderList({ section: 'editors' })
 
     const group = screen.getByRole('group', { name: 'Editors' })
-    for (const label of ['a.ts', 'Git Changes', 'c.ts @ e44b917', 'Example Site', 'Plan.op']) {
+    for (const label of [
+      'a.ts',
+      'Git Changes',
+      'c.ts @ e44b917',
+      'Example Site',
+      'Plan.figcraft'
+    ]) {
       expect(within(group).getByRole('button', { name: label })).toHaveClass('min-h-11')
       expect(within(group).getByRole('button', { name: `Close ${label}` })).toHaveClass('size-11')
     }
@@ -341,7 +347,7 @@ describe('MobileDrawerSectionList editors', () => {
     seedAllTabTypes()
     renderList({ section: 'editors' })
 
-    const row = screen.getByRole('button', { name: 'Plan.op' })
+    const row = screen.getByRole('button', { name: 'Plan.figcraft' })
     expect(row.querySelector('svg[data-termul-icon="Edit2"]')).toBeInTheDocument()
   })
 
@@ -356,8 +362,8 @@ describe('MobileDrawerSectionList editors', () => {
     expect(screen.getByRole('button', { name: /^a\.ts/ })).toHaveAccessibleName(
       'a.ts, unsaved changes'
     )
-    expect(screen.getByRole('button', { name: /^Plan\.op/ })).toHaveAccessibleName(
-      'Plan.op, unsaved changes'
+    expect(screen.getByRole('button', { name: /^Plan\.figcraft/ })).toHaveAccessibleName(
+      'Plan.figcraft, unsaved changes'
     )
     expect(screen.getByTestId('canvas-dirty-dot').className).toBe(dot.className)
   })
@@ -383,7 +389,7 @@ describe('MobileDrawerSectionList editors', () => {
     expect(mockRemoveBrowserTab).toHaveBeenCalledWith('b1')
     expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('browser-b1')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Close Plan.op' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close Plan.figcraft' }))
     expect(mockCloseCanvas).toHaveBeenCalledWith('p1')
     expect(workspaceRef.current.removeTab).toHaveBeenCalledWith('canvas-p1')
 
