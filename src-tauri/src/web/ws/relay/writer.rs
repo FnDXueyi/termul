@@ -161,6 +161,11 @@ where
                     send(sink, Message::Text(text.into()), stop).await?;
                 }
             }
+            Outbound::CanvasLeaseLost(notice) => {
+                if let Some(text) = encode(&notice, || "canvas lease notice".to_string()) {
+                    send(sink, Message::Text(text.into()), stop).await?;
+                }
+            }
             Outbound::Reply(reply) => {
                 if let Some(text) = encode(&reply, || format!("reply for {}", reply.id)) {
                     send(sink, Message::Text(text.into()), stop).await?;

@@ -8,6 +8,9 @@
  * `host.save` is the one call answered here instead of in the editor: the
  * agent's `save_file` is Termul's save of the project's document (AD-18,
  * AD-23), and it answers with the document's project-relative path.
+ *
+ * When another window takes a canvas's lease (AD-30), the store shows that
+ * canvas as open elsewhere.
  */
 
 import { type AcpTransport, getAcpTransport } from '@/lib/acp-transport'
@@ -71,6 +74,10 @@ export function startCanvasGateway(transport: AcpTransport = getAcpTransport()):
     )
   )
 
+  gateway.setLeaseLostHandler((projectId, mountSeq, loss) =>
+    store().leaseLost(projectId, mountSeq, loss)
+  )
+
   const reported = new Set<string>()
   const sync = (sessions: Record<string, CanvasSession>): void => {
     for (const projectId of reported) {
@@ -92,6 +99,7 @@ export function startCanvasGateway(transport: AcpTransport = getAcpTransport()):
   return () => {
     unsubscribe()
     gateway.setCallHandler(null)
+    gateway.setLeaseLostHandler(null)
     for (const projectId of reported) gateway.setMount(projectId, null)
     reported.clear()
   }

@@ -8,7 +8,11 @@ use super::CanvasPersistence;
 use crate::acp::host_mcp::canvas::{CanvasErrorCode, CanvasHolder};
 
 fn holder(id: &'static str) -> CanvasHolder {
-    CanvasHolder::new(id, Arc::new(|_| true))
+    CanvasHolder::new(
+        id,
+        crate::canvas::persistence::test_renderer(),
+        Arc::new(|_| true),
+    )
 }
 
 #[tokio::test]

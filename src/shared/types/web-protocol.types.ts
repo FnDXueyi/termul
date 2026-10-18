@@ -920,6 +920,20 @@ export interface WsHeartbeatFrame {
 /** `type` of the top-level frame that forwards an agent canvas call (no `seq`). */
 export const WS_CANVAS_CALL_FRAME_TYPE = 'canvas_call'
 
+/** `type` of the top-level frame that says another renderer took a canvas lease. */
+export const WS_CANVAS_LEASE_LOST_FRAME_TYPE = 'canvas_lease_lost'
+
+/**
+ * Host → the connection that held `projectId`'s canvas at `mountSeq`: another
+ * window or tab opened the canvas, and this mount was saved and unmounted
+ * for it (spine AD-30).
+ */
+export interface WsCanvasLeaseLostFrame {
+  type: typeof WS_CANVAS_LEASE_LOST_FRAME_TYPE
+  projectId: string
+  mountSeq: number
+}
+
 /**
  * Host → the connection holding `projectId`'s canvas at `mountSeq`: one
  * figcraft control-protocol call to run in the editor. `params` is JSON text.
@@ -934,6 +948,11 @@ export interface WsCanvasCallFrame {
   method: string
   params: string
 }
+
+/** `canvas_mount` reply. A refused report carries `heldElsewhere`: another
+ * window holds the project's lease; otherwise the host no longer has that
+ * mount (its lease grace ran out). */
+export type WsCanvasMountReply = { attached: true } | { attached: false; heldElsewhere: boolean }
 
 /** `canvas_reply` payload: the result's JSON text, or a typed error. */
 export type WsCanvasReplyPayload =

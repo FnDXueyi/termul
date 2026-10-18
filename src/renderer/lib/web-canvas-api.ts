@@ -3,8 +3,9 @@
  * `src-tauri/src/web/canvas_api.rs` and `canvas_persistence_api.rs`
  * (same-origin, behind the bearer `web_auth_gate`; `postJson` adds the web
  * auth header):
- * - `POST /canvas/open` body `{ docPath, projectId, autosaveMs }` →
- *   `CanvasOpenInfo` with an empty `baseUrl` (the bundle is same-origin);
+ * - `POST /canvas/open` body `{ docPath, projectId, clientInstanceId,
+ *   autosaveMs, leaseGraceMs }` → `CanvasOpenInfo` with an empty `baseUrl`
+ *   (the bundle is same-origin); this tab takes the mount lease;
  * - `POST /canvas/close` body `{ projectId, discard }` — the host's AD-31
  *   unmount (save, verify, unmount), which also revokes the `ct` token;
  * - `POST /canvas/read-document|document-loaded|dirty-changed|write-snapshot`
@@ -21,20 +22,28 @@ import type {
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
+  CanvasOpenOptions,
   CanvasPersistenceView,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
 
 import { postJson } from './ipc/http'
+import { getClientInstanceId } from './web-client-identity'
 
 export const webCanvasApi: CanvasApi = {
   open(
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    options: CanvasOpenOptions = {}
   ): Promise<IpcResult<CanvasOpenInfo>> {
-    return postJson<CanvasOpenInfo>('/canvas/open', { docPath, projectId, autosaveMs })
+    return postJson<CanvasOpenInfo>('/canvas/open', {
+      docPath,
+      projectId,
+      clientInstanceId: getClientInstanceId(),
+      autosaveMs: options.autosaveMs,
+      leaseGraceMs: options.leaseGraceMs
+    })
   },
 
   close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

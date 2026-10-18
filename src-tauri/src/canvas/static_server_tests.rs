@@ -11,7 +11,7 @@ use super::persistence::CloseMode;
 use super::pin::pinned_tag;
 use super::static_server::{
     bundle_router, bundle_tokens, canvas_cookie_name, close_canvas, open_canvas, same_origin_base,
-    serve_bundle, Access, BundleTokens, CanvasBundleBase, CookiePolicy, StaticServer,
+    serve_bundle, Access, BundleTokens, CanvasBundleBase, CookiePolicy, OpenRequest, StaticServer,
 };
 use crate::web::auth::{WebAuth, WebAuthToken};
 use crate::web::canvas_api::{canvas_router, CanvasState};
@@ -24,6 +24,14 @@ fn headers_with_cookie(name: &str, value: &str) -> HeaderMap {
         HeaderValue::from_str(&format!("{name}={value}")).unwrap(),
     );
     headers
+}
+
+fn tab(client_instance_id: &str) -> OpenRequest {
+    OpenRequest {
+        client_instance_id: client_instance_id.to_string(),
+        autosave_ms: None,
+        lease_grace_ms: None,
+    }
 }
 
 async fn body_text(response: Response) -> String {
@@ -68,7 +76,14 @@ async fn open_canvas_mints_one_token_per_project_until_close() {
             .granted()
     };
 
-    let first = open_canvas(base.clone(), project, "C:/p/design.figcraft".into(), None).unwrap();
+    let first = open_canvas(
+        base.clone(),
+        project,
+        "C:/p/design.figcraft".into(),
+        tab("tab-a"),
+    )
+    .await
+    .unwrap();
     let wire = serde_json::to_value(&first).unwrap();
     assert_eq!(
         wire,
@@ -86,7 +101,14 @@ async fn open_canvas_mints_one_token_per_project_until_close() {
         "the minted ct opens the bundle"
     );
 
-    let again = open_canvas(base.clone(), project, "C:/p/other.figcraft".into(), None).unwrap();
+    let again = open_canvas(
+        base.clone(),
+        project,
+        "C:/p/other.figcraft".into(),
+        tab("tab-a"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         again.canvas_token, first.canvas_token,
         "a repeat open keeps the mounted iframe's URL valid"
@@ -100,7 +122,9 @@ async fn open_canvas_mints_one_token_per_project_until_close() {
     assert!(!authorized(&first.canvas_token), "close revokes the token");
     close_canvas(project, CloseMode::Save).await.unwrap();
 
-    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), None).unwrap();
+    let reopened = open_canvas(base, project, "C:/p/design.figcraft".into(), tab("tab-a"))
+        .await
+        .unwrap();
     assert_ne!(reopened.canvas_token, first.canvas_token);
     assert!(authorized(&reopened.canvas_token));
     close_canvas(project, CloseMode::Save).await.unwrap();

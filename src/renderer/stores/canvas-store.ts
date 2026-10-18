@@ -21,6 +21,11 @@
  * `unmountCanvas`, which asks the host to run the AD-31 sequence (quiesce,
  * save, verify, unmount) and drops the session once the host unmounted.
  *
+ * The host leases each project's canvas to one window (AD-30). When another
+ * window opens it, the host saves and unmounts this window's mount and the
+ * session moves to `elsewhere`; opening it again here takes it back the same
+ * way.
+ *
  * Bridges live in a module-level map, not in reactive state: they are
  * imperative controllers that `CanvasShell` attaches and detaches with the
  * iframe. Logs never carry the `ct` token or document content.
@@ -29,6 +34,7 @@
 import type {
   CanvasCloseOutcome,
   CanvasErrorCode,
+  CanvasLeaseLoss,
   CanvasOpenInfo,
   CanvasPersistenceView
 } from '@shared/types/canvas.types'
@@ -59,6 +65,9 @@ export type CanvasPhase =
   | { kind: 'loading'; mount: CanvasMount }
   | { kind: 'ready'; mount: CanvasMount }
   | { kind: 'failed'; code: CanvasErrorCode; message: string }
+  /** Another window took the canvas's lease; this one's mount was saved and
+   * unmounted. Opening the canvas again takes it back. */
+  | { kind: 'elsewhere' }
 
 export interface CanvasSession {
   projectId: string
@@ -85,6 +94,10 @@ export interface CanvasState {
    * the host unmounted. `discard` is the user's choice to drop unsaved
    * changes after a failed save. */
   unmountCanvas: (projectId: string, discard?: boolean) => Promise<IpcResult<CanvasCloseOutcome>>
+  /** This window no longer holds the project's mount: another window took
+   * it (`elsewhere`), or the host dropped it after the connection was gone
+   * longer than the lease grace (`expired`). */
+  leaseLost: (projectId: string, mountSeq: number, loss: CanvasLeaseLoss) => void
   attachBridge: (projectId: string, mountSeq: number, bridge: CanvasBridge) => void
   detachBridge: (projectId: string, bridge: CanvasBridge) => void
   handleBridgeEvent: (projectId: string, mountSeq: number, event: CanvasBridgeEvent) => void
@@ -182,6 +195,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
 
   const isLiveMount = (projectId: string, mountSeq: number): boolean =>
     currentBridge(projectId, mountSeq) !== null && phaseMountSeq(projectId) === mountSeq
+
+  /** Ends this window's hold on the project's mount: in-flight work for it
+   * goes stale and its bridge is disposed. */
+  const releaseMount = (projectId: string): void => {
+    nextLifecycleGeneration(projectId)
+    bridges.get(projectId)?.bridge.dispose()
+    bridges.delete(projectId)
+    savesInFlight.delete(projectId)
+  }
+
+  const dropSession = (projectId: string): void => {
+    releaseMount(projectId)
+    set((state) => {
+      const { [projectId]: _closed, ...rest } = state.sessions
+      return { sessions: rest }
+    })
+  }
 
   const failMount = (projectId: string, code: CanvasErrorCode, message: string): void => {
     bridges.get(projectId)?.bridge.dispose()
@@ -369,8 +399,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
           }
         }))
       }
-      const autosaveMs = useAppSettingsStore.getState().settings.canvasAutosaveMs
-      const result = await canvasApi.open(docPath, projectId, autosaveMs)
+      const { canvasAutosaveMs, canvasLeaseGraceMs } = useAppSettingsStore.getState().settings
+      const result = await canvasApi.open(docPath, projectId, {
+        autosaveMs: canvasAutosaveMs,
+        leaseGraceMs: canvasLeaseGraceMs
+      })
       if (isStaleLifecycle(projectId, generation)) {
         logCanvas('info', 'openCanvas', `dropped a superseded canvas open for project ${projectId}`)
         return 'superseded'
@@ -407,7 +440,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
     },
 
     unmountCanvas: async (projectId, discard = false) => {
-      if (!get().sessions[projectId]) {
+      const session = get().sessions[projectId]
+      if (!session || session.phase.kind === 'elsewhere') {
+        // The other window holds the host's mount; closing here must not close it.
+        if (session) dropSession(projectId)
         return {
           success: true,
           data: { unmounted: false, savedVersion: null, discarded: false }
@@ -424,20 +460,33 @@ export const useCanvasStore = create<CanvasState>((set, get) => {
         patchSession(projectId, { closing: false })
         return result
       }
-      nextLifecycleGeneration(projectId)
-      bridges.get(projectId)?.bridge.dispose()
-      bridges.delete(projectId)
-      savesInFlight.delete(projectId)
-      set((state) => {
-        const { [projectId]: _closed, ...rest } = state.sessions
-        return { sessions: rest }
-      })
+      dropSession(projectId)
       logCanvas(
         result.data.discarded ? 'warn' : 'info',
         'unmountCanvas',
         `canvas unmounted for project ${projectId} saved=${result.data.savedVersion ?? 'none'} discarded=${result.data.discarded}`
       )
       return result
+    },
+
+    leaseLost: (projectId, mountSeq, loss) => {
+      if (phaseMountSeq(projectId) !== mountSeq) return
+      releaseMount(projectId)
+      const phase: CanvasPhase =
+        loss === 'elsewhere'
+          ? { kind: 'elsewhere' }
+          : {
+              kind: 'failed',
+              code: 'CANVAS_CLOSED',
+              message:
+                'The canvas closed after this window was disconnected for too long. Open it again to continue from its last save.'
+            }
+      patchSession(projectId, { phase, ...CLEAN_PROJECTION })
+      logCanvas(
+        loss === 'elsewhere' ? 'info' : 'warn',
+        'leaseLost',
+        `canvas for project ${projectId} mountSeq=${mountSeq} lost its lease: ${loss}`
+      )
     },
 
     attachBridge: (projectId, mountSeq, bridge) => {

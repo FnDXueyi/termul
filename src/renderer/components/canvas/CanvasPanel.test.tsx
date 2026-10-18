@@ -186,6 +186,24 @@ describe('CanvasPanel', () => {
     expect(screen.queryByTitle(/Canvas —/)).toBeNull()
   })
 
+  it('shows a canvas open in another window with a Take back that opens it here', async () => {
+    const openCanvas = vi.fn().mockResolvedValue(true)
+    setPhase({ kind: 'elsewhere' })
+    useCanvasStore.setState({ openCanvas })
+    renderPanel()
+
+    expect(screen.getByTestId('canvas-open-elsewhere').textContent).toContain(
+      'open in another window'
+    )
+    expect(screen.queryByTitle(/Canvas —/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save canvas' })).toHaveProperty('disabled', true)
+    const takeBack = screen.getByRole('button', { name: 'Take back' })
+    fireEvent.click(takeBack)
+    expect(openCanvas).toHaveBeenCalledWith(PROJECT, DOC)
+    expect(takeBack).toHaveProperty('disabled', true)
+    await waitFor(() => expect(takeBack).toHaveProperty('disabled', false))
+  })
+
   it('is gated off on phone-width viewports', () => {
     phoneWidth.value = true
     setPhase({ kind: 'loading', mount: { mountSeq: 4, info: INFO } })

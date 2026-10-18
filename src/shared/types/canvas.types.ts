@@ -79,6 +79,7 @@ export const CanvasErrorCodes = {
   DOCUMENT_LOAD_FAILED: 'DOCUMENT_LOAD_FAILED',
   CANVAS_CLOSED: 'CANVAS_CLOSED',
   CANVAS_CLOSING: 'CANVAS_CLOSING',
+  CANVAS_OPEN_ELSEWHERE: 'CANVAS_OPEN_ELSEWHERE',
   SAVE_FAILED: 'SAVE_FAILED',
   CANVAS_NOT_READY: 'CANVAS_NOT_READY',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
@@ -115,11 +116,30 @@ export type CanvasBridgeErrorCode = (typeof CANVAS_BRIDGE_ERROR_CODES)[number]
  * The persistence methods are the renderer's half of AD-23: it forwards what
  * the editor reports and does what the host decides.
  */
+/** Why a window no longer holds a canvas mount (spine AD-30): another window
+ * took the lease, or the host dropped the mount after the window's
+ * connection was gone longer than the lease grace. */
+export type CanvasLeaseLoss = 'elsewhere' | 'expired'
+
+/** Settings sent with each open; the host clamps both. */
+export interface CanvasOpenOptions {
+  /** `canvas.autosave_ms`. */
+  autosaveMs?: number
+  /** `canvas.lease_grace_ms`: how long this window keeps the canvas after
+   * its connection drops, so a reload or reconnect keeps it. */
+  leaseGraceMs?: number
+}
+
 export interface CanvasApi {
+  /** Mount the project's document in this window, which takes the mount
+   * lease (spine AD-30). When another window holds it, that window saves and
+   * unmounts first; if it cannot save, this answers `CANVAS_OPEN_ELSEWHERE`.
+   * The transports send this window's `clientInstanceId` as the lease
+   * holder. */
   open: (
     docPath: string,
     projectId: string,
-    autosaveMs?: number
+    options?: CanvasOpenOptions
   ) => Promise<IpcResult<CanvasOpenInfo>>
   /** Unmount through the host's AD-31 sequence. A failed save answers
    * `SAVE_FAILED` and keeps the mount; `discard` is the user's explicit

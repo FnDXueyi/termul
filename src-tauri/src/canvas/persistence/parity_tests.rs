@@ -9,7 +9,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::canvas::static_server::{open_canvas, same_origin_base};
+use crate::canvas::static_server::{open_canvas, same_origin_base, OpenRequest};
 use crate::commands::{
     canvas_close, canvas_dirty_changed, canvas_document_loaded, canvas_read_document,
     canvas_write_snapshot,
@@ -57,14 +57,19 @@ fn tauri<T: serde::Serialize>(result: Result<crate::commands::IpcResult<T>, Stri
 }
 
 /// One mount per transport, each in its own project and directory.
-fn open(project_id: &str, dir: &tempfile::TempDir) -> u64 {
+async fn open(project_id: &str, dir: &tempfile::TempDir) -> u64 {
     let doc = dir.path().join("design.figcraft");
     open_canvas(
         same_origin_base(),
         project_id,
         doc.to_string_lossy().into_owned(),
-        Some(100),
+        OpenRequest {
+            client_instance_id: "parity-tab".into(),
+            autosave_ms: Some(100),
+            lease_grace_ms: None,
+        },
     )
+    .await
     .unwrap()
     .mount_seq
 }
@@ -178,8 +183,8 @@ async fn web_call(route: &'static str, body: Value) -> Value {
 async fn desktop_commands_and_web_routes_answer_the_same_sequence_alike() {
     let tauri_dir = tempfile::tempdir().unwrap();
     let web_dir = tempfile::tempdir().unwrap();
-    let tauri_seq = open("parity-persist-tauri", &tauri_dir);
-    let web_seq = open("parity-persist-web", &web_dir);
+    let tauri_seq = open("parity-persist-tauri", &tauri_dir).await;
+    let web_seq = open("parity-persist-web", &web_dir).await;
 
     let desktop = run_sequence("parity-persist-tauri", tauri_seq, tauri_call).await;
     let web = run_sequence("parity-persist-web", web_seq, web_call).await;
@@ -314,8 +319,8 @@ async fn tauri_close_call(route: &'static str, body: Value) -> Value {
 async fn desktop_and_web_close_a_canvas_alike() {
     let tauri_dir = tempfile::tempdir().unwrap();
     let web_dir = tempfile::tempdir().unwrap();
-    let tauri_seq = open("parity-close-tauri", &tauri_dir);
-    let web_seq = open("parity-close-web", &web_dir);
+    let tauri_seq = open("parity-close-tauri", &tauri_dir).await;
+    let web_seq = open("parity-close-web", &web_dir).await;
 
     let desktop = run_close("parity-close-tauri", tauri_seq, tauri_close_call).await;
     let web = run_close("parity-close-web", web_seq, web_call).await;
