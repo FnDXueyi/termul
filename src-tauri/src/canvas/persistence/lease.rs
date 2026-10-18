@@ -172,14 +172,20 @@ impl CanvasPersistence {
         }
         let _admitting = self.admission.lock().await;
         let mut evicted = Vec::new();
-        let opened = match self.make_room(project_id, cap, &mut evicted).await {
-            Ok(()) => self.lease(project_id, &request).await,
+        let host_cap = self.host_cap(cap);
+        let opened = match self.make_room(project_id, host_cap, &mut evicted).await {
+            Ok(()) => self.lease(project_id, &request, cap).await,
             Err(error) => Err(error),
         };
         Admitted { evicted, opened }
     }
 
-    async fn lease(&self, project_id: &str, request: &MountRequest) -> Result<Opened, CanvasError> {
+    async fn lease(
+        &self,
+        project_id: &str,
+        request: &MountRequest,
+        cap: usize,
+    ) -> Result<Opened, CanvasError> {
         loop {
             let current = self.mounts.lock().get(project_id).cloned();
             let (lease, expected) = match &current {
@@ -202,7 +208,7 @@ impl CanvasPersistence {
                 Some(mount) => (self.take_over(project_id, mount).await?, None),
             };
             let mount_seq = self.next_mount_seq();
-            let mount = Mount::new(mount_seq, self.tick(), request.clone(), None);
+            let mount = Mount::new(mount_seq, self.tick(), request.clone(), cap, None);
             if self.install(project_id, expected, mount) {
                 return Ok(Opened { mount_seq, lease });
             }

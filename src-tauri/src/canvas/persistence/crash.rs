@@ -161,6 +161,7 @@ impl CanvasPersistence {
             remount.mount_seq,
             self.tick(),
             old.request(),
+            old.max_mounted,
             Some(remount.clone()),
         );
         if !self.install(project_id, Some(old), fresh) {

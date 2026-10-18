@@ -251,6 +251,9 @@ struct Mount {
     lease_grace: Duration,
     /// `canvas.crash_timeouts`: consecutive timeouts that mark it crashed.
     crash_timeouts: u32,
+    /// The `canvas.max_mounted` it was opened under; the host keeps the
+    /// highest of these ([`evict`]).
+    max_mounted: usize,
     /// The crash this mount replaced, so a late report of it answers the
     /// same remount instead of starting another.
     remounted_from: Option<Remount>,
@@ -267,6 +270,7 @@ impl Mount {
         mount_seq: u64,
         tick: u64,
         request: MountRequest,
+        max_mounted: usize,
         remounted_from: Option<Remount>,
     ) -> Arc<Self> {
         let (generation, _) = watch::channel(0);
@@ -279,6 +283,7 @@ impl Mount {
             autosave_max: request.autosave_max,
             lease_grace: request.lease_grace,
             crash_timeouts: request.crash_timeouts,
+            max_mounted,
             remounted_from,
             state: Mutex::new(MountState {
                 phase: Phase::Loading,
@@ -772,7 +777,7 @@ impl CanvasPersistence {
     fn replace_mount(&self, project_id: &str, mount_seq: u64, request: MountRequest) {
         let previous = self.mounts.lock().insert(
             project_id.to_string(),
-            Mount::new(mount_seq, self.tick(), request, None),
+            Mount::new(mount_seq, self.tick(), request, DEFAULT_MAX_MOUNTED, None),
         );
         if let Some(previous) = previous {
             Self::retire(&previous);
