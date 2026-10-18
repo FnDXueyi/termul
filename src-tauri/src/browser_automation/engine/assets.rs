@@ -46,6 +46,10 @@ pub const READY_STATE: Helper = helper!("ready_state");
 pub const LOCATION: Helper = helper!("location");
 pub const CHECKED_STATE: Helper = helper!("checked_state");
 pub const SELECT_OPTION: Helper = helper!("select_option");
+pub const SENSITIVITY: Helper = helper!("sensitivity");
+/// Only CDP engines set a file input through the element itself.
+#[cfg(any(test, target_os = "windows"))]
+pub const FILE_INPUT: Helper = helper!("file_input");
 
 /// A helper with its parameters, ready for an engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +109,19 @@ pub fn scroll(path: Option<&str>, dy: f64) -> Script {
 /// Synthetic hover events on the element at `path`.
 pub fn hover(path: &str) -> Script {
     Script::new(HOVER, json!({ "path": path }))
+}
+
+/// The closed sensitivity facts about the element at `path`, or about the
+/// focused element without one.
+pub fn sensitivity(path: Option<&str>) -> Script {
+    Script::new(SENSITIVITY, json!({ "path": path }))
+}
+
+/// The file input at `path` itself, for engines that set its files by
+/// element handle; null when `path` names anything else.
+#[cfg(any(test, target_os = "windows"))]
+pub fn file_input(path: &str) -> Script {
+    Script::new(FILE_INPUT, json!({ "path": path }))
 }
 
 /// Whether the page's visible text contains `text`.

@@ -108,11 +108,41 @@ fn parse_option(id: &str) -> Option<ConsentOption> {
         .find(|o| option_key(*o) == id)
 }
 
-fn option_name(option: ConsentOption) -> &'static str {
-    match option {
-        ConsentOption::AllowSession => "Allow for this session",
-        ConsentOption::AllowProject => "Always allow for this project",
-        ConsentOption::Deny => "Deny",
+/// Sensitive actions are allowed one action at a time: their session
+/// option means "this once", and their project option pre-approves the
+/// action on the origin.
+fn is_sensitive(action: ActionClass) -> bool {
+    action.is_preapprovable()
+}
+
+fn option_name(option: ConsentOption, action: ActionClass) -> &'static str {
+    match (option, is_sensitive(action)) {
+        (ConsentOption::AllowSession, false) => "Allow for this session",
+        (ConsentOption::AllowSession, true) => "Allow once",
+        (ConsentOption::AllowProject, false) => "Always allow for this project",
+        (ConsentOption::AllowProject, true) => "Always allow on this site for this project",
+        (ConsentOption::Deny, _) => "Deny",
+    }
+}
+
+fn option_scope(option: ConsentOption, action: ActionClass) -> Option<&'static str> {
+    match (option, is_sensitive(action)) {
+        (ConsentOption::AllowSession, true) => Some("once"),
+        _ => option.scope(),
+    }
+}
+
+fn ticket_title(ticket: &TicketRequest) -> String {
+    let origin = ticket.origin.as_str();
+    match ticket.action {
+        ActionClass::Navigate | ActionClass::LocalNetwork => {
+            format!("Open {origin} in the agent browser")
+        }
+        ActionClass::PasswordSubmit => format!("Submit a password on {origin}"),
+        ActionClass::PaymentSubmit => format!("Submit payment details on {origin}"),
+        ActionClass::Upload => format!("Upload a file to {origin}"),
+        ActionClass::Download => format!("Download a file from {origin}"),
+        ActionClass::TaintedExfil => format!("Send page data to {origin}"),
     }
 }
 
@@ -151,15 +181,16 @@ fn display_url(url: &str) -> String {
 }
 
 fn request_payload(ticket: &TicketRequest) -> Value {
-    let options: Vec<Value> = ConsentOption::ALL
-        .into_iter()
-        .map(|option| {
+    let options: Vec<Value> = ticket
+        .options
+        .iter()
+        .map(|&option| {
             let mut entry = json!({
                 "optionId": option_key(option),
-                "name": option_name(option),
+                "name": option_name(option, ticket.action),
                 "kind": option.acp_kind(),
             });
-            if let Some(scope) = option.scope() {
+            if let Some(scope) = option_scope(option, ticket.action) {
                 entry["_meta"] = json!({ "termul": { "scope": scope } });
             }
             entry
@@ -170,7 +201,7 @@ fn request_payload(ticket: &TicketRequest) -> Value {
         "requestId": ticket.id.as_str(),
         "toolCall": {
             "toolCallId": null,
-            "title": format!("Open {} in the agent browser", ticket.origin.as_str()),
+            "title": ticket_title(ticket),
             "kind": "fetch",
             "status": "pending",
         },
@@ -192,6 +223,7 @@ fn request_payload(ticket: &TicketRequest) -> Value {
 
 struct Pending {
     session_id: String,
+    options: &'static [ConsentOption],
     shown_at: Instant,
     tx: oneshot::Sender<TicketOutcome>,
 }
@@ -290,7 +322,9 @@ impl HostTickets {
         }
         let option = match option_id {
             None => ConsentOption::Deny,
-            Some(id) => parse_option(id).ok_or(AnswerError::InvalidOption)?,
+            Some(id) => parse_option(id)
+                .filter(|option| pending.options.contains(option))
+                .ok_or(AnswerError::InvalidOption)?,
         };
         if pending.shown_at.elapsed() < self.answer_floor {
             drop(state);
@@ -365,6 +399,7 @@ impl PermissionRequest for HostTickets {
             id.clone(),
             Pending {
                 session_id: session.clone(),
+                options: ticket.options,
                 shown_at: Instant::now(),
                 tx,
             },

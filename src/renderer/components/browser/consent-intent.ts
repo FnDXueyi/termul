@@ -14,7 +14,27 @@ import {
   CONSENT_ANSWER_FLOOR_MS
 } from '@/lib/browser-consent-api'
 
-export const BROWSER_CONSENT_TITLE = 'Allow the agent to open this site?'
+const TITLES: Record<BrowserConsentAction, string> = {
+  navigate: 'Allow the agent to open this site?',
+  local_network: 'Allow the agent to open this site?',
+  password_submit: 'Allow the agent to submit a password?',
+  payment_submit: 'Allow the agent to submit payment details?',
+  upload: 'Allow the agent to upload a file?',
+  download: 'Allow the agent to keep a download?',
+  tainted_exfil: 'Allow the agent to send page data to another site?'
+}
+
+export function browserConsentTitle(action: BrowserConsentAction): string {
+  return TITLES[action]
+}
+
+/**
+ * Sensitive actions (everything but opening a site) are allowed one action
+ * at a time, and their project option pre-approves that action on the site.
+ */
+function isSensitiveConsent(action: BrowserConsentAction): boolean {
+  return action !== 'navigate' && action !== 'local_network'
+}
 
 /** Generic actor when the requesting agent's live id is unmapped. */
 export const BROWSER_CONSENT_ACTOR = 'The agent'
@@ -54,10 +74,23 @@ export function browserConsentTargetLine(
   return shortened ? `${ticket.targetUrl} (${ticket.targetUrlBytes} bytes)` : ticket.targetUrl
 }
 
-export const BROWSER_CONSENT_OPTION_LABELS: Record<BrowserConsentOptionId, string> = {
+const ORIGIN_OPTION_LABELS: Record<BrowserConsentOptionId, string> = {
   allow_session: 'Allow for this session',
   allow_project: 'Always allow for this project',
   deny: 'Deny'
+}
+
+const SENSITIVE_OPTION_LABELS: Record<BrowserConsentOptionId, string> = {
+  allow_session: 'Allow once',
+  allow_project: 'Always allow on this site for this project',
+  deny: 'Deny'
+}
+
+export function browserConsentOptionLabel(
+  optionId: BrowserConsentOptionId,
+  action: BrowserConsentAction
+): string {
+  return (isSensitiveConsent(action) ? SENSITIVE_OPTION_LABELS : ORIGIN_OPTION_LABELS)[optionId]
 }
 
 /**

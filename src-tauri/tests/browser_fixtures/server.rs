@@ -14,10 +14,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const REDIRECT_PATH: &str = "/redirect";
 pub const REDIRECT_TARGET_PATH: &str = "/redirect-target.html";
+pub const DOWNLOAD_PATH: &str = "/fixture-download.bin";
+/// The fake file `DOWNLOAD_PATH` serves as an attachment.
+pub const DOWNLOAD_BODY: &str = "fake download for the conformance suite\n";
 
 enum Reply {
     Page(&'static str),
     Redirect(&'static str),
+    Attachment(&'static str),
     NotFound,
 }
 
@@ -35,6 +39,10 @@ fn route(path: &str) -> Reply {
         "/permissions.html" => Reply::Page(include_str!("pages/permissions.html")),
         "/controls.html" => Reply::Page(include_str!("pages/controls.html")),
         "/dynamic.html" => Reply::Page(include_str!("pages/dynamic.html")),
+        "/password.html" => Reply::Page(include_str!("pages/password.html")),
+        "/upload.html" => Reply::Page(include_str!("pages/upload.html")),
+        "/download.html" => Reply::Page(include_str!("pages/download.html")),
+        DOWNLOAD_PATH => Reply::Attachment(DOWNLOAD_BODY),
         REDIRECT_TARGET_PATH => Reply::Page(include_str!("pages/redirect-target.html")),
         REDIRECT_PATH => Reply::Redirect(REDIRECT_TARGET_PATH),
         _ => Reply::NotFound,
@@ -114,6 +122,11 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
             html,
         ),
         Reply::Redirect(to) => ("302 Found", format!("Location: {to}\r\n"), ""),
+        Reply::Attachment(body) => (
+            "200 OK",
+            "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"fixture-download.bin\"\r\n".into(),
+            body,
+        ),
         Reply::NotFound => (
             "404 Not Found",
             "Content-Type: text/plain; charset=utf-8\r\n".into(),

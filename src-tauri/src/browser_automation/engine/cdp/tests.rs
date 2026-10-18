@@ -219,3 +219,44 @@ async fn capture_screenshot_decodes_png_bytes_and_rejects_missing_data() {
         Err(EngineError::new(EngineErrorKind::Malformed))
     );
 }
+
+#[tokio::test]
+async fn set_input_files_hands_the_staged_path_to_the_file_input_by_handle() {
+    let t = transport(isolated_world_replies(Ok(json!({
+        "result": { "type": "object", "subtype": "node", "objectId": "obj-7" }
+    }))));
+    let staged = [std::path::PathBuf::from("/data/staging/u1/report.pdf")];
+    set_input_files(&t, "agent-a", "html>body>input:nth-of-type(1)", &staged)
+        .await
+        .expect("files set");
+    let calls = t.calls.lock();
+    let methods: Vec<&str> = calls.iter().map(|c| c.1).collect();
+    assert_eq!(
+        methods,
+        [
+            "Page.getFrameTree",
+            "Page.createIsolatedWorld",
+            "Runtime.callFunctionOn",
+            "DOM.setFileInputFiles"
+        ]
+    );
+    assert_eq!(calls[2].2["returnByValue"], false, "the element comes back by reference");
+    assert_eq!(calls[2].2["executionContextId"], 42);
+    assert_eq!(
+        calls[3].2,
+        json!({ "files": ["/data/staging/u1/report.pdf"], "objectId": "obj-7" })
+    );
+}
+
+#[tokio::test]
+async fn set_input_files_sets_nothing_when_the_path_names_no_file_input() {
+    let t = transport(isolated_world_replies(Ok(json!({
+        "result": { "type": "object", "subtype": "null", "value": null }
+    }))));
+    let staged = [std::path::PathBuf::from("/data/staging/u1/report.pdf")];
+    assert_eq!(
+        set_input_files(&t, "agent-a", "html>body>a:nth-of-type(1)", &staged).await,
+        Err(EngineError::new(EngineErrorKind::PageException))
+    );
+    assert!(t.calls.lock().iter().all(|c| c.1 != "DOM.setFileInputFiles"));
+}

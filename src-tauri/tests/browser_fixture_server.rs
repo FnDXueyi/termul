@@ -6,7 +6,7 @@ mod server;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
+use server::{FixtureServer, DOWNLOAD_BODY, DOWNLOAD_PATH, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
 fn get(server: &FixtureServer, path: &str) -> (u16, String, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
@@ -74,4 +74,13 @@ fn urls_point_at_the_bound_loopback_port() {
         server.url("/form.html"),
         format!("http://127.0.0.1:{}/form.html", server.port())
     );
+}
+
+#[test]
+fn serves_the_download_as_an_attachment() {
+    let server = FixtureServer::start(&[]).unwrap();
+    let (status, head, body) = get(&server, DOWNLOAD_PATH);
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Disposition: attachment; filename=\"fixture-download.bin\""));
+    assert_eq!(body, DOWNLOAD_BODY);
 }

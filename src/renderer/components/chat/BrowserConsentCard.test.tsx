@@ -116,6 +116,26 @@ describe('BrowserConsentCard', () => {
     ])
   })
 
+  it('asks about one sensitive action and offers only what the host offered', () => {
+    render(
+      <BrowserConsentCard
+        consent={ticket({ action: 'password_submit', options: ['allow_session', 'deny'] })}
+      />
+    )
+    expect(screen.getByText('Allow the agent to submit a password?')).toBeInTheDocument()
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Allow once', 'Deny'])
+  })
+
+  it('names the project option of a sensitive action as a pre-approval for the site', () => {
+    render(<BrowserConsentCard consent={ticket({ action: 'upload', profile: 'ephemeral' })} />)
+    expect(screen.getByText('Allow the agent to upload a file?')).toBeInTheDocument()
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Allow once',
+      'Always allow on this site for this project',
+      'Deny'
+    ])
+  })
+
   it('names the ephemeral profile when the agent tab runs in it', () => {
     render(<BrowserConsentCard consent={ticket({ profile: 'ephemeral' })} />)
     expect(

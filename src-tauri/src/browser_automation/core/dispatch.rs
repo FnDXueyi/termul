@@ -40,6 +40,7 @@ pub enum Verb {
     Uncheck,
     SwitchTab,
     HandleDialog,
+    Upload,
 }
 
 impl Verb {
@@ -64,7 +65,8 @@ impl Verb {
             | Verb::Reload
             | Verb::SelectOption
             | Verb::Check
-            | Verb::Uncheck => true,
+            | Verb::Uncheck
+            | Verb::Upload => true,
         }
     }
 }
@@ -84,6 +86,7 @@ pub enum ArgKey {
     UrlContains,
     LoadState,
     Accept,
+    Path,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +98,7 @@ enum ArgType {
 }
 
 impl ArgKey {
-    const ALL: [ArgKey; 12] = [
+    const ALL: [ArgKey; 13] = [
         ArgKey::Url,
         ArgKey::TabId,
         ArgKey::Ref,
@@ -108,6 +111,7 @@ impl ArgKey {
         ArgKey::UrlContains,
         ArgKey::LoadState,
         ArgKey::Accept,
+        ArgKey::Path,
     ];
 
     pub fn name(self) -> &'static str {
@@ -124,6 +128,7 @@ impl ArgKey {
             ArgKey::UrlContains => "urlContains",
             ArgKey::LoadState => "loadState",
             ArgKey::Accept => "accept",
+            ArgKey::Path => "path",
         }
     }
 
@@ -150,6 +155,7 @@ impl ArgKey {
             ArgKey::UrlContains => "Text the tab's URL must contain (wait).",
             ArgKey::LoadState => "Document state to wait for: domcontentloaded or load (wait).",
             ArgKey::Accept => "true for OK, false for Cancel (handle_dialog).",
+            ArgKey::Path => "File to upload, relative to the project folder.",
         }
     }
 }
@@ -235,7 +241,7 @@ pub struct ActionSpec {
 
 use CapabilityId as Cap;
 
-pub static REGISTRY: [ActionSpec; 21] = [
+pub static REGISTRY: [ActionSpec; 22] = [
     ActionSpec {
         verb: Verb::Navigate,
         name: "navigate",
@@ -325,6 +331,16 @@ pub static REGISTRY: [ActionSpec; 21] = [
         mutating: true,
         budget: budgets::ACTION_EVAL,
         summary: "move the pointer over the element.",
+    },
+    ActionSpec {
+        verb: Verb::Upload,
+        name: "upload",
+        params: &[req(ArgKey::Ref), req(ArgKey::Path), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::FileChooser],
+        mutating: true,
+        budget: budgets::ACTION_EVAL,
+        summary: "set a project file on a file input. The user confirms every upload; secrets (.env, keys, credentials) and files outside the project are refused.",
     },
     ActionSpec {
         verb: Verb::Wait,
@@ -664,7 +680,7 @@ fn available(facts: &EngineFacts) -> impl Iterator<Item = &'static ActionSpec> +
 
 /// Failure codes an agent can match on, with what to do about each.
 const FAILURE_CODES: [(&str, &str); 7] = [
-    (ERR_CONFIRMATION, "the user has not allowed browser access (refused, or no answer in time); the first call in a session may wait for their answer, so ask them instead of retrying blindly"),
+    (ERR_CONFIRMATION, "the user has not allowed browser access or a sensitive action such as a password submit, upload or download (refused, or no answer in time); the first call in a session may wait for their answer, and so may a sensitive action, so ask them instead of retrying blindly"),
     (ERR_CAPABILITY, "this host cannot do it; use another action"),
     (ERR_TAB_NOT_FOUND, "no such agent tab; use list_tabs or new_tab"),
     (ERR_STALE_REF, "the page changed; take a new snapshot"),

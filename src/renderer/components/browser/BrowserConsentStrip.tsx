@@ -23,11 +23,11 @@
 
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import {
-  BROWSER_CONSENT_OPTION_LABELS,
-  BROWSER_CONSENT_TITLE,
+  browserConsentOptionLabel,
   browserConsentProfileLabel,
   browserConsentSummary,
   browserConsentTargetLine,
+  browserConsentTitle,
   useConsentArmed
 } from '@/components/browser/consent-intent'
 import { ShieldAlert } from '@/components/icons'
@@ -101,10 +101,14 @@ export function BrowserConsentStrip({
   if (!hosting || !first) return null
 
   return (
-    <AlertOnceStripFrame key={first.requestId} requestId={first.requestId}>
+    <AlertOnceStripFrame
+      key={first.requestId}
+      requestId={first.requestId}
+      title={browserConsentTitle(first.action)}
+    >
       <ShieldAlert size={14} className="shrink-0 text-warning" />
       <div className="min-w-0 flex-1 text-2xs">
-        <span className="font-medium text-foreground">{BROWSER_CONSENT_TITLE}</span>{' '}
+        <span className="font-medium text-foreground">{browserConsentTitle(first.action)}</span>{' '}
         <span className="break-words text-muted-foreground">
           {browserConsentSummary(agentName, first)}
         </span>
@@ -128,7 +132,7 @@ export function BrowserConsentStrip({
           onClick={() => respond(first.requestId, optionId)}
           className="shrink-0 text-2xs"
         >
-          {BROWSER_CONSENT_OPTION_LABELS[optionId]}
+          {browserConsentOptionLabel(optionId, first.action)}
         </Button>
       ))}
     </AlertOnceStripFrame>
@@ -137,9 +141,11 @@ export function BrowserConsentStrip({
 
 function AlertOnceStripFrame({
   requestId,
+  title,
   children
 }: {
   requestId: string
+  title: string
   children: ReactNode
 }): React.JSX.Element {
   const [isFirstMountForRequest] = useState(
@@ -151,9 +157,7 @@ function AlertOnceStripFrame({
   return (
     <div
       className="flex shrink-0 items-center gap-2 border-l-2 border-warning border-b border-border bg-card px-3 py-1.5"
-      {...(isFirstMountForRequest
-        ? { role: 'alert' }
-        : { role: 'region', 'aria-label': BROWSER_CONSENT_TITLE })}
+      {...(isFirstMountForRequest ? { role: 'alert' } : { role: 'region', 'aria-label': title })}
     >
       {children}
     </div>

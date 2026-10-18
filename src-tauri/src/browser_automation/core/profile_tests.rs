@@ -31,6 +31,7 @@ fn profile_harness(engine_profile: Support) -> ProfileHarness {
         permissions: Arc::new(ScriptedPermissions::default()),
         policy: policy.clone(),
         project_of: Arc::new(|session: &str| session.split(':').next().unwrap_or("").to_string()),
+        root_of: Arc::new(|_| None),
     };
     let h = harness_parts(
         FakeEngine::new(webview2_like()),

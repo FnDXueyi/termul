@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Upload fixture</title>
+</head>
+<body>
+<main>
+<h1>Upload fixture</h1>
+<input id="file" type="file" aria-label="Attachment">
+<p id="picked">Picked: none</p>
+</main>
+<script>
+document.getElementById('file').addEventListener('change', function (e) {
+  var f = e.target.files[0];
+  document.getElementById('picked').textContent =
+    f ? 'Picked: ' + f.name + ' (' + f.size + ' bytes)' : 'Picked: none';
+});
+</script>
+</body>
+</html>

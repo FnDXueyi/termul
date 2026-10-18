@@ -330,6 +330,14 @@ impl DesktopBrowserHost {
             }
             Verb::SwitchTab => self.switch_tab(session_id, args),
             Verb::HandleDialog => self.handle_dialog(session_id, args).await,
+            Verb::Upload => {
+                let label = self.resolve_tab(session_id, args)?;
+                let token = required_ref(args)?;
+                let resolved = self.resolve_ref(&label, token)?;
+                self.revalidate(&label, token, &resolved).await?;
+                self.upload(session_id, &label, &resolved.node.path, args).await?;
+                Ok(mutated(Fidelity::Trusted, self.tab_facts(&label)?))
+            }
         }
     }
 

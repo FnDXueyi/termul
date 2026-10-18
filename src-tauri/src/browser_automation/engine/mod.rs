@@ -15,6 +15,7 @@ pub mod assets;
 pub mod cdp;
 pub mod dialogs;
 pub mod events;
+pub mod files;
 pub mod hooks;
 pub mod profile;
 mod issue_gate;
@@ -260,6 +261,16 @@ pub trait BrowserEngine: Send + Sync {
         id: u64,
         answer: events::DialogAnswer,
     ) -> EngineFuture<'a, bool>;
+    /// Set `files` (host-staged paths) on the file input at `path`
+    /// (`file_chooser`).
+    fn set_input_files<'a>(
+        &'a self,
+        _tab: &'a str,
+        _path: &'a str,
+        _files: &'a [std::path::PathBuf],
+    ) -> EngineFuture<'a, ()> {
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
+    }
 }
 
 /// The engine adapter for this desktop OS.
