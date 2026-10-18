@@ -14,6 +14,7 @@ use crate::adapter::{Scope, LINKED_FILE, SECRET_FILE, SWAPPED_FILE, UPLOAD_BODY,
 use crate::cases::{mismatch, CaseResult, Ctx, Failure};
 
 const PASSWORD_READY: &str = "Password fixture";
+const SHADOW_PASSWORD_READY: &str = "Shadow password fixture";
 const UPLOAD_READY: &str = "Upload fixture";
 const DOWNLOAD_READY: &str = "Download fixture";
 const DOWNLOAD_WAIT: Duration = Duration::from_secs(15);
@@ -214,6 +215,21 @@ pub async fn upload_refusals(c: &Ctx<'_>) -> CaseResult {
     )?;
     expect_tickets(c, &[ActionClass::Upload], "swapped upload")?;
     c.expect_text("Picked: none").await
+}
+
+/// Enter on a submit button focused inside a shadow root submits its
+/// password form, so it is classified from that button, not the shadow
+/// host the document reports as focused.
+pub async fn focused_password_submit(c: &Ctx<'_>) -> CaseResult {
+    c.open("/password-shadow.html", SHADOW_PASSWORD_READY).await?;
+    expect_refusal(
+        c.call("press", json!({ "key": "Enter" })).await,
+        "confirmation_required",
+        "unattended",
+        "Enter on a focused shadow-root submit",
+    )?;
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "focused password submit")?;
+    c.expect_url("/password-shadow.html", "the refused submit").await
 }
 
 /// A chooser the page opens on an agent tab never shows the native

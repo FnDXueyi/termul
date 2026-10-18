@@ -1,4 +1,4 @@
-var target = p.path ? byPath(p.path) : document.activeElement;
+var target = p.path ? byPath(p.path) : deepActive();
 if (p.path && !target) return STALE;
 var facts = {
   frameOrigin: location.origin,
@@ -10,9 +10,10 @@ var facts = {
   formAction: null,
   linkTarget: null
 };
-if (!target || target === document.body) return facts;
+if (!target || target === target.ownerDocument.body) return facts;
+var doc = target.ownerDocument;
 function absolute(href) {
-  try { return new URL(href, document.baseURI).href; } catch (e) { return null; }
+  try { return new URL(href, doc.baseURI).href; } catch (e) { return null; }
 }
 function tokens(el) {
   return (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
@@ -37,7 +38,7 @@ if (form) {
   facts.formHasPayment = fields.some(isPayment);
   facts.isSubmitter = (tag === 'BUTTON' && (target.getAttribute('type') || 'submit').toLowerCase() === 'submit') ||
     (tag === 'INPUT' && (type === 'submit' || type === 'image'));
-  var action = (facts.isSubmitter && target.getAttribute('formaction')) || form.getAttribute('action') || location.href;
+  var action = (facts.isSubmitter && target.getAttribute('formaction')) || form.getAttribute('action') || doc.URL;
   facts.formAction = absolute(action);
 }
 var link = target.closest ? target.closest('a[href],area[href]') : null;

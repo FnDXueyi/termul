@@ -57,6 +57,7 @@ fn route(path: &str) -> Reply {
         "/pixel.svg" => Reply::Typed("image/svg+xml", PIXEL_SVG),
         "/redirect-api" => Reply::Redirect("/api/ping?from=redirect"),
         "/password.html" => Reply::Page(include_str!("pages/password.html")),
+        "/password-shadow.html" => Reply::Page(include_str!("pages/password-shadow.html")),
         "/upload.html" => Reply::Page(include_str!("pages/upload.html")),
         "/download.html" => Reply::Page(include_str!("pages/download.html")),
         DOWNLOAD_PATH => Reply::Attachment(DOWNLOAD_BODY),
