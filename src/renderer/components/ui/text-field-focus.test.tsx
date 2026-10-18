@@ -48,7 +48,7 @@ describe('field focus constants', () => {
 
   it('panel field takes the bordered field focus', () => {
     expect(classes(PANEL_FIELD_CLASS)).toEqual(
-      expect.arrayContaining(['border-border', ...classes(FIELD_FOCUS_CLASS)])
+      expect.arrayContaining(['border-field-border', ...classes(FIELD_FOCUS_CLASS)])
     )
     expect(classes(PANEL_FIELD_CLASS)).not.toContain('outline-none')
   })

@@ -1,0 +1,12 @@
+{
+  "title": "Getting started",
+  "pages": [
+    "index",
+    "install",
+    "first-project",
+    "tour",
+    "projects",
+    "command-palette",
+    "keyboard-shortcuts"
+  ]
+}
