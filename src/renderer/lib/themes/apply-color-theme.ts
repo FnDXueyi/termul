@@ -224,6 +224,11 @@ function applyCssVariables(
     '--glow-purple': GLOW_PURPLE_COMPONENTS,
     '--border': hexToOklchComponents(border),
     '--input': hexToOklchComponents(border),
+    '--field-border': readableUiComponents(border, [
+      card,
+      tintedNeutralSurface.emittedHex,
+      popoverHex
+    ]),
     '--ring': hexToOklchComponents(ringHex),
     '--terminal-bg': tintedNeutralSurface.components,
     '--terminal-fg': foregroundComponents,

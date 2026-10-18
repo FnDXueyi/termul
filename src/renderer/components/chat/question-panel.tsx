@@ -241,10 +241,7 @@ export function QuestionPrompt({
   return (
     <div className="space-y-1.5 px-5 pb-1.5 pt-3.5">
       {showEyebrow ? (
-        <p
-          aria-hidden="true"
-          className="font-mono text-3xs font-medium uppercase tracking-[0.08em] text-muted-foreground/70"
-        >
+        <p aria-hidden="true" className="text-xs font-medium text-muted-foreground">
           {eyebrow}
         </p>
       ) : null}
