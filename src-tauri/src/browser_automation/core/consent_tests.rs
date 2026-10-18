@@ -260,7 +260,7 @@ async fn always_allow_retries_a_concurrent_policy_edit() {
 
 #[tokio::test]
 async fn never_reachable_origins_are_denied_without_a_prompt() {
-    crate::browser_automation::core::authz::register_owned_port(47_123);
+    let _listener = crate::host_perimeter::OwnedPort::claim(47_123);
     let (perms, store, gate) = scripted([]);
     store
         .apply_project(

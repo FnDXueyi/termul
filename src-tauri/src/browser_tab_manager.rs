@@ -254,6 +254,7 @@ impl BrowserTabManager {
     ) -> Result<BrowserTabInfo, String> {
         let window = self.get_window()?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
+        crate::host_perimeter::check_tab_target(&self.app_handle, &tab_id, &parsed_url)?;
 
         // Every webview shares one profile, so clearing through the main webview
         // wipes saved grants before this tab exists to load a page.
@@ -299,7 +300,7 @@ impl BrowserTabManager {
                 .map_err(|_| "Lock poisoned")?;
             (ep, en)
         };
-        if enabled {
+        if enabled && crate::host_perimeter::agentation_allowed(&tab_id) {
             if let Some(endpoint_url) = &endpoint {
                 let init_script = format!(
                     r#"
@@ -431,6 +432,7 @@ impl BrowserTabManager {
     pub fn navigate(&self, tab_id: &str, url: String) -> Result<(), String> {
         let webview = self.get_webview(tab_id)?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
+        crate::host_perimeter::check_tab_target(&self.app_handle, tab_id, &parsed_url)?;
         webview
             .navigate(parsed_url)
             .map_err(|e| format!("Navigation failed: {}", e))?;
@@ -538,6 +540,9 @@ impl BrowserTabManager {
     /// Called after page load (browser_tab_report_loaded) because the
     /// agentation library accesses document.head at module top-level.
     pub fn inject_agentation_toolbar(&self, tab_id: &str) -> Result<(), String> {
+        if !crate::host_perimeter::agentation_allowed(tab_id) {
+            return Err("Agentation is not available in agent tabs".to_string());
+        }
         let webview = self.get_webview(tab_id)?;
 
         // Inject the agentation toolbar bundle (bundled IIFE).

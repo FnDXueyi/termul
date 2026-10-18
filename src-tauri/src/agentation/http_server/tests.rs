@@ -316,3 +316,41 @@ async fn test_full_annotation_lifecycle() {
     let pending: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(pending["count"], 1);
 }
+
+/// Raw HTTP/1.1 GET over a real socket so the `Host` header is exactly the
+/// one a rebinding page would send.
+async fn raw_status(addr: SocketAddr, host: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!("GET /sessions HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response.lines().next().unwrap_or_default().to_string()
+}
+
+#[tokio::test]
+async fn listener_rejects_foreign_hosts_and_owns_its_port_while_serving() {
+    let (addr, shutdown) = start_server(Arc::new(SqliteStore::open_in_memory().unwrap()), None)
+        .await
+        .unwrap();
+    assert!(crate::host_perimeter::is_owned_port(addr.port()));
+
+    assert_eq!(raw_status(addr, "attacker.example").await, "HTTP/1.1 403 Forbidden");
+    assert_eq!(
+        raw_status(addr, &format!("attacker.example:{}", addr.port())).await,
+        "HTTP/1.1 403 Forbidden"
+    );
+    assert_eq!(raw_status(addr, &addr.to_string()).await, "HTTP/1.1 200 OK");
+    assert_eq!(
+        raw_status(addr, &format!("localhost:{}", addr.port())).await,
+        "HTTP/1.1 200 OK"
+    );
+
+    shutdown.cancel();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::host_perimeter::is_owned_port(addr.port()) {
+        assert!(std::time::Instant::now() < deadline, "port released after shutdown");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}

@@ -3,23 +3,17 @@ import {
   PROJECT_PREAPPROVABLE_ACTIONS
 } from '@shared/types/browser-policy.types'
 import { useState } from 'react'
-import { useShallow } from 'zustand/shallow'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
 import { Spinner } from '@/components/ui/spinner'
+import { Switch } from '@/components/ui/switch'
 import { useAppBrowserPolicy, useProjectBrowserPolicy } from '@/hooks/use-browser-policy'
-import { useProjectStore } from '@/stores/project-store'
+import type { BrowserPolicyFailure } from '@/lib/browser-policy-api'
 import { OriginListEditor, PreapprovalEditor } from './BrowserPolicyEditors'
-import { describeFailure } from './browser-policy-copy'
-import { SettingsSwitchRow } from './SettingsSwitchRow'
+import { BROWSER_ANCHORS, describeFailure } from './browser-policy-copy'
+import { SettingsCard, SettingsGroup } from './SettingsGroup'
+import { SettingsNotice } from './SettingsNotice'
+import { SettingsRow, settingsDescriptionId } from './SettingsRow'
 
 function Loading(): React.JSX.Element {
   return (
@@ -32,27 +26,77 @@ function Loading(): React.JSX.Element {
 
 function ReadOnlyNotice(): React.JSX.Element {
   return (
-    <p className="rounded-md border border-border bg-secondary/30 px-3 py-2 text-xs text-muted-foreground">
+    <SettingsNotice>
       These rules were saved by a newer version of Termul. You can read them but not change them.
-    </p>
+    </SettingsNotice>
   )
 }
 
 function Failure({ message }: { message: string }): React.JSX.Element {
   return (
-    <p role="alert" className="text-xs text-destructive">
+    <SettingsNotice tone="danger" role="alert">
       {message}
-    </p>
+    </SettingsNotice>
   )
 }
 
-function SwitchFailure({ message }: { message: string | null }): React.JSX.Element | null {
-  return message ? <Failure message={message} /> : null
+interface SwitchRowProps {
+  /** Anchor id for settings search. */
+  id: string
+  /** Control id; the row label names it. */
+  controlId: string
+  label: string
+  description: string
+  checked: boolean
+  disabled: boolean
+  onToggle: (enabled: boolean) => void
 }
 
-function ProjectPanel({ projectId }: { projectId: string }): React.JSX.Element {
+function SwitchRow({
+  id,
+  controlId,
+  label,
+  description,
+  checked,
+  disabled,
+  onToggle
+}: SwitchRowProps): React.JSX.Element {
+  return (
+    <SettingsRow
+      id={id}
+      htmlFor={controlId}
+      label={label}
+      description={description}
+      layout="inline"
+      disabled={disabled}
+    >
+      <Switch
+        id={controlId}
+        aria-describedby={settingsDescriptionId(controlId)}
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onToggle}
+      />
+    </SettingsRow>
+  )
+}
+
+/** Keeps the failure sentence of the last switch edit. */
+function useSwitchEdit(): {
+  error: string | null
+  settle: (failure: BrowserPolicyFailure | null) => void
+} {
+  const [error, setError] = useState<string | null>(null)
+  return {
+    error,
+    settle: (failure) => setError(failure ? describeFailure(failure) : null)
+  }
+}
+
+/** What agents may do in the browser for one project. Edits save as you make them. */
+export function BrowserProjectPolicy({ projectId }: { projectId: string }): React.JSX.Element {
   const { state, edit } = useProjectBrowserPolicy(projectId)
-  const [switchError, setSwitchError] = useState<string | null>(null)
+  const { error: switchError, settle } = useSwitchEdit()
 
   if (state.status === 'loading') return <Loading />
   if (state.status === 'error') return <Failure message={describeFailure(state.failure)} />
@@ -60,22 +104,34 @@ function ProjectPanel({ projectId }: { projectId: string }): React.JSX.Element {
   const locked = policy.readOnly
 
   return (
-    <div className="space-y-5">
+    <>
       {locked && <ReadOnlyNotice />}
-      <div className="space-y-1.5">
-        <SettingsSwitchRow
-          label="Browse logged out in this project"
-          description="Agent tabs start logged out and everything they save is deleted when the chat ends. Off: agents use the shared agent profile."
-          checked={policy.profileMode === 'ephemeral'}
-          onToggle={(ephemeral) => {
-            void edit({ op: 'set_ephemeral', ephemeral }).then((failure) =>
-              setSwitchError(failure ? describeFailure(failure) : null)
-            )
-          }}
-        />
-        <SwitchFailure message={switchError} />
-      </div>
+      <SettingsGroup
+        title="Sign-in"
+        footnote="Changes on this page save as you make them."
+        className="scroll-mt-4"
+      >
+        <SettingsCard>
+          <SwitchRow
+            id={BROWSER_ANCHORS.projectEphemeral}
+            controlId="browser-project-ephemeral"
+            label="Browse logged out in this project"
+            description="Agent tabs start logged out and everything they save is deleted when the chat ends. Off: agents use the shared agent profile."
+            checked={policy.profileMode === 'ephemeral'}
+            disabled={locked}
+            onToggle={(ephemeral) => {
+              void edit({ op: 'set_ephemeral', ephemeral }).then(settle)
+            }}
+          />
+        </SettingsCard>
+        {switchError && (
+          <SettingsNotice tone="danger" role="alert">
+            {switchError}
+          </SettingsNotice>
+        )}
+      </SettingsGroup>
       <OriginListEditor
+        id={BROWSER_ANCHORS.projectAllowList}
         label="Allowed sites"
         description="Agents open these without asking. Use https://*.example.com for every subdomain."
         placeholder="https://example.com"
@@ -85,15 +141,16 @@ function ProjectPanel({ projectId }: { projectId: string }): React.JSX.Element {
         onRemove={(origin) => edit({ op: 'remove_origin', origin })}
       />
       <PreapprovalEditor
+        id={BROWSER_ANCHORS.projectPreapprovals}
         label="Pre-approved actions"
-        description="Agents skip the question for these when they browse logged out in this project. The shared agent profile uses the all-projects list below."
+        description="Agents skip the question for these when they browse logged out in this project. The shared agent profile uses the list in Preferences."
         actions={PROJECT_PREAPPROVABLE_ACTIONS}
         entries={policy.preapprovals}
         disabled={locked}
         onAdd={({ action, origin }) => edit({ op: 'add_preapproval', action, origin })}
         onRemove={({ action, origin }) => edit({ op: 'remove_preapproval', action, origin })}
       />
-    </div>
+    </>
   )
 }
 
@@ -106,9 +163,10 @@ function clearMessage(sessions: number, projects: number): string {
   return `The agent signs out of every site and ${chats} in ${scope} lose their agent browser tabs.`
 }
 
-function AppPanel(): React.JSX.Element {
+/** What agents may do in the browser in every project. Edits save as you make them. */
+export function BrowserAppPolicy(): React.JSX.Element {
   const { state, edit } = useAppBrowserPolicy()
-  const [switchError, setSwitchError] = useState<string | null>(null)
+  const { error: switchError, settle } = useSwitchEdit()
   const [confirming, setConfirming] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [clearError, setClearError] = useState<string | null>(null)
@@ -127,22 +185,50 @@ function AppPanel(): React.JSX.Element {
   }
 
   return (
-    <div className="space-y-5">
+    <>
       {locked && <ReadOnlyNotice />}
-      <div className="space-y-1.5">
-        <SettingsSwitchRow
-          label="Shared agent profile"
-          description="One agent profile for every project keeps logins between chats. Off: agents always browse logged out."
-          checked={policy.globalProfileEnabled}
-          onToggle={(enabled) => {
-            void edit({ op: 'set_global_profile', enabled }).then((failure) =>
-              setSwitchError(failure ? describeFailure(failure) : null)
-            )
-          }}
-        />
-        <SwitchFailure message={switchError} />
-      </div>
+      <SettingsGroup
+        title="Agent profile"
+        footnote="Changes on this page save as you make them."
+        className="scroll-mt-4"
+      >
+        <SettingsCard>
+          <SwitchRow
+            id={BROWSER_ANCHORS.appProfile}
+            controlId="browser-shared-profile"
+            label="Shared agent profile"
+            description="One agent profile for every project keeps logins between chats. Off: agents always browse logged out."
+            checked={policy.globalProfileEnabled}
+            disabled={locked}
+            onToggle={(enabled) => {
+              void edit({ op: 'set_global_profile', enabled }).then(settle)
+            }}
+          />
+          <SettingsRow
+            id={BROWSER_ANCHORS.appClear}
+            label="Logins and site data"
+            description="Closes agent browser tabs that use the shared profile and deletes its logins and site data."
+            layout="inline"
+          >
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              disabled={locked}
+              onClick={() => setConfirming(true)}
+            >
+              Clear agent profile
+            </Button>
+          </SettingsRow>
+        </SettingsCard>
+        {(switchError ?? clearError) && (
+          <SettingsNotice tone="danger" role="alert">
+            {switchError ?? clearError}
+          </SettingsNotice>
+        )}
+      </SettingsGroup>
       <PreapprovalEditor
+        id={BROWSER_ANCHORS.appPreapprovals}
         label="Pre-approved actions in every project"
         description="Agents skip the question for these on the shared agent profile. Password and payment forms always ask."
         actions={APP_PREAPPROVABLE_ACTIONS}
@@ -151,25 +237,6 @@ function AppPanel(): React.JSX.Element {
         onAdd={({ action, origin }) => edit({ op: 'add_preapproval', action, origin })}
         onRemove={({ action, origin }) => edit({ op: 'remove_preapproval', action, origin })}
       />
-      <div className="space-y-2">
-        <div>
-          <div className="text-sm text-foreground">Clear agent profile</div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Closes agent browser tabs that use the shared profile and deletes its logins and site
-            data.
-          </p>
-        </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="destructive"
-          disabled={locked}
-          onClick={() => setConfirming(true)}
-        >
-          Clear agent profile
-        </Button>
-        <SwitchFailure message={clearError} />
-      </div>
       <ConfirmDialog
         isOpen={confirming}
         title="Clear agent profile"
@@ -180,62 +247,6 @@ function AppPanel(): React.JSX.Element {
         onConfirm={() => void clear()}
         onCancel={() => setConfirming(false)}
       />
-    </div>
-  )
-}
-
-/** Settings for what agents may do in the browser: per project, and for the whole app. */
-export function BrowserPolicySettings(): React.JSX.Element {
-  const projects = useProjectStore(
-    useShallow((state) => state.projects.filter((p) => !p.isArchived))
-  )
-  const activeProjectId = useProjectStore((state) => state.activeProjectId)
-  const [picked, setPicked] = useState('')
-  const projectId = projects.some((p) => p.id === picked)
-    ? picked
-    : projects.some((p) => p.id === activeProjectId)
-      ? activeProjectId
-      : (projects[0]?.id ?? '')
-
-  return (
-    <div className="space-y-8">
-      <section aria-labelledby="browser-policy-project" className="space-y-4">
-        <div className="space-y-2">
-          <h3 id="browser-policy-project" className="text-sm font-medium text-foreground">
-            This project
-          </h3>
-          {projects.length > 1 && (
-            <div className="space-y-1.5">
-              <Label htmlFor="browser-policy-project-select" className="text-xs">
-                Project
-              </Label>
-              <Select value={projectId} onValueChange={setPicked}>
-                <SelectTrigger id="browser-policy-project-select" className="h-9">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-        </div>
-        {projectId ? (
-          <ProjectPanel key={projectId} projectId={projectId} />
-        ) : (
-          <p className="text-xs text-muted-foreground">Add a project to set its browser rules.</p>
-        )}
-      </section>
-      <section aria-labelledby="browser-policy-app" className="space-y-4">
-        <h3 id="browser-policy-app" className="text-sm font-medium text-foreground">
-          All projects
-        </h3>
-        <AppPanel />
-      </section>
-    </div>
+    </>
   )
 }

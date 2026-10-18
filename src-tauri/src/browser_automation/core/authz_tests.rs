@@ -197,25 +197,13 @@ fn hop_checks_read_the_allow_list_snapshot_and_revocation_clears_grants() {
     );
 }
 
-#[test]
-fn owned_port_registry_records_listener_ports() {
-    register_owned_port(0);
-    assert!(!is_owned_port(0), "an unbound port is never recorded");
-    register_owned_port(61_234);
-    assert!(is_owned_port(61_234));
-    assert_eq!(
-        SessionGrants::default().check_hop("s1", &url("http://127.0.0.1:61234/")),
-        HopVerdict::Deny(DenyReason::TermulOwned)
-    );
-}
-
 #[tokio::test]
 async fn the_hop_check_and_policy_edits_read_one_owned_port_registry() {
     use crate::acp::browser_policy::{BrowserPolicyService, CallerScope, UnwiredProfileControl};
     let dir = tempfile::tempdir().unwrap();
     let policy = BrowserPolicyService::new(
         dir.path().to_path_buf(),
-        std::sync::Arc::new(owned_ports),
+        std::sync::Arc::new(crate::host_perimeter::owned_ports),
         Vec::new(),
         std::sync::Arc::new(UnwiredProfileControl),
     );
@@ -225,7 +213,7 @@ async fn the_hop_check_and_policy_edits_read_one_owned_port_registry() {
         .await
         .expect("an unregistered loopback port can be allow-listed");
 
-    register_owned_port(61_378);
+    let listener = crate::host_perimeter::OwnedPort::claim(61_378);
     assert_eq!(
         SessionGrants::default().check_hop("s1", &url("http://127.0.0.1:61378/")),
         HopVerdict::Deny(DenyReason::TermulOwned)
@@ -235,6 +223,17 @@ async fn the_hop_check_and_policy_edits_read_one_owned_port_registry() {
         .await
         .unwrap_err();
     assert_eq!(refusal.reason(), "reserved_origin");
+
+    drop(listener);
+    assert_eq!(
+        SessionGrants::default().check_hop("s1", &url("http://127.0.0.1:61378/")),
+        HopVerdict::Allow,
+        "a released port is an ordinary loopback port again"
+    );
+    policy
+        .apply_project(&CallerScope::App, "p1", 1, &add("http://localhost:61378"))
+        .await
+        .expect("both consumers see the release");
 }
 
 #[test]

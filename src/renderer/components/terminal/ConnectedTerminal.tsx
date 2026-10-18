@@ -1823,13 +1823,13 @@ function ConnectedTerminalComponent({
                   <div className="w-20 h-20 rounded-2xl bg-destructive/10 flex items-center justify-center mb-3 shadow-inner group-hover:scale-110 transition-transform duration-500">
                     <AlertTriangle className="text-destructive" size={40} />
                   </div>
-                  <span className="text-3xs uppercase tracking-[0.2em] font-black text-destructive/80 text-center">
-                    CRITICAL ERROR
+                  <span className="text-xs font-medium text-destructive text-center">
+                    Critical error
                   </span>
                 </div>
                 <div className="flex flex-col justify-center text-center md:text-left">
-                  <div className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wider opacity-70">
-                    Terminal Pane Exception
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">
+                    Terminal pane exception
                   </div>
                   <h3 className="text-2xl md:text-3xl font-bold tracking-tighter mb-3">
                     Session Interrupted
@@ -1873,13 +1873,13 @@ function ConnectedTerminalComponent({
                   <div className="w-20 h-20 rounded-2xl bg-warning/10 flex items-center justify-center mb-3 shadow-inner">
                     <AlertTriangle className="text-warning" size={40} />
                   </div>
-                  <span className="text-3xs uppercase tracking-[0.2em] font-black text-warning/80 text-center">
-                    SESSION ENDED
+                  <span className="text-xs font-medium text-warning text-center">
+                    Session ended
                   </span>
                 </div>
                 <div className="flex flex-col justify-center text-center md:text-left">
-                  <div className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wider opacity-70">
-                    Server Restarted
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">
+                    Server restarted
                   </div>
                   <h3 className="text-2xl md:text-3xl font-bold tracking-tighter mb-3">
                     server restarted — session ended

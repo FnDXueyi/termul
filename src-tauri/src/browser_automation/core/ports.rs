@@ -19,10 +19,6 @@ pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// The identity a tab was actually built with (after engine fallbacks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[expect(
-    dead_code,
-    reason = "agent tabs are built with the global or an ephemeral profile once per-OS agent profiles land"
-)]
 pub enum TabProfile {
     Global,
     Ephemeral,
@@ -124,13 +120,6 @@ pub trait PermissionRequest: Send + Sync {
 
 /// Host-owned browser policy: operations only, serialized per scope by a
 /// revision compare-and-swap.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "app-scoped reads and edits serve sensitive-action pre-approvals, which are not consulted yet"
-    )
-)]
 pub trait PolicyStore: Send + Sync {
     fn project<'a>(&'a self, project_id: &'a str) -> PortFuture<'a, Result<ProjectPolicy, PolicyRefusal>>;
     fn app(&self) -> PortFuture<'_, Result<AppPolicy, PolicyRefusal>>;

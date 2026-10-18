@@ -1,0 +1,60 @@
+{
+  "note": "Navigate answers, but the snapshot never sees the fixture page, so every capability that reads the page fails or is blocked behind it. The page-side result of the eval bridge does not reach the host from a loopback page that is not the app origin (inferred root cause, not yet confirmed on this OS). Screenshot has no engine here and says so directly. Blocked entries did not run.",
+  "knownFailing": [
+    {
+      "capability": "screenshot",
+      "code": "capability_unavailable",
+      "observed": "screenshot requires the WebView2 engine (Windows)"
+    },
+    {
+      "capability": "snapshot",
+      "code": "timeout",
+      "observed": "wait: text did not appear within 30s"
+    },
+    {
+      "capability": "click",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "fill",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "type",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "link_click",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "wait_text",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "redirect",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "back",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "reload",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "stale_ref",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    }
+  ]
+}

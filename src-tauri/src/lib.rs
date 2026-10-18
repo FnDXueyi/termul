@@ -17,6 +17,7 @@ pub mod canvas;
 pub mod data_lock;
 mod commands;
 mod exit_cleanup;
+mod host_perimeter;
 mod logging;
 mod migrations;
 mod path_validation;
@@ -172,6 +173,22 @@ pub use acp::host_mcp;
 // `acp` module is private, so `server_main.rs` reaches `claude_admin::run()`
 // through this path (mirrors how `onboard::run()` is dispatched).
 pub use acp::claude_admin;
+// Seam for the browser conformance runner (`tests/browser_conformance`), which
+// drives the real automation host from outside the crate. The runner reaches
+// the host only through these names, so a host refactor edits this list and
+// the runner's adapter, nothing else. Not a supported API.
+#[doc(hidden)]
+pub mod conformance_support {
+    pub use crate::acp::browser_policy::{BrowserPolicyService, UnwiredProfileControl};
+    pub use crate::browser_automation::core::ports::{
+        PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
+    };
+    pub use crate::browser_automation::{
+        budgets, dispatch, eval_resolved, session_ended, set_browser_host, tab_created,
+        BrowserCall, DesktopBrowserHost, HostServices,
+    };
+    pub use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
+}
 pub use pty::PtyManager;
 pub use trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use web::{PermissionRendezvous, ProjectRegistry, QuestionRendezvous, WsRelaySink};
@@ -1075,6 +1092,8 @@ pub fn run() {
     // Install the panic hook before anything can panic so Rust panics are
     // captured to the log file with a backtrace (issue #244).
     logging::install_panic_hook();
+    // Before any webview exists: the engines read these at creation.
+    let scrubbed_engine_env = host_perimeter::scrub_engine_debug_env();
 
     let builder = tauri::Builder::default();
 
@@ -1144,7 +1163,8 @@ pub fn run() {
                     }
                     allow
                 } else {
-                    browser_automation::navigation_allowed(webview.label(), url)
+                    host_perimeter::allow_tab_navigation(webview, url)
+                        && browser_automation::navigation_allowed(webview.label(), url)
                 }
             })
             .build(),
@@ -1165,12 +1185,15 @@ pub fn run() {
                 }
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // Startup diagnostic banner (issue #244): version, OS/arch, build
             // channel, session id, and resolved log path on a single line.
             logging::log_startup_banner(&handle);
+            for key in &scrubbed_engine_env {
+                log::warn!("[perimeter] removed engine debug setting from the environment: {key}");
+            }
 
             // AD-14: one host per durable path. Lock `app_data_dir` (and the
             // stores a server could be pointed at inside it) BEFORE any store
@@ -1588,6 +1611,7 @@ pub fn run() {
                     (relay, manager)
                 }
             };
+            host_perimeter::claim_for_process(acp_manager.host_plan_server_port());
             // Attach the permission and question rendezvous: every `/ws` client
             // (the desktop renderer's channel, a phone, a browser) answers
             // `acp:permission_request` and structured questions through them.
@@ -1639,7 +1663,7 @@ pub fn run() {
                     .join("browser-policy");
                 let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
                     policy_root,
-                    Arc::new(browser_automation::core::authz::owned_ports),
+                    Arc::new(host_perimeter::owned_ports),
                     vec![ws_relay.clone()],
                     Arc::new(acp::browser_policy::UnwiredProfileControl),
                 ));
@@ -1652,7 +1676,7 @@ pub fn run() {
             // pane via BrowserTabManager; registered globally so host_mcp
             // FrameKind::Browser frames dispatch here. Without registration
             // (termul-server, tests) the tool fails closed.
-            if cfg!(debug_assertions) {
+            if tauri::is_dev() {
                 if let Some(port) = handle
                     .config()
                     .build
@@ -1660,7 +1684,7 @@ pub fn run() {
                     .as_ref()
                     .and_then(tauri::Url::port_or_known_default)
                 {
-                    browser_automation::core::authz::register_owned_port(port);
+                    host_perimeter::claim_for_process(port);
                 }
             }
             let project_of: browser_automation::core::ProjectResolver = {
@@ -1853,7 +1877,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(host_perimeter::main_webview_only(tauri::generate_handler![
             // OS notification with click-to-focus (issue #865)
             commands::notification_show,
             // Desktop `/ws` carrier over a Tauri `ipc::Channel`
@@ -2079,7 +2103,7 @@ pub fn run() {
             commands::canvas_close,
             commands::canvas_save,
             commands::canvas_status,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

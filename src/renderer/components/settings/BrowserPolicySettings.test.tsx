@@ -10,9 +10,7 @@ import {
   createBrowserPolicyHost,
   DESKTOP_COMMANDS
 } from '@/lib/test-utils/browser-policy-host'
-import { useProjectStore } from '@/stores/project-store'
-import type { Project } from '@/types/project'
-import { BrowserPolicySettings } from './BrowserPolicySettings'
+import { BrowserAppPolicy, BrowserProjectPolicy } from './BrowserPolicySettings'
 
 const { invokeIpc } = vi.hoisted(() => ({ invokeIpc: vi.fn() }))
 
@@ -20,9 +18,16 @@ vi.mock('@/lib/ipc/tauri', () => ({ invokeIpc }))
 vi.mock('@/lib/tauri-runtime', () => ({ isTauriContext: () => true }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn(() => Promise.resolve()) }))
 
-const project = (id: string, name: string): Project => ({ id, name, color: 'blue' }) as Project
-
 let host: BrowserPolicyHost
+
+function BrowserPolicySettings(): React.JSX.Element {
+  return (
+    <>
+      <BrowserProjectPolicy projectId="p1" />
+      <BrowserAppPolicy />
+    </>
+  )
+}
 
 function connect(): void {
   host = createBrowserPolicyHost()
@@ -32,18 +37,18 @@ function connect(): void {
 }
 
 function addOrigin(origin: string): void {
-  fireEvent.change(screen.getByLabelText('Allowed sites'), { target: { value: origin } })
-  const form = screen.getByLabelText('Allowed sites').closest('form') as HTMLFormElement
+  fireEvent.change(screen.getByRole('textbox', { name: 'Allowed sites' }), {
+    target: { value: origin }
+  })
+  const form = screen
+    .getByRole('textbox', { name: 'Allowed sites' })
+    .closest('form') as HTMLFormElement
   fireEvent.click(within(form).getByRole('button', { name: /add/i }))
 }
 
 describe('BrowserPolicySettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    useProjectStore.setState({
-      projects: [project('p1', 'Alpha'), project('p2', 'Beta')],
-      activeProjectId: 'p1'
-    })
     connect()
   })
 
@@ -66,7 +71,7 @@ describe('BrowserPolicySettings', () => {
 
   it('adds and removes an allowed site through the host', async () => {
     render(<BrowserPolicySettings />)
-    await screen.findByLabelText('Allowed sites')
+    await screen.findByRole('textbox', { name: 'Allowed sites' })
 
     addOrigin('https://*.example.org')
     expect(await screen.findByText('https://*.example.org')).toBeInTheDocument()
@@ -79,13 +84,13 @@ describe('BrowserPolicySettings', () => {
 
   it('explains a refused origin in plain words and keeps the draft', async () => {
     render(<BrowserPolicySettings />)
-    await screen.findByLabelText('Allowed sites')
+    await screen.findByRole('textbox', { name: 'Allowed sites' })
 
     addOrigin('not a url')
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Enter an http or https address such as https://example.com.'
     )
-    expect(screen.getByLabelText('Allowed sites')).toHaveValue('not a url')
+    expect(screen.getByRole('textbox', { name: 'Allowed sites' })).toHaveValue('not a url')
 
     addOrigin('http://tauri.localhost')
     await waitFor(() =>
@@ -113,7 +118,7 @@ describe('BrowserPolicySettings', () => {
 
   it('lists a pre-approval added from the project form', async () => {
     render(<BrowserPolicySettings />)
-    const list = await screen.findByLabelText('Pre-approved actions')
+    const list = await screen.findByRole('textbox', { name: 'Pre-approved actions' })
     const form = list.closest('form') as HTMLFormElement
     fireEvent.change(list, { target: { value: 'https://files.example' } })
     fireEvent.click(within(form).getByRole('button', { name: /add/i }))
@@ -171,13 +176,13 @@ describe('BrowserPolicySettings', () => {
 
     expect(await screen.findByText('https://kept.example')).toBeInTheDocument()
     expect(screen.getByText(/saved by a newer version of Termul/)).toBeInTheDocument()
-    expect(screen.getByLabelText('Allowed sites')).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: 'Allowed sites' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Remove https://kept.example' })).toBeDisabled()
   })
 
   it('re-reads a scope when the host announces a change from another surface', async () => {
     render(<BrowserPolicySettings />)
-    await screen.findByLabelText('Allowed sites')
+    await screen.findByRole('textbox', { name: 'Allowed sites' })
 
     host.dispatch('apply_project', {
       projectId: 'p1',
@@ -222,6 +227,6 @@ describe('BrowserPolicySettings', () => {
     expect(
       await screen.findByText('This device can only change the rules for its own project.')
     ).toBeInTheDocument()
-    expect(await screen.findByLabelText('Allowed sites')).toBeEnabled()
+    expect(await screen.findByRole('textbox', { name: 'Allowed sites' })).toBeEnabled()
   })
 })

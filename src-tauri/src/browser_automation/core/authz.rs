@@ -8,10 +8,10 @@
 //! ports termul itself listens on), allow-listed (auto-granted), private
 //! network (prompt), everything else (prompt once per session).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use tauri::Url;
 
 use super::ports::{ActionClass, CanonicalOrigin};
@@ -24,28 +24,6 @@ const METADATA_HOSTS: [&str; 1] = ["metadata.google.internal"];
 const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
-/// Every port a termul listener is bound to: the one registry both the
-/// navigation hop check and browser policy edits read. Registered by the
-/// listeners themselves at bind time; never removed, so a recycled port
-/// stays denied.
-static OWNED_PORTS: RwLock<BTreeSet<u16>> = RwLock::new(BTreeSet::new());
-
-/// Record a port termul listens on (web server, MCP host bridge,
-/// annotation server, OAuth callback, the dev server).
-pub fn register_owned_port(port: u16) {
-    if port != 0 {
-        OWNED_PORTS.write().insert(port);
-    }
-}
-
-pub fn is_owned_port(port: u16) -> bool {
-    OWNED_PORTS.read().contains(&port)
-}
-
-/// The registered ports, for the policy service's reserved-origin check.
-pub fn owned_ports() -> Vec<u16> {
-    OWNED_PORTS.read().iter().copied().collect()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
@@ -287,7 +265,7 @@ impl SessionGrants {
         let sessions = self.sessions.lock();
         let session = sessions.get(session_id);
         let allow_list = session.map_or(&[][..], |s| s.allow_list.as_slice());
-        let class = classify(url, is_owned_port, allow_list);
+        let class = classify(url, crate::host_perimeter::is_owned_port, allow_list);
         hop_verdict(url, class, |origin| {
             session.is_some_and(|s| s.granted.contains(origin))
         })

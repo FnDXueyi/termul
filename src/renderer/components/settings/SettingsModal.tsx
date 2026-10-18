@@ -1,19 +1,25 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { type ReactNode, useEffect, useRef } from 'react'
-import { X } from '@/components/icons'
+
+const FOCUSABLE_SELECTOR =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+
+/** Controls the user can reach. Hidden pages stay mounted, so skip them. */
+function renderedFocusables(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => el.getClientRects().length > 0
+  )
+}
 
 interface SettingsModalProps {
   /** Whether the modal is visible. */
   isOpen: boolean
-  /** Close handler (Esc + backdrop click + close button). The caller may
-   * gate this behind an unsaved-changes confirm. */
+  /** Close handler (Esc + backdrop click; pass it to `SettingsLayout` for
+   * the Close button). The caller may gate this behind an unsaved-changes
+   * confirm. */
   onClose: () => void
-  /** Modal title rendered in the header. */
+  /** Accessible name of the dialog. The visible title lives in `SettingsLayout`. */
   title: string
-  /** Optional subtitle (e.g. active project name). */
-  subtitle?: ReactNode
-  /** Optional icon rendered before the title. */
-  icon?: ReactNode
   /** Body content — typically the existing `SettingsLayout` + sections. */
   children: ReactNode
   /** Optional footer (e.g. the Project Settings save bar). */
@@ -26,15 +32,13 @@ interface SettingsModalProps {
  * backdrop (`fixed inset-0 bg-overlay/60 backdrop-blur-sm`) → centered card.
  *
  * The card is sized wide (`w-[90vw] max-w-5xl]`) and tall
- * (`max-h-[85vh]`) to accommodate the `SettingsLayout` sidebar + scroll-spy
- * content. Esc and backdrop click call `onClose`.
+ * (`max-h-[85vh]`) to accommodate the `SettingsLayout` sidebar and its
+ * one-page-at-a-time content. Esc and backdrop click call `onClose`.
  */
 export function SettingsModal({
   isOpen,
   onClose,
   title,
-  subtitle,
-  icon,
   children,
   footer
 }: SettingsModalProps): React.JSX.Element {
@@ -82,9 +86,7 @@ export function SettingsModal({
     if (!isOpen) return
     const handleTab = (e: globalThis.KeyboardEvent): void => {
       if (e.key !== 'Tab' || !cardRef.current) return
-      const focusables = cardRef.current.querySelectorAll<HTMLElement>(
-        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
-      )
+      const focusables = renderedFocusables(cardRef.current)
       if (focusables.length === 0) return
       const first = focusables[0]
       const last = focusables[focusables.length - 1]
@@ -117,35 +119,14 @@ export function SettingsModal({
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ duration: 0.15 }}
-            className="flex h-[90vh] max-h-[90vh] w-full flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl focus:outline-none md:h-[85vh] md:max-h-[85vh] md:w-[90vw] md:max-w-5xl"
+            className="flex h-[90vh] max-h-[90vh] w-full flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl focus:outline-none md:h-[85vh] md:max-h-[85vh] md:w-[90vw] md:max-w-5xl"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label={title}
           >
-            {/* Header */}
-            <div className="flex items-center justify-between gap-3 border-b border-border bg-secondary/40 px-6 py-3">
-              <div className="flex items-center gap-3">
-                {icon && <div className="rounded bg-primary/10 p-2 text-primary">{icon}</div>}
-                <div>
-                  <h2 className="text-base font-semibold leading-tight text-foreground">{title}</h2>
-                  {subtitle && <p className="text-xs text-muted-foreground">{subtitle}</p>}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                title="Close"
-                aria-label={`Close ${title}`}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
             {/* Body — flex column so SettingsLayout's `flex-1` fills the
-                bounded height and the sidebar scrolls independently of the
-                content area. */}
+                bounded height. SettingsLayout draws the titles and Close. */}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
 
             {/* Footer */}

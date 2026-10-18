@@ -1,0 +1,38 @@
+---
+title: Annotate a page for an agent
+description: Click parts of a web page, write a note on each, and give the notes to an agent.
+---
+
+<Callout type="info">This works in the desktop app only.</Callout>
+
+Telling an agent "the blue button in the sidebar is too small" leaves it guessing which code you mean. The Agentation toolbar lets you click the button itself and write your note on it. When you copy the notes, each one carries the element's selector, its position, and nearby text. The agent can search the code for that selector.
+
+## Find the toolbar
+
+Termul adds the Agentation toolbar to every page you open in a [browser tab](/docs/browser/browser-tabs). It appears in the bottom-right corner of the page after the page loads.
+
+If the toolbar is missing, click the pen button (**Agentation Toolbar**) at the right end of the address bar. Termul adds the toolbar to the current page again.
+
+## Add notes to a page
+
+1. Click the toolbar button in the bottom-right corner of the page (**Start feedback mode**).
+2. Click the element you want to comment on. You can also select text, or drag to mark an area of the page.
+3. Type your note in the **What should change?** box, then click **Add**. A marker shows where the note belongs.
+4. Repeat for each thing you want to change.
+
+## Give the notes to an agent
+
+1. Click **Copy feedback** in the toolbar, or press `C`.
+2. Open the chat with your agent.
+3. Paste the notes into the message box with `Ctrl+V` (`Cmd+V` on macOS), add any instructions, and send.
+
+The agent receives one entry per note, with the element's selector, position, and your comment.
+
+Termul also keeps a copy of your notes in a local file on your computer. Agents don't read that file on their own, so always paste the notes into the chat.
+
+## Other toolbar buttons
+
+- **Pause animations** (`P`) freezes animations and videos, so you can mark an element that moves.
+- **Hide markers** (`H`) hides the note markers. Click it again to show them.
+- **Clear all** (`X`) deletes every note on the page.
+- **Settings** has display options. **Hide Until Restart** hides the toolbar until you open a new tab.
