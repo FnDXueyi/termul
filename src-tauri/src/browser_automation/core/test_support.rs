@@ -1,12 +1,17 @@
 //! In-memory fakes of the host ports for core tests.
 
+#![expect(
+    dead_code,
+    reason = "the scripted approver is for the consent core tests, which land next"
+)]
+
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use parking_lot::Mutex;
 
 use super::ports::{
-    AppPolicy, AppPolicyOp, PermissionRequest, PolicyError, PolicyStore, PortFuture,
+    AppPolicy, AppPolicyOp, PermissionRequest, PolicyRefusal, PolicyStore, PortFuture,
     ProjectPolicy, ProjectPolicyOp, TicketOutcome, TicketRequest,
 };
 
@@ -44,45 +49,28 @@ impl PermissionRequest for ScriptedPermissions {
     }
 }
 
-/// Policy store with the real CAS and read-only rules, held in memory.
+/// Policy store with the real revision compare-and-swap, held in memory.
 #[derive(Default)]
 pub struct InMemoryPolicyStore {
     projects: Mutex<HashMap<String, ProjectPolicy>>,
     app: Mutex<AppPolicy>,
 }
 
-impl InMemoryPolicyStore {
-    /// Simulate a policy file written by a newer schema version.
-    pub fn mark_project_read_only(&self, project_id: &str) {
-        self.projects
-            .lock()
-            .entry(project_id.to_string())
-            .or_default()
-            .read_only = true;
+fn stale(current: u64, expected: u64) -> Result<(), PolicyRefusal> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(PolicyRefusal::RevisionConflict { current })
     }
-
-    pub fn mark_app_read_only(&self) {
-        self.app.lock().read_only = true;
-    }
-}
-
-fn check_writable(read_only: bool, revision: u64, expected: u64) -> Result<(), PolicyError> {
-    if read_only {
-        return Err(PolicyError::ReadOnly);
-    }
-    if revision != expected {
-        return Err(PolicyError::Conflict { current: revision });
-    }
-    Ok(())
 }
 
 impl PolicyStore for InMemoryPolicyStore {
-    fn project<'a>(&'a self, project_id: &'a str) -> PortFuture<'a, Result<ProjectPolicy, PolicyError>> {
+    fn project<'a>(&'a self, project_id: &'a str) -> PortFuture<'a, Result<ProjectPolicy, PolicyRefusal>> {
         let policy = self.projects.lock().get(project_id).cloned().unwrap_or_default();
         Box::pin(async move { Ok(policy) })
     }
 
-    fn app(&self) -> PortFuture<'_, Result<AppPolicy, PolicyError>> {
+    fn app(&self) -> PortFuture<'_, Result<AppPolicy, PolicyRefusal>> {
         let policy = self.app.lock().clone();
         Box::pin(async move { Ok(policy) })
     }
@@ -92,15 +80,18 @@ impl PolicyStore for InMemoryPolicyStore {
         project_id: &'a str,
         expected_revision: u64,
         op: ProjectPolicyOp,
-    ) -> PortFuture<'a, Result<ProjectPolicy, PolicyError>> {
+    ) -> PortFuture<'a, Result<ProjectPolicy, PolicyRefusal>> {
         let mut projects = self.projects.lock();
-        let current = projects.get(project_id).cloned().unwrap_or_default();
-        let result = check_writable(current.read_only, current.revision, expected_revision).map(|()| {
-            let mut next = current.apply(op);
-            next.revision += 1;
-            projects.insert(project_id.to_string(), next.clone());
-            next
-        });
+        let mut policy = projects.get(project_id).cloned().unwrap_or_default();
+        let result = stale(policy.revision, expected_revision)
+            .and_then(|()| policy.apply(op))
+            .map(|changed| {
+                if changed {
+                    policy.revision += 1;
+                    projects.insert(project_id.to_string(), policy.clone());
+                }
+                policy
+            });
         Box::pin(async move { result })
     }
 
@@ -108,14 +99,18 @@ impl PolicyStore for InMemoryPolicyStore {
         &self,
         expected_revision: u64,
         op: AppPolicyOp,
-    ) -> PortFuture<'_, Result<AppPolicy, PolicyError>> {
+    ) -> PortFuture<'_, Result<AppPolicy, PolicyRefusal>> {
         let mut app = self.app.lock();
-        let result = check_writable(app.read_only, app.revision, expected_revision).map(|()| {
-            let mut next = app.clone().apply(op);
-            next.revision += 1;
-            *app = next.clone();
-            next
-        });
+        let mut policy = app.clone();
+        let result = stale(policy.revision, expected_revision)
+            .and_then(|()| policy.apply(op))
+            .map(|changed| {
+                if changed {
+                    policy.revision += 1;
+                    *app = policy.clone();
+                }
+                policy
+            });
         Box::pin(async move { result })
     }
 }

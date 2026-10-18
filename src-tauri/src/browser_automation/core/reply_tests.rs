@@ -105,7 +105,7 @@ fn replies_serialize_the_closed_wire_shape() {
         tab: Some(TabFacts {
             id: "agent-a".into(),
             epoch: 3,
-            origin: CanonicalOrigin::parse("https://example.com"),
+            origin: CanonicalOrigin::parse("https://example.com").ok(),
             profile: TabProfile::Shared,
         }),
         page: None,
