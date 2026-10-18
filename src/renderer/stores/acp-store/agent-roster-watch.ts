@@ -21,6 +21,7 @@ import type {
   BrowserOpenRequestEvent
 } from '@/lib/acp-api'
 import type { WatchClient } from '@/lib/acp-transport/watch-client'
+import { publishBrowserPolicyChange } from '@/lib/browser-policy-api'
 import { logFrontendError } from '@/lib/log-api'
 import type { AcpState } from './types'
 
@@ -50,6 +51,11 @@ function reconcileRoster(state: AcpState, summaries: WsAgentSummary[]): void {
 }
 
 function applyRosterDelta(state: AcpState, delta: AgentsWatchDelta): void {
+  if (delta?.event === 'browser_policy_changed') {
+    // Not roster state: a hint that one browser policy scope changed.
+    publishBrowserPolicyChange(delta.payload)
+    return
+  }
   const agentId = (delta?.payload as { agentId?: unknown } | null | undefined)?.agentId
   if (typeof agentId !== 'string') {
     void logFrontendError({

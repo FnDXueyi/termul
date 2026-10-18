@@ -2,6 +2,7 @@ import {
   Bot,
   Download,
   FileText,
+  Globe,
   Keyboard,
   KeyRound,
   Monitor,
@@ -29,6 +30,7 @@ const ALL_APP_PREF_CATEGORIES: SettingsCategory[] = [
   { id: 'skills', label: 'Skills', icon: <Sparkles size={16} /> },
   { id: 'provider', label: 'Provider', icon: <KeyRound size={16} /> },
   { id: 'mcp-servers', label: 'MCP Servers', icon: <Network size={16} /> },
+  { id: 'browser', label: 'Browser', icon: <Globe size={16} /> },
   { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: <Keyboard size={16} /> },
   { id: 'updates', label: 'Updates', icon: <Download size={16} /> },
   { id: 'diagnostics', label: 'Diagnostics & Logs', icon: <FileText size={16} /> },
@@ -185,6 +187,24 @@ const ALL_APP_PREF_SEARCH_INDEX: SettingsSearchEntry[] = [
     label: 'MCP Servers',
     description: 'Manage global stdio, HTTP, and SSE servers for new agent sessions.',
     keywords: ['mcp', 'model context protocol', 'stdio', 'http', 'sse']
+  },
+  {
+    categoryId: 'browser',
+    label: 'Browser access for agents',
+    description: 'Allowed sites, pre-approved actions, and the shared agent profile.',
+    keywords: ['browser', 'allow list', 'allowlist', 'origin', 'domain', 'website', 'automation']
+  },
+  {
+    categoryId: 'browser',
+    label: 'Browse logged out in this project',
+    description: 'Agents start logged out and keep nothing after the chat ends.',
+    keywords: ['ephemeral', 'incognito', 'private', 'profile', 'cookies', 'login']
+  },
+  {
+    categoryId: 'browser',
+    label: 'Clear agent profile',
+    description: 'Delete the shared agent profile logins and site data.',
+    keywords: ['cookies', 'sign out', 'logins', 'wipe', 'reset']
   },
   {
     categoryId: 'shortcuts',
