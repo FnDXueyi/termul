@@ -12,6 +12,8 @@ use tauri::{AppHandle, Emitter, Manager, Url};
 
 use super::events::TabProjection;
 use crate::browser_automation::engine::events::TabEvents;
+use crate::browser_automation::engine::profile::{self, DataStore};
+use crate::browser_automation::engine::Support;
 use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,14 +26,15 @@ pub enum HistoryStep {
 pub type SurfaceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait TabSurface: Send + Sync {
-    /// Build `label` at `url` with the engine hooks publishing into
-    /// `events`; resolves once the engine confirmed the webview.
+    /// Build `label` at `url` on `store` with the engine hooks publishing
+    /// into `events`; resolves once the engine confirmed the webview.
     fn create<'a>(
         &'a self,
         label: &'a str,
         url: &'a str,
         bounds: BrowserBounds,
         events: TabEvents,
+        store: DataStore,
     ) -> SurfaceFuture<'a, Result<(), String>>;
     fn navigate(&self, tab: &str, url: String) -> Result<(), String>;
     fn history(&self, tab: &str, step: HistoryStep) -> Result<(), String>;
@@ -49,6 +52,10 @@ pub trait TabSurface: Send + Sync {
     /// Root of the per-session directories teardown deletes and the
     /// startup sweep clears.
     fn session_data_root(&self) -> Result<PathBuf, String>;
+    /// Whether the engine can keep the global agent profile.
+    fn persistent_profile(&self) -> Support;
+    /// Delete the global agent profile's data. No webview uses it.
+    fn wipe_global_profile(&self) -> SurfaceFuture<'_, Result<(), String>>;
 }
 
 const MAIN_WEBVIEW: &str = "main";
@@ -76,8 +83,12 @@ impl TabSurface for PaneSurface {
         url: &'a str,
         bounds: BrowserBounds,
         events: TabEvents,
+        store: DataStore,
     ) -> SurfaceFuture<'a, Result<(), String>> {
-        Box::pin(self.tabs.create(label.to_string(), url.to_string(), bounds, events))
+        Box::pin(
+            self.tabs
+                .create(label.to_string(), url.to_string(), bounds, events, store),
+        )
     }
 
     fn navigate(&self, tab: &str, url: String) -> Result<(), String> {
@@ -125,5 +136,13 @@ impl TabSurface for PaneSurface {
 
     fn session_data_root(&self) -> Result<PathBuf, String> {
         self.app_data("browser-sessions")
+    }
+
+    fn persistent_profile(&self) -> Support {
+        profile::persistent_profile_support()
+    }
+
+    fn wipe_global_profile(&self) -> SurfaceFuture<'_, Result<(), String>> {
+        Box::pin(self.tabs.wipe_global_profile())
     }
 }

@@ -27,9 +27,3 @@ fn the_startup_sweep_deletes_every_session_directory_and_nothing_else() {
     assert_eq!(left, ["not-a-session"]);
     assert_eq!(sweep(&root.path().join("missing")), 0);
 }
-
-#[test]
-fn deleting_a_missing_directory_is_done() {
-    let root = tempfile::tempdir().unwrap();
-    assert!(delete_dir(&root.path().join("never-created")));
-}

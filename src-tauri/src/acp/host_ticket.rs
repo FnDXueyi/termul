@@ -132,7 +132,6 @@ fn profile_id(profile: TabProfile) -> &'static str {
     match profile {
         TabProfile::Global => "global",
         TabProfile::Ephemeral => "ephemeral",
-        TabProfile::Shared => "shared",
     }
 }
 

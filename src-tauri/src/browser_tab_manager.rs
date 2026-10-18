@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
+use crate::browser_automation::engine::profile::{self, AgentProfiles, DataStore};
 use crate::browser_automation::engine::{events::TabEvents, hooks};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -35,15 +36,19 @@ pub struct BrowserTabManager {
     app_handle: AppHandle,
     /// Event channel of every webview this manager built, by label.
     tabs: Arc<Mutex<HashMap<String, TabEvents>>>,
+    /// The agent profiles under app data; agent tabs are refused without.
+    profiles: Result<Arc<AgentProfiles>, String>,
     agentation_endpoint: Arc<Mutex<Option<String>>>,
     agentation_enabled: Arc<Mutex<bool>>,
 }
 
 impl BrowserTabManager {
     pub fn new(app_handle: AppHandle) -> Self {
+        let profiles = open_profiles(&app_handle);
         Self {
             app_handle,
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            profiles,
 
             agentation_endpoint: Arc::new(Mutex::new(None)),
             agentation_enabled: Arc::new(Mutex::new(true)),
@@ -67,24 +72,25 @@ impl BrowserTabManager {
         self.get_webview(tab_id)
     }
 
-    /// Build the tab's webview with the engine hooks installed before its
-    /// first navigation, then confirm the engine created it. A webview the
-    /// engine failed to build is closed and the tab refused.
+    /// Build the tab's webview on `store` with the engine hooks installed
+    /// before its first navigation, then confirm the engine created it. A
+    /// webview the engine failed to build is closed and the tab refused.
     pub async fn create(
         &self,
         tab_id: String,
         url: String,
         bounds: BrowserBounds,
         events: TabEvents,
+        store: DataStore,
     ) -> Result<(), String> {
         let window = self.get_window()?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
         crate::host_perimeter::check_tab_target(&self.app_handle, &tab_id, &parsed_url)?;
 
-        // Every webview shares one profile, so clearing through the main webview
-        // wipes saved grants before this tab exists to load a page.
+        // User tabs share the app's profile, so clearing through the main
+        // webview wipes saved grants before this tab exists to load a page.
         #[cfg(windows)]
-        if let Some(main) = self.app_handle.get_webview("main") {
+        if let (DataStore::App, Some(main)) = (&store, self.app_handle.get_webview("main")) {
             use crate::browser_tab_saved_grants::{clear_saved_grants, ClearError};
             match clear_saved_grants(&main).await {
                 Ok(report) if report.reset > 0 => log::warn!(
@@ -143,6 +149,49 @@ impl BrowserTabManager {
             }
         }
 
+        if store != DataStore::App {
+            let profiles = self.profiles.as_ref().map_err(Clone::clone)?;
+            builder = profiles.configure(builder, &tab_id, &store)?;
+        }
+        match self.mount(&window, builder, &tab_id, bounds, events.clone()).await {
+            Ok(webview) => {
+                if let Ok(profiles) = &self.profiles {
+                    profiles.built(&webview, &tab_id).await;
+                }
+            }
+            Err(error) => {
+                self.release_profile(&tab_id);
+                return Err(error);
+            }
+        }
+        self.tabs
+            .lock()
+            .map_err(|_| "Lock poisoned")?
+            .insert(tab_id, events);
+        Ok(())
+    }
+
+    fn release_profile(&self, tab_id: &str) {
+        if let Ok(profiles) = &self.profiles {
+            profiles.dropped(&self.app_handle, tab_id);
+        }
+    }
+
+    /// Clear the global agent profile. No webview may use it any more.
+    pub async fn wipe_global_profile(&self) -> Result<(), String> {
+        let profiles = self.profiles.as_ref().map_err(Clone::clone)?;
+        profiles.wipe_global(&self.app_handle).await
+    }
+
+    /// Add the built webview to the window and confirm the engine created it.
+    async fn mount(
+        &self,
+        window: &tauri::Window,
+        builder: tauri::webview::WebviewBuilder<tauri::Wry>,
+        tab_id: &str,
+        bounds: BrowserBounds,
+        events: TabEvents,
+    ) -> Result<tauri::Webview, String> {
         let _webview = window
             .add_child(
                 builder,
@@ -239,17 +288,12 @@ impl BrowserTabManager {
             }
         }
 
-        if let Err(error) = hooks::attach(&_webview, events.clone()).await {
+        if let Err(error) = hooks::attach(&_webview, events).await {
             let _ = _webview.close();
             log::warn!("[BrowserTab] tab {tab_id} refused: engine did not confirm the webview ({error})");
             return Err(format!("the browser engine did not create the tab: {error}"));
         }
-
-        self.tabs
-            .lock()
-            .map_err(|_| "Lock poisoned")?
-            .insert(tab_id, events);
-        Ok(())
+        Ok(_webview)
     }
 
     pub fn navigate(&self, tab_id: &str, url: String) -> Result<(), String> {
@@ -418,6 +462,7 @@ impl BrowserTabManager {
             }
             hooks::close(&webview).await;
         }
+        self.release_profile(tab_id);
         events.publish(crate::browser_automation::engine::events::TabEvent::Closed);
     }
 
@@ -486,9 +531,33 @@ impl BrowserTabManager {
             if let Ok(webview) = self.get_webview(&id) {
                 let _ = webview.close();
             }
+            self.release_profile(&id);
         }
         tabs.clear();
     }
+}
+
+/// Open the agent profiles under app data and delete what an earlier run
+/// left of retired global generations.
+fn open_profiles(app: &AppHandle) -> Result<Arc<AgentProfiles>, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join(profile::GLOBAL_ROOT);
+    let profiles = AgentProfiles::open(root).map(Arc::new).map_err(|e| {
+        log::error!("[BrowserTab] agent profile unavailable; agent tabs are refused: {e}");
+        format!("the agent browser profile is unavailable: {e}")
+    })?;
+    let sweeping = profiles.clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let removed = sweeping.sweep(&handle).await;
+        if removed > 0 {
+            log::info!("[BrowserTab] removed {removed} retired agent profile generation(s)");
+        }
+    });
+    Ok(profiles)
 }
 
 impl Drop for BrowserTabManager {

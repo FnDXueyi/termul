@@ -16,15 +16,14 @@ use uuid::Uuid;
 
 pub type PortFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// The identity a tab was actually built with (after engine fallbacks).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// The agent identity a tab was actually built with (after engine
+/// fallbacks). Ordered narrowest first: a session already running
+/// ephemeral never widens to global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TabProfile {
-    Global,
     Ephemeral,
-    /// The app's own webview profile, shared with the user's tabs: what
-    /// every agent tab runs in until per-OS agent profiles land.
-    Shared,
+    Global,
 }
 
 /// Host ticket id, `host:<uuid>`. Never reaches the ACP manager.

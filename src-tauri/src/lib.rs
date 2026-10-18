@@ -1667,6 +1667,9 @@ pub fn run() {
             // profile switch). The relay sink carries `browser_policy_changed`
             // to the desktop renderer and every remote client; the web router
             // reaches the same service through `browser_policy::installed`.
+            // The browser host clears the global agent profile and applies
+            // narrowing edits; it is built after the service it reads.
+            let profile_control = Arc::new(acp::browser_policy::LateProfileControl::default());
             let policy_service = {
                 let policy_root = handle
                     .path()
@@ -1677,7 +1680,7 @@ pub fn run() {
                     policy_root,
                     Arc::new(host_perimeter::owned_ports),
                     vec![ws_relay.clone()],
-                    Arc::new(acp::browser_policy::UnwiredProfileControl),
+                    profile_control.clone(),
                 ));
                 acp::browser_policy::install(Arc::clone(&policy_service));
                 app.manage(Arc::clone(&policy_service));
@@ -1709,21 +1712,21 @@ pub fn run() {
                         .unwrap_or_else(|| acp::session_persistence::UNASSIGNED_PROJECT_ID.to_string())
                 })
             };
-            browser_automation::set_browser_host(
-                browser_automation::DesktopBrowserHost::new(
-                    handle.clone(),
-                    browser_tab_manager.clone(),
-                    // Same sink the ACP manager uses: the relay carries tab
-                    // open/close and Stop state to every `/ws` client (the
-                    // desktop renderer's channel, phones, browsers).
-                    vec![ws_relay.clone()],
-                    browser_automation::HostServices {
-                        permissions: host_tickets,
-                        policy: policy_service,
-                        project_of,
-                    },
-                ),
+            let browser_host = browser_automation::DesktopBrowserHost::new(
+                handle.clone(),
+                browser_tab_manager.clone(),
+                // Same sink the ACP manager uses: the relay carries tab
+                // open/close and Stop state to every `/ws` client (the
+                // desktop renderer's channel, phones, browsers).
+                vec![ws_relay.clone()],
+                browser_automation::HostServices {
+                    permissions: host_tickets,
+                    policy: policy_service,
+                    project_of,
+                },
             );
+            profile_control.attach(browser_host.profile_control());
+            browser_automation::set_browser_host(browser_host);
 
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));

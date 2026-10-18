@@ -106,7 +106,7 @@ fn replies_serialize_the_closed_wire_shape() {
             id: "agent-a".into(),
             epoch: 3,
             origin: CanonicalOrigin::parse("https://example.com").ok(),
-            profile: TabProfile::Shared,
+            profile: TabProfile::Global,
         }),
         page: None,
         data: None,
@@ -116,7 +116,7 @@ fn replies_serialize_the_closed_wire_shape() {
         json!({
             "ok": true,
             "fidelity": "synthetic",
-            "tab": { "id": "agent-a", "epoch": 3, "origin": "https://example.com", "profile": "shared" }
+            "tab": { "id": "agent-a", "epoch": 3, "origin": "https://example.com", "profile": "global" }
         })
     );
     let err = BrowserError::new(ERR_TIMEOUT, "late").with_reason("deadline");

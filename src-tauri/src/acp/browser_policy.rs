@@ -35,7 +35,8 @@ pub use model::{
 };
 pub use origin::{CanonicalOrigin, OriginError, OriginPattern, OwnedPorts, ReservedKind};
 pub use profile::{
-    AgentProfileControl, ClearImpact, ProfileClearError, ProfileFuture, UnwiredProfileControl,
+    AgentProfileControl, ClearImpact, LateProfileControl, ProfileClearError, ProfileFuture,
+    UnwiredProfileControl,
 };
 pub use refusal::{PolicyRefusal, WireCode};
 pub use service::{BrowserPolicyService, CallerScope, EVENT_BROWSER_POLICY_CHANGED};

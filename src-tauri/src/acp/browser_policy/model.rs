@@ -21,6 +21,18 @@ pub enum ProfileMode {
     Ephemeral,
 }
 
+impl ProfileMode {
+    /// The mode a project's sessions actually get: global only while the
+    /// app switch is on and the engine can keep a global profile.
+    pub fn effective(self, global_enabled: bool, engine_keeps_global: bool) -> Self {
+        if self == Self::Global && global_enabled && engine_keeps_global {
+            Self::Global
+        } else {
+            Self::Ephemeral
+        }
+    }
+}
+
 /// Closed set of actions a consent ticket or a pre-approval names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

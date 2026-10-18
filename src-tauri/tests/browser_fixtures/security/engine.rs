@@ -20,6 +20,7 @@ use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, WebviewBuilde
 
 use super::ProbeRuns;
 use crate::browser_automation::engine::events::{NavPolicy, NavVerdict, TabEvents};
+use crate::browser_automation::engine::profile::DataStore;
 use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 use crate::host_perimeter::{allow_tab_navigation, main_webview_only, OwnedPort};
 
@@ -170,7 +171,13 @@ fn create_tab(
 ) -> Result<(), String> {
     let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
     let events = TabEvents::new(&label, tx, Arc::new(Perimeter(handle.clone())));
-    tauri::async_runtime::block_on(manager.create(label, url.to_string(), bounds, events))
+    tauri::async_runtime::block_on(manager.create(
+        label,
+        url.to_string(),
+        bounds,
+        events,
+        DataStore::App,
+    ))
 }
 
 fn run() -> Report {

@@ -13,6 +13,7 @@ pub mod cdp;
 pub mod events;
 pub mod hooks;
 mod jsbridge;
+pub mod profile;
 #[cfg(target_os = "windows")]
 mod webview2;
 #[cfg(target_os = "linux")]

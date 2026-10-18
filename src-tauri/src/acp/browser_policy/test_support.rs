@@ -71,6 +71,12 @@ impl AgentProfileControl for ScriptedProfile {
         let outcome = self.outcome;
         Box::pin(async move { outcome })
     }
+
+    fn global_profile_supported(&self) -> bool {
+        true
+    }
+
+    fn policy_changed(&self) {}
 }
 
 pub(crate) struct Fixture {

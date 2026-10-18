@@ -121,10 +121,12 @@ pub struct ProjectPolicyView {
     pub allow_list: Vec<String>,
     pub preapprovals: Vec<PreapprovalView>,
     pub profile_mode: ProfileMode,
+    /// What the project's sessions get after the app switch and the engine.
+    pub effective_profile_mode: ProfileMode,
 }
 
 impl ProjectPolicyView {
-    pub fn new(project_id: &str, policy: &ProjectPolicy) -> Self {
+    pub fn new(project_id: &str, policy: &ProjectPolicy, effective_profile_mode: ProfileMode) -> Self {
         Self {
             project_id: project_id.to_string(),
             revision: policy.revision,
@@ -136,6 +138,7 @@ impl ProjectPolicyView {
                 .collect(),
             preapprovals: preapproval_views(&policy.preapprovals),
             profile_mode: policy.profile_mode,
+            effective_profile_mode,
         }
     }
 }
@@ -146,17 +149,21 @@ pub struct AppPolicyView {
     pub revision: u64,
     pub read_only: bool,
     pub global_profile_enabled: bool,
+    /// Whether agents get the global profile: the switch is on and the
+    /// engine can keep one (macOS needs 14).
+    pub effective_global_profile: bool,
     pub preapprovals: Vec<PreapprovalView>,
     /// What clearing the global profile would close right now.
     pub clear_impact: ClearImpact,
 }
 
 impl AppPolicyView {
-    pub fn new(policy: &AppPolicy, clear_impact: ClearImpact) -> Self {
+    pub fn new(policy: &AppPolicy, clear_impact: ClearImpact, engine_keeps_global: bool) -> Self {
         Self {
             revision: policy.revision,
             read_only: policy.read_only,
             global_profile_enabled: policy.global_profile_enabled,
+            effective_global_profile: policy.global_profile_enabled && engine_keeps_global,
             preapprovals: preapproval_views(&policy.preapprovals),
             clear_impact,
         }

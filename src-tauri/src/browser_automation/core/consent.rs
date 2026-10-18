@@ -281,6 +281,7 @@ impl DesktopBrowserHost {
             return Ok(());
         };
         let project_id = (self.project_of)(session_id);
+        let profile = self.call_profile(session_id, verb, call).await;
         self.gate
             .authorize(
                 token,
@@ -289,8 +290,7 @@ impl DesktopBrowserHost {
                     project_id: &project_id,
                     url: &url,
                     element: call.element.as_deref(),
-                    // Every agent tab runs in the app's shared webview profile today.
-                    profile: TabProfile::Shared,
+                    profile,
                     deadline,
                 },
             )

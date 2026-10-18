@@ -6,7 +6,8 @@ const USER: &str = "tab-2d9e4f30-7182-4c3d-9e4f-5a6b7c8d9e0f";
 
 fn registry_with_live_tabs() -> TabRegistry {
     let mut registry = TabRegistry::default();
-    let _opened = registry.expect_agent_tab(AGENT, "s1", "https://example.com/");
+    let _opened = registry.expect_agent_tab(AGENT, "s1", "https://example.com/", crate::browser_automation::core::ports::TabProfile::Global)
+        .unwrap();
     registry.begin_create(AGENT, "").unwrap();
     registry.finish_create(AGENT);
     registry.begin_create(USER, "https://user.test/").unwrap();

@@ -97,7 +97,7 @@ impl BrowserPolicyService {
             validate_project_id(project_id)?;
             caller.require_project(project_id)?;
             let policy = self.project_policy(project_id).await?;
-            Ok(ProjectPolicyView::new(project_id, &policy))
+            Ok(self.project_view_of(project_id, &policy).await)
         }
         .await;
         audited("read project policy", result)
@@ -107,7 +107,7 @@ impl BrowserPolicyService {
         let result = async {
             caller.require_app()?;
             let policy = self.app_policy().await?;
-            Ok(AppPolicyView::new(&policy, self.profile.clear_impact()))
+            Ok(self.app_view_of(&policy))
         }
         .await;
         audited("read app policy", result)
@@ -127,7 +127,7 @@ impl BrowserPolicyService {
             let policy = self
                 .apply_project_op(project_id, expected_revision, op)
                 .await?;
-            Ok(ProjectPolicyView::new(project_id, &policy))
+            Ok(self.project_view_of(project_id, &policy).await)
         }
         .await;
         audited("edit project policy", result)
@@ -146,10 +146,30 @@ impl BrowserPolicyService {
                 AppOperation::Edit(op) => self.apply_app_op(expected_revision, op).await?,
                 AppOperation::ClearGlobalProfile => self.clear_global_profile().await?,
             };
-            Ok(AppPolicyView::new(&policy, self.profile.clear_impact()))
+            Ok(self.app_view_of(&policy))
         }
         .await;
         audited("edit app policy", result)
+    }
+
+    async fn project_view_of(&self, project_id: &str, policy: &ProjectPolicy) -> ProjectPolicyView {
+        // An unreadable app policy leaves agents ephemeral, as the engine does.
+        let global_enabled = self
+            .app_policy()
+            .await
+            .is_ok_and(|app| app.global_profile_enabled);
+        let effective = policy
+            .profile_mode
+            .effective(global_enabled, self.profile.global_profile_supported());
+        ProjectPolicyView::new(project_id, policy, effective)
+    }
+
+    fn app_view_of(&self, policy: &AppPolicy) -> AppPolicyView {
+        AppPolicyView::new(
+            policy,
+            self.profile.clear_impact(),
+            self.profile.global_profile_supported(),
+        )
     }
 
     /// Current project policy, for the engine's authorization checks.
@@ -236,6 +256,7 @@ impl BrowserPolicyService {
 
     fn announce(&self, change: PolicyChanged) {
         fan_out(&self.sinks, None, EVENT_BROWSER_POLICY_CHANGED, &change);
+        self.profile.policy_changed();
     }
 }
 

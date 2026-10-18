@@ -9,6 +9,7 @@ mod actions;
 pub(crate) mod dispatch;
 mod events;
 pub mod ports;
+mod profile;
 mod reply;
 mod stop;
 mod surface;
@@ -69,6 +70,7 @@ pub struct DesktopBrowserHost {
     engine: Arc<dyn BrowserEngine>,
     sinks: Vec<Arc<dyn EventSink>>,
     gate: ConsentGate,
+    policy: Arc<dyn PolicyStore>,
     project_of: ProjectResolver,
     registry: Arc<Mutex<TabRegistry>>,
     events: UnboundedSender<(String, TabEvent)>,
@@ -112,7 +114,8 @@ impl DesktopBrowserHost {
             surface,
             engine,
             sinks,
-            gate: ConsentGate::new(services.permissions, services.policy),
+            gate: ConsentGate::new(services.permissions, services.policy.clone()),
+            policy: services.policy,
             project_of: services.project_of,
             registry,
             events: tx,
@@ -143,11 +146,15 @@ impl DesktopBrowserHost {
                 code: refusal.code(),
                 message: refusal.message().to_string(),
             })?;
-        if let Err(message) = self
-            .surface
-            .create(label, &url, bounds, self.tab_events(label))
-            .await
-        {
+        let built = match self.data_store(label) {
+            Ok(store) => {
+                self.surface
+                    .create(label, &url, bounds, self.tab_events(label), store)
+                    .await
+            }
+            Err(message) => Err(message),
+        };
+        if let Err(message) = built {
             self.registry
                 .lock()
                 .fail_create(label, "the browser engine did not create the tab");

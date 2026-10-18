@@ -12,6 +12,7 @@ use super::ports::{ConsentOption, PortFuture, TicketOutcome, TicketRequest};
 use super::surface::{HistoryStep, SurfaceFuture, TabSurface};
 use super::test_support::ScriptedPermissions;
 use super::*;
+use crate::browser_automation::engine::profile::DataStore;
 use crate::browser_automation::engine::{
     CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFuture, EngineTraits,
     InputMode, Point, Support,
@@ -27,14 +28,18 @@ struct FakeTab {
 
 /// Plays the engine for the pane: every load publishes the hops, commit,
 /// title and load finish a real engine would, in order.
-struct FakePane {
+pub(super) struct FakePane {
     tabs: Mutex<HashMap<String, FakeTab>>,
     artifacts: PathBuf,
-    sessions: PathBuf,
+    pub(super) sessions: PathBuf,
     fail_create: bool,
-    /// `close <label> dir=<a session directory existed>` per close, in order.
-    closes: Mutex<Vec<String>>,
+    /// `close <label> dir=<a session directory existed>` per close and
+    /// `wipe open=<tabs still open>` per global profile wipe, in order.
+    pub(super) closes: Mutex<Vec<String>>,
     published: Mutex<Vec<TabProjection>>,
+    /// The data store each tab was built on, by label.
+    pub(super) stores: Mutex<HashMap<String, DataStore>>,
+    persistent_profile: Support,
 }
 
 /// The app's own dev server: the fake perimeter denies every hop to it.
@@ -97,8 +102,10 @@ impl TabSurface for FakePane {
         url: &'a str,
         _bounds: BrowserBounds,
         events: TabEvents,
+        store: DataStore,
     ) -> SurfaceFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            self.stores.lock().insert(label.to_string(), store);
             if self.fail_create {
                 return Err("the browser engine did not create the tab: not created".to_string());
             }
@@ -158,10 +165,20 @@ impl TabSurface for FakePane {
     fn session_data_root(&self) -> Result<PathBuf, String> {
         Ok(self.sessions.clone())
     }
+    fn persistent_profile(&self) -> Support {
+        self.persistent_profile
+    }
+    fn wipe_global_profile(&self) -> SurfaceFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let open = self.tabs.lock().len();
+            self.closes.lock().push(format!("wipe open={open}"));
+            Ok(())
+        })
+    }
 }
 
 /// Answers each helper script by what it is.
-struct FakeEngine {
+pub(super) struct FakeEngine {
     facts: EngineFacts,
     clicks: Mutex<Vec<(Point, InputMode)>>,
     fail_trusted_click: bool,
@@ -169,7 +186,7 @@ struct FakeEngine {
 }
 
 impl FakeEngine {
-    fn new(capabilities: CapabilityTable) -> Self {
+    pub(super) fn new(capabilities: CapabilityTable) -> Self {
         Self {
             facts: EngineFacts {
                 capabilities,
@@ -263,10 +280,10 @@ fn bounds() -> BrowserBounds {
     }
 }
 
-struct Harness {
-    host: Arc<DesktopBrowserHost>,
+pub(super) struct Harness {
+    pub(super) host: Arc<DesktopBrowserHost>,
     engine: Arc<FakeEngine>,
-    pane: Arc<FakePane>,
+    pub(super) pane: Arc<FakePane>,
     sink: Arc<AutoMountSink>,
     _root: tempfile::TempDir,
 }
@@ -291,6 +308,20 @@ fn harness_answering(engine: FakeEngine, permissions: Arc<dyn PermissionRequest>
 }
 
 fn harness_full(engine: FakeEngine, fail_create: bool, permissions: Arc<dyn PermissionRequest>) -> Harness {
+    let services = HostServices {
+        permissions,
+        policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
+        project_of: Arc::new(|_| "p1".to_string()),
+    };
+    harness_parts(engine, fail_create, services, Support::Trusted)
+}
+
+pub(super) fn harness_parts(
+    engine: FakeEngine,
+    fail_create: bool,
+    services: HostServices,
+    persistent_profile: Support,
+) -> Harness {
     let root = tempfile::tempdir().unwrap();
     let pane = Arc::new(FakePane {
         tabs: Mutex::new(HashMap::new()),
@@ -299,17 +330,14 @@ fn harness_full(engine: FakeEngine, fail_create: bool, permissions: Arc<dyn Perm
         fail_create,
         closes: Mutex::new(Vec::new()),
         published: Mutex::new(Vec::new()),
+        stores: Mutex::new(HashMap::new()),
+        persistent_profile,
     });
     let sink = Arc::new(AutoMountSink {
         host: OnceLock::new(),
         seen: Mutex::new(Vec::new()),
     });
     let engine = Arc::new(engine);
-    let services = HostServices {
-        permissions,
-        policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
-        project_of: Arc::new(|_| "p1".to_string()),
-    };
     let host = DesktopBrowserHost::with_parts(pane.clone(), engine.clone(), vec![sink.clone()], services);
     sink.host.set(Arc::downgrade(&host)).ok();
     Harness {
@@ -321,7 +349,7 @@ fn harness_full(engine: FakeEngine, fail_create: bool, permissions: Arc<dyn Perm
     }
 }
 
-fn webview2_like() -> CapabilityTable {
+pub(super) fn webview2_like() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented")
         .with(CapabilityId::IsolatedEval, Support::Trusted)
         .with(CapabilityId::PointerClick, Support::Trusted)
@@ -342,7 +370,7 @@ impl Harness {
         self.call_as("s1", action, args).await
     }
 
-    async fn call_as(&self, session: &str, action: &str, args: Value) -> Value {
+    pub(super) async fn call_as(&self, session: &str, action: &str, args: Value) -> Value {
         let budget = crate::browser_automation::budgets::FRAME_BUDGET;
         self.call_within_as(session, action, args, budget).await
     }
@@ -371,7 +399,7 @@ impl Harness {
     }
 
     /// Let the event consumer catch up with what the fake engine published.
-    async fn settle_events(&self) {
+    pub(super) async fn settle_events(&self) {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
@@ -428,7 +456,7 @@ async fn every_verb_replies_with_the_closed_shape_and_fidelity_exactly_when_it_m
         let mutating = dispatch::spec(action).unwrap().mutating;
         assert_eq!(mutating, fidelity.is_some(), "{action}: registry and reply disagree");
         if action != "list_tabs" {
-            assert_eq!(reply["tab"]["profile"], "shared", "{action}: {reply}");
+            assert_eq!(reply["tab"]["profile"], "global", "{action}: {reply}");
             assert!(reply["tab"]["epoch"].as_u64().unwrap() >= 1, "{action}: {reply}");
         }
         covered.push(action);
@@ -593,7 +621,7 @@ async fn a_quoted_wait_duration_runs_as_a_number() {
     );
 }
 
-fn tab_of(reply: &Value) -> String {
+pub(super) fn tab_of(reply: &Value) -> String {
     reply["tab"]["id"].as_str().expect("the reply names its tab").to_string()
 }
 

@@ -10,17 +10,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::events::label_prefix;
 use super::surface::TabSurface;
 use super::tabs::{BrowserAgentTabEvent, EVENT_AGENT_TAB};
 use super::DesktopBrowserHost;
-
-/// Attempts at deleting a session directory whose files the engine may
-/// still hold for a moment after its webviews closed.
-const DELETE_ATTEMPTS: u32 = 5;
-const DELETE_RETRY: Duration = Duration::from_millis(500);
+use crate::browser_automation::engine::profile::delete_dir;
 
 /// The session's directory under `root`. Session ids are agent-generated:
 /// only `[A-Za-z0-9_-]` survive, so an id can never name another path.
@@ -34,19 +29,6 @@ pub(super) fn session_dir(root: &Path, session_id: &str) -> PathBuf {
     } else {
         safe
     })
-}
-
-/// Delete `dir`, retrying while files are still held. Missing is done.
-pub(super) fn delete_dir(dir: &Path) -> bool {
-    for attempt in 1..=DELETE_ATTEMPTS {
-        match std::fs::remove_dir_all(dir) {
-            Ok(()) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
-            Err(_) if attempt < DELETE_ATTEMPTS => std::thread::sleep(DELETE_RETRY),
-            Err(_) => {}
-        }
-    }
-    false
 }
 
 /// Delete every per-session directory under `root`. Returns how many

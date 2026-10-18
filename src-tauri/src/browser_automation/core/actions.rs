@@ -10,7 +10,9 @@ use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
 use super::reply::{engine_error, eval_gate, shape_snapshot, Fidelity, PageData, Success, TabFacts};
 use super::surface::HistoryStep;
-use super::tabs::{mint_agent_label, rewrite_snapshot_refs, stale_ref_error, NavOutcome, RefNode, RefStale};
+use super::tabs::{
+    mint_agent_label, rewrite_snapshot_refs, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale,
+};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::engine::{assets, CapabilityId, InputMode, Point, Support};
@@ -105,7 +107,9 @@ impl DesktopBrowserHost {
             id: label.to_string(),
             epoch: record.epoch,
             origin: CanonicalOrigin::parse(&record.url).ok(),
-            profile: record.profile,
+            profile: record
+                .profile()
+                .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?,
         })
     }
 
@@ -376,7 +380,15 @@ impl DesktopBrowserHost {
         url: &str,
     ) -> Result<(String, oneshot::Receiver<NavOutcome>), BrowserError> {
         let label = mint_agent_label();
-        let opened = self.registry.lock().expect_agent_tab(&label, session_id, url);
+        let requested = self.requested_profile(session_id).await;
+        let opened = self
+            .registry
+            .lock()
+            .expect_agent_tab(&label, session_id, url, requested)
+            .map_err(|BindRefusal::GlobalClearing| {
+                BrowserError::capability("the agent browser profile is being cleared; try again in a moment")
+                    .with_reason("agent_profile_clearing")
+            })?;
         self.emit(
             Some(session_id),
             super::tabs::EVENT_AGENT_TAB,

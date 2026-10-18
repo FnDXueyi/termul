@@ -63,7 +63,9 @@ pub(super) fn mint_agent_label() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner {
     User,
-    Agent { session_id: String },
+    /// `profile` is the agent identity the adapter built the tab with,
+    /// fixed for the tab's life.
+    Agent { session_id: String, profile: TabProfile },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,8 +104,6 @@ impl NavWaiter {
 
 pub struct TabRecord {
     pub owner: Owner,
-    /// The profile the adapter actually built, fixed for the tab's life.
-    pub profile: TabProfile,
     /// Bumped on every new-document commit. Zero until the first commit.
     pub epoch: u64,
     pub url: String,
@@ -130,7 +130,6 @@ impl TabRecord {
     fn new(owner: Owner, url: &str, opened: u64) -> Self {
         Self {
             owner,
-            profile: TabProfile::Shared,
             epoch: 0,
             url: url.to_string(),
             title: String::new(),
@@ -146,7 +145,15 @@ impl TabRecord {
 
     pub fn session_id(&self) -> Option<&str> {
         match &self.owner {
-            Owner::Agent { session_id } => Some(session_id),
+            Owner::Agent { session_id, .. } => Some(session_id),
+            Owner::User => None,
+        }
+    }
+
+    /// The agent identity of an agent tab; user tabs have none.
+    pub fn profile(&self) -> Option<TabProfile> {
+        match &self.owner {
+            Owner::Agent { profile, .. } => Some(*profile),
             Owner::User => None,
         }
     }
@@ -229,7 +236,15 @@ impl TabRecord {
 struct PendingAgentTab {
     session_id: String,
     url: String,
+    profile: TabProfile,
     opened: oneshot::Sender<OpenResult>,
+}
+
+/// Why the registry refused to bind a session's next tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindRefusal {
+    /// The global agent profile is being cleared.
+    GlobalClearing,
 }
 
 /// Why the registry refused a renderer create request.
@@ -279,6 +294,9 @@ pub struct TabRegistry {
     default_tab: HashMap<String, String>,
     /// Sessions in teardown: they get no new tabs and no admissions.
     closing: HashSet<String>,
+    /// Clears of the global agent profile in progress; while any runs, no
+    /// tab binds to it.
+    global_clearing: u32,
     next_open: u64,
 }
 
@@ -307,7 +325,8 @@ impl TabRegistry {
         self.closing.contains(session_id)
     }
 
-    /// Register an agent tab the renderer is about to mount. The receiver
+    /// Register an agent tab the renderer is about to mount, bound to the
+    /// session's profile (see [`super::profile::bind`]). The receiver
     /// resolves when the engine confirmed the webview, with a waiter for
     /// its first navigation.
     pub(super) fn expect_agent_tab(
@@ -315,17 +334,83 @@ impl TabRegistry {
         label: &str,
         session_id: &str,
         url: &str,
-    ) -> oneshot::Receiver<OpenResult> {
+        requested: TabProfile,
+    ) -> Result<oneshot::Receiver<OpenResult>, BindRefusal> {
+        let profile = super::profile::bind(self.session_profile(session_id), requested);
+        if profile == TabProfile::Global && self.global_clearing > 0 {
+            return Err(BindRefusal::GlobalClearing);
+        }
         let (tx, rx) = oneshot::channel();
         self.pending.insert(
             label.to_string(),
             PendingAgentTab {
                 session_id: session_id.to_string(),
                 url: url.to_string(),
+                profile,
                 opened: tx,
             },
         );
-        rx
+        Ok(rx)
+    }
+
+    /// The profile the session's open or opening tabs run in.
+    pub fn session_profile(&self, session_id: &str) -> Option<TabProfile> {
+        let open = self
+            .tabs
+            .values()
+            .filter(|r| r.life != Lifecycle::Closing && r.session_id() == Some(session_id))
+            .filter_map(TabRecord::profile);
+        let opening = self
+            .pending
+            .values()
+            .filter(|p| p.session_id == session_id)
+            .map(|p| p.profile);
+        open.chain(opening).min()
+    }
+
+    /// Every agent tab built on the global profile, with its session.
+    pub fn global_tabs(&self) -> Vec<(String, String)> {
+        self.tabs
+            .iter()
+            .filter_map(|(label, r)| match &r.owner {
+                Owner::Agent {
+                    session_id,
+                    profile: TabProfile::Global,
+                } => Some((label.clone(), session_id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Webviews that hold the global profile or are about to.
+    pub fn global_lease(&self) -> usize {
+        let opening = self
+            .pending
+            .values()
+            .filter(|p| p.profile == TabProfile::Global)
+            .count();
+        self.global_tabs().len() + opening
+    }
+
+    /// Start or end clearing the global profile. Starting refuses new
+    /// global binds and withdraws the global tabs not yet mounted.
+    pub fn set_global_clearing(&mut self, clearing: bool) {
+        if !clearing {
+            self.global_clearing = self.global_clearing.saturating_sub(1);
+            return;
+        }
+        self.global_clearing += 1;
+        let pending: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.profile == TabProfile::Global)
+            .map(|(label, _)| label.clone())
+            .collect();
+        for label in pending {
+            if let Some(p) = self.pending.remove(&label) {
+                let _ = p.opened.send(Err("the agent browser profile is being cleared".to_string()));
+            }
+        }
     }
 
     /// The opener gave up: the renderer may still mount the tab, and then
@@ -357,6 +442,7 @@ impl TabRegistry {
                 let mut record = TabRecord::new(
                     Owner::Agent {
                         session_id: pending.session_id,
+                        profile: pending.profile,
                     },
                     &pending.url,
                     opened,

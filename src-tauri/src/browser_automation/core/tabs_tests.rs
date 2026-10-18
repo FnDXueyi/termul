@@ -21,7 +21,8 @@ fn live_agent_tab(
     label: &str,
     session: &str,
 ) -> oneshot::Receiver<NavOutcome> {
-    let mut opened = registry.expect_agent_tab(label, session, "https://example.com/");
+    let mut opened = registry.expect_agent_tab(label, session, "https://example.com/", TabProfile::Global)
+        .unwrap();
     assert_eq!(
         registry.begin_create(label, "ignored").as_deref(),
         Ok("https://example.com/")
@@ -105,7 +106,8 @@ fn an_explicit_tab_id_resolves_only_to_a_live_agent_tab_of_the_same_session() {
 #[test]
 fn a_tab_still_being_built_is_not_resolvable() {
     let mut registry = TabRegistry::default();
-    let _opened = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/");
+    let _opened = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/", TabProfile::Global)
+        .unwrap();
     registry.begin_create(AGENT_A, "").unwrap();
     assert!(registry.resolve("s1", Some(AGENT_A)).is_err());
     assert_eq!(registry.resolve("s1", None).unwrap(), None);
@@ -267,7 +269,8 @@ fn closing_a_tab_ends_its_waiters_and_a_failed_create_tells_the_opener() {
     registry.begin_close(AGENT_A);
     assert_eq!(nav.try_recv(), Ok(NavOutcome::Closed));
 
-    let mut opened = registry.expect_agent_tab(AGENT_B, "s1", "https://example.com/");
+    let mut opened = registry.expect_agent_tab(AGENT_B, "s1", "https://example.com/", TabProfile::Global)
+        .unwrap();
     registry.begin_create(AGENT_B, "").unwrap();
     registry.fail_create(AGENT_B, "the browser engine did not create the tab");
     assert_eq!(
@@ -283,7 +286,8 @@ fn closing_a_tab_ends_its_waiters_and_a_failed_create_tells_the_opener() {
 #[test]
 fn a_session_in_teardown_gets_no_new_tab() {
     let mut registry = TabRegistry::default();
-    let mut pending = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/");
+    let mut pending = registry.expect_agent_tab(AGENT_A, "s1", "https://example.com/", TabProfile::Global)
+        .unwrap();
     registry.begin_session_teardown("s1");
     assert!(registry.is_closing("s1"));
     assert_eq!(
