@@ -5,6 +5,7 @@
 
 mod eval;
 pub mod events;
+pub mod input;
 mod screenshot;
 mod ui_delegate;
 

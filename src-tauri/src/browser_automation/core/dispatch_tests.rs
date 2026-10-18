@@ -307,7 +307,7 @@ fn served_text_never_leaks_an_identifier_name_and_documents_the_key_param() {
     assert!(!served.contains("ArgKey"), "{served}");
     assert_eq!(
         schema.input_schema["properties"]["key"]["description"],
-        "Key name to press, e.g. Enter (the default)."
+        "Key to press: one character, or Enter (the default), Tab, Escape, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown or Space."
     );
 }
 

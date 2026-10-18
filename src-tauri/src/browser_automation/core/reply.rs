@@ -294,6 +294,32 @@ pub(super) fn resolve_result(out: Value, ref_id: Option<&str>) -> Result<Resolve
     }
 }
 
+/// What the focused-field helper reports.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FocusedEditable {
+    editable: bool,
+}
+
+/// Whether the focused element takes typed text.
+pub(super) fn focused_editable_result(out: Value) -> Result<bool, BrowserError> {
+    serde_json::from_value::<FocusedEditable>(out)
+        .map(|f| f.editable)
+        .map_err(|_| malformed_helper_result())
+}
+
+/// The viewport size in CSS px.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Viewport {
+    pub w: f64,
+    pub h: f64,
+}
+
+pub(super) fn viewport_result(out: Value) -> Result<Viewport, BrowserError> {
+    serde_json::from_value(out).map_err(|_| malformed_helper_result())
+}
+
 /// Parse the checked-state helper's result.
 pub(super) fn check_result(out: Value, ref_id: Option<&str>) -> Result<CheckState, BrowserError> {
     match serde_json::from_value::<CheckReply>(out) {
@@ -325,6 +351,11 @@ fn helper_failure(e: &str, ref_id: Option<&str>) -> BrowserError {
     }
     if e == "no focused element" {
         return BrowserError::invalid("no element has focus; pass a ref").with_reason("no_focused_element");
+    }
+    if e == "not_focused" {
+        return BrowserError::new(ERR_TIMEOUT, "clicking the element did not focus it")
+            .with_reason("not_focused")
+            .with_arg_keys(&["ref"]);
     }
     BrowserError::new(ERR_INTERNAL, "the page helper reported a failure").with_reason("page_helper_error")
 }

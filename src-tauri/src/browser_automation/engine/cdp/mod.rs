@@ -12,6 +12,7 @@ use super::assets::{self, Script, WORLD_NAME};
 use super::{EngineError, EngineErrorKind, EngineFuture, Point};
 
 pub mod observe;
+pub mod input;
 
 /// Closed CDP method allow-list: a transport can issue nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum CdpMethod {
     PageCreateIsolatedWorld,
     RuntimeCallFunctionOn,
     InputDispatchMouseEvent,
+    InputDispatchKeyEvent,
+    InputInsertText,
     PageCaptureScreenshot,
     DomGetFrameOwner,
     DomResolveNode,
@@ -39,6 +42,8 @@ impl CdpMethod {
             CdpMethod::PageCreateIsolatedWorld => "Page.createIsolatedWorld",
             CdpMethod::RuntimeCallFunctionOn => "Runtime.callFunctionOn",
             CdpMethod::InputDispatchMouseEvent => "Input.dispatchMouseEvent",
+            CdpMethod::InputDispatchKeyEvent => "Input.dispatchKeyEvent",
+            CdpMethod::InputInsertText => "Input.insertText",
             CdpMethod::PageCaptureScreenshot => "Page.captureScreenshot",
             CdpMethod::DomGetFrameOwner => "DOM.getFrameOwner",
             CdpMethod::DomResolveNode => "DOM.resolveNode",

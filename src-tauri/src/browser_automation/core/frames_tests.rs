@@ -35,6 +35,11 @@ pub(crate) fn answer_in_frame(known: bool, script: &Script) -> Result<Value, Eng
             })
         }
         "resolve" => json!({ "rect": { "cx": 5.0, "cy": 6.0 }, "role": "button", "name": "Pay now" }),
+        "facts" => json!({
+            "state": "present", "role": "button", "name": "Pay now", "x": 5.0, "y": 6.0,
+            "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "text",
+            "focusOnClick": true
+        }),
         _ => json!({ "ok": true }),
     })
 }

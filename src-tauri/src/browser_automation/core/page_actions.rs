@@ -15,7 +15,7 @@ use crate::browser_automation::core::{
     BrowserError, DesktopBrowserHost, ERR_INTERNAL, ERR_TIMEOUT,
 };
 use crate::browser_automation::engine::assets::{self, Script};
-use crate::browser_automation::engine::InputMode;
+use crate::browser_automation::engine::{CapabilityId, InputMode};
 
 /// What a `wait` call waits for: exactly one condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,7 +195,7 @@ impl DesktopBrowserHost {
     ) -> Result<Success, BrowserError> {
         let token = required_ref(args)?;
         let resolved = self.resolve_ref(label, token)?;
-        let mode = self.click_mode()?;
+        let mode = self.input_mode(CapabilityId::PointerClick)?;
         let element = self.revalidate(label, token, &resolved).await?;
         let before = element.check.ok_or_else(|| not_checkable(token))?;
         if !want && before.radio {
@@ -211,9 +211,7 @@ impl DesktopBrowserHost {
                 InputMode::Synthetic => Fidelity::Synthetic,
             }
         } else {
-            let fidelity = self
-                .click_revalidated(label, token, &resolved, &element, mode, deadline)
-                .await?;
+            let fidelity = self.click(label, token, &resolved, deadline).await?;
             if deadline.admits(budgets::EVAL_STEP)
                 && self.checked(label, token, &resolved).await?.checked != want
             {
