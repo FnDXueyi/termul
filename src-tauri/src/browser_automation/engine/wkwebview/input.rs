@@ -6,14 +6,16 @@
 //! - The wheel goes to `scrollWheel:` as a CGEvent-built NSEvent. That
 //!   event has no window, so WebKit reads its location as window
 //!   coordinates, and the point is encoded that way.
-//! - Text uses `insertText:replacementRange:`: trusted `beforeinput` and
-//!   `input` with no responder change. A plain `keyDown:` would type into
-//!   the focused chat, so key presses stay synthetic.
+//! - An element taking focus in the tab, by click or by script, makes
+//!   the tab first responder and blurs the chat. Text entry needs a
+//!   focused element, and a plain `keyDown:` types into the chat, so keys
+//!   stay synthetic and the core sends no trusted click that would focus
+//!   an element.
 //! - Hover needs private API since WebKit dropped `mouseMoved:`, and a
 //!   held button reads as `buttons: 0`, so pointer moves and drags stay
 //!   synthetic.
 
-use std::ffi::{c_void, CString};
+use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,15 +26,13 @@ use objc2::{class, msg_send};
 use tokio::sync::oneshot;
 
 use super::super::input::NativeInput;
-use super::super::{
-    CapabilityId, EngineError, EngineErrorKind, EngineFuture, KeyInput, Point, Support,
-};
+use super::super::{CapabilityId, EngineError, EngineErrorKind, EngineFuture, Point, Support};
 use crate::browser_automation::budgets::NATIVE_INPUT;
 use crate::browser_tab_manager::BrowserTabManager;
 
 const TIERS: &[(CapabilityId, Support)] = &[
     (CapabilityId::PointerClick, Support::Trusted),
-    (CapabilityId::TrustedKey, Support::Trusted),
+    (CapabilityId::TrustedKey, Support::Synthetic),
     (CapabilityId::PointerMove, Support::Synthetic),
     (CapabilityId::Wheel, Support::Trusted),
     (CapabilityId::Drag, Support::Synthetic),
@@ -43,7 +43,6 @@ const LEFT_MOUSE_UP: usize = 2;
 const SCROLL_UNIT_PIXEL: u32 = 0;
 /// Largest scroll a single wheel event carries, in px.
 const WHEEL_CHUNK: f64 = 100.0;
-const NS_NOT_FOUND: usize = isize::MAX as usize;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -81,18 +80,6 @@ unsafe impl Encode for CGRect {
     const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct NSRange {
-    location: usize,
-    length: usize,
-}
-
-// SAFETY: as above.
-unsafe impl Encode for NSRange {
-    const ENCODING: Encoding = Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
-}
-
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventCreateScrollWheelEvent2(
@@ -119,7 +106,6 @@ const CLICK_HOLD: Duration = Duration::from_millis(80);
 enum Op {
     Button { at: Point, down: bool },
     Wheel { at: Point, dx: f64, dy: f64 },
-    Text(String),
 }
 
 pub struct AppKitInput {
@@ -218,18 +204,6 @@ unsafe fn perform(wk: *mut AnyObject, op: &Op) -> Result<(), EngineErrorKind> {
                 let _: () = msg_send![wk, scrollWheel: ns];
             }
         }
-        Op::Text(text) => {
-            let text = CString::new(text.replace('\0', "")).map_err(|_| EngineErrorKind::Dispatch)?;
-            let s: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()];
-            if s.is_null() {
-                return Err(EngineErrorKind::Dispatch);
-            }
-            let selection = NSRange {
-                location: NS_NOT_FOUND,
-                length: 0,
-            };
-            let _: () = msg_send![wk, insertText: s, replacementRange: selection];
-        }
     }
     Ok(())
 }
@@ -280,8 +254,8 @@ impl NativeInput for AppKitInput {
         TIERS
     }
 
-    fn press_support(&self) -> Option<Support> {
-        Some(Support::Synthetic)
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        true
     }
 
     fn click<'a>(&'a self, tab: &'a str, at: Point) -> EngineFuture<'a, ()> {
@@ -294,12 +268,5 @@ impl NativeInput for AppKitInput {
 
     fn wheel<'a>(&'a self, tab: &'a str, at: Point, dx: f64, dy: f64) -> EngineFuture<'a, ()> {
         self.run(tab, Op::Wheel { at, dx, dy })
-    }
-
-    fn key<'a>(&'a self, tab: &'a str, input: KeyInput<'a>) -> EngineFuture<'a, ()> {
-        match input {
-            KeyInput::Text(text) => self.run(tab, Op::Text(text.to_string())),
-            KeyInput::Press(_) => super::super::input::unsupported(),
-        }
     }
 }

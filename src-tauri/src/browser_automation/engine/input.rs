@@ -163,6 +163,9 @@ pub struct ElementState {
     pub hit: bool,
     pub enabled: bool,
     pub kind: ControlKind,
+    /// A click at `point` focuses something: a text field, a select, an
+    /// editable or tabindex element, or a label's control.
+    pub focus_on_click: bool,
 }
 
 fn malformed() -> EngineError {
@@ -197,6 +200,7 @@ pub fn parse_facts(out: &Value) -> Result<ActionabilityFacts, EngineError> {
         hit: flag("hit")?,
         enabled: flag("enabled")?,
         kind,
+        focus_on_click: flag("focusOnClick")?,
     }))
 }
 
@@ -228,6 +232,11 @@ pub trait NativeInput: Send + Sync {
     /// tier for text entry.
     fn press_support(&self) -> Option<Support> {
         None
+    }
+    /// True when an element taking focus in the tab, by click or by
+    /// script, moves native focus to the tab.
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        false
     }
     fn click<'a>(&'a self, tab: &'a str, at: Point) -> EngineFuture<'a, ()>;
     fn move_to<'a>(&'a self, _tab: &'a str, _at: Point) -> EngineFuture<'a, ()> {
@@ -315,6 +324,10 @@ impl<E: BrowserEngine> BrowserEngine for WithNativeInput<E> {
             return unsupported();
         }
         self.input.drag(tab, from, to)
+    }
+
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        self.input.element_focus_moves_tab_focus()
     }
 
     fn key_support(&self, kind: KeyKind) -> Support {

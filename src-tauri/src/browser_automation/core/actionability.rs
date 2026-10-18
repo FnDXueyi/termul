@@ -25,11 +25,13 @@ pub(super) enum Need {
     Type,
 }
 
-/// Where the action lands, and what kind of control is there.
+/// Where the action lands, what kind of control is there, and whether a
+/// click there focuses something.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Target {
     pub point: Point,
     pub kind: ControlKind,
+    pub focus_on_click: bool,
 }
 
 /// The first unmet check, as the reply's `reason`.
@@ -93,6 +95,7 @@ pub(super) async fn wait_until_actionable(
             return Ok(Target {
                 point: state.point,
                 kind: state.kind,
+                focus_on_click: state.focus_on_click,
             });
         };
         if wait.remaining().is_zero() {

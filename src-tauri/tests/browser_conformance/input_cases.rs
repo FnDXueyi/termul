@@ -181,8 +181,15 @@ pub async fn pointer_click(c: &Ctx<'_>) -> CaseResult {
 
 pub async fn trusted_key(c: &Ctx<'_>) -> CaseResult {
     let tiers = c.engine.tiers();
-    if tiers.text != Support::Trusted {
-        return Err(unavailable("trusted_key text entry", tiers.text));
+    match tiers.text {
+        Support::Trusted => {}
+        Support::Synthetic => {
+            let tab = c.input_tab().await?;
+            let input = c.engine.input();
+            refused(input.key(&tab, KeyInput::Text("abc"), InputMode::Trusted).await, "text")?;
+            return refused(input.key(&tab, KeyInput::Press(Key::Char('d')), InputMode::Trusted).await, "press");
+        }
+        other => return Err(unavailable("trusted_key text entry", other)),
     }
     let tab = c.input_tab().await?;
     c.chat_focused().await?;
@@ -295,7 +302,9 @@ pub async fn drag(c: &Ctx<'_>) -> CaseResult {
 }
 
 /// The chat keeps focus and sees nothing while the agent tab is clicked
-/// and typed into through every trusted path the engine declares.
+/// and typed into through every trusted path the engine declares. Where
+/// focusing an element moves native focus to the tab, the core never
+/// clicks a field with trusted input, so neither does this case.
 pub async fn focus_retention(c: &Ctx<'_>) -> CaseResult {
     let tiers = c.engine.tiers();
     if tiers.pointer_click != Support::Trusted {
@@ -306,9 +315,13 @@ pub async fn focus_retention(c: &Ctx<'_>) -> CaseResult {
     let mark = c.mark();
     let input = c.engine.input();
     c.trusted_click(&tab, BUTTON, "click").await?;
-    c.trusted_click(&tab, FIELD, "focus click").await?;
-    c.await_report(mark, REPORT_WAIT, "field focus", |r| is(r, "agent", "focus") && r["id"] == "field")
+    c.trusted_report(mark, "a button click", |r| is(r, "agent", "click") && r["id"] == "btn")
         .await?;
+    if !tiers.focus_moves {
+        c.trusted_click(&tab, FIELD, "focus click").await?;
+        c.await_report(mark, REPORT_WAIT, "field focus", |r| is(r, "agent", "focus") && r["id"] == "field")
+            .await?;
+    }
     if tiers.text == Support::Trusted {
         input
             .key(&tab, KeyInput::Text("xyz"), InputMode::Trusted)

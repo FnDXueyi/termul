@@ -20,7 +20,8 @@ fn key_names_parse_to_named_keys_or_one_character() {
 fn facts_parse_from_the_helper_reply() {
     let facts = parse_facts(&json!({
         "state": "present", "role": "textbox", "name": "Email", "x": 10.5, "y": 20.0,
-        "visible": true, "stable": false, "hit": true, "enabled": true, "kind": "text"
+        "visible": true, "stable": false, "hit": true, "enabled": true, "kind": "text",
+        "focusOnClick": true
     }))
     .unwrap();
     assert_eq!(
@@ -34,6 +35,7 @@ fn facts_parse_from_the_helper_reply() {
             hit: true,
             enabled: true,
             kind: ControlKind::Text,
+            focus_on_click: true,
         })
     );
     assert_eq!(parse_facts(&json!({ "state": "detached" })).unwrap(), ActionabilityFacts::Detached);

@@ -80,6 +80,9 @@ pub struct Tiers {
     pub pointer_move: host::Support,
     pub wheel: host::Support,
     pub drag: host::Support,
+    /// Focusing an element moves native focus to the tab, so the core
+    /// never sends a trusted click that would focus one.
+    pub focus_moves: bool,
 }
 
 pub struct Engine {
@@ -134,6 +137,7 @@ impl Engine {
             pointer_move: caps.get(host::CapabilityId::PointerMove),
             wheel: caps.get(host::CapabilityId::Wheel),
             drag: caps.get(host::CapabilityId::Drag),
+            focus_moves: self.input.element_focus_moves_tab_focus(),
         }
     }
 

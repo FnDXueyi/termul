@@ -3,9 +3,11 @@
 //! page-script fallback only where it declares synthetic, and replies with
 //! the fidelity of the input that ran.
 //!
-//! Text goes into an element focused by a trusted click, never by
-//! `element.focus()`, which on WKWebView moves first responder to the agent
-//! tab and blurs the chat.
+//! Trusted text goes into an element focused by a trusted click. Where
+//! focusing an element moves native focus to the tab (WKWebView makes it
+//! first responder and blurs the chat), nothing focuses one: a click that
+//! would is synthetic, and so is text entry, which writes the value
+//! without `element.focus()`.
 
 use std::future::Future;
 
@@ -61,11 +63,15 @@ impl DesktopBrowserHost {
     }
 
     /// The key tier for `kind`, and whether trusted keys can reach an
-    /// element: that needs a trusted click to focus it first.
+    /// element: that needs a trusted click to focus it first, one that
+    /// leaves native focus with the chat.
     fn key_modes(&self, kind: KeyKind) -> Result<(InputMode, bool), BrowserError> {
         let mode = mode_of(self.engine.key_support(kind))?;
         let click = self.engine.facts().capabilities.get(CapabilityId::PointerClick);
-        Ok((mode, mode == InputMode::Trusted && click == Support::Trusted))
+        let by_click = mode == InputMode::Trusted
+            && click == Support::Trusted
+            && !self.engine.element_focus_moves_tab_focus();
+        Ok((mode, by_click))
     }
 
     async fn input(&self, tab: &str, step: EngineFuture<'_, ()>) -> Result<(), BrowserError> {
@@ -124,8 +130,11 @@ impl DesktopBrowserHost {
         resolved: &ResolvedRef,
         deadline: Deadline,
     ) -> Result<Fidelity, BrowserError> {
-        let mode = self.input_mode(CapabilityId::PointerClick)?;
+        let mut mode = self.input_mode(CapabilityId::PointerClick)?;
         let target = self.actionable(tab, token, resolved, Need::Activate, deadline).await?;
+        if target.focus_on_click && self.engine.element_focus_moves_tab_focus() {
+            mode = InputMode::Synthetic;
+        }
         match mode {
             InputMode::Trusted => {
                 self.input(tab, self.engine.pointer_click(tab, target.point, mode)).await?;
@@ -187,6 +196,22 @@ impl DesktopBrowserHost {
         Ok(fidelity(mode))
     }
 
+    /// Script text entry into the ref: replace its value, or `append`.
+    /// It focuses the element first only where that leaves native focus
+    /// with the chat.
+    fn synthetic_text(&self, resolved: &ResolvedRef, text: &str, append: bool) -> String {
+        let path = &resolved.node.path;
+        if self.engine.element_focus_moves_tab_focus() {
+            return input_assets::synthetic_set_value(path, text, append);
+        }
+        if append {
+            let args = json!({ "ref": path, "text": text });
+            assets::interaction("type", &args, resolved.epoch)
+        } else {
+            assets::fill_ref(path, text, resolved.epoch)
+        }
+    }
+
     pub(super) async fn fill(
         &self,
         tab: &str,
@@ -199,12 +224,12 @@ impl DesktopBrowserHost {
         let bound = Deadline::after(deadline.clamp(budgets::ACTION_TEXT));
         let target = self.actionable(tab, token, resolved, Need::Fill, bound).await?;
         if target.kind == ControlKind::Select || value.is_empty() {
-            let script = input_assets::synthetic_set_value(&resolved.node.path, value);
+            let script = input_assets::synthetic_set_value(&resolved.node.path, value, false);
             within(bound, self.helper(tab, Some(token), &script)).await?;
             return Ok(Fidelity::Synthetic);
         }
         if !by_click {
-            let script = assets::fill_ref(&resolved.node.path, value, resolved.epoch);
+            let script = self.synthetic_text(resolved, value, false);
             within(bound, self.helper(tab, Some(token), &script)).await?;
             return Ok(Fidelity::Synthetic);
         }
@@ -226,9 +251,7 @@ impl DesktopBrowserHost {
                 let resolved = self.resolve_ref(tab, token)?;
                 let target = self.actionable(tab, token, &resolved, Need::Type, bound).await?;
                 if !by_click {
-                    let mut page_args = args.clone();
-                    page_args["ref"] = Value::String(resolved.node.path.clone());
-                    let script = assets::interaction("type", &page_args, resolved.epoch);
+                    let script = self.synthetic_text(&resolved, text, true);
                     within(bound, self.helper(tab, Some(token), &script)).await?;
                     return Ok(Fidelity::Synthetic);
                 }

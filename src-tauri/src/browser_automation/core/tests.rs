@@ -171,6 +171,10 @@ struct FakeEngine {
     facts_patch: Value,
     /// The key-press tier when it differs from text entry's.
     press_tier: Option<Support>,
+    /// Element focus moves native focus to the tab, as on WKWebView.
+    focus_moves: bool,
+    /// Helper scripts that called `.focus()`.
+    focus_scripts: Mutex<usize>,
 }
 
 impl FakeEngine {
@@ -190,6 +194,8 @@ impl FakeEngine {
             snapshot_text: "- button \"Sign in\" @e1",
             facts_patch: json!({}),
             press_tier: None,
+            focus_moves: false,
+            focus_scripts: Mutex::new(0),
         }
     }
 }
@@ -199,6 +205,9 @@ impl BrowserEngine for FakeEngine {
         &self.facts
     }
     fn evaluate<'a>(&'a self, _tab: &'a str, script: &'a str) -> EngineFuture<'a, Value> {
+        if script.contains(".focus()") {
+            *self.focus_scripts.lock() += 1;
+        }
         let out = if script == engine::assets::READY_STATE {
             json!("complete")
         } else if script.contains("MAX_LINES") {
@@ -214,7 +223,8 @@ impl BrowserEngine for FakeEngine {
             } else {
                 let mut facts = json!({
                     "state": "present", "role": "button", "name": "Sign in", "x": 12.0, "y": 34.0,
-                    "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "text"
+                    "visible": true, "stable": true, "hit": true, "enabled": true, "kind": "text",
+                    "focusOnClick": true
                 });
                 for (key, value) in self.facts_patch.as_object().unwrap() {
                     facts[key] = value.clone();
@@ -242,6 +252,9 @@ impl BrowserEngine for FakeEngine {
                 Ok(())
             }
         })
+    }
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        self.focus_moves
     }
     fn key_support(&self, kind: KeyKind) -> Support {
         match (kind, self.press_tier) {
@@ -958,4 +971,34 @@ async fn an_unknown_key_name_is_refused_where_presses_are_trusted() {
     let reply = h.call("press", json!({ "key": "Control+a" })).await;
     assert_eq!(reply["code"], "invalid_params", "{reply}");
     assert!(h.engine.keys.lock().is_empty());
+}
+
+#[tokio::test]
+async fn where_element_focus_moves_tab_focus_nothing_focuses_an_element() {
+    let mut engine = FakeEngine::new(all_trusted());
+    engine.focus_moves = true;
+    let h = snapshotted(engine).await;
+    for (action, args) in [
+        ("click", json!({ "ref": "@e1" })),
+        ("fill", json!({ "ref": "@e1", "value": "Ada" })),
+        ("type", json!({ "ref": "@e1", "text": "Ada" })),
+        ("press", json!({ "ref": "@e1", "key": "Enter" })),
+    ] {
+        let reply = h.call(action, args).await;
+        assert_eq!(reply["fidelity"], "synthetic", "{action}: {reply}");
+    }
+    assert!(h.engine.clicks.lock().is_empty(), "a trusted click on a text field would focus it");
+    assert!(h.engine.keys.lock().is_empty());
+    assert_eq!(*h.engine.focus_scripts.lock(), 0, "no helper focuses an element by script");
+
+    let mut engine = FakeEngine::new(all_trusted());
+    engine.focus_moves = true;
+    engine.facts_patch = json!({ "kind": "other", "focusOnClick": false });
+    let h = snapshotted(engine).await;
+    let reply = h.call("click", json!({ "ref": "@e1" })).await;
+    assert_eq!(reply["fidelity"], "trusted", "{reply}");
+    assert_eq!(
+        h.engine.clicks.lock().as_slice(),
+        [(Point { x: 12.0, y: 34.0 }, InputMode::Trusted)]
+    );
 }

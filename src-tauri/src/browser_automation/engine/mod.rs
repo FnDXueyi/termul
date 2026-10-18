@@ -257,6 +257,13 @@ pub trait BrowserEngine: Send + Sync {
     fn drag<'a>(&'a self, _tab: &'a str, _from: Point, _to: Point, _mode: InputMode) -> EngineFuture<'a, ()> {
         input::unsupported()
     }
+    /// True when an element taking focus in the tab, by click or by
+    /// script, moves native focus to the tab and away from the chat. The
+    /// core then sends no trusted click that would focus an element and
+    /// never focuses one by script.
+    fn element_focus_moves_tab_focus(&self) -> bool {
+        false
+    }
     /// The `trusted_key` tier for one kind of keyboard input.
     fn key_support(&self, _kind: KeyKind) -> Support {
         self.facts().capabilities.get(CapabilityId::TrustedKey)

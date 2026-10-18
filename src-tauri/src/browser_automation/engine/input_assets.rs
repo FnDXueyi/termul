@@ -35,6 +35,9 @@ pub fn facts(path: &str) -> String {
         path,
         r#"
   if (!el || !el.isConnected) return { state: 'detached' };
+  var FOCUSES_ON_CLICK = 'textarea, select, iframe, embed, object, input:not([type=button i], ' +
+    '[type=submit i], [type=reset i], [type=checkbox i], [type=radio i], [type=image i], ' +
+    '[type=file i], [type=range i], [type=color i])';
   function box() { var r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; }
   function same(a, b) { return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]; }
   function frame() {
@@ -70,11 +73,16 @@ pub fn facts(path: &str) -> String {
       var disabled = el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true' ||
         !!el.closest('[inert]');
       var kind = el.matches(':read-write') ? 'text' : (el.tagName === 'SELECT' ? 'select' : 'other');
+      var focusOnClick = false;
+      for (var f = hit || el; f && !focusOnClick; f = f.parentNode || f.host) {
+        focusOnClick = f.nodeType === 1 && (f.isContentEditable || f.hasAttribute('tabindex') ||
+          f.matches(FOCUSES_ON_CLICK) || (f.tagName === 'LABEL' && !!f.control));
+      }
       return {
         state: 'present', role: B.roleOf(el), name: B.nameOf(el), x: x, y: y,
         visible: b2[2] > 0 && b2[3] > 0 && shown,
         stable: inView && same(b0, b1) && same(b1, b2),
-        hit: onTarget, enabled: !disabled, kind: kind
+        hit: onTarget, enabled: !disabled, kind: kind, focusOnClick: focusOnClick
       };
     });
   });
@@ -141,14 +149,16 @@ pub fn synthetic_press(path: Option<&str>, key: &str) -> String {
 }
 
 /// Synthetic value write with input and change events, without moving
-/// focus: `<select>` choices and clearing a field.
-pub fn synthetic_set_value(path: &str, value: &str) -> String {
+/// focus: `<select>` choices, clearing a field, and text entry where
+/// trusted keys cannot reach the element. `append` adds to the value.
+pub fn synthetic_set_value(path: &str, value: &str, append: bool) -> String {
     let body = format!(
         r#"
   if (!el) return {{ error: 'stale_ref' }};
   var v = {v};
-  if (el.isContentEditable) {{ el.textContent = v; }}
+  if (el.isContentEditable) {{ el.textContent = ({append} ? el.textContent || '' : '') + v; }}
   else {{
+    if ({append}) v = (el.value || '') + v;
     var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype
       : el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     var d = Object.getOwnPropertyDescriptor(proto, 'value');

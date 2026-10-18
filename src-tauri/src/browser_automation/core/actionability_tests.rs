@@ -80,6 +80,7 @@ fn ready() -> ElementState {
         hit: true,
         enabled: true,
         kind: ControlKind::Other,
+        focus_on_click: false,
     }
 }
 
