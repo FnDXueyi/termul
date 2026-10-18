@@ -423,18 +423,13 @@ impl BrowserTabManager {
 
     pub fn go_back(&self, tab_id: &str) -> Result<(), String> {
         let webview = self.get_webview(tab_id)?;
-        webview
-            .eval("window.history.back()")
-            .map_err(|e| format!("Go back failed: {}", e))?;
-        Ok(())
+        step_history(&webview, HistoryDirection::Back).map_err(|e| format!("Go back failed: {}", e))
     }
 
     pub fn go_forward(&self, tab_id: &str) -> Result<(), String> {
         let webview = self.get_webview(tab_id)?;
-        webview
-            .eval("window.history.forward()")
-            .map_err(|e| format!("Go forward failed: {}", e))?;
-        Ok(())
+        step_history(&webview, HistoryDirection::Forward)
+            .map_err(|e| format!("Go forward failed: {}", e))
     }
 
     pub fn reload(&self, tab_id: &str) -> Result<(), String> {
@@ -494,5 +489,58 @@ impl BrowserTabManager {
 impl Drop for BrowserTabManager {
     fn drop(&mut self) {
         self.destroy_all();
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HistoryDirection {
+    Back,
+    Forward,
+}
+
+/// Move the tab along the engine's own back-forward list. Page script
+/// cannot intercept it the way it can `window.history`.
+fn step_history(webview: &tauri::Webview, direction: HistoryDirection) -> tauri::Result<()> {
+    webview.with_webview(move |platform| native_history(&platform, direction))
+}
+
+#[cfg(target_os = "windows")]
+fn native_history(platform: &tauri::webview::PlatformWebview, direction: HistoryDirection) {
+    // SAFETY: this closure runs on the UI thread that owns the WebView2
+    // COM objects.
+    let stepped = unsafe {
+        platform.controller().CoreWebView2().and_then(|core| match direction {
+            HistoryDirection::Back => core.GoBack(),
+            HistoryDirection::Forward => core.GoForward(),
+        })
+    };
+    if stepped.is_err() {
+        log::warn!("[BrowserTab] WebView2 history step ({direction:?}) failed");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_history(platform: &tauri::webview::PlatformWebview, direction: HistoryDirection) {
+    use objc2_web_kit::WKWebView;
+    // SAFETY: tauri hands out the tab's live WKWebView, and this closure
+    // runs on the main thread that owns it.
+    let webview = unsafe { &*platform.inner().cast::<WKWebView>() };
+    // SAFETY: main thread, as above. A missing history item returns nil,
+    // so there is nothing to report.
+    let _ = unsafe {
+        match direction {
+            HistoryDirection::Back => webview.goBack(),
+            HistoryDirection::Forward => webview.goForward(),
+        }
+    };
+}
+
+#[cfg(target_os = "linux")]
+fn native_history(platform: &tauri::webview::PlatformWebview, direction: HistoryDirection) {
+    use webkit2gtk::WebViewExt;
+    let webview = platform.inner();
+    match direction {
+        HistoryDirection::Back => webview.go_back(),
+        HistoryDirection::Forward => webview.go_forward(),
     }
 }
