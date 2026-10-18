@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::*;
-use crate::browser_automation::ERR_INVALID_PARAMS;
+use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_TAB_NOT_FOUND};
 
 #[test]
 fn url_allowlist_accepts_http_s_only() {
@@ -62,39 +62,15 @@ fn require_url_arg_missing_or_non_string_names_url() {
 }
 
 #[test]
-fn tab_id_arg_rejects_non_string_and_empty_naming_tabid() {
-    // Missing (and JSON null) mean "use the default tab".
-    assert_eq!(
-        tab_id_arg(&json!({}), "navigate").expect("absent tabId is Ok"),
-        None
-    );
-    assert_eq!(
-        tab_id_arg(&json!({"tabId": null}), "navigate")
-            .expect("null tabId is Ok"),
-        None
-    );
-    let err = tab_id_arg(&json!({"tabId": 7}), "navigate")
-        .expect_err("non-string tabId must error");
-    assert_eq!(err.code, ERR_INVALID_PARAMS);
-    // Site attribution pinned from origin: the failing key is `tabId`.
-    assert_eq!(err.arg_keys, vec!["tabId"]);
-    assert!(
-        err.message.contains("tabId"),
-        "must name 'tabId': {}",
-        err.message
-    );
-    let err = tab_id_arg(&json!({"tabId": ""}), "navigate")
-        .expect_err("empty tabId must error");
-    assert_eq!(err.code, ERR_INVALID_PARAMS);
-    assert_eq!(err.arg_keys, vec!["tabId"]);
-    assert!(
-        err.message.contains("tabId"),
-        "must name 'tabId': {}",
-        err.message
-    );
-    let ok = tab_id_arg(&json!({"tabId": "agent-a"}), "navigate")
-        .expect("string tabId extracts");
-    assert_eq!(ok.as_deref(), Some("agent-a"));
+fn a_malformed_tab_id_is_tab_not_found_never_the_default_tab() {
+    assert_eq!(tab_id_arg(&json!({})).unwrap(), None, "absent means the default tab");
+    assert_eq!(tab_id_arg(&json!({"tabId": null})).unwrap(), None);
+    for bad in [json!(7), json!(""), json!(["agent-a"])] {
+        let err = tab_id_arg(&json!({ "tabId": bad })).expect_err("malformed tabId");
+        assert_eq!((err.code, err.reason), (ERR_TAB_NOT_FOUND, Some("malformed_tab_id")), "{bad}");
+        assert_eq!(err.arg_keys, vec!["tabId"]);
+    }
+    assert_eq!(tab_id_arg(&json!({"tabId": "agent-a"})).unwrap().as_deref(), Some("agent-a"));
 }
 
 #[test]

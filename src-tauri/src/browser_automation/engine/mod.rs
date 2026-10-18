@@ -2,16 +2,23 @@
 //! capability, trait and error types every adapter reports in.
 //!
 //! Dependency direction: the core depends on this module; adapters
-//! (`webview2`, `jsbridge`) implement it and never import core types.
+//! (`webview2`, `webkitgtk`, `wkwebview`, `jsbridge`) implement it and
+//! never import core types. Tab events flow back through [`events`].
 //! Platform crates and per-OS code live only inside the adapter
 //! directories; `cdp` holds engine-neutral CDP logic over `CdpTransport`.
 
 pub mod assets;
 #[cfg(any(test, target_os = "windows"))]
 pub mod cdp;
+pub mod events;
+pub mod hooks;
 mod jsbridge;
 #[cfg(target_os = "windows")]
 mod webview2;
+#[cfg(target_os = "linux")]
+mod webkitgtk;
+#[cfg(target_os = "macos")]
+mod wkwebview;
 
 use std::future::Future;
 use std::pin::Pin;

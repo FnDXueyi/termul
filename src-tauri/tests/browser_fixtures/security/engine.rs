@@ -16,9 +16,10 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tauri::{LogicalPosition, LogicalSize, Manager, Url, WebviewBuilder, WebviewUrl};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Url, WebviewBuilder, WebviewUrl};
 
 use super::ProbeRuns;
+use crate::browser_automation::engine::events::{NavPolicy, NavVerdict, TabEvents};
 use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 use crate::host_perimeter::{allow_tab_navigation, main_webview_only, OwnedPort};
 
@@ -48,10 +49,6 @@ const PROBE: &str = r#"
   });
 })();
 "#;
-
-/// Tabs whose label starts with this skip the navigation verdict, so the
-/// command guard is tested on an app-origin page that actually loaded.
-const BYPASS_PREFIX: &str = "bypass-";
 
 /// Query marking the requests of page-initiated navigations.
 const PAGE_NAVIGATION: &str = "page-navigation";
@@ -150,13 +147,30 @@ fn percent_decode(raw: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// The perimeter half of the app's per-hop verdict; these tabs belong to no
+/// agent session, so it is the whole verdict.
+struct Perimeter(AppHandle);
+
+impl NavPolicy for Perimeter {
+    fn decide(&self, tab: &str, url: &Url) -> NavVerdict {
+        if allow_tab_navigation(&self.0, tab, url) {
+            NavVerdict::Allow
+        } else {
+            NavVerdict::Deny
+        }
+    }
+}
+
 fn create_tab(
     manager: &BrowserTabManager,
+    handle: &AppHandle,
     label: String,
     url: &str,
     bounds: BrowserBounds,
 ) -> Result<(), String> {
-    tauri::async_runtime::block_on(manager.create(label, url.to_string(), bounds)).map(|_| ())
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
+    let events = TabEvents::new(&label, tx, Arc::new(Perimeter(handle.clone())));
+    tauri::async_runtime::block_on(manager.create(label, url.to_string(), bounds, events))
 }
 
 fn run() -> Report {
@@ -194,6 +208,8 @@ fn run() -> Report {
             .iter()
             .map(|(label, _)| (*label, format!("{remote_origin}/{page}?{label}"))),
     );
+    // Built without the tab hooks, so no navigation verdict applies: the
+    // command guard is tested on an app-origin page that actually loaded.
     let bypass_tabs: Vec<(&'static str, String)> = vec![
         ("bypass-dev-origin", format!("{dev_origin}/{page}")),
         ("bypass-app-origin", format!("{}/{page}", app_origin())),
@@ -219,16 +235,6 @@ fn run() -> Report {
     let builder = builder.any_thread();
     let app = builder
         .plugin(tauri_plugin_os::init())
-        .plugin(
-            tauri::plugin::Builder::<_, ()>::new("perimeter-fixture-navigation")
-                .on_navigation(|webview, url| {
-                    let label = webview.label();
-                    label == "main"
-                        || label.starts_with(BYPASS_PREFIX)
-                        || allow_tab_navigation(webview, url)
-                })
-                .build(),
-        )
         .manage(runs.clone())
         .invoke_handler(main_webview_only(tauri::generate_handler![
             super::perimeter_probe
@@ -263,11 +269,11 @@ fn run() -> Report {
                 let mut refusals = BTreeMap::new();
                 for (label, target) in &denied_targets {
                     let create =
-                        create_tab(&manager, format!("refused-{label}"), target, bounds(0));
+                        create_tab(&manager, &handle, format!("refused-{label}"), target, bounds(0));
                     refusals.insert(format!("create {label}"), create);
                 }
                 for (index, (label, url)) in loaded_tabs.iter().enumerate() {
-                    create_tab(&manager, (*label).to_string(), url, bounds(index))
+                    create_tab(&manager, &handle, (*label).to_string(), url, bounds(index))
                         .expect("tab created");
                 }
                 let mut page_navigation_tried: Vec<&str> = Vec::new();

@@ -8,6 +8,8 @@
 //! object); the completion handler forwards the result through a oneshot
 //! to the awaiting task.
 
+pub mod events;
+
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 

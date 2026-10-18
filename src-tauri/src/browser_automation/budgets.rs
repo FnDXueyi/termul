@@ -27,6 +27,9 @@ pub const DESCRIBE: Duration = secs(5);
 pub const CONSENT_WAIT: Duration = secs(120);
 /// Renderer round trip to mount an agent tab's pane and webview.
 pub const TAB_OPEN: Duration = secs(15);
+/// How long the engine may take to confirm a webview was created, or to
+/// process its close.
+pub const TAB_CONFIRM: Duration = secs(5);
 /// Post-navigation wait for the document to become interactive.
 pub const NAV_SETTLE: Duration = secs(15);
 pub const SETTLE_POLL: Duration = Duration::from_millis(200);

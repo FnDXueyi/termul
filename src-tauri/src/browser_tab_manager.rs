@@ -1,6 +1,13 @@
+//! Native webviews for browser tabs: building them with the engine's
+//! hooks, confirming the engine really created them, placing, showing and
+//! closing them. Tab state (owner, epoch, URL, title) lives in the
+//! automation core's tab registry; this module only drives webviews.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+
+use crate::browser_automation::engine::{events::TabEvents, hooks};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,7 +33,8 @@ pub struct BrowserBounds {
 
 pub struct BrowserTabManager {
     app_handle: AppHandle,
-    tabs: Arc<Mutex<HashMap<String, BrowserTabInfo>>>,
+    /// Event channel of every webview this manager built, by label.
+    tabs: Arc<Mutex<HashMap<String, TabEvents>>>,
     agentation_endpoint: Arc<Mutex<Option<String>>>,
     agentation_enabled: Arc<Mutex<bool>>,
 }
@@ -59,199 +67,16 @@ impl BrowserTabManager {
         self.get_webview(tab_id)
     }
 
-    /// Current metadata for a tab (clone).
-    pub(crate) fn info(&self, tab_id: &str) -> Result<BrowserTabInfo, String> {
-        self.tabs
-            .lock()
-            .map_err(|_| "Lock poisoned".to_string())?
-            .get(tab_id)
-            .cloned()
-            .ok_or_else(|| format!("Browser tab '{}' not found", tab_id))
-    }
-
-    /// Mark/unmark a tab as agent-controlled (returned to the renderer in
-    /// `browser_tab_list` so the badge stays correct).
-    pub(crate) fn set_agent_controlled(&self, tab_id: &str, controlled: bool) {
-        if let Ok(mut tabs) = self.tabs.lock() {
-            if let Some(info) = tabs.get_mut(tab_id) {
-                info.agent_controlled = controlled;
-            }
-        }
-    }
-
-    fn start_url_poller(&self, tab_id: String) {
-        let app_handle = self.app_handle.clone();
-        std::thread::spawn(move || {
-            // Wait for webview to fully initialize before injecting scripts
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-
-            // Script that polls URL, title and readyState continuously.
-            // This is more reliable than window.load for SPAs (React, Vue, Angular).
-            let poller_script = format!(
-                r#"
-                (function() {{
-                    if (window.__termul_poller) return;
-                    window.__termul_poller = true;
-
-                    var tabId = '{}';
-                    var lastUrl = location.href;
-                    var lastTitle = '';
-                    var lastReady = '';
-                    var loadedReported = false;
-
-                    var invoke = function(cmd, args) {{
-                        try {{
-                            if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-                                window.__TAURI_INTERNALS__.invoke(cmd, args);
-                                return true;
-                            }}
-                        }} catch(e) {{}}
-                        try {{
-                            if (window.__TAURI__ && window.__TAURI__.invoke) {{
-                                window.__TAURI__.invoke(cmd, args);
-                                return true;
-                            }}
-                        }} catch(e) {{}}
-                        try {{
-                            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {{
-                                window.__TAURI__.core.invoke(cmd, args);
-                                return true;
-                            }}
-                        }} catch(e) {{}}
-                        return false;
-                    }};
-
-                    var reportUrl = function(url) {{
-                        invoke('browser_tab_report_url', {{ tabId: tabId, url: url }});
-                    }};
-
-                    var reportTitle = function(title) {{
-                        invoke('browser_tab_report_title', {{ tabId: tabId, title: title }});
-                    }};
-
-                    var reportLoaded = function() {{
-                        if (loadedReported) return;
-                        loadedReported = true;
-                        invoke('browser_tab_report_loaded', {{ tabId: tabId }});
-                    }};
-
-                    var check = function() {{
-                        var url = location.href;
-                        var ready = document.readyState;
-                        var title = document.title || '';
-
-                        // Report URL change
-                        if (url !== lastUrl) {{
-                            lastUrl = url;
-                            reportUrl(url);
-                            // Reset loaded flag on navigation — new page needs to load
-                            loadedReported = false;
-                            lastReady = '';
-                        }}
-
-                        // Report title change
-                        if (title !== lastTitle) {{
-                            lastTitle = title;
-                            reportTitle(title);
-                        }}
-
-                        // Report loaded when readyState stabilizes at 'complete'
-                        if (ready === 'complete' && lastReady !== 'complete') {{
-                            reportLoaded();
-                        }}
-                        lastReady = ready;
-                    }};
-
-                    // Poll every 400ms
-                    setInterval(check, 400);
-
-                    // Hook history.pushState for SPA navigation
-                    var origPush = history.pushState;
-                    var origReplace = history.replaceState;
-                    history.pushState = function() {{
-                        origPush.apply(this, arguments);
-                        setTimeout(check, 50);
-                        setTimeout(check, 300);
-                    }};
-                    history.replaceState = function() {{
-                        origReplace.apply(this, arguments);
-                        setTimeout(check, 50);
-                        setTimeout(check, 300);
-                    }};
-                    window.addEventListener('popstate', function() {{
-                        setTimeout(check, 50);
-                        setTimeout(check, 300);
-                    }});
-
-                    // Initial check
-                    check();
-                }})();
-                "#,
-                tab_id
-            );
-
-            // Try to inject the poller script. Retry a few times if webview not ready.
-            for attempt in 0..5 {
-                match app_handle.get_webview(&tab_id) {
-                    Some(webview) => {
-                        let _ = webview.eval(&poller_script);
-                        log::info!(
-                            "[BrowserTab] Injected URL poller for tab={} (attempt={})",
-                            tab_id,
-                            attempt
-                        );
-                        break;
-                    }
-                    None => {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    }
-                }
-            }
-
-            // Inject agentation toolbar via eval after a delay for DOM readiness.
-            // The agentation library accesses document.head at module top-level,
-            // so it needs a ready DOM. 3s delay matches the poller's init time.
-            let app_handle_clone = app_handle.clone();
-            let tab_id_clone = tab_id.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(3000));
-                log::info!(
-                    "[BrowserTab] Agentation delayed injection check for tab={}",
-                    tab_id_clone
-                );
-                if let Some(bt) = app_handle_clone.try_state::<Arc<BrowserTabManager>>() {
-                    let enabled = bt.is_agentation_enabled();
-                    log::info!(
-                        "[BrowserTab] Agentation enabled={} for tab={}",
-                        enabled,
-                        tab_id_clone
-                    );
-                    if enabled {
-                        match bt.inject_agentation_toolbar(&tab_id_clone) {
-                            Ok(()) => {}
-                            Err(e) => log::warn!(
-                                "[BrowserTab] Agentation toolbar eval failed for tab={}: {}",
-                                tab_id_clone,
-                                e
-                            ),
-                        }
-                    }
-                } else {
-                    log::warn!(
-                        "[BrowserTab] Could not get BrowserTabManager from state for tab={}",
-                        tab_id_clone
-                    );
-                }
-            });
-        });
-    }
-
+    /// Build the tab's webview with the engine hooks installed before its
+    /// first navigation, then confirm the engine created it. A webview the
+    /// engine failed to build is closed and the tab refused.
     pub async fn create(
         &self,
         tab_id: String,
         url: String,
         bounds: BrowserBounds,
-    ) -> Result<BrowserTabInfo, String> {
+        events: TabEvents,
+    ) -> Result<(), String> {
         let window = self.get_window()?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
         crate::host_perimeter::check_tab_target(&self.app_handle, &tab_id, &parsed_url)?;
@@ -283,6 +108,7 @@ impl BrowserTabManager {
             tauri::WebviewUrl::External(parsed_url),
         )
         .on_permission_request(crate::browser_tab_permissions::on_permission_request);
+        builder = hooks::install(builder, &events);
 
         // Inject agentation globals via initialization_script (runs before page JS).
         // The toolbar bundle itself is injected via eval AFTER page load,
@@ -413,22 +239,19 @@ impl BrowserTabManager {
             }
         }
 
-        // Start background poller only after native placement succeeds.
-        self.start_url_poller(tab_id.clone());
+        if let Err(error) = hooks::attach(&_webview, events.clone()).await {
+            let _ = _webview.close();
+            log::warn!("[BrowserTab] tab {tab_id} refused: engine did not confirm the webview ({error})");
+            return Err(format!("the browser engine did not create the tab: {error}"));
+        }
 
-        let info = BrowserTabInfo {
-            id: tab_id.clone(),
-            url,
-            title: String::new(),
-            agent_controlled: false,
-        };
-
-        let mut tabs = self.tabs.lock().map_err(|_| "Lock poisoned")?;
-        tabs.insert(tab_id.clone(), info.clone());
-        drop(tabs);
-
-        Ok(info)
+        self.tabs
+            .lock()
+            .map_err(|_| "Lock poisoned")?
+            .insert(tab_id, events);
+        Ok(())
     }
+
     pub fn navigate(&self, tab_id: &str, url: String) -> Result<(), String> {
         let webview = self.get_webview(tab_id)?;
         let parsed_url: tauri::Url = url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
@@ -436,7 +259,6 @@ impl BrowserTabManager {
         webview
             .navigate(parsed_url)
             .map_err(|e| format!("Navigation failed: {}", e))?;
-        self.schedule_agentation_reinject(tab_id);
         Ok(())
     }
 
@@ -537,8 +359,8 @@ impl BrowserTabManager {
     }
 
     /// Inject the agentation toolbar bundle into a browser tab via eval.
-    /// Called after page load (browser_tab_report_loaded) because the
-    /// agentation library accesses document.head at module top-level.
+    /// Runs after a page load because the agentation library accesses
+    /// document.head at module top-level.
     pub fn inject_agentation_toolbar(&self, tab_id: &str) -> Result<(), String> {
         if !crate::host_perimeter::agentation_allowed(tab_id) {
             return Err("Agentation is not available in agent tabs".to_string());
@@ -559,33 +381,31 @@ impl BrowserTabManager {
         Ok(())
     }
 
-    /// Re-inject the URL poller after navigation. The poller detects
-    /// `readyState === 'complete'` and calls `browser_tab_report_loaded`,
-    /// which in turn injects the agentation toolbar. This chains the
-    /// document-load signal instead of using a blind fixed delay.
-    fn schedule_agentation_reinject(&self, tab_id: &str) {
-        let app_handle = self.app_handle.clone();
-        let tab_id = tab_id.to_string();
-        std::thread::spawn(move || {
-            // Wait for the new document to start loading before re-injecting
-            // the poller. The poller self-deduplicates via __termul_poller.
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Some(bt) = app_handle.try_state::<Arc<BrowserTabManager>>() {
-                if bt.is_agentation_enabled() {
-                    bt.start_url_poller(tab_id.clone());
-                    log::info!(
-                        "[BrowserTab] Re-injected URL poller after navigation for tab={}",
-                        tab_id
-                    );
-                }
-            }
-        });
+    /// The toolbar's post-load injection on user tabs, when enabled.
+    pub(crate) fn inject_agentation_after_load(&self, tab_id: &str) {
+        if !self.is_agentation_enabled() {
+            return;
+        }
+        if let Err(e) = self.inject_agentation_toolbar(tab_id) {
+            log::warn!("[BrowserTab] Agentation toolbar injection failed for tab={tab_id}: {e}");
+        }
     }
 
-    pub fn destroy(&self, tab_id: &str) -> Result<(), String> {
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(webview) = self.get_webview(tab_id) {
+    /// Close the tab's webview and wait until the engine has destroyed it,
+    /// then publish the close on the tab's event stream. A no-op for
+    /// labels this manager never built.
+    pub async fn destroy(&self, tab_id: &str) {
+        let events = self
+            .tabs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(tab_id);
+        let Some(events) = events else {
+            return;
+        };
+        if let Ok(webview) = self.get_webview(tab_id) {
+            #[cfg(target_os = "linux")]
+            {
                 let _ = webview.with_webview(move |child_platform| {
                     use gtk::prelude::*;
                     let child_widget = child_platform.inner();
@@ -596,15 +416,9 @@ impl BrowserTabManager {
                     }
                 });
             }
+            hooks::close(&webview).await;
         }
-
-        if let Ok(webview) = self.get_webview(tab_id) {
-            let _ = webview.close();
-        }
-        let mut tabs = self.tabs.lock().map_err(|_| "Lock poisoned")?;
-        tabs.remove(tab_id);
-        drop(tabs);
-        Ok(())
+        events.publish(crate::browser_automation::engine::events::TabEvent::Closed);
     }
 
     pub fn go_back(&self, tab_id: &str) -> Result<(), String> {
@@ -612,7 +426,6 @@ impl BrowserTabManager {
         webview
             .eval("window.history.back()")
             .map_err(|e| format!("Go back failed: {}", e))?;
-        self.schedule_agentation_reinject(tab_id);
         Ok(())
     }
 
@@ -621,16 +434,14 @@ impl BrowserTabManager {
         webview
             .eval("window.history.forward()")
             .map_err(|e| format!("Go forward failed: {}", e))?;
-        self.schedule_agentation_reinject(tab_id);
         Ok(())
     }
 
     pub fn reload(&self, tab_id: &str) -> Result<(), String> {
         let webview = self.get_webview(tab_id)?;
         webview
-            .eval("window.location.reload()")
+            .reload()
             .map_err(|e| format!("Reload failed: {}", e))?;
-        self.schedule_agentation_reinject(tab_id);
         Ok(())
     }
 

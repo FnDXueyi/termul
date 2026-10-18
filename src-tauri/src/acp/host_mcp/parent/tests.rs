@@ -454,11 +454,6 @@ fn browser_failures_log_code_and_arg_key_names_never_values() {
             Box::pin(async move { Err(err) })
         }
         fn end_session(&self, _session_id: &str) {}
-        fn notify_tab_created(&self, _tab_id: &str) -> bool {
-            false
-        }
-        fn notify_tab_closed(&self, _tab_id: &str) {}
-        fn notify_tab_navigated(&self, _tab_id: &str) {}
         fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
             false
         }
@@ -1418,11 +1413,6 @@ impl crate::browser_automation::BrowserHost for EchoHost {
         })
     }
     fn end_session(&self, _session_id: &str) {}
-    fn notify_tab_created(&self, _tab_id: &str) -> bool {
-        false
-    }
-    fn notify_tab_closed(&self, _tab_id: &str) {}
-    fn notify_tab_navigated(&self, _tab_id: &str) {}
     fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
         false
     }

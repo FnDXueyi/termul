@@ -99,7 +99,7 @@ impl Engine {
                 project_of: Arc::new(|_| "conformance".to_string()),
             },
         ));
-        tauri::async_runtime::spawn(renderer_stand_in(rx, tabs.clone()));
+        tauri::async_runtime::spawn(renderer_stand_in(rx));
         Self {
             _tabs: tabs,
             _policy_root: policy_root,
@@ -149,28 +149,20 @@ fn over_budget(action: &str, elapsed: Duration) -> StepError {
     }
 }
 
-async fn renderer_stand_in(
-    mut events: mpsc::UnboundedReceiver<AcpEvent>,
-    tabs: Arc<host::BrowserTabManager>,
-) {
+/// Mounts every agent tab the host asks for through the registry, as the
+/// renderer's `browser_tab_create` does.
+async fn renderer_stand_in(mut events: mpsc::UnboundedReceiver<AcpEvent>) {
     while let Some(event) = events.recv().await {
         if event.type_ != EVENT_AGENT_TAB || event.payload["action"] != "open" {
             continue;
         }
-        let tabs = tabs.clone();
         tauri::async_runtime::spawn(async move {
             let Some(tab_id) = event.payload["tabId"].as_str() else {
                 return;
             };
             let url = event.payload["url"].as_str().unwrap_or("about:blank");
-            match tabs
-                .create(tab_id.to_string(), url.to_string(), TAB_BOUNDS)
-                .await
-            {
-                Ok(_) => {
-                    host::tab_created(tab_id);
-                }
-                Err(e) => eprintln!("conformance: tab create failed: {e}"),
+            if let Err(e) = host::create_tab(tab_id, url, TAB_BOUNDS).await {
+                eprintln!("conformance: tab create failed: {} {}", e.code, e.message);
             }
         });
     }

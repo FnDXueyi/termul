@@ -257,11 +257,6 @@ impl crate::browser_automation::BrowserHost for StopHost {
         Box::pin(async { Ok(crate::browser_automation::Success::default()) })
     }
     fn end_session(&self, _session_id: &str) {}
-    fn notify_tab_created(&self, _tab_id: &str) -> bool {
-        false
-    }
-    fn notify_tab_closed(&self, _tab_id: &str) {}
-    fn notify_tab_navigated(&self, _tab_id: &str) {}
     fn resolve_eval(&self, _nonce: &str, _ok: bool, _value: Option<String>) -> bool {
         false
     }
