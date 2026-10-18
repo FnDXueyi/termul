@@ -55,6 +55,21 @@
       "capability": "stale_ref",
       "code": "blocked",
       "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "actionability_covered",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "actionability_moving",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
+    },
+    {
+      "capability": "actionability_hidden",
+      "code": "blocked",
+      "observed": "needs snapshot, which failed"
     }
   ]
 }

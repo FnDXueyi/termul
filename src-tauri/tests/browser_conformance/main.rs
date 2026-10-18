@@ -11,6 +11,7 @@
 mod adapter;
 mod cases;
 mod expected;
+mod input_cases;
 #[path = "../browser_fixtures/server.rs"]
 mod fixture_server;
 mod report;
@@ -169,7 +170,7 @@ fn main() {
     ));
     let main_ready = Arc::new(AtomicBool::new(false));
     let ready_flag = main_ready.clone();
-    let shell_url = fixtures.url("/");
+    let shell_url = fixtures.url("/chat.html");
 
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![browser_agent_eval_result])

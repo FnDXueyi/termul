@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::adapter::{Engine, StepError};
+use crate::input_cases;
+use termul_manager_lib::conformance_support::Support;
 use crate::fixture_server::{FixtureServer, REDIRECT_PATH, REDIRECT_TARGET_PATH};
 
 const FORM_READY: &str = "Conformance form";
@@ -47,6 +49,15 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("back", &["snapshot"]),
     cap("reload", &["snapshot"]),
     cap("stale_ref", &["snapshot"]),
+    cap("actionability_covered", &["snapshot"]),
+    cap("actionability_moving", &["snapshot"]),
+    cap("actionability_hidden", &["snapshot"]),
+    cap("input_pointer_click", &["navigate"]),
+    cap("input_trusted_key", &["navigate"]),
+    cap("input_pointer_move", &["navigate"]),
+    cap("input_wheel", &["navigate"]),
+    cap("input_drag", &["navigate"]),
+    cap("focus_retention", &["navigate"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -70,7 +81,7 @@ impl From<StepError> for Failure {
     }
 }
 
-fn mismatch(message: impl Into<String>) -> Failure {
+pub fn mismatch(message: impl Into<String>) -> Failure {
     Failure {
         code: "assertion".into(),
         reason: None,
@@ -78,7 +89,7 @@ fn mismatch(message: impl Into<String>) -> Failure {
     }
 }
 
-type CaseResult = Result<(), Failure>;
+pub type CaseResult = Result<(), Failure>;
 
 struct Snapshot {
     text: String,
@@ -86,28 +97,50 @@ struct Snapshot {
     title: String,
 }
 
-struct Ctx<'a> {
-    engine: &'a Engine,
-    fixtures: &'a FixtureServer,
+pub struct Ctx<'a> {
+    pub engine: &'a Engine,
+    pub fixtures: &'a FixtureServer,
     session: String,
 }
 
-fn tab_id(reply: &Value) -> Result<String, Failure> {
+pub fn tab_id(reply: &Value) -> Result<String, Failure> {
     reply["tab"]["id"]
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| mismatch("reply carries no tab id"))
 }
 
-fn expect_fidelity(reply: &Value, what: &str) -> CaseResult {
+fn tier_name(support: Support) -> &'static str {
+    match support {
+        Support::Trusted => "trusted",
+        Support::Synthetic => "synthetic",
+        Support::Unavailable(_) => "unavailable",
+    }
+}
+
+/// The reply's fidelity is the tier the engine declares for the input.
+fn expect_fidelity(reply: &Value, tier: Support, what: &str) -> CaseResult {
     match reply["fidelity"].as_str() {
-        Some("trusted" | "synthetic") => Ok(()),
-        other => Err(mismatch(format!("{what} reply fidelity is {other:?}"))),
+        Some(f) if f == tier_name(tier) => Ok(()),
+        other => Err(mismatch(format!(
+            "{what} reply fidelity is {other:?}, the declared tier is {}",
+            tier_name(tier)
+        ))),
+    }
+}
+
+/// Trusted text needs a trusted click to focus the field first.
+fn text_tier(c: &Ctx<'_>) -> Support {
+    let tiers = c.engine.tiers();
+    match (tiers.text, tiers.pointer_click) {
+        (Support::Trusted, Support::Trusted) => Support::Trusted,
+        (Support::Trusted, _) => Support::Synthetic,
+        (other, _) => other,
     }
 }
 
 impl Ctx<'_> {
-    async fn call(&self, action: &str, args: Value) -> Result<Value, Failure> {
+    pub async fn call(&self, action: &str, args: Value) -> Result<Value, Failure> {
         Ok(self.engine.call(&self.session, action, args).await?)
     }
 
@@ -119,7 +152,7 @@ impl Ctx<'_> {
     /// Navigate, then wait until the page's own text is visible. A call that
     /// returns before the new document commits would otherwise race the next
     /// snapshot.
-    async fn open(&self, path: &str, ready_text: &str) -> CaseResult {
+    pub async fn open(&self, path: &str, ready_text: &str) -> CaseResult {
         self.navigate(path).await?;
         self.call("wait", json!({ "text": ready_text })).await?;
         Ok(())
@@ -135,19 +168,19 @@ impl Ctx<'_> {
         })
     }
 
-    async fn ref_of(&self, role: &str, name: &str) -> Result<String, Failure> {
+    pub async fn ref_of(&self, role: &str, name: &str) -> Result<String, Failure> {
         let snap = self.snapshot().await?;
         find_ref(&snap.text, role, name)
             .ok_or_else(|| mismatch(format!("snapshot has no {role} \"{name}\" ref")))
     }
 
-    async fn click(&self, role: &str, name: &str) -> CaseResult {
+    pub async fn click(&self, role: &str, name: &str) -> CaseResult {
         let target = self.ref_of(role, name).await?;
         let reply = self.call("click", json!({ "ref": target })).await?;
-        expect_fidelity(&reply, "click")
+        expect_fidelity(&reply, self.engine.tiers().pointer_click, "click")
     }
 
-    async fn expect_text(&self, needle: &str) -> CaseResult {
+    pub async fn expect_text(&self, needle: &str) -> CaseResult {
         let snap = self.snapshot().await?;
         if snap.text.contains(needle) {
             Ok(())
@@ -174,6 +207,17 @@ fn find_ref(snapshot: &str, role: &str, name: &str) -> Option<String> {
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         (!digits.is_empty()).then(|| format!("@e{digits}"))
     })
+}
+
+pub fn expect_code_reason(result: Result<Value, Failure>, code: &str, reason: &str, what: &str) -> CaseResult {
+    match result {
+        Err(f) if f.code == code && f.reason.as_deref() == Some(reason) => Ok(()),
+        Err(f) => Err(mismatch(format!(
+            "{what}: expected {code}/{reason}, got {}/{:?}",
+            f.code, f.reason
+        ))),
+        Ok(_) => Err(mismatch(format!("{what}: expected {code}/{reason}, call succeeded"))),
+    }
 }
 
 fn expect_code(result: Result<Value, Failure>, code: &str, what: &str) -> CaseResult {
@@ -246,7 +290,7 @@ async fn error_codes(c: &Ctx<'_>) -> CaseResult {
 async fn navigate(c: &Ctx<'_>) -> CaseResult {
     let reply = c.navigate("/form.html").await?;
     tab_id(&reply)?;
-    expect_fidelity(&reply, "navigate")
+    expect_fidelity(&reply, Support::Trusted, "navigate")
 }
 
 async fn snapshot(c: &Ctx<'_>) -> CaseResult {
@@ -274,7 +318,8 @@ async fn snapshot(c: &Ctx<'_>) -> CaseResult {
 async fn click(c: &Ctx<'_>) -> CaseResult {
     c.open("/form.html", FORM_READY).await?;
     c.click("button", "Submit").await?;
-    c.expect_text("Result: submitted [] clicks=1").await
+    let trusted = c.engine.tiers().pointer_click == Support::Trusted;
+    c.expect_text(&format!("Result: submitted [] clicks=1 trusted={trusted}")).await
 }
 
 async fn fill(c: &Ctx<'_>) -> CaseResult {
@@ -283,7 +328,7 @@ async fn fill(c: &Ctx<'_>) -> CaseResult {
     let reply = c
         .call("fill", json!({ "ref": field, "value": "Ada" }))
         .await?;
-    expect_fidelity(&reply, "fill")?;
+    expect_fidelity(&reply, text_tier(c), "fill")?;
     c.click("button", "Submit").await?;
     c.expect_text("Result: submitted [Ada]").await
 }
@@ -294,7 +339,7 @@ async fn type_text(c: &Ctx<'_>) -> CaseResult {
     let reply = c
         .call("type", json!({ "ref": field, "text": "Bob" }))
         .await?;
-    expect_fidelity(&reply, "type")?;
+    expect_fidelity(&reply, text_tier(c), "type")?;
     c.click("button", "Submit").await?;
     c.expect_text("Result: submitted [Bob]").await
 }
@@ -425,6 +470,15 @@ pub async fn run(
         "reload" => reload(&ctx).await,
         "stale_ref" => stale_ref(&ctx).await,
         "screenshot" => screenshot(&ctx).await,
+        "actionability_covered" => input_cases::actionability_covered(&ctx).await,
+        "actionability_moving" => input_cases::actionability_moving(&ctx).await,
+        "actionability_hidden" => input_cases::actionability_hidden(&ctx).await,
+        "input_pointer_click" => input_cases::pointer_click(&ctx).await,
+        "input_trusted_key" => input_cases::trusted_key(&ctx).await,
+        "input_pointer_move" => input_cases::pointer_move(&ctx).await,
+        "input_wheel" => input_cases::wheel(&ctx).await,
+        "input_drag" => input_cases::drag(&ctx).await,
+        "focus_retention" => input_cases::focus_retention(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

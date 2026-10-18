@@ -4,16 +4,23 @@
 //! on 127.0.0.1 and never the dev server's port: a page served from the dev
 //! origin would count as a local page for Tauri's command ACL and hide the
 //! remote-origin behaviour the suite exists to cover.
+//!
+//! Pages report what they observed by posting JSON to [`REPORT_PATH`].
+//! The runner reads those reports back without evaluating script in the
+//! page, so input cases work on engines whose eval channel does not.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_REPORT: usize = 64 * 1024;
 
 pub const REDIRECT_PATH: &str = "/redirect";
 pub const REDIRECT_TARGET_PATH: &str = "/redirect-target.html";
+pub const REPORT_PATH: &str = "/report";
 
 enum Reply {
     Page(&'static str),
@@ -27,14 +34,20 @@ fn route(path: &str) -> Reply {
         "/form.html" => Reply::Page(include_str!("pages/form.html")),
         "/form-done.html" => Reply::Page(include_str!("pages/form-done.html")),
         "/delayed.html" => Reply::Page(include_str!("pages/delayed.html")),
+        "/chat.html" => Reply::Page(include_str!("pages/chat.html")),
+        "/input.html" => Reply::Page(include_str!("pages/input.html")),
+        "/actionability.html" => Reply::Page(include_str!("pages/actionability.html")),
         REDIRECT_TARGET_PATH => Reply::Page(include_str!("pages/redirect-target.html")),
         REDIRECT_PATH => Reply::Redirect(REDIRECT_TARGET_PATH),
         _ => Reply::NotFound,
     }
 }
 
+type Reports = Arc<Mutex<Vec<String>>>;
+
 pub struct FixtureServer {
     addr: SocketAddr,
+    reports: Reports,
 }
 
 impl FixtureServer {
@@ -48,18 +61,29 @@ impl FixtureServer {
             }
         };
         let addr = listener.local_addr()?;
+        let reports = Reports::default();
+        let sink = reports.clone();
         std::thread::Builder::new()
             .name("fixture-accept".into())
             .spawn(move || {
                 for stream in listener.incoming().flatten() {
+                    let sink = sink.clone();
                     let _ = std::thread::Builder::new()
                         .name("fixture-conn".into())
                         .spawn(move || {
-                            let _ = serve(stream);
+                            let _ = serve(stream, &sink);
                         });
                 }
             })?;
-        Ok(Self { addr })
+        Ok(Self { addr, reports })
+    }
+
+    /// Every report posted so far, in arrival order, parsed as JSON.
+    pub fn reports(&self) -> Vec<serde_json::Value> {
+        let raw = self.reports.lock().map(|r| r.clone()).unwrap_or_default();
+        raw.iter()
+            .filter_map(|body| serde_json::from_str(body).ok())
+            .collect()
     }
 
     pub fn port(&self) -> u16 {
@@ -71,7 +95,8 @@ impl FixtureServer {
     }
 }
 
-fn read_request_head(stream: &mut TcpStream) -> io::Result<String> {
+/// The request head, and whatever body bytes arrived with it.
+fn read_request_head(stream: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -87,17 +112,60 @@ fn read_request_head(stream: &mut TcpStream) -> io::Result<String> {
         }
         buf.extend_from_slice(&chunk[..n]);
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"
+
+")
+        .map_or(buf.len(), |i| i + 4);
+    let rest = buf.split_off(split);
+    Ok((String::from_utf8_lossy(&buf).into_owned(), rest))
 }
 
-fn serve(mut stream: TcpStream) -> io::Result<()> {
+fn read_body(stream: &mut TcpStream, head: &str, mut body: Vec<u8>) -> io::Result<Vec<u8>> {
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
+        .min(MAX_REPORT);
+    let mut chunk = [0u8; 1024];
+    while body.len() < length {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(length);
+    Ok(body)
+}
+
+fn serve(mut stream: TcpStream, reports: &Reports) -> io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let head = read_request_head(&mut stream)?;
+    let (head, rest) = read_request_head(&mut stream)?;
     let mut request_line = head.lines().next().unwrap_or_default().split_whitespace();
     let method = request_line.next().unwrap_or_default();
     let target = request_line.next().unwrap_or("/");
     let path = target.split(['?', '#']).next().unwrap_or("/");
+
+    if method == "POST" && path == REPORT_PATH {
+        let body = read_body(&mut stream, &head, rest)?;
+        if let Ok(mut all) = reports.lock() {
+            all.push(String::from_utf8_lossy(&body).into_owned());
+        }
+        stream.write_all(b"HTTP/1.1 204 No Content
+Content-Length: 0
+Connection: close
+
+")?;
+        return stream.flush();
+    }
 
     let (status, extra_headers, body): (&str, String, &str) = match route(path) {
         Reply::Page(html) => (
