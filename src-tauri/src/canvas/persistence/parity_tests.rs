@@ -11,8 +11,9 @@ use tower::ServiceExt;
 
 use crate::canvas::static_server::{open_canvas, same_origin_base, OpenRequest};
 use crate::commands::{
-    canvas_close, canvas_dirty_changed, canvas_document_loaded, canvas_read_document,
-    canvas_set_visible, canvas_write_snapshot,
+    canvas_close, canvas_crashed, canvas_dirty_changed, canvas_disk_changed,
+    canvas_document_loaded, canvas_read_document, canvas_resolve_conflict, canvas_set_visible,
+    canvas_write_snapshot,
 };
 use crate::web::canvas_api::{canvas_router, CanvasState};
 use crate::web::capabilities::WriteFlags;
@@ -68,6 +69,7 @@ async fn open(project_id: &str, dir: &tempfile::TempDir) -> u64 {
             autosave_ms: Some(100),
             lease_grace_ms: None,
             max_mounted: Some(16),
+            crash_timeouts: None,
         },
     )
     .await
@@ -132,8 +134,10 @@ where
 fn blank_mount_seq(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            if map.contains_key("mountSeq") {
-                map.insert("mountSeq".into(), Value::Null);
+            for key in ["mountSeq", "previousMountSeq", "sinceMs"] {
+                if map.contains_key(key) {
+                    map.insert(key.into(), Value::Null);
+                }
             }
             map.values_mut().for_each(blank_mount_seq);
         }
@@ -172,6 +176,24 @@ async fn tauri_call(route: &'static str, body: Value) -> Value {
                 project_id,
                 mount_seq,
                 body["snapshot"].as_str().unwrap().to_string(),
+            )
+            .await,
+        ),
+        "disk-changed" => tauri(canvas_disk_changed(project_id, mount_seq).await),
+        "resolve-conflict" => tauri(
+            canvas_resolve_conflict(
+                project_id,
+                mount_seq,
+                serde_json::from_value(body["choice"].clone()).unwrap(),
+                body["snapshot"].as_str().map(str::to_string),
+            )
+            .await,
+        ),
+        "crashed" => tauri(
+            canvas_crashed(
+                project_id,
+                mount_seq,
+                body["reason"].as_str().unwrap().to_string(),
             )
             .await,
         ),
@@ -261,7 +283,8 @@ async fn the_persistence_routes_refuse_a_view_only_peer() {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({"projectId": "p", "mountSeq": 1, "dirty": true,
-                               "contentVersion": "1", "snapshot": "{}", "ack": null, "visible": true})
+                               "contentVersion": "1", "snapshot": "{}", "ack": null, "visible": true,
+                               "choice": "keepMine", "reason": "x"})
                         .to_string(),
                     ))
                     .unwrap(),
@@ -378,4 +401,99 @@ async fn desktop_and_web_report_visibility_alike() {
     assert_eq!(desktop[0], json!({"success": true, "data": null}));
     assert_eq!(desktop[1], desktop[0]);
     assert_eq!(desktop[2]["code"], "CANVAS_CLOSED");
+}
+
+/// AD-27 and AD-31 through either transport: Termul's own write is no change,
+/// an outside change reloads a clean editor and conflicts with a dirty one,
+/// "take disk" hands back the disk, and a crash remounts once.
+async fn run_disk_and_crash<F, Fut>(
+    project_id: &str,
+    mount_seq: u64,
+    dir: &tempfile::TempDir,
+    call: F,
+) -> Vec<Value>
+where
+    F: Fn(&'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let doc = dir.path().join("design.figcraft");
+    let id = |extra: Value| {
+        let mut body = json!({"projectId": project_id, "mountSeq": mount_seq});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    let snapshot = format!(
+        r#"{{"contentVersion":4,"bytes":"{}"}}"#,
+        BASE64.encode(b"figcraft bytes")
+    );
+    let mut replies = Vec::new();
+    let mut step = async |route: &'static str, body: Value| {
+        let mut reply = call(route, body).await;
+        blank_mount_seq(&mut reply);
+        replies.push(reply);
+    };
+    step("read-document", id(json!({}))).await;
+    step("document-loaded", id(json!({"ack": null}))).await;
+    step("write-snapshot", id(json!({"snapshot": snapshot}))).await;
+    step("disk-changed", id(json!({}))).await;
+    std::fs::write(&doc, b"theirs").unwrap();
+    step("disk-changed", id(json!({}))).await;
+    step(
+        "dirty-changed",
+        id(json!({"dirty": true, "contentVersion": "5"})),
+    )
+    .await;
+    std::fs::write(&doc, b"again").unwrap();
+    step("disk-changed", id(json!({}))).await;
+    step("resolve-conflict", id(json!({"choice": "takeDisk"}))).await;
+    step("crashed", id(json!({"reason": "wasm panic"}))).await;
+    step("crashed", id(json!({"reason": "wasm panic"}))).await;
+    replies
+}
+
+#[tokio::test]
+async fn desktop_and_web_handle_disk_changes_and_crashes_alike() {
+    let tauri_dir = tempfile::tempdir().unwrap();
+    let web_dir = tempfile::tempdir().unwrap();
+    let tauri_seq = open("parity-disk-tauri", &tauri_dir).await;
+    let web_seq = open("parity-disk-web", &web_dir).await;
+
+    let desktop = run_disk_and_crash("parity-disk-tauri", tauri_seq, &tauri_dir, tauri_call).await;
+    let web = run_disk_and_crash("parity-disk-web", web_seq, &web_dir, web_call).await;
+    tauri(canvas_close("parity-disk-tauri".into(), Some(true)).await);
+    web_call(
+        "close",
+        json!({"projectId": "parity-disk-web", "discard": true}),
+    )
+    .await;
+
+    assert_eq!(desktop, web);
+    let kinds: Vec<Value> = desktop[3..=6]
+        .iter()
+        .map(|reply| reply["data"]["kind"].clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            json!("unchanged"),
+            json!("reload"),
+            json!("saveDue"),
+            json!("conflict")
+        ]
+    );
+    assert_eq!(desktop[4]["data"]["bytes"], json!(BASE64.encode(b"theirs")));
+    assert_eq!(
+        desktop[6]["data"]["view"]["conflict"]["diskHash"],
+        json!(crate::web::fs_api::sha256_hex(b"again"))
+    );
+    assert_eq!(desktop[7]["data"]["reload"], json!(BASE64.encode(b"again")));
+    assert_eq!(desktop[7]["data"]["view"]["conflict"], Value::Null);
+    assert_eq!(desktop[8]["data"]["lost"]["count"], json!(1));
+    assert_eq!(
+        desktop[8]["data"]["reason"],
+        "the editor crashed: wasm panic"
+    );
+    assert_eq!(desktop[8], desktop[9], "one crash, one remount");
 }

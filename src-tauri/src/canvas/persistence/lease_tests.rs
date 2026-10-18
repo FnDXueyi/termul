@@ -75,6 +75,7 @@ fn request(tab: &str, doc: &Path) -> MountRequest {
         doc_path: doc.to_path_buf(),
         autosave: Duration::from_secs(60),
         lease_grace: GRACE,
+        crash_timeouts: super::DEFAULT_CRASH_TIMEOUTS,
     }
 }
 

@@ -354,21 +354,49 @@ impl CanvasPersistence {
                 "the canvas renderer is not reachable",
             ));
         }
-        let outcome = tokio::select! {
-            answered = waiting => answered.unwrap_or_else(|_| {
-                Err(refused(CanvasErrorCode::CanvasClosed, "the canvas closed before it answered"))
-            }),
-            _ = gone.changed() => Err(refused(
+        let gone_before_answer = || {
+            Err(refused(
                 CanvasErrorCode::CanvasClosed,
                 "the canvas closed before it answered",
-            )),
-            () = tokio::time::sleep(timeout) => Err(CanvasError::new(
-                CanvasErrorCode::CanvasTimeout,
-                format!("the canvas did not answer within {} ms", timeout.as_millis()),
-            )),
+            ))
+        };
+        let outcome = tokio::select! {
+            answered = waiting => match answered {
+                Ok(outcome) => {
+                    self.call_answered(project_id, mount_seq);
+                    outcome
+                }
+                Err(_) => gone_before_answer(),
+            },
+            _ = gone.changed() => gone_before_answer(),
+            () = tokio::time::sleep(timeout) => {
+                self.calls.waiting.lock().remove(&call_id);
+                self.call_timed_out(project_id, mount_seq);
+                Err(CanvasError::new(
+                    CanvasErrorCode::CanvasTimeout,
+                    format!("the canvas did not answer within {} ms", timeout.as_millis()),
+                ))
+            }
         };
         self.calls.waiting.lock().remove(&call_id);
         outcome
+    }
+
+    /// A host notice to the renderer on `holder`, on the call channel so it
+    /// reaches both transports alike. Nothing waits for the answer: a reply
+    /// to it finds no waiting call and is dropped.
+    pub(super) fn notify(
+        &self,
+        holder: &CanvasHolder,
+        project_id: &str,
+        mount_seq: u64,
+        method: &str,
+        params: String,
+    ) {
+        let call_id = self.calls.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = holder.deliver(CanvasCallFrame::new(
+            call_id, project_id, mount_seq, method, params,
+        ));
     }
 
     /// A renderer answered `call_id`. Only the connection the call went to

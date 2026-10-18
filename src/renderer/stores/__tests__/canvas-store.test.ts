@@ -14,7 +14,12 @@ const {
   documentLoaded,
   dirtyChanged,
   writeSnapshot,
+  diskChanged,
+  resolveConflict,
+  crashed,
   toastError,
+  toastWarning,
+  toastSuccess,
   logFrontendError
 } = vi.hoisted(() => ({
   open: vi.fn(),
@@ -24,16 +29,32 @@ const {
   documentLoaded: vi.fn(),
   dirtyChanged: vi.fn(),
   writeSnapshot: vi.fn(),
+  diskChanged: vi.fn(),
+  resolveConflict: vi.fn(),
+  crashed: vi.fn(),
   toastError: vi.fn(),
+  toastWarning: vi.fn(),
+  toastSuccess: vi.fn(),
   logFrontendError: vi.fn()
 }))
 
 vi.mock('@/lib/canvas-api', () => ({
-  canvasApi: { open, close, setVisible, readDocument, documentLoaded, dirtyChanged, writeSnapshot }
+  canvasApi: {
+    open,
+    close,
+    setVisible,
+    readDocument,
+    documentLoaded,
+    dirtyChanged,
+    writeSnapshot,
+    diskChanged,
+    resolveConflict,
+    crashed
+  }
 }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError }))
 vi.mock('sonner', () => ({
-  toast: { error: toastError, info: vi.fn(), success: vi.fn(), warning: vi.fn() }
+  toast: { error: toastError, info: vi.fn(), success: toastSuccess, warning: toastWarning }
 }))
 
 const THEME = {
@@ -92,6 +113,7 @@ function view(overrides: Partial<CanvasPersistenceView> = {}): CanvasPersistence
     contentVersion: '3',
     savedVersion: '3',
     saveError: null,
+    conflict: null,
     ...overrides
   }
 }
@@ -224,7 +246,8 @@ describe('open and close', () => {
     expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, {
       autosaveMs: 1500,
       leaseGraceMs: 5000,
-      maxMounted: 2
+      maxMounted: 2,
+      crashTimeouts: 3
     })
     expect(session()?.phase.kind).toBe('loading')
     expect(currentMount()).toEqual({ mountSeq: 41, info: INFO })
@@ -522,11 +545,61 @@ describe('mount and load', () => {
     expect(stale.posted).toHaveLength(0)
   })
 
-  it('an editor crash fails the mount', () => {
+  it('an editor crash remounts from the last save under the new mountSeq', async () => {
     const editor = mountEditor()
     editor.ready()
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    const remount = {
+      previousMountSeq: 41,
+      mountSeq: 43,
+      reason: 'the editor crashed: panic',
+      lost: { count: 4, sinceMs: 1_700_000_000_000 }
+    }
+    crashed.mockResolvedValueOnce(ok(remount))
     editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+
+    expect(crashed).toHaveBeenCalledWith(PROJECT, 41, 'panic')
+    expect(session()?.phase).toEqual({
+      kind: 'loading',
+      mount: { mountSeq: 43, info: { ...INFO, mountSeq: 43 } }
+    })
+    expect(session()?.crash).toEqual(remount)
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+
+  it('a remount that crashes again before it loaded is not retried', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    crashed.mockResolvedValueOnce(
+      ok({ previousMountSeq: 41, mountSeq: 43, reason: 'the editor crashed: panic', lost: null })
+    )
+    editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+    const again = mountEditor()
+    again.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 43 })
+    await flush()
+
+    expect(crashed).toHaveBeenCalledTimes(1)
     expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'EDITOR_CRASHED' })
+  })
+
+  it('a crash the host cannot remount fails the mount', async () => {
+    const editor = mountEditor()
+    editor.ready()
+    crashed.mockResolvedValueOnce({ success: false, error: 'gone', code: 'CANVAS_CLOSED' })
+    editor.send({ method: 'event.crashed', params: '{"reason":"panic"}', mountSeq: 41 })
+    await flush()
+    expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'EDITOR_CRASHED' })
+  })
+
+  it('a remount notice for a mount this window does not hold changes nothing', () => {
+    mountEditor()
+    const applied = useCanvasStore
+      .getState()
+      .applyRemount(PROJECT, { previousMountSeq: 7, mountSeq: 8, reason: 'x', lost: null })
+    expect(applied).toBe(false)
+    expect(currentMount().mountSeq).toBe(41)
   })
 })
 
@@ -665,6 +738,145 @@ describe('persistence', () => {
     await expect(saving).resolves.toBe(false)
     expect(toastError).toHaveBeenCalled()
     expect(session()?.saveError).toContain('ENGINE_ERROR')
+  })
+})
+
+describe('disk changes (AD-27)', () => {
+  const CONFLICT = { diskHash: 'ab'.repeat(32), version: '5' }
+
+  beforeEach(async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+  })
+
+  async function conflicted() {
+    const editor = await mountReady()
+    diskChanged.mockResolvedValueOnce(
+      ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+    )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+    return editor
+  }
+
+  it('a change under a clean editor reloads it with the disk bytes', async () => {
+    const editor = await mountReady()
+    diskChanged.mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '9', savedVersion: '9' })))
+    const checking = useCanvasStore.getState().checkDisk(PROJECT)
+    await flush()
+
+    expect(diskChanged).toHaveBeenCalledWith(PROJECT, 41)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"bmV3"}')
+    editor.reply('host.openDocument', '{"contentVersion":9}')
+    await checking
+
+    expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":9}')
+    expect(session()?.savedVersion).toBe('9')
+    expect(toastWarning).not.toHaveBeenCalled()
+  })
+
+  it('a change under unsaved edits raises the conflict once', async () => {
+    await conflicted()
+    expect(session()?.conflict).toEqual(CONFLICT)
+    diskChanged.mockResolvedValueOnce(
+      ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+    )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+    expect(toastWarning).toHaveBeenCalledTimes(1)
+  })
+
+  it('a save the host refused for a conflict is not a save error', async () => {
+    const editor = await mountReady()
+    writeSnapshot.mockResolvedValueOnce(
+      ok({ view: view({ dirty: true, conflict: CONFLICT }), markSaved: null })
+    )
+    const saving = useCanvasStore.getState().saveCanvas(PROJECT)
+    await flush()
+    editor.reply('host.snapshot', '{"contentVersion":4,"bytes":"Zm9v"}')
+    await expect(saving).resolves.toBe(false)
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastError).not.toHaveBeenCalled()
+  })
+
+  it('keep mine clears the conflict, then saves the editor over the disk', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(
+      ok({ view: view({ dirty: true }), reload: null, copyPath: null })
+    )
+    writeSnapshot.mockResolvedValueOnce(ok({ view: view({ savedVersion: '5' }), markSaved: '5' }))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'keepMine')
+    await flush()
+    expect(resolveConflict).toHaveBeenCalledWith(PROJECT, 41, 'keepMine', undefined)
+    expect(session()?.conflict).toBeNull()
+    editor.reply('host.snapshot', '{"contentVersion":5,"bytes":"bWluZQ=="}')
+    await flush()
+    editor.reply('host.markSaved', '{"dirty":false,"contentVersion":5}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(writeSnapshot).toHaveBeenCalledWith(
+      PROJECT,
+      41,
+      '{"contentVersion":5,"bytes":"bWluZQ=="}'
+    )
+    expect(session()?.resolving).toBe(false)
+  })
+
+  it('take disk reloads the editor from the bytes the host read', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(ok({ view: view(), reload: 'ZGlzaw==', copyPath: null }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '6', savedVersion: '6' })))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'takeDisk')
+    await flush()
+    editor.reply('host.openDocument', '{"contentVersion":6}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"ZGlzaw=="}')
+    expect(session()).toMatchObject({ conflict: null, savedVersion: '6' })
+    expect(writeSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('save a copy snapshots the editor for the host, then reloads the disk', async () => {
+    const editor = await conflicted()
+    resolveConflict.mockResolvedValueOnce(
+      ok({
+        view: view(),
+        reload: 'ZGlzaw==',
+        copyPath: 'C:/proj/design.conflict-20261018-101500.figcraft'
+      })
+    )
+    documentLoaded.mockResolvedValueOnce(ok(view()))
+    const resolving = useCanvasStore.getState().resolveConflict(PROJECT, 'saveCopy')
+    await flush()
+    editor.reply('host.snapshot', '{"contentVersion":5,"bytes":"bWluZQ=="}')
+    await flush()
+    expect(resolveConflict).toHaveBeenCalledWith(
+      PROJECT,
+      41,
+      'saveCopy',
+      '{"contentVersion":5,"bytes":"bWluZQ=="}'
+    )
+    editor.reply('host.openDocument', '{"contentVersion":3}')
+
+    await expect(resolving).resolves.toBe(true)
+    expect(toastSuccess).toHaveBeenCalledWith(
+      'Saved your version as design.conflict-20261018-101500.figcraft'
+    )
+  })
+
+  it('a refused resolution keeps the conflict and says why', async () => {
+    await conflicted()
+    resolveConflict.mockResolvedValueOnce({
+      success: false,
+      error: 'the canvas document was deleted',
+      code: 'DOCUMENT_DELETED'
+    })
+    await expect(useCanvasStore.getState().resolveConflict(PROJECT, 'takeDisk')).resolves.toBe(
+      false
+    )
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastError).toHaveBeenCalledWith(
+      'Could not resolve the canvas conflict: the canvas document was deleted'
+    )
   })
 })
 

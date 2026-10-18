@@ -8,11 +8,15 @@
 import type {
   CanvasApi,
   CanvasCloseOutcome,
+  CanvasConflictChoice,
   CanvasDirtyOutcome,
+  CanvasDiskOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
   CanvasOpenOptions,
   CanvasPersistenceView,
+  CanvasRemount,
+  CanvasResolveOutcome,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
 import type { IpcResult } from '@shared/types/ipc.types'
@@ -28,7 +32,10 @@ const IPC_COMMANDS = {
   READ_DOCUMENT: 'canvas_read_document',
   DOCUMENT_LOADED: 'canvas_document_loaded',
   DIRTY_CHANGED: 'canvas_dirty_changed',
-  WRITE_SNAPSHOT: 'canvas_write_snapshot'
+  WRITE_SNAPSHOT: 'canvas_write_snapshot',
+  DISK_CHANGED: 'canvas_disk_changed',
+  RESOLVE_CONFLICT: 'canvas_resolve_conflict',
+  CRASHED: 'canvas_crashed'
 } as const
 
 function notTauri(method: string): IpcResult<never> {
@@ -59,7 +66,8 @@ export function createTauriCanvasApi(): CanvasApi {
         clientInstanceId: getClientInstanceId(),
         autosaveMs: options.autosaveMs,
         leaseGraceMs: options.leaseGraceMs,
-        maxMounted: options.maxMounted
+        maxMounted: options.maxMounted,
+        crashTimeouts: options.crashTimeouts
       })
     },
 
@@ -103,6 +111,32 @@ export function createTauriCanvasApi(): CanvasApi {
       snapshot: string
     ): Promise<IpcResult<CanvasWriteOutcome>> {
       return invokeCanvas(IPC_COMMANDS.WRITE_SNAPSHOT, { projectId, mountSeq, snapshot })
+    },
+
+    diskChanged(projectId: string, mountSeq: number): Promise<IpcResult<CanvasDiskOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.DISK_CHANGED, { projectId, mountSeq })
+    },
+
+    resolveConflict(
+      projectId: string,
+      mountSeq: number,
+      choice: CanvasConflictChoice,
+      snapshot?: string
+    ): Promise<IpcResult<CanvasResolveOutcome>> {
+      return invokeCanvas(IPC_COMMANDS.RESOLVE_CONFLICT, {
+        projectId,
+        mountSeq,
+        choice,
+        snapshot: snapshot ?? null
+      })
+    },
+
+    crashed(
+      projectId: string,
+      mountSeq: number,
+      reason: string
+    ): Promise<IpcResult<CanvasRemount>> {
+      return invokeCanvas(IPC_COMMANDS.CRASHED, { projectId, mountSeq, reason })
     }
   }
 }

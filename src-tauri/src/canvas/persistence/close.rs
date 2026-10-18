@@ -180,6 +180,11 @@ impl CanvasPersistence {
                 ))
             })?;
         let written = wire::write_snapshot(self, project_id, mount_seq, &snapshot).await?;
+        if written.view.conflict.is_some() {
+            return Err(save_failed(
+                "the canvas document changed on disk; choose which version to keep first",
+            ));
+        }
         if let Some(error) = written.view.save_error {
             return Err(save_failed(error));
         }

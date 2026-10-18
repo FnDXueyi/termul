@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use super::disk::{ConflictChoice, Resolution, ResolveOutcome};
 use super::{CanvasPersistence, DirtyOutcome, PersistenceView, WriteOutcome};
 use crate::canvas::CanvasError;
 
@@ -58,18 +59,20 @@ pub async fn read_document(
     let read = tokio::task::spawn_blocking(move || std::fs::read(path))
         .await
         .unwrap_or_else(|join| Err(std::io::Error::other(join.to_string())));
-    match read {
-        Ok(bytes) => Ok(DocumentBytes {
-            bytes: Some(BASE64.encode(bytes)),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(DocumentBytes { bytes: None })
+    let bytes = match read {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(CanvasError::new(
+                CODE_READ_FAILED,
+                format!("could not read the canvas document: {error}"),
+            ))
         }
-        Err(error) => Err(CanvasError::new(
-            CODE_READ_FAILED,
-            format!("could not read the canvas document: {error}"),
-        )),
-    }
+    };
+    mounts.set_disk_baseline(project_id, mount_seq, bytes.as_deref())?;
+    Ok(DocumentBytes {
+        bytes: bytes.map(|bytes| BASE64.encode(bytes)),
+    })
 }
 
 /// `ack` is the `host.openDocument` result text, or `None` for a new
@@ -119,4 +122,29 @@ pub async fn dirty_changed(
     mounts
         .dirty_changed(project_id, mount_seq, dirty, content_version)
         .await
+}
+
+/// `snapshot` is the `host.snapshot` result text, required for `saveCopy`.
+pub async fn resolve_conflict(
+    mounts: &CanvasPersistence,
+    project_id: &str,
+    mount_seq: u64,
+    choice: ConflictChoice,
+    snapshot: Option<&str>,
+) -> Result<ResolveOutcome, CanvasError> {
+    let resolution = match choice {
+        ConflictChoice::KeepMine => Resolution::KeepMine,
+        ConflictChoice::TakeDisk => Resolution::TakeDisk,
+        ConflictChoice::SaveCopy => {
+            let snapshot = snapshot.ok_or_else(|| invalid("saveCopy", "no snapshot"))?;
+            let reply: SnapshotReply = serde_json::from_str(snapshot)
+                .map_err(|error| invalid("host.snapshot result", error))?;
+            Resolution::SaveCopy(
+                BASE64
+                    .decode(reply.bytes.as_bytes())
+                    .map_err(|error| invalid("host.snapshot bytes", error))?,
+            )
+        }
+    };
+    mounts.resolve(project_id, mount_seq, resolution).await
 }

@@ -97,6 +97,9 @@ export interface AppSettings {
    * another unloads the least recently active one after saving it (spine
    * AD-26). Sent with each canvas open; the host clamps it to 1..16. */
   canvasMaxMounted: number
+  /** `canvas.crash_timeouts`: consecutive timed-out canvas calls that mark the
+   * editor crashed and remount it (spine AD-31). Sent with each canvas open. */
+  canvasCrashTimeouts: number
   /** ACP per-turn idle timeout in seconds, or null = use the env var / Rust
    * default (unlimited by default). Set via App Preferences; pushed to the
    * Rust core. */
@@ -287,6 +290,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   canvasAutosaveMs: 1500,
   canvasLeaseGraceMs: 5000,
   canvasMaxMounted: 2,
+  canvasCrashTimeouts: 3,
   acpTurnIdleTimeoutSecs: null,
   acpSessionNewTimeoutSecs: null,
   acpSessionReopenTimeoutSecs: null,

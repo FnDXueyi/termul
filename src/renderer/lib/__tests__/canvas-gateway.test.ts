@@ -140,6 +140,39 @@ describe('startCanvasGateway', () => {
     ])
   })
 
+  it('answers host.remounted by moving the store to the new mount, which it then reports', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'ready', mount: { mountSeq: 4, info: INFO } })
+    sent.length = 0
+    const remount = {
+      previousMountSeq: 4,
+      mountSeq: 6,
+      reason: '3 consecutive calls timed out',
+      lost: null
+    }
+    canvas.handleFrame({
+      type: 'canvas_call',
+      callId: 9,
+      projectId: 'proj-1',
+      mountSeq: 4,
+      method: 'host.remounted',
+      params: JSON.stringify(remount)
+    })
+    await vi.waitFor(() => expect(sent.some(([type]) => type === 'canvas_reply')).toBe(true))
+
+    expect(useCanvasStore.getState().sessions['proj-1']?.phase).toEqual({
+      kind: 'loading',
+      mount: { mountSeq: 6, info: { ...INFO, mountSeq: 6 } }
+    })
+    expect(useCanvasStore.getState().sessions['proj-1']?.crash).toEqual(remount)
+    expect(sent).toContainEqual(['canvas_mount', { projectId: 'proj-1', mountSeq: 6 }])
+    expect(sent).toContainEqual([
+      'canvas_reply',
+      { callId: 9, mountSeq: 4, ok: true, result: '{}' }
+    ])
+  })
+
   function hostSaveCall(canvas: CanvasGatewayClient, callId: number, mountSeq: number): void {
     canvas.handleFrame({
       type: 'canvas_call',

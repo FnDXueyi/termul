@@ -32,6 +32,7 @@ fn tab(client_instance_id: &str) -> OpenRequest {
         autosave_ms: None,
         lease_grace_ms: None,
         max_mounted: Some(16),
+        crash_timeouts: None,
     }
 }
 

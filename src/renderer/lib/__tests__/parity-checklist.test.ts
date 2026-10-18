@@ -1483,7 +1483,13 @@ describe('Parity Checklist Automation', () => {
       documentLoaded: { command: 'canvas_document_loaded', route: '/canvas/document-loaded' },
       dirtyChanged: { command: 'canvas_dirty_changed', route: '/canvas/dirty-changed' },
       setVisible: { command: 'canvas_set_visible', route: '/canvas/set-visible' },
-      writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' }
+      writeSnapshot: { command: 'canvas_write_snapshot', route: '/canvas/write-snapshot' },
+      diskChanged: { command: 'canvas_disk_changed', route: '/canvas/disk-changed' },
+      resolveConflict: {
+        command: 'canvas_resolve_conflict',
+        route: '/canvas/resolve-conflict'
+      },
+      crashed: { command: 'canvas_crashed', route: '/canvas/crashed' }
     } as const
 
     it('the adapters exist and export the factory and the singleton', () => {
