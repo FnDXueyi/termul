@@ -36,6 +36,11 @@ function log(target, types) {
   });
 }
 log(document.getElementById('btn'), ['click']);
+['pointerdown', 'mousedown', 'mouseup'].forEach(function (type) {
+  window.addEventListener(type, function (e) {
+    report({ ev: type, id: (e.target && e.target.id) || '', trusted: e.isTrusted, x: e.clientX, y: e.clientY });
+  }, true);
+});
 log(document.getElementById('field'), ['focus', 'keydown', 'beforeinput', 'input']);
 log(document.getElementById('hov'), ['mouseover']);
 window.addEventListener('wheel', function (e) {

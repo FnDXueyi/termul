@@ -63,7 +63,8 @@ impl Ctx<'_> {
                 return Ok(report);
             }
             if Instant::now() > deadline {
-                return Err(mismatch(format!("the page never reported {what}")));
+                let seen: Vec<Value> = self.since(mark).into_iter().filter(|r| r["src"] == "agent").collect();
+                return Err(mismatch(format!("the page never reported {what}; it reported {seen:?}")));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
