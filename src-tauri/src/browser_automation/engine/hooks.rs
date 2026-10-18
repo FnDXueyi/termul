@@ -15,13 +15,48 @@ pub fn install(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuild
     let nav = events.clone();
     let load = events.clone();
     let title = events.clone();
-    builder
+    let builder = builder
         .on_navigation(move |url| nav.nav_starting(url))
         .on_page_load(move |_, payload| match payload.event() {
             PageLoadEvent::Started => load.committed(payload.url().as_str()),
             PageLoadEvent::Finished => load.publish(TabEvent::LoadFinished),
         })
-        .on_document_title_changed(move |_, t| title.publish(TabEvent::TitleChanged { title: t }))
+        .on_document_title_changed(move |_, t| title.publish(TabEvent::TitleChanged { title: t }));
+    install_downloads(builder, events)
+}
+
+/// WebView2 and WKWebView raise downloads per webview through tauri's hook.
+#[cfg(not(target_os = "linux"))]
+fn install_downloads(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuilder<Wry> {
+    use tauri::webview::DownloadEvent;
+
+    if !events.holds_downloads() {
+        return builder;
+    }
+    let downloads = events.clone();
+    builder.on_download(move |_, event| match event {
+        DownloadEvent::Requested { url, destination } => {
+            match downloads.download_starting(&url, destination) {
+                Some(path) => {
+                    *destination = path;
+                    true
+                }
+                None => false,
+            }
+        }
+        DownloadEvent::Finished { url, success, .. } => {
+            downloads.download_finished(&url, success);
+            true
+        }
+        _ => true,
+    })
+}
+
+/// WebKitGTK raises downloads on the web context every tab shares, so the
+/// adapter attaches its own handler per webview (`webkitgtk::events`).
+#[cfg(target_os = "linux")]
+fn install_downloads(builder: WebviewBuilder<Wry>, _events: &TabEvents) -> WebviewBuilder<Wry> {
+    builder
 }
 
 /// Why a built webview is refused.

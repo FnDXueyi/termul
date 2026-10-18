@@ -14,6 +14,7 @@ pub mod assets;
 #[cfg(any(test, target_os = "windows"))]
 pub mod cdp;
 pub mod events;
+pub mod files;
 pub mod hooks;
 pub mod profile;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
@@ -253,6 +254,16 @@ pub trait BrowserEngine: Send + Sync {
         -> EngineFuture<'a, ()>;
     /// PNG bytes of the visible viewport (`screenshot`).
     fn screenshot<'a>(&'a self, tab: &'a str) -> EngineFuture<'a, Vec<u8>>;
+    /// Set `files` (host-staged paths) on the file input at `path`
+    /// (`file_chooser`).
+    fn set_input_files<'a>(
+        &'a self,
+        _tab: &'a str,
+        _path: &'a str,
+        _files: &'a [std::path::PathBuf],
+    ) -> EngineFuture<'a, ()> {
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported, true)) })
+    }
 }
 
 /// The engine adapter for this desktop OS.

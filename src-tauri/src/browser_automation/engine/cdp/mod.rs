@@ -25,6 +25,7 @@ pub enum CdpMethod {
     RuntimeCallFunctionOn,
     InputDispatchMouseEvent,
     PageCaptureScreenshot,
+    DomSetFileInputFiles,
 }
 
 impl CdpMethod {
@@ -35,6 +36,7 @@ impl CdpMethod {
             CdpMethod::RuntimeCallFunctionOn => "Runtime.callFunctionOn",
             CdpMethod::InputDispatchMouseEvent => "Input.dispatchMouseEvent",
             CdpMethod::PageCaptureScreenshot => "Page.captureScreenshot",
+            CdpMethod::DomSetFileInputFiles => "DOM.setFileInputFiles",
         }
     }
 }
@@ -103,15 +105,11 @@ pub fn world_context_id(world: &Value) -> Option<i64> {
     world.get("executionContextId").and_then(Value::as_i64)
 }
 
-/// Run `script` in the main frame's isolated world. The world is looked
-/// up per call: each new document gets a new context, and asking for the
-/// named world again returns the current document's one. A failure
-/// before the call itself never ran the helper, so it stays retryable.
-pub async fn evaluate(
-    transport: &dyn CdpTransport,
-    tab: &str,
-    script: &Script,
-) -> Result<Value, EngineError> {
+/// The main frame's isolated world context. The world is looked up per
+/// call: each new document gets a new context, and asking for the named
+/// world again returns the current document's one. Failures here never
+/// ran a helper, so they stay retryable.
+async fn world_context(transport: &dyn CdpTransport, tab: &str) -> Result<i64, EngineError> {
     let not_run = |e: EngineError| EngineError::new(e.kind, true);
     let malformed = EngineError::new(EngineErrorKind::Malformed, true);
     let tree = transport
@@ -127,11 +125,62 @@ pub async fn evaluate(
         )
         .await
         .map_err(not_run)?;
-    let context = world_context_id(&world).ok_or(malformed)?;
+    world_context_id(&world).ok_or(malformed)
+}
+
+/// Run `script` in the main frame's isolated world.
+pub async fn evaluate(
+    transport: &dyn CdpTransport,
+    tab: &str,
+    script: &Script,
+) -> Result<Value, EngineError> {
+    let context = world_context(transport, tab).await?;
     let out = transport
         .call(tab, CdpMethod::RuntimeCallFunctionOn, call_params(script, context))
         .await?;
     parse_evaluate_result(&out)
+}
+
+/// Set `files` on the file input at `path` through `DOM.setFileInputFiles`:
+/// the isolated-world helper hands back the element itself, by reference.
+pub async fn set_input_files(
+    transport: &dyn CdpTransport,
+    tab: &str,
+    path: &str,
+    files: &[std::path::PathBuf],
+) -> Result<(), EngineError> {
+    let context = world_context(transport, tab).await?;
+    let mut params = call_params(&super::assets::file_input(path), context);
+    params["returnByValue"] = Value::Bool(false);
+    let out = transport
+        .call(tab, CdpMethod::RuntimeCallFunctionOn, params)
+        .await?;
+    let element = file_input_object(&out)?;
+    let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
+    transport
+        .call(
+            tab,
+            CdpMethod::DomSetFileInputFiles,
+            json!({ "files": files, "objectId": element }),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The element handle a by-reference helper call returned. Anything but a
+/// DOM node means the path named no file input.
+pub fn file_input_object(out: &Value) -> Result<String, EngineError> {
+    if out.get("exceptionDetails").is_some_and(Value::is_object) {
+        return Err(EngineError::new(EngineErrorKind::PageException, false));
+    }
+    let result = out.get("result");
+    match (
+        result.and_then(|r| r.get("subtype")).and_then(Value::as_str),
+        result.and_then(|r| r.get("objectId")).and_then(Value::as_str),
+    ) {
+        (Some("node"), Some(id)) => Ok(id.to_string()),
+        _ => Err(EngineError::new(EngineErrorKind::PageException, false)),
+    }
 }
 
 /// Trusted left click at `at` via `Input.dispatchMouseEvent`.

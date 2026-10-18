@@ -185,6 +185,10 @@ pub(super) struct FakeEngine {
     fail_trusted_click: bool,
     /// The buttons the snapshot helper reports, by name.
     snapshot_buttons: Vec<&'static str>,
+    /// What the sensitivity helper reports.
+    sensitivity: Mutex<Value>,
+    /// Every `set_input_files` call: tab, input path, staged files.
+    files_set: Mutex<Vec<(String, String, Vec<PathBuf>)>>,
 }
 
 impl FakeEngine {
@@ -201,6 +205,8 @@ impl FakeEngine {
             clicks: Mutex::new(Vec::new()),
             fail_trusted_click: false,
             snapshot_buttons: vec!["Sign in"],
+            sensitivity: Mutex::new(json!({})),
+            files_set: Mutex::new(Vec::new()),
         }
     }
 }
@@ -236,6 +242,7 @@ impl BrowserEngine for FakeEngine {
             }
             "resolve" => json!({ "rect": { "cx": 12.0, "cy": 34.0 }, "role": "button", "name": "Sign in" }),
             "contains_text" => json!(true),
+            "sensitivity" => self.sensitivity.lock().clone(),
             _ => json!({ "ok": true }),
         };
         Box::pin(async move { Ok(out) })
@@ -253,6 +260,12 @@ impl BrowserEngine for FakeEngine {
     }
     fn screenshot<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<u8>> {
         Box::pin(async { Ok(vec![0x89, b'P', b'N', b'G']) })
+    }
+    fn set_input_files<'a>(&'a self, tab: &'a str, path: &'a str, files: &'a [PathBuf]) -> EngineFuture<'a, ()> {
+        self.files_set
+            .lock()
+            .push((tab.to_string(), path.to_string(), files.to_vec()));
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -321,6 +334,7 @@ fn harness_full(engine: FakeEngine, fail_create: bool, permissions: Arc<dyn Perm
         permissions,
         policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
         project_of: Arc::new(|_| "p1".to_string()),
+        root_of: Arc::new(|_| None),
     };
     harness_parts(engine, fail_create, services, Support::Trusted)
 }
@@ -363,6 +377,7 @@ pub(super) fn webview2_like() -> CapabilityTable {
         .with(CapabilityId::IsolatedEval, Support::Trusted)
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
+        .with(CapabilityId::FileChooser, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)
@@ -372,6 +387,7 @@ fn webkit_like() -> CapabilityTable {
     webview2_like()
         .with(CapabilityId::PointerClick, Support::Synthetic)
         .with(CapabilityId::Screenshot, Support::Unavailable("no screenshots here"))
+        .with(CapabilityId::FileChooser, Support::Unavailable("no file inputs here"))
 }
 
 impl Harness {
@@ -433,7 +449,18 @@ fn assert_closed_shape(reply: &Value) {
 
 #[tokio::test]
 async fn every_verb_replies_with_the_closed_shape_and_fidelity_exactly_when_it_mutates() {
-    let h = harness_with(FakeEngine::new(webview2_like()));
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("report.pdf"), b"%PDF fake").unwrap();
+    let root = project.path().to_path_buf();
+    let engine = FakeEngine::new(webview2_like());
+    *engine.sensitivity.lock() = json!({ "isFileInput": true });
+    let services = HostServices {
+        permissions: Arc::new(AllowSession),
+        policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
+        project_of: Arc::new(|_| "p1".to_string()),
+        root_of: Arc::new(move |_| Some(root.clone())),
+    };
+    let h = harness_parts(engine, false, services, Support::Trusted);
     let opened = h.call("navigate", json!({ "url": "https://example.com/start" })).await;
     let tab_id = opened["tab"]["id"].as_str().expect("navigate reports its tab").to_string();
 
@@ -447,6 +474,7 @@ async fn every_verb_replies_with_the_closed_shape_and_fidelity_exactly_when_it_m
         ("press", json!({ "key": "Enter" }), Some("synthetic")),
         ("scroll", json!({ "dy": 100 }), Some("synthetic")),
         ("hover", json!({ "ref": "@e1" }), Some("synthetic")),
+        ("upload", json!({ "ref": "@e1", "path": "report.pdf" }), Some("trusted")),
         ("wait", json!({ "ms": 1 }), None),
         ("wait", json!({ "text": "Sign in" }), None),
         ("back", json!({}), Some("trusted")),
@@ -881,3 +909,6 @@ async fn a_session_in_teardown_admits_no_call() {
     assert_eq!(code_and_reason(&reply), (Some("tab_not_found"), Some("session_ended")));
     assert!(h.pane.tabs.lock().is_empty());
 }
+
+#[path = "sensitive_host_tests.rs"]
+mod sensitive;

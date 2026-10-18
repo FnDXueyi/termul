@@ -4,7 +4,7 @@ use super::*;
 use crate::browser_automation::engine::{CapabilityTable, EngineTraits};
 use crate::browser_automation::{ERR_INVALID_PARAMS, ERR_CAPABILITY};
 
-const ALL_VERBS: [&str; 16] = [
+const ALL_VERBS: [&str; 17] = [
     "navigate",
     "snapshot",
     "screenshot",
@@ -14,6 +14,7 @@ const ALL_VERBS: [&str; 16] = [
     "press",
     "scroll",
     "hover",
+    "upload",
     "wait",
     "new_tab",
     "list_tabs",
@@ -57,6 +58,7 @@ fn expected_args_text_comes_from_the_registry() {
         ("press", "optional 'key', 'ref', 'tabId'"),
         ("scroll", "optional 'dy', 'ref', 'tabId'"),
         ("hover", "'ref' (optional 'tabId')"),
+        ("upload", "'ref' and 'path' (optional 'tabId')"),
         ("wait", "'ms' or 'text' (optional 'tabId')"),
         ("snapshot", "optional 'tabId'"),
         ("back", "optional 'tabId'"),
@@ -147,7 +149,7 @@ fn admit_refuses_unknown_and_withdrawn_verbs_before_any_side_effect() {
     assert_eq!(err.code, ERR_INVALID_PARAMS);
     assert_eq!(
         err.message,
-        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, wait, new_tab, list_tabs, close_tab, back, forward, reload"
+        "unknown action 'teleport'; valid actions: navigate, snapshot, click, fill, type, press, scroll, hover, upload, wait, new_tab, list_tabs, close_tab, back, forward, reload"
     );
 
     let err = admit("screenshot", &mut Value::Null, &facts).unwrap_err();
@@ -190,6 +192,7 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         ("key", "string"),
         ("ms", "integer"),
         ("dy", "number"),
+        ("path", "string"),
     ] {
         assert_eq!(props[key]["type"], ty, "flat {key}");
         assert_eq!(nested["properties"][key]["type"], ty, "nested {key}");
@@ -201,6 +204,7 @@ fn schema_advertises_every_available_verb_in_flat_and_nested_form() {
         "- fill {ref, value, tabId?}:",
         "- wait {ms?, text?, tabId?}:",
         "- list_tabs {}:",
+        "- upload {ref, path, tabId?}:",
     ] {
         assert!(schema.description.contains(line), "missing {line:?}: {}", schema.description);
     }

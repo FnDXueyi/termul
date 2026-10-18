@@ -35,6 +35,7 @@ pub enum Verb {
     Back,
     Forward,
     Reload,
+    Upload,
 }
 
 /// Argument keys. One JSON type per key across every verb.
@@ -48,6 +49,7 @@ pub enum ArgKey {
     Key,
     Ms,
     Dy,
+    Path,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +60,7 @@ enum ArgType {
 }
 
 impl ArgKey {
-    const ALL: [ArgKey; 8] = [
+    const ALL: [ArgKey; 9] = [
         ArgKey::Url,
         ArgKey::TabId,
         ArgKey::Ref,
@@ -67,6 +69,7 @@ impl ArgKey {
         ArgKey::Key,
         ArgKey::Ms,
         ArgKey::Dy,
+        ArgKey::Path,
     ];
 
     pub fn name(self) -> &'static str {
@@ -79,6 +82,7 @@ impl ArgKey {
             ArgKey::Key => "key",
             ArgKey::Ms => "ms",
             ArgKey::Dy => "dy",
+            ArgKey::Path => "path",
         }
     }
 
@@ -100,6 +104,7 @@ impl ArgKey {
             ArgKey::Key => "Key name to press, e.g. Enter (the default).",
             ArgKey::Ms => "Milliseconds to wait (max 30000).",
             ArgKey::Dy => "Pixels to scroll vertically (default 600).",
+            ArgKey::Path => "File to upload, relative to the project folder.",
         }
     }
 }
@@ -179,7 +184,7 @@ pub struct ActionSpec {
 
 use CapabilityId as Cap;
 
-pub static REGISTRY: [ActionSpec; 16] = [
+pub static REGISTRY: [ActionSpec; 17] = [
     ActionSpec {
         verb: Verb::Navigate,
         name: "navigate",
@@ -269,6 +274,16 @@ pub static REGISTRY: [ActionSpec; 16] = [
         mutating: true,
         budget: budgets::ACTION_EVAL,
         summary: "move the pointer over the element.",
+    },
+    ActionSpec {
+        verb: Verb::Upload,
+        name: "upload",
+        params: &[req(ArgKey::Ref), req(ArgKey::Path), opt(ArgKey::TabId)],
+        one_of: &[],
+        requires: &[Cap::IsolatedEval, Cap::FileChooser],
+        mutating: true,
+        budget: budgets::ACTION_EVAL,
+        summary: "set a project file on a file input. The user confirms every upload; secrets (.env, keys, credentials) and files outside the project are refused.",
     },
     ActionSpec {
         verb: Verb::Wait,
@@ -508,7 +523,7 @@ fn available(facts: &EngineFacts) -> impl Iterator<Item = &'static ActionSpec> +
 
 /// Failure codes an agent can match on, with what to do about each.
 const FAILURE_CODES: [(&str, &str); 7] = [
-    (ERR_CONFIRMATION, "the user has not allowed browser access (refused, or no answer in time); the first call in a session may wait for their answer, so ask them instead of retrying blindly"),
+    (ERR_CONFIRMATION, "the user has not allowed browser access or a sensitive action such as a password submit, upload or download (refused, or no answer in time); the first call in a session may wait for their answer, and so may a sensitive action, so ask them instead of retrying blindly"),
     (ERR_CAPABILITY, "this host cannot do it; use another action"),
     (ERR_TAB_NOT_FOUND, "no such agent tab; use list_tabs or new_tab"),
     (ERR_STALE_REF, "the page changed; take a new snapshot"),

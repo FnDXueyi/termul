@@ -97,6 +97,7 @@ impl Engine {
                 permissions: Arc::new(Unattended),
                 policy,
                 project_of: Arc::new(|_| "conformance".to_string()),
+                root_of: Arc::new(|_| None),
             },
         ));
         tauri::async_runtime::spawn(renderer_stand_in(rx));

@@ -10,15 +10,16 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use tauri::Url;
 
-use super::authz::{DenyReason, HopVerdict, PromptKind, SessionGrants};
+use super::authz::{DenyReason, HopVerdict, OriginClass, PromptKind, SessionGrants};
 use super::dispatch::Verb;
 use super::ports::{
-    CanonicalOrigin, ConsentOption, PermissionRequest, PolicyRefusal, PolicyStore,
+    ActionClass, CanonicalOrigin, ConsentOption, PermissionRequest, PolicyRefusal, PolicyStore,
     ProjectPolicyOp, TabProfile, TicketId, TicketOutcome, TicketRequest,
 };
+use super::sensitivity::{Sensitive, Taint};
 use super::stop::{stopped_error, StopLatch, StopToken};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION};
-use crate::acp::browser_policy::OriginPattern;
+use crate::acp::browser_policy::{OriginPattern, ProjectPreapproval};
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::BrowserCall;
 
@@ -56,8 +57,59 @@ fn outcome_label(outcome: &TicketOutcome) -> &'static str {
     }
 }
 
+/// One sensitive action awaiting confirmation.
+pub struct SensitiveRequest<'a> {
+    pub session_id: &'a str,
+    pub project_id: &'a str,
+    pub element: Option<&'a str>,
+    pub profile: TabProfile,
+    pub deadline: Deadline,
+}
+
+/// Which pre-approvals a tab's identity honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreapprovalScope {
+    Project,
+    App,
+}
+
+impl PreapprovalScope {
+    fn of(profile: TabProfile) -> Self {
+        match profile {
+            TabProfile::Ephemeral => Self::Project,
+            // The global profile's logins are seen by every project.
+            TabProfile::Global => Self::App,
+        }
+    }
+}
+
+fn class_phrase(class: ActionClass) -> &'static str {
+    match class {
+        ActionClass::Navigate => "open",
+        ActionClass::LocalNetwork => "open the local network address",
+        ActionClass::PasswordSubmit => "submit a password on",
+        ActionClass::PaymentSubmit => "submit payment details on",
+        ActionClass::Upload => "upload a file to",
+        ActionClass::Download => "download a file from",
+        ActionClass::TaintedExfil => "send page data to",
+    }
+}
+
+fn class_id(class: ActionClass) -> &'static str {
+    match class {
+        ActionClass::Navigate => "navigate",
+        ActionClass::LocalNetwork => "local_network",
+        ActionClass::PasswordSubmit => "password_submit",
+        ActionClass::PaymentSubmit => "payment_submit",
+        ActionClass::Upload => "upload",
+        ActionClass::Download => "download",
+        ActionClass::TaintedExfil => "tainted_exfil",
+    }
+}
+
 pub struct ConsentGate {
     grants: SessionGrants,
+    taint: Taint,
     stop: StopLatch,
     permissions: Arc<dyn PermissionRequest>,
     policy: Arc<dyn PolicyStore>,
@@ -73,6 +125,7 @@ impl ConsentGate {
     ) -> Self {
         Self {
             grants: SessionGrants::default(),
+            taint: Taint::default(),
             stop: StopLatch::default(),
             permissions,
             policy,
@@ -146,6 +199,7 @@ impl ConsentGate {
             action: kind.action(),
             element: req.element.map(str::to_string),
             profile: req.profile,
+            options: &ConsentOption::ALL,
         };
         let outcome = self
             .permissions
@@ -197,7 +251,11 @@ impl ConsentGate {
     }
 
     async fn persist_origin(&self, project_id: &str, origin: &CanonicalOrigin) {
-        let op = || ProjectPolicyOp::AddOrigin(OriginPattern::Exact(origin.clone()));
+        self.persist(project_id, || ProjectPolicyOp::AddOrigin(OriginPattern::Exact(origin.clone())))
+            .await;
+    }
+
+    async fn persist(&self, project_id: &str, op: impl Fn() -> ProjectPolicyOp) {
         let mut expected = match self.policy.project(project_id).await {
             Ok(policy) => policy.revision,
             Err(error) => {
@@ -216,6 +274,141 @@ impl ConsentGate {
             }
         }
         log::warn!("[browser-agent] consent persist failed reason=revision_conflict");
+    }
+
+    /// The agent read page content: from now on the session is tainted.
+    pub fn taint(&self, session_id: &str) {
+        self.taint.mark(session_id);
+    }
+
+    pub fn is_tainted(&self, session_id: &str) -> bool {
+        self.taint.is_tainted(session_id)
+    }
+
+    /// The origins the user vouched for: loopback, and for ephemeral tabs
+    /// the project's allow-list. A global tab's logins outlive the project
+    /// whose list vouched for the origin.
+    pub fn vouched_for(&self, session_id: &str, url: &Url, profile: TabProfile) -> bool {
+        match self.grants.class_of(session_id, url) {
+            OriginClass::Loopback => true,
+            OriginClass::AllowListed => profile == TabProfile::Ephemeral,
+            _ => false,
+        }
+    }
+
+    /// Confirm one sensitive class of an action: a pre-approval at the
+    /// scope of the tab's identity covers it, otherwise the user is asked
+    /// about this one action.
+    pub async fn confirm_sensitive(
+        &self,
+        token: &StopToken,
+        req: &SensitiveRequest<'_>,
+        item: &Sensitive,
+    ) -> Result<(), BrowserError> {
+        let phrase = class_phrase(item.class);
+        let Some(origin) = item.origin.clone() else {
+            return Err(confirmation(
+                "sensitive_origin_unknown",
+                format!("the agent cannot {phrase} a page without a web origin"),
+            ));
+        };
+        let scope = PreapprovalScope::of(req.profile);
+        if !item.pinned && self.preapproved(scope, req.project_id, item.class, &origin).await {
+            log::info!(
+                "[browser-agent] sensitive action pre-approved class={} session={}",
+                class_id(item.class),
+                crate::logging::redact_session_id(req.session_id)
+            );
+            return Ok(());
+        }
+        let lock = self
+            .prompts
+            .lock()
+            .entry(req.session_id.to_string())
+            .or_default()
+            .clone();
+        let _one_prompt = lock.lock().await;
+        token.check()?;
+        let offer_project = scope == PreapprovalScope::Project && !item.pinned;
+        let ticket = TicketRequest {
+            id: TicketId::mint(),
+            session_id: req.session_id.to_string(),
+            project_id: req.project_id.to_string(),
+            origin: origin.clone(),
+            target_url: item.target.clone(),
+            action: item.class,
+            element: req.element.map(str::to_string),
+            profile: req.profile,
+            options: if offer_project {
+                &ConsentOption::ALL
+            } else {
+                &ConsentOption::ONCE_OR_DENY
+            },
+        };
+        let outcome = self
+            .permissions
+            .request(ticket, req.deadline.clamp(budgets::CONSENT_WAIT))
+            .await;
+        log::info!(
+            "[browser-agent] sensitive consent class={} outcome={} session={}",
+            class_id(item.class),
+            outcome_label(&outcome),
+            crate::logging::redact_session_id(req.session_id)
+        );
+        let what = format!("{phrase} {}", origin.as_str());
+        match outcome {
+            TicketOutcome::Answered(ConsentOption::AllowSession) => token.check(),
+            TicketOutcome::Answered(ConsentOption::AllowProject) => {
+                token.check()?;
+                if offer_project {
+                    if let Ok(item) = ProjectPreapproval::new(item.class, origin) {
+                        self.persist(req.project_id, || ProjectPolicyOp::AddPreapproval(item.clone()))
+                            .await;
+                    }
+                }
+                Ok(())
+            }
+            TicketOutcome::Answered(ConsentOption::Deny) => Err(confirmation(
+                "denied_by_user",
+                format!("the user did not allow the agent to {what}"),
+            )),
+            TicketOutcome::Unattended => Err(confirmation(
+                "unattended",
+                format!(
+                    "no one can approve this right now: the agent wants to {what}; ask the user, or have them pre-approve it in the browser settings"
+                ),
+            )),
+            TicketOutcome::TimedOut => Err(confirmation(
+                "consent_timeout",
+                format!("the user did not answer the request to {what}"),
+            )),
+            TicketOutcome::Cancelled if token.is_stopped() => Err(stopped_error()),
+            TicketOutcome::Cancelled => Err(confirmation(
+                "consent_cancelled",
+                format!("the request to {what} was withdrawn"),
+            )),
+        }
+    }
+
+    async fn preapproved(
+        &self,
+        scope: PreapprovalScope,
+        project_id: &str,
+        class: ActionClass,
+        origin: &CanonicalOrigin,
+    ) -> bool {
+        let read = match scope {
+            PreapprovalScope::Project => self
+                .policy
+                .project(project_id)
+                .await
+                .map(|p| p.preapproves(class, origin)),
+            PreapprovalScope::App => self.policy.app().await.map(|p| p.preapproves(class, origin)),
+        };
+        read.unwrap_or_else(|error| {
+            log::warn!("[browser-agent] pre-approval read failed reason={}", error.reason());
+            false
+        })
     }
 
     /// Stop: latch the session, revoke its grants and withdraw its pending
@@ -244,6 +437,7 @@ impl ConsentGate {
     pub fn end_session(&self, session_id: &str) {
         self.stop.forget(session_id);
         self.grants.forget_session(session_id);
+        self.taint.forget(session_id);
         self.prompts.lock().remove(session_id);
         self.permissions.cancel_session(session_id);
     }

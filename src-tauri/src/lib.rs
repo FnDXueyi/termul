@@ -179,9 +179,12 @@ pub use acp::claude_admin;
 // the runner's adapter, nothing else. Not a supported API.
 #[doc(hidden)]
 pub mod conformance_support {
-    pub use crate::acp::browser_policy::{BrowserPolicyService, UnwiredProfileControl};
+    pub use crate::acp::browser_policy::{
+        ActionClass, AppPolicyOp, AppPreapproval, BrowserPolicyService, CanonicalOrigin,
+        ProjectPolicyOp, ProjectPreapproval, UnwiredProfileControl,
+    };
     pub use crate::browser_automation::core::ports::{
-        PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
+        ConsentOption, PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
     };
     pub use crate::browser_automation::{
         budgets, create_tab, dispatch, session_ended, set_browser_host,
@@ -1714,6 +1717,16 @@ pub fn run() {
                         .unwrap_or_else(|| acp::session_persistence::UNASSIGNED_PROJECT_ID.to_string())
                 })
             };
+            let root_of: browser_automation::core::RootResolver = {
+                let persistence = session_persistence.clone();
+                Arc::new(move |session_id| {
+                    persistence
+                        .as_ref()
+                        .and_then(|p| p.metadata(session_id).ok())
+                        .map(|m| std::path::PathBuf::from(m.cwd))
+                        .filter(|cwd| cwd.is_absolute())
+                })
+            };
             let browser_host = browser_automation::DesktopBrowserHost::new(
                 handle.clone(),
                 browser_tab_manager.clone(),
@@ -1725,6 +1738,7 @@ pub fn run() {
                     permissions: host_tickets,
                     policy: policy_service,
                     project_of,
+                    root_of,
                 },
             );
             profile_control.attach(browser_host.profile_control());

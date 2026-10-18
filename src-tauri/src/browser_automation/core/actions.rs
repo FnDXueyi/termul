@@ -312,6 +312,14 @@ impl DesktopBrowserHost {
                 Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
             }
             Verb::Wait => self.wait(session_id, args, deadline).await,
+            Verb::Upload => {
+                let label = self.resolve_tab(session_id, args)?;
+                let token = required_ref(args)?;
+                let resolved = self.resolve_ref(&label, token)?;
+                self.revalidate(&label, token, &resolved).await?;
+                self.upload(session_id, &label, &resolved.node.path, args).await?;
+                Ok(mutated(Fidelity::Trusted, self.tab_facts(&label)?))
+            }
         }
     }
 
