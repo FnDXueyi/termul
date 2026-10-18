@@ -1,0 +1,68 @@
+---
+title: Command palette
+description: Find projects and run commands from one search box.
+---
+
+The command palette is a search box for projects and commands. Use it to switch projects, open a terminal, change the theme, and more, without the mouse.
+
+## Open the palette
+
+Use one of these:
+
+- Press `Ctrl+K` (`Cmd+K` on macOS).
+- Press `Ctrl+Shift+P` (`Cmd+Shift+P` on macOS).
+- Select **Search** at the top of the projects list.
+
+Both keys open the same palette, in the desktop app and in the browser.
+
+![The command palette with the Projects group listing acme-shop, payments-api, and blog, and the Workspace group with New Terminal, Agent Launcher, Launch Agent, and Save Workspace Snapshot](/screenshots/getting-started-command-palette.png)
+
+## Run a command
+
+1. Type a few letters of what you want. The list keeps only the items that match.
+2. Press `Up` and `Down` to move through the list.
+3. Press `Enter` to run the selected item, or select it with the mouse.
+
+Press `Esc` to close the palette.
+
+The palette matches the names and descriptions of commands, and the names and folders of projects. It doesn't search the files in your project or your chats. To search files, use the [file explorer](/docs/files). To find a chat, use **Search chats…** on the **Chats** tab.
+
+![The command palette after typing history, showing the payments-api project, Command History, and Open Shortcut Menu](/screenshots/getting-started-palette-search.png)
+
+## Pin the commands you use most
+
+1. Open the palette and hover over a command, or move to it with the arrow keys.
+2. Select the pin icon at the right of the row.
+
+Pinned commands show at the top of the palette, under **Pinned**, until you unpin them. To unpin a command, select its pin icon again.
+
+Under **Pinned**, the palette shows **Recent**, the last five commands you ran. Both groups show only while the search box is empty.
+
+## What you can do from the palette
+
+The palette groups its items in this order.
+
+**Projects** lists every project with its folder. Select one to switch to it.
+
+**Workspace** has these commands:
+
+- **New Terminal** opens a terminal in the active pane.
+- **New Terminal: &lt;name&gt;** opens a terminal from one of your saved terminal profiles. See [Terminals](/docs/terminals).
+- **Agent Launcher** shows the box where you start a new agent chat. See [Agents](/docs/agents).
+- **Launch Agent** opens a command-line agent in a terminal in the active pane.
+- **New Browser Tab** opens a web page in Termul. Desktop app only.
+- **Save Workspace Snapshot** saves the terminals you have open so you can bring them back later. See [Terminals](/docs/terminals).
+- **Open Canvas** opens the project's design document.
+- **New Project** creates a project. This command is in the phone layout only. Elsewhere, use **+** in the projects list.
+
+**Navigation** has these commands:
+
+- **Project Settings** opens the settings of the current project.
+- **App Preferences** opens the app settings.
+
+**Tools** has these commands:
+
+- **Command History** opens a searchable list of the commands you ran in terminals. It shows when a project is open.
+- **Change Color Theme** opens the theme picker.
+- **Open Shortcut Menu** shows the most used shortcuts so you can change them.
+- **SSH: &lt;host&gt;** connects to a saved SSH host. Desktop app only. See [SSH](/docs/ssh).

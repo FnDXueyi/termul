@@ -1,0 +1,64 @@
+---
+title: Let an agent use the browser
+description: Allow an agent to open pages, click, and type in a Termul browser tab while you watch.
+---
+
+<Callout type="info">This works in the desktop app only.</Callout>
+
+An agent in a Termul chat can use a browser tab by itself. It can open your app, click through it, fill in a form, and check the result. You see every step in a visible tab, and the agent asks for your permission first.
+
+## Allow the agent to use the browser
+
+The first time an agent in a chat tries to use the browser, Termul asks you. The prompt reads **Allow browser automation?** and names the agent and what it wants to do, for example "Claude wants to drive this app's browser for this session. It wants to navigate."
+
+The prompt shows up in one of two places:
+
+- In the chat, as a card below the agent's latest messages. This is the usual place.
+- At the top of the agent's browser tab, as a narrow bar, when you are looking at that tab.
+
+Choose one:
+
+- **Allow for this session** lets the agent use the browser for the rest of this chat's agent session. Termul doesn't ask again in this chat.
+- **Deny** stops the request. The agent gets an error. If it tries again later, Termul asks again.
+
+If you don't answer within 2 minutes, Termul denies the request.
+
+The prompt appears only in the desktop app. If you follow the chat from a phone or the browser version, you won't see it. Answer it on the desktop, or the request is denied after 2 minutes.
+
+## Watch the agent work
+
+When the agent opens its first page, Termul splits the pane you are working in and puts the agent's browser tab on the right. Your cursor stays in the chat. Later pages from the same chat open in that same pane.
+
+You can tell an agent's tab by:
+
+- An **Agent** label on the tab.
+- A colored border around the page.
+
+## What the agent can do
+
+In its own browser tabs, the agent can:
+
+- Open `http` and `https` addresses. Other kinds of addresses are refused.
+- Go back, go forward, and reload.
+- Read the page's structure: its buttons, links, fields, and text.
+- Click, fill in fields, type, press keys, scroll, and hover.
+- Wait for a set time or until some text appears.
+- Open, list, and close its own tabs.
+- Take a screenshot of the page (Windows only).
+
+The agent works only in tabs that it opened. It can't see or control the browser tabs that you opened.
+
+## Differences between Windows, macOS, and Linux
+
+On Windows, the agent has the full set of actions. Its clicks are real mouse clicks, and it can take screenshots.
+
+On macOS and Linux:
+
+- The agent can't take screenshots.
+- Clicks come from a script inside the page, not from the mouse. Some pages ignore clicks like these.
+
+## Stop the agent
+
+Close the agent's browser tab. The agent loses control of that tab.
+
+Your permission still lasts for the rest of the chat's agent session. The agent can open a new tab without asking again. When the agent session ends, Termul closes the agent's browser tabs and forgets the permission.

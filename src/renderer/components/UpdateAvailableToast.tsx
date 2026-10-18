@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import { toast } from 'sonner'
-import { Clock, Download, Terminal } from '@/components/icons'
 import { confirmInstallAndRestart } from '@/lib/confirm-install-update'
 import { isTauriContext } from '@/lib/tauri-runtime'
 import { isAurUpdateMode } from '@/lib/tauri-updater-api'
@@ -16,6 +15,25 @@ import {
 
 // Local storage keys
 const UPDATE_REMINDER_KEY = 'update-reminder-timestamp'
+
+/**
+ * Sonner lays out icon, text and buttons in one row; two buttons leave the
+ * text about 30px wide. Wrap so the text keeps the full width (the basis
+ * leaves room for the 16px icon and its margins) and the buttons take their
+ * own row, and let long nightly versions break. Sonner gives every button
+ * `margin-left: auto`, so the first one aligns the row right.
+ */
+const UPDATE_TOAST_CLASS_NAMES = {
+  toast: 'flex-wrap',
+  content: 'min-w-0 grow basis-[calc(100%-28px)]',
+  description: '[overflow-wrap:anywhere]'
+}
+
+/** With a cancel button, the action sits 8px after it instead of taking the other auto margin. */
+const UPDATE_TOAST_TWO_BUTTON_CLASS_NAMES = {
+  ...UPDATE_TOAST_CLASS_NAMES,
+  actionButton: 'ml-2!'
+}
 
 /**
  * Check if the user has asked to be reminded tomorrow
@@ -45,26 +63,25 @@ function setReminderForTomorrow(): void {
 export function showUpdateToast(version: string, releaseNotes?: string): void {
   const isAur = isAurUpdateMode()
   const channel = updaterStore.getState().updateChannel
-  const channelPrefix = channel === 'insider' ? 'Insider ' : channel === 'nightly' ? 'Nightly ' : ''
+  const title =
+    channel === 'insider'
+      ? 'Insider update available'
+      : channel === 'nightly'
+        ? 'Nightly update available'
+        : 'Update available'
 
-  toast.success(`${channelPrefix}Update available: version ${version}`, {
+  toast.success(title, {
     duration: 30000,
+    classNames: UPDATE_TOAST_TWO_BUTTON_CLASS_NAMES,
     description: releaseNotes
-      ? `What's new:\n${releaseNotes.slice(0, 100)}${releaseNotes.length > 100 ? '...' : ''}`
+      ? `Version ${version}. What's new: ${releaseNotes.slice(0, 100)}${releaseNotes.length > 100 ? '…' : ''}`
       : isAur
-        ? 'A new version is available. Update with yay.'
+        ? `Version ${version} is available. Update with yay.`
         : channel !== 'stable'
-          ? `A new ${channel} build is available. Open the download page to install it manually.`
-          : 'A new version is available for download.',
+          ? `Version ${version}. Open the download page to install it manually.`
+          : `Version ${version} is ready to download.`,
     action: {
-      label: (
-        <div className="flex items-center gap-2">
-          {isAur ? <Terminal size={14} /> : <Download size={14} />}
-          <span>
-            {isAur ? 'Use yay' : channel !== 'stable' ? 'Open Download Page' : 'Download'}
-          </span>
-        </div>
-      ),
+      label: isAur ? 'Use yay' : channel !== 'stable' ? 'Open download page' : 'Download',
       onClick: async () => {
         if (isAur) {
           toast.info('Run in terminal', {
@@ -90,12 +107,7 @@ export function showUpdateToast(version: string, releaseNotes?: string): void {
       }
     },
     cancel: {
-      label: (
-        <div className="flex items-center gap-2">
-          <Clock size={14} />
-          <span>Remind Me</span>
-        </div>
-      ),
+      label: 'Remind me tomorrow',
       onClick: () => {
         setReminderForTomorrow()
       }
@@ -107,16 +119,12 @@ export function showUpdateToast(version: string, releaseNotes?: string): void {
  * Show a toast notification when update is downloaded
  */
 export function showUpdateDownloadedToast(version: string): void {
-  toast.success(`Update ready to install`, {
+  toast.success('Update ready to install', {
     duration: 30000,
-    description: `Version ${version} has been downloaded. Install now to apply it — the app will restart and any running terminal sessions will close.`,
+    classNames: UPDATE_TOAST_CLASS_NAMES,
+    description: `Version ${version} is downloaded. Termul restarts to install it, and running terminal sessions close.`,
     action: {
-      label: (
-        <div className="flex items-center gap-2">
-          <Download size={14} />
-          <span>Install &amp; Restart</span>
-        </div>
-      ),
+      label: 'Install and restart',
       onClick: () => confirmInstallAndRestart(version)
     }
   })

@@ -1,0 +1,53 @@
+---
+title: Switch agents mid-chat
+description: Hand a running conversation to a different agent without starting a new chat.
+---
+
+Sometimes the agent you started with is not the right one any more. Another agent may have a stronger model, or a tool this one lacks. You can switch agents inside the same chat. The new agent gets a summary of the conversation so far, and you keep the same tab and history.
+
+## Switch to another agent
+
+1. In the chat, click the model button in the message box.
+2. Click the tab of the agent you want. Its models appear in the list, with the line "Switches to _agent_ on the next send".
+3. Click a model. The model button now shows an arrow and the new model's name. This means the switch is ready, but nothing has changed yet.
+4. Type your next message and send it.
+
+![The model panel in a chat with a second agent's tab selected. It lists that agent's two models and says that the chat switches to it on the next send.](/screenshots/agents-switch-picker.png)
+
+When you send, Termul starts the new agent in the same folder. The new agent receives a summary of the conversation, followed by your message. Your message is all that shows in your chat bubble. The summary travels with it.
+
+To change your mind before you send, click **Cancel agent switch** (the **X** next to the model button). You can also pick a model on the current agent's tab. The next message then goes to the current agent.
+
+## Install an agent while you switch
+
+If the agent you pick is not installed, the panel says so and shows an **Install** button. Click it. When the install finishes, the agent's models appear. Pick one to prepare the switch. The **Install** button is off while the chat is busy.
+
+An agent marked **Manual install**, **Needs Node**, **Needs uv**, or **Unavailable** cannot be installed from here. Click it to read why. See [Set up agents](/docs/agent-setup).
+
+## What you see after a switch
+
+![After the switch, a row with both agents' names and an arrow between them separates the old reply from the summary the new agent received. Your next message and the new agent's reply follow the summary.](/screenshots/agents-switch-done.png)
+
+- The earlier messages stay at the top of the chat.
+- A row with the old agent's icon and name, an arrow, and the new agent's icon and name marks the switch.
+- The summary the new agent received sits under that row. Click the row to collapse or expand the summary. It is open again each time you reopen the chat.
+- Your message and the new agent's replies follow.
+
+The chat's card in the **Chats** list shows the icons of the agents in order. With more than three agents, the card shows the first and the last, and a count such as **+2** for the rest. When you reopen the chat later, it continues with the last agent you switched to. You can switch more than once.
+
+## Switch while the agent is busy
+
+You can switch only when the chat is free. If the agent is working when you pick a model on another agent's tab, the panel says the agent is working on a turn and offers two choices:
+
+- **Wait** closes the panel and changes nothing. Try again when the turn ends.
+- **Cancel turn and switch** stops the current turn, then prepares the switch.
+
+If messages are queued, or an approval request or a question is waiting, only **Wait** is offered. The panel says "This chat is busy. Wait for the queued prompts or the open request to finish." Only **Wait** is offered too while the chat is starting or waiting for a sign-in.
+
+## If the switch fails
+
+If the new agent cannot start, the chat stays with the original agent and shows "Could not switch agent" with the reason. You can keep working with the original agent, or try the switch again.
+
+If the new agent starts but does not receive your message, the switch still happens, and no reply comes. Send your message again.
+
+The old agent does not stop at once. Termul closes it after it sits idle, like any idle chat.

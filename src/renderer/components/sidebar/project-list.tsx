@@ -1,6 +1,7 @@
 import { LayoutGroup, Reorder } from 'framer-motion'
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react'
 import { ChevronDown, ChevronRight, FolderPlus } from '@/components/icons'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { CollapseExpandMotion } from '@/components/ui/collapse-expand-motion'
 import { cn } from '@/lib/utils'
 import { useSettingsModalStore } from '@/stores/settings-modal-store'
@@ -196,16 +197,17 @@ export function ProjectList({
           <LayoutGroup>
             {showSections && (
               <RailSectionHeader label="Groups">
-                <button
-                  type="button"
-                  onClick={onNewGroup}
-                  className={RAIL_SECTION_BUTTON_CLASS}
-                  title="New group"
-                  aria-label="New group"
-                  data-testid="rail-new-group"
-                >
-                  <FolderPlus size={14} />
-                </button>
+                <RailTooltip label="New group">
+                  <button
+                    type="button"
+                    onClick={onNewGroup}
+                    className={RAIL_SECTION_BUTTON_CLASS}
+                    aria-label="New group"
+                    data-testid="rail-new-group"
+                  >
+                    <FolderPlus size={14} />
+                  </button>
+                </RailTooltip>
               </RailSectionHeader>
             )}
 
