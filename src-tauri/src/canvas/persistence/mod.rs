@@ -66,7 +66,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -165,8 +165,9 @@ enum Link {
     Attached(gateway::Connection),
     /// The holder's connection ended at `since`. The holder keeps the lease
     /// for the mount's grace so a reconnect or reload can take it up again.
+    /// On the tokio clock, like the grace timer that reads it.
     Lost {
-        since: Instant,
+        since: tokio::time::Instant,
     },
 }
 

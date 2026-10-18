@@ -1557,6 +1557,31 @@ describe('Parity Checklist Automation', () => {
       }
     })
 
+    it('agent calls reach the lease holder through one gateway client on both transports', () => {
+      const ws = readFileSync(join(LIB_DIR, 'acp-transport', 'ws-transport.ts'), 'utf-8')
+      expect(ws).toMatch(/readonly canvas = new CanvasGatewayClient\(/)
+      expect(ws).toMatch(/this\.canvas\.handleFrame\(/)
+      expect(ws).toMatch(/this\.canvas\.handleLeaseLost\(/)
+      expect(ws, 're-reports its mounts on every (re)connect').toMatch(
+        /this\.canvas\.onConnected\(\)/
+      )
+      const desktop = readFileSync(join(LIB_DIR, 'acp-transport', 'desktop-transport.ts'), 'utf-8')
+      expect(desktop).toMatch(/class DesktopAcpTransport extends WsAcpTransport\b/)
+      expect(desktop).toMatch(/WebSocketImpl: ChannelSocket\b/)
+      const harness = readFileSync(
+        join(RustRoot, 'web', 'ws', 'harness', 'canvas_gateway_tests.rs'),
+        'utf-8'
+      )
+      for (const body of [
+        'a_gateway_call_reaches_the_holder_and_its_reply_answers_the_agent',
+        'a_holder_back_within_the_grace_takes_its_calls_again',
+        'a_holder_gone_past_the_grace_leaves_calls_closed',
+        'a_call_the_holder_never_answers_times_out'
+      ]) {
+        expect(harness, body).toContain(`on_both_carriers!(${body});`)
+      }
+    })
+
     it('shared contracts carry the open info, the facade and both typed error sets', () => {
       const content = readFileSync(
         join(LIB_DIR, '..', '..', 'shared', 'types', 'canvas.types.ts'),
