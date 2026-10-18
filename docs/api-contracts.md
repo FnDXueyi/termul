@@ -497,6 +497,9 @@ The class column is the request's command class, defined in `src-tauri/src/web/c
 | `store_delete` | idempotent | Deletes a key of the host store. |
 | `watch` | read | Subscribes to a state watch and queues its full state. See "State watches". |
 | `unwatch` | read | Drops a state watch. Idempotent. |
+| `canvas_mount` | idempotent | Tells the host this connection runs a project's canvas mount (`{projectId, mountSeq}`). Replies `{attached: true}`, or `{attached: false, heldElsewhere}` when the host holds no such mount for this renderer. The host then forwards agent canvas calls to the connection as `canvas_call` frames. |
+| `canvas_unmount` | idempotent | Tells the host this connection no longer runs the mount (`{projectId, mountSeq}`) and replies `{unmounted}`. The mount itself closes only through the host's save-then-close sequence. |
+| `canvas_reply` | idempotent | Answers one `canvas_call` (`{callId, mountSeq, ok}` plus a `result` or an `error`) and replies `{resolved}`. A reply to a call that is no longer waiting is ignored. |
 
 ### Events
 
