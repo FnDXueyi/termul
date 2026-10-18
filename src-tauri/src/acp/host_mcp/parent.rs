@@ -36,6 +36,7 @@ pub use ask::IdleSignal;
 use ask::PendingAsk;
 
 use crate::acp::host_mcp::canvas::CanvasRouter;
+use crate::acp::host_mcp::presence::Presence;
 
 /// Per-session auth + routing context, keyed by the random token.
 #[derive(Clone)]
@@ -97,6 +98,8 @@ pub struct HostPlanServer {
     ask_heartbeat_override: Mutex<Option<std::time::Duration>>,
     /// Routes `Canvas` frames to the renderer holding each project's canvas.
     canvas: Arc<CanvasRouter>,
+    /// Shows each answered agent canvas call as the session's guest cursor.
+    presence: Arc<Presence>,
 }
 
 impl HostPlanServer {
@@ -112,6 +115,7 @@ impl HostPlanServer {
         sinks: Vec<Arc<dyn EventSink>>,
         persistence: Option<Arc<SessionPersistence>>,
     ) -> Arc<Self> {
+        let canvas = Arc::new(CanvasRouter::default());
         let server = Arc::new(Self {
             port: std::sync::OnceLock::new(),
             sinks,
@@ -124,7 +128,8 @@ impl HostPlanServer {
             branch_attempted_for_session: Mutex::new(HashSet::new()),
             plan_store: PlanStore::new(),
             persistence,
-            canvas: Arc::new(CanvasRouter::default()),
+            presence: Presence::new(Arc::clone(canvas.mounts())),
+            canvas,
         });
         let server_for_thread = Arc::clone(&server);
         let (port_tx, port_rx) = std::sync::mpsc::channel::<u16>();
@@ -267,6 +272,8 @@ impl HostPlanServer {
                 active_turns.remove(agent_id);
             }
         }
+        drop(active_turns);
+        self.presence.hide(real_session_id);
         log::debug!(
             "[host-mcp] removed active plan route for session {} (agent {})",
             crate::logging::redact_session_id(real_session_id),
@@ -294,6 +301,7 @@ impl HostPlanServer {
             .remove(real_session_id);
         self.plan_store.drop_session(real_session_id);
         self.cancel_asks_for_session(real_session_id);
+        self.presence.hide(real_session_id);
         // Close agent-controlled browser tabs + drop the consent grant. The
         // host no-ops when no browser feature was used by this session.
         crate::browser_automation::session_ended(real_session_id);
@@ -310,6 +318,11 @@ impl HostPlanServer {
         if let Some(sid) = real_sid {
             self.plan_store.drop_session(&sid);
         }
+    }
+
+    /// `agent_id`'s display name, shown on its sessions' canvas cursors.
+    pub fn name_agent(&self, agent_id: &str, name: &str) {
+        self.presence.name_agent(agent_id, name);
     }
 
     /// The canvas router: renderers report mounts and replies to it.
@@ -516,6 +529,7 @@ impl HostPlanServer {
             FrameKind::Canvas => {
                 self.canvas_call(
                     &real_session_id,
+                    &auth.agent_id,
                     req.canvas_tool,
                     req.canvas_method,
                     req.canvas_params,

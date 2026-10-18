@@ -64,6 +64,8 @@ The iframe cannot send an `Authorization` header, so the bundle has its own cred
 
 Canvas tools live in the per-session host `termul` MCP server (`acp/host_mcp`). The gateway resolves the session's project, forwards each call to the renderer that holds the mount's lease, and answers from the engine. It caches no document or selection state. Tool names are figcraft's own. `save_file` is Termul's own save of the project document. A project with no mount answers `CANVAS_CLOSED`, a closing one `CANVAS_CLOSING`, and a stalled editor `CANVAS_TIMEOUT`. No MCP registry entry is persisted for the canvas, and no `/canvas/mcp` route exists. On load the renderer drops any `canvas-mcp-*` entries an older build persisted.
 
+Every answered agent call also shows on the canvas as that session's cursor (`acp/host_mcp/presence`). The host derives what the call touched from the call and its result, looks up the last node's bounds with at most one `node.get` or `document.inspect`, and sends the editor `host.guestCursor`, `host.guestFlash` and, when the turn ends or the session closes, `host.guestHide`. The cursor carries the agent's display name and a colour fixed by the session id. Moves are paced to one per 120 ms per session. This work starts after the agent's reply and never delays or fails it. Its lookups never count as canvas activity or toward the crash timeouts. Nothing is sent when no editor is connected.
+
 ## Interfaces
 
 | Surface | Desktop (Tauri command) | Web (`termul-server`) |
