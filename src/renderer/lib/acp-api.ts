@@ -748,7 +748,11 @@ export const ACP_EVENTS = {
   browserOpenRequest: 'acp:browser_open_request',
   browserAgentTab: 'acp:browser_agent_tab',
   browserTicketClosed: 'acp:browser_ticket_closed',
-  browserStopChanged: 'acp:browser_stop_changed'
+  browserStopChanged: 'acp:browser_stop_changed',
+  /** An agent tab's URL, title, loading state or epoch changed. The
+   *  desktop pane mirrors the Tauri event of the same name instead. */
+  browserTabUpdated: 'acp:browser_tab_updated',
+  browserTabClosed: 'acp:browser_tab_closed'
 } as const
 
 /** A browser consent ticket was answered, timed out or withdrawn. */
