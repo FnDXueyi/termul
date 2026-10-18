@@ -44,6 +44,10 @@ pnpm-debug.log*
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/perf-toolkit/
+!.claude/skills/termul-routines/
+
+# Routine run artifacts (triage reports, audit JSON, chat-agent frame logs)
+goal-routine-runs/
 
 # Windows null file artifact
 nul
