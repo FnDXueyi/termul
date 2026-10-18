@@ -269,8 +269,63 @@ export const inFlightWarms = new Map<string, Promise<AgentId | null>>()
  */
 const inFlightWarmOutcomes = new Map<
   string,
-  { outcome: Promise<AgentId | null>; signature: string }
+  { outcome: Promise<AgentId | null>; signature: string; holders: AgentHolder[] }
 >()
+
+/**
+ * What an `ensureLiveAgent` caller puts on the agent it gets: a chat, or a
+ * warm session that becomes the launcher's next chat. One Agent process per
+ * Agent chat: nothing takes an agent a chat holds, and a chat does not take
+ * one a warm session holds.
+ */
+export type AgentHolder = 'chat' | 'warm'
+
+/** Agents handed to a chat caller whose chat is not on them yet. */
+const pendingChatAgents = new Set<AgentId>()
+
+/** Agents handed to a warm prepare that has not published or dropped its session, with a count per prepare. */
+const pendingWarmAgents = new Map<AgentId, number>()
+
+function holdAgent(agentId: AgentId, holder: AgentHolder): void {
+  if (holder === 'chat') pendingChatAgents.add(agentId)
+  else pendingWarmAgents.set(agentId, (pendingWarmAgents.get(agentId) ?? 0) + 1)
+}
+
+/** A warm prepare is done with the agent `ensureLiveAgent` gave it. */
+export function releaseWarmAgent(agentId: AgentId): void {
+  const count = (pendingWarmAgents.get(agentId) ?? 0) - 1
+  if (count > 0) pendingWarmAgents.set(agentId, count)
+  else pendingWarmAgents.delete(agentId)
+}
+
+function agentHolder(state: AcpState, agentId: AgentId): AgentHolder | null {
+  const chats = Object.values(state.sessions).filter(
+    (session) => session.agentId === agentId && !ephemeralSessionIds.has(session.id)
+  )
+  if (chats.length > 0) {
+    // A chat reached the agent: its session status decides from here, so a
+    // closed chat frees the agent as before.
+    pendingChatAgents.delete(agentId)
+    if (chats.some((session) => session.status !== 'closed')) return 'chat'
+  } else if (pendingChatAgents.has(agentId)) {
+    return 'chat'
+  }
+  if (pendingWarmAgents.has(agentId)) return 'warm'
+  const hostsWarm = Object.values(state.preparedSessions).some(
+    (sessionId) => state.sessions[sessionId]?.agentId === agentId
+  )
+  return hostsWarm ? 'warm' : null
+}
+
+/** Whether a caller putting `holder` on an agent `current` holds must get its own agent. */
+function heldAgainst(current: AgentHolder | null, holder: AgentHolder | undefined): boolean {
+  return current === 'chat' || (current === 'warm' && holder === 'chat')
+}
+
+function spawnHolder(holders: AgentHolder[]): AgentHolder | null {
+  if (holders.includes('chat')) return 'chat'
+  return holders.length > 0 ? 'warm' : null
+}
 
 /**
  * Definite host spawn rejections (`agent_unavailable` / `invalid_agent_config`,
@@ -346,6 +401,8 @@ export const inFlightPrepared = new Map<string, Promise<SessionId | null>>()
 /** Test-only: clear module-level prepare dedupe maps between tests. */
 export function _resetInFlightPreparedForTesting(): void {
   inFlightPrepared.clear()
+  pendingChatAgents.clear()
+  pendingWarmAgents.clear()
 }
 
 /**
@@ -704,6 +761,8 @@ export type EnsureLiveAgentOptions = {
    * agent. Without it, the Project whose folder holds `cwd` is used.
    */
   projectId?: string
+  /** What the caller puts on the agent; omit for helpers (commit message, prewarm) that may share one. */
+  holder?: AgentHolder
 }
 
 /**
@@ -799,19 +858,13 @@ export function ensureLiveAgent(
   const staleLaunch = currentSignature !== undefined && currentSignature !== signature
   if (
     currentAgentId &&
-    (staleLaunch ||
-      Object.values(get().sessions).some(
-        (session) =>
-          session.agentId === currentAgentId &&
-          session.status !== 'closed' &&
-          !ephemeralSessionIds.has(session.id)
-      ))
+    (staleLaunch || heldAgainst(agentHolder(get(), currentAgentId), options.holder))
   ) {
     // One Agent process per Agent chat, and none started with an outdated
-    // launch. Keep this process for whatever it still serves (a chat, or an
-    // ephemeral session such as a commit message whose session/new may not be
-    // in `sessions` yet; the host's idle reaper stops it once quiet) and
-    // reserve the canonical key for the next chat.
+    // launch. Keep this process for whatever it still serves (a chat, a warm
+    // session, or an ephemeral session such as a commit message whose
+    // session/new may not be in `sessions` yet; the host's idle reaper stops
+    // it once quiet) and reserve the canonical key for the next chat.
     set((s) => {
       if (s.configToLiveAgent[reuseKey] !== currentAgentId) return {}
       const configToLiveAgent = { ...s.configToLiveAgent }
@@ -830,12 +883,17 @@ export function ensureLiveAgent(
 
   const existing = get().configToLiveAgent[reuseKey]
   if (existing && isReusableStatus(get().agentStatus[existing])) {
+    if (options.holder) holdAgent(existing, options.holder)
     return Promise.resolve(existing)
   }
 
   const inFlight = inFlightWarms.get(reuseKey)
   const running = inFlightWarmOutcomes.get(reuseKey)
-  if (inFlight && (!running || running.signature === signature)) {
+  const outdatedSpawn = running !== undefined && running.signature !== signature
+  const heldSpawn =
+    running !== undefined && heldAgainst(spawnHolder(running.holders), options.holder)
+  if (inFlight && !outdatedSpawn && !heldSpawn) {
+    if (running && options.holder) running.holders.push(options.holder)
     // Join the running spawn, but judge ITS failure by THIS caller's options: a
     // prewarm (silent) started it, yet a user-initiated caller that joins must
     // still see a definite rejection instead of a swallowed `null`.
@@ -845,7 +903,9 @@ export function ensureLiveAgent(
     void logFrontendError({
       level: 'info',
       source: 'acp-store.ensureLiveAgent',
-      message: `Not joining the running spawn for ${reuseKey}: it started with an outdated launch`
+      message: outdatedSpawn
+        ? `Not joining the running spawn for ${reuseKey}: it started with an outdated launch`
+        : `Not joining the running spawn for ${reuseKey}: a ${spawnHolder(running?.holders ?? [])} holds it, so this ${options.holder} gets its own process`
     })
   }
 
@@ -870,6 +930,7 @@ export function ensureLiveAgent(
   }
 
   let spawnPromise: Promise<AgentId | null> | undefined
+  const holders: AgentHolder[] = options.holder ? [options.holder] : []
   const strictSpawn = (async (): Promise<AgentId | null> => {
     try {
       if (project?.envVars?.length) {
@@ -900,6 +961,7 @@ export function ensureLiveAgent(
             ? reuseKey
             : detachedReuseKey(reuseKey, agentId)
         set((s) => ({ configToLiveAgent: { ...s.configToLiveAgent, [key]: agentId } }))
+        for (const holder of holders) holdAgent(agentId, holder)
         return agentId
       }
       try {
@@ -928,7 +990,7 @@ export function ensureLiveAgent(
 
   spawnPromise = asCallerView(strictSpawn, reuseKey, configId, options)
   inFlightWarms.set(reuseKey, spawnPromise)
-  inFlightWarmOutcomes.set(reuseKey, { outcome: strictSpawn, signature })
+  inFlightWarmOutcomes.set(reuseKey, { outcome: strictSpawn, signature, holders })
   // Joiners derive their own view; this handle must never be an unhandled rejection.
   strictSpawn.catch(() => undefined)
   return spawnPromise

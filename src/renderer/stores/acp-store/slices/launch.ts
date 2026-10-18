@@ -5,7 +5,7 @@
 import { toast } from 'sonner'
 import type { StateCreator } from 'zustand'
 import { wireConfigValue } from '@/components/chat/chat-input-bar-config'
-import { acpApi, type ContentBlock, type SessionId } from '@/lib/acp-api'
+import { type AgentId, acpApi, type ContentBlock, type SessionId } from '@/lib/acp-api'
 import { agentPolicyForConfigId } from '@/lib/agents/acp-registry'
 import {
   classifySetupError,
@@ -34,6 +34,7 @@ import {
   inFlightPromotions,
   nextSeq,
   persistSession,
+  releaseWarmAgent,
   runsCurrentLaunch
 } from '../shared-state'
 import {
@@ -183,6 +184,25 @@ function preparedLaunchIsCurrent(state: AcpState, key: string, sessionId: Sessio
   return runsCurrentLaunch(state, session.agentId, configId, cwd, session.projectId)
 }
 
+/**
+ * Stop an agent spawned on an outdated launch once its warm session is gone,
+ * unless it still serves a session. Otherwise it idles on the old Claude
+ * account until the host reaps it.
+ */
+function stopIdleOutdatedAgent(get: () => AcpState, agentId: AgentId): void {
+  const state = get()
+  if (!state.agentStatus[agentId]) return
+  if (Object.values(state.sessions).some((s) => s.agentId === agentId && s.status !== 'closed')) {
+    return
+  }
+  void logFrontendError({
+    level: 'info',
+    source: 'acp-store.prepareChat',
+    message: `Stopping agent ${agentId}: it started with an outdated launch and serves no session`
+  })
+  void state.killAgent(agentId).catch(() => undefined)
+}
+
 function reconcilePreparedSlot(
   key: string,
   get: () => AcpState,
@@ -271,10 +291,15 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
     })
     inFlightPrepared.set(key, task)
     let outdated = false
+    let heldAgentId: AgentId | null = null
 
     void (async (): Promise<void> => {
       try {
-        const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
+        const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, {
+          projectId,
+          holder: 'warm'
+        })
+        heldAgentId = agentId
         if (inFlightPrepared.get(key) !== task) {
           settle(null)
           return
@@ -346,7 +371,9 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
             source: 'acp-store.prepareChat',
             message: `Warm session ${sessionId} on agent ${agentId} started with an outdated launch; preparing it again`
           })
-          reapOrphanPreparedSession(get, set, sessionId)
+          void reapOrphanPreparedSession(get, set, sessionId)
+            .catch(() => undefined)
+            .then(() => stopIdleOutdatedAgent(get, agentId))
           outdated = true
           settle(null)
           return
@@ -376,6 +403,7 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
         }
         settle(null)
       } finally {
+        if (heldAgentId) releaseWarmAgent(heldAgentId)
         // Only this task may clear preparing / in-flight state.
         if (inFlightPrepared.get(key) === task) {
           inFlightPrepared.delete(key)
@@ -415,7 +443,10 @@ export const createLaunchSlice: StateCreator<AcpState, [], [], LaunchSliceState>
       if (!inFlight) break
       await inFlight
     }
-    const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, { projectId })
+    const agentId = await ensureLiveAgent(get, set, configId, trimmedCwd, {
+      projectId,
+      holder: 'chat'
+    })
     if (!agentId) throw new Error(`failed to spawn agent for config ${configId}`)
     return get().createSession(agentId, trimmedCwd, mcpServers, projectId, opts)
   },
