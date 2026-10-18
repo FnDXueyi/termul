@@ -623,7 +623,12 @@ describe('WorkspaceTabBar', () => {
 
   it('closes a canvas tab without unmounting its canvas (AD-19: closing hides)', async () => {
     const tabs: WorkspaceTab[] = [
-      { type: 'canvas', id: 'canvas-proj-7', projectId: 'proj-7', docPath: 'C:/proj/design.op' }
+      {
+        type: 'canvas',
+        id: 'canvas-proj-7',
+        projectId: 'proj-7',
+        docPath: 'C:/proj/design.figcraft'
+      }
     ]
 
     render(<WorkspaceTabBar paneId="pane-a" tabs={tabs} activeTabId="canvas-proj-7" />)

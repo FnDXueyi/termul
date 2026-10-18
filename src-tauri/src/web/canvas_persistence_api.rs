@@ -37,8 +37,8 @@ use crate::canvas::CanvasError;
 use crate::web::canvas_api::{check_canvas_write, CanvasState};
 use crate::web::fs_api::IpcBody;
 
-/// The web routes this module serves; `canvas_api` exempts them from the
-/// `ct` gate and the router keeps them behind the bearer gate.
+/// The web routes this module serves; the router keeps them behind the
+/// bearer gate.
 pub const PERSISTENCE_ROUTES: &[&str] = &[
     "/canvas/read-document",
     "/canvas/document-loaded",

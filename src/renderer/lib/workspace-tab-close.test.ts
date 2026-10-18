@@ -74,9 +74,9 @@ describe('closeWorkspaceTab', () => {
   })
 
   it('removes a canvas tab and leaves its mount alone (AD-19: closing hides)', () => {
-    expect(close({ type: 'canvas', id: 'canvas-p1', projectId: 'p1', docPath: '/p/Plan.op' })).toBe(
-      false
-    )
+    expect(
+      close({ type: 'canvas', id: 'canvas-p1', projectId: 'p1', docPath: '/p/Plan.figcraft' })
+    ).toBe(false)
 
     expect(mockRemoveTab).toHaveBeenCalledWith('canvas-p1')
     expect(mockUnmountCanvas).not.toHaveBeenCalled()

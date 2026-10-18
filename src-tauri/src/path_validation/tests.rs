@@ -187,3 +187,21 @@ fn test_strip_verbatim_disk_prefix_chosen_over_unc_match() {
         "UNC verbatim prefix must map to a UNC share path"
     );
 }
+
+#[test]
+fn plain_windows_client_path_drops_a_verbatim_prefix_in_any_slash_style() {
+    let plain = r"D:\work\proj\design.figcraft";
+    for client in [
+        r"\\?\D:\work\proj\design.figcraft",
+        "//?/D:/work/proj/design.figcraft",
+        r"\\?\D:\work\proj/design.figcraft",
+        "D:/work/proj/design.figcraft",
+        plain,
+    ] {
+        assert_eq!(plain_windows_client_path(client), plain, "{client}");
+    }
+    assert_eq!(
+        plain_windows_client_path("//?/UNC/srv/share/p/a.figcraft"),
+        r"\\srv\share\p\a.figcraft"
+    );
+}

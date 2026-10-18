@@ -112,6 +112,9 @@ pub use worktree::*;
 mod notification_tests;
 
 #[cfg(test)]
+mod canvas_tests;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

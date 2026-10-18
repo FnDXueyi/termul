@@ -24,7 +24,6 @@ use crate::web::acp_api;
 use crate::web::auth::{BearerVerified, WebAuth};
 
 use crate::acp::{AcpCatalogService, AcpInstallService, AcpManager};
-use crate::canvas::pool::CanvasDaemonPool;
 use crate::pty::PtyManager;
 use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
 use crate::web::catalog_api;
@@ -136,14 +135,9 @@ impl AppState {
 /// route via the [`web_auth_gate`] middleware and stores it in [`AppState`]
 /// for `/ws` + `/terminal/ws`. `None` = ungated (legacy behavior).
 ///
-/// `canvas_pool` backs the `/canvas/*` routes and the ROOT canvas routes
-/// (`/pkg|/canvaskit|/api` — OpenPencil canvas mode, CAP-5/CAP-2): same-origin
-/// embed + MCP proxy + the editor's absolute-path traffic, all proxied to
-/// the managed OpenPencil daemons. `open/close/save` are bearer-gated like
-/// the other API prefixes; the rest carry canvas-credential auth in the
-/// sub-router (see `web::canvas_api`). `None` (the desktop shared-live
-/// host) degrades the routes to typed 502 `DAEMON_DOWN` — the desktop
-/// mounts its MCP proxy on the agentation server instead (AD-8).
+/// The `/canvas/*` routes serve the figcraft bundle same-origin. The API
+/// routes are bearer-gated like the other prefixes; `/canvas/<id>/*` carries
+/// the canvas session token instead (see `web::canvas_api`).
 ///
 /// `connections` is the host's [`ConnectionRuntime`]: the shutdown handle every
 /// upgraded `/ws` + `/terminal/ws` socket joins, and the outbound overflow
@@ -166,7 +160,6 @@ pub fn router(
     shared_live_writes_denied: bool,
     oauth_base_url: String,
     web_auth: Option<Arc<WebAuth>>,
-    canvas_pool: Option<Arc<CanvasDaemonPool>>,
     allowed_origins: OriginPolicy,
     connections: ConnectionRuntime,
 ) -> Router {
@@ -335,22 +328,16 @@ pub fn router(
             post(worktree_api::ensure_symlinks),
         );
     let mut r = r
-        // Canvas web routes (OpenPencil canvas mode, CAP-5): open/close/
-        // save (IpcBody), the same-origin
-        // /canvas/<id>/* embed proxy, and the ROOT canvas routes
-        // (/pkg|/canvaskit|/api — the editor's absolute-path traffic).
-        // Merged BEFORE the static fallback so the SPA mount cannot shadow
-        // them. Bearer-gated via GATED_PREFIXES ("/canvas/") for
-        // open/close/save only: /canvas/<id>/* and the root
-        // routes are exempt from the bearer gate (is_canvas_proxy_path /
-        // not under a gated prefix) and authenticated by the canvas
-        // sub-router's own credentials instead (browser iframes cannot
-        // send Authorization headers). The boundary validates web-opened
-        // doc paths against the same project registry the fs/git routes use.
+        // Canvas web routes: open/close/persistence (IpcBody) and the
+        // same-origin /canvas/<id>/* bundle. Merged BEFORE the static fallback
+        // so the SPA mount cannot shadow them. The API routes are bearer-gated
+        // via GATED_PREFIXES ("/canvas/"); /canvas/<id>/* is exempt
+        // (is_canvas_proxy_path) and authenticated by the canvas session token
+        // instead (browser iframes cannot send Authorization headers). The
+        // boundary validates web-opened doc paths against the same project
+        // registry the fs/git routes use.
         .merge(crate::web::canvas_api::canvas_router(
             crate::web::canvas_api::CanvasState {
-                pool: canvas_pool,
-                web_auth: web_auth.clone(),
                 boundary: Some(crate::web::canvas_api::CanvasProjectBoundary {
                     registry: registry.clone(),
                 }),
@@ -447,19 +434,15 @@ const GATED_PREFIXES: &[&str] = &[
     "/shells",
     "/acp/",
     "/worktree/",
-    // OpenPencil canvas mode: the /canvas/open|close|save API routes
-    // require the token. The /canvas/<id>/* embed paths are
-    // exempt — see [`is_canvas_proxy_path`] (canvas-credential authed in
-    // the sub-router); the root canvas routes (/pkg, /canvaskit, /api) are
-    // not under any gated prefix (cookie authed in the sub-router).
+    // The /canvas/ API routes require the token. The /canvas/<id>/* bundle
+    // paths are exempt — see [`is_canvas_proxy_path`] (canvas-token authed
+    // in the sub-router).
     "/canvas/",
 ];
 
-/// Whether `path` is canvas-credential authed INSTEAD of the outer bearer
-/// gate: the `/canvas/<id>…` embed/proxy paths (`?ct=` canvas
-/// token, first segment after `/canvas/` is a canvas id, not an API route
-/// name). The root canvas routes (`/pkg|/canvaskit|/api`) need no exemption
-/// — they are not under any gated prefix; their cookie middleware owns them.
+/// Whether `path` is canvas-token authed INSTEAD of the outer bearer gate:
+/// the `/canvas/<id>…` bundle paths (`?ct=` canvas token or cookie, first
+/// segment after `/canvas/` is a canvas id, not an API route name).
 fn is_canvas_proxy_path(path: &str) -> bool {
     path.strip_prefix("/canvas/").is_some_and(|rest| {
         !matches!(
@@ -467,7 +450,6 @@ fn is_canvas_proxy_path(path: &str) -> bool {
             Some(
                 "open"
                     | "close"
-                    | "save"
                     | "read-document"
                     | "document-loaded"
                     | "dirty-changed"
@@ -486,9 +468,8 @@ fn requires_token(path: &str) -> bool {
     if PUBLIC_PATHS.contains(&path) {
         return false;
     }
-    // Canvas embed/proxy paths carry their own canvas credentials (ct token
-    // / cookie / canvas-layer bearer check); the outer bearer gate skips
-    // them.
+    // Canvas bundle paths carry their own canvas credentials (ct token or
+    // cookie); the outer bearer gate skips them.
     if is_canvas_proxy_path(path) {
         return false;
     }
@@ -650,15 +631,11 @@ pub fn router_with_static(
             "/acp/factory-key",
             get(acp_api::factory_key_status).post(acp_api::factory_key_save),
         );
-    // Canvas routes parity (test/dev variant): the pool is always `None`
-    // here — the routes degrade to typed 502 DAEMON_DOWN, which is exactly
-    // what the auth tests assert. The boundary is still wired so open's
-    // doc-path validation behavior matches production.
+    // Canvas routes parity (test/dev variant): the boundary is wired so
+    // open's doc-path validation behavior matches production.
     let r = r
         .merge(crate::web::canvas_api::canvas_router(
             crate::web::canvas_api::CanvasState {
-                pool: None,
-                web_auth: web_auth.clone(),
                 boundary: Some(crate::web::canvas_api::CanvasProjectBoundary {
                     registry: registry.clone(),
                 }),
