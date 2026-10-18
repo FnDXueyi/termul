@@ -48,3 +48,8 @@ pub(crate) fn claim_for_process(port: u16) {
 pub(crate) fn is_owned(port: u16) -> bool {
     owned().contains_key(&port)
 }
+
+/// Every owned port, for checks that take the whole set.
+pub(crate) fn owned_list() -> Vec<u16> {
+    owned().keys().copied().collect()
+}

@@ -12,8 +12,8 @@ must own the main thread on macOS. It:
    port that is never the dev server port;
 2. starts a Tauri app with one main window;
 3. installs the real `DesktopBrowserHost` and stands in for the renderer
-   (`adapter.rs`): it opens the webview when the host asks for an agent tab and
-   answers the consent prompt;
+   (`adapter.rs`): it opens the webview when the host asks for an agent tab.
+   Loopback fixtures never raise a consent ticket, so nobody answers one;
 4. runs each case in `cases.rs` through `dispatch`, the same entry point the
    host MCP parent uses.
 

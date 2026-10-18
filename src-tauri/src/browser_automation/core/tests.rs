@@ -8,7 +8,9 @@ use std::sync::{Arc, OnceLock, Weak};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
+use super::ports::{ConsentOption, PortFuture, TicketOutcome, TicketRequest};
 use super::surface::{HistoryStep, TabInfo, TabSurface};
+use super::test_support::ScriptedPermissions;
 use super::*;
 use crate::browser_automation::engine::{
     CapabilityId, CapabilityTable, EngineError, EngineErrorKind, EngineFuture, EngineTraits,
@@ -142,7 +144,22 @@ struct Harness {
     _root: tempfile::TempDir,
 }
 
+/// The user allows every origin for the session.
+struct AllowSession;
+
+impl PermissionRequest for AllowSession {
+    fn request(&self, _ticket: TicketRequest, _wait: std::time::Duration) -> PortFuture<'_, TicketOutcome> {
+        Box::pin(async { TicketOutcome::Answered(ConsentOption::AllowSession) })
+    }
+
+    fn cancel_session(&self, _session_id: &str) {}
+}
+
 fn harness_with(engine: FakeEngine) -> Harness {
+    harness_answering(engine, Arc::new(AllowSession))
+}
+
+fn harness_answering(engine: FakeEngine, permissions: Arc<dyn PermissionRequest>) -> Harness {
     let root = tempfile::tempdir().unwrap();
     let pane = Arc::new(FakePane {
         tabs: Mutex::new(HashMap::new()),
@@ -153,9 +170,13 @@ fn harness_with(engine: FakeEngine) -> Harness {
         pane: pane.clone(),
     });
     let engine = Arc::new(engine);
-    let host = DesktopBrowserHost::with_parts(pane, engine.clone(), vec![sink.clone()]);
+    let services = HostServices {
+        permissions,
+        policy: Arc::new(super::test_support::InMemoryPolicyStore::default()),
+        project_of: Arc::new(|_| "p1".to_string()),
+    };
+    let host = DesktopBrowserHost::with_parts(pane, engine.clone(), vec![sink.clone()], services);
     sink.host.set(Arc::downgrade(&host)).ok();
-    host.consent.lock().insert("s1".to_string(), ());
     Harness {
         host,
         engine,
@@ -356,11 +377,11 @@ async fn failures_carry_code_reason_and_a_host_message_only() {
 
 #[tokio::test]
 async fn withdrawn_verbs_are_refused_before_consent_is_asked() {
-    let h = harness_with(FakeEngine::new(bridge_like()));
-    h.host.consent.lock().clear();
+    let perms = Arc::new(ScriptedPermissions::default());
+    let h = harness_answering(FakeEngine::new(bridge_like()), perms.clone());
     let reply = h.call("screenshot", json!({})).await;
     assert_eq!(reply["code"], "capability_unavailable");
-    assert!(h.host.pending_consent.lock().is_empty(), "no prompt for a call that cannot run");
+    assert!(perms.requests.lock().is_empty(), "no prompt for a call that cannot run");
 }
 
 #[tokio::test]
@@ -386,13 +407,27 @@ async fn admission_refuses_a_verb_that_no_longer_fits_the_deadline() {
 
 #[tokio::test]
 async fn the_consent_wait_ends_at_the_call_deadline() {
-    let h = harness_with(FakeEngine::new(webview2_like()));
-    h.host.consent.lock().clear();
-    let started = std::time::Instant::now();
+    let perms = Arc::new(ScriptedPermissions::default());
+    let h = harness_answering(FakeEngine::new(webview2_like()), perms.clone());
+    let budget = std::time::Duration::from_millis(100);
     let reply = h
-        .call_within("snapshot", json!({}), std::time::Duration::from_millis(100))
+        .call_within("navigate", json!({ "url": "https://example.com" }), budget)
         .await;
-    assert!(started.elapsed() < std::time::Duration::from_secs(5), "never waits the full consent budget");
     assert_eq!(reply["code"], "confirmation_required");
-    assert_eq!(reply["reason"], "consent_unanswered");
+    let requests = perms.requests.lock();
+    let (_, wait) = requests.first().expect("the unlisted origin raised a ticket");
+    assert!(*wait <= budget, "the ticket waits no longer than the call has left");
+}
+
+#[tokio::test]
+async fn a_quoted_wait_duration_runs_as_a_number() {
+    let h = harness_with(FakeEngine::new(webview2_like()));
+    h.call("navigate", json!({ "url": "https://example.com" })).await;
+    let reply = h.call("wait", json!({ "ms": "10" })).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = h.call("wait", json!({ "ms": "ten" })).await;
+    assert_eq!(
+        (reply["code"].as_str(), reply["message"].as_str()),
+        (Some("invalid_params"), Some("wait: 'ms' must be a non-negative integer"))
+    );
 }

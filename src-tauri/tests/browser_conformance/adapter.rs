@@ -1,10 +1,11 @@
 //! The runner's only view of the automation host.
 //!
 //! It stands in for the renderer (opens the webview when the host asks for an
-//! agent tab, answers the consent prompt) and exposes one `call` that goes
-//! through the same entry point the host MCP parent uses, with the deadline
-//! the parent stamps on a frame. Switching the runner to another host API
-//! means editing this file.
+//! agent tab) and exposes one `call` that goes through the same entry point
+//! the host MCP parent uses, with the deadline the parent stamps on a frame.
+//! Fixtures are loopback pages, which never raise a consent ticket; a ticket
+//! means a case left loopback, and is answered as unattended. Switching the
+//! runner to another host API means editing this file.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +18,6 @@ use tokio::sync::mpsc;
 
 const AGENT_ID: &str = "conformance-agent";
 const EVENT_AGENT_TAB: &str = "acp:browser_agent_tab";
-const EVENT_CONSENT_REQUEST: &str = "acp:browser_consent_request";
 
 /// Right-hand pane geometry in logical pixels, like the app's browser pane.
 const TAB_BOUNDS: host::BrowserBounds = host::BrowserBounds {
@@ -56,8 +56,24 @@ impl EventSink for RendererSink {
     }
 }
 
+/// No one answers consent tickets.
+struct Unattended;
+
+impl host::PermissionRequest for Unattended {
+    fn request(
+        &self,
+        _ticket: host::TicketRequest,
+        _wait: Duration,
+    ) -> host::PortFuture<'_, host::TicketOutcome> {
+        Box::pin(async { host::TicketOutcome::Unattended })
+    }
+
+    fn cancel_session(&self, _session_id: &str) {}
+}
+
 pub struct Engine {
     _tabs: Arc<host::BrowserTabManager>,
+    _policy_root: tempfile::TempDir,
 }
 
 impl Engine {
@@ -66,13 +82,28 @@ impl Engine {
         tabs.set_agentation_enabled(false);
         let (tx, rx) = mpsc::unbounded_channel();
         let sink: Arc<dyn EventSink> = Arc::new(RendererSink(tx));
+        let policy_root = tempfile::tempdir().expect("policy dir");
+        let policy = Arc::new(host::BrowserPolicyService::new(
+            policy_root.path().to_path_buf(),
+            Arc::new(Vec::new),
+            Vec::new(),
+            Arc::new(host::UnwiredProfileControl),
+        ));
         host::set_browser_host(host::DesktopBrowserHost::new(
             app.clone(),
             tabs.clone(),
             vec![sink],
+            host::HostServices {
+                permissions: Arc::new(Unattended),
+                policy,
+                project_of: Arc::new(|_| "conformance".to_string()),
+            },
         ));
         tauri::async_runtime::spawn(renderer_stand_in(rx, tabs.clone()));
-        Self { _tabs: tabs }
+        Self {
+            _tabs: tabs,
+            _policy_root: policy_root,
+        }
     }
 
     /// One tool call, as the wire reply an agent would read. A reply that
@@ -123,31 +154,24 @@ async fn renderer_stand_in(
     tabs: Arc<host::BrowserTabManager>,
 ) {
     while let Some(event) = events.recv().await {
-        match event.type_ {
-            EVENT_CONSENT_REQUEST => {
-                if let Some(id) = event.payload["requestId"].as_str() {
-                    host::consent_responded(id, true);
-                }
-            }
-            EVENT_AGENT_TAB if event.payload["action"] == "open" => {
-                let tabs = tabs.clone();
-                tauri::async_runtime::spawn(async move {
-                    let Some(tab_id) = event.payload["tabId"].as_str() else {
-                        return;
-                    };
-                    let url = event.payload["url"].as_str().unwrap_or("about:blank");
-                    match tabs
-                        .create(tab_id.to_string(), url.to_string(), TAB_BOUNDS)
-                        .await
-                    {
-                        Ok(_) => {
-                            host::tab_created(tab_id);
-                        }
-                        Err(e) => eprintln!("conformance: tab create failed: {e}"),
-                    }
-                });
-            }
-            _ => {}
+        if event.type_ != EVENT_AGENT_TAB || event.payload["action"] != "open" {
+            continue;
         }
+        let tabs = tabs.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(tab_id) = event.payload["tabId"].as_str() else {
+                return;
+            };
+            let url = event.payload["url"].as_str().unwrap_or("about:blank");
+            match tabs
+                .create(tab_id.to_string(), url.to_string(), TAB_BOUNDS)
+                .await
+            {
+                Ok(_) => {
+                    host::tab_created(tab_id);
+                }
+                Err(e) => eprintln!("conformance: tab create failed: {e}"),
+            }
+        });
     }
 }

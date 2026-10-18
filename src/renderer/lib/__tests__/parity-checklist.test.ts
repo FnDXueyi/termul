@@ -2226,3 +2226,42 @@ describe('Browser policy parity', () => {
     expect(readFileSync(Facade, 'utf-8')).toContain("from './log-api'")
   })
 })
+
+// Browser consent tickets and Stop: the desktop answers through its
+// `main`-webview commands, a remote client through `/ws`, and the facade
+// picks the carrier. Source-grep checks pin that every carrier exists.
+describe('Browser consent and Stop parity', () => {
+  const SRC_TAURI = join(LIB_DIR, '..', '..', '..', 'src-tauri', 'src')
+  const read = (...parts: string[]): string => readFileSync(join(SRC_TAURI, ...parts), 'utf-8')
+  const facade = readFileSync(join(LIB_DIR, 'browser-consent-api.ts'), 'utf-8')
+
+  it('the facade branches on isTauriContext() between the commands and the transport', () => {
+    expect(facade).toMatch(/invokeIpc<null>\('browser_ticket_respond'/)
+    expect(facade).toMatch(/invokeIpc<null>\('browser_stop'/)
+    expect(facade).toMatch(/getAcpTransport\(\)\.respondPermission\(/)
+    expect(facade).toMatch(/getAcpTransport\(\)\.stopBrowserAgent\(/)
+    expect(readFileSync(join(LIB_DIR, 'acp-transport', 'ws-transport.ts'), 'utf-8')).toMatch(
+      /this\.request\('browser_stop', \{ sessionId \}\)/
+    )
+  })
+
+  it('registers both desktop commands and routes both /ws requests to the host paths', () => {
+    const lib = read('lib.rs')
+    expect(lib).toContain('commands::browser_ticket_respond,')
+    expect(lib).toContain('commands::browser_stop,')
+    const dispatch = read('web', 'ws', 'dispatch.rs')
+    expect(dispatch).toMatch(/handle_respond_host_ticket\(id, &req\.payload, env\)/)
+    expect(dispatch).toMatch(/"browser_stop" => handle_browser_stop\(id, &req\.payload, env\)/)
+  })
+
+  it('both carriers resolve through the same host ticket table and stop latch', () => {
+    expect(read('commands', 'browser.rs')).toMatch(/tickets\.answer\(Approver::Desktop/)
+    expect(read('web', 'permissions.rs')).toMatch(/\.answer\(approver, request_id, option_id\)/)
+    expect(read('commands', 'browser.rs')).toMatch(
+      /browser_automation::stop_session\(&session_id\)/
+    )
+    expect(read('web', 'ws', 'subscribe.rs')).toMatch(
+      /browser_automation::stop_session\(&parsed\.session_id\)/
+    )
+  })
+})

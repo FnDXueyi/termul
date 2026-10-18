@@ -179,9 +179,13 @@ pub use acp::claude_admin;
 // the runner's adapter, nothing else. Not a supported API.
 #[doc(hidden)]
 pub mod conformance_support {
+    pub use crate::acp::browser_policy::{BrowserPolicyService, UnwiredProfileControl};
+    pub use crate::browser_automation::core::ports::{
+        PermissionRequest, PortFuture, TicketOutcome, TicketRequest,
+    };
     pub use crate::browser_automation::{
-        budgets, consent_responded, dispatch, eval_resolved, session_ended, set_browser_host,
-        tab_created, BrowserCall, DesktopBrowserHost,
+        budgets, dispatch, eval_resolved, session_ended, set_browser_host, tab_created,
+        BrowserCall, DesktopBrowserHost, HostServices,
     };
     pub use crate::browser_tab_manager::{BrowserBounds, BrowserTabManager};
 }
@@ -1138,8 +1142,9 @@ pub fn run() {
 
     // Defense-in-depth: reject top-level navigation on the main app webview so
     // a stray chat-link click (or any external anchor) can never tear down the
-    // SPA (issue #406). Only the `main` webview is restricted — browser-tab
-    // webviews load external URLs by design and stay unrestricted.
+    // SPA (issue #406). Browser-tab webviews load external URLs by design;
+    // for agent tabs every top-level request, redirect hops included, must
+    // pass the agent's origin authorization.
     builder = builder.plugin(
         tauri::plugin::Builder::<_, ()>::new("main-navigation-guard")
             .on_navigation(|webview, url| {
@@ -1159,6 +1164,7 @@ pub fn run() {
                     allow
                 } else {
                     host_perimeter::allow_tab_navigation(webview, url)
+                        && browser_automation::navigation_allowed(webview.label(), url)
                 }
             })
             .build(),
@@ -1619,6 +1625,18 @@ pub fn run() {
             // makes the first answer win. Tickets have no timer, so no runtime
             // handle is needed here.
             let rendezvous = Arc::new(PermissionRendezvous::new(Arc::clone(&acp_manager)));
+            // Host-originated browser consent tickets: answerable from the
+            // desktop command or a qualified `/ws` client, raised only while
+            // someone is subscribed to the session.
+            let host_tickets = {
+                let relay = Arc::clone(&ws_relay);
+                Arc::new(acp::host_ticket::HostTickets::new(
+                    vec![ws_relay.clone()],
+                    Box::new(move |session_id| relay.session_subscriber_count(session_id) > 0),
+                ))
+            };
+            rendezvous.set_host_tickets(Arc::clone(&host_tickets));
+            app.manage(Arc::clone(&host_tickets));
             ws_relay.set_rendezvous(rendezvous);
             let question_rendezvous = Arc::new(QuestionRendezvous::new(Arc::clone(&acp_manager)));
             ws_relay.set_question_rendezvous(question_rendezvous);
@@ -1639,43 +1657,11 @@ pub fn run() {
                 tauri::async_runtime::handle().inner(),
             )));
 
-            // Desktop browser-automation host: drives the visible browser
-            // pane via BrowserTabManager; registered globally so host_mcp
-            // FrameKind::Browser frames dispatch here. Without registration
-            // (termul-server, tests) the tool fails closed.
-            browser_automation::set_browser_host(
-                browser_automation::DesktopBrowserHost::new(
-                    handle.clone(),
-                    browser_tab_manager.clone(),
-                    // Same sink the ACP manager uses: the relay carries the
-                    // consent prompt and tab open/close to every `/ws` client
-                    // (the desktop renderer's channel, phones, browsers).
-                    vec![ws_relay.clone()],
-                ),
-            );
-
             // Host-owned browser policy (allow-list, pre-approvals, global
             // profile switch). The relay sink carries `browser_policy_changed`
             // to the desktop renderer and every remote client; the web router
             // reaches the same service through `browser_policy::installed`.
-            {
-                let owned_handle = handle.clone();
-                let owned_ports: acp::browser_policy::OwnedPorts = Arc::new(move || {
-                    let mut ports = Vec::new();
-                    if let Some(service) =
-                        owned_handle.try_state::<agentation::AgentationService>()
-                    {
-                        ports.push(service.http_port());
-                    }
-                    if let Some(remote) = owned_handle.try_state::<Arc<RemoteServerState>>() {
-                        ports.extend(remote.status().port);
-                    }
-                    if tauri::is_dev() {
-                        let dev_url = owned_handle.config().build.dev_url.as_ref();
-                        ports.extend(dev_url.and_then(|url| url.port_or_known_default()));
-                    }
-                    ports
-                });
+            let policy_service = {
                 let policy_root = handle
                     .path()
                     .app_data_dir()
@@ -1683,13 +1669,55 @@ pub fn run() {
                     .join("browser-policy");
                 let policy_service = Arc::new(acp::browser_policy::BrowserPolicyService::new(
                     policy_root,
-                    owned_ports,
+                    Arc::new(host_perimeter::owned_ports),
                     vec![ws_relay.clone()],
                     Arc::new(acp::browser_policy::UnwiredProfileControl),
                 ));
                 acp::browser_policy::install(Arc::clone(&policy_service));
-                app.manage(policy_service);
+                app.manage(Arc::clone(&policy_service));
+                policy_service
+            };
+
+            // Desktop browser-automation host: drives the visible browser
+            // pane via BrowserTabManager; registered globally so host_mcp
+            // FrameKind::Browser frames dispatch here. Without registration
+            // (termul-server, tests) the tool fails closed.
+            if tauri::is_dev() {
+                if let Some(port) = handle
+                    .config()
+                    .build
+                    .dev_url
+                    .as_ref()
+                    .and_then(tauri::Url::port_or_known_default)
+                {
+                    host_perimeter::claim_for_process(port);
+                }
             }
+            let project_of: browser_automation::core::ProjectResolver = {
+                let persistence = session_persistence.clone();
+                Arc::new(move |session_id| {
+                    persistence
+                        .as_ref()
+                        .and_then(|p| p.metadata(session_id).ok())
+                        .and_then(|m| m.project_id)
+                        .unwrap_or_else(|| acp::session_persistence::UNASSIGNED_PROJECT_ID.to_string())
+                })
+            };
+            browser_automation::set_browser_host(
+                browser_automation::DesktopBrowserHost::new(
+                    handle.clone(),
+                    browser_tab_manager.clone(),
+                    // Same sink the ACP manager uses: the relay carries tab
+                    // open/close and Stop state to every `/ws` client (the
+                    // desktop renderer's channel, phones, browsers).
+                    vec![ws_relay.clone()],
+                    browser_automation::HostServices {
+                        permissions: host_tickets,
+                        policy: policy_service,
+                        project_of,
+                    },
+                ),
+            );
 
             app.manage(Arc::clone(&acp_manager));
             app.manage(Arc::clone(&ws_relay));
@@ -1912,9 +1940,11 @@ pub fn run() {
             commands::browser_tab_report_title,
             // Agentation toolbar injection (on-demand)
             commands::browser_tab_inject_agentation,
-            // Agent browser automation (eval bridge reply + consent respond)
+            // Agent browser automation (eval bridge reply, host consent
+            // tickets, Stop)
             commands::browser_agent_eval_result,
-            commands::browser_consent_respond,
+            commands::browser_ticket_respond,
+            commands::browser_stop,
             // Worktree commands
             commands::worktree_list,
             commands::worktree_create,

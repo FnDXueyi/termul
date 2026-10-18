@@ -1,130 +1,304 @@
-//! One-time per-session consent prompt (`acp:browser_consent_request` →
-//! `browser_consent_respond`).
+//! Origin consent for agent browser calls: classify the call's target,
+//! honour the session's grants and the project allow-list, and raise a
+//! host-originated consent ticket for everything else. Owns the Stop
+//! latch, because Stop revokes exactly what consent grants.
 
-use serde::Serialize;
-use tokio::sync::oneshot;
-use uuid::Uuid;
+use std::collections::HashMap;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
+use serde_json::Value;
+use tauri::Url;
+
+use super::authz::{DenyReason, HopVerdict, PromptKind, SessionGrants};
+use super::dispatch::Verb;
+use super::ports::{
+    CanonicalOrigin, ConsentOption, PermissionRequest, PolicyRefusal, PolicyStore,
+    ProjectPolicyOp, TabProfile, TicketId, TicketOutcome, TicketRequest,
+};
+use super::stop::{stopped_error, StopLatch, StopToken};
 use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION};
+use crate::acp::browser_policy::OriginPattern;
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::BrowserCall;
 
-const EVENT_CONSENT_REQUEST: &str = "acp:browser_consent_request";
+/// CAS retries when "always allow for this project" races another edit.
+const PERSIST_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserConsentRequestEvent {
-    pub request_id: String,
-    pub session_id: String,
-    pub agent_id: String,
-    /// First action the agent wants to run — surfaced in the dialog.
-    pub action: String,
-    /// Agent-stated intent for the first mutating action, when provided.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub element: Option<String>,
+pub struct OriginRequest<'a> {
+    pub session_id: &'a str,
+    pub project_id: &'a str,
+    pub url: &'a str,
+    pub element: Option<&'a str>,
+    pub profile: TabProfile,
+    /// The call's deadline: the consent wait never outlasts it.
+    pub deadline: Deadline,
 }
 
-pub(super) struct PendingConsent {
-    request_id: String,
-    waiters: Vec<oneshot::Sender<bool>>,
+fn confirmation(reason: &'static str, message: String) -> BrowserError {
+    BrowserError::new(ERR_CONFIRMATION, message).with_reason(reason)
 }
 
-impl DesktopBrowserHost {
-    pub(super) async fn ensure_consent(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        call: &BrowserCall,
-        deadline: Deadline,
-    ) -> Result<(), BrowserError> {
-        if self.consent.lock().contains_key(session_id) {
-            return Ok(());
+fn denied(reason: DenyReason) -> BrowserError {
+    BrowserError::invalid("this origin is never reachable from the agent browser")
+        .with_reason(reason.as_str())
+        .with_arg_keys(&["url"])
+}
+
+fn outcome_label(outcome: &TicketOutcome) -> &'static str {
+    match outcome {
+        TicketOutcome::Answered(ConsentOption::AllowSession) => "allow_session",
+        TicketOutcome::Answered(ConsentOption::AllowProject) => "allow_project",
+        TicketOutcome::Answered(ConsentOption::Deny) => "deny",
+        TicketOutcome::Unattended => "unattended",
+        TicketOutcome::TimedOut => "timed_out",
+        TicketOutcome::Cancelled => "cancelled",
+    }
+}
+
+pub struct ConsentGate {
+    grants: SessionGrants,
+    stop: StopLatch,
+    permissions: Arc<dyn PermissionRequest>,
+    policy: Arc<dyn PolicyStore>,
+    /// One consent ticket per session at a time: a concurrent call for the
+    /// same origin waits, then finds the grant instead of prompting again.
+    prompts: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ConsentGate {
+    pub fn new(
+        permissions: Arc<dyn PermissionRequest>,
+        policy: Arc<dyn PolicyStore>,
+    ) -> Self {
+        Self {
+            grants: SessionGrants::default(),
+            stop: StopLatch::default(),
+            permissions,
+            policy,
+            prompts: Mutex::new(HashMap::new()),
         }
-        let (tx, rx) = oneshot::channel::<bool>();
-        {
-            let mut pending = self.pending_consent.lock();
-            match pending.get_mut(session_id) {
-                // A prompt is already on screen for this session — queue
-                // behind it rather than stacking a second dialog.
-                Some(pc) => pc.waiters.push(tx),
-                None => {
-                    let request_id = Uuid::new_v4().to_string();
-                    pending.insert(
-                        session_id.to_string(),
-                        PendingConsent {
-                            request_id: request_id.clone(),
-                            waiters: vec![tx],
-                        },
-                    );
-                    drop(pending);
-                    self.emit(
-                        Some(session_id),
-                        EVENT_CONSENT_REQUEST,
-                        &BrowserConsentRequestEvent {
-                            request_id,
-                            session_id: session_id.to_string(),
-                            agent_id: agent_id.to_string(),
-                            action: call.action.clone(),
-                            element: call.element.clone(),
-                        },
-                    );
+    }
+
+    pub fn begin(&self, session_id: &str) -> Result<StopToken, BrowserError> {
+        self.stop.begin(session_id)
+    }
+
+    pub async fn authorize(
+        &self,
+        token: &StopToken,
+        req: OriginRequest<'_>,
+    ) -> Result<(), BrowserError> {
+        let url: Url = req
+            .url
+            .parse()
+            .map_err(|_| BrowserError::invalid("invalid url").with_arg_keys(&["url"]))?;
+        let allow_list = self.allow_list(req.project_id).await;
+        self.grants.set_allow_list(req.session_id, allow_list);
+        let lock = self
+            .prompts
+            .lock()
+            .entry(req.session_id.to_string())
+            .or_default()
+            .clone();
+        let _one_prompt = lock.lock().await;
+        token.check()?;
+        match self.grants.check_hop(req.session_id, &url) {
+            HopVerdict::Allow => Ok(()),
+            HopVerdict::Deny(reason) => {
+                log::info!(
+                    "[browser-agent] origin denied code={} reason={} keys=[url]",
+                    super::ERR_INVALID_PARAMS,
+                    reason.as_str()
+                );
+                Err(denied(reason))
+            }
+            HopVerdict::Ungranted(kind, origin) => self.prompt(token, &req, kind, origin).await,
+        }
+    }
+
+    async fn allow_list(&self, project_id: &str) -> Vec<OriginPattern> {
+        match self.policy.project(project_id).await {
+            Ok(policy) => policy.allow_list,
+            Err(error) => {
+                log::warn!(
+                    "[browser-agent] policy read failed reason={}; using an empty allow-list",
+                    error.reason()
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn prompt(
+        &self,
+        token: &StopToken,
+        req: &OriginRequest<'_>,
+        kind: PromptKind,
+        origin: CanonicalOrigin,
+    ) -> Result<(), BrowserError> {
+        let ticket = TicketRequest {
+            id: TicketId::mint(),
+            session_id: req.session_id.to_string(),
+            project_id: req.project_id.to_string(),
+            origin: origin.clone(),
+            target_url: req.url.to_string(),
+            action: kind.action(),
+            element: req.element.map(str::to_string),
+            profile: req.profile,
+        };
+        let outcome = self
+            .permissions
+            .request(ticket, req.deadline.clamp(budgets::CONSENT_WAIT))
+            .await;
+        log::info!(
+            "[browser-agent] consent outcome={} session={}",
+            outcome_label(&outcome),
+            crate::logging::redact_session_id(req.session_id)
+        );
+        let origin_text = origin.as_str().to_string();
+        match outcome {
+            TicketOutcome::Answered(ConsentOption::AllowSession) => self.keep_grant(token, req.session_id, origin),
+            TicketOutcome::Answered(ConsentOption::AllowProject) => {
+                token.check()?;
+                self.persist_origin(req.project_id, &origin).await;
+                self.keep_grant(token, req.session_id, origin)
+            }
+            TicketOutcome::Answered(ConsentOption::Deny) => Err(confirmation(
+                "denied_by_user",
+                format!("the user denied the agent browser access to {origin_text}"),
+            )),
+            TicketOutcome::Unattended => Err(confirmation(
+                "unattended",
+                format!(
+                    "no one can approve {origin_text} right now; ask the user to allow it or add it to the project's browser allow-list"
+                ),
+            )),
+            TicketOutcome::TimedOut => Err(confirmation(
+                "consent_timeout",
+                format!("the user did not answer the request to open {origin_text}"),
+            )),
+            TicketOutcome::Cancelled if token.is_stopped() => Err(stopped_error()),
+            TicketOutcome::Cancelled => Err(confirmation(
+                "consent_cancelled",
+                format!("the request to open {origin_text} was withdrawn"),
+            )),
+        }
+    }
+
+    fn keep_grant(
+        &self,
+        token: &StopToken,
+        session_id: &str,
+        origin: CanonicalOrigin,
+    ) -> Result<(), BrowserError> {
+        self.stop
+            .commit(session_id, token, || self.grants.grant(session_id, origin))
+    }
+
+    async fn persist_origin(&self, project_id: &str, origin: &CanonicalOrigin) {
+        let op = || ProjectPolicyOp::AddOrigin(OriginPattern::Exact(origin.clone()));
+        let mut expected = match self.policy.project(project_id).await {
+            Ok(policy) => policy.revision,
+            Err(error) => {
+                log::warn!("[browser-agent] consent persist failed reason={}", error.reason());
+                return;
+            }
+        };
+        for _ in 0..PERSIST_ATTEMPTS {
+            match self.policy.apply_project(project_id, expected, op()).await {
+                Ok(_) => return,
+                Err(PolicyRefusal::RevisionConflict { current }) => expected = current,
+                Err(error) => {
+                    log::warn!("[browser-agent] consent persist failed reason={}", error.reason());
+                    return;
                 }
             }
         }
-        // Unanswered in time or renderer gone (sender dropped): fail closed.
-        let answer = tokio::time::timeout(deadline.clamp(budgets::CONSENT_WAIT), rx).await;
-        if matches!(answer, Ok(Ok(true))) {
-            self.consent.lock().insert(session_id.to_string(), ());
-            log::info!(
-                "[browser-agent] consent granted for session {}",
-                crate::logging::redact_session_id(session_id)
-            );
-            Ok(())
-        } else {
-            log::info!(
-                "[browser-agent] consent denied/timed out for session {}",
-                crate::logging::redact_session_id(session_id)
-            );
-            let reason = match answer {
-                Ok(Ok(false)) => "consent_denied",
-                _ => "consent_unanswered",
-            };
-            Err(BrowserError::new(
-                ERR_CONFIRMATION,
-                "user did not grant browser automation for this session",
-            )
-            .with_reason(reason))
-        }
+        log::warn!("[browser-agent] consent persist failed reason=revision_conflict");
     }
 
-    /// Answer the pending prompt carrying `request_id`; false when none does.
-    pub(super) fn answer_consent(&self, request_id: &str, allowed: bool) -> bool {
-        let mut pending = self.pending_consent.lock();
-        let Some(session) = pending
-            .iter()
-            .find(|(_, pc)| pc.request_id == request_id)
-            .map(|(sid, _)| sid.clone())
-        else {
-            return false;
-        };
-        let Some(pc) = pending.remove(&session) else {
-            return false;
-        };
-        drop(pending);
-        for tx in pc.waiters {
-            let _ = tx.send(allowed);
-        }
-        true
+    /// Stop: latch the session, revoke its grants and withdraw its pending
+    /// tickets. Returns false when it was already stopped.
+    pub fn stop(&self, session_id: &str) -> bool {
+        let first = self
+            .stop
+            .stop(session_id, || self.grants.revoke_session(session_id));
+        self.permissions.cancel_session(session_id);
+        first
     }
 
-    /// Drop the session's grant and deny its in-flight prompt immediately
-    /// (waiters would otherwise sit until the consent timeout).
-    pub(super) fn forget_consent(&self, session_id: &str) {
-        self.consent.lock().remove(session_id);
-        if let Some(pc) = self.pending_consent.lock().remove(session_id) {
-            for tx in pc.waiters {
-                let _ = tx.send(false);
+    /// The user's next prompt turn. Returns whether the session was stopped.
+    pub fn resume(&self, session_id: &str) -> bool {
+        self.stop.resume(session_id)
+    }
+
+    pub fn is_stopped(&self, session_id: &str) -> bool {
+        self.stop.is_stopped(session_id)
+    }
+
+    pub fn check_hop(&self, session_id: &str, url: &Url) -> HopVerdict {
+        self.grants.check_hop(session_id, url)
+    }
+
+    pub fn end_session(&self, session_id: &str) {
+        self.stop.forget(session_id);
+        self.grants.forget_session(session_id);
+        self.prompts.lock().remove(session_id);
+        self.permissions.cancel_session(session_id);
+    }
+}
+
+impl DesktopBrowserHost {
+    /// The URL a call needs consent for: the target of `navigate` and
+    /// `new_tab`, otherwise the page the targeted tab shows now. `None`
+    /// when the call reaches no page or its tab does not resolve (the verb
+    /// itself then reports the error).
+    fn consent_target(&self, session_id: &str, verb: Verb, call: &BrowserCall) -> Option<String> {
+        match verb {
+            Verb::Navigate | Verb::NewTab => call
+                .args
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            Verb::ListTabs | Verb::CloseTab => None,
+            _ => {
+                let tab = call.args.get("tabId").and_then(Value::as_str);
+                let (tab_id, _) = self.resolve_tab(session_id, tab).ok()?;
+                self.surface.info(&tab_id).ok().map(|info| info.url)
             }
         }
     }
+
+    pub(super) async fn authorize_call(
+        &self,
+        token: &StopToken,
+        session_id: &str,
+        verb: Verb,
+        call: &BrowserCall,
+        deadline: Deadline,
+    ) -> Result<(), BrowserError> {
+        let Some(url) = self.consent_target(session_id, verb, call) else {
+            return Ok(());
+        };
+        let project_id = (self.project_of)(session_id);
+        self.gate
+            .authorize(
+                token,
+                OriginRequest {
+                    session_id,
+                    project_id: &project_id,
+                    url: &url,
+                    element: call.element.as_deref(),
+                    // Every agent tab runs in the app's shared webview profile today.
+                    profile: TabProfile::Shared,
+                    deadline,
+                },
+            )
+            .await
+    }
 }
+
+#[cfg(test)]
+#[path = "consent_tests.rs"]
+mod tests;

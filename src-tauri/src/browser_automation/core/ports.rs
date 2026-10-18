@@ -2,11 +2,6 @@
 //! and the browser policy store. Implementations live in `acp/` and
 //! `web/`; the core only sees these traits.
 
-#![expect(
-    dead_code,
-    reason = "the consent core, which lands next, is the only consumer of the consent ports"
-)]
-
 pub use crate::acp::browser_policy::{
     ActionClass, AppPolicy, AppPolicyOp, CanonicalOrigin, PolicyRefusal, ProjectPolicy,
     ProjectPolicyOp,

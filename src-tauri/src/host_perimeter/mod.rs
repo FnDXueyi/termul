@@ -25,8 +25,8 @@ mod owned_ports_tests;
 #[path = "../../tests/browser_fixtures/security/mod.rs"]
 mod security_fixtures;
 
-#[cfg(test)]
 pub(crate) use owned_ports::is_owned as is_owned_port;
+pub(crate) use owned_ports::owned_list as owned_ports;
 pub(crate) use owned_ports::{claim_for_process, OwnedPort};
 
 use tauri::ipc::Invoke;
