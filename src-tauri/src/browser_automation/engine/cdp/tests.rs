@@ -334,3 +334,11 @@ async fn set_input_files_sets_nothing_when_the_path_names_no_file_input() {
     );
     assert!(t.calls.lock().iter().all(|c| c.1 != "DOM.setFileInputFiles"));
 }
+
+#[test]
+fn every_session_cancels_file_choosers_with_the_page_domain_on() {
+    let calls = file_chooser_calls();
+    let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
+    assert_eq!(methods, ["Page.enable", "Page.setInterceptFileChooserDialog"]);
+    assert_eq!(calls[1].1, json!({ "enabled": true, "cancel": true }), "the native dialog never opens");
+}
