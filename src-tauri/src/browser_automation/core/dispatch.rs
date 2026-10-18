@@ -477,31 +477,22 @@ pub static REGISTRY: [ActionSpec; 22] = [
     },
 ];
 
-/// `download_intercept` and `file_chooser` join the agent-tab floor once
-/// their engine hooks ship; flip this then.
-pub const FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER: bool = false;
-
 /// The tab-policy hooks that must all be `Trusted` before any agent tab
 /// opens.
-const FLOOR: [Cap; 5] = [
+const FLOOR: [Cap; 7] = [
     Cap::NavigationIntercept,
     Cap::NewWindowIntercept,
+    Cap::DownloadIntercept,
     Cap::DialogIntercept,
+    Cap::FileChooser,
     Cap::PermissionIntercept,
     Cap::ExternalProtocolIntercept,
 ];
-const FLOOR_PENDING: [Cap; 2] = [Cap::DownloadIntercept, Cap::FileChooser];
 
 /// The first floor capability this engine does not enforce natively.
 pub fn floor_gap(facts: &EngineFacts) -> Option<CapabilityId> {
-    let pending: &[Cap] = if FLOOR_INCLUDES_DOWNLOAD_AND_FILE_CHOOSER {
-        &FLOOR_PENDING
-    } else {
-        &[]
-    };
     FLOOR
         .iter()
-        .chain(pending)
         .copied()
         .find(|id| facts.capabilities.get(*id) != Support::Trusted)
 }

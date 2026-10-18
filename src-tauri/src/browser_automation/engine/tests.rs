@@ -63,6 +63,7 @@ fn webview2_declares_isolated_eval_trusted_click_screenshot_file_inputs_and_poli
         CapabilityId::DialogIntercept,
         CapabilityId::PermissionIntercept,
         CapabilityId::ExternalProtocolIntercept,
+        CapabilityId::DownloadIntercept,
     ] {
         assert_eq!(table.get(id), Support::Trusted, "{id:?}");
     }

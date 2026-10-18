@@ -7,6 +7,7 @@
 //! object); the completion handler forwards the result through a oneshot
 //! to the awaiting task.
 
+mod chooser;
 mod dialogs;
 pub mod events;
 mod external_protocol;
@@ -142,8 +143,8 @@ impl WebView2Engine {
 }
 
 /// What this adapter implements today: isolated-world eval, trusted
-/// clicks, screenshots and file inputs, the tab-policy hooks; the
-/// DOM-event verbs are synthetic.
+/// clicks, screenshots and file inputs, the tab-policy hooks (downloads
+/// and file choosers among them); the DOM-event verbs are synthetic.
 pub fn capability_table() -> CapabilityTable {
     CapabilityTable::unavailable("not implemented on the WebView2 engine yet")
         .with(CapabilityId::IsolatedEval, Support::Trusted)
@@ -155,6 +156,7 @@ pub fn capability_table() -> CapabilityTable {
         .with(CapabilityId::PermissionIntercept, Support::Trusted)
         .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted)
         .with(CapabilityId::FileChooser, Support::Trusted)
+        .with(CapabilityId::DownloadIntercept, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)

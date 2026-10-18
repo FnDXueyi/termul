@@ -411,6 +411,7 @@ pub(super) fn webview2_like() -> CapabilityTable {
         .with(CapabilityId::PointerClick, Support::Trusted)
         .with(CapabilityId::Screenshot, Support::Trusted)
         .with(CapabilityId::FileChooser, Support::Trusted)
+        .with(CapabilityId::DownloadIntercept, Support::Trusted)
         .with(CapabilityId::TrustedKey, Support::Synthetic)
         .with(CapabilityId::PointerMove, Support::Synthetic)
         .with(CapabilityId::Wheel, Support::Synthetic)
@@ -420,7 +421,6 @@ fn webkit_like() -> CapabilityTable {
     webview2_like()
         .with(CapabilityId::PointerClick, Support::Synthetic)
         .with(CapabilityId::Screenshot, Support::Unavailable("no screenshots here"))
-        .with(CapabilityId::FileChooser, Support::Unavailable("no file inputs here"))
 }
 
 impl Harness {

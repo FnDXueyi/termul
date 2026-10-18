@@ -35,8 +35,9 @@ pub fn params_json(script: &Script) -> String {
 }
 
 /// What both WebKit adapters implement today: isolated-world eval, the
-/// tab-policy hooks and viewport snapshots, with every input verb run as
-/// synthetic DOM events by the helpers.
+/// tab-policy hooks (downloads and file choosers among them), file inputs
+/// and viewport snapshots, with every input verb run as synthetic DOM
+/// events by the helpers.
 pub fn isolated_facts() -> EngineFacts {
     EngineFacts {
         capabilities: CapabilityTable::unavailable("not implemented on this engine yet")
@@ -50,7 +51,9 @@ pub fn isolated_facts() -> EngineFacts {
             .with(CapabilityId::NewWindowIntercept, Support::Trusted)
             .with(CapabilityId::DialogIntercept, Support::Trusted)
             .with(CapabilityId::PermissionIntercept, Support::Trusted)
-            .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted),
+            .with(CapabilityId::ExternalProtocolIntercept, Support::Trusted)
+            .with(CapabilityId::DownloadIntercept, Support::Trusted)
+            .with(CapabilityId::FileChooser, Support::Trusted),
         traits: EngineTraits {
             isolated_world: true,
             background_render: false,

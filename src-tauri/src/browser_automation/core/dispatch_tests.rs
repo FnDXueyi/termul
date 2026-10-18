@@ -339,3 +339,17 @@ fn a_withdrawn_verb_drops_its_result_line() {
     assert!(!description.contains("data.path"), "{description}");
     assert!(description.contains("data.refs"));
 }
+
+#[test]
+fn the_agent_tab_floor_needs_native_download_and_file_chooser_hooks() {
+    assert_eq!(floor_gap(&EngineFacts::all_trusted()), None);
+    for hook in [CapabilityId::DownloadIntercept, CapabilityId::FileChooser] {
+        let facts = EngineFacts {
+            capabilities: EngineFacts::all_trusted()
+                .capabilities
+                .with(hook, Support::Synthetic),
+            ..EngineFacts::all_trusted()
+        };
+        assert_eq!(floor_gap(&facts), Some(hook), "{hook:?}");
+    }
+}
