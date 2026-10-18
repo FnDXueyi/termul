@@ -204,7 +204,9 @@ termul-server --host 127.0.0.1 --port 8080 \
 
 Comma-separate several origins, or repeat `--allowed-origins`. The flag replaces `TERMUL_ALLOWED_ORIGINS` when both are set. The server does not send `Access-Control-Allow-Origin`.
 
-The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket routes. The desktop shared-live server uses the same host check. Browser clients of that server are served by it, so they match the request host; a proxy in front of it that keeps the public `Host` header does too.
+A server that runs without a bearer token also checks the `Host` header, so a DNS-rebinding page cannot reach it. It answers IP literals, `localhost`, and the hosts of `--allowed-origins`, and returns `403` for any other name. To reach a token-less server by a host name, such as a proxy that keeps the public `Host` header, list that origin with `--allowed-origins`. A server that requires the token accepts any `Host`, because a rebinding page cannot present the token.
+
+The desktop app talks to the host through Tauri IPC, not these HTTP or WebSocket routes. The desktop shared-live server uses the same origin check. Browser clients of that server are served by it, so they match the request host. It always requires its token, and it answers only IP literals, `localhost`, and its cloudflared tunnel host.
 
 ## Run in Docker
 

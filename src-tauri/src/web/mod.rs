@@ -34,6 +34,7 @@ pub mod git_api;
 pub mod git_diff_stat_api;
 pub mod git_history_api;
 pub mod git_hunk_api;
+pub mod host_allow;
 pub mod install_api;
 pub mod log_api;
 pub mod mcp_oauth_api;
@@ -171,6 +172,12 @@ pub async fn serve(
         }),
     );
 
+    let host_allow = if web_auth.is_some() {
+        host_allow::HostAllowList::any()
+    } else {
+        info!("No bearer token: answering only IP literals, localhost and --allowed-origins hosts");
+        host_allow::HostAllowList::from_origins(&cfg.allowed_origins)
+    };
     let (_addr, handle) = serve_router(
         acp.clone(),
         pty.clone(),
@@ -181,6 +188,7 @@ pub async fn serve(
         ws_relay,
         registry,
         cfg,
+        host_allow,
         shutdown_signal_future(),
         acp_catalog,
         acp_install,
@@ -270,6 +278,9 @@ pub async fn serve(
 /// `/terminal/ws`. `None` keeps every endpoint ungated (loopback-only hosts);
 /// the desktop shared-live host passes `Some` whenever it advertises a tunnel
 /// or binds beyond loopback (AD-3).
+///
+/// `host_allow` is the `Host` allow-list the router enforces. The caller
+/// keeps a clone to add names that only exist after start (a tunnel host).
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_router(
     acp: Arc<AcpManager>,
@@ -281,6 +292,7 @@ pub async fn serve_router(
     ws_relay: Arc<WsRelaySink>,
     registry: Arc<crate::web::project_registry::ProjectRegistry>,
     cfg: ServerConfig,
+    host_allow: host_allow::HostAllowList,
     shutdown: impl Future<Output = ()> + Send + 'static,
     acp_catalog: Option<Arc<crate::acp::AcpCatalogService>>,
     acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
@@ -298,6 +310,7 @@ pub async fn serve_router(
 
     let listener = TcpListener::bind(bind_addr).await?;
     let addr = listener.local_addr()?;
+    let owned_port = crate::host_perimeter::OwnedPort::claim(addr.port());
     info!("ACP web server listening on http://{}", addr);
 
     if !assets::dist_web_ready() {
@@ -373,6 +386,7 @@ pub async fn serve_router(
         // server instead (AD-8).
         canvas_pool,
         cfg.allowed_origins.clone(),
+        host_allow,
         connections,
     );
 
@@ -380,6 +394,7 @@ pub async fn serve_router(
     // task stops with it (the desktop shared-live host starts and stops).
     let store_gc = store::spawn_gc_task(store_for_gc, Arc::clone(ws_relay.presence()));
     let handle = tokio::spawn(async move {
+        let _owned_port = owned_port;
         // Patch D: `into_make_service_with_connect_info::<SocketAddr>()` so
         // the fs WRITE routes can extract `ConnectInfo<SocketAddr>` for the
         // localhost-only guard. Read routes and `/ws` are unaffected.

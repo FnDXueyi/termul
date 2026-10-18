@@ -413,7 +413,7 @@ pub fn router(state: AppState) -> Router {
         ])
         .allow_headers(tower_http::cors::Any);
 
-    Router::new()
+    let router = Router::new()
         .route("/sessions/{id}/annotations", post(add_annotation))
         .route("/sessions/{id}/pending", get(get_pending))
         .route("/sessions/{id}/events", get(session_sse))
@@ -433,7 +433,8 @@ pub fn router(state: AppState) -> Router {
         // global (active daemon) + per-project id-scoped.
         .route("/canvas/mcp", post(canvas_mcp).get(canvas_mcp))
         .route("/canvas/{canvas_id}/mcp", post(canvas_id_mcp).get(canvas_id_mcp))
-        .layer(cors)
+        .layer(cors);
+    crate::web::host_allow::layer(router, crate::web::host_allow::HostAllowList::loopback())
         .with_state(state)
 }
 
@@ -457,9 +458,11 @@ pub async fn start_server(
     let addr = listener
         .local_addr()
         .map_err(|e| format!("Local addr: {e}"))?;
+    let owned_port = crate::host_perimeter::OwnedPort::claim(addr.port());
     let token = tokio_util::sync::CancellationToken::new();
     let t = token.clone();
     tokio::spawn(async move {
+        let _owned_port = owned_port;
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 t.cancelled().await;

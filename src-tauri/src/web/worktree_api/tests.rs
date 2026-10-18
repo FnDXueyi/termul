@@ -555,6 +555,7 @@ pub(super) fn production_router(root: &std::path::Path) -> axum::Router {
         // No canvas pool on this fixture — the /canvas/* routes degrade.
         None,
         crate::web::origin::OriginPolicy::default(),
+        crate::web::host_allow::HostAllowList::loopback(),
         crate::web::connection_runtime::ConnectionRuntime::default(),
     )
 }
