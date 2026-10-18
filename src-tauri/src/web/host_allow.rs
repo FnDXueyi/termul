@@ -92,6 +92,17 @@ impl HostAllowList {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&host)
     }
+
+    /// For listeners that parse HTTP by hand: read the header lines that
+    /// follow the request line and check their `Host`. A block that does not
+    /// end cleanly (read error, timeout, EOF, more than 100 lines) fails.
+    pub fn allows_header_block(
+        &self,
+        lines: &mut impl Iterator<Item = std::io::Result<String>>,
+    ) -> bool {
+        read_header_block(lines)
+            .is_some_and(|headers| self.allows(header_value(&headers, "host")))
+    }
 }
 
 /// Put the `Host` check in front of everything else in `router`.
@@ -121,11 +132,16 @@ async fn enforce_host(
     if hosts.allows(host.as_deref()) {
         return next.run(request).await;
     }
+    // The name is caller-controlled, so only its port is logged.
+    let port = host
+        .as_deref()
+        .and_then(split_host_port)
+        .and_then(|(_, port)| port);
     tracing::warn!(
         target: "termul::web::host",
         method = %request.method(),
-        host = %bounded(host.as_deref().unwrap_or("")),
-        "rejected request host"
+        port = ?port,
+        "rejected request: host not served"
     );
     (
         StatusCode::FORBIDDEN,
@@ -138,10 +154,7 @@ async fn enforce_host(
         .into_response()
 }
 
-/// For listeners that parse HTTP by hand: read the header lines that follow
-/// the request line, up to the blank line. `None` when the block does not
-/// end cleanly (read error, timeout, EOF, or more than 100 lines).
-pub fn read_header_block(
+fn read_header_block(
     lines: &mut impl Iterator<Item = std::io::Result<String>>,
 ) -> Option<Vec<String>> {
     let mut headers = Vec::new();
@@ -155,20 +168,11 @@ pub fn read_header_block(
     None
 }
 
-/// First value of header `name` (case-insensitive) in `headers`.
-pub fn header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
+fn header_value<'a>(headers: &'a [String], name: &str) -> Option<&'a str> {
     headers.iter().find_map(|line| {
         let (key, value) = line.split_once(':')?;
         key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
     })
-}
-
-fn bounded(value: &str) -> String {
-    value
-        .chars()
-        .take(100)
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect()
 }
 
 #[cfg(test)]

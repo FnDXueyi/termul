@@ -34,13 +34,15 @@ use tauri::{Manager, Runtime, Url, Webview};
 
 /// The only webview that may invoke app commands. Capability files target it
 /// by the same label.
-pub(crate) const COMMAND_WEBVIEW_LABEL: &str = "main";
+const COMMAND_WEBVIEW_LABEL: &str = "main";
 
 /// Agent tab labels are minted as `agent-<uuid>`.
-pub(crate) const AGENT_TAB_LABEL_PREFIX: &str = "agent-";
+const AGENT_TAB_LABEL_PREFIX: &str = "agent-";
 
-pub(crate) fn is_agent_tab(label: &str) -> bool {
-    label.starts_with(AGENT_TAB_LABEL_PREFIX)
+/// Agentation never runs in agent tabs: its toolbar would hand an
+/// agent-driven page a channel into the user's annotation store.
+pub(crate) fn agentation_allowed(label: &str) -> bool {
+    !label.starts_with(AGENT_TAB_LABEL_PREFIX)
 }
 
 /// Wrap the app's command handler so a command from any webview other than

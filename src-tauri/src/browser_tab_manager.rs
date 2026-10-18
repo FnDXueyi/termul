@@ -24,12 +24,6 @@ pub struct BrowserBounds {
     pub height: f64,
 }
 
-/// Agentation never runs in agent tabs: its toolbar would hand an agent-driven
-/// page a channel into the user's annotation store.
-fn agentation_allowed(tab_id: &str) -> bool {
-    !crate::host_perimeter::is_agent_tab(tab_id)
-}
-
 pub struct BrowserTabManager {
     app_handle: AppHandle,
     tabs: Arc<Mutex<HashMap<String, BrowserTabInfo>>>,
@@ -283,7 +277,7 @@ impl BrowserTabManager {
                 .map_err(|_| "Lock poisoned")?;
             (ep, en)
         };
-        if enabled && agentation_allowed(&tab_id) {
+        if enabled && crate::host_perimeter::agentation_allowed(&tab_id) {
             if let Some(endpoint_url) = &endpoint {
                 let init_script = format!(
                     r#"
@@ -523,7 +517,7 @@ impl BrowserTabManager {
     /// Called after page load (browser_tab_report_loaded) because the
     /// agentation library accesses document.head at module top-level.
     pub fn inject_agentation_toolbar(&self, tab_id: &str) -> Result<(), String> {
-        if !agentation_allowed(tab_id) {
+        if !crate::host_perimeter::agentation_allowed(tab_id) {
             return Err("Agentation is not available in agent tabs".to_string());
         }
         let webview = self.get_webview(tab_id)?;

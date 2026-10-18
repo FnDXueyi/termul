@@ -213,13 +213,8 @@ pub async fn acp_mcp_oauth_start(app: tauri::AppHandle, server_url: String) -> R
                 let reader = BufReader::new(&mut stream);
                 let mut lines = reader.lines();
                 if let Some(Ok(first_line)) = lines.next() {
-                    let headers: Option<Vec<String>> =
-                        crate::web::host_allow::read_header_block(&mut lines);
-                    let host = headers
-                        .as_deref()
-                        .and_then(|headers| crate::web::host_allow::header_value(headers, "host"));
-                    if headers.is_none()
-                        || !crate::web::host_allow::HostAllowList::loopback().allows(host)
+                    if !crate::web::host_allow::HostAllowList::loopback()
+                        .allows_header_block(&mut lines)
                     {
                         log::warn!("[mcp-oauth] rejected callback request: foreign or missing host");
                         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
