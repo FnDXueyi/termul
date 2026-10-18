@@ -3,6 +3,12 @@
 //! on one. `host_mcp::canvas::CanvasRouter` is the thin front the transports
 //! and the `host_mcp` parent use.
 //!
+//! Only the mount's lease holder (AD-30) may attach a connection to it. When
+//! that connection ends the holder keeps the lease for the mount's grace
+//! ([`CanvasPersistence::release_holder`]); the gateway front then calls
+//! [`CanvasPersistence::expire_lease`], which drops a mount nobody took up
+//! again.
+//!
 //! A call waits on three things at once: the reply, its timeout, and the
 //! connection it went to. A [`Connection`] owns a `watch` sender that is never
 //! sent on; every waiting call holds a receiver, so dropping the connection
@@ -13,12 +19,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 
-use super::{CanvasPersistence, Lifecycle, Mount};
+use super::{CanvasPersistence, ExpiredLease, Lifecycle, Link, Mount, RendererId};
 use crate::acp::host_mcp::canvas::{
     CanvasCallFrame, CanvasError, CanvasErrorCode, CanvasHolder, CanvasOutcome,
 };
@@ -30,6 +36,10 @@ pub(super) struct Connection {
 }
 
 impl Connection {
+    pub(super) fn holder(&self) -> &CanvasHolder {
+        &self.holder
+    }
+
     fn new(holder: CanvasHolder) -> Self {
         let (gone, _) = watch::channel(());
         Self { holder, gone }
@@ -88,16 +98,31 @@ fn refused(code: CanvasErrorCode, message: &str) -> CanvasError {
     CanvasError::new(code, message)
 }
 
+/// A mount whose holder's connection ended: the holder keeps the lease for
+/// `grace`, then [`CanvasPersistence::expire_lease`] drops the mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostLease {
+    pub project_id: String,
+    pub mount_seq: u64,
+    pub grace: Duration,
+}
+
+fn held_by(link: &Link, connection_id: &str) -> bool {
+    link.connection()
+        .is_some_and(|connection| connection.holder.id() == connection_id)
+}
+
 impl CanvasPersistence {
-    /// `holder` now runs the editor of `project_id`'s mount at `mount_seq`.
-    /// A previous connection's calls resolve `CANVAS_CLOSED`. Refused (false)
-    /// when the host holds no such mount: a stale report cannot claim a
-    /// project.
+    /// `holder` now runs the editor of `project_id`'s mount at `mount_seq`,
+    /// which also takes up a lease kept through a reconnect. A previous
+    /// connection's calls resolve `CANVAS_CLOSED`. Refused (false) when the
+    /// host holds no such mount or another renderer holds its lease: a stale
+    /// report cannot claim a project.
     pub fn attach(&self, project_id: &str, mount_seq: u64, holder: CanvasHolder) -> bool {
         let Some(mount) = self.mounts.lock().get(project_id).cloned() else {
             return false;
         };
-        if mount.mount_seq != mount_seq {
+        if mount.mount_seq != mount_seq || mount.holder != *holder.renderer() {
             return false;
         }
         let previous = {
@@ -105,7 +130,7 @@ impl CanvasPersistence {
             if state.lifecycle == Lifecycle::Closed {
                 return false;
             }
-            state.connection.replace(Connection::new(holder))
+            std::mem::replace(&mut state.link, Link::Attached(Connection::new(holder)))
         };
         drop(previous);
         true
@@ -123,54 +148,89 @@ impl CanvasPersistence {
         }
         let taken = {
             let mut state = mount.state.lock();
-            let held = state
-                .connection
-                .as_ref()
-                .is_some_and(|connection| connection.holder.id() == holder_id);
-            if !held {
+            if !held_by(&state.link, holder_id) {
                 return false;
             }
-            state.connection.take()
+            std::mem::replace(&mut state.link, Link::Unattached)
         };
         drop(taken);
         true
     }
 
-    /// The connection `holder_id` ended: it holds nothing any more. Returns
-    /// the projects it held.
-    pub fn release_holder(&self, holder_id: &str) -> Vec<String> {
+    /// The connection `holder_id` ended. Calls waiting on it resolve
+    /// `CANVAS_CLOSED` now, but each mount it ran keeps its lease for the
+    /// mount's grace; the caller schedules [`Self::expire_lease`] for each
+    /// returned [`LostLease`].
+    pub fn release_holder(&self, holder_id: &str) -> Vec<LostLease> {
         let mounts: Vec<(String, Arc<Mount>)> = self
             .mounts
             .lock()
             .iter()
             .map(|(project, mount)| (project.clone(), Arc::clone(mount)))
             .collect();
-        let mut released = Vec::new();
-        for (project, mount) in mounts {
+        let mut lost = Vec::new();
+        for (project_id, mount) in mounts {
             let taken = {
                 let mut state = mount.state.lock();
-                let held = state
-                    .connection
-                    .as_ref()
-                    .is_some_and(|connection| connection.holder.id() == holder_id);
-                if held {
-                    state.connection.take()
-                } else {
-                    None
+                if !held_by(&state.link, holder_id) {
+                    continue;
                 }
+                std::mem::replace(
+                    &mut state.link,
+                    Link::Lost {
+                        since: Instant::now(),
+                    },
+                )
             };
-            if taken.is_some() {
-                released.push(project);
+            drop(taken);
+            lost.push(LostLease {
+                project_id,
+                mount_seq: mount.mount_seq,
+                grace: mount.lease_grace,
+            });
+        }
+        lost
+    }
+
+    /// The grace of a [`LostLease`] ran out: if the holder has not taken the
+    /// mount up again, unmount it without a save (no renderer is left to
+    /// snapshot it; its last autosave stands). `None` when the mount was
+    /// reattached, replaced or closed meanwhile, or lost again since.
+    pub fn expire_lease(&self, project_id: &str, mount_seq: u64) -> Option<ExpiredLease> {
+        let mut mounts = self.mounts.lock();
+        let mount = mounts
+            .get(project_id)
+            .filter(|mount| mount.mount_seq == mount_seq)
+            .cloned()?;
+        {
+            let state = mount.state.lock();
+            let Link::Lost { since } = state.link else {
+                return None;
+            };
+            if state.lifecycle != Lifecycle::Open || since.elapsed() < mount.lease_grace {
+                return None;
             }
         }
-        released
+        mounts.remove(project_id);
+        drop(mounts);
+        let expired = ExpiredLease::of(&mount.view());
+        Self::retire(&mount);
+        Some(expired)
+    }
+
+    /// The renderer holding `project_id`'s lease, whether or not it is
+    /// connected.
+    pub fn lease_holder(&self, project_id: &str) -> Option<RendererId> {
+        let mount = self.mounts.lock().get(project_id).cloned()?;
+        let open = mount.state.lock().lifecycle != Lifecycle::Closed;
+        open.then(|| mount.holder.clone())
     }
 
     /// The renderer connection running `project_id`'s editor, if any.
     pub fn holder_of(&self, project_id: &str) -> Option<(u64, String)> {
         let mount = self.mounts.lock().get(project_id).cloned()?;
         let state = mount.state.lock();
-        let holder_id = state.connection.as_ref()?.holder.id().to_string();
+        let holder_id = state.link.connection()?.holder.id().to_string();
         Some((mount.mount_seq, holder_id))
     }
 
@@ -206,7 +266,7 @@ impl CanvasPersistence {
             }
             _ => {}
         }
-        let connection = state.connection.as_ref().ok_or_else(|| {
+        let connection = state.link.connection().ok_or_else(|| {
             refused(
                 CanvasErrorCode::CanvasClosed,
                 "the canvas is not running in any window",

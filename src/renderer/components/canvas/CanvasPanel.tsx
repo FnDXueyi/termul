@@ -34,6 +34,8 @@ function statusLabel(phase: CanvasPhase, closing: boolean): string {
       return 'Ready'
     case 'failed':
       return 'Canvas unavailable'
+    case 'elsewhere':
+      return 'Open in another window'
   }
 }
 
@@ -47,6 +49,45 @@ function CanvasSlot({ projectId }: { projectId: string }): React.JSX.Element {
     return () => useCanvasSlots.getState().releaseSlot(projectId, element)
   }, [projectId, element])
   return <div ref={setElement} className="h-full w-full" data-canvas-slot={projectId} />
+}
+
+/** AD-30: another window holds the canvas. Taking it back saves and
+ * unmounts it there first; a failure is toasted and this notice stays. */
+function OpenElsewhere({
+  projectId,
+  docPath
+}: {
+  projectId: string
+  docPath: string
+}): React.JSX.Element {
+  const [taking, setTaking] = useState(false)
+  const takeBack = (): void => {
+    setTaking(true)
+    void useCanvasStore
+      .getState()
+      .openCanvas(projectId, docPath)
+      .finally(() => setTaking(false))
+  }
+  return (
+    <div
+      className="flex h-full w-full flex-col items-center justify-center gap-3 bg-background p-4"
+      data-testid="canvas-open-elsewhere"
+    >
+      <span className="text-center text-sm text-muted-foreground">
+        This canvas is open in another window.
+      </span>
+      <Button size="xs" variant="secondary" disabled={taking} onClick={takeBack}>
+        {taking && (
+          <Loader2
+            size={12}
+            className="animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+        )}
+        Take back
+      </Button>
+    </div>
+  )
 }
 
 function Notice({ text, testId }: { text: string; testId?: string }): React.JSX.Element {
@@ -148,6 +189,8 @@ export function CanvasPanel({
           isVisible && <CanvasSlot projectId={projectId} />
         ) : phase.kind === 'failed' ? (
           <Notice text={phase.message} testId="canvas-mount-failed" />
+        ) : phase.kind === 'elsewhere' ? (
+          <OpenElsewhere projectId={projectId} docPath={session.docPath || docPath} />
         ) : (
           <Notice text="Starting canvas…" />
         )}

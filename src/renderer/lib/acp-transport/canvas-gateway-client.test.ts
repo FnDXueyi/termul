@@ -103,4 +103,43 @@ describe('CanvasGatewayClient', () => {
       ]
     ])
   })
+
+  it('hands a lease-lost frame for the held mount to the handler and forgets the mount', () => {
+    const { client, sent } = harness()
+    const lost = vi.fn()
+    client.setLeaseLostHandler(lost)
+    client.setMount('proj-1', 3)
+    client.handleLeaseLost({ type: 'canvas_lease_lost', projectId: 'proj-1', mountSeq: 2 })
+    expect(lost).not.toHaveBeenCalled()
+    client.handleLeaseLost({ type: 'canvas_lease_lost', projectId: 'proj-1', mountSeq: 3 })
+    expect(lost).toHaveBeenCalledWith('proj-1', 3, 'elsewhere')
+    client.setMount('proj-1', null)
+    expect(sent).toEqual([['canvas_mount', { projectId: 'proj-1', mountSeq: 3 }]])
+  })
+
+  it('treats a refused re-report as a lost lease: elsewhere when another window holds it, else expired', async () => {
+    const sent: Array<[string, unknown]> = []
+    const client = new CanvasGatewayClient({
+      request: (type, payload) => {
+        sent.push([type, payload])
+        const { projectId } = payload as { projectId: string }
+        return Promise.resolve(
+          type === 'canvas_mount' ? { attached: false, heldElsewhere: projectId === 'proj-2' } : {}
+        )
+      },
+      isLive: () => true
+    })
+    const lost = vi.fn()
+    client.setLeaseLostHandler(lost)
+    client.setMount('proj-1', 5)
+    client.setMount('proj-2', 7)
+    await settled()
+    expect(lost).toHaveBeenCalledWith('proj-1', 5, 'expired')
+    expect(lost).toHaveBeenCalledWith('proj-2', 7, 'elsewhere')
+    client.onConnected()
+    expect(sent).toEqual([
+      ['canvas_mount', { projectId: 'proj-1', mountSeq: 5 }],
+      ['canvas_mount', { projectId: 'proj-2', mountSeq: 7 }]
+    ])
+  })
 })

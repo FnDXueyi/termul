@@ -12,11 +12,13 @@
 //! creates a mount on open and removes it through the AD-31 close sequence.
 //! Renderers report which connection runs each mount (`canvas_mount` /
 //! `canvas_unmount` on `/ws`, the same protocol on the desktop Channel and the
-//! web socket); a report for a mount the host does not hold is refused. Until
-//! the E2-4 lease exists, the newest report wins. A connection replaced, an
-//! unmount report, the connection closing, or the mount closing resolves
-//! every call in flight over it with `CANVAS_CLOSED`; a closing mount
-//! refuses new calls with `CANVAS_CLOSING`.
+//! web socket). Only the renderer holding the mount's lease (AD-30) can
+//! report it; any other report is refused, so calls reach the lease holder
+//! only. A connection replaced, an unmount report, the connection closing,
+//! or the mount closing resolves every call in flight over it with
+//! `CANVAS_CLOSED`; a closing mount refuses new calls with `CANVAS_CLOSING`.
+//! A holder whose connection closed keeps the lease for the mount's grace;
+//! after that the mount is dropped.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -24,6 +26,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::canvas::persistence::RendererId;
 use crate::canvas::persistence::{CanvasPersistence, ReplyMatch};
 
 /// `canvas.call_timeout_ms` default (AD-29).
@@ -161,24 +164,53 @@ pub struct CanvasMountPayload {
     pub mount_seq: u64,
 }
 
+/// Host → renderer `{"type":"canvas_lease_lost", projectId, mountSeq}`:
+/// another renderer opened the canvas, and the mount at `mountSeq` was saved
+/// and unmounted for it (AD-30).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanvasLeaseLostFrame {
+    #[serde(rename = "type")]
+    type_: &'static str,
+    pub project_id: String,
+    pub mount_seq: u64,
+}
+
+/// Top-level type of [`CanvasLeaseLostFrame`].
+pub const CANVAS_LEASE_LOST_TYPE: &str = "canvas_lease_lost";
+
 /// Hands a frame to the renderer connection. `false` means it was not queued
 /// (the connection is gone or its queue is full).
 pub type Deliver = Arc<dyn Fn(CanvasCallFrame) -> bool + Send + Sync>;
 
-/// A renderer connection that can hold mounts.
+/// Tells the renderer connection it lost a lease; `false` as for [`Deliver`].
+pub type NotifyLeaseLost = Arc<dyn Fn(CanvasLeaseLostFrame) -> bool + Send + Sync>;
+
+/// A renderer connection that can hold mounts: connection `id`, run by
+/// `renderer`, the lease identity that outlives the connection.
 #[derive(Clone)]
 pub struct CanvasHolder {
     id: String,
+    renderer: RendererId,
     deliver: Deliver,
+    lease_lost: Option<NotifyLeaseLost>,
 }
 
 impl CanvasHolder {
     #[must_use]
-    pub fn new(id: impl Into<String>, deliver: Deliver) -> Self {
+    pub fn new(id: impl Into<String>, renderer: RendererId, deliver: Deliver) -> Self {
         Self {
             id: id.into(),
+            renderer,
             deliver,
+            lease_lost: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_lease_notice(mut self, notify: NotifyLeaseLost) -> Self {
+        self.lease_lost = Some(notify);
+        self
     }
 
     #[must_use]
@@ -186,10 +218,27 @@ impl CanvasHolder {
         &self.id
     }
 
+    #[must_use]
+    pub fn renderer(&self) -> &RendererId {
+        &self.renderer
+    }
+
     /// Queue `frame` on the connection; false when it was not queued.
     #[must_use]
     pub fn deliver(&self, frame: CanvasCallFrame) -> bool {
         (self.deliver)(frame)
+    }
+
+    /// Tell the connection another renderer took `project_id`'s lease from
+    /// its mount at `mount_seq`; false when it was not queued.
+    pub fn tell_lease_lost(&self, project_id: &str, mount_seq: u64) -> bool {
+        self.lease_lost.as_ref().is_some_and(|notify| {
+            notify(CanvasLeaseLostFrame {
+                type_: CANVAS_LEASE_LOST_TYPE,
+                project_id: project_id.to_string(),
+                mount_seq,
+            })
+        })
     }
 }
 
@@ -280,7 +329,7 @@ impl CanvasRouter {
             );
         } else {
             log::warn!(
-                "[canvas-gateway] project {project_id} mountSeq={mount_seq} refused: the host holds no such mount"
+                "[canvas-gateway] project {project_id} mountSeq={mount_seq} refused for connection {holder_id}: the host holds no such mount, or another renderer holds its lease"
             );
         }
         attached
@@ -298,11 +347,39 @@ impl CanvasRouter {
         detached
     }
 
-    /// The holder's connection ended: it runs no canvas any more and its
-    /// calls resolve `CANVAS_CLOSED`.
+    /// The holder's connection ended: its calls resolve `CANVAS_CLOSED`, and
+    /// each mount it ran is dropped unless its renderer takes it up again
+    /// within the mount's lease grace (AD-30).
     pub fn release_holder(&self, holder_id: &str) {
-        for project in self.mounts.release_holder(holder_id) {
-            log::info!("[canvas-gateway] project {project} has no renderer: its connection closed");
+        let lost = self.mounts.release_holder(holder_id);
+        if lost.is_empty() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::warn!("[canvas-gateway] connection {holder_id} closed outside a runtime; its canvas leases are kept");
+            return;
+        };
+        for lease in lost {
+            log::info!(
+                "[canvas-gateway] project {} mountSeq={} lost its connection; lease kept for {} ms",
+                lease.project_id,
+                lease.mount_seq,
+                lease.grace.as_millis()
+            );
+            let mounts = Arc::clone(&self.mounts);
+            runtime.spawn(async move {
+                tokio::time::sleep(lease.grace).await;
+                if let Some(expired) = mounts.expire_lease(&lease.project_id, lease.mount_seq) {
+                    log::warn!(
+                        "[canvas-gateway] project {} mountSeq={} lease released after {} ms grace: unmounted, last autosave stands saved={} unsaved_dropped={}",
+                        lease.project_id,
+                        lease.mount_seq,
+                        lease.grace.as_millis(),
+                        expired.saved_version.as_deref().unwrap_or("none"),
+                        expired.unsaved
+                    );
+                }
+            });
         }
     }
 

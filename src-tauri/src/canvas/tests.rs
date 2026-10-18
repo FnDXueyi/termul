@@ -781,7 +781,8 @@ async fn web_open(app: Router, doc: &str, project_id: &str) -> serde_json::Value
                 .extension(axum::extract::ConnectInfo(web_test_peer()))
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({"docPath": doc, "projectId": project_id}).to_string(),
+                    serde_json::json!({"docPath": doc, "projectId": project_id, "clientInstanceId": "web-tab"})
+                        .to_string(),
                 ))
                 .expect("build open request"),
         )
@@ -885,9 +886,12 @@ async fn web_open_reuses_the_token_until_close_revokes_it() {
 
     let third = token_of(&web_open(app, &doc, project).await);
     assert_ne!(first, third, "the next open mints a fresh token");
-    crate::canvas::static_server::close_canvas(project, crate::canvas::persistence::CloseMode::Save)
-        .await
-        .unwrap();
+    crate::canvas::static_server::close_canvas(
+        project,
+        crate::canvas::persistence::CloseMode::Save,
+    )
+    .await
+    .unwrap();
     drop(dir);
 }
 
@@ -1187,7 +1191,8 @@ async fn web_canvas_write_routes_refuse_a_view_only_peer() {
                         .extension(axum::extract::ConnectInfo(peer))
                         .header("content-type", "application/json")
                         .body(Body::from(
-                            serde_json::json!({"docPath": doc, "projectId": "p"}).to_string(),
+                            serde_json::json!({"docPath": doc, "projectId": "p", "clientInstanceId": "tab"})
+                                .to_string(),
                         ))
                         .expect("build request"),
                 )

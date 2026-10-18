@@ -28,11 +28,13 @@ import {
   type SessionSubscribeReply,
   type UpdateProjectPayload,
   WS_CANVAS_CALL_FRAME_TYPE,
+  WS_CANVAS_LEASE_LOST_FRAME_TYPE,
   WS_ERROR_CODES,
   WS_EVENT_TYPES,
   WS_WATCH_FRAME_TYPE,
   type WsAgentSummary,
   type WsCanvasCallFrame,
+  type WsCanvasLeaseLostFrame,
   type WsEvent,
   type WsReply,
   type WsRequest,
@@ -2033,6 +2035,10 @@ export class WsAcpTransport implements AcpTransport {
     }
     if (obj.type === WS_CANVAS_CALL_FRAME_TYPE) {
       this.canvas.handleFrame(obj as unknown as WsCanvasCallFrame)
+      return
+    }
+    if (obj.type === WS_CANVAS_LEASE_LOST_FRAME_TYPE) {
+      this.canvas.handleLeaseLost(obj as unknown as WsCanvasLeaseLostFrame)
       return
     }
     if (obj.type === 'gap' && typeof obj.sid === 'string') {

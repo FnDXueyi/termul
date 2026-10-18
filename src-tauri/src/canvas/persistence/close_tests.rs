@@ -35,7 +35,11 @@ impl Fixture {
         let seq = mounts.mount(PROJECT, doc.clone(), Duration::from_secs(60));
         mounts.document_loaded(PROJECT, seq, Some(saved)).unwrap();
         let (tx, frames) = mpsc::unbounded_channel();
-        let holder = CanvasHolder::new(HOLDER, Arc::new(move |frame| tx.send(frame).is_ok()));
+        let holder = CanvasHolder::new(
+            HOLDER,
+            crate::canvas::persistence::test_renderer(),
+            Arc::new(move |frame| tx.send(frame).is_ok()),
+        );
         assert!(mounts.attach(PROJECT, seq, holder));
         Self {
             mounts,
@@ -213,9 +217,12 @@ async fn a_failed_snapshot_keeps_the_mount_until_the_user_discards() {
 async fn a_dirty_mount_with_no_renderer_cannot_be_saved() {
     let fixture = Fixture::ready(1);
     let _debounce = fixture.edit(2).await;
+    let lost = fixture.mounts.release_holder(HOLDER);
     assert_eq!(
-        fixture.mounts.release_holder(HOLDER),
-        vec![PROJECT.to_string()]
+        lost.iter()
+            .map(|lease| lease.project_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![PROJECT]
     );
     let error = fixture.close(CloseMode::Save).await.unwrap().unwrap_err();
     assert_eq!(error.code, CODE_SAVE_FAILED);

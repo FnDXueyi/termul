@@ -217,7 +217,7 @@ describe('open and close', () => {
     open.mockResolvedValueOnce(openInfo())
     await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
 
-    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, 1500)
+    expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, { autosaveMs: 1500, leaseGraceMs: 5000 })
     expect(session()?.phase.kind).toBe('loading')
     expect(currentMount()).toEqual({ mountSeq: 41, info: INFO })
     expect(canvasTabs()).toEqual([
@@ -312,6 +312,80 @@ describe('unmount refused by the host', () => {
     expect(close).toHaveBeenLastCalledWith(PROJECT, true)
     expect(session()).toBeUndefined()
     await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+  })
+})
+
+describe('lease lost to another window', () => {
+  it('the saved-elsewhere mount shows as open elsewhere: bridge gone, calls CANVAS_CLOSED', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    const editor = await mountReady()
+    editor.dirty(true, '4')
+    const pending = useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq - 1, 'elsewhere')
+    expect(session()?.phase.kind).toBe('ready')
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    expect(session()?.phase).toEqual({ kind: 'elsewhere' })
+    expect(session()?.dirty).toBe(false)
+    expect(session()?.docPath).toBe(DOC_A)
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    await expect(
+      useCanvasStore.getState().callCanvas(PROJECT, 'document.inspect')
+    ).resolves.toMatchObject({ ok: false, error: { code: 'CANVAS_CLOSED' } })
+    expect(canvasTabs()).toHaveLength(1)
+  })
+
+  it('a mount the host dropped after the grace shows as closed, not elsewhere', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'expired')
+
+    expect(session()?.phase).toMatchObject({ kind: 'failed', code: 'CANVAS_CLOSED' })
+  })
+
+  it('take back opens the canvas again here with a new mount', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    open.mockResolvedValueOnce(openInfo({ mountSeq: 57 }))
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(true)
+
+    expect(open).toHaveBeenLastCalledWith(DOC_A, PROJECT, expect.any(Object))
+    expect(close).not.toHaveBeenCalled()
+    expect(session()?.phase.kind).toBe('loading')
+    expect(currentMount().mountSeq).toBe(57)
+  })
+
+  it('a refused take back keeps the elsewhere state and says why', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    open.mockResolvedValueOnce({
+      success: false,
+      error: 'This canvas is open in another window, and it could not be saved there',
+      code: 'CANVAS_OPEN_ELSEWHERE'
+    })
+    await expect(useCanvasStore.getState().openCanvas(PROJECT, DOC_A)).resolves.toBe(false)
+
+    expect(session()?.phase).toEqual({ kind: 'elsewhere' })
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('could not be saved there'))
+  })
+
+  it('closing an elsewhere canvas here leaves the mount in the other window alone', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    useCanvasStore.getState().leaseLost(PROJECT, INFO.mountSeq, 'elsewhere')
+
+    await expect(useCanvasStore.getState().unmountCanvas(PROJECT)).resolves.toMatchObject({
+      success: true,
+      data: { unmounted: false }
+    })
+    expect(close).not.toHaveBeenCalled()
+    expect(session()).toBeUndefined()
   })
 })
 

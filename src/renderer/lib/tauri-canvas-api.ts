@@ -11,6 +11,7 @@ import type {
   CanvasDirtyOutcome,
   CanvasDocumentBytes,
   CanvasOpenInfo,
+  CanvasOpenOptions,
   CanvasPersistenceView,
   CanvasWriteOutcome
 } from '@shared/types/canvas.types'
@@ -18,6 +19,7 @@ import type { IpcResult } from '@shared/types/ipc.types'
 
 import { invokeIpc } from './ipc/tauri'
 import { isTauriContext } from './tauri-runtime'
+import { getClientInstanceId } from './web-client-identity'
 
 const IPC_COMMANDS = {
   OPEN: 'canvas_open',
@@ -48,9 +50,15 @@ export function createTauriCanvasApi(): CanvasApi {
     open(
       docPath: string,
       projectId: string,
-      autosaveMs?: number
+      options: CanvasOpenOptions = {}
     ): Promise<IpcResult<CanvasOpenInfo>> {
-      return invokeCanvas(IPC_COMMANDS.OPEN, { docPath, projectId, autosaveMs })
+      return invokeCanvas(IPC_COMMANDS.OPEN, {
+        docPath,
+        projectId,
+        clientInstanceId: getClientInstanceId(),
+        autosaveMs: options.autosaveMs,
+        leaseGraceMs: options.leaseGraceMs
+      })
     },
 
     close(projectId: string, discard = false): Promise<IpcResult<CanvasCloseOutcome>> {

@@ -2,13 +2,20 @@
 //! requests and frame on the desktop Channel and on a browser socket.
 //!
 //! - `canvas_mount{projectId, mountSeq}`: this connection now runs the
-//!   project's mount (`{attached: false}` when the host holds no such mount);
+//!   project's mount. Refused `{attached: false, heldElsewhere}` when the
+//!   host holds no such mount for this renderer; `heldElsewhere` says another
+//!   renderer holds the project's lease (AD-30);
 //!   gateway calls for it arrive here as top-level
 //!   `{"type":"canvas_call", callId, projectId, mountSeq, method, params}`
 //!   frames, including the host's own `host.snapshot` / `host.markSaved`
 //!   when it closes the mount (AD-31).
 //! - `canvas_unmount{projectId, mountSeq}`: it no longer does; the mount
 //!   itself closes only through the host's AD-31 sequence.
+//! - `{"type":"canvas_lease_lost", projectId, mountSeq}` (host → renderer):
+//!   another renderer opened the canvas and the mount was saved and
+//!   unmounted for it (AD-30). The connection's renderer is its
+//!   `clientInstanceId`, so a reload or reconnect of the same window or tab
+//!   can report its mount again.
 //! - `canvas_reply{callId, mountSeq, ok, result | error: {code, message}}`:
 //!   the answer to one `canvas_call`; `params` and `result` are JSON text.
 //!
@@ -17,7 +24,8 @@
 
 use super::*;
 use crate::acp::host_mcp::canvas::{
-    CanvasCallFrame, CanvasHolder, CanvasMountPayload, CanvasReplyPayload,
+    CanvasCallFrame, CanvasHolder, CanvasLeaseLostFrame, CanvasMountPayload, CanvasReplyPayload,
+    RendererId,
 };
 
 fn malformed(id: String, request: &str, want: &str, error: &serde_json::Error) -> WsReply {
@@ -30,15 +38,26 @@ fn malformed(id: String, request: &str, want: &str, error: &serde_json::Error) -
 }
 
 /// The router's handle on this connection: frames go through its bounded
-/// outbound queue without waiting.
+/// outbound queue without waiting. Its renderer is the authenticated
+/// `clientInstanceId` (every post-auth request has one).
 fn holder_for(env: &HandlerEnv) -> CanvasHolder {
-    let out = env.out_tx.clone();
+    let connection_id = env.connection_id.to_string();
+    let renderer = RendererId::new(env.identity.get().map_or_else(
+        || connection_id.clone(),
+        |identity| identity.client_instance_id.clone(),
+    ));
+    let calls = env.out_tx.clone();
+    let notices = env.out_tx.clone();
     CanvasHolder::new(
-        env.connection_id.to_string(),
+        connection_id,
+        renderer,
         Arc::new(move |frame: CanvasCallFrame| {
-            out.try_enqueue(Outbound::Canvas(frame)) == EnqueueOutcome::Enqueued
+            calls.try_enqueue(Outbound::Canvas(frame)) == EnqueueOutcome::Enqueued
         }),
     )
+    .with_lease_notice(Arc::new(move |frame: CanvasLeaseLostFrame| {
+        notices.try_enqueue(Outbound::CanvasLeaseLost(frame)) == EnqueueOutcome::Enqueued
+    }))
 }
 
 pub(super) fn handle_canvas_mount(id: String, payload: &Value, env: &HandlerEnv) -> WsReply {
@@ -46,11 +65,20 @@ pub(super) fn handle_canvas_mount(id: String, payload: &Value, env: &HandlerEnv)
         Ok(parsed) => parsed,
         Err(error) => return malformed(id, "canvas_mount", "projectId, mountSeq", &error),
     };
-    let attached =
-        env.acp
-            .canvas_router()
-            .mount(&parsed.project_id, parsed.mount_seq, holder_for(env));
-    WsReply::ok(id, Some(json!({ "attached": attached })))
+    let holder = holder_for(env);
+    let renderer = holder.renderer().clone();
+    let router = env.acp.canvas_router();
+    if router.mount(&parsed.project_id, parsed.mount_seq, holder) {
+        return WsReply::ok(id, Some(json!({ "attached": true })));
+    }
+    let held_elsewhere = router
+        .mounts()
+        .lease_holder(&parsed.project_id)
+        .is_some_and(|holder| holder != renderer);
+    WsReply::ok(
+        id,
+        Some(json!({ "attached": false, "heldElsewhere": held_elsewhere })),
+    )
 }
 
 pub(super) fn handle_canvas_unmount(id: String, payload: &Value, env: &HandlerEnv) -> WsReply {

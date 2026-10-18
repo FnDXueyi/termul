@@ -102,6 +102,7 @@ pub(crate) fn mount_renderer(
         mount_seq,
         CanvasHolder::new(
             holder_id,
+            crate::canvas::persistence::test_renderer(),
             Arc::new(move |frame| frames_tx.send(frame).is_ok()),
         ),
     );

@@ -61,6 +61,9 @@ pub const CODE_PATH_VALIDATION_FAILED: &str = "PATH_VALIDATION_FAILED";
 pub const CODE_CANVAS_CLOSED: &str = "CANVAS_CLOSED";
 /// The canvas is running its unmount sequence (AD-31 quiesce).
 pub const CODE_CANVAS_CLOSING: &str = "CANVAS_CLOSING";
+/// Another renderer holds the canvas's mount lease (AD-30), and taking it
+/// over failed because the holder could not save.
+pub const CODE_CANVAS_OPEN_ELSEWHERE: &str = "CANVAS_OPEN_ELSEWHERE";
 /// A save failed: the daemon transport, or a figcraft mount's flush before
 /// unmount (the mount stays open and the user is asked).
 pub const CODE_SAVE_FAILED: &str = "SAVE_FAILED";

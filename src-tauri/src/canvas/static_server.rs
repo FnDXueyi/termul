@@ -29,7 +29,10 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::persistence::{autosave_delay, canvas_mounts, CloseMode, CloseOutcome};
+use super::persistence::{
+    autosave_delay, canvas_mounts, lease_grace, CloseMode, CloseOutcome, LeaseChange, MountRequest,
+    RendererId,
+};
 use super::pin::pinned_tag;
 use super::{canvas_id_for_project, CanvasError, CODE_TOKEN_GENERATION_FAILED};
 use crate::web::assets;
@@ -206,14 +209,31 @@ pub struct CanvasOpenInfo {
     pub mount_seq: u64,
 }
 
+/// What a renderer's open carries besides the document.
+#[derive(Debug, Clone)]
+pub struct OpenRequest {
+    /// The opening window or tab; it gets the lease.
+    pub client_instance_id: String,
+    /// `canvas.autosave_ms`.
+    pub autosave_ms: Option<u64>,
+    /// `canvas.lease_grace_ms`.
+    pub lease_grace_ms: Option<u64>,
+}
+
 /// Mint (or reuse) the project's bundle token and start a new persistence
-/// mount for the document. Shared by `canvas_open` and `POST /canvas/open`,
-/// which differ only in the base they pass.
-pub fn open_canvas(
+/// mount for the document, leased to the opening renderer (AD-30): another
+/// renderer's mount is saved and unmounted first. Shared by `canvas_open`
+/// and `POST /canvas/open`, which differ only in the base they pass.
+///
+/// # Errors
+/// `INVALID_PAYLOAD` for a malformed `clientInstanceId`;
+/// `TOKEN_GENERATION_FAILED`; `CANVAS_OPEN_ELSEWHERE` when the renderer
+/// holding the lease could not save.
+pub async fn open_canvas(
     base: CanvasBundleBase,
     project_id: &str,
     doc_key: String,
-    autosave_ms: Option<u64>,
+    request: OpenRequest,
 ) -> Result<CanvasOpenInfo, CanvasError> {
     let canvas_id = canvas_id_for_project(project_id);
     let canvas_token = bundle_tokens().issue(&canvas_id).map_err(|reason| {
@@ -222,11 +242,28 @@ pub fn open_canvas(
             format!("failed to mint the canvas session token: {reason}"),
         )
     })?;
-    let mount_seq = canvas_mounts().mount(
-        project_id,
-        PathBuf::from(&doc_key),
-        autosave_delay(autosave_ms),
-    );
+    let renderer_id = RendererId::parse(request.client_instance_id)?;
+    let renderer = renderer_id.log_label();
+    let opened = canvas_mounts()
+        .open(
+            project_id,
+            MountRequest {
+                renderer: renderer_id,
+                doc_path: PathBuf::from(&doc_key),
+                autosave: autosave_delay(request.autosave_ms),
+                lease_grace: lease_grace(request.lease_grace_ms),
+            },
+        )
+        .await
+        .inspect_err(|error| {
+            log::warn!(
+                "[canvas] lease takeover refused project_id={} renderer={renderer}: {}",
+                crate::commands::sanitize_log_field(project_id),
+                error.message
+            );
+        })?;
+    log_lease_change(project_id, &renderer, opened.mount_seq, &opened.lease);
+    let mount_seq = opened.mount_seq;
     Ok(CanvasOpenInfo {
         canvas_id,
         base_url: base.base_url,
@@ -235,6 +272,25 @@ pub fn open_canvas(
         doc_key,
         mount_seq,
     })
+}
+
+fn log_lease_change(project_id: &str, renderer: &str, mount_seq: u64, change: &LeaseChange) {
+    let project_id = crate::commands::sanitize_log_field(project_id);
+    match change {
+        LeaseChange::Granted => log::info!(
+            "[canvas] lease granted project_id={project_id} renderer={renderer} mount_seq={mount_seq}"
+        ),
+        LeaseChange::Remounted { previous } => log::info!(
+            "[canvas] lease kept by its renderer project_id={project_id} renderer={renderer} mount_seq={mount_seq} replaced={previous}"
+        ),
+        LeaseChange::TakenOver {
+            previous,
+            saved_version,
+        } => log::info!(
+            "[canvas] lease taken over project_id={project_id} renderer={renderer} mount_seq={mount_seq} from_mount_seq={previous} saved={}",
+            saved_version.as_deref().unwrap_or("none")
+        ),
+    }
 }
 
 /// Unmount the project's canvas through the AD-31 sequence (quiesce, save,

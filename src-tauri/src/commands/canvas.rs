@@ -20,7 +20,7 @@ use crate::canvas::persistence::{
 };
 use crate::canvas::pool::CanvasDaemonPool;
 use crate::canvas::static_server::{
-    close_canvas, open_canvas, CanvasBundleBase, CanvasOpenInfo, StaticServer,
+    close_canvas, open_canvas, CanvasBundleBase, CanvasOpenInfo, OpenRequest, StaticServer,
     CODE_BUNDLE_LISTENER_DOWN,
 };
 use crate::canvas::{CanvasError, CanvasStatus, CODE_DAEMON_DOWN};
@@ -67,14 +67,19 @@ fn persistence_result<T>(
     }
 }
 
-/// `canvas_open { docPath, projectId, autosaveMs? }` — the loopback bundle
-/// base plus a minted `ct` token and a new `mountSeq` for the project's
-/// canvas. Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound.
+/// `canvas_open { docPath, projectId, clientInstanceId, autosaveMs?,
+/// leaseGraceMs? }` — the loopback bundle base plus a minted `ct` token and a
+/// new `mountSeq` for the project's canvas, leased to this window (AD-30).
+/// Typed `BUNDLE_LISTENER_DOWN` while the listener is not bound;
+/// `CANVAS_OPEN_ELSEWHERE` when the renderer holding the lease could not
+/// save.
 #[tauri::command]
 pub async fn canvas_open(
     doc_path: String,
     project_id: String,
+    client_instance_id: String,
     autosave_ms: Option<u64>,
+    lease_grace_ms: Option<u64>,
     server: State<'_, Arc<StaticServer>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
     let doc_key = match validate_canvas_doc_path(&doc_path) {
@@ -91,7 +96,12 @@ pub async fn canvas_open(
             CODE_BUNDLE_LISTENER_DOWN,
         ));
     };
-    match open_canvas(base, &project_id, doc_key, autosave_ms) {
+    let request = OpenRequest {
+        client_instance_id,
+        autosave_ms,
+        lease_grace_ms,
+    };
+    match open_canvas(base, &project_id, doc_key, request).await {
         Ok(info) => {
             log::info!(
                 "[canvas] open project_id={log_project_id} canvas_id={} mount_seq={}",

@@ -209,6 +209,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
         | Outbound::Gap(_)
         | Outbound::Watch(_)
         | Outbound::Canvas(_)
+        | Outbound::CanvasLeaseLost(_)
         | Outbound::Close(_) => panic!("expected ping reply"),
     };
     assert!(ping.ok);
@@ -255,6 +256,7 @@ async fn long_prompt_dispatch_does_not_block_ping_request() {
         | Outbound::Gap(_)
         | Outbound::Watch(_)
         | Outbound::Canvas(_)
+        | Outbound::CanvasLeaseLost(_)
         | Outbound::Close(_) => panic!("expected prompt reply"),
     };
     assert!(completed.ok);
@@ -325,6 +327,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
         | Outbound::Gap(_)
         | Outbound::Watch(_)
         | Outbound::Canvas(_)
+        | Outbound::CanvasLeaseLost(_)
         | Outbound::Close(_) => panic!("expected reply"),
     };
     let second = match rx.recv().await.expect("second reply") {
@@ -333,6 +336,7 @@ async fn immediate_cancel_after_prompt_is_ordered_after_turn_acceptance() {
         | Outbound::Gap(_)
         | Outbound::Watch(_)
         | Outbound::Canvas(_)
+        | Outbound::CanvasLeaseLost(_)
         | Outbound::Close(_) => panic!("expected reply"),
     };
     let replies = [first, second];
