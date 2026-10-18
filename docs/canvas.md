@@ -57,12 +57,14 @@ The iframe cannot send an `Authorization` header, so the bundle has its own cred
 - The token is a path segment: the iframe loads `/canvas/<id>/<token>/`, so the bundle's relative sub-resource URLs carry it too. Tokens are compared in constant time.
 - No cookie is involved. On the desktop the loopback iframe is a cross-site frame inside the app webview, and WKWebView (macOS) and WebKitGTK (Linux) drop third-party cookies by default.
 - `close` revokes the token, so stale URLs stop working.
-- The token is never logged.
+- The token is never logged. Every log line that names a request path writes the token segment as `[redacted]` (`canvas::bundle_path::redact_canvas_path`).
 - The `/canvas/open`, `/canvas/close` and persistence routes stay behind the web auth bearer. They are write routes: a view-only peer (remote peer without write access, or the desktop shared-live host) is refused with `FORBIDDEN`. A doc path must lie inside the root of the project that opens it (a registered, non-archived project), on the web routes and the desktop commands alike.
 
 ## Agents
 
 Canvas tools live in the per-session host `termul` MCP server (`acp/host_mcp`). The gateway resolves the session's project, forwards each call to the renderer that holds the mount's lease, and answers from the engine. It caches no document or selection state. Tool names are figcraft's own. `save_file` is Termul's own save of the project document. A project with no mount answers `CANVAS_CLOSED`, a closing one `CANVAS_CLOSING`, and a stalled editor `CANVAS_TIMEOUT`. No MCP registry entry is persisted for the canvas, and no `/canvas/mcp` route exists. On load the renderer drops any `canvas-mcp-*` entries an older build persisted.
+
+Every answered agent call also shows on the canvas as that session's cursor (`acp/host_mcp/presence`). The host derives what the call touched from the call and its result, looks up the last node's bounds with at most one `node.get` or `document.inspect`, and sends the editor `host.guestCursor`, `host.guestFlash` and, when the turn ends or the session closes, `host.guestHide`. The cursor carries the agent's display name and a colour fixed by the session id. Moves are paced to one per 120 ms per session. This work starts after the agent's reply and never delays or fails it. Its lookups never count as canvas activity or toward the crash timeouts. Nothing is sent when no editor is connected.
 
 ## Interfaces
 
@@ -81,7 +83,8 @@ Both transports share the same Rust service and typed error codes. Every facade 
 - **Fetch.** `bun scripts/canvas/fetch-figcraft-bundle.mjs` downloads the pinned zip, verifies the checksum and unpacks it to `canvas/bundle/`. `--zip <file>` uses a local zip. The release workflow runs it before the Rust build, and the bundle is embedded alongside the web UI.
 - **Dev override.** Set `TERMUL_FIGCRAFT_BUNDLE` to a built bundle directory (a figcraft checkout's `dist-web`) to serve it instead of the embedded one.
 - **Missing bundle.** A build without a bundle logs one warning and answers the canvas routes with a typed error. The rest of Termul is unaffected.
-- **Fork.** The bundle comes from `gnoviawan/figcraft` (branch `termul`). Its patches are limited to the web host API, the kiosk flag, the brand knob and the theme hook.
+- **Fork.** The bundle comes from `gnoviawan/figcraft` (branch `termul`). Its patches are limited to the web host API, the kiosk flag, the brand knob, the theme hook and guest presence (the agent cursor).
+- **Licences.** The bundle embeds Inter (SIL OFL 1.1). `canvas/licenses/OFL-inter.txt` is the tracked copy of its licence, and the unpacked bundle carries `NOTICE` and `OFL-inter.txt`, which Termul embeds and serves with it. FigCraft is MIT OR Apache-2.0. Both are credited in the README acknowledgments.
 
 ## Retired: the OpenPencil daemon
 

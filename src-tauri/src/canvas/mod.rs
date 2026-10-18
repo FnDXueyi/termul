@@ -13,14 +13,21 @@
 //! - [`persistence`] — the mount registry: load floor, autosave debounce,
 //!   saved version and the atomic document write (AD-23, AD-31).
 //! - [`pin`] — the figcraft bundle tag this build expects.
+//! - [`bundle_path`] — the `/canvas/<id>/<token>/...` path shape, and the
+//!   redaction every log line naming a request path goes through.
 
+pub mod bundle_path;
 pub mod doc_path;
 pub mod persistence;
 pub mod pin;
 pub mod static_server;
 
 #[cfg(test)]
+mod bundle_path_tests;
+#[cfg(test)]
 mod doc_path_tests;
+#[cfg(test)]
+mod loopback_log_tests;
 #[cfg(test)]
 mod pin_tests;
 #[cfg(test)]

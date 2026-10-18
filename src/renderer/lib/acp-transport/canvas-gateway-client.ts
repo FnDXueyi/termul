@@ -44,6 +44,20 @@ export type CanvasLeaseLostHandler = (
   loss: CanvasLeaseLoss
 ) => void
 
+/**
+ * Longest slice of a reply sent in one message, in UTF-16 units. The host's
+ * socket takes at most 16 MiB a frame, and a unit is at most 3 bytes of UTF-8.
+ */
+export const REPLY_SLICE_UNITS = 4 * 1024 * 1024
+
+/** End of the slice starting at `start`, never between a surrogate pair. */
+function sliceEnd(text: string, start: number): number {
+  const end = start + REPLY_SLICE_UNITS
+  if (end >= text.length) return text.length
+  const last = text.charCodeAt(end - 1)
+  return last >= 0xd800 && last <= 0xdbff ? end - 1 : end
+}
+
 function closedReply(call: WsCanvasCallFrame, message: string): WsCanvasReplyPayload {
   return {
     callId: call.callId,
@@ -116,7 +130,32 @@ export class CanvasGatewayClient {
           error: { code: 'ENGINE_ERROR', message: String(error) }
         }))
       : Promise.resolve(closedReply(call, 'no canvas is mounted in this window'))
-    void answer.then((reply) => this.send('canvas_reply', reply))
+    void answer.then((reply) => this.sendReply(reply))
+  }
+
+  /**
+   * A result longer than one slice goes as slices, each waiting for the host
+   * to take the one before it, and stops when the host no longer wants them.
+   */
+  private async sendReply(reply: WsCanvasReplyPayload): Promise<void> {
+    if (!reply.ok || reply.result.length <= REPLY_SLICE_UNITS) {
+      await this.send('canvas_reply', reply)
+      return
+    }
+    const { result } = reply
+    let start = 0
+    let end = sliceEnd(result, 0)
+    while (end < result.length) {
+      const taken = (await this.send('canvas_reply', {
+        ...reply,
+        result: result.slice(start, end),
+        partial: true
+      })) as { accepted?: boolean } | undefined
+      if (taken?.accepted !== true) return
+      start = end
+      end = sliceEnd(result, start)
+    }
+    await this.send('canvas_reply', { ...reply, result: result.slice(start) })
   }
 
   /** The host's reply, or `undefined` when nothing was sent or it failed. */

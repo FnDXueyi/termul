@@ -162,6 +162,56 @@ async fn quiesce_refuses_new_agent_calls_and_drains_the_ones_in_flight() {
 }
 
 #[tokio::test]
+async fn an_unanswered_presence_lookup_never_holds_up_a_close_by_mount_seq() {
+    let mut fixture = Fixture::ready(1);
+    let _debounce = fixture.edit(2).await;
+    let lookup = {
+        let mounts = Arc::clone(&fixture.mounts);
+        tokio::spawn(async move {
+            mounts
+                .presence_call(PROJECT, "node.get", "{}".into(), CALL_TIMEOUT)
+                .await
+        })
+    };
+    fixture.next("node.get").await;
+
+    let mounts = Arc::clone(&fixture.mounts);
+    let seq = fixture.seq;
+    let close =
+        tokio::spawn(async move { mounts.close_mount(PROJECT, seq, CloseMode::Save).await });
+    let snapshot = fixture.next("host.snapshot").await;
+    assert!(
+        !fixture
+            .mounts
+            .presence_notice(PROJECT, "host.guestHide", "{}".into()),
+        "no guest notice while the mount closes"
+    );
+    let refused = fixture
+        .mounts
+        .presence_call(PROJECT, "node.get", "{}".into(), CALL_TIMEOUT)
+        .await;
+    assert_eq!(refused.unwrap_err().code, CanvasErrorCode::CanvasClosing);
+    fixture.answer(
+        &snapshot,
+        &format!(
+            r#"{{"contentVersion":2,"bytes":"{}"}}"#,
+            BASE64.encode(b"edited")
+        ),
+    );
+    let verify = fixture.next("host.markSaved").await;
+    fixture.answer(&verify, r#"{"dirty":false,"contentVersion":2}"#);
+
+    assert!(close.await.unwrap().unwrap().unmounted);
+    assert!(
+        lookup.await.unwrap().is_err(),
+        "the lookup ends with the mount"
+    );
+    assert!(!fixture
+        .mounts
+        .presence_notice(PROJECT, "host.guestHide", "{}".into()));
+}
+
+#[tokio::test]
 async fn an_editor_still_dirty_after_the_save_fails_the_verify_and_keeps_the_mount() {
     let mut fixture = Fixture::ready(1);
     let _debounce = fixture.edit(2).await;

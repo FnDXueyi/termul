@@ -3,15 +3,15 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 
-import { CanvasGatewayClient } from './canvas-gateway-client'
+import { CanvasGatewayClient, REPLY_SLICE_UNITS } from './canvas-gateway-client'
 
-function harness(live = true) {
+function harness(live = true, answer: (payload: unknown) => unknown = () => ({})) {
   const sent: Array<[string, unknown]> = []
   const state = { live }
   const client = new CanvasGatewayClient({
     request: (type, payload) => {
       sent.push([type, payload])
-      return Promise.resolve({})
+      return Promise.resolve(answer(payload))
     },
     isLive: () => state.live
   })
@@ -74,6 +74,69 @@ describe('CanvasGatewayClient', () => {
     expect(sent).toEqual([
       ['canvas_reply', { callId: 12, mountSeq: 3, ok: true, result: '{"id":18446744073709551615}' }]
     ])
+  })
+
+  describe('a reply longer than one message', () => {
+    type Sent = { result: string; partial?: true }
+
+    function answeringWith(result: string, accept: (index: number) => boolean = () => true) {
+      let index = 0
+      const { client, sent } = harness(true, (payload) =>
+        (payload as Sent).partial ? { accepted: accept(index++) } : { resolved: true }
+      )
+      client.setCallHandler(async (call) => ({
+        callId: call.callId,
+        mountSeq: call.mountSeq,
+        ok: true as const,
+        result
+      }))
+      client.handleFrame(CALL)
+      return sent
+    }
+
+    const slices = (sent: Array<[string, unknown]>) => sent.map(([, payload]) => payload as Sent)
+
+    it('is sent as slices, partial but the last, that join into the result', async () => {
+      const result = 'a'.repeat(REPLY_SLICE_UNITS * 2 + 5)
+      const sent = answeringWith(result)
+      await vi.waitFor(() => expect(sent).toHaveLength(3))
+
+      expect(sent.every(([type]) => type === 'canvas_reply')).toBe(true)
+      expect(slices(sent).map((slice) => slice.partial)).toEqual([true, true, undefined])
+      expect(
+        slices(sent)
+          .map((slice) => slice.result)
+          .join('')
+      ).toBe(result)
+      expect(sent[2][1]).toEqual({ callId: 12, mountSeq: 3, ok: true, result: 'aaaaa' })
+    })
+
+    it('never splits a surrogate pair between slices', async () => {
+      const result = `${'a'.repeat(REPLY_SLICE_UNITS - 1)}😀tail`
+      const sent = answeringWith(result)
+      await vi.waitFor(() => expect(sent).toHaveLength(2))
+
+      const [first, last] = slices(sent)
+      expect(first.result).toBe('a'.repeat(REPLY_SLICE_UNITS - 1))
+      expect(last.result).toBe('😀tail')
+      expect(first.result + last.result).toBe(result)
+    })
+
+    it('stops sending when the host no longer takes slices', async () => {
+      const sent = answeringWith('a'.repeat(REPLY_SLICE_UNITS * 3), (index) => index < 1)
+      await vi.waitFor(() => expect(sent).toHaveLength(2))
+      await settled()
+
+      expect(slices(sent).map((slice) => slice.partial)).toEqual([true, true])
+    })
+
+    it('is one message at the slice size', async () => {
+      const result = 'a'.repeat(REPLY_SLICE_UNITS)
+      const sent = answeringWith(result)
+      await settled()
+
+      expect(sent).toEqual([['canvas_reply', { callId: 12, mountSeq: 3, ok: true, result }]])
+    })
   })
 
   it('answers CANVAS_CLOSED when no handler is attached and ENGINE_ERROR when it throws', async () => {

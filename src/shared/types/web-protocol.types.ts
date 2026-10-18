@@ -262,7 +262,8 @@ export const WS_REQUEST_TYPES = [
   // agent canvas calls to it as top-level `canvas_call` frames, answered with
   // `canvas_reply { callId, mountSeq, ok, result | error }`. `params` and
   // `result` are JSON text, never parsed on the way. Replies `{}`,
-  // `{ unmounted }` and `{ resolved }`.
+  // `{ unmounted }` and `{ resolved }`. A long `result` goes in several
+  // `canvas_reply`, each `partial: true` but the last, answered `{ accepted }`.
   'canvas_mount',
   'canvas_unmount',
   'canvas_reply'
@@ -956,9 +957,14 @@ export interface WsCanvasCallFrame {
  * mount (its lease grace ran out). */
 export type WsCanvasMountReply = { attached: true } | { attached: false; heldElsewhere: boolean }
 
-/** `canvas_reply` payload: the result's JSON text, or a typed error. */
+/**
+ * `canvas_reply` payload: the result's JSON text, or a typed error. A result
+ * too long for one message is sent as several, each `partial: true` but the
+ * last, and the host joins them. It answers a partial one `{ accepted }`;
+ * `false` tells the sender to stop.
+ */
 export type WsCanvasReplyPayload =
-  | { callId: number; mountSeq: number; ok: true; result: string }
+  | { callId: number; mountSeq: number; ok: true; result: string; partial?: true }
   | { callId: number; mountSeq: number; ok: false; error: { code: string; message: string } }
 
 /**

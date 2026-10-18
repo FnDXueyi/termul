@@ -499,7 +499,7 @@ The class column is the request's command class, defined in `src-tauri/src/web/c
 | `unwatch` | read | Drops a state watch. Idempotent. |
 | `canvas_mount` | idempotent | Tells the host this connection runs a project's canvas mount (`{projectId, mountSeq}`). Replies `{attached: true}`, or `{attached: false, heldElsewhere}` when the host holds no such mount for this renderer. The host then forwards agent canvas calls to the connection as `canvas_call` frames. |
 | `canvas_unmount` | idempotent | Tells the host this connection no longer runs the mount (`{projectId, mountSeq}`) and replies `{unmounted}`. The mount itself closes only through the host's save-then-close sequence. |
-| `canvas_reply` | idempotent | Answers one `canvas_call` (`{callId, mountSeq, ok}` plus a `result` or an `error`) and replies `{resolved}`. A reply to a call that is no longer waiting is ignored. |
+| `canvas_reply` | idempotent | Answers one `canvas_call` (`{callId, mountSeq, ok}` plus a `result` or an `error`) and replies `{resolved}`. A reply to a call that is no longer waiting is ignored. A `result` too long for one message (`/ws` takes at most 16 MiB a frame and 64 MiB a message from any peer) goes as several `canvas_reply`, each with `partial: true` but the last; the host joins them (up to 256 MiB) and answers a partial one `{accepted}`, which is `false` once the call is gone or the reply passed the limit. |
 
 ### Events
 

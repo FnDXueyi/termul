@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::HostPlanServer;
 use crate::acp::host_mcp::canvas::{CanvasError, CanvasErrorCode, CanvasOutcome};
 use crate::acp::host_mcp::canvas_policy::{self, CanvasRoute, ProjectFile};
+use crate::acp::host_mcp::presence::CallOrigin;
 use crate::acp::host_mcp::FrameReply;
 
 /// The project a session works in: the router key and the folder exports
@@ -21,6 +22,7 @@ impl HostPlanServer {
     pub(super) async fn canvas_call(
         &self,
         session_id: &str,
+        agent_id: &str,
         tool: Option<String>,
         method: Option<String>,
         params: Option<String>,
@@ -46,8 +48,9 @@ impl HostPlanServer {
         let params = params.unwrap_or_else(|| "{}".to_string());
         // Params the gateway cannot parse cannot name a file the editor would
         // parse either; they go through for the editor to reject.
-        let route = serde_json::from_str::<Value>(&params).map_or(CanvasRoute::Forward, |parsed| {
-            canvas_policy::route(&method, &parsed)
+        let parsed = serde_json::from_str::<Value>(&params).ok();
+        let route = parsed.as_ref().map_or(CanvasRoute::Forward, |parsed| {
+            canvas_policy::route(&method, parsed)
         });
         let outcome = match route {
             CanvasRoute::Forward => {
@@ -71,7 +74,18 @@ impl HostPlanServer {
             }
         };
         match outcome {
-            Ok(result) => FrameReply::ok_with(Value::String(result)),
+            Ok(result) => {
+                if let Some(parsed) = &parsed {
+                    let origin = CallOrigin {
+                        session_id,
+                        agent_id,
+                        project_id,
+                    };
+                    self.presence
+                        .after_call(origin, &tool, &method, parsed, &result);
+                }
+                FrameReply::ok_with(Value::String(result))
+            }
             Err(error) => canvas_failure(&error),
         }
     }

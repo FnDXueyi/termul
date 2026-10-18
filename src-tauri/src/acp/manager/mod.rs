@@ -850,6 +850,7 @@ impl AcpManager {
                 );
                 return Err(with_stderr_tail(reason.to_string(), &stderr_ring));
             }
+            self.host_plan_server.name_agent(&agent_id.0, &config.name);
             agents.insert(
                 agent_id.clone(),
                 AgentEntry {

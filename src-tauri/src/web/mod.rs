@@ -37,6 +37,8 @@ pub mod git_history_api;
 pub mod git_hunk_api;
 pub mod install_api;
 pub mod log_api;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod mcp_oauth_api;
 pub mod mcp_probe_api;
 pub mod mcp_servers_api;

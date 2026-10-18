@@ -1530,6 +1530,8 @@ describe('Parity Checklist Automation', () => {
         'utf-8'
       )
       const router = readFileSync(join(RustRoot, 'web', 'router.rs'), 'utf-8')
+      const bundlePath = readFileSync(join(RustRoot, 'canvas', 'bundle_path.rs'), 'utf-8')
+      expect(router, 'the bearer gate exempts only bundle paths').toContain('is_bundle_path')
       const lib = readFileSync(join(RustRoot, 'lib.rs'), 'utf-8')
       for (const [method, { command, route }] of Object.entries(CANVAS_FACADE)) {
         expect(tauri, `tauri adapter ${method}`).toMatch(new RegExp(`\\b${method}\\s*\\(`))
@@ -1543,7 +1545,7 @@ describe('Parity Checklist Automation', () => {
         expect(routes + persistenceRoutes, `web route ${route}`).toMatch(
           new RegExp(`\\.route\\(\\s*"${route}"`)
         )
-        expect(router, `${route} stays behind the bearer gate`).toContain(
+        expect(bundlePath, `${route} stays behind the bearer gate`).toContain(
           `"${route.slice('/canvas/'.length)}"`
         )
       }

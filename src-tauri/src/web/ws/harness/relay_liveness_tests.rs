@@ -283,11 +283,13 @@ async fn stop_with_an_open_terminal_socket_sends_close_1001() {
     assert_eq!(close, Some(1001));
 }
 
-/// A canvas reply can carry an export far past tungstenite's default 16 MiB
-/// frame: the socket must take a frame that size and answer it, instead of
-/// failing the read and ending the connection.
+const OVERSIZE_TEXT_BYTES: usize = 20 * 1024 * 1024;
+
+/// `/ws` takes no frame past tungstenite's 16 MiB default from a peer that
+/// has not authenticated: the read fails and the connection ends, instead of
+/// the host buffering up to the canvas reply cap for anyone who connects.
 #[tokio::test]
-async fn a_message_past_the_default_frame_limit_keeps_the_socket_open() {
+async fn an_unauthenticated_frame_past_the_default_limit_ends_the_connection() {
     let started = start_host().await;
     let mut client = RawWsClient::connect(started.addr, "/ws").await;
     client
@@ -296,20 +298,150 @@ async fn a_message_past_the_default_frame_limit_keeps_the_socket_open() {
         .expect("auth_required event not delivered in time")
         .expect("auth_required event");
 
-    let pad = "a".repeat(20 * 1024 * 1024);
-    let big = json!({ "id": "big", "type": "canvas_reply", "payload": { "pad": pad } });
-    client.send_text(&big.to_string()).await;
-    let reply = loop {
+    let pad = "a".repeat(OVERSIZE_TEXT_BYTES);
+    // The host may close before it has read the whole frame.
+    let _ = client
+        .send_text(
+            &json!({ "id": "big", "type": "authenticate", "payload": { "pad": pad } }).to_string(),
+        )
+        .await;
+
+    loop {
         let frame = client
             .read_json_within(Duration::from_secs(30))
             .await
-            .expect("no reply to the large frame in time")
-            .expect("the socket closed on a large frame");
-        if frame["id"] == "big" {
-            break frame;
-        }
-    };
-    assert_eq!(reply["ok"], false, "{reply}");
+            .expect("the socket stayed open after an oversize frame");
+        let Some(frame) = frame else { break };
+        assert_ne!(
+            frame["id"], "big",
+            "the oversize frame was answered: {frame}"
+        );
+    }
 
     started.host.stop().await.expect("stop succeeds");
+}
+
+/// An export larger than one frame still reaches the call: an authenticated
+/// renderer sends the reply as slices, the host joins them, and the socket
+/// stays open for the next message.
+#[tokio::test]
+async fn an_authenticated_renderer_can_answer_a_canvas_call_with_a_reply_past_the_frame_limit() {
+    let host = Host::new(|_, _| {});
+    host.state
+        .acp
+        .canvas_router()
+        .mounts()
+        .ensure_test_mount("p-canvas", 1);
+    let addr = serve_ws(&host).await;
+    let mut client = RawWsClient::connect(addr, "/ws").await;
+    client
+        .read_json_within(Duration::from_secs(5))
+        .await
+        .expect("auth_required event not delivered in time")
+        .expect("auth_required event");
+
+    send_request(
+        &mut client,
+        "auth",
+        "authenticate",
+        json!({
+            "protocolVersion": WS_PROTOCOL_VERSION,
+            "deviceId": "device-harness",
+            "clientInstanceId": crate::canvas::persistence::TEST_RENDERER,
+        }),
+    )
+    .await;
+    let authed = wait_reply(&mut client, "auth").await;
+    assert_eq!(authed["ok"], true, "{authed}");
+    send_request(
+        &mut client,
+        "mount",
+        "canvas_mount",
+        json!({ "projectId": "p-canvas", "mountSeq": 1 }),
+    )
+    .await;
+    let mounted = wait_reply(&mut client, "mount").await;
+    assert_eq!(mounted["payload"]["attached"], true, "{mounted}");
+
+    let call = tokio::spawn({
+        let acp = Arc::clone(&host.state.acp);
+        async move {
+            acp.canvas_router()
+                .call("p-canvas", "export.png", "{}".into())
+                .await
+        }
+    });
+    let call_id = loop {
+        let frame = client
+            .read_json_within(Duration::from_secs(5))
+            .await
+            .expect("no canvas_call frame in time")
+            .expect("the socket closed before the call arrived");
+        if frame["type"] == "canvas_call" {
+            break frame["callId"].as_u64().expect("callId");
+        }
+    };
+
+    let result = "a".repeat(OVERSIZE_TEXT_BYTES);
+    let slice_len = 8 * 1024 * 1024;
+    let slices: Vec<&[u8]> = result.as_bytes().chunks(slice_len).collect();
+    for (index, slice) in slices.iter().enumerate() {
+        let last = index + 1 == slices.len();
+        let id = format!("slice-{index}");
+        let mut payload = json!({
+            "callId": call_id,
+            "mountSeq": 1,
+            "ok": true,
+            "result": std::str::from_utf8(slice).expect("ascii"),
+        });
+        if !last {
+            payload["partial"] = json!(true);
+        }
+        send_request(&mut client, &id, "canvas_reply", payload).await;
+        let reply = wait_reply(&mut client, &id).await;
+        let key = if last { "resolved" } else { "accepted" };
+        assert_eq!(reply["payload"][key], true, "{reply}");
+    }
+
+    assert_eq!(call.await.expect("call task"), Ok(result));
+}
+
+async fn send_request(client: &mut RawWsClient, id: &str, type_: &str, payload: Value) {
+    client
+        .send_text(&json!({ "id": id, "type": type_, "payload": payload }).to_string())
+        .await
+        .expect("the host closed the socket on a request");
+}
+
+async fn wait_reply(client: &mut RawWsClient, id: &str) -> Value {
+    loop {
+        let frame = client
+            .read_json_within(Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|()| panic!("no reply to {id} in time"))
+            .unwrap_or_else(|| panic!("the socket closed before the reply to {id}"));
+        if frame["id"] == id {
+            return frame;
+        }
+    }
+}
+
+/// The real `/ws` upgrade handler over a loopback listener, for a host's
+/// state: a local, write-capable peer on an OS-assigned port.
+async fn serve_ws(host: &Host) -> std::net::SocketAddr {
+    let app = axum::Router::new()
+        .route("/ws", axum::routing::get(crate::web::ws::ws_upgrade))
+        .with_state(host.state.clone());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind a loopback port");
+    let addr = listener.local_addr().expect("bound address");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+    });
+    addr
 }

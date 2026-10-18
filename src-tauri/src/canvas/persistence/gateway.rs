@@ -28,6 +28,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
 use super::{CanvasPersistence, ExpiredLease, Lifecycle, Link, Mount, RendererId};
+use crate::acp::host_mcp::bridge::MAX_REPLY_BYTES;
 use crate::acp::host_mcp::canvas::{
     CanvasCallFrame, CanvasError, CanvasErrorCode, CanvasHolder, CanvasOutcome,
 };
@@ -52,22 +53,39 @@ impl Connection {
 struct Pending {
     holder_id: String,
     mount_seq: u64,
+    /// The leading slices of a long reply, which arrive ahead of its last one.
+    slices: String,
     responder: oneshot::Sender<CanvasOutcome>,
 }
 
-#[derive(Default)]
 pub(super) struct Calls {
     waiting: Mutex<HashMap<u64, Pending>>,
     next_id: AtomicU64,
+    /// The longest reply, slices joined. A field so a test can lower it.
+    reply_limit: AtomicU64,
+}
+
+impl Default for Calls {
+    fn default() -> Self {
+        Self {
+            waiting: Mutex::default(),
+            next_id: AtomicU64::default(),
+            reply_limit: AtomicU64::new(MAX_REPLY_BYTES),
+        }
+    }
 }
 
 /// Who is asking. Agent calls are refused while the mount quiesces and are
 /// counted so the quiesce can wait them out; the host's own calls belong to
-/// the close sequence and name the mount they expect.
+/// the close sequence and name the mount they expect. Presence lookups
+/// follow an agent call already answered: they reach only a connected
+/// editor, and never count as activity, as a call the quiesce waits for, or
+/// toward the crash timeouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Caller {
     Agent,
     Host { mount_seq: u64 },
+    Presence,
 }
 
 /// Keeps an agent call counted in its mount's `in_flight` until it settles.
@@ -95,6 +113,8 @@ struct Route {
     holder: CanvasHolder,
     gone: watch::Receiver<()>,
     _in_flight: Option<InFlight>,
+    /// Whether the answer or timeout feeds the crash detector.
+    watched: bool,
 }
 
 /// Where a call can go right now.
@@ -287,7 +307,7 @@ impl CanvasPersistence {
         let mut state = mount.state.lock();
         match (state.lifecycle, caller) {
             (Lifecycle::Closed, _) => return Err(no_canvas()),
-            (Lifecycle::Closing, Caller::Agent) => {
+            (Lifecycle::Closing, Caller::Agent | Caller::Presence) => {
                 return Err(refused(
                     CanvasErrorCode::CanvasClosing,
                     "the canvas is closing",
@@ -297,7 +317,9 @@ impl CanvasPersistence {
         }
         let connection = match &state.link {
             Link::Attached(connection) => connection,
-            Link::Lost { since, ended } if since.elapsed() < mount.lease_grace => {
+            Link::Lost { since, ended }
+                if caller != Caller::Presence && since.elapsed() < mount.lease_grace =>
+            {
                 return Ok(Routed::Reconnecting {
                     ended: ended.subscribe(),
                     grace_ends: *since + mount.lease_grace,
@@ -315,6 +337,7 @@ impl CanvasPersistence {
             holder,
             gone,
             _in_flight: (caller == Caller::Agent).then(|| InFlight::enter(&mount)),
+            watched: caller != Caller::Presence,
         }))
     }
 
@@ -379,6 +402,50 @@ impl CanvasPersistence {
         .await
     }
 
+    /// A presence lookup (`node.get`, `document.inspect`) for an agent call
+    /// already answered. It goes only to a connected editor, never waits out
+    /// a reconnect, and leaves activity, the quiesce and the crash count
+    /// alone (see [`Caller::Presence`]).
+    pub async fn presence_call(
+        &self,
+        project_id: &str,
+        method: &str,
+        params: String,
+        timeout: Duration,
+    ) -> CanvasOutcome {
+        let Routed::Ready(route) = self.route(project_id, Caller::Presence)? else {
+            return Err(not_running());
+        };
+        self.forward(
+            project_id,
+            route,
+            method,
+            params,
+            (Instant::now() + timeout, timeout),
+        )
+        .await
+    }
+
+    /// A presence notice (`host.guest*`) to the connected editor of
+    /// `project_id`'s open mount. False when none is connected or the frame
+    /// was not queued; nothing waits for the answer.
+    pub fn presence_notice(&self, project_id: &str, method: &str, params: String) -> bool {
+        let Some(mount) = self.mounts.lock().get(project_id).cloned() else {
+            return false;
+        };
+        let holder = {
+            let state = mount.state.lock();
+            if state.lifecycle != Lifecycle::Open {
+                return false;
+            }
+            let Some(connection) = state.link.connection() else {
+                return false;
+            };
+            connection.holder.clone()
+        };
+        self.notify(&holder, project_id, mount.mount_seq, method, params)
+    }
+
     async fn forward(
         &self,
         project_id: &str,
@@ -392,6 +459,7 @@ impl CanvasPersistence {
             holder,
             mut gone,
             _in_flight,
+            watched,
         } = route;
         let call_id = self.calls.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (responder, waiting) = oneshot::channel();
@@ -400,6 +468,7 @@ impl CanvasPersistence {
             Pending {
                 holder_id: holder.id().to_string(),
                 mount_seq,
+                slices: String::new(),
                 responder,
             },
         );
@@ -420,7 +489,9 @@ impl CanvasPersistence {
         let outcome = tokio::select! {
             answered = waiting => match answered {
                 Ok(outcome) => {
-                    self.call_answered(project_id, mount_seq);
+                    if watched {
+                        self.call_answered(project_id, mount_seq);
+                    }
                     outcome
                 }
                 Err(_) => gone_before_answer(),
@@ -428,7 +499,9 @@ impl CanvasPersistence {
             _ = gone.changed() => gone_before_answer(),
             () = tokio::time::sleep_until(deadline) => {
                 self.calls.waiting.lock().remove(&call_id);
-                self.call_timed_out(project_id, mount_seq);
+                if watched {
+                    self.call_timed_out(project_id, mount_seq);
+                }
                 Err(timed_out(timeout))
             }
         };
@@ -438,7 +511,8 @@ impl CanvasPersistence {
 
     /// A host notice to the renderer on `holder`, on the call channel so it
     /// reaches both transports alike. Nothing waits for the answer: a reply
-    /// to it finds no waiting call and is dropped.
+    /// to it finds no waiting call and is dropped. False when it was not
+    /// queued.
     pub(super) fn notify(
         &self,
         holder: &CanvasHolder,
@@ -446,11 +520,40 @@ impl CanvasPersistence {
         mount_seq: u64,
         method: &str,
         params: String,
-    ) {
+    ) -> bool {
         let call_id = self.calls.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = holder.deliver(CanvasCallFrame::new(
+        holder.deliver(CanvasCallFrame::new(
             call_id, project_id, mount_seq, method, params,
-        ));
+        ))
+    }
+
+    /// Lower the longest reply to `bytes`.
+    #[cfg(test)]
+    pub(crate) fn limit_replies_to(&self, bytes: u64) {
+        self.calls.reply_limit.store(bytes, Ordering::Relaxed);
+    }
+
+    /// A renderer sent the next slice of its reply to `call_id`, which is not
+    /// its last: the slices are joined when the last one arrives. A slice that
+    /// takes the reply past the limit ([`MAX_REPLY_BYTES`]) resolves the call with an
+    /// `ENGINE_ERROR`, as the bridge does for an oversize frame.
+    pub fn push_reply_slice(&self, holder_id: &str, call_id: u64, slice: &str) -> SliceMatch {
+        let limit = self.calls.reply_limit.load(Ordering::Relaxed);
+        let mut waiting = self.calls.waiting.lock();
+        let Some(call) = waiting
+            .get_mut(&call_id)
+            .filter(|call| call.holder_id == holder_id)
+        else {
+            return SliceMatch::NotWaiting;
+        };
+        if call.slices.len().saturating_add(slice.len()) as u64 <= limit {
+            call.slices.push_str(slice);
+            return SliceMatch::Buffered;
+        }
+        if let Some(call) = waiting.remove(&call_id) {
+            let _ = call.responder.send(Err(reply_too_large(limit)));
+        }
+        SliceMatch::TooLarge
     }
 
     /// A renderer answered `call_id`. Only the connection the call went to
@@ -475,7 +578,11 @@ impl CanvasPersistence {
             return ReplyMatch::NotWaiting;
         };
         if call.mount_seq == mount_seq {
-            let _ = call.responder.send(outcome);
+            let _ = call.responder.send(join_slices(
+                call.slices,
+                outcome,
+                self.calls.reply_limit.load(Ordering::Relaxed),
+            ));
             ReplyMatch::Resolved
         } else {
             let _ = call.responder.send(Err(refused(
@@ -498,4 +605,37 @@ pub enum ReplyMatch {
         sent_to: u64,
     },
     NotWaiting,
+}
+
+/// What became of one slice of a long reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceMatch {
+    Buffered,
+    /// No call of that connection waits for it; the slice was dropped.
+    NotWaiting,
+    /// The reply grew past the limit; the call was resolved with an error.
+    TooLarge,
+}
+
+fn reply_too_large(limit: u64) -> CanvasError {
+    refused(
+        CanvasErrorCode::EngineError,
+        &format!(
+            "the canvas reply is larger than the {} MiB limit",
+            limit / (1024 * 1024)
+        ),
+    )
+}
+
+/// The reply a renderer ended with, behind the slices it sent first.
+fn join_slices(mut slices: String, last: CanvasOutcome, limit: u64) -> CanvasOutcome {
+    let last = last?;
+    if slices.is_empty() {
+        return Ok(last);
+    }
+    if slices.len().saturating_add(last.len()) as u64 > limit {
+        return Err(reply_too_large(limit));
+    }
+    slices.push_str(&last);
+    Ok(slices)
 }

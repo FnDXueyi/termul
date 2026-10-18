@@ -62,8 +62,9 @@ impl RawWsClient {
         Self { stream }
     }
 
-    /// Send `text` as one masked text frame, as a browser does.
-    pub(crate) async fn send_text(&mut self, text: &str) {
+    /// Send `text` as one masked text frame, as a browser does. An error is
+    /// the host closing the socket before the frame was written whole.
+    pub(crate) async fn send_text(&mut self, text: &str) -> std::io::Result<()> {
         const MASK: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
         let payload = text.as_bytes();
         let mut frame = vec![0x80 | OP_TEXT];
@@ -80,7 +81,7 @@ impl RawWsClient {
         }
         frame.extend_from_slice(&MASK);
         frame.extend(payload.iter().zip(MASK.iter().cycle()).map(|(b, m)| b ^ m));
-        self.stream.write_all(&frame).await.expect("write frame");
+        self.stream.write_all(&frame).await
     }
 
     /// Read one server frame (unmasked) as `(opcode, payload)`; `None` once

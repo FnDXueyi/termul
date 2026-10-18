@@ -19,6 +19,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+use crate::canvas::bundle_path::redact_canvas_path;
+
 /// Extra origins accepted in addition to the request's own host and port.
 ///
 /// Empty means "same host and port only". Stored in canonical form
@@ -155,7 +157,7 @@ fn origin_and_host(headers: &HeaderMap) -> (Option<String>, Option<String>, bool
 fn forbidden(path: &str, origin: Option<&str>) -> Response {
     tracing::warn!(
         target: "termul::web::origin",
-        path = %bounded(path),
+        path = %bounded(&redact_canvas_path(path)),
         origin = %bounded(origin.unwrap_or("")),
         "rejected request origin"
     );
