@@ -1,5 +1,5 @@
-import { ChevronDownIcon, PaperclipIcon } from 'lucide-react'
 import type { ComponentProps, ReactNode } from 'react'
+import { ChevronDownIcon, PaperclipIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -8,13 +8,7 @@ import { cn } from '@/lib/utils'
 export type QueueItemProps = ComponentProps<'li'>
 
 export const QueueItem = ({ className, ...props }: QueueItemProps) => (
-  <li
-    className={cn(
-      'group flex flex-col gap-1 rounded-md px-3 py-1 text-sm transition-colors hover:bg-muted',
-      className
-    )}
-    {...props}
-  />
+  <li className={cn('group flex flex-col gap-0.5 px-0 py-0.5 text-sm', className)} {...props} />
 )
 
 export type QueueItemContentProps = ComponentProps<'span'> & {
@@ -47,7 +41,8 @@ export type QueueItemActionProps = Omit<ComponentProps<typeof Button>, 'variant'
 export const QueueItemAction = ({ className, ...props }: QueueItemActionProps) => (
   <Button
     className={cn(
-      'size-auto rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted-foreground/10 hover:text-foreground group-hover:opacity-100',
+      'relative h-11 w-11 shrink-0 rounded-md p-0 text-muted-foreground @[400px]:h-10 @[400px]:w-10',
+      'opacity-0 transition-colors group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 hover:bg-muted-foreground/10 hover:text-foreground',
       className
     )}
     size="icon"
@@ -60,7 +55,7 @@ export const QueueItemAction = ({ className, ...props }: QueueItemActionProps) =
 export type QueueItemAttachmentProps = ComponentProps<'div'>
 
 export const QueueItemAttachment = ({ className, ...props }: QueueItemAttachmentProps) => (
-  <div className={cn('mt-1 flex flex-wrap gap-2', className)} {...props} />
+  <div className={cn('mt-0.5 flex flex-wrap gap-1.5', className)} {...props} />
 )
 
 export type QueueItemImageProps = ComponentProps<'img'>
@@ -68,9 +63,9 @@ export type QueueItemImageProps = ComponentProps<'img'>
 export const QueueItemImage = ({ className, ...props }: QueueItemImageProps) => (
   <img
     alt=""
-    className={cn('h-8 w-8 rounded border object-cover', className)}
-    height={32}
-    width={32}
+    className={cn('h-10 w-10 rounded border object-cover', className)}
+    height={40}
+    width={40}
     {...props}
   />
 )
@@ -90,13 +85,12 @@ export const QueueItemFile = ({ children, className, ...props }: QueueItemFilePr
 export type QueueListProps = ComponentProps<typeof ScrollArea>
 
 export const QueueList = ({ children, className, ...props }: QueueListProps) => (
-  <ScrollArea className={cn('mt-2 -mb-1', className)} {...props}>
+  <ScrollArea className={cn('mt-1 -mb-1', className)} {...props}>
     <div className="max-h-40">
       <ul>{children}</ul>
     </div>
   </ScrollArea>
 )
-
 export type QueueSectionProps = ComponentProps<typeof Collapsible>
 
 export const QueueSection = ({ className, defaultOpen = true, ...props }: QueueSectionProps) => (
@@ -113,7 +107,7 @@ export const QueueSectionTrigger = ({
   <CollapsibleTrigger asChild>
     <button
       className={cn(
-        'group flex w-full items-center justify-between rounded-md bg-muted/40 px-3 py-2 text-left font-medium text-muted-foreground text-sm transition-colors hover:bg-muted',
+        'group flex min-h-7 w-full items-center rounded-md px-2 py-1 text-left font-medium leading-5 text-muted-foreground text-sm transition-colors hover:bg-muted',
         className
       )}
       type="button"
@@ -137,10 +131,10 @@ export const QueueSectionLabel = ({
   className,
   ...props
 }: QueueSectionLabelProps) => (
-  <span className={cn('flex items-center gap-2', className)} {...props}>
-    <ChevronDownIcon className="size-4 transition-transform group-data-[state=closed]:-rotate-90" />
+  <span className={cn('flex items-center gap-1.5 leading-5', className)} {...props}>
+    <ChevronDownIcon className="size-3.5 shrink-0 transition-transform duration-[var(--acc-chevron)] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none group-data-[state=closed]:-rotate-90" />
     {icon}
-    <span>
+    <span className="tabular-nums leading-5">
       {count} {label}
     </span>
   </span>
@@ -157,7 +151,7 @@ export type QueueProps = ComponentProps<'div'>
 export const Queue = ({ className, ...props }: QueueProps) => (
   <div
     className={cn(
-      'flex flex-col gap-2 rounded-xl border border-border bg-background px-3 pt-2 pb-2 shadow-xs',
+      'relative z-0 flex flex-col gap-1 rounded-2xl border border-border/60 bg-card/60 px-3 py-2',
       className
     )}
     {...props}

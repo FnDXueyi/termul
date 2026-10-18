@@ -21,6 +21,25 @@ vi.mock('@/hooks/use-pinned-commands', () => ({
   useTogglePinnedCommand: () => togglePinnedCommand
 }))
 
+// Story 8 (web honesty): the New Browser Tab command is desktop-only — the
+// palette must omit it on web. Mutable ref defaults to desktop so the
+// existing palette tests (which assert the command's presence and execute
+// behavior) keep running in desktop mode; the web-mode test flips it.
+const { tauriRef, mobileRef } = vi.hoisted(() => ({
+  tauriRef: { current: true as boolean },
+  // Story 11: mutable so the mobile-ergonomics tests can flip the shell.
+  mobileRef: { current: false as boolean }
+}))
+
+vi.mock('@/lib/tauri-runtime', () => ({
+  isTauriContext: () => tauriRef.current
+}))
+
+vi.mock('@/hooks/use-mobile-web-shell', () => ({
+  useMobileWebShell: () => mobileRef.current,
+  MOBILE_WEB_SHELL_MAX_PX: 767
+}))
+
 const projects: Project[] = [
   {
     id: 'alpha',
@@ -76,6 +95,7 @@ describe('CommandPalette', () => {
     pinnedCommandIds = []
     saveRecentCommand.mockClear()
     togglePinnedCommand.mockClear()
+    tauriRef.current = true
   })
 
   it('renders a compact command-center layout with metadata, categories, shortcuts, and footer hints', () => {
@@ -93,9 +113,23 @@ describe('CommandPalette', () => {
       screen.getByText('Show the agent launcher prompt in the active pane')
     ).toBeInTheDocument()
     expect(screen.getByText('Ctrl+T')).toBeInTheDocument()
-    expect(screen.getByText('Navigate')).toBeInTheDocument()
-    expect(screen.getByText('Select')).toBeInTheDocument()
+    expect(screen.getByText('Move')).toBeInTheDocument()
+    expect(screen.getByText('Run')).toBeInTheDocument()
     expect(screen.getByText('Close')).toBeInTheDocument()
+  })
+
+  it('uses neutral popover chrome: foreground-wash selection and hairline kbd hints', () => {
+    const { container } = renderPalette()
+
+    const item = container.querySelector('[cmdk-item]')
+    expect(item?.className).toContain("data-[selected='true']:bg-foreground/[0.06]")
+    expect(item?.className).not.toContain('bg-background')
+    expect(item?.className).not.toContain('bg-accent')
+    const shortcut = screen.getByText('Ctrl+T')
+    expect(shortcut.className).not.toContain('bg-secondary')
+    const kbd = screen.getByText('Esc')
+    expect(kbd.tagName).toBe('KBD')
+    expect(kbd.className).not.toContain('bg-secondary')
   })
 
   it('orders the Projects group above Workspace, Navigation, and Tools', () => {
@@ -261,6 +295,75 @@ describe('CommandPalette', () => {
     expect(screen.getByText('Alpha')).toBeInTheDocument()
   })
 
+  // Story 8 (web honesty): New Browser Tab is desktop-only — on the web
+  // client the command must be absent (not present-but-broken), while other
+  // workspace commands stay offered. On desktop it is offered exactly as
+  // before (covered by the executes-callbacks + shortcut-label tests above).
+  it('omits New Browser Tab on web while keeping other workspace commands', () => {
+    const prev = tauriRef.current
+    tauriRef.current = false
+    try {
+      const { props } = renderPalette()
+
+      expect(screen.queryByText('New Browser Tab')).not.toBeInTheDocument()
+      expect(screen.queryByText('Ctrl+Shift+N')).not.toBeInTheDocument()
+      expect(screen.getByText('New Terminal')).toBeInTheDocument()
+      expect(screen.getByText('Save Workspace Snapshot')).toBeInTheDocument()
+      expect(props.onNewBrowserTab).not.toHaveBeenCalled()
+    } finally {
+      tauriRef.current = prev
+    }
+  })
+
+  it('lists one New Terminal entry per profile on desktop and web, and opens that profile', async () => {
+    const node = {
+      id: 'p1',
+      name: 'Node dev',
+      shell: '/bin/zsh',
+      args: ['-l'],
+      cwd: '/work/app',
+      env: { NODE_ENV: 'development' }
+    }
+    const plain = { id: 'p2', name: 'Plain', shell: '', args: [], cwd: '', env: {} }
+    const prev = tauriRef.current
+    try {
+      for (const tauri of [true, false]) {
+        tauriRef.current = tauri
+        saveRecentCommand.mockClear()
+        const { props, unmount } = renderPalette({
+          terminalProfiles: [node, plain],
+          onOpenTerminalProfile: vi.fn()
+        })
+
+        expect(screen.getByText('/bin/zsh -l')).toBeInTheDocument()
+        expect(screen.getByText('Default shell')).toBeInTheDocument()
+        fireEvent.click(screen.getByText('New Terminal: Node dev'))
+
+        await waitFor(() => {
+          expect(saveRecentCommand).toHaveBeenCalledWith('terminal-profile-p1')
+          expect(props.onClose).toHaveBeenCalled()
+          expect(props.onOpenTerminalProfile).toHaveBeenCalledWith(node)
+        })
+        unmount()
+      }
+    } finally {
+      tauriRef.current = prev
+    }
+  })
+
+  it('lists Open Shortcut Menu and omits New Project on the desktop palette', async () => {
+    mobileRef.current = false
+    const { props } = renderPalette()
+
+    expect(screen.getByText('Open Shortcut Menu')).toBeInTheDocument()
+    expect(screen.queryByText('New Project')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Open Shortcut Menu'))
+    await waitFor(() => {
+      expect(props.onOpenShortcutMenu).toHaveBeenCalledTimes(1)
+    })
+  })
+
   it('keeps recent commands visible when the search is empty', () => {
     recentCommandIds = ['open-command-history', 'project-alpha']
 
@@ -353,5 +456,84 @@ describe('CommandPalette', () => {
     expect(backdrop).not.toBeNull()
     fireEvent.click(backdrop as Element)
     expect(props.onClose).toHaveBeenCalledTimes(2)
+  })
+
+  // ── Story 11 (QA F9): mobile palette ergonomics ──────────────────────────
+
+  describe('mobile web shell', () => {
+    beforeEach(() => {
+      mobileRef.current = true
+    })
+
+    afterEach(() => {
+      mobileRef.current = false
+    })
+
+    it('anchors the palette in the lower third (thumb zone), not top-anchored', () => {
+      const { container } = renderPalette()
+
+      const backdrop = container.querySelector('.fixed.inset-0')
+      expect(backdrop).not.toBeNull()
+      // Bottom-anchored with safe-area padding replaces the desktop pt-[7vh].
+      expect(backdrop?.className).toContain('justify-end')
+      expect(backdrop?.className).toContain('pb-[max(2rem,env(safe-area-inset-bottom))]')
+      expect(backdrop?.className).not.toContain('pt-[7vh]')
+    })
+
+    it('hides the desktop kbd hints (↑↓/↵/Esc) and shows a touch-sized visible close', () => {
+      const { props } = renderPalette()
+
+      // Dead keyboard affordances are gone on touch.
+      expect(screen.queryByText('Move')).not.toBeInTheDocument()
+      expect(screen.queryByText('Run')).not.toBeInTheDocument()
+      // The visible close button meets the 44px floor (size-11).
+      const closeBtn = screen.getByRole('button', { name: 'Close command palette' })
+      expect(closeBtn.className).toContain('size-11')
+      fireEvent.click(closeBtn)
+      expect(props.onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('lists New Project and runs it after closing the palette', async () => {
+      const onNewProject = vi.fn()
+      const { props } = renderPalette({ onNewProject })
+
+      fireEvent.click(screen.getByText('New Project'))
+
+      await waitFor(() => {
+        expect(saveRecentCommand).toHaveBeenCalledWith('new-project')
+        expect(props.onClose).toHaveBeenCalledTimes(1)
+        expect(onNewProject).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    it('does not list Open Shortcut Menu, including under Pinned and Recent', () => {
+      pinnedCommandIds = ['open-shortcut-menu', 'new-terminal']
+      recentCommandIds = ['open-shortcut-menu']
+
+      const { props } = renderPalette({ onNewProject: vi.fn() })
+
+      expect(screen.queryByText('Open Shortcut Menu')).not.toBeInTheDocument()
+      expect(screen.queryByText('View and edit common keyboard shortcuts')).not.toBeInTheDocument()
+      // The pinned id that still resolves keeps its group; the unresolved
+      // shortcut id and the recent-only entry produce no rows.
+      expect(screen.getByText('Pinned')).toBeInTheDocument()
+      expect(screen.queryByText('Recent')).not.toBeInTheDocument()
+      expect(props.onOpenShortcutMenu).not.toHaveBeenCalled()
+    })
+
+    it('keeps the desktop layout byte-identical off the mobile shell', () => {
+      mobileRef.current = false
+      const { container } = renderPalette()
+
+      const backdrop = container.querySelector('.fixed.inset-0')
+      expect(backdrop?.className).toContain('pt-[7vh]')
+      expect(backdrop?.className).not.toContain('justify-end')
+      // Desktop keeps the kbd hints + has no mobile close button.
+      expect(screen.getByText('Move')).toBeInTheDocument()
+      expect(screen.getByText('Run')).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Close command palette' })
+      ).not.toBeInTheDocument()
+    })
   })
 })

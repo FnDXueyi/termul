@@ -10,6 +10,11 @@
     "file": "amp-acp.svg"
   },
   {
+    "id": "antigravity-acp",
+    "name": "Google Antigravity",
+    "file": "antigravity-acp.svg"
+  },
+  {
     "id": "auggie",
     "name": "Auggie CLI",
     "file": "auggie.svg"
@@ -130,9 +135,19 @@
     "file": "kilo.svg"
   },
   {
+    "id": "kimchi",
+    "name": "Kimchi",
+    "file": "kimchi.svg"
+  },
+  {
     "id": "kimi",
     "name": "Kimi CLI",
     "file": "kimi.svg"
+  },
+  {
+    "id": "minimax-code",
+    "name": "MiniMax Code",
+    "file": "minimax-code.svg"
   },
   {
     "id": "minion-code",

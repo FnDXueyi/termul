@@ -1,13 +1,17 @@
-import { join, tempDir } from '@tauri-apps/api/path'
-import { readImage } from '@tauri-apps/plugin-clipboard-manager'
-import { open } from '@tauri-apps/plugin-dialog'
-import { writeFile } from '@tauri-apps/plugin-fs'
-import { type ClipboardEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { readAttachmentBytes } from '@/lib/attachment-api'
 import { deleteTempFile } from '@/lib/attachment-temp-cleanup'
 import {
-  basename,
+  pickAttachmentFilesBrowser,
+  pickAttachmentPaths,
+  readClipboardRgbaImage,
+  writeBytesToTempFile
+} from '@/lib/composer-attachments-io'
+import { basename } from '@/lib/path-basename'
+import { isTauriContext } from '@/lib/tauri-runtime'
+import { randomUUID } from '@/lib/uuid'
+import {
   guessMimeType,
   isImageMime,
   isTextLike,
@@ -16,10 +20,9 @@ import {
   type PendingAttachment,
   uint8ToBase64
 } from './chat-attachments'
-import type { MentionMatch } from './mention-menu-model'
 
 function attachmentId(): string {
-  return `att-${crypto.randomUUID()}`
+  return `att-${randomUUID()}`
 }
 
 /** Read a browser image File into an inline base64 `image` attachment. */
@@ -120,9 +123,12 @@ async function writeImageBytesToTempLink(
   mimeType: string
 ): Promise<PendingAttachment> {
   const safe = (name || 'pasted-image.png').replace(/[^\w.-]+/g, '_')
-  const dir = await tempDir()
-  const path = await join(dir, `faizui-${crypto.randomUUID()}-${safe}`)
-  await writeFile(path, bytes)
+  if (!isTauriContext()) {
+    // Web has no temp path. Callers must only reach here when imageCapable
+    // (inline) — otherwise guard upstream and toast.
+    throw new Error('Temp-link image attach is desktop-only; require imageCapable on web')
+  }
+  const path = await writeBytesToTempFile(bytes, safe)
   // Skip the data-URL preview when the temp file is too large to thumbnail so
   // the card falls back to an image icon instead of holding a giant base64 URL
   // in memory. The file-ref itself is still created — the agent reads by path.
@@ -161,11 +167,11 @@ async function readClipboardImageAttachment(): Promise<Extract<
   let width: number
   let height: number
   try {
-    const image = await readImage()
-    rgba = await image.rgba()
-    const size = await image.size()
-    width = size.width
-    height = size.height
+    const image = await readClipboardRgbaImage()
+    if (!image) return null
+    rgba = image.rgba
+    width = image.width
+    height = image.height
   } catch {
     return null
   }
@@ -190,18 +196,22 @@ async function readClipboardImageAttachment(): Promise<Extract<
 }
 
 /**
- * Collect File objects from a clipboard/drag payload, covering BOTH `files` and
- * `items` (screenshots often surface only as an image item, not in `files`),
- * de-duplicating the overlap.
+ * Collect File objects from a clipboard/drag payload. Prefer `files` when the
+ * browser exposes it; some clipboard implementations expose the same image in
+ * both `files` and `items`, so merging both sources can attach it twice. Some
+ * screenshots surface only as an image item, so retain that fallback.
  */
-function dataTransferFiles(data: DataTransfer): File[] {
-  const fromItems = Array.from(data.items)
-    .filter((it) => it.kind === 'file')
-    .map((it) => it.getAsFile())
-    .filter((f): f is File => f != null)
-  const all = [...Array.from(data.files), ...fromItems]
+export function dataTransferFiles(data: DataTransfer): File[] {
+  const files = Array.from(data.files)
+  const candidates =
+    files.length > 0
+      ? files
+      : Array.from(data.items)
+          .filter((it) => it.kind === 'file')
+          .map((it) => it.getAsFile())
+          .filter((f): f is File => f != null)
   const seen = new Set<string>()
-  return all.filter((f) => {
+  return candidates.filter((f) => {
     const key = `${f.name}:${f.size}:${f.type}:${f.lastModified}`
     if (seen.has(key)) return false
     seen.add(key)
@@ -215,10 +225,11 @@ export interface ComposerAttachments {
   addFiles: (files: FileList | File[]) => Promise<void>
   /** Picker channel (OS file dialog): real filesystem paths. */
   pickFiles: () => Promise<void>
-  /** Mention channel (@-picker): stage a `file-ref` by absolute path. */
-  addFileRef: (match: MentionMatch) => void
-  /** Paste handler for a composer textarea — images from clipboard, incl. screenshots. */
-  handlePaste: (e: ClipboardEvent<HTMLElement>) => void
+  /** Paste handler for the composer — images from clipboard, incl. screenshots.
+   *  Accepts the DOM `ClipboardEvent` the Tiptap editor's `handlePaste` editorProp
+   *  passes (the pre-refactor textarea's React event was structurally compatible;
+   *  only `clipboardData` + `preventDefault()` are read, both native). */
+  handlePaste: (e: ClipboardEvent) => void
   removeAttachment: (id: string) => void
   clearAttachments: () => void
   /**
@@ -236,8 +247,7 @@ export interface ComposerAttachments {
 
 /**
  * Shared composer attachment engine for the Agent Chat input and the new-thread
- * launcher. Encodes the hybrid transport from
- * docs/adr/0001-agent-chat-file-attachment-transport.md: OS picker -> path
+ * launcher. Encodes the hybrid attachment transport: OS picker -> path
  * `resource_link` (images read inline when capable); drag/paste -> inline
  * base64 image or embedded text resource, gated by capability.
  */
@@ -273,6 +283,7 @@ export function useComposerAttachments(opts: {
       let tooLarge = 0
       let needEmbed = 0
       let unsupported = 0
+      let needImageCap = 0
       for (const f of arr) {
         if (isImageMime(f.type)) {
           // Images always attach: inline base64 when the agent accepts images,
@@ -283,6 +294,9 @@ export function useComposerAttachments(opts: {
           if (imageCapable) {
             if (f.size > MAX_IMAGE_BYTES) tooLarge++
             else reads.push(readImageAsAttachment(f))
+          } else if (!isTauriContext()) {
+            // Web has no temp path — inline without imageCapable is unusable.
+            needImageCap++
           } else {
             reads.push(fileToTempLink(f))
           }
@@ -305,6 +319,7 @@ export function useComposerAttachments(opts: {
       if (tooLarge > 0) toast.error('File too large')
       if (needEmbed > 0)
         toast.error("This agent can't embed files — use the attach button to link by path")
+      if (needImageCap > 0) toast.error("This agent can't accept images in the browser")
       if (unsupported > 0) toast.error('Unsupported file type (text or image only)')
     },
     [imageCapable, embedCapable]
@@ -312,15 +327,26 @@ export function useComposerAttachments(opts: {
 
   const pickFiles = useCallback(async () => {
     if (disabled) return
-    let selected: string | string[] | null
+
+    // Web: no filesystem paths — use a DOM file picker and stage File objects.
+    if (!isTauriContext()) {
+      try {
+        const files = await pickAttachmentFilesBrowser()
+        if (files && files.length > 0) await addFiles(files)
+      } catch {
+        toast.error('Failed to open file picker')
+      }
+      return
+    }
+
+    let paths: string[] | null
     try {
-      selected = await open({ multiple: true, title: 'Attach files' })
+      paths = await pickAttachmentPaths()
     } catch {
       toast.error('Failed to open file picker')
       return
     }
-    if (!selected) return
-    const paths = Array.isArray(selected) ? selected : [selected]
+    if (!paths) return
     const next: PendingAttachment[] = []
     let unsupported = 0
     let readFell = 0
@@ -349,39 +375,13 @@ export function useComposerAttachments(opts: {
     if (next.length > 0) setAttachments((prev) => [...prev, ...next])
     if (readFell > 0) toast.error('Could not read image inline — linked by path instead')
     if (unsupported > 0) toast.error('Unsupported file type (text or image only)')
-  }, [disabled, imageCapable])
-
-  /**
-   * Stage a `file-ref` attachment from an @-mention pick (ADR 0003). The
-   * attachment is staged synchronously so it is send-safe immediately; for
-   * images a thumbnail is read in the background and patched onto the card.
-   */
-  const addFileRef = useCallback(
-    (match: MentionMatch) => {
-      if (disabled) return
-      const id = attachmentId()
-      const name = match.name
-      const mimeType = guessMimeType(name)
-      setAttachments((prev) => [
-        ...prev,
-        { kind: 'file-ref', id, name, mimeType, path: match.absPath }
-      ])
-      if (isImageMime(mimeType)) {
-        void (async () => {
-          const previewUrl = await readThumbnail(match.absPath, mimeType)
-          if (previewUrl) {
-            setAttachments((prev) => prev.map((a) => (a.id === id ? { ...a, previewUrl } : a)))
-          }
-        })()
-      }
-    },
-    [disabled]
-  )
+  }, [disabled, imageCapable, addFiles])
 
   const handlePaste = useCallback(
-    (e: ClipboardEvent<HTMLElement>) => {
+    (e: ClipboardEvent) => {
       if (disabled) return
       const data = e.clipboardData
+      if (!data) return
       const files = dataTransferFiles(data)
       if (files.length > 0) {
         // addFiles surfaces capability/size errors via toast.
@@ -403,6 +403,10 @@ export function useComposerAttachments(opts: {
             return
           }
           setAttachments((prev) => [...prev, att])
+          return
+        }
+        if (!isTauriContext()) {
+          toast.error("This agent can't accept images in the browser")
           return
         }
         // Agent can't take inline images but can read files by path: persist
@@ -455,7 +459,6 @@ export function useComposerAttachments(opts: {
     attachments,
     addFiles,
     pickFiles,
-    addFileRef,
     handlePaste,
     removeAttachment,
     clearAttachments,

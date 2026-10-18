@@ -27,6 +27,17 @@ describe('agent-templates', () => {
     }
   })
 
+  it('Claude ACP template uses the exact bundled package pin and does not inject an unresolved API-key placeholder', () => {
+    const claude = templateById('claude-acp')
+    expect(claude?.config.args).toEqual(['-y', '@agentclientprotocol/claude-agent-acp@0.78.0'])
+    expect(claude?.config.env).not.toHaveProperty('ANTHROPIC_API_KEY')
+  })
+
+  it('Codex ACP template uses the official catalog package', () => {
+    const codex = templateById('codex-acp')
+    expect(codex?.config.args).toEqual(['-y', '@agentclientprotocol/codex-acp@1.12.0'])
+  })
+
   it('templateById resolves a known template and returns undefined otherwise', () => {
     expect(templateById('gemini')?.label).toBe('Gemini CLI')
     expect(templateById('does-not-exist')).toBeUndefined()

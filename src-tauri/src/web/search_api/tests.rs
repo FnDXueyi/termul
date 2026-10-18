@@ -1,0 +1,505 @@
+use super::*;
+use crate::acp::AcpManager;
+use crate::web::sink::WsRelaySink;
+use crate::web::test_pty_manager;
+use axum::body::Body;
+use axum::http::Request;
+use axum::routing::{get, post};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+/// Minimal percent-encoding for test query strings (same shape as the
+/// private helper in `fs_api/tests.rs` — kept local so test modules stay
+/// decoupled).
+fn urlencoding(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '\\' => out.push_str("%5C"),
+            ':' => out.push_str("%3A"),
+            _ if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/') => {
+                out.push(c)
+            }
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{:02X}", b));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Deserializable mirror of `FileNameSearchResponse` for reading route
+/// bodies in tests (`SearchFileHit` itself only implements `Serialize`).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestFileHit {
+    path: String,
+    ignored: bool,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestFileNameResponse {
+    files: Vec<TestFileHit>,
+    truncated: bool,
+}
+
+fn test_state() -> AppState {
+    let pty = test_pty_manager();
+    AppState {
+        acp: Arc::new(AcpManager::new(vec![])),
+        terminal_events: pty.terminal_events(),
+        cwd_tracker: pty.cwd_tracker(),
+        git_tracker: pty.git_tracker(),
+        exit_code_tracker: pty.exit_code_tracker(),
+        pty,
+        relay: Arc::new(WsRelaySink::new()),
+        registry: crate::web::project_registry::ProjectRegistry::seeded_for_test(
+            &std::env::temp_dir()
+                .canonicalize()
+                .unwrap_or_else(|_| std::env::temp_dir()),
+        ),
+        history_mode: crate::web::ws::HistoryMode::LiveOnly,
+        acp_catalog: None,
+        acp_install: None,
+        store: None,
+        web_auth: None,
+        allow_remote_writes: false,
+        shared_live_writes_denied: false,
+        pending_oauth_flows: std::sync::Arc::new(parking_lot::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        oauth_base_url: "http://127.0.0.1".to_string(),
+        connections: Default::default(),
+    }
+}
+
+fn test_router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/search/rg-info", get(rg_info))
+        .route("/search/content", post(content))
+        .route("/search/file-names", get(file_names))
+        .route("/search/cancel", post(cancel))
+        .with_state(state)
+}
+
+async fn get_request(state: AppState, uri: &str) -> axum::http::Response<Body> {
+    test_router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("router response")
+}
+
+async fn post_json(
+    state: AppState,
+    uri: &str,
+    body: &serde_json::Value,
+) -> axum::http::Response<Body> {
+    post_json_from(state, uri, body, std::net::SocketAddr::from(([127, 0, 0, 1], 54321))).await
+}
+
+/// POST JSON as `peer` (the write routes need `ConnectInfo`).
+async fn post_json_from(
+    state: AppState,
+    uri: &str,
+    body: &serde_json::Value,
+    peer: std::net::SocketAddr,
+) -> axum::http::Response<Body> {
+    let bytes = serde_json::to_vec(body).expect("serialize body");
+    test_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .extension(axum::extract::ConnectInfo(peer))
+                .body(Body::from(bytes))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response")
+}
+
+async fn body_as_json<T: serde::de::DeserializeOwned>(body: Body) -> T {
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).expect("deserialize IpcBody")
+}
+
+#[tokio::test]
+async fn rg_info_returns_info() {
+    let resp = get_request(test_state(), "/search/rg-info").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<RgInfoResponse> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "rg-info should succeed: {:?}", body.error);
+    let data = body.data.expect("RgInfoResponse");
+    assert!(!data.resolved_path.is_empty());
+}
+
+#[tokio::test]
+async fn content_search_empty_query_returns_empty() {
+    let req = serde_json::json!({
+        "scopeRoot": "/tmp",
+        "rootPath": "/tmp",
+        "query": ""
+    });
+    let resp = post_json(test_state(), "/search/content", &req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<FileSearchResponse> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "empty query should succeed: {:?}", body.error);
+    let data = body.data.expect("FileSearchResponse");
+    assert!(data.results.is_empty());
+}
+
+#[tokio::test]
+async fn content_search_too_long_query_rejected() {
+    let huge_query = "x".repeat(MAX_SEARCH_QUERY_LEN + 10);
+    let req = serde_json::json!({
+        "scopeRoot": "/tmp",
+        "rootPath": "/tmp",
+        "query": huge_query
+    });
+    let resp = post_json(test_state(), "/search/content", &req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<FileSearchResponse> = body_as_json(resp.into_body()).await;
+    assert!(!body.success, "too-long query should be rejected");
+    assert_eq!(body.code.as_deref(), Some("QUERY_TOO_LONG"));
+}
+
+#[tokio::test]
+async fn cancel_unknown_search_id_returns_success() {
+    let req = serde_json::json!({ "searchId": "nonexistent-id" });
+    let resp = post_json(test_state(), "/search/cancel", &req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<()> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "cancel of unknown id should succeed");
+}
+
+#[tokio::test]
+async fn cancel_is_refused_for_a_view_only_peer() {
+    let req = serde_json::json!({ "searchId": "any-id" });
+    let remote = std::net::SocketAddr::from(([192, 168, 1, 50], 40000));
+    let resp = post_json_from(test_state(), "/search/cancel", &req, remote).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<()> = body_as_json(resp.into_body()).await;
+    assert!(!body.success);
+    assert_eq!(body.code.as_deref(), Some("FORBIDDEN"));
+
+    let mut shared_live = test_state();
+    shared_live.shared_live_writes_denied = true;
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 54321));
+    let resp = post_json_from(shared_live, "/search/cancel", &req, loopback).await;
+    let body: IpcBody<()> = body_as_json(resp.into_body()).await;
+    assert_eq!(body.code.as_deref(), Some("FORBIDDEN"));
+}
+
+// ----- `GET /search/file-names` (issue #848) ---------------------------------
+
+/// One-shot filename search over a real temp workspace: files matching the
+/// query are returned root-relative, ignored classification is applied when
+/// `includeIgnored` is set, and the caps match the desktop stream.
+#[tokio::test]
+async fn file_names_search_returns_root_relative_hits() {
+    let root = std::env::temp_dir().join(format!(
+        "termul-search-fnames-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(root.join("src")).expect("create src dir");
+    std::fs::write(root.join("src/alpha.rs"), "fn main() {}").expect("write alpha");
+    std::fs::create_dir_all(root.join("node_modules")).expect("create node_modules");
+    std::fs::write(root.join("node_modules/alpha.js"), "x").expect("write nm alpha");
+
+    // The boundary check needs a registered project root covering the temp
+    // dir (the default project_root points at temp_dir itself).
+    let state = test_state();
+    state.registry.set(
+        vec![crate::web::project_registry::ProjectSummary {
+            id: "p-test".to_string(),
+            name: "Test".to_string(),
+            color: "blue".to_string(),
+            path: Some(root.to_string_lossy().to_string()),
+            is_archived: false,
+            is_default: false,
+        }],
+        None,
+    );
+
+    let root_str = root.to_string_lossy().to_string();
+    let uri = format!(
+        "/search/file-names?query=alpha&root={}",
+        urlencoding(&root_str)
+    );
+    let resp = get_request(state, &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "file-names search should succeed: {:?}", body.error);
+    let data = body.data.expect("FileNameSearchResponse");
+    // Default path: node_modules excluded by the ignore list; the hit is
+    // root-relative with forward slashes.
+    assert_eq!(data.files.len(), 1);
+    assert_eq!(data.files[0].path, "src/alpha.rs");
+    assert!(!data.files[0].ignored);
+    assert!(!data.truncated);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `includeIgnored=true` surfaces node_modules hits with `ignored: true`,
+/// ranked after non-ignored ones (ADR 0003 ranking).
+#[tokio::test]
+async fn file_names_search_include_ignored_tags_and_ranks() {
+    let root = std::env::temp_dir().join(format!(
+        "termul-search-fnames-ign-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(root.join("src")).expect("create src dir");
+    std::fs::write(root.join("src/alpha.rs"), "fn main() {}").expect("write alpha");
+    std::fs::create_dir_all(root.join("node_modules")).expect("create node_modules");
+    std::fs::write(root.join("node_modules/alpha.js"), "x").expect("write nm alpha");
+
+    let state = test_state();
+    state.registry.set(
+        vec![crate::web::project_registry::ProjectSummary {
+            id: "p-test".to_string(),
+            name: "Test".to_string(),
+            color: "blue".to_string(),
+            path: Some(root.to_string_lossy().to_string()),
+            is_archived: false,
+            is_default: false,
+        }],
+        None,
+    );
+
+    let root_str = root.to_string_lossy().to_string();
+    let uri = format!(
+        "/search/file-names?query=alpha&includeIgnored=true&root={}",
+        urlencoding(&root_str)
+    );
+    let resp = get_request(state, &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "file-names search should succeed: {:?}", body.error);
+    let data = body.data.expect("FileNameSearchResponse");
+    // Non-ignored first, ignored second (rank_search_hits).
+    assert_eq!(data.files.len(), 2);
+    assert_eq!(data.files[0].path, "src/alpha.rs");
+    assert!(!data.files[0].ignored);
+    assert_eq!(data.files[1].path, "node_modules/alpha.js");
+    assert!(data.files[1].ignored);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Empty query short-circuits to an empty result (no rg spawned).
+#[tokio::test]
+async fn file_names_search_empty_query_returns_empty() {
+    let uri = "/search/file-names?query=&root=/tmp";
+    let resp = get_request(test_state(), uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(body.success, "empty query should succeed: {:?}", body.error);
+    let data = body.data.expect("FileNameSearchResponse");
+    assert!(data.files.is_empty());
+    assert!(!data.truncated);
+}
+
+/// Too-long queries are rejected with `QUERY_TOO_LONG` (security guard).
+#[tokio::test]
+async fn file_names_search_too_long_query_rejected() {
+    let huge = "x".repeat(MAX_SEARCH_QUERY_LEN + 10);
+    let uri = format!(
+        "/search/file-names?query={}&root=/tmp",
+        urlencoding(&huge)
+    );
+    let resp = get_request(test_state(), &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(!body.success, "too-long query should be rejected");
+    assert_eq!(body.code.as_deref(), Some("QUERY_TOO_LONG"));
+}
+
+/// A root outside every registered project root is rejected with
+/// `OUTSIDE_PROJECT_ROOT` (containment parity with `/search/content`).
+#[tokio::test]
+async fn file_names_search_outside_project_root_rejected() {
+    // The default project_root in `test_state()` is the canonicalized temp
+    // dir; `/` is outside it and outside every registered root (the registry
+    // is empty here).
+    let uri = "/search/file-names?query=zzz-no-such-file&root=/";
+    let resp = get_request(test_state(), uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(!body.success, "outside root should be rejected");
+    assert_eq!(body.code.as_deref(), Some("OUTSIDE_PROJECT_ROOT"));
+}
+
+/// Temp project with a registered root (the boundary check needs it) for the
+/// folder-name tests (gh-896).
+fn folder_fixture(tag: &str) -> (std::path::PathBuf, AppState) {
+    let root = std::env::temp_dir().join(format!(
+        "termul-search-dirs-{tag}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(root.join("src/renderer/components/ui")).expect("create components");
+    std::fs::write(root.join("src/renderer/components/ui/button.tsx"), "x").expect("write button");
+    std::fs::write(root.join("src/renderer/components/panel.tsx"), "x").expect("write panel");
+    std::fs::create_dir_all(root.join("node_modules/pkg/components")).expect("create nm");
+    std::fs::write(root.join("node_modules/pkg/components/z.js"), "x").expect("write nm file");
+    std::fs::create_dir_all(root.join("src/empty-components")).expect("create empty dir");
+    std::fs::write(root.join("src/search.rs"), "x").expect("write search file");
+    std::fs::create_dir_all(root.join("src/search")).expect("create search dir");
+    std::fs::write(root.join("src/search/mod.rs"), "x").expect("write search mod");
+
+    let state = test_state();
+    state.registry.set(
+        vec![crate::web::project_registry::ProjectSummary {
+            id: "p-test".to_string(),
+            name: "Test".to_string(),
+            color: "blue".to_string(),
+            path: Some(root.to_string_lossy().to_string()),
+            is_archived: false,
+            is_default: false,
+        }],
+        None,
+    );
+    (root, state)
+}
+
+async fn file_names_for(
+    state: AppState,
+    root: &std::path::Path,
+    query: &str,
+    include_ignored: bool,
+) -> TestFileNameResponse {
+    let uri = format!(
+        "/search/file-names?query={}&root={}{}",
+        urlencoding(query),
+        urlencoding(&root.to_string_lossy()),
+        if include_ignored {
+            "&includeIgnored=true"
+        } else {
+            ""
+        }
+    );
+    let resp = get_request(state, &uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: IpcBody<TestFileNameResponse> = body_as_json(resp.into_body()).await;
+    assert!(
+        body.success,
+        "file-names search should succeed: {:?}",
+        body.error
+    );
+    body.data.expect("FileNameSearchResponse")
+}
+
+fn dir_paths(data: &TestFileNameResponse) -> Vec<&str> {
+    data.files
+        .iter()
+        .filter(|h| h.kind.as_deref() == Some("dir"))
+        .map(|h| h.path.as_str())
+        .collect()
+}
+
+fn file_paths(data: &TestFileNameResponse) -> Vec<&str> {
+    data.files
+        .iter()
+        .filter(|h| h.kind.is_none())
+        .map(|h| h.path.as_str())
+        .collect()
+}
+
+/// `@components` lists the folder (root-relative, `kind: "dir"`) after the
+/// file hits; empty dirs and ignored dirs are not matched by default.
+#[tokio::test]
+async fn file_names_search_returns_folder_hits_for_directory_names() {
+    let (root, state) = folder_fixture("basic");
+    let data = file_names_for(state, &root, "components", false).await;
+    assert_eq!(dir_paths(&data), vec!["src/renderer/components"]);
+    // No file's own name contains "components".
+    assert!(file_paths(&data).is_empty());
+    let dir = data.files.iter().find(|h| h.kind.is_some()).unwrap();
+    assert!(!dir.ignored);
+    assert!(!data.truncated);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Ignored dirs follow the file rules: hidden by default, dimmed and ranked
+/// after non-ignored under `includeIgnored`.
+#[tokio::test]
+async fn file_names_search_folder_hits_obey_ignore_rules() {
+    let (root, state) = folder_fixture("ignored");
+    let hidden = file_names_for(state.clone(), &root, "node_modules", false).await;
+    assert!(dir_paths(&hidden).is_empty());
+
+    let shown = file_names_for(state, &root, "components", true).await;
+    let dirs: Vec<&TestFileHit> = shown
+        .files
+        .iter()
+        .filter(|h| h.kind.as_deref() == Some("dir"))
+        .collect();
+    assert_eq!(dirs.len(), 2);
+    assert_eq!(dirs[0].path, "src/renderer/components");
+    assert!(!dirs[0].ignored);
+    assert_eq!(dirs[1].path, "node_modules/pkg/components");
+    assert!(dirs[1].ignored);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A dir and a file sharing a name are both listed: files first with no
+/// `kind`, folders after with `kind: "dir"`; file hits are unchanged.
+#[tokio::test]
+async fn file_names_search_lists_dir_and_file_sharing_a_name() {
+    let (root, state) = folder_fixture("shared");
+    let data = file_names_for(state, &root, "search", false).await;
+    assert_eq!(file_paths(&data), vec!["src/search.rs"]);
+    assert_eq!(dir_paths(&data), vec!["src/search"]);
+    let first_dir = data.files.iter().position(|h| h.kind.is_some()).unwrap();
+    assert!(data.files[..first_dir].iter().all(|h| h.kind.is_none()));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Wire shape: file hits keep exactly `{path, ignored}` (no `kind`), dir hits
+/// add `kind: "dir"`.
+#[tokio::test]
+async fn file_names_search_wire_omits_kind_for_files() {
+    let (root, state) = folder_fixture("wire");
+    let uri = format!(
+        "/search/file-names?query=search&root={}",
+        urlencoding(&root.to_string_lossy())
+    );
+    let resp = get_request(state, &uri).await;
+    let body: serde_json::Value = body_as_json(resp.into_body()).await;
+    let files = body["data"]["files"].as_array().expect("files array");
+    let file = files.iter().find(|h| h["path"] == "src/search.rs").unwrap();
+    assert_eq!(
+        file,
+        &serde_json::json!({"path": "src/search.rs", "ignored": false})
+    );
+    let dir = files.iter().find(|h| h["path"] == "src/search").unwrap();
+    assert_eq!(dir["kind"], "dir");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A query with a path separator cannot match a single dir name: no folder
+/// hits and the file pass is unchanged.
+#[tokio::test]
+async fn file_names_search_separator_query_returns_no_folder_hits() {
+    let (root, state) = folder_fixture("sep");
+    let data = file_names_for(state, &root, "renderer/comp", false).await;
+    assert!(dir_paths(&data).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}

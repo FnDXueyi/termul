@@ -1,5 +1,5 @@
-import { SlidersHorizontal, Sparkles, TerminalSquare } from 'lucide-react'
 import { forwardRef, type RefObject } from 'react'
+import { SlidersHorizontal, Sparkles, TerminalSquare } from '@/components/icons'
 import { ComposerMenu, type ComposerMenuItem, type ComposerMenuSection } from './composer-menu'
 import type { SlashItem, SlashSection } from './slash-menu-model'
 
@@ -14,7 +14,7 @@ interface SlashCommandMenuProps {
   sections: SlashSection[]
   onSelect: (item: SlashItem) => void
   /** The composer textarea that owns this listbox (for aria-controls/activedescendant). */
-  inputRef?: RefObject<HTMLTextAreaElement | null>
+  inputRef?: RefObject<HTMLElement | null>
 }
 
 function itemKey(item: SlashItem): string {
@@ -35,14 +35,18 @@ function slashItemToComposer(item: SlashItem): ComposerMenuItem {
   const Icon =
     item.kind === 'command' ? TerminalSquare : item.kind === 'skill' ? Sparkles : SlidersHorizontal
   const label = isCommandOrSkill ? `/${item.name}` : item.label
-  const selected = item.kind !== 'command' && item.kind !== 'skill' && item.selected
+  const selected = !isCommandOrSkill && item.selected
   return {
     key: itemKey(item),
     label,
+    hint: item.kind === 'command' ? item.hint : null,
     description: item.description,
     icon: Icon,
+    // Skill rows share the accent `Sparkles` treatment with `SkillChip`
+    // (composer overlay + timeline) so the skills icon reads consistently
+    // across the picker and the chips. Commands/config/mode stay muted.
+    iconClassName: item.kind === 'skill' ? 'text-primary' : undefined,
     selected,
-    wrap: item.kind === 'skill',
     payload: item
   }
 }
@@ -50,7 +54,7 @@ function slashItemToComposer(item: SlashItem): ComposerMenuItem {
 /**
  * Inline slash-command menu rendered above the chat input. A thin wrapper over
  * the shared {@link ComposerMenu} shell; the slash-specific part is the
- * SlashItem → ComposerMenuItem mapping (icon, `/<name>` label, skill wrap).
+ * SlashItem → ComposerMenuItem mapping (icon, `/<name>` label).
  */
 export const SlashCommandMenu = forwardRef<SlashMenuHandle, SlashCommandMenuProps>(
   ({ sections, onSelect, inputRef }, ref) => {
@@ -64,7 +68,7 @@ export const SlashCommandMenu = forwardRef<SlashMenuHandle, SlashCommandMenuProp
       <ComposerMenu
         ref={ref}
         sections={composerSections}
-        emptyLabel="No commands available."
+        emptyLabel="No commands match. Try another name."
         inputRef={inputRef}
         onSelect={(_sectionId, cItem) => onSelect(cItem.payload as SlashItem)}
       />

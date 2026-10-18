@@ -10,7 +10,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A description or title edit uses action `edited`. Code jobs skip that
+  # action. Cancelling the in-progress run would abort the synchronize jobs
+  # and leave them skipped.
+  # A base-branch edit is also `edited`, but the merge commit changed.
+  # Cancel the older run. The code jobs on this run still execute.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 jobs:
   pr-title-check:
@@ -115,8 +120,9 @@ jobs:
 
   validate:
     name: Lint, Typecheck & Test
-    # Code jobs don't need to re-run when only the PR description is edited.
-    if: github.event.action != 'edited'
+    # Skip a description or title edit. A base-branch edit changes the merge
+    # commit, so these jobs still run.
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -142,40 +148,12 @@ jobs:
       - name: Test
         run: bun run test
 
-  acp-registry-bundle:
-    name: ACP Registry Bundle Freshness
-    if: github.event.action != 'edited'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.x
-
-      - name: Install Bun dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Sync bundled ACP registry snapshot
-        run: bun run sync:acp-icons
-
-      - name: Format bundled ACP assets
-        run: bunx biome format --write src/renderer/assets/agent-icons/acp/
-
-      - name: Verify bundled registry artifacts match CDN registry
-        run: >
-          git diff --exit-code --
-          src/renderer/assets/agent-icons/acp/
-          src-tauri/src/acp_registry_snapshot.rs
+      - name: Shell tests (installer and Homebrew cask)
+        run: bun run test:shell
 
   rust-checks:
     name: Rust Checks
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -205,6 +183,25 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install Bun dependencies
+        run: bun install --frozen-lockfile
+
+      # Build the Vite web bundle BEFORE the Rust checks so rust-embed embeds a
+      # non-empty dist-web/ — the web::assets tests then exercise the embedded-
+      # serving OK-path (200 + correct Content-Type + caching), not just the
+      # empty-embed 404 branch. (A missing dist-web/ would still compile green
+      # in debug via allow_missing, but the OK-path assertions need the bundle.)
+      - name: Build web client (dist-web/)
+        run: bun run build:web
+
+      - name: Assert dist-web/index.html exists
+        run: test -f dist-web/index.html && test -s dist-web/index.html
+
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check --all-targets
@@ -217,11 +214,95 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+  web-build:
+    name: Web Client Build
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install Bun dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build web client (dist-web/)
+        run: bun run build:web
+
+      - name: Assert dist-web/index.html exists
+        run: test -f dist-web/index.html && test -s dist-web/index.html
+
+  standalone-server-build:
+    name: Standalone Server Build
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            patchelf
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install Bun dependencies
+        run: bun install --frozen-lockfile
+
+      # Build the Vite web bundle BEFORE the cargo build so rust-embed embeds a
+      # non-empty `dist-web/` (build sequencing). A release build with a missing
+      # bundle fails clearly via the `web_embed_missing` compile_error in
+      # assets.rs; this dev build compiles green regardless (allow_missing), but
+      # the embedded bundle is exercised with real content.
+      - name: Build web client (dist-web/)
+        run: bun run build:web
+
+      - name: Assert dist-web/index.html exists
+        run: test -f dist-web/index.html && test -s dist-web/index.html
+
+      - name: Build termul-server (native host)
+        working-directory: src-tauri
+        run: cargo build --bin termul-server --features standalone-server
+
+      - name: Clippy termul-server (feature on)
+        working-directory: src-tauri
+        run: cargo clippy --bin termul-server --features standalone-server -- -D warnings
+
   rust-windows-check:
     name: Rust Windows Smoke Check
-    if: github.event.action != 'edited'
+    if: github.event.action != 'edited' || github.event.changes.base != null
     runs-on: windows-latest
-    timeout-minutes: 15
+    # A cold-cache run builds for up to about 18 min, and the post-job cache
+    # save adds up to about 6 min. The budget covers both.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -239,14 +320,33 @@ jobs:
           workspaces: src-tauri
           cache-on-failure: true
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.x
+
+      - name: Install Bun dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build web client (dist-web/)
+        run: bun run build:web
+
+      - name: Assert dist-web/index.html exists
+        shell: bash
+        run: test -f dist-web/index.html && test -s dist-web/index.html
+
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check --all-targets
 
+      - name: Build termul-server (Windows host)
+        working-directory: src-tauri
+        run: cargo build --bin termul-server --features standalone-server
+
   build-check:
     name: Verify Tauri Frontend Build
-    if: github.event.action != 'edited'
-    needs: [validate, rust-checks, rust-windows-check]
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    needs: [validate, rust-checks, rust-windows-check, web-build, standalone-server-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

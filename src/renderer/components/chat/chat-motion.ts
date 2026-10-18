@@ -22,11 +22,32 @@ export const CHAT_SPRING_SOFT: Transition = {
   mass: 0.9
 }
 
-/** Icon swap spring — no bounce per make-interfaces-feel-better. */
-const ICON_SPRING: Transition = { type: 'spring', duration: 0.3, bounce: 0 }
+/**
+ * Disclosure chevron rotate. Matches the accordion token: 250ms, smooth-out,
+ * same duration both ways. Not the brand spring — overshoot reads as noise.
+ */
+export const CHEVRON_TRANSITION: Transition = {
+  duration: 0.25,
+  ease: [0.22, 1, 0.36, 1]
+}
 
-/** Reduced-motion fallback: a quick opacity fade, no transform. */
-const REDUCED_TRANSITION: Transition = { duration: 0.15, ease: 'easeOut' }
+/** Icon swap enter — opacity + mild scale, no blur. --duration-fast, ease-in-out. */
+const ICON_ENTER: Transition = {
+  duration: 0.25,
+  ease: 'easeInOut'
+}
+
+/**
+ * Icon swap exit. Quicker than enter (--duration-quick). Send/stop is an
+ * open/close pair, so the close gets out of the way.
+ */
+const ICON_EXIT: Transition = {
+  duration: 0.15,
+  ease: 'easeInOut'
+}
+
+/** Reduced-motion fallback: snap with no perceptible motion. */
+const REDUCED_TRANSITION: Transition = { duration: 0 }
 
 export type BubbleAlign = 'start' | 'end' | 'neutral'
 
@@ -36,15 +57,21 @@ export interface EnterMotion {
   transition: Transition
 }
 
+export interface IconPopMotion extends EnterMotion {
+  /** Quieter leave state for AnimatePresence exit. */
+  exit: TargetAndTransition
+  exitTransition: Transition
+}
+
 /**
  * Entrance for a chat row. Direction encodes sender: user bubbles drift in from
  * the right, assistant from the left, tool/neutral rows rise straight up. Under
- * reduced-motion every variant collapses to an opacity-only fade.
+ * reduced-motion every variant collapses to an instant appear (no fade/travel).
  */
 export function bubbleEnter(align: BubbleAlign, reduced: boolean): EnterMotion {
   if (reduced) {
     return {
-      initial: { opacity: 0 },
+      initial: { opacity: 1 },
       animate: { opacity: 1 },
       transition: REDUCED_TRANSITION
     }
@@ -87,18 +114,60 @@ export function staggerChild(
   return { ...enter, transition: { ...enter.transition, delay } }
 }
 
-/** Pop used for icon swaps (send arrow, tool-call checkmark). */
-export function iconPop(reduced: boolean): EnterMotion {
+/** Agent-activity row reveal (tool calls, thoughts) — smooth ease-out, no overshoot. */
+const ROW_REVEAL_EASE = [0.22, 1, 0.36, 1] as const
+const ROW_REVEAL_STAGGER_S = 0.04
+/** Caps a burst of parallel tool calls at 120ms of total stagger. */
+const ROW_REVEAL_MAX_STAGGER_STEPS = 3
+
+export interface RowRevealMotion {
+  /** Outer grid track: grows 0fr→1fr so the list glides instead of jumping. */
+  shell: EnterMotion
+  /** Row content: fades and rises into the space the shell opens. */
+  content: EnterMotion
+}
+
+/**
+ * Entrance for a live agent-activity row. Rows arrive often during a turn, so
+ * the reveal stays short (≈200ms) and bursts are staggered with a hard cap.
+ * Callers skip this entirely under reduced motion.
+ */
+export function rowReveal(staggerIndex: number): RowRevealMotion {
+  const steps = Math.min(Math.max(staggerIndex, 0), ROW_REVEAL_MAX_STAGGER_STEPS)
+  const delay = steps * ROW_REVEAL_STAGGER_S
+  return {
+    shell: {
+      initial: { gridTemplateRows: '0fr' },
+      animate: { gridTemplateRows: '1fr' },
+      transition: { duration: 0.2, ease: ROW_REVEAL_EASE, delay }
+    },
+    content: {
+      initial: { opacity: 0, y: 4, filter: 'blur(2px)' },
+      animate: { opacity: 1, y: 0, filter: 'blur(0px)', transitionEnd: { filter: 'none' } },
+      transition: { duration: 0.22, ease: ROW_REVEAL_EASE, delay }
+    }
+  }
+}
+
+/**
+ * Pop used for high-frequency icon swaps (send↔stop, pending chevron, plan
+ * status). Opacity + scale ≥ 0.96 only — never near-zero scale or blur.
+ */
+export function iconPop(reduced: boolean): IconPopMotion {
   if (reduced) {
     return {
-      initial: { opacity: 0 },
+      initial: { opacity: 1 },
       animate: { opacity: 1 },
-      transition: REDUCED_TRANSITION
+      exit: { opacity: 1 },
+      transition: REDUCED_TRANSITION,
+      exitTransition: REDUCED_TRANSITION
     }
   }
   return {
-    initial: { opacity: 0, scale: 0.25, filter: 'blur(4px)' },
-    animate: { opacity: 1, scale: 1, filter: 'blur(0px)' },
-    transition: ICON_SPRING
+    initial: { opacity: 0, scale: 0.96 },
+    animate: { opacity: 1, scale: 1 },
+    exit: { opacity: 0, transition: ICON_EXIT },
+    transition: ICON_ENTER,
+    exitTransition: ICON_EXIT
   }
 }

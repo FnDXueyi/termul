@@ -1,18 +1,28 @@
+import type { PreservedTerminalEntry } from '@shared/types/ipc.types'
+import { WEB_TERMINAL_ERROR_CODES } from '@shared/types/web-terminal-protocol.types'
 import { useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
+import { hasCachedTerminal } from '@/components/terminal/terminal-cache'
 import { resolveAgentEnv } from '@/lib/agent-launch'
 import { getBuiltInAgent } from '@/lib/agents/agent-registry'
 import { loadCustomAgents } from '@/lib/agents/custom-agents'
 import { terminalApi } from '@/lib/api'
 import { resolveEnvForSpawn } from '@/lib/env-parser'
+import { whenProjectSwitchSettled } from '@/lib/project-switch/status-store'
 import { shellApi } from '@/lib/shell-api'
 import {
   beginProjectContinuityCorrelation,
   recordTerminalContinuityEvent as emitTerminalContinuityEvent
 } from '@/lib/terminal-continuity-instrumentation'
+import { randomUUID } from '@/lib/uuid'
 import { isVisibleReady } from '@/lib/visibility-signal'
 import { ensureWorktreeSymlinks, getDefaultCwdForProject } from '@/lib/worktree-context'
 import type { Terminal as TerminalRecord } from '@/types/project'
-import type { PersistedTerminalLayout } from '../../shared/types/persistence.types'
+import type {
+  PersistedTerminal,
+  PersistedTerminalLayout
+} from '../../shared/types/persistence.types'
+import { useAcpStore } from '../stores/acp-store'
 import { useAppSettingsStore } from '../stores/app-settings-store'
 import { useProjectStore } from '../stores/project-store'
 import { useTerminalStore } from '../stores/terminal-store'
@@ -119,14 +129,10 @@ function resetSpawnCallCount(sessionId: string): void {
 }
 
 async function cleanupSpawnedPtys(
-  terminals: Array<{ ptyId?: string }>,
+  ptyIds: readonly string[],
   restoreId: string,
   phase: string
 ): Promise<void> {
-  const ptyIds = Array.from(
-    new Set(terminals.map((terminal) => terminal.ptyId).filter((ptyId): ptyId is string => !!ptyId))
-  )
-
   if (ptyIds.length === 0) {
     return
   }
@@ -285,7 +291,7 @@ export function useTerminalRestore(): void {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: visibilityRetry intentionally retriggers restore attempts
   useEffect(() => {
-    const callId = crypto.randomUUID().slice(0, 7)
+    const callId = randomUUID().slice(0, 7)
     RESTORE_CALL_STACK.push(callId)
 
     debugLog('useTerminalRestore', `EFFECT RUN [callId: ${callId}]`, {
@@ -416,7 +422,21 @@ export function useTerminalRestore(): void {
             return
           }
 
+          // The visible pane tree belongs to the project being left until the
+          // switch commits: wait, or these tabs would land in the wrong tree.
+          await whenProjectSwitchSettled(projectIdToRestore)
+          // Settled also means failed/superseded/disposed: only a committed
+          // target owns the visible tree.
+          if (
+            isCancelled() ||
+            useWorkspaceStore.getState().activeProjectId !== projectIdToRestore
+          ) {
+            debugLog('useTerminalRestore', `CANCELLED [${callId}] after project switch settled`)
+            return
+          }
+
           const workspaceStore = useWorkspaceStore.getState()
+          const preserveActiveTab = hasValidActiveAgentChatTab(workspaceStore, projectIdToRestore)
           reconcilePersistedHistoryIntoLiveTerminals(liveProjectTerminals, layout)
           const terminalIdToSelect = selectTerminalForProject(liveProjectTerminals, layout)
 
@@ -424,7 +444,7 @@ export function useTerminalRestore(): void {
             workspaceStore.ensureTerminalTab(
               terminal.id,
               undefined,
-              terminal.id === terminalIdToSelect
+              !preserveActiveTab && terminal.id === terminalIdToSelect
             )
           }
 
@@ -438,7 +458,7 @@ export function useTerminalRestore(): void {
             ? findPaneContainingTab(useWorkspaceStore.getState().root, terminalTab)
             : null
           const activePane = containingPane ?? workspaceStore.getActivePaneLeaf()
-          if (terminalTab && activePane) {
+          if (!preserveActiveTab && terminalTab && activePane) {
             workspaceStore.setActiveTab(activePane.id, terminalTab)
           }
 
@@ -650,6 +670,25 @@ export function useTerminalRestore(): void {
  * Select the appropriate terminal for a project
  * Uses multiple matching strategies: ID match, then name match, then fallback
  */
+function hasValidActiveAgentChatTab(
+  workspaceStore: ReturnType<typeof useWorkspaceStore.getState>,
+  projectId: string
+): boolean {
+  const activePane = workspaceStore.getActivePaneLeaf()
+  if (!activePane?.activeTabId) return false
+
+  const activeTab = activePane.tabs.find((tab) => tab.id === activePane.activeTabId)
+  if (!activeTab || activeTab.type !== 'agent-chat') return false
+
+  const acpState = useAcpStore.getState()
+  return (
+    acpState.sessions[activeTab.sessionId]?.projectId === projectId ||
+    acpState.sessionIndex.some(
+      (entry) => entry.id === activeTab.sessionId && entry.projectId === projectId
+    )
+  )
+}
+
 function reconcilePersistedHistoryIntoLiveTerminals(
   liveProjectTerminals: TerminalRecord[],
   layout: PersistedTerminalLayout | null
@@ -680,14 +719,73 @@ function reconcilePersistedHistoryIntoLiveTerminals(
       return terminal
     }
 
+    // A cached or mounted xterm already shows the persisted output, and it
+    // writes any store transcript as output it missed: taking the persisted
+    // copy would print it twice. Only its own missed-output transcript stays.
+    const xtermHoldsOutput =
+      (terminal.rendererAttachmentCount ?? 0) > 0 ||
+      (terminal.ptyId !== undefined && hasCachedTerminal(terminal.ptyId))
+
     return {
       ...terminal,
       pendingScrollback: terminal.pendingScrollback ?? persistedTerminal.scrollback,
-      transcript: terminal.transcript ?? persistedTerminal.transcript
+      transcript:
+        terminal.transcript ?? (xtermHoldsOutput ? undefined : persistedTerminal.transcript),
+      // R3: also carry the captured DEC modes so a pane-transition remount can
+      // replay them (the live tracker is reset on unmount→remount). Prefer the
+      // persisted snapshot when present so a stale in-memory pendingModes can't
+      // override newer persisted state (e.g. alt-screen turned off after restore).
+      pendingModes:
+        persistedTerminal.modes != null ? persistedTerminal.modes : terminal.pendingModes
     }
   })
 
   store.setTerminals(nextTerminals)
+}
+
+/**
+ * Story 5: find the preserved-PTY candidate for a persisted layout entry by
+ * the stable identity triple (name, shell, cwd). Matching is lenient on the
+ * shell/cwd comparators the persisted layout normalizes (a bare shell name
+ * vs the resolved path, a missing persisted cwd): the NAME is the primary
+ * key in the persisted layout, and shell/cwd act as disambiguators when
+ * several preserved terminals share a name. The matched entry is NOT
+ * removed here — callers delete it from the pool once an attach actually
+ * succeeds (or a claim is rejected, so it is never re-presented).
+ *
+ * NOTE (CodeRabbit, deferred): the preserved protocol carries no
+ * renderer-side name/tab identity — `PreservedTerminalEntry` is PTY-domain
+ * metadata (shell/cwd). The matcher therefore cannot compare names across
+ * the two domains; ambiguity is only possible between terminals with
+ * IDENTICAL shell AND cwd, whose scrollbacks are interchangeable to the
+ * user. A dedicated stable restore key (persisted schema + spawn payload +
+ * server entry) is the full fix — out of scope for this PR.
+ */
+function findPreservedMatch(
+  preservedById: Map<string, PreservedTerminalEntry>,
+  name: string,
+  resolvedShell: string,
+  cwd?: string
+): PreservedTerminalEntry | undefined {
+  if (preservedById.size === 0) return undefined
+  const shellMatches = (candidateShell: string): boolean => {
+    if (candidateShell === resolvedShell) return true
+    // Bare name vs resolved path: compare the basename segments.
+    const candidateBase = candidateShell.split(/[\\/]/).pop() ?? candidateShell
+    const resolvedBase = resolvedShell.split(/[\\/]/).pop() ?? resolvedShell
+    return candidateBase === resolvedBase
+  }
+  for (const entry of preservedById.values()) {
+    // Claim-less entries carry a live attachment on ANOTHER connection
+    // (CodeRabbit: preserve existing live attachments when reissuing) —
+    // they are metadata-only and must never match: there is no credential
+    // to attach with, and the owning connection keeps its forwarder.
+    if (!entry.claim) continue
+    if (entry.shell && !shellMatches(entry.shell)) continue
+    if (cwd && entry.cwd && entry.cwd !== cwd) continue
+    return entry
+  }
+  return undefined
 }
 
 function selectTerminalForProject(
@@ -751,7 +849,7 @@ async function restoreFromLayout(
   layout: PersistedTerminalLayout,
   isCancelled: () => boolean
 ): Promise<RestoreExecutionResult> {
-  const restoreId = `restore-${crypto.randomUUID().slice(0, 5)}`
+  const restoreId = `restore-${randomUUID().slice(0, 5)}`
 
   // FIX #2: Use proper lock acquire/release with owner tracking
   if (!acquireGlobalSpawnLock(restoreId)) {
@@ -804,7 +902,12 @@ async function restoreFromLayout(
       output: never[]
       pendingScrollback?: string[]
       transcript?: string
+      // R3: DEC private-mode snapshot replayed before pendingScrollback on mount.
+      pendingModes?: PersistedTerminal['modes']
       ptyId?: string
+      // CAP-3: lease credential issued by the restore re-spawn (in-memory
+      // only, never persisted).
+      claim?: string
       // ADR-004.4: restored agent metadata (re-applied after store insert)
       kind?: 'shell' | 'agent'
       agentId?: string
@@ -812,18 +915,50 @@ async function restoreFromLayout(
       agentProgram?: string
       agentArgs?: string[]
     }> = []
-
     // Map old IDs to new IDs for active terminal selection and pane remapping
     const idMap = new Map<string, string>()
+    const spawnedPtyIds: string[] = []
 
+    let preserved: PreservedTerminalEntry[] = []
+    const preservedResult = await terminalApi.listPreserved(projectId)
+    if (preservedResult.success) {
+      preserved = preservedResult.data
+      emitTerminalContinuityEvent({
+        name: 'restore-path-selected',
+        correlationId: '',
+        projectId,
+        details: {
+          path: 'preserved-reattach',
+          preservedTerminalCount: preserved.length,
+          persistedTerminalCount: layout.terminals.length
+        }
+      })
+    } else {
+      emitTerminalContinuityEvent({
+        name: 'restore-failed',
+        correlationId: '',
+        projectId,
+        details: {
+          reason: 'list-preserved-unavailable',
+          code: preservedResult.code,
+          fallback: 'spawn'
+        }
+      })
+    }
+    // Consumed entries are removed as tabs claim them so a preserved PTY is
+    // never attached twice; leftovers get their own tabs below (resolved Q3:
+    // ALL preserved restore as tabs, not just the active one).
+    const preservedById = new Map(preserved.map((entry) => [entry.id, entry]))
+
+    const limitRefusals = { count: 0, message: '' }
     for (const persistedTerminal of layout.terminals) {
       if (isCancelled()) {
-        await cleanupSpawnedPtys(newTerminals, restoreId, 'during restore loop')
+        await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'during restore loop')
         debugLog('restoreFromLayout', `CANCELLED [${restoreId}] during restore loop`)
         return { status: 'cancelled', path: 'persisted-replay' }
       }
 
-      const terminalCallId = `${restoreId}-${persistedTerminal.name}-${crypto.randomUUID().slice(0, 3)}`
+      const terminalCallId = `${restoreId}-${persistedTerminal.name}-${randomUUID().slice(0, 3)}`
       SPAWN_TRACKER.set(terminalCallId, (SPAWN_TRACKER.get(terminalCallId) || 0) + 1)
       let spawnTimeout: ReturnType<typeof setTimeout> | null = null
 
@@ -834,13 +969,12 @@ async function restoreFromLayout(
         spawnCount: SPAWN_TRACKER.get(terminalCallId)
       })
 
-      const newId = crypto.randomUUID()
-      TERMINALS_PENDING_PTY_ASSIGNMENT.add(newId)
+      const newId = randomUUID()
 
       try {
         const resolvedShell = await resolveShellToPath(persistedTerminal.shell)
         if (isCancelled()) {
-          await cleanupSpawnedPtys(newTerminals, restoreId, 'after shell resolution')
+          await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'after shell resolution')
           debugLog('restoreFromLayout', `CANCELLED [${terminalCallId}] after shell resolution`)
           return { status: 'cancelled', path: 'persisted-replay' }
         }
@@ -869,6 +1003,82 @@ async function restoreFromLayout(
               kind: 'agent' as const
             }
           : null
+        // Story 5: cross-reload reattach. Match the persisted entry to a
+        // preserved PTY by the stable identity triple (name + shell + cwd)
+        // — the same triple reconcilePersistedHistoryIntoLiveTerminals
+        // uses — then attach to the server terminal with lastSeq=0 so the
+        // retained scrollback replays through the existing replay frame
+        // machinery. The claim was adopted by listPreserved; the attach is
+        // a verified round trip, so failure falls through to the spawn
+        // path below (no claim is re-presented after rejection).
+        const preservedMatch = findPreservedMatch(
+          preservedById,
+          persistedTerminal.name,
+          resolvedShell,
+          persistedTerminal.cwd
+        )
+        if (preservedMatch && preservedMatch.claim) {
+          const attachResult = await terminalApi.attach(preservedMatch.id, preservedMatch.claim, 0)
+          if (attachResult.success) {
+            preservedById.delete(preservedMatch.id)
+            emitTerminalContinuityEvent({
+              name: 'restore-complete',
+              correlationId: '',
+              projectId,
+              terminalId: newId,
+              details: {
+                path: 'preserved-reattach',
+                preservedTerminalId: preservedMatch.id,
+                reattached: true
+              }
+            })
+            idMap.set(persistedTerminal.id, newId)
+            newTerminals.push({
+              id: newId,
+              name: persistedTerminal.name,
+              projectId,
+              shell: persistedTerminal.shell,
+              cwd: preservedMatch.cwd,
+              output: [],
+              // Scrollback for a reattached terminal comes from the attach
+              // replay frame (lastSeq=0 replays the retained window), so
+              // the persisted scrollback/transcript stay unset — the live
+              // replay owns the content.
+              ptyId: preservedMatch.id,
+              claim: preservedMatch.claim,
+              ...(isAgentTerminal
+                ? {
+                    kind: 'agent' as const,
+                    agentId: persistedTerminal.agentId,
+                    agentName: persistedTerminal.agentName,
+                    agentProgram: persistedTerminal.agentProgram,
+                    agentArgs: persistedTerminal.agentArgs
+                  }
+                : {})
+            })
+            debugLog('restoreFromLayout', `Reattached preserved PTY [${terminalCallId}]`, {
+              ptyId: preservedMatch.id,
+              name: persistedTerminal.name
+            })
+            continue
+          }
+          debugLog('restoreFromLayout', `Preserved attach failed [${terminalCallId}]`, {
+            code: attachResult.code
+          })
+          emitTerminalContinuityEvent({
+            name: 'restore-failed',
+            correlationId: '',
+            projectId,
+            details: {
+              reason: 'preserved-attach-rejected',
+              code: attachResult.code,
+              fallback: 'spawn'
+            }
+          })
+          // A rejected claim must never be re-presented: drop it from the
+          // candidate pool so the leftover pass below doesn't retry it.
+          preservedById.delete(preservedMatch.id)
+        }
         // FIX #1: Wrap spawn in timeout to prevent indefinite lock blocking
         // FIX #1b: Kill orphan PTY if timeout fires after spawn resolves
         let spawnPtyId: string | null = null
@@ -878,11 +1088,13 @@ async function restoreFromLayout(
             const result = await terminalApi.spawn(
               agentSpawnOptions
                 ? {
+                    projectId,
                     cwd: persistedTerminal.cwd,
                     ...agentSpawnOptions,
                     ...(spawnEnv ? { env: spawnEnv } : {})
                   }
                 : {
+                    projectId,
                     shell: normalizedShell,
                     cwd: persistedTerminal.cwd,
                     ...(spawnEnv ? { env: spawnEnv } : {})
@@ -927,6 +1139,14 @@ async function restoreFromLayout(
 
         if (!spawnResult.success || !spawnData) {
           debugLog('restoreFromLayout', `Spawn FAILED, skipping [${terminalCallId}]`)
+          if (
+            !spawnResult.success &&
+            'code' in spawnResult &&
+            spawnResult.code === WEB_TERMINAL_ERROR_CODES.TERMINAL_LIMIT
+          ) {
+            limitRefusals.count += 1
+            limitRefusals.message = spawnResult.error
+          }
           continue
         }
 
@@ -944,6 +1164,7 @@ async function restoreFromLayout(
 
         // FIX #6: Increment SPAWN_CALL_COUNT for each successful spawn in the loop
         SPAWN_CALL_COUNT++
+        spawnedPtyIds.push(spawnData.id)
 
         idMap.set(persistedTerminal.id, newId)
         newTerminals.push({
@@ -956,6 +1177,11 @@ async function restoreFromLayout(
           pendingScrollback: persistedTerminal.scrollback,
           transcript: persistedTerminal.transcript,
           ptyId: spawnData.id,
+          // CAP-3: the restore re-spawn issues a fresh lease — capture it.
+          ...(spawnData.claim ? { claim: spawnData.claim } : {}),
+          // R3: carry the captured DEC mode snapshot so ConnectedTerminal can
+          // replay it (via restoreScrollback) before the scrollback content.
+          ...(persistedTerminal.modes ? { pendingModes: persistedTerminal.modes } : {}),
           // ADR-004.4: carry restored agent metadata so the tab labels as the
           // agent and re-persists correctly. Seed prompt stays dropped.
           ...(isAgentTerminal
@@ -974,8 +1200,65 @@ async function restoreFromLayout(
       }
     }
 
+    // The host refuses a spawn past a terminal cap. Say so once: a skipped
+    // tab would otherwise vanish without a trace.
+    if (limitRefusals.count > 0) {
+      toast.error(
+        `${limitRefusals.count} terminal${limitRefusals.count === 1 ? '' : 's'} not restored. ${limitRefusals.message}`
+      )
+    }
+
+    // Story 5 (resolved Q3): every preserved PTY of the project restores as
+    // its own tab — including ones with NO persisted-layout counterpart
+    // (spawned by another window, or the layout save lost the entry). Each
+    // leftover gets a fresh tab record and a verified attach; a failed
+    // attach leaves the PTY preserved server-side (the claim is dropped,
+    // never re-presented) and skips the tab rather than blocking restore.
+    for (const leftover of preservedById.values()) {
+      if (isCancelled()) break
+      // Claim-less leftovers hold a live attachment on another connection
+      // (CodeRabbit: preserve existing live attachments) — leave them to
+      // their owning connection entirely.
+      if (!leftover.claim) continue
+      const attachResult = await terminalApi.attach(leftover.id, leftover.claim, 0)
+      if (!attachResult.success) {
+        debugLog('restoreFromLayout', `Leftover preserved attach failed`, {
+          code: attachResult.code
+        })
+        emitTerminalContinuityEvent({
+          name: 'restore-failed',
+          correlationId: '',
+          projectId,
+          details: {
+            reason: 'preserved-leftover-attach-rejected',
+            code: attachResult.code
+          }
+        })
+        continue
+      }
+      const leftoverId = randomUUID()
+      TERMINALS_PENDING_PTY_ASSIGNMENT.add(leftoverId)
+      try {
+        newTerminals.push({
+          id: leftoverId,
+          name: `Terminal ${leftover.id.slice(-4)}`,
+          projectId,
+          shell: leftover.shell,
+          cwd: leftover.cwd,
+          output: [],
+          ptyId: leftover.id,
+          claim: leftover.claim
+        })
+        debugLog('restoreFromLayout', `Restored leftover preserved PTY as tab`, {
+          ptyId: leftover.id
+        })
+      } finally {
+        TERMINALS_PENDING_PTY_ASSIGNMENT.delete(leftoverId)
+      }
+    }
+
     if (isCancelled()) {
-      await cleanupSpawnedPtys(newTerminals, restoreId, 'before store mutation')
+      await cleanupSpawnedPtys(spawnedPtyIds, restoreId, 'before store mutation')
       debugLog('restoreFromLayout', `CANCELLED [${restoreId}] before store mutation`)
       return { status: 'cancelled', path: 'persisted-replay' }
     }
@@ -1002,7 +1285,12 @@ async function restoreFromLayout(
     const existingTerminals = terminalStore.terminals
     terminalStore.setTerminals([...existingTerminals, ...newTerminals])
 
-    if (idMap.size > 0) {
+    // Remap rewrites the visible tree: wait until the switch toward this
+    // project has committed so it is the tree being rewritten. Settled also
+    // means failed/superseded/disposed, so re-check that the target is visible.
+    if (idMap.size > 0) await whenProjectSwitchSettled(projectId)
+    const targetCommitted = useWorkspaceStore.getState().activeProjectId === projectId
+    if (idMap.size > 0 && targetCommitted) {
       useWorkspaceStore.getState().remapTerminalTabs(Object.fromEntries(idMap))
     }
 
@@ -1012,8 +1300,8 @@ async function restoreFromLayout(
       activeId = idMap.get(layout.activeTerminalId)!
     }
 
-    // Select the active terminal
-    if (activeId) {
+    // Select the active terminal (only while the target's tree is visible)
+    if (activeId && targetCommitted) {
       terminalStore.selectTerminal(activeId)
     }
 
@@ -1050,7 +1338,7 @@ async function createDefaultTerminal(
   projectId: string,
   isCancelled: () => boolean
 ): Promise<RestoreExecutionResult> {
-  const defaultId = `default-${crypto.randomUUID().slice(0, 5)}`
+  const defaultId = `default-${randomUUID().slice(0, 5)}`
 
   // FIX #2: Use proper lock acquire/release with owner tracking
   if (!acquireGlobalSpawnLock(defaultId)) {
@@ -1124,7 +1412,9 @@ async function createDefaultTerminal(
 
     const cwd = getDefaultCwdForProject(projectId)
 
-    // Ensure worktree symlinks are reconciled before spawning
+    // Best-effort: reconcile worktree symlinks in case the project has an
+    // active worktree (the default terminal spawns at the project root, but
+    // symlink state must stay consistent for worktree-aware terminals).
     try {
       await ensureWorktreeSymlinks(projectId)
     } catch {
@@ -1144,6 +1434,7 @@ async function createDefaultTerminal(
         const result = await terminalApi.spawn({
           shell,
           cwd,
+          projectId,
           ...(hasProjectEnv ? { env } : {})
         })
         if (spawnTimeout) {
@@ -1209,6 +1500,10 @@ async function createDefaultTerminal(
     // Create default terminal - addTerminal also sets it as active
     const newTerminal = terminalStore.addTerminal('Terminal 1', projectId, shell, cwd)
     terminalStore.setTerminalPtyId(newTerminal.id, spawnData.id)
+    // CAP-3: store the issued lease credential (in-memory only).
+    if (spawnData.claim) {
+      terminalStore.setTerminalClaim(spawnData.id, spawnData.claim)
+    }
 
     // Explicitly select to ensure activeTerminalId is set correctly
     terminalStore.selectTerminal(newTerminal.id)

@@ -1,6 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { X } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect, useState } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useId, useState } from 'react'
+import { X } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 
 interface CreateSnapshotModalProps {
   isOpen: boolean
@@ -13,6 +16,10 @@ export function CreateSnapshotModal({
   onClose,
   onCreateSnapshot
 }: CreateSnapshotModalProps): React.JSX.Element {
+  // Mobile web shell: system back closes this modal (inert on desktop).
+  const overlayId = `create-snapshot-modal:${useId()}`
+  useOverlayRegistration(overlayId, isOpen, onClose, { mobileShellOnly: true })
+
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [isCreating, setIsCreating] = useState(false)
@@ -76,7 +83,7 @@ export function CreateSnapshotModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+          className="fixed inset-0 bg-overlay/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={onClose}
         >
           <motion.div
@@ -110,7 +117,7 @@ export function CreateSnapshotModal({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Pre-deployment state"
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
 
@@ -123,26 +130,24 @@ export function CreateSnapshotModal({
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Describe the state of your workspace..."
                   rows={3}
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground resize-none"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm pointer-coarse:text-base text-foreground placeholder-muted-foreground resize-none ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
             </div>
 
             {/* Footer */}
             <div className="px-4 py-3 bg-secondary/50 flex justify-end gap-2 border-t border-border">
-              <button
-                onClick={onClose}
-                className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-              >
+              <Button type="button" variant="ghost" size="sm" onClick={onClose}>
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                type="button"
+                size="sm"
                 onClick={handleCreate}
                 disabled={!name.trim() || isCreating}
-                className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 shadow-md shadow-primary/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isCreating ? 'Creating...' : 'Create'}
-              </button>
+              </Button>
             </div>
           </motion.div>
         </motion.div>

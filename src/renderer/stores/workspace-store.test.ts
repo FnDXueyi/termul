@@ -1,7 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setRouterNavigate } from '@/lib/router-navigate'
 import type { LeafNode, SplitNode } from '@/types/workspace.types'
-import type { WorkspaceState } from './workspace-store'
+import type { WorkspaceState, WorkspaceTab } from './workspace-store'
 import { flattenSameDirection, useWorkspaceStore } from './workspace-store'
+
+const { mockLogFrontendError } = vi.hoisted(() => ({
+  mockLogFrontendError: vi.fn()
+}))
+
+vi.mock('@/lib/log-api', () => ({
+  logFrontendError: mockLogFrontendError
+}))
 
 function createEditorTab(id: string): { type: 'editor'; id: string; filePath: string } {
   return {
@@ -645,5 +654,746 @@ describe('workspace-store agent launcher auto-dismiss', () => {
     store.addEditorTab('/c.ts', rightPaneId)
 
     expect(useWorkspaceStore.getState().agentLauncherPaneId).toBe(leftPaneId)
+  })
+})
+
+describe('workspace-store git tab reuse-by-(type, cwd) (QA P1 duplicate panes)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+  })
+
+  it('4 repeated addGitTab calls for the same cwd yield exactly one activated tab', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addGitTab('/demo', 'pane-root')
+    store.addGitTab('/demo', 'pane-root')
+    store.addGitTab('/demo', 'pane-root')
+    store.addGitTab('/demo', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const gitTabs = leaf.tabs.filter((t) => t.type === 'git')
+    expect(gitTabs).toHaveLength(1)
+    expect(gitTabs[0].id).toBe('git-/demo')
+    // The existing tab is activated, not just deduplicated.
+    expect(leaf.activeTabId).toBe('git-/demo')
+    expect(useWorkspaceStore.getState().activePaneId).toBe('pane-root')
+  })
+
+  it('repeated addGitHistoryTab calls for the same cwd yield exactly one activated tab', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addGitHistoryTab('/demo', 'pane-root')
+    store.addGitHistoryTab('/demo', 'pane-root')
+    store.addGitHistoryTab('/demo', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const historyTabs = leaf.tabs.filter((t) => t.type === 'git-history')
+    expect(historyTabs).toHaveLength(1)
+    expect(historyTabs[0].id).toBe('git-history-/demo')
+    expect(leaf.activeTabId).toBe('git-history-/demo')
+  })
+
+  it('different cwds create distinct git tabs', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addGitTab('/demo', 'pane-root')
+    store.addGitTab('/other', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const gitTabs = leaf.tabs.filter((t) => t.type === 'git')
+    expect(gitTabs).toHaveLength(2)
+    expect(gitTabs.map((t) => t.id).sort()).toEqual(['git-/demo', 'git-/other'])
+  })
+
+  it('addGitTab reuses a tab living in another pane and activates it there', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addGitTab('/demo', 'pane-root')
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+
+    const split = useWorkspaceStore.getState().root as SplitNode
+    const rightPaneId = (split.children[1] as LeafNode).id
+
+    // The second open targets the right pane but must find + activate the
+    // existing left-pane tab instead of minting a duplicate.
+    store.addGitTab('/demo', rightPaneId)
+
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const gitTabs = leaves.flatMap((leaf) => leaf.tabs.filter((t) => t.type === 'git'))
+    expect(gitTabs).toHaveLength(1)
+    const containing = leaves.find((leaf) => leaf.tabs.some((t) => t.id === 'git-/demo'))
+    expect(containing?.activeTabId).toBe('git-/demo')
+  })
+
+  it('addGitTab activates the existing tab without re-adding (no launcher dismissal side effect loops)', () => {
+    const store = useWorkspaceStore.getState()
+    store.addGitTab('/demo', 'pane-root')
+    store.showAgentLauncher('pane-root')
+
+    // Re-open while the launcher is up: activation path must dismiss it.
+    store.addGitTab('/demo', 'pane-root')
+
+    expect(useWorkspaceStore.getState().agentLauncherPaneId).toBeNull()
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    expect(leaf.tabs.filter((t) => t.type === 'git')).toHaveLength(1)
+  })
+})
+
+describe('workspace-store addAgentChatTab idempotent activation (multi-project perf)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+  })
+
+  function addChatTab(sessionId: string): void {
+    useWorkspaceStore.getState().addAgentChatTab(sessionId)
+  }
+
+  it('second activation of the already-active chat tab performs no store set (no tree rebuild)', () => {
+    addChatTab('s1')
+    const rootAfterFirst = useWorkspaceStore.getState().root
+    let setCount = 0
+    const unsubscribe = useWorkspaceStore.subscribe(() => {
+      setCount++
+    })
+
+    addChatTab('s1')
+
+    unsubscribe()
+    expect(setCount).toBe(0)
+    // Root identity unchanged — no immutable pane-tree rebuild happened.
+    expect(useWorkspaceStore.getState().root).toBe(rootAfterFirst)
+  })
+
+  it('activating an inactive chat tab still performs exactly one set', () => {
+    addChatTab('s1')
+    // Park the pane on a different tab so the chat tab is inactive.
+    useWorkspaceStore.getState().addTabToPane('pane-root', createEditorTab('edit-/a.ts'))
+    let setCount = 0
+    const unsubscribe = useWorkspaceStore.subscribe(() => {
+      setCount++
+    })
+
+    addChatTab('s1')
+
+    unsubscribe()
+    expect(setCount).toBe(1)
+  })
+
+  it('re-activating an already-active chat tab in an unfocused pane still refocuses that pane', () => {
+    // Two panes: chat tab lives in pane-A, focus drifts to pane-B (user
+    // clicked a terminal there). Sidebar re-open must move focus back.
+    addChatTab('s1')
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/b.ts'), 'right')
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const chatPane = leaves.find((l) => l.tabs.some((t) => t.type === 'agent-chat'))
+    const otherPane = leaves.find((l) => l.id !== chatPane?.id)
+    expect(chatPane).toBeTruthy()
+    expect(otherPane).toBeTruthy()
+
+    useWorkspaceStore.getState().setActivePane(otherPane!.id)
+    expect(useWorkspaceStore.getState().activePaneId).toBe(otherPane!.id)
+
+    // The chat tab is still pane-A's active tab, but the workspace focus is
+    // pane-B → the noop guard must NOT fire; activation refocuses pane-A.
+    addChatTab('s1')
+
+    expect(useWorkspaceStore.getState().activePaneId).toBe(chatPane!.id)
+  })
+
+  it('activation while agent launcher is up still dismisses the launcher (existing behavior preserved)', () => {
+    addChatTab('s1')
+    useWorkspaceStore.getState().showAgentLauncher('pane-root')
+    expect(useWorkspaceStore.getState().agentLauncherPaneId).toBe('pane-root')
+
+    addChatTab('s1')
+
+    expect(useWorkspaceStore.getState().agentLauncherPaneId).toBeNull()
+  })
+})
+
+describe('workspace-store agent-chat mountKey (remap mount continuity)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+  })
+
+  function agentChatTab(sessionId: string): Extract<WorkspaceTab, { type: 'agent-chat' }> {
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const tab = leaf.tabs.find((t) => t.type === 'agent-chat' && t.sessionId === sessionId)
+    if (tab?.type !== 'agent-chat') throw new Error(`no agent-chat tab for ${sessionId}`)
+    return tab
+  }
+
+  it('addAgentChatTab stamps mountKey equal to the tab id', () => {
+    useWorkspaceStore.getState().addAgentChatTab('s1')
+
+    const tab = agentChatTab('s1')
+    expect(tab.id).toBe('chat-s1')
+    expect(tab.mountKey).toBe('chat-s1')
+  })
+
+  it('insertAgentChatTab stamps mountKey equal to the tab id', () => {
+    useWorkspaceStore.getState().insertAgentChatTab('s1')
+
+    expect(agentChatTab('s1').mountKey).toBe('chat-s1')
+  })
+
+  it('remapAgentChatSession preserves mountKey across the placeholder→real id swap', () => {
+    const store = useWorkspaceStore.getState()
+    store.addAgentChatTab('launch-1')
+    expect(agentChatTab('launch-1').mountKey).toBe('chat-launch-1')
+
+    store.remapAgentChatSession('launch-1', 's-real')
+
+    const tab = agentChatTab('s-real')
+    expect(tab.id).toBe('chat-s-real')
+    expect(tab.mountKey).toBe('chat-launch-1')
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    expect(leaf.activeTabId).toBe('chat-s-real')
+    expect(leaf.tabs.filter((t) => t.type === 'agent-chat')).toHaveLength(1)
+  })
+
+  it('chained remaps keep the original mountKey', () => {
+    const store = useWorkspaceStore.getState()
+    store.addAgentChatTab('launch-1')
+    store.remapAgentChatSession('launch-1', 's-real')
+    store.remapAgentChatSession('s-real', 's-switched')
+
+    expect(agentChatTab('s-switched').mountKey).toBe('chat-launch-1')
+  })
+
+  it('keeps the remapped source when a pre-existing destination tab precedes it', () => {
+    // Destination-first order: the naive first-occurrence dedup used to keep
+    // the pre-existing tab and drop the remapped source — losing mountKey.
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = {
+        type: 'leaf',
+        id: 'pane-root',
+        tabs: [
+          { type: 'agent-chat', id: 'chat-s-real', sessionId: 's-real' },
+          {
+            type: 'agent-chat',
+            id: 'chat-launch-1',
+            sessionId: 'launch-1',
+            mountKey: 'chat-launch-1'
+          }
+        ],
+        activeTabId: 'chat-launch-1'
+      }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+
+    useWorkspaceStore.getState().remapAgentChatSession('launch-1', 's-real')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const survivors = leaf.tabs.filter((t) => t.type === 'agent-chat' && t.id === 'chat-s-real')
+    expect(survivors).toHaveLength(1)
+    expect(survivors[0].mountKey).toBe('chat-launch-1')
+    expect(leaf.activeTabId).toBe('chat-s-real')
+  })
+
+  it('a mountKey-less tab remaps with mountKey equal to the pre-swap id', () => {
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = {
+        type: 'leaf',
+        id: 'pane-root',
+        tabs: [{ type: 'agent-chat', id: 'chat-old', sessionId: 'old' }],
+        activeTabId: 'chat-old'
+      }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+
+    useWorkspaceStore.getState().remapAgentChatSession('old', 'new')
+
+    expect(agentChatTab('new').mountKey).toBe('chat-old')
+  })
+})
+
+describe('workspace-store openAgentBrowserTab (spec-acp-browser-automation-v2 CAP-3)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    mockLogFrontendError.mockReset()
+    let seq = 0
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
+      () => `00000000-0000-0000-0000-00000000000${++seq}`
+    )
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = {
+        type: 'leaf',
+        id: 'pane-root',
+        tabs: [{ type: 'agent-chat', id: 'chat-s1', sessionId: 's1' }],
+        activeTabId: 'chat-s1'
+      }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null,
+        agentBrowserPaneId: null
+      }
+    })
+  })
+
+  it('first open splits right ~[33.3, 66.7] and keeps the chat pane focused', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    const root = useWorkspaceStore.getState().root
+    expect(root.type).toBe('split')
+    const split = root as SplitNode
+    expect(split.direction).toBe('horizontal')
+    expect(split.sizes[0]).toBeCloseTo(33.3)
+    expect(split.sizes[1]).toBeCloseTo(66.7)
+    const chatPane = split.children[0] as LeafNode
+    const browserPane = split.children[1] as LeafNode
+    expect(chatPane.id).toBe('pane-root')
+    expect(browserPane.tabs.map((t) => t.id)).toEqual(['browser-agent-tab-1'])
+    expect(browserPane.activeTabId).toBe('browser-agent-tab-1')
+    expect(useWorkspaceStore.getState().activePaneId).toBe('pane-root')
+    expect(useWorkspaceStore.getState().agentBrowserPaneId).toBe(browserPane.id)
+  })
+
+  it('second open reuses the dedicated pane without another split', () => {
+    const store = useWorkspaceStore.getState()
+    store.openAgentBrowserTab('agent-tab-1')
+    const firstRight = (useWorkspaceStore.getState().root as SplitNode).children[1] as LeafNode
+
+    store.openAgentBrowserTab('agent-tab-2')
+
+    const root = useWorkspaceStore.getState().root as SplitNode
+    expect(getLeavesFromNode(root)).toHaveLength(2)
+    const chatPane = root.children[0] as LeafNode
+    const browserPane = root.children[1] as LeafNode
+    expect(chatPane.id).toBe('pane-root')
+    expect(browserPane.id).toBe(firstRight.id)
+    expect(browserPane.tabs.map((t) => t.id)).toEqual([
+      'browser-agent-tab-1',
+      'browser-agent-tab-2'
+    ])
+    expect(browserPane.activeTabId).toBe('browser-agent-tab-2')
+    expect(useWorkspaceStore.getState().activePaneId).toBe('pane-root')
+    expect(useWorkspaceStore.getState().agentBrowserPaneId).toBe(browserPane.id)
+  })
+
+  it('re-splits the active pane after the user closes the dedicated pane', () => {
+    const store = useWorkspaceStore.getState()
+    store.openAgentBrowserTab('agent-tab-1')
+    const firstRight = (useWorkspaceStore.getState().root as SplitNode).children[1] as LeafNode
+
+    store.collapsePane(firstRight.id)
+    expect(useWorkspaceStore.getState().root.type).toBe('leaf')
+
+    store.openAgentBrowserTab('agent-tab-2')
+
+    const root = useWorkspaceStore.getState().root as SplitNode
+    expect(root.type).toBe('split')
+    expect(root.direction).toBe('horizontal')
+    expect(root.sizes[0]).toBeCloseTo(33.3)
+    expect(root.sizes[1]).toBeCloseTo(66.7)
+    const browserPane = root.children[1] as LeafNode
+    expect(browserPane.tabs.map((t) => t.id)).toEqual(['browser-agent-tab-2'])
+    expect(useWorkspaceStore.getState().activePaneId).toBe('pane-root')
+    expect(useWorkspaceStore.getState().agentBrowserPaneId).toBe(browserPane.id)
+  })
+
+  it('re-opening the same tab activates it in place without a duplicate', () => {
+    const store = useWorkspaceStore.getState()
+    store.openAgentBrowserTab('agent-tab-1')
+    store.setActivePane('pane-root')
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const browserTabs = leaves.flatMap((leaf) => leaf.tabs.filter((t) => t.type === 'browser'))
+    expect(browserTabs).toHaveLength(1)
+    const containing = leaves.find((leaf) => leaf.tabs.some((t) => t.id === 'browser-agent-tab-1'))
+    expect(containing?.activeTabId).toBe('browser-agent-tab-1')
+    // Current addBrowserTab semantics: activating the existing tab focuses
+    // its pane.
+    expect(useWorkspaceStore.getState().activePaneId).toBe(containing?.id)
+  })
+
+  it('applies the 2/3 ratio to the target pane inside a same-direction flat group', () => {
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/right.ts'), 'right')
+    const firstSplit = useWorkspaceStore.getState().root as SplitNode
+    const editorPane = firstSplit.children[1] as LeafNode
+    store.setActivePane(editorPane.id)
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    const root = useWorkspaceStore.getState().root as SplitNode
+    expect(root.direction).toBe('horizontal')
+    expect(root.children).toHaveLength(3)
+    const targetIndex = root.children.findIndex((c) => c.id === editorPane.id)
+    expect(root.sizes[targetIndex]).toBeCloseTo(50 * 0.333)
+    expect(root.sizes[targetIndex + 1]).toBeCloseTo(50 * 0.667)
+    const browserPane = root.children[targetIndex + 1] as LeafNode
+    expect(browserPane.tabs.map((t) => t.id)).toEqual(['browser-agent-tab-1'])
+    expect(useWorkspaceStore.getState().activePaneId).toBe(editorPane.id)
+  })
+
+  it('keeps default splitPane sizes and focus for non-agent splits', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+
+    const split = useWorkspaceStore.getState().root as SplitNode
+    expect(split.sizes).toEqual([50, 50])
+    expect(useWorkspaceStore.getState().activePaneId).toBe((split.children[1] as LeafNode).id)
+  })
+
+  it('clears fullscreenPaneId when an agent open lands outside the fullscreen pane', () => {
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/full.ts'), 'right')
+    const split = useWorkspaceStore.getState().root as SplitNode
+    const editorPane = split.children[1] as LeafNode
+    store.togglePaneFullscreen(editorPane.id)
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe(editorPane.id)
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    // Only the fullscreen pane renders while one is active, so an agent tab
+    // landing elsewhere must exit fullscreen to mount at all.
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBeNull()
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    expect(leaves).toHaveLength(3)
+    const containing = leaves.find((leaf) => leaf.tabs.some((t) => t.id === 'browser-agent-tab-1'))
+    expect(containing).toBeTruthy()
+  })
+
+  it('keeps fullscreenPaneId when the agent browser pane itself is fullscreened', () => {
+    const store = useWorkspaceStore.getState()
+    store.openAgentBrowserTab('agent-tab-1')
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const agentPane = leaves.find((leaf) =>
+      leaf.tabs.some((t) => t.id === 'browser-agent-tab-1')
+    ) as LeafNode
+
+    store.togglePaneFullscreen(agentPane.id)
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe(agentPane.id)
+
+    // Reuse path: the hosting pane IS the fullscreen pane, so it stays.
+    store.openAgentBrowserTab('agent-tab-2')
+
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBe(agentPane.id)
+    const leavesAfter = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const agentPaneAfter = leavesAfter.find((leaf) =>
+      leaf.tabs.some((t) => t.id === 'browser-agent-tab-2')
+    )
+    expect(agentPaneAfter?.id).toBe(agentPane.id)
+  })
+
+  it('still clears fullscreenPaneId on a focusing split', () => {
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/full.ts'), 'right')
+    const split = useWorkspaceStore.getState().root as SplitNode
+    const editorPane = split.children[1] as LeafNode
+    store.togglePaneFullscreen(editorPane.id)
+
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+
+    expect(useWorkspaceStore.getState().fullscreenPaneId).toBeNull()
+  })
+
+  it('falls back to [50, 50] with a warn log on invalid custom sizes', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right', {
+      sizes: [120, -20]
+    })
+
+    const split = useWorkspaceStore.getState().root as SplitNode
+    expect(split.sizes[0]).toBeCloseTo(50)
+    expect(split.sizes[1]).toBeCloseTo(50)
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'warn', source: 'workspace-store:splitPane' })
+    )
+  })
+
+  it('falls back to equal shares in a flat group on non-finite custom sizes', () => {
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/b.ts'), 'right', {
+      sizes: [Number.NaN, 50]
+    })
+
+    const root = useWorkspaceStore.getState().root as SplitNode
+    expect(root.children).toHaveLength(3)
+    for (const size of root.sizes) {
+      expect(size).toBeCloseTo(100 / 3)
+    }
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'warn', source: 'workspace-store:splitPane' })
+    )
+  })
+
+  it('falls back to the first leaf pane when the active pane is invalid', () => {
+    const store = useWorkspaceStore.getState()
+    useWorkspaceStore.setState({ activePaneId: 'pane-missing' })
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    const state = useWorkspaceStore.getState()
+    const split = state.root as SplitNode
+    expect(split.type).toBe('split')
+    expect(split.sizes[1]).toBeCloseTo(66.7)
+    expect((split.children[0] as LeafNode).id).toBe('pane-root')
+    const browserPane = split.children[1] as LeafNode
+    expect(browserPane.tabs.map((t) => t.id)).toEqual(['browser-agent-tab-1'])
+    expect(state.agentBrowserPaneId).toBe(browserPane.id)
+    expect(mockLogFrontendError).not.toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'workspace-store:openAgentBrowserTab' })
+    )
+  })
+
+  it('logs an error when no leaf pane can host the agent browser tab', () => {
+    const store = useWorkspaceStore.getState()
+    useWorkspaceStore.setState(() => ({
+      root: {
+        type: 'split',
+        id: 'split-empty',
+        direction: 'horizontal',
+        children: [],
+        sizes: []
+      } as SplitNode,
+      activePaneId: 'pane-missing',
+      agentBrowserPaneId: null
+    }))
+
+    store.openAgentBrowserTab('agent-tab-1')
+
+    expect(mockLogFrontendError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: 'error',
+        source: 'workspace-store:openAgentBrowserTab'
+      })
+    )
+  })
+
+  it("custom sizes with position 'left' place the new leaf first at its share", () => {
+    const store = useWorkspaceStore.getState()
+    const tab = createEditorTab('edit-/left.ts')
+
+    store.splitPane('pane-root', 'horizontal', tab, 'left', { sizes: [40, 60] })
+
+    const split = useWorkspaceStore.getState().root as SplitNode
+    expect(split.direction).toBe('horizontal')
+    expect((split.children[0] as LeafNode).tabs[0]?.id).toBe('edit-/left.ts')
+    expect((split.children[1] as LeafNode).id).toBe('pane-root')
+    expect(split.sizes[0]).toBeCloseTo(60)
+    expect(split.sizes[1]).toBeCloseTo(40)
+    expect(useWorkspaceStore.getState().activePaneId).toBe((split.children[0] as LeafNode).id)
+  })
+
+  it("custom sizes with position 'left' in a flat group insert before the target", () => {
+    const store = useWorkspaceStore.getState()
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/right.ts'), 'right')
+    const firstSplit = useWorkspaceStore.getState().root as SplitNode
+    const rightPane = firstSplit.children[1] as LeafNode
+
+    store.splitPane(rightPane.id, 'horizontal', createEditorTab('edit-/left.ts'), 'left', {
+      sizes: [40, 60]
+    })
+
+    const root = useWorkspaceStore.getState().root as SplitNode
+    expect(root.children).toHaveLength(3)
+    expect((root.children[0] as LeafNode).id).toBe('pane-root')
+    expect((root.children[1] as LeafNode).tabs[0]?.id).toBe('edit-/left.ts')
+    expect((root.children[2] as LeafNode).id).toBe(rightPane.id)
+    expect(root.sizes[0]).toBeCloseTo(50)
+    expect(root.sizes[1]).toBeCloseTo(30)
+    expect(root.sizes[2]).toBeCloseTo(20)
+  })
+})
+
+describe('workspace-store canvas tab singleton (OpenPencil canvas mode, AD-7)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null,
+        agentBrowserPaneId: null
+      }
+    })
+  })
+
+  it('4 repeated addCanvasTab calls for the same project yield exactly one activated tab', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/poster.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
+    expect(canvasTabs).toHaveLength(1)
+    expect(canvasTabs[0].id).toBe('canvas-proj-1')
+    expect(leaf.activeTabId).toBe('canvas-proj-1')
+  })
+
+  it('opening a different doc re-binds the singleton tab docPath in place', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-1', 'C:/demo/poster.op', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
+    expect(canvasTabs).toHaveLength(1)
+    expect(canvasTabs[0]).toMatchObject({
+      type: 'canvas',
+      id: 'canvas-proj-1',
+      projectId: 'proj-1',
+      docPath: 'C:/demo/poster.op'
+    })
+  })
+
+  it('different projects create distinct canvas tabs', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.addCanvasTab('proj-2', 'C:/other/design.op', 'pane-root')
+
+    const leaf = useWorkspaceStore.getState().root as LeafNode
+    const canvasTabs = leaf.tabs.filter((t) => t.type === 'canvas')
+    expect(canvasTabs).toHaveLength(2)
+    expect(canvasTabs.map((t) => t.id).sort()).toEqual(['canvas-proj-1', 'canvas-proj-2'])
+  })
+
+  it('addCanvasTab reuses a tab living in another pane and activates it there', () => {
+    const store = useWorkspaceStore.getState()
+
+    store.addCanvasTab('proj-1', 'C:/demo/design.op', 'pane-root')
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+
+    const split = useWorkspaceStore.getState().root as SplitNode
+    const rightPaneId = (split.children[1] as LeafNode).id
+
+    store.addCanvasTab('proj-1', 'C:/demo/poster.op', rightPaneId)
+
+    const leaves = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const canvasTabs = leaves.flatMap((leaf) => leaf.tabs.filter((t) => t.type === 'canvas'))
+    expect(canvasTabs).toHaveLength(1)
+    const containing = leaves.find((leaf) => leaf.tabs.some((t) => t.id === 'canvas-proj-1'))
+    expect(containing?.activeTabId).toBe('canvas-proj-1')
+  })
+
+  it('addCanvasTab lands in the active pane as a plain tab — never a new split pane', () => {
+    const store = useWorkspaceStore.getState()
+
+    // A single-pane layout: the canvas must join THIS pane, not fork a new one
+    // (unlike agent browser tabs, which deliberately split ~[33.3, 66.7]).
+    store.addCanvasTab('proj-1', 'C:/demo/design.op')
+
+    const state = useWorkspaceStore.getState()
+    expect(state.root.type).toBe('leaf')
+    const leaf = state.root as LeafNode
+    expect(leaf.tabs.some((t) => t.id === 'canvas-proj-1' && t.type === 'canvas')).toBe(true)
+    expect(leaf.activeTabId).toBe('canvas-proj-1')
+    expect(getLeavesFromNode(state.root)).toHaveLength(1)
+
+    // Same guarantee inside an existing split: the tab goes to the ACTIVE
+    // pane and the pane count does not change.
+    store.splitPane('pane-root', 'horizontal', createEditorTab('edit-/a.ts'), 'right')
+    const before = getLeavesFromNode(useWorkspaceStore.getState().root)
+    const beforeCount = before.length
+    const activePaneId = useWorkspaceStore.getState().activePaneId
+
+    store.addCanvasTab('proj-2', 'C:/other/design.op')
+
+    const after = getLeavesFromNode(useWorkspaceStore.getState().root)
+    expect(after).toHaveLength(beforeCount)
+    const activePane = after.find((leaf) => leaf.id === useWorkspaceStore.getState().activePaneId)
+    expect(activePane?.tabs.some((t) => t.id === 'canvas-proj-2')).toBe(true)
+    expect(activePaneId).toBeTruthy()
+  })
+})
+
+describe('workspace-store setActiveTab chat route (the mobile /snapshots chat row relies on it)', () => {
+  const navigate = vi.fn()
+
+  beforeEach(() => {
+    navigate.mockReset()
+    setRouterNavigate(navigate)
+    window.location.hash = ''
+    useWorkspaceStore.setState(() => {
+      const root: LeafNode = {
+        type: 'leaf',
+        id: 'pane-root',
+        tabs: [
+          { type: 'agent-chat', id: 'chat-s1', sessionId: 's1' },
+          { type: 'git', id: 'git-/proj', cwd: '/proj' }
+        ],
+        activeTabId: 'git-/proj'
+      }
+      return {
+        root,
+        activePaneId: 'pane-root',
+        fullscreenPaneId: null,
+        agentLauncherPaneId: null
+      }
+    })
+  })
+
+  afterEach(() => {
+    setRouterNavigate(null)
+  })
+
+  it('activating an agent-chat tab navigates to /c/<sessionId>', () => {
+    useWorkspaceStore.getState().setActiveTab('pane-root', 'chat-s1')
+
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect(navigate).toHaveBeenCalledWith('/c/s1')
+  })
+
+  it('activating a non-chat tab does not navigate (the caller owns the route)', () => {
+    useWorkspaceStore.getState().setActiveTab('pane-root', 'git-/proj')
+
+    expect(navigate).not.toHaveBeenCalled()
   })
 })

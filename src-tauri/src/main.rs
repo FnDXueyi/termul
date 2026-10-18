@@ -1,7 +1,30 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Set by build.rs for a release-profile build without `custom-protocol`. Lives
+// in the desktop entry point so it blocks only this binary, never the
+// `termul-server` binary or the library.
+#[cfg(termul_release_without_custom_protocol)]
+compile_error!(concat!(
+    "termul: refusing to build a release desktop binary without the `custom-protocol` feature.\n",
+    "Without it Tauri compiles with cfg(dev) and the app loads `devUrl` instead of the embedded\n",
+    "frontend, showing \"Could not connect to localhost\".\n",
+    "Fix: run `cargo build --release --features custom-protocol`, or build through the Tauri CLI\n",
+    "(`bun run build:tauri --no-bundle`).\n",
+    "For `cargo test/clippy --release` only, set TERMUL_ALLOW_RELEASE_WITHOUT_CUSTOM_PROTOCOL=1."
+));
+
 fn main() {
+    // Self-spawned `--internal-mcp-plan-server` child: the agent spawns this
+    // binary (current_exe) as the injected `McpServer::Stdio` for the
+    // host-injected `plan` tool. Branch BEFORE any Tauri/log setup so
+    // the child never initializes the app / plugins / sinks — it just runs
+    // an rmcp MCP server over stdio + forwards calls to the parent's TCP
+    // listener. See `acp::host_mcp::child` + spec `spec-acp-host-todo-plan-tool.md`.
+    if termul_manager_lib::host_mcp::is_child_invocation() {
+        std::process::exit(termul_manager_lib::host_mcp::child::run());
+    }
+
     // Seed a default RUST_LOG so module-level overrides keep working, e.g.:
     //   RUST_LOG=trace npm run dev
     //   RUST_LOG=termul_manager_lib=debug npm run dev

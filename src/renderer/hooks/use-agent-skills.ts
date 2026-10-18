@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
+import { logFrontendError } from '@/lib/log-api'
 import { type AgentSkillSummary, skillsApi } from '@/lib/skills-api'
-
-export interface LoadedAgentSkill {
-  name: string
-  description: string
-}
+import { type FramedSkill, formatPromptWithSkills } from '@/lib/skills-prompt'
 
 export function useAgentSkills(projectRoot: string | undefined): {
   skills: AgentSkillSummary[]
@@ -12,8 +9,17 @@ export function useAgentSkills(projectRoot: string | undefined): {
   reload: () => void
 } {
   const [skills, setSkills] = useState<AgentSkillSummary[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [reloadToken, setReloadToken] = useState(0)
+  const [trackedRoot, setTrackedRoot] = useState(projectRoot)
+  // Drop the previous project's rows in this render, before paint. The fetch
+  // effect runs after paint, so waiting for it would label the new project
+  // with the previous project's skills.
+  if (trackedRoot !== projectRoot) {
+    setTrackedRoot(projectRoot)
+    setSkills([])
+    setLoading(true)
+  }
 
   const reload = useCallback(() => {
     setReloadToken((t) => t + 1)
@@ -27,8 +33,15 @@ export function useAgentSkills(projectRoot: string | undefined): {
       try {
         const listed = await skillsApi.listSkills(projectRoot)
         if (!cancelled) setSkills(listed)
-      } catch {
+      } catch (err) {
         if (!cancelled) setSkills([])
+        // Never swallow silently: surface list failures to the backend log so
+        // a closed DevTools doesn't hide why the Skills section is empty.
+        void logFrontendError({
+          level: 'warn',
+          message: `Failed to list agent skills: ${err instanceof Error ? err.message : String(err)}`,
+          source: 'useAgentSkills'
+        })
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -41,20 +54,13 @@ export function useAgentSkills(projectRoot: string | undefined): {
   return { skills, loading, reload }
 }
 
-export async function buildPromptWithLoadedSkill(
-  loadedSkill: LoadedAgentSkill | null,
-  userText: string,
-  projectRoot: string | undefined
-): Promise<string> {
-  const trimmed = userText.trim()
-  if (!loadedSkill) return trimmed
-
-  try {
-    const skill = await skillsApi.readSkill(loadedSkill.name, projectRoot)
-    const { formatPromptWithSkill } = await import('@/lib/skills-prompt')
-    return formatPromptWithSkill(skill.body, trimmed)
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err)
-    throw new Error(`Failed to load skill '${loadedSkill.name}': ${detail}`)
-  }
+/**
+ * Frame the selected skills (by path) and the user's text into the wire prompt.
+ * Synchronous: paths are captured at pick time, so there is no IPC read at send
+ * and it cannot fail. Tokens in the user text are replaced with `(<name>)`
+ * inline and each unique skill is cited as `<name>: <path>` under a
+ * `# Agent Skills` header (see `formatPromptWithSkills`).
+ */
+export function buildPromptWithLoadedSkills(skills: FramedSkill[], userText: string): string {
+  return formatPromptWithSkills(skills, userText)
 }

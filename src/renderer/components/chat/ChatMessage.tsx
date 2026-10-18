@@ -1,31 +1,31 @@
-import { code as codePlugin } from '@streamdown/code'
-import { mermaid as mermaidPlugin } from '@streamdown/mermaid'
 import { motion, useReducedMotion } from 'framer-motion'
 import { memo, useEffect, useMemo, useState } from 'react'
-import { type LinkSafetyConfig, type LinkSafetyModalProps, Streamdown } from 'streamdown'
+
 import { Attachment, AttachmentPreview, Attachments } from '@/components/ai-elements/attachments'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
 import { Bubble, BubbleContent } from '@/components/ui/bubble'
 import { ImageLightbox } from '@/components/ui/image-lightbox'
 import { Message, MessageContent } from '@/components/ui/message'
+import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import type { ContentBlock } from '@/lib/acp-api'
-import { openerApi } from '@/lib/api'
 import { readAttachmentBytes } from '@/lib/attachment-api'
-import { stripEmptyFences } from '@/lib/strip-empty-fences'
+import type { FilePathResolutionContext } from '@/lib/file-path-links'
+import {
+  isFolderTokenPath,
+  parseCommandSegments,
+  parseFileSegments,
+  parseSkillSegments,
+  sanitizeDisplayText
+} from '@/lib/skill-tokens'
+import { normalizePlanFenceBoundary, stripEmptyFences } from '@/lib/strip-empty-fences'
 import { cn } from '@/lib/utils'
 import type { ChatMessage as ChatMessageType } from '@/stores/acp-store'
+import { CommandChip } from './CommandChip'
+import { AgentProse } from './chat-agent-prose'
 import {
+  blockData,
   blockDisplayName,
   blockMimeType,
+  blockResource,
   blockToAttachmentData,
   blockUri,
   fileUrlToPath,
@@ -33,10 +33,21 @@ import {
   isLocalFileUri,
   uint8ToBase64
 } from './chat-attachments'
-import { ChatMarkdownCode } from './chat-markdown-code'
-import { ChatMarkdownTable } from './chat-markdown-table'
 import { type BubbleAlign, staggerChild } from './chat-motion'
-import { MessageActions } from './MessageActions'
+import { FileChip } from './FileChip'
+import {
+  logLongPressFallbackOnce,
+  MessageActions,
+  MessageActionsContextMenu,
+  type MessageActionsMode,
+  resolveMessageActionsMode,
+  supportsLongPressMenu
+} from './MessageActions'
+import { SkillChip } from './SkillChip'
+
+// The markdown renderer moved to `chat-agent-prose.tsx` to keep this file under
+// the ~800-line limit. Re-exported so existing importers keep their paths.
+export { AgentProse, TermulFilePathButton, TermulMarkdownImage } from './chat-agent-prose'
 
 /** Concatenate the text of all text blocks. */
 function blocksToText(blocks: ContentBlock[]): string {
@@ -44,6 +55,94 @@ function blocksToText(blocks: ContentBlock[]): string {
     .filter((b) => b.type === 'text')
     .map((b) => b.text ?? '')
     .join('')
+}
+
+/**
+ * Render a user message's text, swapping inline skill, file, AND command
+ * tokens for read-only `SkillChip`/`CommandChip`/`FileChip` pills. Skill
+ * (`\uE000..\uE001`), command (`\uE004..\uE005`), and file (`\uE006..\uE007`)
+ * tokens use distinct sentinel pairs, so each walk leaves the other tokens in
+ * its text segments. We parse skill segments first, then walk each text
+ * segment for command tokens, then each command text segment for file tokens
+ * — all pill types render at their correct positions when inline together. A
+ * command token renders as a `CommandChip` (terminal icon, muted `/name`),
+ * the same chip as the composer's `CommandPill`. Plain text (no tokens)
+ * renders verbatim with `whitespace-pre-wrap` to preserve the original
+ * spacing. `MessageActions` still receives the sanitized copy text (tokens →
+ * readable text) while edit keeps the raw token text so the composer
+ * re-seeds with chips inline.
+ */
+function UserMessageText({ text }: { text: string }): React.JSX.Element {
+  const skillSegments = parseSkillSegments(text)
+  // Flatten: skill segments → command tokens → file tokens (innermost).
+  type FlatSeg =
+    | { kind: 'text'; text: string }
+    | { kind: 'skill'; name: string }
+    | { kind: 'file'; display: string; dir: boolean }
+    | { kind: 'command'; name: string }
+  const flat: FlatSeg[] = []
+  let hasPills = false
+  const pushFileSegments = (segmentText: string): void => {
+    const fileSegs = parseFileSegments(segmentText)
+    if (fileSegs.length === 1 && fileSegs[0].kind === 'text') {
+      // No file tokens in this text segment — keep it as one text span.
+      flat.push({ kind: 'text', text: segmentText })
+      return
+    }
+    for (const fseg of fileSegs) {
+      if (fseg.kind === 'file') {
+        flat.push({
+          kind: 'file',
+          display: fseg.display,
+          dir: isFolderTokenPath(fseg.absPath)
+        })
+        hasPills = true
+      } else {
+        flat.push({ kind: 'text', text: fseg.text })
+      }
+    }
+  }
+  for (const seg of skillSegments) {
+    if (seg.kind === 'skill') {
+      flat.push({ kind: 'skill', name: seg.name })
+      hasPills = true
+      continue
+    }
+    // Text segment: walk for command tokens (\uE004..\uE005). Skill tokens
+    // are invisible to this walk (already extracted above), so command
+    // tokens land in the text segments alongside plain text and file tokens.
+    const commandSegs = parseCommandSegments(seg.text)
+    if (commandSegs.length === 1 && commandSegs[0].kind === 'text') {
+      // No command tokens in this text segment — run the file walk on it.
+      pushFileSegments(seg.text)
+      continue
+    }
+    for (const cseg of commandSegs) {
+      if (cseg.kind === 'command') {
+        flat.push({ kind: 'command', name: cseg.name })
+        hasPills = true
+      } else {
+        pushFileSegments(cseg.text)
+      }
+    }
+  }
+  return (
+    <BubbleContent className="whitespace-pre-wrap">
+      {!hasPills && flat.length === 0
+        ? text
+        : flat.map((seg, i) =>
+            seg.kind === 'skill' ? (
+              <SkillChip key={`skill-${i}`} name={seg.name} />
+            ) : seg.kind === 'command' ? (
+              <CommandChip key={`command-${i}`} name={seg.name} />
+            ) : seg.kind === 'file' ? (
+              <FileChip key={`file-${i}`} name={seg.display} kind={seg.dir ? 'dir' : 'file'} />
+            ) : (
+              <span key={`text-${i}`}>{seg.text}</span>
+            )
+          )}
+    </BubbleContent>
+  )
 }
 
 /** Non-text content blocks (image / resource / etc). */
@@ -77,10 +176,10 @@ function MediaGridItem({ block, id }: { block: ContentBlock; id: string }): Reac
     if (initial.url) return
     const uri = blockUri(block) ?? ''
     if (!isLocalFileUri(uri) || !blockIsImage(block)) return
-    const resolvedPath = fileUrlToPath(uri)
     let cancelled = false
     void (async () => {
       try {
+        const resolvedPath = fileUrlToPath(uri)
         const bytes = await readAttachmentBytes(resolvedPath)
         if (cancelled) return
         const mime = guessMimeType(resolvedPath)
@@ -111,122 +210,80 @@ function MediaGridItem({ block, id }: { block: ContentBlock; id: string }): Reac
   return attachment
 }
 
-/** Render image / resource blocks as grid attachment thumbnails. */
-function MediaBlocks({ blocks }: { blocks: ContentBlock[] }): React.JSX.Element | null {
+const MAX_INLINE_RESOURCE_TEXT = 32 * 1024
+const MAX_INLINE_AUDIO_BYTES = 20 * 1024 * 1024
+
+/** Return only bounded inline audio sources; remote URLs must not auto-load. */
+function inlineAudioUrl(block: ContentBlock): string | null {
+  if (block.type !== 'audio' || !blockMimeType(block)?.startsWith('audio/')) return null
+  const data = blockData(block)
+  if (!data) return null
+  if (data.startsWith('blob:')) return data
+  if (data.startsWith('data:audio/')) {
+    return data.length <= MAX_INLINE_AUDIO_BYTES * 1.4 ? data : null
+  }
+  if (data.startsWith('data:')) return null
+  if (data.length > MAX_INLINE_AUDIO_BYTES * 1.4) return null
+  return `data:${blockMimeType(block)};base64,${data}`
+}
+
+function ResourceText({ block }: { block: ContentBlock }): React.JSX.Element | null {
+  const text = blockResource(block)?.text
+  if (typeof text !== 'string') return null
+  const boundedText =
+    text.length > MAX_INLINE_RESOURCE_TEXT ? `${text.slice(0, MAX_INLINE_RESOURCE_TEXT)}\n…` : text
+  return (
+    <pre
+      data-embedded-resource={blockDisplayName(block)}
+      className="scroller-thin max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border/40 bg-background/60 px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground/90"
+    >
+      {boundedText}
+    </pre>
+  )
+}
+
+function InlineAudio({ block }: { block: ContentBlock }): React.JSX.Element | null {
+  const src = inlineAudioUrl(block)
+  if (!src) return null
+  return (
+    // biome-ignore lint/a11y/useMediaCaption: ACP audio blocks do not provide caption tracks.
+    <audio
+      aria-label={`Play ${blockDisplayName(block)}`}
+      className="max-w-full"
+      controls
+      preload="metadata"
+      src={src}
+    />
+  )
+}
+
+/** Render media blocks with safe inline previews and bounded embedded text. */
+export function MediaBlocks({ blocks }: { blocks: ContentBlock[] }): React.JSX.Element | null {
   const media = mediaBlocks(blocks)
   if (media.length === 0) return null
+  const resources = media.filter((block) => block.type === 'resource')
+  const attachments = media.filter(
+    (block) =>
+      (block.type !== 'audio' || !inlineAudioUrl(block)) &&
+      !(block.type === 'resource' && typeof blockResource(block)?.text === 'string')
+  )
+  const audio = media.filter((block) => block.type === 'audio')
   return (
-    <Attachments variant="grid" className="ml-0 w-fit py-0.5">
-      {media.map((block, i) => (
-        <MediaGridItem key={`${block.type}-${i}`} block={block} id={`${block.type}-${i}`} />
+    <>
+      {attachments.length > 0 && (
+        <Attachments variant="grid" className="ml-0 w-fit py-0.5">
+          {attachments.map((block, i) => (
+            <MediaGridItem key={`${block.type}-${i}`} block={block} id={`${block.type}-${i}`} />
+          ))}
+        </Attachments>
+      )}
+      {audio.map((block, i) => (
+        <InlineAudio key={`audio-${i}`} block={block} />
       ))}
-    </Attachments>
-  )
-}
-
-/**
- * Shiki syntax-highlighting for fenced code blocks. Themes track the app's
- * light/dark mode via Streamdown's dual-theme output (github-light/dark).
- */
-const CODE_PLUGIN = codePlugin
-/** Live Mermaid diagram rendering for ```mermaid fences. */
-const MERMAID_PLUGIN = mermaidPlugin
-const STREAMDOWN_PLUGINS = { code: CODE_PLUGIN, mermaid: MERMAID_PLUGIN }
-
-// Copy on code blocks, plus download (save an agent-generated file); no line
-// numbers (chat snippets are short). Mermaid keeps its interactive controls.
-const STREAMDOWN_CONTROLS = {
-  // Fenced code copy/download come from ChatMarkdownCode (IconActionButton).
-  code: false,
-  table: { copy: true, download: true, fullscreen: true },
-  mermaid: { copy: true, download: true, fullscreen: true, panZoom: true }
-} as const
-
-const STREAMDOWN_COMPONENTS = {
-  code: ChatMarkdownCode,
-  table: ChatMarkdownTable
-} as const
-
-// Word-by-word reveal so replies feel like they stream even when an agent
-// sends its text as one big chunk. `animated` uses the styles.css keyframes
-// imported in main.tsx; already-visible words get duration 0 (no re-animation).
-const STREAMDOWN_ANIMATED = { animation: 'blurIn', sep: 'word', duration: 350, stagger: 8 } as const
-
-/**
- * Confirm external links, then hand off to the OS browser.
- *
- * `onLinkCheck` only decides whether to show the confirm UI (never opens).
- * Opening happens in the modal action so Streamdown's default `window.open`
- * path is not used and the dialog actually closes after confirm.
- */
-function StreamdownLinkSafetyModal({
-  isOpen,
-  onClose,
-  url
-}: LinkSafetyModalProps): React.JSX.Element {
-  return (
-    <AlertDialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
-    >
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Open external link?</AlertDialogTitle>
-          <AlertDialogDescription className="break-all">{url}</AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() => {
-              void openerApi.openUrlWithSystemBrowser(url)
-              onClose()
-            }}
-          >
-            Open
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  )
-}
-
-const LINK_SAFETY: LinkSafetyConfig = {
-  enabled: true,
-  // Always take the confirm path; never open from the check callback.
-  onLinkCheck: () => false,
-  renderModal: (props) => <StreamdownLinkSafetyModal {...props} />
-}
-
-/** Agent reply rendered as streaming-safe, hardened markdown via Streamdown. */
-function AgentProse({
-  text,
-  streaming,
-  reduced
-}: {
-  text: string
-  streaming: boolean
-  reduced: boolean
-}): React.JSX.Element {
-  return (
-    <div className="chat-streamdown text-sm leading-relaxed text-foreground">
-      <Streamdown
-        mode="streaming"
-        isAnimating={streaming}
-        caret="block"
-        animated={reduced ? false : STREAMDOWN_ANIMATED}
-        parseIncompleteMarkdown
-        plugins={STREAMDOWN_PLUGINS}
-        controls={STREAMDOWN_CONTROLS}
-        components={STREAMDOWN_COMPONENTS}
-        lineNumbers={false}
-        linkSafety={LINK_SAFETY}
-        shikiTheme={['github-light', 'github-dark']}
-      >
-        {text}
-      </Streamdown>
-    </div>
+      {resources.map((block, i) => (
+        <ResourceText key={`resource-${i}`} block={block} />
+      ))}
+    </>
   )
 }
 
@@ -279,6 +336,43 @@ interface ChatMessageProps {
   onEdit?: (text: string) => void
   /** Re-run the latest user turn (assistant turns). */
   onRetry?: () => void
+  /** Filesystem roots used for safe file-path links in agent prose. */
+  filePathContext?: FilePathResolutionContext
+}
+
+/** The same inset focus ring as `ToolCallCard`, for a focusable message. */
+const MOBILE_ACTIONS_RING_CLASS =
+  'rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring'
+
+/**
+ * Classes for a message that owns mobile actions: the focus ring in every
+ * mobile mode, plus no native text selection on coarse pointers only in
+ * `focus-reveal`, where the long-press belongs to the menu (see
+ * `MessageActionsContextMenu`). In `visible-fallback` long-press cannot work,
+ * so selection stays and the always-visible row carries Copy.
+ */
+function mobileActionsMessageClass(mode: MessageActionsMode): string | undefined {
+  if (mode === 'desktop') return undefined
+  return mode === 'focus-reveal'
+    ? `${MOBILE_ACTIONS_RING_CLASS} pointer-coarse:select-none`
+    : MOBILE_ACTIONS_RING_CLASS
+}
+
+/**
+ * Touch / pen `pointerdown` on a message that owns the long-press menu: cancel
+ * the default so the app-root `GlobalContextMenu` (Copy / Cut / Paste / Select
+ * All) does not arm its own 700ms timer. Radix composes the root trigger's
+ * handler behind a `defaultPrevented` check, and the deeper message trigger has
+ * already armed by the time the event reaches this wrapper. The event is NOT
+ * stopped: `ChatRoute` and Radix outside-pointer detection need it to bubble.
+ *
+ * Events from portaled descendants (link-safety dialog, image lightbox) bubble
+ * here through React but are not on the message: leave their default alone.
+ */
+function suppressGlobalLongPress(event: React.PointerEvent<HTMLDivElement>): void {
+  if (event.pointerType === 'mouse') return
+  if (!event.currentTarget.contains(event.target as Node)) return
+  event.preventDefault()
 }
 
 function ChatMessageComponent({
@@ -290,13 +384,33 @@ function ChatMessageComponent({
   actionsPinned = false,
   animateEnter = true,
   onEdit,
-  onRetry
+  onRetry,
+  filePathContext
 }: ChatMessageProps): React.JSX.Element {
   const reduced = useReducedMotion() ?? false
+  const isMobileShell = useMobileWebShell()
 
   const isUser = message.role === 'user'
   const text = blocksToText(message.blocks)
   const hasMedia = mediaBlocks(message.blocks).length > 0
+  // Only messages that render `MessageActions` take part in the mobile actions
+  // model: every user message, and an agent message only at its settled turn
+  // tail. Messages inside `TurnActivity` never qualify.
+  const hasActions = isUser || (!message.streaming && isTurnTail)
+  const actionsMode: MessageActionsMode = hasActions
+    ? resolveMessageActionsMode(isMobileShell, supportsLongPressMenu())
+    : 'desktop'
+  const mobileActions = actionsMode !== 'desktop'
+  const mobileActionsClass = mobileActionsMessageClass(actionsMode)
+  // On the mobile shell every message keeps the same menu wrapper (inert unless
+  // it has actions), so a message that gains or loses actions as its stream
+  // settles or the turn tail moves does not remount its subtree.
+  const menuWrapped = isMobileShell
+  const actionsReveal = actionsMode === 'focus-reveal' ? 'focus' : 'hover'
+  const actionsMenuId = `message-actions-menu:${message.id}`
+  useEffect(() => {
+    if (actionsMode === 'visible-fallback') logLongPressFallbackOnce()
+  }, [actionsMode])
   let staggerStep = 0
   const nextDelay = (): number => {
     const delay = staggerStep * 0.08
@@ -305,114 +419,173 @@ function ChatMessageComponent({
   }
 
   if (isUser) {
-    return (
-      <div className="w-full">
-        <Message align="end" className="py-2">
-          <MessageContent className="w-fit max-w-[85%]">
-            {hasMedia && (
-              <StaggerSection
-                delay={nextDelay()}
-                align="end"
-                reduced={reduced}
-                animateEnter={animateEnter}
-              >
-                <MediaBlocks blocks={message.blocks} />
-              </StaggerSection>
-            )}
-            {text.length > 0 && (
-              <StaggerSection
-                delay={nextDelay()}
-                align="end"
-                reduced={reduced}
-                animateEnter={animateEnter}
-              >
-                <Bubble variant="tinted" align="end" className="max-w-full">
-                  <BubbleContent className="whitespace-pre-wrap">{text}</BubbleContent>
-                </Bubble>
-              </StaggerSection>
-            )}
+    // Copy a display-safe string: skill/file tokens become `(name)` and command
+    // tokens become `/name` so the clipboard never carries private-use
+    // sentinels. Edit keeps the raw token text so the composer re-seeds with
+    // chips inline (command pill included). The row and the mobile menu share
+    // both.
+    const copyTextForActions = sanitizeDisplayText(text)
+    const editForActions = onEdit && text.length > 0 ? () => onEdit(text) : undefined
+    const userMessage = (
+      <Message
+        align="end"
+        className={cn('py-2', mobileActionsClass)}
+        // On the mobile shell a message with actions is focusable so keyboard and
+        // switch users reach its focus-revealed row. Biome does not flag tabIndex
+        // on this component, so no suppression is needed.
+        tabIndex={mobileActions ? 0 : undefined}
+      >
+        <MessageContent className="w-fit max-w-[85%]">
+          {hasMedia && (
             <StaggerSection
               delay={nextDelay()}
               align="end"
               reduced={reduced}
               animateEnter={animateEnter}
             >
-              <MessageActions
-                text={text}
-                align="end"
-                pinned={actionsPinned}
-                onEdit={onEdit && text.length > 0 ? () => onEdit(text) : undefined}
-              />
+              <MediaBlocks blocks={message.blocks} />
             </StaggerSection>
-          </MessageContent>
-        </Message>
+          )}
+          {text.length > 0 && (
+            <StaggerSection
+              delay={nextDelay()}
+              align="end"
+              reduced={reduced}
+              animateEnter={animateEnter}
+            >
+              <Bubble variant="tinted" align="end" className="max-w-full">
+                <UserMessageText text={text} />
+              </Bubble>
+            </StaggerSection>
+          )}
+          <StaggerSection
+            delay={nextDelay()}
+            align="end"
+            reduced={reduced}
+            animateEnter={animateEnter}
+          >
+            <MessageActions
+              text={copyTextForActions}
+              align="end"
+              pinned={actionsPinned}
+              reveal={actionsReveal}
+              onEdit={editForActions}
+            />
+          </StaggerSection>
+        </MessageContent>
+      </Message>
+    )
+
+    return (
+      <div className="w-full" onPointerDown={mobileActions ? suppressGlobalLongPress : undefined}>
+        {menuWrapped ? (
+          <MessageActionsContextMenu
+            overlayId={actionsMenuId}
+            text={copyTextForActions}
+            onEdit={editForActions}
+            disabled={!mobileActions}
+          >
+            {userMessage}
+          </MessageActionsContextMenu>
+        ) : (
+          userMessage
+        )}
       </div>
     )
   }
 
   const streaming = message.streaming && isLast
-  const proseText = stripEmptyFences(text, streaming)
+  const proseText = normalizePlanFenceBoundary(stripEmptyFences(text, streaming))
   const proseDelay = nextDelay()
   const mediaDelay = hasMedia ? nextDelay() : null
   const actionsDelay = nextDelay()
+  const agentCopyText = turnText ?? text
+
+  const agentMessage = (
+    <Message
+      align="start"
+      className={cn(showHeader ? 'py-2' : 'pb-2', mobileActionsClass)}
+      // On the mobile shell a message with actions is focusable so keyboard and
+      // switch users reach its focus-revealed row. Biome does not flag tabIndex
+      // on this component, so no suppression is needed.
+      tabIndex={mobileActions ? 0 : undefined}
+    >
+      <MessageContent className="min-w-0 flex-1">
+        {/* Skip the ghost bubble entirely for attachment-only assistant turns
+            so they don't render a blank shell above the media grid. The
+            streaming caret still needs a bubble to live in while the turn is
+            in progress, even before any text has arrived. */}
+        {(proseText.length > 0 || streaming) && (
+          <Bubble variant="ghost" className="w-full">
+            <BubbleContent>
+              <StaggerSection
+                delay={proseDelay}
+                align="start"
+                reduced={reduced}
+                animateEnter={animateEnter}
+              >
+                {proseText.length > 0 && (
+                  <AgentProse
+                    text={proseText}
+                    streaming={streaming}
+                    reduced={reduced}
+                    filePathContext={filePathContext}
+                  />
+                )}
+                {streaming && proseText.length === 0 && (
+                  <span
+                    aria-hidden="true"
+                    className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-0.5 animate-caret-blink bg-foreground align-middle motion-reduce:animate-none motion-reduce:opacity-100"
+                  />
+                )}
+              </StaggerSection>
+            </BubbleContent>
+          </Bubble>
+        )}
+        {hasMedia && mediaDelay != null && (
+          <StaggerSection
+            delay={mediaDelay}
+            align="start"
+            reduced={reduced}
+            animateEnter={animateEnter}
+          >
+            <MediaBlocks blocks={message.blocks} />
+          </StaggerSection>
+        )}
+        {hasActions && (
+          <StaggerSection
+            delay={actionsDelay}
+            align="start"
+            reduced={reduced}
+            animateEnter={animateEnter}
+          >
+            <MessageActions
+              text={agentCopyText}
+              align="start"
+              pinned={actionsPinned}
+              reveal={actionsReveal}
+              onRetry={onRetry}
+            />
+          </StaggerSection>
+        )}
+      </MessageContent>
+    </Message>
+  )
 
   return (
-    <div className="w-full">
-      <Message align="start" className={cn(showHeader ? 'py-2' : 'pb-2')}>
-        <MessageContent className="min-w-0 flex-1">
-          {/* Skip the ghost bubble entirely for attachment-only assistant turns
-              so they don't render a blank shell above the media grid. The
-              streaming caret still needs a bubble to live in while the turn is
-              in progress, even before any text has arrived. */}
-          {(proseText.length > 0 || streaming) && (
-            <Bubble variant="ghost" className="w-fit max-w-full">
-              <BubbleContent>
-                <StaggerSection
-                  delay={proseDelay}
-                  align="start"
-                  reduced={reduced}
-                  animateEnter={animateEnter}
-                >
-                  {proseText.length > 0 && (
-                    <AgentProse text={proseText} streaming={streaming} reduced={reduced} />
-                  )}
-                  {streaming && proseText.length === 0 && (
-                    <span
-                      aria-hidden="true"
-                      className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-0.5 animate-caret-blink bg-primary align-middle motion-reduce:animate-none motion-reduce:opacity-100"
-                    />
-                  )}
-                </StaggerSection>
-              </BubbleContent>
-            </Bubble>
-          )}
-          {hasMedia && mediaDelay != null && (
-            <StaggerSection
-              delay={mediaDelay}
-              align="start"
-              reduced={reduced}
-              animateEnter={animateEnter}
-            >
-              <MediaBlocks blocks={message.blocks} />
-            </StaggerSection>
-          )}
-          {!message.streaming && isTurnTail && (
-            <StaggerSection
-              delay={actionsDelay}
-              align="start"
-              reduced={reduced}
-              animateEnter={animateEnter}
-            >
-              <MessageActions
-                text={turnText ?? text}
-                align="start"
-                pinned={actionsPinned}
-                onRetry={onRetry}
-              />
-            </StaggerSection>
-          )}
-        </MessageContent>
-      </Message>
+    <div className="w-full" onPointerDown={mobileActions ? suppressGlobalLongPress : undefined}>
+      {menuWrapped ? (
+        <MessageActionsContextMenu
+          overlayId={actionsMenuId}
+          text={agentCopyText}
+          onRetry={onRetry}
+          disabled={!mobileActions}
+        >
+          {agentMessage}
+        </MessageActionsContextMenu>
+      ) : (
+        agentMessage
+      )}
     </div>
   )
 }

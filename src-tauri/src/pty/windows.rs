@@ -3,9 +3,9 @@
 //! This module provides Windows-specific PTY spawning functionality using ConPTY.
 
 use std::fs::File;
-use winapi::ctypes::c_void;
 use std::mem::{size_of, MaybeUninit};
 use std::os::windows::io::FromRawHandle;
+use winapi::ctypes::c_void;
 
 /// ADR-004.2: Build a Windows command-line string from an argv array using the
 /// `CommandLineToArgvW` escaping rules.
@@ -203,61 +203,6 @@ fn env_to_wide_block(env: &std::collections::HashMap<String, String>) -> Vec<u16
     block
 }
 
-/// Create a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assign
-/// `process` to it. When the returned handle is closed, the OS terminates the
-/// process and its entire descendant tree. Returns a null handle (and logs a
-/// warning) if the job could not be created, configured, or assigned, in which
-/// case the caller proceeds with the process running but without tree-kill.
-#[cfg(target_os = "windows")]
-unsafe fn create_kill_on_close_job(process: *mut c_void) -> *mut c_void {
-    use winapi::um::jobapi2::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    };
-    use winapi::um::winnt::{
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-
-    let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-    if job.is_null() {
-        log::warn!(
-            "[ConPTY] CreateJobObject failed, orphan protection disabled: {}",
-            std::io::Error::last_os_error()
-        );
-        return std::ptr::null_mut();
-    }
-
-    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if SetInformationJobObject(
-        job,
-        JobObjectExtendedLimitInformation,
-        &mut info as *mut _ as *mut c_void,
-        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-    ) == 0
-    {
-        log::warn!(
-            "[ConPTY] SetInformationJobObject failed, orphan protection disabled: {}",
-            std::io::Error::last_os_error()
-        );
-        winapi::um::handleapi::CloseHandle(job);
-        return std::ptr::null_mut();
-    }
-
-    // Nested jobs are supported on Win8+/Win10+ (ConPTY requires Win10+), so
-    // assignment is safe even if the child is already in a job.
-    if AssignProcessToJobObject(job, process) == 0 {
-        log::warn!(
-            "[ConPTY] AssignProcessToJobObject failed, orphan protection disabled: {}",
-            std::io::Error::last_os_error()
-        );
-        winapi::um::handleapi::CloseHandle(job);
-        return std::ptr::null_mut();
-    }
-
-    job
-}
-
 /// Spawn a command using Windows ConPTY with proper flags to hide console window
 ///
 /// This function uses the Windows ConPTY API directly to spawn processes
@@ -451,7 +396,11 @@ pub fn spawn_conpty(
         // owning handle (held by the terminal instance) is closed. It also kills
         // grandchildren that single-PID TerminateProcess misses. On any failure
         // we log and continue with a null job handle — no regression vs. before.
-        let job = create_kill_on_close_job(pi.hProcess);
+        // The raw job handle is owned by the terminal instance from here on
+        // (null when the job could not be set up; the helper already warned).
+        let job: *mut c_void =
+            crate::process_util::KillOnCloseJob::new_assigned(pi.hProcess.cast(), "ConPTY", false)
+                .map_or(std::ptr::null_mut(), |job| job.into_raw().cast());
 
         // Resume the child only after it is in the job so no grandchild can
         // escape assignment (#281 spawn race).
@@ -499,182 +448,4 @@ pub fn spawn_conpty(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::build_windows_command_line;
-
-    fn cmdline(program: &str, args: &[&str]) -> String {
-        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        build_windows_command_line(program, &owned)
-    }
-
-    /// #281: a spawned ConPTY child must be owned by a kill-on-close Job Object,
-    /// and dropping the returned handles must terminate the whole process tree
-    /// (the same mechanism that reaps children when the app process exits).
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn spawn_conpty_assigns_job_and_kills_tree_on_close() {
-        use super::spawn_conpty;
-        use std::collections::HashMap;
-
-        let mut env = HashMap::new();
-        env.insert("Path".to_string(), std::env::var("PATH").unwrap_or_default());
-
-        let (reader, writer, pid, process_handle, job_handle, conpty_handles) =
-            spawn_conpty("cmd.exe", None, 80, 24, &env).expect("spawn_conpty failed");
-
-        assert_ne!(pid, 0, "expected a valid child pid");
-        assert!(!job_handle.is_null(), "child must be assigned to a Job Object");
-        assert!(
-            is_process_alive(pid),
-            "child should be running immediately after spawn"
-        );
-
-        // Drop all owned handles. Closing the last job handle triggers
-        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, terminating the child tree.
-        drop(reader);
-        drop(writer);
-        unsafe {
-            winapi::um::handleapi::CloseHandle(process_handle);
-        }
-        drop(conpty_handles);
-        unsafe {
-            winapi::um::handleapi::CloseHandle(job_handle);
-        }
-
-        // Give the OS a brief moment to reap the tree.
-        let mut alive = true;
-        for _ in 0..50 {
-            if !is_process_alive(pid) {
-                alive = false;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(!alive, "child pid {} leaked after job handle close", pid);
-    }
-
-    #[cfg(target_os = "windows")]
-    fn is_process_alive(pid: u32) -> bool {
-        unsafe {
-            let handle = winapi::um::processthreadsapi::OpenProcess(
-                winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                pid,
-            );
-            if handle.is_null() {
-                return false;
-            }
-            let mut code: u32 = 0;
-            let ok =
-                winapi::um::processthreadsapi::GetExitCodeProcess(handle, &mut code);
-            winapi::um::handleapi::CloseHandle(handle);
-            ok != 0 && code == winapi::um::minwinbase::STILL_ACTIVE
-        }
-    }
-
-    #[test]
-    fn no_args_returns_program_only() {
-        assert_eq!(cmdline("claude", &[]), "claude");
-    }
-
-    #[test]
-    fn simple_arg_not_quoted() {
-        assert_eq!(cmdline("claude", &["hello"]), "claude hello");
-    }
-
-    #[test]
-    fn arg_with_space_is_quoted() {
-        assert_eq!(
-            cmdline("claude", &["explain this project"]),
-            "claude \"explain this project\""
-        );
-    }
-
-    #[test]
-    fn empty_arg_is_quoted() {
-        assert_eq!(cmdline("claude", &[""]), "claude \"\"");
-    }
-
-    #[test]
-    fn embedded_double_quote_is_escaped() {
-        // Prompt: say "hi"  ->  "say \"hi\""
-        assert_eq!(
-            cmdline("claude", &["say \"hi\""]),
-            "claude \"say \\\"hi\\\"\""
-        );
-    }
-
-    #[test]
-    fn trailing_backslash_in_quoted_arg_is_doubled() {
-        // Prompt: C:\path with space\  ->  the trailing backslash before the
-        // closing quote must be doubled so it is not read as escaping the quote.
-        assert_eq!(
-            cmdline("claude", &["C:\\path with space\\"]),
-            "claude \"C:\\path with space\\\\\""
-        );
-    }
-
-    #[test]
-    fn backslashes_before_quote_are_doubled_plus_escaped_quote() {
-        // Input: a\\"b  (two backslashes then a quote)
-        // Expected inside quotes: a\\\\\"b -> four backslashes + escaped quote
-        assert_eq!(
-            cmdline("p", &["a\\\\\"b"]),
-            "p \"a\\\\\\\\\\\"b\""
-        );
-    }
-
-    #[test]
-    fn interior_backslashes_stay_literal_when_quoted() {
-        // Backslashes not adjacent to a quote are literal even inside quotes.
-        assert_eq!(
-            cmdline("p", &["a\\b c"]),
-            "p \"a\\b c\""
-        );
-    }
-
-    #[test]
-    fn shell_metacharacters_are_not_interpreted_just_passed_through() {
-        // No cmd.exe wrapper, so these stay literal. They contain no spaces/quotes,
-        // so they are not even quoted — CreateProcessW never interprets them.
-        assert_eq!(cmdline("claude", &["a&&b|c^d%e"]), "claude a&&b|c^d%e");
-    }
-
-    #[test]
-    fn dangerous_prompt_with_space_and_metachars_is_single_quoted_arg() {
-        // The classic injection attempt becomes ONE quoted argument.
-        let out = cmdline("claude", &["; rm -rf ~ #"]);
-        assert_eq!(out, "claude \"; rm -rf ~ #\"");
-    }
-
-    #[test]
-    fn newline_in_arg_forces_quoting() {
-        assert_eq!(cmdline("p", &["line1\nline2"]), "p \"line1\nline2\"");
-    }
-
-    #[test]
-    fn tab_in_arg_forces_quoting() {
-        assert_eq!(cmdline("p", &["a\tb"]), "p \"a\tb\"");
-    }
-
-    #[test]
-    fn program_with_space_is_quoted() {
-        assert_eq!(
-            cmdline("C:\\Program Files\\agent.exe", &["go"]),
-            "\"C:\\Program Files\\agent.exe\" go"
-        );
-    }
-
-    #[test]
-    fn multiple_args_joined_with_single_spaces() {
-        assert_eq!(
-            cmdline("gemini", &["-i", "query text"]),
-            "gemini -i \"query text\""
-        );
-    }
-
-    #[test]
-    fn non_ascii_arg_passes_through() {
-        assert_eq!(cmdline("p", &["caf\u{e9} \u{2014} test"]), "p \"caf\u{e9} \u{2014} test\"");
-    }
-}
+mod tests;

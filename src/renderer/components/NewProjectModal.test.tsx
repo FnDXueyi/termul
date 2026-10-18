@@ -1,0 +1,973 @@
+/**
+ * End-to-end tests for `NewProjectModal` in web mode (`!isTauriContext()`).
+ *
+ * Original Patch G: the web-mode create chain (`handleCreate` →
+ * `filesystemApi.createDirectory` → scaffold) was untested and surfaced
+ * `Setup failed: fs.mkdir is unavailable`. That guard lives on: the create
+ * test still asserts NO `fs.mkdir is unavailable` error surfaces and that
+ * `onCreateProject` fires.
+ *
+ * Since the modal simplification, the tests also defend the new observable
+ * contract:
+ *  - the Project Name auto-fills from the selected folder's basename
+ *    (typed path or Browse), with re-derivation on folder change and
+ *    user-edit override semantics,
+ *  - only Root Directory + Project Name render (no template, color, shell,
+ *    or git-init controls), and
+ *  - the web session-only note is preserved.
+ *
+ * The `@tauri-apps/plugin-fs` + `@tauri-apps/plugin-dialog` +
+ * `@tauri-apps/api/core` modules are stubbed so the module loads without a
+ * Tauri runtime; the web branch is the one under test.
+ */
+
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  resetNativeWebviewOcclusionForTests,
+  useNativeWebviewOccluded
+} from '@/hooks/use-native-webview-occlusion'
+import { claimEscape } from '@/lib/escape-claim'
+import {
+  armMobileOverlayBackStack,
+  pressSystemBack,
+  settleOverlayBackStack,
+  waitForSentinelDepth
+} from '@/lib/test-utils/overlay-back-stack'
+import { readOverlaySentinelDepth, useOverlayStackStore } from '@/stores/overlay-stack-store'
+import { NewProjectModal } from './NewProjectModal'
+
+const {
+  mockFetch,
+  mockIsTauriContext,
+  mockInvoke,
+  mockSelectDirectory,
+  mockDefaultProjectColor,
+  mockUseProjectStore,
+  mockUpdateProject,
+  mockReconcileProjectWorktrees,
+  existingProjectsRef
+} = vi.hoisted(() => ({
+  // fetch: used by webServerFilesystem / webServerGit / webServerShell.
+  mockFetch: vi.fn(),
+  // Pin to web mode so the createDirectory/createFile/readDirectory/git.init
+  // chain routes through the fetch client (NOT the Tauri plugin-fs / invoke).
+  mockIsTauriContext: vi.fn(() => false),
+  // invoke: desktop-only; never called in web mode. Stubbed so the module
+  // loads without a real Tauri runtime.
+  mockInvoke: vi.fn(),
+  // dialogApi.selectDirectory: the Browse button calls this; we return a
+  // fixed path so the path input is populated for the Create flow.
+  mockSelectDirectory: vi.fn(),
+  // useDefaultProjectColor: zustand hook imported by the modal.
+  mockDefaultProjectColor: vi.fn(() => 'blue'),
+  // useProjectStore.getState (used by the zustand mock below).
+  mockUseProjectStore: vi.fn(() => ({})),
+  mockUpdateProject: vi.fn(),
+  mockReconcileProjectWorktrees: vi.fn(() => Promise.resolve('unchanged')),
+  // Existing projects for the Story 7 duplicate-name warning. Mutable per-test.
+  existingProjectsRef: { current: [] as Array<{ id: string; name: string }> }
+}))
+
+vi.mock('@/lib/tauri-runtime', () => ({
+  isTauriContext: mockIsTauriContext
+}))
+
+// Overlay back-stack boundary logs must not POST through the mocked fetch.
+vi.mock('@/lib/log-api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/log-api')>()),
+  logFrontendError: vi.fn()
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: mockInvoke
+}))
+
+vi.mock('@tauri-apps/plugin-fs', () => ({
+  // Desktop branch — never called when isTauriContext() is false. Stubs throw
+  // `fs.mkdir is unavailable` via tauriUnavailable; the test asserts this is
+  // NEVER reached on the web branch (the original bug).
+  mkdir: vi.fn(),
+  writeTextFile: vi.fn(),
+  readDir: vi.fn(),
+  open: vi.fn(),
+  readTextFile: vi.fn(),
+  remove: vi.fn(),
+  rename: vi.fn(),
+  copyFile: vi.fn(),
+  stat: vi.fn(),
+  watchImmediate: vi.fn()
+}))
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+  confirm: vi.fn()
+}))
+
+vi.mock('@/lib/dialog-api', () => ({
+  dialogApi: {
+    selectDirectory: mockSelectDirectory
+  },
+  registerWebDirectoryPicker: vi.fn(),
+  _resetWebDirectoryPickerForTesting: vi.fn()
+}))
+
+vi.mock('@/stores/app-settings-store', () => ({
+  useDefaultProjectColor: mockDefaultProjectColor
+}))
+
+// stub the project store the modal chain may touch downstream (avoid the real
+// zustand store pulling in stores that require Tauri runtime). `useProjects`
+// (Story 7 duplicate-name warning) is backed by a mutable array ref so
+// individual tests can seed existing project names.
+vi.mock('@/stores/project-store', () => ({
+  useProjectStore: Object.assign(mockUseProjectStore, {
+    getState: () => ({ updateProject: mockUpdateProject })
+  }),
+  useProjects: () => existingProjectsRef.current
+}))
+
+vi.mock('@/lib/worktree-reconciler', () => ({
+  reconcileProjectWorktrees: mockReconcileProjectWorktrees
+}))
+
+// Silence sonner toast during tests (it renders to document.body and can throw
+// on the jsdom portal in some configs).
+vi.mock('sonner', () => ({
+  toast: {
+    promise: vi.fn((_p, opts) => {
+      // Drive the promise to settle so the test's act() unwinds cleanly.
+      // success/error may be a string OR a resolver fn — call fns only.
+      _p.then(
+        (v: unknown) => typeof opts.success === 'function' && opts.success(v),
+        (e: unknown) => typeof opts.error === 'function' && opts.error(e)
+      )
+      return 'toast-id'
+    }),
+    error: vi.fn(),
+    success: vi.fn(),
+    loading: vi.fn()
+  }
+}))
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? 'OK' : 'Error',
+    json: () => Promise.resolve(body)
+  } as unknown as Response
+}
+
+describe('NewProjectModal (web-mode · auto-name + advanced options)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockReset()
+    vi.stubGlobal('fetch', mockFetch)
+    mockDefaultProjectColor.mockReturnValue('blue')
+    mockSelectDirectory.mockResolvedValue({ success: true, data: '/web/proj' })
+    existingProjectsRef.current = []
+    mockFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/shells')) {
+        return jsonResponse({
+          success: true,
+          data: {
+            default: { name: 'bash', path: '/bin/bash', displayName: 'Bash' },
+            available: [{ name: 'bash', path: '/bin/bash', displayName: 'Bash' }]
+          }
+        })
+      }
+      if (String(url).includes('/fs/ls')) {
+        // Empty directory listing — enables git-init advanced option tests.
+        return jsonResponse({ success: true, data: [] })
+      }
+      return jsonResponse({ success: true })
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('does not surface "fs.mkdir is unavailable" and completes the create flow', async () => {
+    const onCreateProject = vi.fn()
+
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+
+    // Fill the path — the simplified modal derives the name from the folder's
+    // basename, so only the path needs setting before Create is enabled.
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/proj' } })
+    })
+
+    // The path auto-filled the name field (core feature of the simplified
+    // modal — folder basename without user action).
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await waitFor(() => {
+      expect(nameInput).toHaveValue('proj')
+    })
+
+    // Now override the derived name with an explicit user edit — the edited
+    // name persists until the next folder change (which re-derives), and the
+    // name current at Create time is what onCreateProject receives.
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'My Web Project' } })
+    })
+
+    // Click Create. The chain fires:
+    //   filesystemApi.createDirectory(/web/proj) -> POST /fs/mkdir (web branch)
+    //   (empty template — no scaffold files written)
+    //   onCreateProject(name, color, path, shell, envVars?)
+    const createBtn = screen.getByText('Create')
+    await act(async () => {
+      fireEvent.click(createBtn)
+    })
+
+    // The PRIMARY assertion (Patch G's reason for existing): the web branch
+    // must route createDirectory through /fs/mkdir (NOT the desktop plugin-fs
+    // stub which would throw "fs.mkdir is unavailable").
+    await waitFor(
+      () => {
+        const mkdirCalls = mockFetch.mock.calls.filter(([url]) => String(url).includes('/fs/mkdir'))
+        expect(mkdirCalls.length).toBeGreaterThan(0)
+      },
+      { timeout: 10000 }
+    )
+
+    await waitFor(
+      () => {
+        expect(onCreateProject).toHaveBeenCalledTimes(1)
+      },
+      { timeout: 10000 }
+    )
+    const [nameArg, _colorArg, pathArg] = onCreateProject.mock.calls[0]
+    expect(nameArg).toBe('My Web Project')
+    expect(pathArg).toBe('/web/proj')
+
+    // No scaffolding: the empty-template pin means /fs/write must never fire.
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/fs/write'))).toBe(false)
+
+    // Sanity: the desktop tauri-unavailable message never reached the user.
+    const allFetchUrls = mockFetch.mock.calls.map(([url]) => String(url))
+    expect(allFetchUrls.some((u) => u.includes('/fs/mkdir'))).toBe(true)
+  })
+
+  it('re-derives the name on folder change and respects a user edit in between', async () => {
+    const onCreateProject = vi.fn()
+
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+
+    // Pick a first folder: name auto-fills from its basename.
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/home/me/my-app' } })
+    })
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await waitFor(() => {
+      expect(nameInput).toHaveValue('my-app')
+    })
+    // User edits the name — the edit persists until the next folder change.
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'Custom Name' } })
+    })
+    expect(nameInput).toHaveValue('Custom Name')
+
+    // Changing the folder re-derives the name (auto-name guarantee).
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/home/me/other-app' } })
+    })
+    await waitFor(() => {
+      expect(nameInput).toHaveValue('other-app')
+    })
+
+    // A filesystem root ('/', 'C:\\') or dot segment ('.', '..') must NOT
+    // become a project name — the derived name clears instead of keeping a
+    // stale one that no longer matches the chosen directory.
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/' } })
+    })
+    expect(nameInput).toHaveValue('')
+
+    // A one-segment relative path (no separators) is a valid folder name.
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: 'project' } })
+    })
+    expect(nameInput).toHaveValue('project')
+
+    // A drive root ('C:\\') must not derive 'C:' as the name.
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: 'C:\\' } })
+    })
+    expect(nameInput).toHaveValue('')
+
+    // Re-derive once more, then create and assert the final derived name used.
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/home/me/final-app' } })
+      fireEvent.click(screen.getByText('Create'))
+    })
+    await waitFor(
+      () => {
+        expect(onCreateProject).toHaveBeenCalledTimes(1)
+      },
+      { timeout: 10000 }
+    )
+    expect(onCreateProject.mock.calls[0][0]).toBe('final-app')
+    expect(onCreateProject.mock.calls[0][2]).toBe('/home/me/final-app')
+  })
+
+  it('auto-fills the name from the Browse picker (handleBrowse path)', async () => {
+    mockSelectDirectory.mockResolvedValue({ success: true, data: '/home/me/picked-app' })
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Browse'))
+    })
+
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await waitFor(() => {
+      expect(nameInput).toHaveValue('picked-app')
+    })
+    expect(screen.getByPlaceholderText('No directory selected')).toHaveValue('/home/me/picked-app')
+  })
+
+  it('derives the name from Windows-style paths (backslash separators)', async () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: 'C:\\Users\\me\\proj' } })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('My Project')).toHaveValue('proj')
+    })
+  })
+
+  it('passes the app default project color through to onCreateProject', async () => {
+    mockDefaultProjectColor.mockReturnValue('green')
+    const onCreateProject = vi.fn()
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/green-proj' } })
+      fireEvent.click(screen.getByText('Create'))
+    })
+
+    await waitFor(
+      () => {
+        expect(onCreateProject).toHaveBeenCalledTimes(1)
+      },
+      { timeout: 10000 }
+    )
+    // 2nd positional arg is the color.
+    expect(onCreateProject.mock.calls[0][1]).toBe('green')
+  })
+
+  it('resets name and path when the modal is closed and reopened', async () => {
+    const { rerender } = render(
+      <NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />
+    )
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/home/me/app' } })
+    })
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('My Project')).toHaveValue('app')
+    })
+
+    rerender(<NewProjectModal isOpen={false} onClose={vi.fn()} onCreateProject={vi.fn()} />)
+    rerender(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    expect(screen.getByPlaceholderText('No directory selected')).toHaveValue('')
+    expect(screen.getByPlaceholderText('My Project')).toHaveValue('')
+  })
+
+  it('keeps advanced options collapsed by default (simple common path)', () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+    expect(screen.getByText('Advanced options')).toBeInTheDocument()
+    // Collapsed by default: controls live inside the closed Collapsible.
+    expect(screen.queryByText('Project Template')).not.toBeInTheDocument()
+    expect(screen.queryByText('Default Terminal')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/Initialize Git repository/i)).not.toBeInTheDocument()
+  })
+
+  it('keeps the path, name and advanced selects at 16px on a coarse pointer', async () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    expect(screen.getByPlaceholderText('No directory selected')).toHaveClass(
+      'pointer-coarse:text-base'
+    )
+    expect(screen.getByPlaceholderText('My Project')).toHaveClass('pointer-coarse:text-base')
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Advanced options'))
+    })
+    await waitFor(() => {
+      expect(screen.getAllByRole('combobox').length).toBe(2)
+    })
+    for (const select of screen.getAllByRole('combobox')) {
+      expect(select).toHaveClass('pointer-coarse:text-base')
+    }
+  })
+
+  it('shows all advanced controls when the section is expanded', async () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Advanced options'))
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Project Template')).toBeInTheDocument()
+    })
+    expect(screen.getByText('Color')).toBeInTheDocument()
+    expect(screen.getByText('Default Terminal')).toBeInTheDocument()
+    expect(screen.getAllByRole('combobox').length).toBe(2)
+  })
+
+  it('shows the git-init checkbox when the chosen folder is empty (advanced)', async () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    // Pick a folder first — the git-init checkbox only renders when the
+    // chosen directory reads as empty (/fs/ls returns success with no data).
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/proj' } })
+    })
+
+    // Open Advanced so the conditional block is mounted.
+    await act(async () => {
+      fireEvent.click(screen.getByText('Advanced options'))
+    })
+
+    // /fs/ls returns success with no data → treated as empty folder.
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Initialize Git repository/i)).toBeInTheDocument()
+    })
+  })
+
+  it('completes the create flow with a template + git init via Advanced', async () => {
+    const onCreateProject = vi.fn()
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/adv' } })
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Advanced options'))
+    })
+
+    // Select the Node template so scaffoldProject emits real files (/fs/write).
+    const selects = screen.getAllByRole('combobox') as unknown as HTMLSelectElement[]
+    const templateSelect = selects.find((s) => s.value === 'empty')
+    expect(templateSelect, 'Project Template select must default to empty').toBeTruthy()
+    await act(async () => {
+      fireEvent.change(templateSelect!, { target: { value: 'node' } })
+    })
+
+    fireEvent.click(screen.getByLabelText(/Initialize Git repository/i))
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Create'))
+    })
+
+    await waitFor(
+      () => {
+        expect(mockFetch.mock.calls.some(([url]) => String(url).includes('/git/init'))).toBe(true)
+      },
+      { timeout: 10000 }
+    )
+    await waitFor(
+      () => {
+        const writeCalls = mockFetch.mock.calls.filter(([url]) => String(url).includes('/fs/write'))
+        expect(writeCalls.length).toBeGreaterThan(0)
+      },
+      { timeout: 10000 }
+    )
+  })
+
+  it('shows a server-persistence info note on web (conditional restart persistence)', () => {
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+    expect(screen.getByText(/this project is saved on the server/i)).toBeInTheDocument()
+    // The note must NOT unconditionally promise restart persistence: a
+    // memory-only server (no projects registry file) loses projects on
+    // restart, so the wording stays conditional.
+    expect(
+      screen.getByText(/persists across server restarts when the server is configured/i)
+    ).toBeInTheDocument()
+  })
+
+  it('hides the server-persistence note on desktop (isTauriContext true)', () => {
+    mockIsTauriContext.mockReturnValue(true)
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+    expect(screen.queryByText(/this project is saved on the server/i)).not.toBeInTheDocument()
+  })
+
+  // ── Story 7: responsive width + doubled-name/duplicate warning ──────────
+
+  it('constrains the modal to 100vw-2rem on phone-sized viewports', () => {
+    // Matrix row "Modal fits 390px": the container must carry the responsive
+    // max-width alongside the desktop width so a 390px viewport never
+    // overflows horizontally.
+    const { container } = render(
+      <NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />
+    )
+    const panel = container.querySelector('.bg-card.rounded-lg') as HTMLElement
+    expect(panel).toBeTruthy()
+    expect(panel.className).toContain('w-[520px]')
+    expect(panel.className).toContain('max-w-[calc(100vw-2rem)]')
+  })
+
+  it('warns when the name is a doubled pattern and still allows creating', async () => {
+    // Matrix row "Doubled name": the QA artifact was demo-projectdemo-project.
+    const onCreateProject = vi.fn()
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/demo-project' } })
+    })
+    // Simulate the doubled-name trap: type the name again on top of the
+    // auto-derived value (the QA repro).
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'demo-projectdemo-project' } })
+    })
+
+    const warning = await screen.findByTestId('new-project-name-warning')
+    expect(warning).toHaveTextContent(/typed twice/i)
+    expect(warning).toHaveTextContent('demo-project')
+
+    // "Create stays possible after warning": the button is NOT disabled.
+    const createBtn = screen.getByText('Create') as HTMLButtonElement
+    expect(createBtn).not.toBeDisabled()
+
+    await act(async () => {
+      fireEvent.click(createBtn)
+    })
+    await waitFor(
+      () => {
+        expect(onCreateProject).toHaveBeenCalledTimes(1)
+      },
+      { timeout: 10000 }
+    )
+    // No silent munging: the submitted name is exactly what the field held.
+    expect(onCreateProject.mock.calls[0][0]).toBe('demo-projectdemo-project')
+  })
+
+  it('does not double when typing over the auto-derived name (no-concat regression)', async () => {
+    // The QA report claimed "typing on top of the auto-filled value silently
+    // concatenates". The controlled input cannot do that — pin the behavior:
+    // typing a fresh value replaces the derived name verbatim.
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/demo-project' } })
+    })
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await waitFor(() => {
+      expect(nameInput).toHaveValue('demo-project')
+    })
+
+    // Type a full replacement value char-by-char as a keyboard would.
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'my-project' } })
+    })
+    expect(nameInput).toHaveValue('my-project')
+    expect(screen.queryByTestId('new-project-name-warning')).not.toBeInTheDocument()
+
+    // Select-all + type the derived name again (the "typed twice" gesture
+    // short of actually doubling) — still exactly the typed value.
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'demo-project' } })
+    })
+    expect(nameInput).toHaveValue('demo-project')
+    expect(screen.queryByTestId('new-project-name-warning')).not.toBeInTheDocument()
+  })
+
+  it('warns when the name duplicates an existing project', async () => {
+    // Matrix row "Doubled name" duplicate branch: warn at minimum.
+    existingProjectsRef.current = [{ id: 'p1', name: 'demo-project' }]
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/other' } })
+      fireEvent.change(nameInput, { target: { value: 'demo-project' } })
+    })
+
+    const warning = await screen.findByTestId('new-project-name-warning')
+    expect(warning).toHaveTextContent(/already exists/i)
+    expect(warning).toHaveTextContent('demo-project')
+
+    // Warn, not block.
+    const createBtn = screen.getByText('Create') as HTMLButtonElement
+    expect(createBtn).not.toBeDisabled()
+  })
+
+  it('does not warn for a fresh, non-doubled, non-duplicate name', async () => {
+    existingProjectsRef.current = [{ id: 'p1', name: 'demo-project' }]
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={vi.fn()} />)
+
+    const pathInput = screen.getByPlaceholderText('No directory selected')
+    await act(async () => {
+      fireEvent.change(pathInput, { target: { value: '/web/my-app' } })
+    })
+    // Auto-derived "my-app": no warning.
+    await waitFor(() => {
+      expect(screen.queryByTestId('new-project-name-warning')).not.toBeInTheDocument()
+    })
+
+    // Short two-char names ("aa") are legitimate and must NOT trip the
+    // doubled-pattern guard (fragment length ≥ 2 required).
+    const nameInput = screen.getByPlaceholderText('My Project')
+    await act(async () => {
+      fireEvent.change(nameInput, { target: { value: 'aa' } })
+    })
+    expect(screen.queryByTestId('new-project-name-warning')).not.toBeInTheDocument()
+  })
+
+  describe('Escape (L-32: one Esc closes one layer)', () => {
+    it('closes once on an Esc nothing else handled', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes once, not twice, on an Esc inside the panel (panel handler, then the window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes nothing on an Esc a layer above already claimed (window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+      const layerAbove = (event: KeyboardEvent): void => {
+        event.preventDefault()
+        claimEscape(event)
+      }
+      window.addEventListener('keydown', layerAbove, true)
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      window.removeEventListener('keydown', layerAbove, true)
+
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('closes nothing on a claimed Esc with focus inside the panel (panel onKeyDown)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+      const layerAbove = (event: KeyboardEvent): void => {
+        event.preventDefault()
+        claimEscape(event)
+      }
+      window.addEventListener('keydown', layerAbove, true)
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+      window.removeEventListener('keydown', layerAbove, true)
+
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    // A Radix layer still animating out (the project sheet this modal was swapped
+    // in from) prevents the Esc it receives although it sits above nothing: that
+    // Esc is the modal's own. The phone shell's Esc after "Add project" needs it.
+    it('closes on an Esc that only a closing layer prevented, without claiming it (window handler)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      await screen.findByPlaceholderText('No directory selected')
+      const closingLayer = (event: KeyboardEvent): void => event.preventDefault()
+      document.addEventListener('keydown', closingLayer, true)
+
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      document.removeEventListener('keydown', closingLayer, true)
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('closes once on an Esc that only a closing layer prevented, with focus inside the panel (panel onKeyDown)', async () => {
+      const onClose = vi.fn()
+      render(<NewProjectModal isOpen onClose={onClose} onCreateProject={vi.fn()} />)
+      const pathInput = await screen.findByPlaceholderText('No directory selected')
+      const closingLayer = (event: KeyboardEvent): void => event.preventDefault()
+      document.addEventListener('keydown', closingLayer, true)
+
+      fireEvent.keyDown(pathInput, { key: 'Escape' })
+      document.removeEventListener('keydown', closingLayer, true)
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('NewProjectModal (web-mode · existing .git detection after create)', () => {
+  const REPO = '/web/repo'
+  const DOT_GIT = `${REPO}/.git`
+  const READ_ERROR = { success: false, error: 'not a directory', code: 'READ_ERROR' }
+
+  type DotGit = 'directory' | 'gitdir-file' | 'plain-file' | 'missing'
+
+  function routeFilesystem(dotGit: DotGit) {
+    mockFetch.mockImplementation(async (url: string) => {
+      const u = new URL(String(url), 'http://termul.test')
+      const target = u.searchParams.get('path')
+      if (u.pathname.endsWith('/shells')) {
+        return jsonResponse({
+          success: true,
+          data: {
+            default: { name: 'bash', path: '/bin/bash', displayName: 'Bash' },
+            available: [{ name: 'bash', path: '/bin/bash', displayName: 'Bash' }]
+          }
+        })
+      }
+      if (u.pathname.endsWith('/fs/ls') && target === REPO) {
+        return jsonResponse({ success: true, data: [{ name: '.git', path: DOT_GIT }] })
+      }
+      if (u.pathname.endsWith('/fs/ls') && target === DOT_GIT) {
+        return dotGit === 'directory'
+          ? jsonResponse({ success: true, data: [{ name: 'HEAD', path: `${DOT_GIT}/HEAD` }] })
+          : jsonResponse(READ_ERROR)
+      }
+      if (u.pathname.endsWith('/fs/read') && target === DOT_GIT) {
+        if (dotGit === 'gitdir-file') {
+          return jsonResponse({
+            success: true,
+            data: { content: 'gitdir: /web/main/.git/worktrees/repo\n' }
+          })
+        }
+        if (dotGit === 'plain-file') {
+          return jsonResponse({ success: true, data: { content: 'notes\n' } })
+        }
+        return jsonResponse({ success: false, error: 'no such file', code: 'NOT_FOUND' })
+      }
+      return jsonResponse({ success: true })
+    })
+  }
+
+  async function createProjectAt(path: string) {
+    const onCreateProject = vi.fn(async () => ({ id: 'proj-1' }))
+    render(<NewProjectModal isOpen onClose={vi.fn()} onCreateProject={onCreateProject} />)
+    await act(async () => {
+      fireEvent.change(screen.getByPlaceholderText('No directory selected'), {
+        target: { value: path }
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByText('Create'))
+    })
+    await waitFor(() => expect(mockReconcileProjectWorktrees).toHaveBeenCalledWith('proj-1'), {
+      timeout: 10000
+    })
+  }
+
+  const probedPaths = () =>
+    mockFetch.mock.calls
+      .map(([url]) => new URL(String(url), 'http://termul.test'))
+      .filter((u) => u.searchParams.get('path') === DOT_GIT)
+      .map((u) => u.pathname.replace(/^.*\/fs\//, 'fs/'))
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockReset()
+    vi.stubGlobal('fetch', mockFetch)
+    mockDefaultProjectColor.mockReturnValue('blue')
+    existingProjectsRef.current = []
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('marks the project a git repo when .git is a directory', async () => {
+    routeFilesystem('directory')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([
+      ['proj-1', { isGitRepo: false }],
+      ['proj-1', { isGitRepo: true }]
+    ])
+    expect(probedPaths()).toEqual(['fs/ls'])
+  })
+
+  it('marks the project a git repo when .git is a gitdir: pointer file', async () => {
+    routeFilesystem('gitdir-file')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([
+      ['proj-1', { isGitRepo: false }],
+      ['proj-1', { isGitRepo: true }]
+    ])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
+  })
+
+  it('leaves isGitRepo false when .git is a file without a gitdir: line', async () => {
+    routeFilesystem('plain-file')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([['proj-1', { isGitRepo: false }]])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
+  })
+
+  it('leaves isGitRepo false when there is no .git at all', async () => {
+    routeFilesystem('missing')
+    await createProjectAt(REPO)
+
+    expect(mockUpdateProject.mock.calls).toEqual([['proj-1', { isGitRepo: false }]])
+    expect(probedPaths()).toEqual(['fs/ls', 'fs/read'])
+  })
+})
+
+describe('NewProjectModal overlay back stack', () => {
+  let cleanup: () => void
+
+  function Harness({ onClose }: { onClose: () => void }): React.JSX.Element {
+    const [open, setOpen] = useState(true)
+    return (
+      <NewProjectModal
+        isOpen={open}
+        onClose={() => {
+          onClose()
+          setOpen(false)
+        }}
+        onCreateProject={vi.fn()}
+      />
+    )
+  }
+
+  const stackIds = (): string[] => useOverlayStackStore.getState().stack.map((entry) => entry.id)
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(false)
+    mockFetch.mockReset()
+    vi.stubGlobal('fetch', mockFetch)
+    existingProjectsRef.current = []
+    mockFetch.mockImplementation(async (url: string) =>
+      String(url).includes('/shells')
+        ? jsonResponse({
+            success: true,
+            data: {
+              default: { name: 'bash', path: '/bin/bash', displayName: 'Bash' },
+              available: [{ name: 'bash', path: '/bin/bash', displayName: 'Bash' }]
+            }
+          })
+        : jsonResponse({ success: true, data: [] })
+    )
+    window.history.replaceState(null, '', '#/base')
+    cleanup = armMobileOverlayBackStack()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  describe('mobile shell', () => {
+    it('registers while open and system back closes it and consumes the sentinel', async () => {
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+
+      expect(stackIds()[0]).toMatch(/^new-project-modal:/)
+      await waitForSentinelDepth(1)
+
+      await pressSystemBack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+      await waitFor(
+        () => expect(screen.queryByPlaceholderText('My Project')).not.toBeInTheDocument(),
+        {
+          timeout: 3000
+        }
+      )
+      expect(location.hash).toBe('#/base')
+      expect(readOverlaySentinelDepth(history.state)).toBe(0)
+      expect(stackIds()).toEqual([])
+    })
+
+    it('a close by Esc closes exactly once and consumes the sentinel', async () => {
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+      await waitForSentinelDepth(1)
+
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await waitForSentinelDepth(0)
+      await settleOverlayBackStack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('desktop shell', () => {
+    it('is inert: no registration, no history push and no traversal', async () => {
+      useOverlayStackStore.getState().setMobileShell(false)
+      const pushSpy = vi.spyOn(history, 'pushState')
+      const backSpy = vi.spyOn(history, 'back')
+      const goSpy = vi.spyOn(history, 'go')
+      const onClose = vi.fn()
+      render(<Harness onClose={onClose} />)
+
+      expect(stackIds()).toEqual([])
+      fireEvent.keyDown(window, { key: 'Escape' })
+      await settleOverlayBackStack()
+
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(pushSpy).not.toHaveBeenCalled()
+      expect(backSpy).not.toHaveBeenCalled()
+      expect(goSpy).not.toHaveBeenCalled()
+    })
+  })
+})
+
+describe('NewProjectModal over native browser webviews', () => {
+  function OcclusionProbe(): React.JSX.Element {
+    return <span data-testid="occlusion">{useNativeWebviewOccluded() ? 'occluded' : 'clear'}</span>
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsTauriContext.mockReturnValue(true)
+  })
+
+  afterEach(() => {
+    resetNativeWebviewOcclusionForTests()
+  })
+
+  it('keeps every browser webview hidden while open and releases them once it closes', async () => {
+    const Page = ({ open }: { open: boolean }): React.JSX.Element => (
+      <>
+        <NewProjectModal isOpen={open} onClose={vi.fn()} onCreateProject={vi.fn()} />
+        <OcclusionProbe />
+      </>
+    )
+    const { rerender } = render(<Page open={false} />)
+    expect(screen.getByTestId('occlusion')).toHaveTextContent('clear')
+
+    rerender(<Page open />)
+    expect(screen.getByTestId('occlusion')).toHaveTextContent('occluded')
+
+    rerender(<Page open={false} />)
+    await waitFor(() => expect(screen.getByTestId('occlusion')).toHaveTextContent('clear'))
+  })
+})

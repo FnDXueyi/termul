@@ -1,10 +1,143 @@
+import { COMMAND_RESULT_CODES, type IpcResult } from '@shared/types/ipc.types'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { useShallow } from 'zustand/shallow'
 import { filesystemApi } from '@/lib/api'
+import {
+  cancelAllAutoSaves,
+  cancelAutoSave,
+  clearAutoSaveFailure,
+  scheduleAutoSave
+} from '@/lib/editor-auto-save'
 import { flushEditorContent } from '@/lib/editor-content-flush'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
 import { markEditorSelfSave } from '@/lib/editor-self-save'
+import { logFrontendError } from '@/lib/log-api'
 import { scheduleGitStatusRefreshForPath } from '@/lib/schedule-git-status-refresh'
+import { sha256Hex } from '@/lib/sha256-hex'
+
+/** Saves currently in flight, by file path (in-flight guard, QA r2 story 4). */
+const savesInFlight = new Map<string, Promise<boolean>>()
+
+interface RenameHold {
+  from: string
+  to: string
+  /** Settles to whether the rename succeeded. */
+  outcome: Promise<boolean>
+}
+
+/** Renames in flight; each holds saves to its path and to everything under it. */
+const renamesInFlight = new Set<RenameHold>()
+
+function forwardSlashes(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+function isAtOrUnder(path: string, folder: string): boolean {
+  const normalized = forwardSlashes(path)
+  return normalized === folder || normalized.startsWith(`${folder}/`)
+}
+
+/**
+ * Run `rename`, which moves `fromPath` (a file or folder) to `toPath` on disk
+ * and moves the open files under it in this store, without racing their saves.
+ * It starts once no save at or under `fromPath` is in flight, so a write
+ * already sent lands before the move. A save requested at or under `fromPath`
+ * meanwhile, including for a file opened during the wait, waits for the rename,
+ * then saves the file wherever it ended up.
+ */
+export async function renameBetweenSaves(
+  fromPath: string,
+  toPath: string,
+  rename: () => Promise<IpcResult<void>>
+): Promise<IpcResult<void>> {
+  const from = forwardSlashes(fromPath)
+  let settle: (renamed: boolean) => void = () => {}
+  const hold: RenameHold = {
+    from,
+    to: forwardSlashes(toPath),
+    outcome: new Promise<boolean>((resolve) => {
+      settle = resolve
+    })
+  }
+  renamesInFlight.add(hold)
+  let renamed = false
+  try {
+    const savesUnderway = (): Array<Promise<boolean>> =>
+      [...savesInFlight].filter(([path]) => isAtOrUnder(path, from)).map(([, save]) => save)
+    for (let saves = savesUnderway(); saves.length > 0; saves = savesUnderway()) {
+      await Promise.all(saves)
+    }
+    const result = await rename()
+    renamed = result.success
+    return result
+  } finally {
+    renamesInFlight.delete(hold)
+    settle(renamed)
+  }
+}
+
+/**
+ * Boundary log for editor saves. Failures route through logFrontendError
+ * (error level → Tauri command / server `/log/frontend-error`); successes
+ * route through logFrontendError at the info level (story 8 extended the
+ * level set) so they land in the backend log file without polluting the
+ * error channel. File basename + byte length only — never full contents,
+ * secrets, or absolute paths.
+ */
+function logSaveBoundary(
+  path: string,
+  byteLength: number,
+  outcome: 'saved' | 'failed',
+  error?: string
+): void {
+  const name = path.split(/[\\/]/).pop() || path
+  const detail = `file=${name} bytes=${byteLength}${error ? ` error=${error}` : ''}`
+  if (outcome === 'failed') {
+    void logFrontendError({
+      level: 'error',
+      source: 'editor-store.saveFile',
+      message: `editor save failed ${detail}`
+    })
+    return
+  }
+  void logFrontendError({
+    level: 'info',
+    source: 'editor-store.saveFile',
+    message: `editor save succeeded ${detail}`
+  })
+}
+
+/**
+ * The host refused a save because the file changed on disk since it was read
+ * (`PRECONDITION_FAILED`): same "File changed externally" notice the file
+ * watcher raises for a dirty buffer. Reload takes the disk version; Overwrite
+ * keeps the buffer and saves it without a precondition.
+ */
+function notifyExternalChange(path: string): void {
+  toast('File changed externally', {
+    description: path.split(/[\\/]/).pop() || path,
+    action: {
+      label: 'Reload',
+      onClick: () => {
+        void useEditorStore.getState().reloadFile(path, { force: true })
+      }
+    },
+    cancel: {
+      label: 'Overwrite',
+      onClick: () => {
+        void useEditorStore.getState().overwriteFile(path)
+      }
+    }
+  })
+}
+
+/** Write failures that say nothing about whether the host applied the write. */
+const UNCERTAIN_WRITE_CODES: ReadonlySet<string> = new Set([
+  'NETWORK_ERROR',
+  COMMAND_RESULT_CODES.OUTCOME_UNKNOWN,
+  COMMAND_RESULT_CODES.COMMAND_IN_PROGRESS
+])
 
 const EDITOR_TAB_LIMIT = 15
 
@@ -27,6 +160,7 @@ function detectLanguage(filePath: string): string {
     scss: 'css',
     html: 'html',
     htm: 'html',
+    astro: 'astro',
     md: 'markdown',
     yaml: 'yaml',
     yml: 'yaml',
@@ -58,6 +192,46 @@ export interface EditorFileState {
   cursorPosition: { line: number; col: number }
   scrollTop: number
   operationStatus: 'idle' | 'saving' | 'reloading' | 'saved'
+  /**
+   * sha256 of the bytes this buffer was last read from / saved to (web host
+   * only): sent as the `expected` precondition of the next save so a write over
+   * a file changed elsewhere is refused instead of overwriting it.
+   */
+  contentHash?: string
+  /**
+   * The host reports content hashes for this file (web): kept when `contentHash`
+   * is dropped (overwrite) so the next successful save re-establishes it.
+   */
+  tracksHash?: true
+  /** The host refused the last save (`PRECONDITION_FAILED`): the file changed on disk. */
+  externalConflict?: boolean
+  /**
+   * Set when a restored unsaved draft differs from a file that changed on disk
+   * after the draft was saved. `content` holds the disk version; the draft is
+   * kept here until the user resolves it (never silently dropped).
+   */
+  draftConflict?: { draftContent: string; draftSavedAt: number }
+}
+
+/**
+ * Reconcile a persisted unsaved draft with a freshly opened file (pure).
+ * - same text as disk: nothing to restore
+ * - disk not newer than the draft: apply the draft as an unsaved edit
+ * - disk newer: keep disk content and record the draft as a conflict
+ */
+export function reconcileDraft(
+  file: EditorFileState,
+  draft: { content: string; savedAt: number }
+): EditorFileState {
+  if (file.content === draft.content) return file
+  if (file.lastModified <= draft.savedAt) {
+    const { draftConflict: _cleared, ...rest } = file
+    return { ...rest, content: draft.content, isDirty: draft.content !== file.originalContent }
+  }
+  return {
+    ...file,
+    draftConflict: { draftContent: draft.content, draftSavedAt: draft.savedAt }
+  }
 }
 
 export interface EditorState {
@@ -67,17 +241,31 @@ export interface EditorState {
   openFile: (path: string) => Promise<void>
   closeFile: (path: string) => void
   closeFileIfIdle: (path: string) => boolean
+  /** Re-key an open file to the path it was renamed to, keeping its buffer and dirty state. */
+  renameOpenFile: (fromPath: string, toPath: string) => void
   updateContent: (path: string, content: string) => void
   saveFile: (path: string) => Promise<boolean>
   saveAllDirty: () => Promise<void>
   setViewMode: (path: string, mode: 'code' | 'markdown') => void
   updateCursorPosition: (path: string, line: number, col: number) => void
   updateScrollTop: (path: string, scrollTop: number) => void
-  reloadFile: (path: string) => Promise<void>
+  /**
+   * Save the buffer over whatever is on disk: drops the stored hash (and the
+   * conflict flag) so the write carries no precondition. The user's answer to
+   * "File changed externally".
+   */
+  overwriteFile: (path: string) => Promise<boolean>
+  /** `force`: reload even a dirty buffer (the user chose to take the disk version). */
+  reloadFile: (path: string, options?: { force?: boolean }) => Promise<void>
   setActiveFilePath: (path: string | null) => void
   clearAllFiles: () => void
   hasDirtyFiles: () => boolean
   getDirtyFileCount: () => number
+  restoreDraft: (
+    path: string,
+    draft: { content: string; savedAt: number }
+  ) => 'applied' | 'conflict' | 'unchanged'
+  resolveDraftConflict: (path: string, choice: 'draft' | 'disk') => void
   getOpenFilePaths: () => string[]
 }
 
@@ -111,7 +299,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       let oldestTime = Infinity
 
       newFiles.forEach((file, filePath) => {
-        if (filePath !== activeFilePath && !file.isDirty && file.lastModified < oldestTime) {
+        if (
+          filePath !== activeFilePath &&
+          !fileNeedsAttention(file) &&
+          file.lastModified < oldestTime
+        ) {
           oldestTime = file.lastModified
           oldestPath = filePath
         }
@@ -134,6 +326,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       isDirty: false,
       language: detectLanguage(path),
       lastModified: result.data.modifiedAt,
+      ...(result.data.contentHash
+        ? { contentHash: result.data.contentHash, tracksHash: true as const }
+        : {}),
       viewMode: getDefaultViewMode(path),
       cursorPosition: { line: 1, col: 1 },
       scrollTop: 0,
@@ -145,6 +340,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   closeFile: (path: string): void => {
+    cancelAutoSave(path)
     const { openFiles, activeFilePath } = get()
     const newFiles = new Map(openFiles)
     newFiles.delete(path)
@@ -170,6 +366,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     const { openFiles: openFiles2, activeFilePath } = get()
     const newFiles = new Map(openFiles2)
     newFiles.delete(path)
+    cancelAutoSave(path)
 
     let newActive = activeFilePath
     if (activeFilePath === path) {
@@ -181,82 +378,230 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     return true
   },
 
+  renameOpenFile: (fromPath: string, toPath: string): void => {
+    const { openFiles, activeFilePath } = get()
+    const file = openFiles.get(fromPath)
+    if (!file || fromPath === toPath) return
+
+    cancelAutoSave(fromPath)
+    const renamed: EditorFileState = {
+      ...file,
+      filePath: toPath,
+      language: detectLanguage(toPath),
+      // A finished save's status reset is keyed to the old path and cannot reach this entry.
+      operationStatus: 'idle',
+      viewMode: getDefaultViewMode(toPath) === 'markdown' ? file.viewMode : 'code'
+    }
+    const newFiles = new Map<string, EditorFileState>()
+    for (const [path, state] of openFiles) {
+      if (path === fromPath) newFiles.set(toPath, renamed)
+      else if (path !== toPath) newFiles.set(path, state)
+    }
+    set({
+      openFiles: newFiles,
+      activeFilePath: activeFilePath === fromPath ? toPath : activeFilePath
+    })
+    if (renamed.isDirty) scheduleAutoSave(toPath)
+  },
+
   updateContent: (path: string, content: string): void => {
     const { openFiles } = get()
     const file = openFiles.get(path)
     if (!file) return
+    // The editor is read-only while a draft conflict is unresolved: an edit
+    // here would live outside the two stored buffers (disk + draft) and be
+    // lost on switch. Drop it rather than let it diverge.
+    if (file.draftConflict) return
 
     const newFiles = new Map(openFiles)
+    const isDirty = content !== file.originalContent
     newFiles.set(path, {
       ...file,
       content,
-      isDirty: content !== file.originalContent
+      isDirty
     })
     set({ openFiles: newFiles })
+
+    // Auto-save (GH-539): every real buffer change pushes the debounce window;
+    // returning to the original content clears it (and any pending timer).
+    if (content !== file.content) {
+      clearAutoSaveFailure(path)
+      if (isDirty) {
+        scheduleAutoSave(path)
+      } else {
+        cancelAutoSave(path)
+      }
+    }
   },
 
   saveFile: async (path: string): Promise<boolean> => {
-    await flushEditorContent(path)
+    for (const hold of renamesInFlight) {
+      if (!isAtOrUnder(path, hold.from)) continue
+      return hold.outcome.then((renamed) =>
+        get().saveFile(
+          renamed ? `${hold.to}${forwardSlashes(path).slice(hold.from.length)}` : path
+        )
+      )
+    }
 
-    const { openFiles } = get()
-    const file = openFiles.get(path)
-    if (!file) return false
+    // In-flight guard (QA r2 story 4): serialize concurrent save requests for
+    // the same path (autosave debounce + manual button/Ctrl+S can race). The
+    // second caller awaits the first write's completion, then re-checks
+    // dirtiness — a no-longer-dirty file skips the redundant write entirely,
+    // and a still-dirty file writes the freshest buffer.
+    const inFlight = savesInFlight.get(path)
+    if (inFlight) {
+      // Await the first save, then re-run (dirty-check decides whether a
+      // second write is needed at all).
+      return inFlight.then(() => get().saveFile(path))
+    }
 
-    const snapshotContent = file.content
-    const newFiles = new Map(get().openFiles)
-    newFiles.set(path, { ...file, operationStatus: 'saving' })
-    set({ openFiles: newFiles })
+    const save = (async (): Promise<boolean> => {
+      // CodeRabbit: a registered flusher may reject (its contract permits
+      // it). A rejection here previously escaped saveFile's try block — no
+      // boundary log, no failure cleanup, and saveAllDirty (which awaits
+      // each saveFile without a per-file boundary) would stop at this file.
+      // Catch it, log the save failure, and report false — the flusher's
+      // unsaved content stays marked dirty for the next attempt.
+      try {
+        await flushEditorContent(path)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        logSaveBoundary(path, -1, 'failed', `content flush failed: ${detail}`)
+        return false
+      }
 
-    try {
-      const result = await filesystemApi.writeFile(path, snapshotContent)
-      if (!result.success) {
+      const { openFiles } = get()
+      const file = openFiles.get(path)
+      if (!file) return false
+
+      // An unresolved draft conflict means the buffer is the disk version
+      // while a newer-than-disk draft is still pending a user decision;
+      // writing now would bury that choice, so refuse until it is resolved.
+      if (file.draftConflict) {
+        void logFrontendError({
+          level: 'info',
+          source: 'editor-store.saveFile',
+          message: `save skipped for ${path.split(/[\\/]/).pop() || path}: unresolved draft conflict`
+        })
+        return false
+      }
+
+      // Dirty-check skip: a save request for a buffer that already matches
+      // the original content must not hit the write API — the autosave
+      // "fires with no changes" row. The content IS on disk (a prior save
+      // persisted it), so report success rather than failure.
+      if (!file.isDirty) return true
+
+      const snapshotContent = file.content
+      const newFiles = new Map(get().openFiles)
+      newFiles.set(path, { ...file, operationStatus: 'saving' })
+      set({ openFiles: newFiles })
+
+      try {
+        let result = file.contentHash
+          ? await filesystemApi.writeFile(path, snapshotContent, {
+              expected: { sha256: file.contentHash }
+            })
+          : await filesystemApi.writeFile(path, snapshotContent)
+        // The reply was lost or its outcome is unknown: the host may or may not
+        // have applied the write. Read the file back. If it holds our content the
+        // write landed, so treat it as saved. Otherwise keep the hash this buffer
+        // was read at: the next save is checked against it, so it never
+        // overwrites a change made after the unknown write.
+        if (!result.success && file.tracksHash && UNCERTAIN_WRITE_CODES.has(result.code)) {
+          const disk = await filesystemApi.readFile(path)
+          if (disk.success && disk.data.content === snapshotContent) {
+            result = { success: true, data: undefined }
+          }
+        }
+        if (!result.success) {
+          const conflict = result.code === COMMAND_RESULT_CODES.PRECONDITION_FAILED
+          // An unchecked write (an overwrite the user chose) whose outcome could
+          // not be confirmed has no hash to check a retry against: stop automatic
+          // saves and let the user decide again (Reload or Overwrite).
+          const needsDecision =
+            !conflict &&
+            !file.contentHash &&
+            file.tracksHash === true &&
+            UNCERTAIN_WRITE_CODES.has(result.code)
+          const resetFiles = new Map(get().openFiles)
+          const current = resetFiles.get(path)
+          if (current) {
+            resetFiles.set(path, {
+              ...current,
+              operationStatus: 'idle',
+              ...(conflict || needsDecision ? { externalConflict: true } : {})
+            })
+            set({ openFiles: resetFiles })
+          }
+          if (conflict) notifyExternalChange(path)
+          logSaveBoundary(path, snapshotContent.length, 'failed', result.error)
+          return false
+        }
+        // The host now holds exactly `snapshotContent`; its hash is the next
+        // save's precondition.
+        const savedHash = file.tracksHash ? sha256Hex(snapshotContent) : undefined
+
+        const updatedFiles = new Map(get().openFiles)
+        const current = updatedFiles.get(path)
+        if (!current) return false
+
+        // Only mark clean if buffer hasn't changed since the snapshot
+        const bufferUnchanged = current.content === snapshotContent
+        updatedFiles.set(path, {
+          ...current,
+          originalContent: current.content,
+          isDirty: !bufferUnchanged,
+          lastModified: Date.now(),
+          operationStatus: 'saved',
+          externalConflict: false,
+          ...(savedHash ? { contentHash: savedHash } : {})
+        })
+        set({ openFiles: updatedFiles })
+        markEditorSelfSave(path)
+        scheduleGitStatusRefreshForPath(path)
+
+        window.setTimeout(() => {
+          const latest = get().openFiles.get(path)
+          if (latest?.operationStatus === 'saved') {
+            const resetFiles = new Map(get().openFiles)
+            const entry = resetFiles.get(path)
+            if (entry) {
+              resetFiles.set(path, { ...entry, operationStatus: 'idle' })
+              set({ openFiles: resetFiles })
+            }
+          }
+        }, 1500)
+
+        logSaveBoundary(path, snapshotContent.length, 'saved')
+        return true
+      } catch (error) {
         const resetFiles = new Map(get().openFiles)
         const current = resetFiles.get(path)
         if (current) {
           resetFiles.set(path, { ...current, operationStatus: 'idle' })
           set({ openFiles: resetFiles })
         }
+        logSaveBoundary(
+          path,
+          snapshotContent.length,
+          'failed',
+          error instanceof Error ? error.message : String(error)
+        )
         return false
       }
+    })()
 
-      const updatedFiles = new Map(get().openFiles)
-      const current = updatedFiles.get(path)
-      if (!current) return false
-
-      // Only mark clean if buffer hasn't changed since the snapshot
-      const bufferUnchanged = current.content === snapshotContent
-      updatedFiles.set(path, {
-        ...current,
-        originalContent: current.content,
-        isDirty: !bufferUnchanged,
-        lastModified: Date.now(),
-        operationStatus: 'saved'
-      })
-      set({ openFiles: updatedFiles })
-      markEditorSelfSave(path)
-      scheduleGitStatusRefreshForPath(path)
-
-      window.setTimeout(() => {
-        const latest = get().openFiles.get(path)
-        if (latest?.operationStatus === 'saved') {
-          const resetFiles = new Map(get().openFiles)
-          const entry = resetFiles.get(path)
-          if (entry) {
-            resetFiles.set(path, { ...entry, operationStatus: 'idle' })
-            set({ openFiles: resetFiles })
-          }
-        }
-      }, 1500)
-
-      return true
-    } catch {
-      const resetFiles = new Map(get().openFiles)
-      const current = resetFiles.get(path)
-      if (current) {
-        resetFiles.set(path, { ...current, operationStatus: 'idle' })
-        set({ openFiles: resetFiles })
+    savesInFlight.set(path, save)
+    try {
+      return await save
+    } finally {
+      // Only clear when this save is still the latest one for the path (a
+      // queued re-save inside the chain sets its own entry first).
+      if (savesInFlight.get(path) === save) {
+        savesInFlight.delete(path)
       }
-      return false
     }
   },
 
@@ -302,13 +647,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ openFiles: newFiles })
   },
 
-  reloadFile: async (path: string): Promise<void> => {
+  overwriteFile: async (path: string): Promise<boolean> => {
+    const file = get().openFiles.get(path)
+    if (!file) return false
+    const files = new Map(get().openFiles)
+    files.set(path, { ...file, contentHash: undefined, externalConflict: false })
+    set({ openFiles: files })
+    return get().saveFile(path)
+  },
+
+  reloadFile: async (path: string, options?: { force?: boolean }): Promise<void> => {
     const { openFiles } = get()
     const file = openFiles.get(path)
     if (!file) return
 
-    // Don't reload dirty files silently
-    if (file.isDirty) return
+    // Don't reload dirty (or draft-conflicted) files silently
+    if ((file.isDirty && !options?.force) || file.draftConflict) return
 
     const snapshotContent = file.content
     const newFiles = new Map(get().openFiles)
@@ -340,6 +694,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           originalContent: result.data.content,
           isDirty: false,
           lastModified: result.data.modifiedAt,
+          contentHash: result.data.contentHash,
+          ...(result.data.contentHash ? { tracksHash: true as const } : {}),
+          externalConflict: false,
           operationStatus: 'idle'
         })
       } else {
@@ -364,25 +721,59 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   clearAllFiles: (): void => {
+    cancelAllAutoSaves()
     set({ openFiles: new Map(), activeFilePath: null })
   },
 
+  restoreDraft: (path, draft) => {
+    const file = get().openFiles.get(path)
+    if (!file) return 'unchanged'
+
+    const next = reconcileDraft(file, draft)
+    if (next === file) return 'unchanged'
+
+    const newFiles = new Map(get().openFiles)
+    newFiles.set(path, next)
+    set({ openFiles: newFiles })
+
+    if (next.draftConflict) return 'conflict'
+    if (next.isDirty) scheduleAutoSave(path)
+    return 'applied'
+  },
+
+  resolveDraftConflict: (path, choice) => {
+    const file = get().openFiles.get(path)
+    if (!file?.draftConflict) return
+
+    const { draftConflict, ...rest } = file
+    const next: EditorFileState =
+      choice === 'draft'
+        ? {
+            ...rest,
+            content: draftConflict.draftContent,
+            isDirty: draftConflict.draftContent !== file.originalContent
+          }
+        : rest
+    const newFiles = new Map(get().openFiles)
+    newFiles.set(path, next)
+    set({ openFiles: newFiles })
+
+    if (choice === 'draft') {
+      clearAutoSaveFailure(path)
+      if (next.isDirty) scheduleAutoSave(path)
+      else cancelAutoSave(path)
+    } else if (next.isDirty) {
+      // The kept disk-side buffer may carry edits typed during the conflict.
+      scheduleAutoSave(path)
+    }
+  },
+
   hasDirtyFiles: (): boolean => {
-    const { openFiles } = get()
-    let hasDirty = false
-    openFiles.forEach((file) => {
-      if (file.isDirty) hasDirty = true
-    })
-    return hasDirty
+    return Array.from(get().openFiles.values()).some(fileNeedsAttention)
   },
 
   getDirtyFileCount: (): number => {
-    const { openFiles } = get()
-    let count = 0
-    openFiles.forEach((file) => {
-      if (file.isDirty) count++
-    })
-    return count
+    return Array.from(get().openFiles.values()).filter(fileNeedsAttention).length
   },
 
   getOpenFilePaths: (): string[] => {
@@ -451,7 +842,7 @@ export function useDirtyFiles(): string[] {
     useShallow((state) => {
       const dirty: string[] = []
       state.openFiles.forEach((file, path) => {
-        if (file.isDirty) dirty.push(path)
+        if (fileNeedsAttention(file)) dirty.push(path)
       })
       return dirty
     })

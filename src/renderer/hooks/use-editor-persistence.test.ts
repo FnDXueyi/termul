@@ -1,22 +1,37 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mockPersistedTerminal, mockTerminal } from '@/lib/test-utils/terminal'
+import {
+  _resetDroppedLaunchPlaceholdersForTesting,
+  setLiveLaunchSessionLookup,
+  takeAllDroppedLaunchPlaceholders
+} from '@/stores/acp-store/live-turn'
+import { useAgentChatLifetimeStore } from '@/stores/agent-chat-lifetime-store'
+import type { ProjectWorkspace } from '@/stores/workspace-store'
 import type { LeafNode, PaneNode, SplitNode } from '@/types/workspace.types'
-import { persistState, useEditorPersistence } from './use-editor-persistence'
+import {
+  deserializePaneTree,
+  persistState,
+  reconcileTerminalTabs,
+  useEditorPersistence
+} from './use-editor-persistence'
 
 const { mockLoadPersistedTerminals } = vi.hoisted(() => ({
   mockLoadPersistedTerminals: vi.fn()
 }))
 
-const { mockPersistenceRead, mockPersistenceWriteDebounced } = vi.hoisted(() => ({
+const { mockPersistenceRead, mockPersistenceWriteDebounced, mockReadFile } = vi.hoisted(() => ({
   mockPersistenceRead: vi.fn(),
-  mockPersistenceWriteDebounced: vi.fn()
+  mockPersistenceWriteDebounced: vi.fn(),
+  mockReadFile: vi.fn()
 }))
 
 vi.mock('@/lib/api', () => ({
   persistenceApi: {
     read: mockPersistenceRead,
     writeDebounced: mockPersistenceWriteDebounced
-  }
+  },
+  filesystemApi: { readFile: mockReadFile }
 }))
 
 function createEditorFileState(filePath: string): {
@@ -47,11 +62,6 @@ const mockEditorState = {
   openFiles: new Map<string, ReturnType<typeof createEditorFileState>>(),
   activeFilePath: null as string | null,
   clearAllFiles: vi.fn(),
-  openFile: vi.fn().mockResolvedValue(undefined),
-  updateCursorPosition: vi.fn(),
-  updateScrollTop: vi.fn(),
-  setViewMode: vi.fn(),
-  updateContent: vi.fn(),
   setActiveFilePath: vi.fn()
 }
 
@@ -62,43 +72,53 @@ const mockExplorerState = {
   restoreExpandedDirs: vi.fn().mockResolvedValue(undefined)
 }
 
-const mockWorkspaceState: {
-  root: PaneNode
-  activePaneId: string
-  activeTabId: string | null
-  syncEditorTabs: ReturnType<typeof vi.fn>
-  remapTerminalTabs: ReturnType<typeof vi.fn>
-  syncTerminalTabs: ReturnType<typeof vi.fn>
-  clearEditorTabs: ReturnType<typeof vi.fn>
-  resetLayout: ReturnType<typeof vi.fn>
-  loadProjectWorkspace: ReturnType<typeof vi.fn>
-} = {
+const mockWorkspaceState = {
   root: {
     type: 'leaf',
     id: 'pane-root',
     tabs: [],
     activeTabId: null
-  },
+  } as PaneNode,
   activePaneId: 'pane-root',
-  activeTabId: null,
-  syncEditorTabs: vi.fn(),
-  remapTerminalTabs: vi.fn(),
+  activeTabId: null as string | null,
+  activeProjectId: '',
+  parkedTrees: {} as Record<string, unknown>,
+  // The store's park/unpark is covered in workspace-store.test.ts: here it is
+  // only the recorded commit target.
+  activateProject: vi.fn((projectId: string, _tree?: unknown) => {
+    mockWorkspaceState.activeProjectId = projectId
+  }),
+  hasProjectTree: vi.fn(
+    (projectId: string) =>
+      mockWorkspaceState.activeProjectId === projectId ||
+      projectId in mockWorkspaceState.parkedTrees
+  ),
+  dropProjectTree: vi.fn(),
   syncTerminalTabs: vi.fn(),
-  clearEditorTabs: vi.fn(),
-  resetLayout: vi.fn(),
-  loadProjectWorkspace: vi.fn()
+  insertAgentChatTab: vi.fn(),
+  addAgentChatTab: vi.fn(),
+  hideAgentLauncher: vi.fn()
 }
 
 const mockProjectState = {
+  activeProjectId: 'project-a',
   projects: [
     { id: 'project-a', path: '/projects/a' },
     { id: 'project-b', path: '/projects/b' }
-  ]
+  ],
+  selectProject: vi.fn((id: string) => {
+    mockProjectState.activeProjectId = id
+  })
 }
 
 vi.mock('@/stores/editor-store', () => ({
+  detectLanguage: () => 'typescript',
+  getDefaultViewMode: () => 'code',
   useEditorStore: {
     getState: vi.fn(() => mockEditorState),
+    setState: vi.fn((patch: Partial<typeof mockEditorState>) =>
+      Object.assign(mockEditorState, patch)
+    ),
     subscribe: vi.fn(() => vi.fn())
   }
 }))
@@ -126,7 +146,8 @@ vi.mock('@/stores/workspace-store', async () => {
 
 vi.mock('@/stores/project-store', () => ({
   useProjectStore: {
-    getState: vi.fn(() => mockProjectState)
+    getState: vi.fn(() => mockProjectState),
+    subscribe: vi.fn(() => vi.fn())
   }
 }))
 
@@ -151,11 +172,20 @@ vi.mock('./useTerminalAutoSave', () => ({
   loadPersistedTerminals: mockLoadPersistedTerminals
 }))
 
+const { mockLogFrontendError } = vi.hoisted(() => ({
+  mockLogFrontendError: vi.fn().mockResolvedValue(undefined)
+}))
+
+vi.mock('@/lib/log-api', () => ({
+  logFrontendError: mockLogFrontendError
+}))
+
 beforeEach(() => {
   mockPersistenceRead.mockReset()
   mockPersistenceWriteDebounced.mockReset()
   mockLoadPersistedTerminals.mockReset()
   mockLoadPersistedTerminals.mockResolvedValue(null)
+  mockLogFrontendError.mockReset()
 
   mockEditorState.openFiles = new Map<string, ReturnType<typeof createEditorFileState>>()
   mockEditorState.activeFilePath = null
@@ -164,15 +194,12 @@ beforeEach(() => {
     mockEditorState.openFiles.clear()
     mockEditorState.activeFilePath = null
   })
-  mockEditorState.openFile.mockReset()
-  mockEditorState.openFile.mockImplementation(async (filePath: string) => {
-    mockEditorState.openFiles.set(filePath, createEditorFileState(filePath))
-  })
-  mockEditorState.updateCursorPosition.mockReset()
-  mockEditorState.updateScrollTop.mockReset()
-  mockEditorState.setViewMode.mockReset()
-  mockEditorState.updateContent.mockReset()
   mockEditorState.setActiveFilePath.mockReset()
+  mockReadFile.mockReset()
+  mockReadFile.mockImplementation(async () => ({
+    success: true,
+    data: { content: 'disk', modifiedAt: 5 }
+  }))
 
   mockExplorerState.expandedDirs = new Set<string>()
   mockExplorerState.isVisible = true
@@ -188,19 +215,46 @@ beforeEach(() => {
   }
   mockWorkspaceState.activePaneId = 'pane-root'
   mockWorkspaceState.activeTabId = null
-  mockWorkspaceState.syncEditorTabs.mockReset()
-  mockWorkspaceState.remapTerminalTabs.mockReset()
+  mockWorkspaceState.activeProjectId = ''
+  mockWorkspaceState.parkedTrees = {}
+  mockWorkspaceState.activateProject.mockClear()
   mockWorkspaceState.syncTerminalTabs.mockReset()
-  mockWorkspaceState.clearEditorTabs.mockReset()
-  mockWorkspaceState.resetLayout.mockReset()
-  mockWorkspaceState.loadProjectWorkspace.mockReset()
+  mockProjectState.activeProjectId = 'project-a'
 
   mockTerminalState.terminals = []
 })
 
 afterEach(() => {
   vi.clearAllMocks()
+  setLiveLaunchSessionLookup(() => false)
+  _resetDroppedLaunchPlaceholdersForTesting()
+  useAgentChatLifetimeStore.setState({
+    retainedByProject: {},
+    activeSessionByProject: {},
+    focusSessionByProject: {}
+  })
 })
+
+/** Mount the hook on `projectId`, mirroring the project store (the user's intent) like the real layout. */
+function mountPersistence(projectId: string): {
+  switchTo: (nextProjectId: string) => void
+} {
+  mockProjectState.activeProjectId = projectId
+  const hook = renderHook(({ id }) => useEditorPersistence(id), { initialProps: { id: projectId } })
+  return {
+    switchTo: (nextProjectId) => {
+      mockProjectState.activeProjectId = nextProjectId
+      hook.rerender({ id: nextProjectId })
+    }
+  }
+}
+
+/** The tree + project the coordinator last committed through `activateProject`. */
+function lastActivation(): { projectId: string; tree: ProjectWorkspace | undefined } {
+  const call = mockWorkspaceState.activateProject.mock.calls.at(-1)
+  if (!call) throw new Error('nothing was committed')
+  return { projectId: call[0], tree: call[1] as ProjectWorkspace | undefined }
+}
 
 describe('useEditorPersistence', () => {
   it('restores only expanded dirs within active project root', async () => {
@@ -214,7 +268,7 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.setExpandedDirs).toHaveBeenCalledWith(
@@ -241,7 +295,7 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenCalledWith(['/projects/a/src'])
@@ -271,15 +325,13 @@ describe('useEditorPersistence', () => {
         }
       })
 
-    const { rerender } = renderHook(({ projectId }) => useEditorPersistence(projectId), {
-      initialProps: { projectId: 'project-a' }
-    })
+    const mounted = mountPersistence('project-a')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenLastCalledWith(['/projects/a/src'])
     })
 
-    rerender({ projectId: 'project-b' })
+    mounted.switchTo('project-b')
 
     await waitFor(() => {
       expect(mockExplorerState.restoreExpandedDirs).toHaveBeenLastCalledWith(['/projects/b/docs'])
@@ -332,12 +384,13 @@ describe('useEditorPersistence', () => {
       ]
     }
     mockWorkspaceState.activePaneId = 'pane-left'
+    mockWorkspaceState.activeProjectId = 'project-a'
 
     persistState('project-a')
 
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledTimes(1)
     expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
-      'editor-state/project-a',
+      'workspace/project-a',
       expect.objectContaining({
         activePaneId: 'pane-left',
         paneLayout: expect.objectContaining({
@@ -354,6 +407,83 @@ describe('useEditorPersistence', () => {
       { type: 'terminal', terminalId: 'old-1' },
       { type: 'editor', filePath: '/projects/a/src/index.ts' }
     ])
+  })
+
+  it('refuses to persist a project whose tree is not the committed one', () => {
+    mockWorkspaceState.activeProjectId = 'project-a'
+
+    persistState('project-b')
+
+    expect(mockPersistenceWriteDebounced).not.toHaveBeenCalled()
+  })
+
+  it('drops canvas tabs on persist (host-local runtime, never portable)', () => {
+    mockEditorState.openFiles.set(
+      '/projects/a/design-notes.md',
+      createEditorFileState('/projects/a/design-notes.md')
+    )
+    mockEditorState.activeFilePath = '/projects/a/design-notes.md'
+
+    mockWorkspaceState.root = {
+      type: 'leaf',
+      id: 'pane-canvas',
+      tabs: [
+        {
+          type: 'canvas',
+          id: 'canvas-project-a',
+          projectId: 'project-a',
+          docPath: '/projects/a/design.op'
+        },
+        {
+          type: 'editor',
+          id: 'edit-/projects/a/design-notes.md',
+          filePath: '/projects/a/design-notes.md'
+        }
+      ],
+      activeTabId: 'canvas-project-a'
+    }
+    mockWorkspaceState.activePaneId = 'pane-canvas'
+    mockWorkspaceState.activeProjectId = 'project-a'
+
+    persistState('project-a')
+
+    const payload = mockPersistenceWriteDebounced.mock.calls[0][1]
+    expect(payload.paneLayout.tabs).toEqual([
+      { type: 'editor', filePath: '/projects/a/design-notes.md' }
+    ])
+  })
+
+  it('reconcile drops a canvas tab alongside the keep rules for browser/git tabs', () => {
+    const root: PaneNode = {
+      type: 'leaf',
+      id: 'pane-reconcile',
+      tabs: [
+        {
+          type: 'canvas',
+          id: 'canvas-project-a',
+          projectId: 'project-a',
+          docPath: '/projects/a/design.op'
+        },
+        { type: 'browser', id: 'browser-b1', browserTabId: 'b1' },
+        { type: 'git', id: 'git-/projects/a', cwd: '/projects/a' },
+        {
+          type: 'editor',
+          id: 'edit-/projects/a/src/existing.ts',
+          filePath: '/projects/a/src/existing.ts'
+        }
+      ],
+      activeTabId: 'edit-/projects/a/src/existing.ts'
+    }
+
+    const reconciled = reconcileTerminalTabs(
+      root,
+      new Set(['/projects/a/src/existing.ts']),
+      [],
+      null
+    ) as LeafNode
+
+    expect(reconciled.tabs.map((tab) => tab.type)).toEqual(['browser', 'git', 'editor'])
+    expect(reconciled.activeTabId).toBe('edit-/projects/a/src/existing.ts')
   })
 
   it('restores pane layout, remaps terminal tabs to live terminals, and prunes missing editor tabs', async () => {
@@ -401,40 +531,38 @@ describe('useEditorPersistence', () => {
     })
 
     mockTerminalState.terminals = [
-      {
+      mockTerminal({
         id: 'live-1',
         name: 'Claude',
         projectId: 'project-a',
-        shell: 'bash',
         cwd: '/projects/a',
         ptyId: 'pty-live-1'
-      }
+      })
     ]
     mockLoadPersistedTerminals.mockResolvedValue({
       activeTerminalId: 'old-1',
       terminals: [
-        {
+        mockPersistedTerminal({
           id: 'old-1',
           name: 'Claude',
-          shell: 'bash',
           cwd: '/projects/a',
           scrollback: []
-        }
+        })
       ],
       updatedAt: '2026-03-09T00:00:00.000Z'
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
+    const { projectId: committedProjectId, tree } = lastActivation()
+    expect(committedProjectId).toBe('project-a')
+    expect(tree?.activePaneId).toBe('pane-drop')
 
-    expect(activePaneIdArg).toBe('pane-drop')
-
-    const restoredRoot = restoredRootArg as SplitNode
+    const restoredRoot = tree?.root as SplitNode
     expect(restoredRoot.type).toBe('split')
 
     const leftLeaf = restoredRoot.children[0] as LeafNode
@@ -478,26 +606,25 @@ describe('useEditorPersistence', () => {
     mockLoadPersistedTerminals.mockResolvedValue({
       activeTerminalId: 'persisted-only',
       terminals: [
-        {
+        mockPersistedTerminal({
           id: 'persisted-only',
           name: 'Recovered terminal',
-          shell: 'bash',
           cwd: '/projects/a',
           scrollback: []
-        }
+        })
       ],
       updatedAt: '2026-03-09T00:00:00.000Z'
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
-    expect(activePaneIdArg).toBe('pane-recovery')
-    expect(restoredRootArg).toEqual({
+    const { tree } = lastActivation()
+    expect(tree?.activePaneId).toBe('pane-recovery')
+    expect(tree?.root).toEqual({
       type: 'leaf',
       id: 'pane-recovery',
       tabs: [
@@ -512,43 +639,19 @@ describe('useEditorPersistence', () => {
   })
 
   it('ignores stale restore results after switching projects', async () => {
-    const projectARead = {
-      resolve: undefined as
-        | ((value: {
-            success: true
-            data: {
-              openFiles: never[]
-              activeFilePath: null
-              expandedDirs: string[]
-              fileExplorerVisible: boolean
-              activeTabId: null
-              activePaneId: string
-              paneLayout: {
-                type: 'leaf'
-                id: string
-                tabs: { type: 'editor'; filePath: string }[]
-                activeTabId: string
-              }
-            }
-          }) => void)
-        | undefined
-    }
-
-    mockPersistenceRead
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            projectARead.resolve = resolve
-          })
-      )
-      .mockResolvedValueOnce({ success: true, data: null })
-      .mockResolvedValueOnce({
+    let resolveProjectARead: ((value: unknown) => void) | undefined
+    mockPersistenceRead.mockImplementation((key: string) => {
+      if (key === 'workspace/project-a') {
+        return new Promise((resolve) => {
+          resolveProjectARead = resolve
+        })
+      }
+      return Promise.resolve({
         success: true,
         data: {
           openFiles: [],
           activeFilePath: null,
           expandedDirs: ['/projects/b'],
-          fileExplorerVisible: true,
           activeTabId: null,
           activePaneId: 'pane-b',
           paneLayout: {
@@ -559,27 +662,26 @@ describe('useEditorPersistence', () => {
           }
         }
       })
-
-    const { rerender } = renderHook(
-      ({ currentProjectId }) => useEditorPersistence(currentProjectId),
-      {
-        initialProps: { currentProjectId: 'project-a' }
-      }
-    )
-
-    rerender({ currentProjectId: 'project-b' })
-
-    await waitFor(() => {
-      expect(mockWorkspaceState.resetLayout).toHaveBeenCalledTimes(1)
     })
 
-    projectARead.resolve?.({
+    const mounted = mountPersistence('project-a')
+    await waitFor(() => expect(resolveProjectARead).toBeDefined())
+    mounted.switchTo('project-b')
+
+    await waitFor(() => {
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledWith(
+        'project-b',
+        expect.anything()
+      )
+    })
+
+    // Project A's read lands after B committed: it must be dropped.
+    resolveProjectARead?.({
       success: true,
       data: {
         openFiles: [],
         activeFilePath: null,
         expandedDirs: ['/projects/a'],
-        fileExplorerVisible: true,
         activeTabId: null,
         activePaneId: 'pane-a',
         paneLayout: {
@@ -590,12 +692,11 @@ describe('useEditorPersistence', () => {
         }
       }
     })
+    await Promise.resolve()
+    await Promise.resolve()
 
-    await waitFor(() => {
-      expect(mockPersistenceRead).toHaveBeenCalledTimes(2)
-    })
-
-    expect(mockWorkspaceState.loadProjectWorkspace).not.toHaveBeenCalled()
+    expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
+    expect(mockWorkspaceState.activeProjectId).toBe('project-b')
   })
 
   it('restores legacy pane layout entries that use editorFilePaths', async () => {
@@ -625,16 +726,15 @@ describe('useEditorPersistence', () => {
       }
     })
 
-    renderHook(() => useEditorPersistence('project-a'))
+    mountPersistence('project-a')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.loadProjectWorkspace).toHaveBeenCalled()
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalled()
     })
 
-    const [restoredRootArg, activePaneIdArg] = mockWorkspaceState.loadProjectWorkspace.mock.calls[0]
-
-    expect(activePaneIdArg).toBe('pane-legacy')
-    expect(restoredRootArg).toEqual({
+    const { tree } = lastActivation()
+    expect(tree?.activePaneId).toBe('pane-legacy')
+    expect(tree?.root).toEqual({
       type: 'leaf',
       id: 'pane-legacy',
       tabs: [
@@ -648,7 +748,8 @@ describe('useEditorPersistence', () => {
     })
   })
 
-  it('resets pane layout when destination project has no persisted state', async () => {
+  it('commits a fresh single-leaf layout when the destination project has no persisted state', async () => {
+    mockWorkspaceState.activeProjectId = 'project-a'
     mockWorkspaceState.root = {
       type: 'split',
       id: 'split-old',
@@ -661,31 +762,327 @@ describe('useEditorPersistence', () => {
           tabs: [{ type: 'terminal', id: 'term-old-1', terminalId: 'old-1' }],
           activeTabId: 'term-old-1'
         },
-        {
-          type: 'leaf',
-          id: 'pane-right',
-          tabs: [
-            {
-              type: 'editor',
-              id: 'edit-/projects/a/src/leftover.ts',
-              filePath: '/projects/a/src/leftover.ts'
-            }
-          ],
-          activeTabId: 'edit-/projects/a/src/leftover.ts'
-        }
+        { type: 'leaf', id: 'pane-right', tabs: [], activeTabId: null }
       ]
     }
     mockWorkspaceState.activePaneId = 'pane-left'
 
-    mockPersistenceRead.mockResolvedValue({
-      success: true,
-      data: null
-    })
+    mockPersistenceRead.mockResolvedValue({ success: true, data: null })
 
-    renderHook(() => useEditorPersistence('project-b'))
+    mountPersistence('project-b')
 
     await waitFor(() => {
-      expect(mockWorkspaceState.resetLayout).toHaveBeenCalledTimes(1)
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
     })
+    const { projectId, tree } = lastActivation()
+    expect(projectId).toBe('project-b')
+    expect(tree?.root).toMatchObject({ type: 'leaf', tabs: [], activeTabId: null })
+    expect(tree?.root.id).not.toBe('split-old')
+    // The project left is persisted before the swap.
+    expect(mockPersistenceWriteDebounced).toHaveBeenCalledWith(
+      'workspace/project-a',
+      expect.anything()
+    )
+  })
+
+  it('stages a visited project without a tree so its parked tree is kept', async () => {
+    mockPersistenceRead.mockResolvedValue({ success: true, data: null })
+    const mounted = mountPersistence('project-a')
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-a'))
+    mounted.switchTo('project-b')
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-b'))
+    // project-a now has a parked tree in the real store.
+    mockWorkspaceState.parkedTrees = { 'project-a': {} }
+    mockLoadPersistedTerminals.mockClear()
+
+    mounted.switchTo('project-a')
+
+    await waitFor(() => expect(mockWorkspaceState.activeProjectId).toBe('project-a'))
+    const { projectId, tree } = lastActivation()
+    expect(projectId).toBe('project-a')
+    expect(tree).toBeUndefined()
+    // No terminal read for a tree that already exists; the parked tree is
+    // reconciled against the project's live terminals.
+    expect(mockLoadPersistedTerminals).not.toHaveBeenCalled()
+    expect(mockWorkspaceState.syncTerminalTabs).toHaveBeenCalledWith([])
+  })
+
+  it('restores the saved pane layout and reads the persisted terminal layout', async () => {
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        openFiles: [],
+        activeFilePath: null,
+        expandedDirs: [],
+        activeTabId: null,
+        paneLayout: {
+          type: 'leaf',
+          id: 'legacy-leaf',
+          tabs: [{ type: 'editor', filePath: '/projects/a/legacy.ts' }],
+          activeTabId: 'edit-/projects/a/legacy.ts'
+        }
+      }
+    })
+    mockLoadPersistedTerminals.mockResolvedValue(null)
+
+    mountPersistence('project-a')
+
+    await waitFor(() => {
+      expect(mockLoadPersistedTerminals).toHaveBeenCalledWith('project-a')
+      expect(mockWorkspaceState.activateProject).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('does not reinsert a dropped launch-* tab and records it for session recovery (#882)', async () => {
+    _resetDroppedLaunchPlaceholdersForTesting()
+    useAgentChatLifetimeStore.setState({
+      retainedByProject: {},
+      activeSessionByProject: {},
+      focusSessionByProject: {}
+    })
+    mockWorkspaceState.insertAgentChatTab.mockReset()
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        openFiles: [],
+        activeFilePath: null,
+        expandedDirs: [],
+        activeTabId: null,
+        paneLayout: {
+          type: 'leaf',
+          id: 'legacy-leaf',
+          tabs: [
+            { type: 'agent-chat', id: 'chat-launch-abc', sessionId: 'launch-abc' },
+            { type: 'agent-chat', id: 'chat-sess-real', sessionId: 'sess-real' }
+          ],
+          activeTabId: 'chat-launch-abc'
+        }
+      }
+    })
+    mockLoadPersistedTerminals.mockResolvedValue(null)
+
+    mountPersistence('project-a')
+
+    await waitFor(() => {
+      expect(mockWorkspaceState.insertAgentChatTab).toHaveBeenCalledWith('sess-real')
+    })
+    expect(mockWorkspaceState.insertAgentChatTab).not.toHaveBeenCalledWith('launch-abc')
+    expect(takeAllDroppedLaunchPlaceholders()).toEqual([{ projectId: 'project-a', count: 1 }])
+  })
+
+  it('keeps a live launch-* tab so finalizeChatLaunch can remap it (#882)', async () => {
+    setLiveLaunchSessionLookup((sessionId) => sessionId === 'launch-abc')
+    mockWorkspaceState.insertAgentChatTab.mockReset()
+    mockPersistenceRead.mockResolvedValue({
+      success: true,
+      data: {
+        openFiles: [],
+        activeFilePath: null,
+        expandedDirs: [],
+        activeTabId: null,
+        paneLayout: {
+          type: 'leaf',
+          id: 'legacy-leaf',
+          tabs: [{ type: 'agent-chat', id: 'chat-launch-abc', sessionId: 'launch-abc' }],
+          activeTabId: 'chat-launch-abc'
+        }
+      }
+    })
+    mockLoadPersistedTerminals.mockResolvedValue(null)
+
+    mountPersistence('project-a')
+
+    await waitFor(() => {
+      expect(mockWorkspaceState.insertAgentChatTab).toHaveBeenCalledWith('launch-abc')
+    })
+    expect(takeAllDroppedLaunchPlaceholders()).toEqual([])
+  })
+})
+
+describe('deserializePaneTree agent-chat restore (story 5)', () => {
+  it('drops launch-* placeholder tabs (corpses of failed launches) and keeps real session tabs', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'chat-sess-1',
+      tabs: [
+        { type: 'agent-chat', id: 'chat-launch-abc', sessionId: 'launch-abc' },
+        { type: 'agent-chat', id: 'chat-sess-1', sessionId: 'sess-1' }
+      ]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    expect(tree.tabs).toEqual([{ type: 'agent-chat', id: 'chat-sess-1', sessionId: 'sess-1' }])
+    expect(tree.activeTabId).toBe('chat-sess-1')
+  })
+
+  it('tolerates a corrupt agent-chat tab without a sessionId (drops it, keeps the rest)', () => {
+    const corruptTab = { type: 'agent-chat', id: 'chat-broken' } as unknown as {
+      type: 'agent-chat'
+      id: string
+      sessionId: string
+    }
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'chat-sess-1',
+      tabs: [corruptTab, { type: 'agent-chat', id: 'chat-sess-1', sessionId: 'sess-1' }]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    // The corrupt tab is dropped without aborting the restore of the others.
+    expect(tree.tabs).toEqual([{ type: 'agent-chat', id: 'chat-sess-1', sessionId: 'sess-1' }])
+    expect(tree.activeTabId).toBe('chat-sess-1')
+  })
+
+  it('restores every persisted chat tab (incl. nested splits) without judging ownership', () => {
+    const tree = deserializePaneTree({
+      type: 'split',
+      id: 'split-1',
+      direction: 'horizontal',
+      sizes: [50, 50],
+      children: [
+        {
+          type: 'leaf',
+          id: 'pane-1',
+          activeTabId: 'chat-s-a',
+          tabs: [
+            { type: 'agent-chat', id: 'chat-s-a', sessionId: 's-a' },
+            { type: 'agent-chat', id: 'chat-s-b', sessionId: 's-b' }
+          ]
+        },
+        {
+          type: 'leaf',
+          id: 'pane-2',
+          activeTabId: 'chat-s-c',
+          tabs: [{ type: 'agent-chat', id: 'chat-s-c', sessionId: 's-c' }]
+        }
+      ]
+    })
+    if (tree.type !== 'split') throw new Error('expected split')
+    const [left, right] = tree.children
+    if (left.type !== 'leaf' || right.type !== 'leaf') throw new Error('expected leaves')
+    expect(left.tabs.map((t) => t.id)).toEqual(['chat-s-a', 'chat-s-b'])
+    expect(left.activeTabId).toBe('chat-s-a')
+    expect(right.tabs.map((t) => t.id)).toEqual(['chat-s-c'])
+  })
+
+  it('repairs a dangling activeTabId when the active tab was a dropped launch-* corpse', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'chat-launch-abc',
+      tabs: [
+        { type: 'agent-chat', id: 'chat-launch-abc', sessionId: 'launch-abc' },
+        { type: 'agent-chat', id: 'chat-sess-1', sessionId: 'sess-1' }
+      ]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    expect(tree.tabs).toHaveLength(1)
+    expect(tree.activeTabId).toBe('chat-sess-1')
+  })
+})
+
+describe('unrecognised persisted tab kinds (E4a)', () => {
+  const unknownTab = (extra: Record<string, unknown> = {}) =>
+    ({ type: 'future-kind', id: 'future-1', secretPayload: 'do-not-log', ...extra }) as never
+
+  const warnMessages = () =>
+    mockLogFrontendError.mock.calls
+      .map((call) => call[0] as { level?: string; message: string })
+      .filter((payload) => payload.level === 'warn')
+
+  it('drops an unknown kind on restore without coercing it into a terminal tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'edit-/a.ts',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    expect(tree.type).toBe('leaf')
+    if (tree.type !== 'leaf') return
+    expect(tree.tabs).toEqual([{ type: 'editor', id: 'edit-/a.ts', filePath: '/a.ts' }])
+    expect(tree.tabs.some((tab) => tab.type === 'terminal')).toBe(false)
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('"future-kind"')
+    expect(warns[0].message).not.toContain('do-not-log')
+  })
+
+  it('repairs activeTabId when it pointed at the dropped unknown tab', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'editor', filePath: '/a.ts' }]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.activeTabId).toBe('edit-/a.ts')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('falls activeTabId to null when the unknown tab was the only one', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab()]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    expect(tree.activeTabId).toBeNull()
+  })
+
+  it('drops a ref with a missing type and reports the kind as undefined', () => {
+    const tree = deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{} as never]
+    })
+    if (tree.type !== 'leaf') throw new Error('expected leaf')
+    expect(tree.tabs).toEqual([])
+    const warns = warnMessages()
+    expect(warns).toHaveLength(1)
+    expect(warns[0].message).toContain('undefined')
+  })
+
+  it('truncates an overlong kind in the log', () => {
+    deserializePaneTree({
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: null,
+      tabs: [{ type: 'x'.repeat(500) } as never]
+    })
+    const [warn] = warnMessages()
+    expect(warn.message.length).toBeLessThan(200)
+  })
+
+  it('reconcileTerminalTabs drops an unknown kind with one warn and repairs activeTabId', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'future-1',
+      tabs: [unknownTab(), { type: 'git', id: 'git-1', cwd: '/repo' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([{ type: 'git', id: 'git-1', cwd: '/repo' }])
+    expect(result.activeTabId).toBe('git-1')
+    expect(warnMessages()).toHaveLength(1)
+  })
+
+  it('reconcileTerminalTabs drops canvas tabs silently', () => {
+    const root = {
+      type: 'leaf',
+      id: 'pane-1',
+      activeTabId: 'canvas-1',
+      tabs: [{ type: 'canvas', id: 'canvas-1', projectId: 'p', docPath: '/d.op' }]
+    } as unknown as PaneNode
+    const result = reconcileTerminalTabs(root, new Set(), [], null)
+    if (result.type !== 'leaf') throw new Error('expected leaf')
+    expect(result.tabs).toEqual([])
+    expect(warnMessages()).toHaveLength(0)
   })
 })

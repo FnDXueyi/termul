@@ -1,8 +1,8 @@
-import { confirm } from '@tauri-apps/plugin-dialog'
-import { Clock, Download, Terminal } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { toast } from 'sonner'
-import { hasActiveTerminalSessions } from '@/lib/tauri-safe-update'
+import { Clock, Download, Terminal } from '@/components/icons'
+import { confirmInstallAndRestart } from '@/lib/confirm-install-update'
+import { isTauriContext } from '@/lib/tauri-runtime'
 import { isAurUpdateMode } from '@/lib/tauri-updater-api'
 import {
   updaterStore,
@@ -44,19 +44,25 @@ function setReminderForTomorrow(): void {
  */
 export function showUpdateToast(version: string, releaseNotes?: string): void {
   const isAur = isAurUpdateMode()
+  const channel = updaterStore.getState().updateChannel
+  const channelPrefix = channel === 'insider' ? 'Insider ' : channel === 'nightly' ? 'Nightly ' : ''
 
-  toast.success(`Update available: version ${version}`, {
+  toast.success(`${channelPrefix}Update available: version ${version}`, {
     duration: 30000,
     description: releaseNotes
       ? `What's new:\n${releaseNotes.slice(0, 100)}${releaseNotes.length > 100 ? '...' : ''}`
       : isAur
         ? 'A new version is available. Update with yay.'
-        : 'A new version is available for download.',
+        : channel !== 'stable'
+          ? `A new ${channel} build is available. Open the download page to install it manually.`
+          : 'A new version is available for download.',
     action: {
       label: (
         <div className="flex items-center gap-2">
           {isAur ? <Terminal size={14} /> : <Download size={14} />}
-          <span>{isAur ? 'Use yay' : 'Download'}</span>
+          <span>
+            {isAur ? 'Use yay' : channel !== 'stable' ? 'Open Download Page' : 'Download'}
+          </span>
         </div>
       ),
       onClick: async () => {
@@ -111,36 +117,7 @@ export function showUpdateDownloadedToast(version: string): void {
           <span>Install &amp; Restart</span>
         </div>
       ),
-      onClick: async () => {
-        try {
-          const hasActiveTerminals = hasActiveTerminalSessions()
-          const confirmed = await confirm(
-            hasActiveTerminals
-              ? `Termul will install version ${version} and restart. Your running terminal sessions will be closed. Continue?`
-              : `Termul will install version ${version} and restart now. Continue?`,
-            {
-              title: 'Install update',
-              kind: 'warning',
-              okLabel: 'Install & Restart',
-              cancelLabel: 'Not now'
-            }
-          )
-          if (!confirmed) return
-
-          const { installAndRestart } = updaterStore.getState()
-          await installAndRestart()
-          const installError = updaterStore.getState().error
-          if (installError) {
-            toast.error('Update install failed', {
-              description: installError
-            })
-          }
-        } catch (error) {
-          toast.error('Update install failed', {
-            description: error instanceof Error ? error.message : 'Unexpected error during install'
-          })
-        }
-      }
+      onClick: () => confirmInstallAndRestart(version)
     }
   })
 }
@@ -169,8 +146,14 @@ function dismissDownloadProgressToast(version: string): void {
 /**
  * Hook to manage update toast notifications
  * Listens to updater state changes and shows appropriate toasts
+ *
+ * Desktop-only (issue #843): the web client is updated together with the
+ * server, so update-available/downloaded/progress toasts never show there.
+ * The hook still subscribes to store state (stable hook order for both
+ * roots) but every toast effect no-ops on web.
  */
 export function useUpdateToast(): void {
+  const isDesktop = isTauriContext()
   const { updateAvailable, downloaded, isDownloading, skippedVersion } = useUpdaterState()
   const version = useUpdateVersion()
   const _updateDownloaded = useUpdateDownloaded()
@@ -184,6 +167,7 @@ export function useUpdateToast(): void {
   // Show toast when update becomes available
   useEffect(() => {
     if (
+      isDesktop &&
       updateAvailable &&
       version &&
       !downloaded &&
@@ -195,19 +179,19 @@ export function useUpdateToast(): void {
       showUpdateToast(version)
       hasShownAvailableToast.current = true
     }
-  }, [updateAvailable, version, downloaded, downloading, skippedVersion])
+  }, [isDesktop, updateAvailable, version, downloaded, downloading, skippedVersion])
 
   // Show toast when update is downloaded and ready to install
   useEffect(() => {
-    if (downloaded && version && !hasShownDownloadedToast.current) {
+    if (isDesktop && downloaded && version && !hasShownDownloadedToast.current) {
       showUpdateDownloadedToast(version)
       hasShownDownloadedToast.current = true
     }
-  }, [downloaded, version])
+  }, [isDesktop, downloaded, version])
 
   // Show download progress
   useEffect(() => {
-    if (isDownloading && version) {
+    if (isDesktop && isDownloading && version) {
       showDownloadProgressToast(version, downloadProgress)
 
       // Clean up progress toast when download completes or effect re-runs
@@ -215,7 +199,7 @@ export function useUpdateToast(): void {
         dismissDownloadProgressToast(version)
       }
     }
-  }, [isDownloading, downloadProgress, version])
+  }, [isDesktop, isDownloading, downloadProgress, version])
 
   // Reset flags when update state changes
   useEffect(() => {

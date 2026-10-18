@@ -1,0 +1,726 @@
+import type { DirectoryEntry } from '@shared/types/filesystem.types'
+import { PersistenceKeys } from '@shared/types/persistence.types'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
+import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  FilePlus,
+  FolderPlus,
+  MoreHorizontal,
+  Pencil,
+  RefreshCw,
+  Trash2
+} from '@/components/icons'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle
+} from '@/components/ui/sheet'
+import { useClippedSegments } from '@/hooks/use-clipped-segments'
+import { useServerPathsCaseInsensitive } from '@/hooks/use-server-paths-case-insensitive'
+import { filesystemApi, persistenceApi } from '@/lib/api'
+import { renamePathWithOpenEditors } from '@/lib/editor-tab-rename'
+import { sortDirectoryEntries } from '@/lib/filesystem-sort'
+import { logFrontendError } from '@/lib/log-api'
+import {
+  buildFolderCrumbs,
+  comparePath,
+  isWithinRoot,
+  joinPath,
+  normalizePath,
+  resolveBreadcrumbTarget
+} from '@/lib/mobile-file-paths'
+import { recordSheetOpener, sheetCloseAutoFocus } from '@/lib/sheet-focus-return'
+import { useEditorStore } from '@/stores/editor-store'
+import { useFileExplorer, useFileExplorerActions } from '@/stores/file-explorer-store'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
+import { useActiveProjectId } from '@/stores/project-store'
+import { editorTabId, useWorkspaceStore } from '@/stores/workspace-store'
+
+interface MobileFileExplorerProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  /**
+   * Called when a file opened successfully, just before the sheet closes. The
+   * shell uses it to point focus at the new surface's heading instead of the
+   * "Browse files" opener.
+   */
+  onFileOpened?: () => void
+}
+
+// Focus return for the two pre-existing Files sheets (see lib/sheet-focus-return).
+const filesSheetCloseAutoFocus = sheetCloseAutoFocus('files-sheet')
+const fileActionsSheetCloseAutoFocus = sheetCloseAutoFocus('file-actions-sheet')
+
+interface CreateState {
+  type: 'file' | 'directory'
+  value: string
+}
+
+interface RenameState {
+  path: string
+  value: string
+}
+
+type NavigationDirection = -1 | 0 | 1
+
+// Path helpers live in `lib/mobile-file-paths`; the two below stay importable
+// from here for this module's consumers and tests.
+export { buildFolderCrumbs, resolveBreadcrumbTarget }
+
+/** Lean touch-first file explorer drawer for the web/mobile view. Directory
+ * rows drill into a single folder at a time, while files reuse the desktop
+ * open-file wiring. Native desktop keeps its existing tree explorer. */
+export function MobileFileExplorer({
+  open,
+  onOpenChange,
+  onFileOpened
+}: MobileFileExplorerProps): React.JSX.Element {
+  const { rootPath, directoryContents, loadingDirs, rootLoadError } = useFileExplorer()
+  const { toggleDirectory, refreshDirectory, selectPath } = useFileExplorerActions()
+  const reducedMotion = useReducedMotion() ?? false
+  const projectId = useActiveProjectId()
+  const caseInsensitive = useServerPathsCaseInsensitive()
+
+  const [currentPath, setCurrentPath] = useState<string | null>(null)
+  const [navigationDirection, setNavigationDirection] = useState<NavigationDirection>(0)
+  const [actionEntry, setActionEntry] = useState<DirectoryEntry | null>(null)
+  // Mobile web shell: system back closes the row-actions sheet (inert on desktop).
+  // The sheet is nested in the Files sheet, so it is only an overlay while that
+  // sheet is open: `actionEntry` survives a close until the next open resets it.
+  useOverlayRegistration(
+    'mobile-file-actions',
+    open && actionEntry !== null,
+    () => setActionEntry(null),
+    { mobileShellOnly: true }
+  )
+  const [renaming, setRenaming] = useState<RenameState | null>(null)
+  const [creating, setCreating] = useState<CreateState | null>(null)
+  const [createSubmitting, setCreateSubmitting] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<DirectoryEntry | null>(null)
+  // Tracks the project, root and case rule we've already restored the persisted
+  // folder for. Prevents re-reading persistence (and clobbering the in-session
+  // folder) on every drawer reopen — the component stays mounted across close,
+  // so currentPath already holds the user's last folder.
+  const restoredKeyRef = useRef<string | null>(null)
+
+  function persistFolder(path: string): void {
+    if (!projectId) return
+    void persistenceApi.write(PersistenceKeys.mobileFileExplorerFolder(projectId), path)
+  }
+
+  // Restore the last folder the user navigated into (persisted per project)
+  // when opening for a new/different project root — first open, reload, or
+  // project switch. Within-session reopens keep the current folder: the
+  // component stays mounted across drawer close, so currentPath survives.
+  useEffect(() => {
+    if (!open) return
+    setNavigationDirection(0)
+    setActionEntry(null)
+    setRenaming(null)
+    setCreating(null)
+    if (!rootPath) {
+      setCurrentPath(null)
+      return
+    }
+    const restoreKey = `${projectId ?? ''}:${rootPath}:${caseInsensitive}`
+    if (restoredKeyRef.current === restoreKey) return
+    restoredKeyRef.current = restoreKey
+    const normalizedRoot = normalizePath(rootPath)
+    if (!projectId) {
+      setCurrentPath(normalizedRoot)
+      return
+    }
+    // Clear a stale folder from a different project while reading the
+    // persisted one, so the drawer shows loading instead of old contents.
+    setCurrentPath(null)
+    // Cancel the pending read if rootPath/projectId change mid-flight, so a
+    // late resolution can't apply the previous project's folder; fall back to
+    // root on rejection (persistenceApi.read shouldn't reject, but defend it).
+    let cancelled = false
+    void persistenceApi
+      .read<string>(PersistenceKeys.mobileFileExplorerFolder(projectId))
+      .then((res) => {
+        if (cancelled) return
+        // Normalize before the containment check so a persisted `..` path
+        // that lexically escapes the root is dropped, never restored.
+        const persisted = res.success && res.data ? normalizePath(res.data) : null
+        if (persisted && !isWithinRoot(persisted, rootPath, caseInsensitive)) {
+          void logFrontendError({
+            level: 'warn',
+            source: 'MobileFileExplorer.restore',
+            message: `saved folder is outside the project root under a case-${caseInsensitive ? 'insensitive' : 'sensitive'} compare; showing the root`
+          })
+          setCurrentPath(normalizedRoot)
+          return
+        }
+        setCurrentPath(persisted ?? normalizedRoot)
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentPath(normalizedRoot)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, rootPath, projectId, caseInsensitive])
+
+  // Web has no directory watcher, so load whichever folder is currently shown.
+  useEffect(() => {
+    if (!open || !currentPath) return
+    if (!directoryContents.has(currentPath) && !loadingDirs.has(currentPath)) {
+      void toggleDirectory(currentPath)
+    }
+  }, [open, currentPath, directoryContents, loadingDirs, toggleDirectory])
+
+  function parentOf(path: string): string {
+    const normalized = normalizePath(path)
+    const canonicalRoot = rootPath ? normalizePath(rootPath) : normalized
+    const rootCompare = comparePath(canonicalRoot, caseInsensitive)
+    const currentCompare = comparePath(normalized, caseInsensitive)
+    const rootPrefix = rootCompare === '/' ? '/' : `${rootCompare}/`
+    if (currentCompare === rootCompare || !currentCompare.startsWith(rootPrefix)) {
+      return canonicalRoot
+    }
+    const parent = normalized.slice(0, normalized.lastIndexOf('/'))
+    return comparePath(parent, caseInsensitive) === rootCompare ? canonicalRoot : parent
+  }
+
+  function closeAffectedTabs(target: DirectoryEntry): void {
+    const editor = useEditorStore.getState()
+    const targetNorm = normalizePath(target.path)
+    const prefix = `${targetNorm}/`
+    for (const openPath of Array.from(editor.openFiles.keys())) {
+      const openNorm = normalizePath(openPath)
+      if (openNorm === targetNorm || (target.type === 'directory' && openNorm.startsWith(prefix))) {
+        editor.closeFile(openPath)
+        useWorkspaceStore.getState().removeTab(editorTabId(openPath))
+      }
+    }
+  }
+
+  async function handleOpenFile(entry: DirectoryEntry): Promise<void> {
+    selectPath(entry.path)
+    try {
+      await useEditorStore.getState().openFile(entry.path)
+      useWorkspaceStore.getState().addEditorTab(entry.path)
+      onFileOpened?.()
+      onOpenChange(false)
+    } catch (error) {
+      toast.error('Failed to open file', {
+        description: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  function navigateForward(path: string): void {
+    setCreating(null)
+    setRenaming(null)
+    setNavigationDirection(1)
+    const next = normalizePath(path)
+    setCurrentPath(next)
+    persistFolder(next)
+  }
+
+  function navigateBack(): void {
+    if (
+      !currentPath ||
+      !rootPath ||
+      comparePath(currentPath, caseInsensitive) === comparePath(rootPath, caseInsensitive)
+    ) {
+      return
+    }
+    setCreating(null)
+    setRenaming(null)
+    setNavigationDirection(-1)
+    const next = parentOf(currentPath)
+    setCurrentPath(next)
+    persistFolder(next)
+  }
+
+  /** Breadcrumb tap: jump to an ancestor folder. Mirrors `navigateBack` (clears
+   * the inline create/rename state, slides back, persists the folder). */
+  function navigateTo(path: string): void {
+    const target = resolveBreadcrumbTarget(path, rootPath, currentPath, caseInsensitive)
+    if (!target) return
+    setCreating(null)
+    setRenaming(null)
+    setNavigationDirection(-1)
+    setCurrentPath(target)
+    persistFolder(target)
+  }
+
+  function handleRowTap(entry: DirectoryEntry): void {
+    if (renaming?.path === entry.path) return
+    if (entry.type === 'directory') navigateForward(entry.path)
+    else void handleOpenFile(entry)
+  }
+
+  async function handleCreate(): Promise<void> {
+    if (!creating || !currentPath || createSubmitting) return
+    const name = creating.value.trim()
+    if (!name) return
+    const submittedPath = currentPath
+    const fullPath = joinPath(submittedPath, name)
+    setCreateSubmitting(true)
+    try {
+      const result =
+        creating.type === 'file'
+          ? await filesystemApi.createFile(fullPath)
+          : await filesystemApi.createDirectory(fullPath)
+      if (!result.success) {
+        toast.error('Failed to create', { description: result.error })
+        return
+      }
+      setCreating(null)
+      await refreshDirectory(submittedPath)
+    } finally {
+      setCreateSubmitting(false)
+    }
+  }
+
+  async function handleRename(entry: DirectoryEntry, value: string): Promise<void> {
+    const name = value.trim()
+    if (!name || !renaming) {
+      setRenaming(null)
+      return
+    }
+    const parent = parentOf(entry.path)
+    const newPath = joinPath(parent, name)
+    if (normalizePath(newPath) === normalizePath(entry.path)) {
+      setRenaming(null)
+      return
+    }
+    setRenaming(null)
+    const result = await renamePathWithOpenEditors(entry.path, newPath)
+    if (!result.success) {
+      toast.error('Failed to rename', { description: result.error })
+      return
+    }
+    if (currentPath && normalizePath(currentPath).startsWith(`${normalizePath(entry.path)}/`)) {
+      setCurrentPath(parent)
+      setNavigationDirection(-1)
+      persistFolder(parent)
+    }
+    await refreshDirectory(parent)
+  }
+
+  async function handleDelete(entry: DirectoryEntry): Promise<void> {
+    const result = await filesystemApi.deletePath(entry.path, {
+      recursive: entry.type === 'directory'
+    })
+    if (!result.success) {
+      toast.error('Failed to delete', { description: result.error })
+      return
+    }
+    closeAffectedTabs(entry)
+    const parent = parentOf(entry.path)
+    if (
+      currentPath &&
+      (normalizePath(currentPath) === normalizePath(entry.path) ||
+        normalizePath(currentPath).startsWith(`${normalizePath(entry.path)}/`))
+    ) {
+      setCurrentPath(parent)
+      setNavigationDirection(-1)
+      persistFolder(parent)
+    }
+    await refreshDirectory(parent)
+  }
+
+  async function handleDuplicate(entry: DirectoryEntry): Promise<void> {
+    const dot = entry.name.lastIndexOf('.')
+    const stem = dot > 0 ? entry.name.slice(0, dot) : entry.name
+    const ext = dot > 0 ? entry.name.slice(dot) : ''
+    const parent = parentOf(entry.path)
+    const result = await filesystemApi.copyFile(entry.path, joinPath(parent, `${stem} copy${ext}`))
+    if (!result.success) {
+      toast.error('Failed to copy', { description: result.error })
+      return
+    }
+    await refreshDirectory(parent)
+  }
+
+  function renderRow(entry: DirectoryEntry): React.ReactNode {
+    const isRenaming = renaming?.path === entry.path
+    return (
+      <li key={entry.path}>
+        {isRenaming ? (
+          <Input
+            autoFocus
+            defaultValue={renaming.value}
+            onChange={(event) => setRenaming({ path: entry.path, value: event.target.value })}
+            onBlur={() => void handleRename(entry, renaming.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void handleRename(entry, renaming.value)
+              if (event.key === 'Escape') setRenaming(null)
+            }}
+            className="m-1 h-11"
+            aria-label={`Rename ${entry.name}`}
+          />
+        ) : (
+          <div className="flex h-11 items-center gap-2 px-2">
+            <button
+              type="button"
+              className="flex h-11 min-w-0 flex-1 items-center gap-2 text-left"
+              onClick={() => handleRowTap(entry)}
+              aria-label={
+                entry.type === 'directory' ? `Open folder ${entry.name}` : `Open ${entry.name}`
+              }
+            >
+              <MaterialFileIcon
+                name={entry.name}
+                isDirectory={entry.type === 'directory'}
+                isExpanded={false}
+                depth={0}
+                size={18}
+              />
+              <span
+                className={`min-w-0 flex-1 truncate text-sm ${entry.ignored ? 'text-muted-foreground' : 'text-foreground'}`}
+              >
+                {entry.name}
+              </span>
+              {entry.type === 'directory' && (
+                <ChevronRight size={16} className="shrink-0 text-muted-foreground" />
+              )}
+            </button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-9 shrink-0"
+              aria-label={`Actions for ${entry.name}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                recordSheetOpener('file-actions-sheet', event.currentTarget)
+                setActionEntry(entry)
+              }}
+            >
+              <MoreHorizontal size={18} />
+            </Button>
+          </div>
+        )}
+      </li>
+    )
+  }
+
+  const normalizedRoot = rootPath ? normalizePath(rootPath) : null
+  const normalizedCurrent = currentPath ? normalizePath(currentPath) : null
+  // Roots ending in a separator (`/`, `C:/`) already include it, so the
+  // relative-path label slices from the root length itself; otherwise skip the
+  // separator after the root (the old `+ 1` dropped the first child char for
+  // `C:/`/`/`).
+  const rootPrefixLength = normalizedRoot
+    ? normalizedRoot.endsWith('/')
+      ? normalizedRoot.length
+      : normalizedRoot.length + 1
+    : 0
+  const isAtRoot =
+    !normalizedRoot ||
+    comparePath(normalizedCurrent ?? '/', caseInsensitive) ===
+      comparePath(normalizedRoot, caseInsensitive)
+  const currentName =
+    normalizedCurrent && normalizedRoot
+      ? isAtRoot
+        ? normalizedRoot.split('/').filter(Boolean).at(-1) || normalizedRoot
+        : normalizedCurrent.split('/').filter(Boolean).at(-1) || normalizedCurrent
+      : 'Files'
+  const folderCrumbs =
+    normalizedRoot && normalizedCurrent
+      ? buildFolderCrumbs(normalizedRoot, normalizedCurrent, caseInsensitive)
+      : null
+  // An ancestor clipped away on the left cannot be scrolled into view, so it
+  // must not take keyboard focus unseen (see `useClippedSegments`).
+  const {
+    rootRef: crumbNavRef,
+    segmentRef: crumbRef,
+    clipped: clippedCrumbs
+  } = useClippedSegments(folderCrumbs?.ancestors.map((crumb) => crumb.path) ?? [])
+  const currentEntries = currentPath
+    ? sortDirectoryEntries(directoryContents.get(currentPath) ?? [])
+    : []
+  const isCurrentLoading = !!currentPath && loadingDirs.has(currentPath)
+  const slideDistance = reducedMotion ? 0 : 28
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent
+        side="right"
+        className="flex w-[min(100vw,26rem)] flex-col gap-0 p-0 sm:max-w-md"
+        onCloseAutoFocus={filesSheetCloseAutoFocus}
+      >
+        <SheetHeader className="space-y-0 border-b border-border/60 p-2 text-left">
+          <div className="flex min-w-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="-ml-2 size-9 shrink-0"
+              aria-label="Back to parent folder"
+              disabled={isAtRoot || createSubmitting}
+              onClick={navigateBack}
+            >
+              <ChevronLeft size={19} />
+            </Button>
+            <div className="min-w-0">
+              <SheetTitle className="truncate text-base">{currentName}</SheetTitle>
+              {folderCrumbs ? (
+                // Below the root the path is tappable segments; on narrow
+                // widths it clips from the left (end-aligned) so the current
+                // folder always stays visible. Clip the x axis only
+                // (`overflow-x-clip`, y stays visible): `overflow-hidden`
+                // would also clip the segments' vertical hit-slop below and
+                // shrink every tap target to the 16px row.
+                <nav
+                  ref={crumbNavRef}
+                  aria-label="Folder path"
+                  title={normalizedCurrent ?? undefined}
+                  className="flex w-fit max-w-full items-center justify-end gap-0.5 overflow-x-clip whitespace-nowrap text-xs text-muted-foreground"
+                >
+                  {folderCrumbs.ancestors.map((crumb) => (
+                    <Fragment key={crumb.path}>
+                      <Button
+                        ref={crumbRef(crumb.path)}
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        // A fully clipped ancestor is skipped by Tab until it is
+                        // visible again; the Back button still steps up a level.
+                        tabIndex={clippedCrumbs.has(crumb.path) ? -1 : undefined}
+                        // Vertical-only hit-slop (16px row + 14px each side =
+                        // 44px tall): the header does not grow and neighbouring
+                        // segments never overlap horizontally.
+                        className="relative h-4 shrink-0 px-1 font-normal text-muted-foreground after:absolute after:inset-x-0 after:-inset-y-3.5 after:content-['']"
+                        disabled={createSubmitting}
+                        onClick={() => navigateTo(crumb.path)}
+                      >
+                        {crumb.label}
+                      </Button>
+                      <ChevronRight aria-hidden="true" size={12} className="shrink-0" />
+                    </Fragment>
+                  ))}
+                  <span aria-current="page" className="shrink-0 px-1 text-foreground">
+                    {folderCrumbs.currentLabel}
+                  </span>
+                </nav>
+              ) : (
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  title={normalizedCurrent ?? undefined}
+                >
+                  {isAtRoot ? 'Project files' : normalizedCurrent?.slice(rootPrefixLength)}
+                </p>
+              )}
+            </div>
+          </div>
+          <SheetDescription className="sr-only">Browse project files</SheetDescription>
+        </SheetHeader>
+
+        <div className="flex shrink-0 items-center gap-1 border-b border-border/60 p-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9"
+            aria-label="Refresh current folder"
+            disabled={!currentPath || createSubmitting}
+            onClick={() => currentPath && void refreshDirectory(currentPath)}
+          >
+            <RefreshCw size={16} />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9"
+            aria-label="New file"
+            disabled={!currentPath || createSubmitting}
+            onClick={() => setCreating({ type: 'file', value: '' })}
+          >
+            <FilePlus size={16} />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9"
+            aria-label="New folder"
+            disabled={!currentPath || createSubmitting}
+            onClick={() => setCreating({ type: 'directory', value: '' })}
+          >
+            <FolderPlus size={16} />
+          </Button>
+        </div>
+
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          {rootLoadError && isAtRoot ? (
+            <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+              <p className="text-sm text-muted-foreground">{rootLoadError.message}</p>
+              {currentPath && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void refreshDirectory(currentPath)}
+                >
+                  Retry
+                </Button>
+              )}
+            </div>
+          ) : !currentPath ? (
+            rootPath ? (
+              <div className="px-4 py-8 text-center text-sm text-muted-foreground">Loading…</div>
+            ) : (
+              <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                No active project
+              </div>
+            )
+          ) : (
+            <AnimatePresence initial={false} mode="wait" custom={navigationDirection}>
+              <motion.div
+                key={currentPath}
+                custom={navigationDirection}
+                data-testid="mobile-folder-view"
+                data-navigation-direction={
+                  navigationDirection === 1
+                    ? 'forward'
+                    : navigationDirection === -1
+                      ? 'back'
+                      : 'none'
+                }
+                data-reduced-motion={reducedMotion ? 'true' : 'false'}
+                className="absolute inset-0 overflow-y-auto py-1"
+                initial={{ opacity: reducedMotion ? 1 : 0, x: navigationDirection * slideDistance }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{
+                  opacity: reducedMotion ? 1 : 0,
+                  x: navigationDirection * -slideDistance
+                }}
+                transition={{ duration: reducedMotion ? 0 : 0.18, ease: 'easeOut' }}
+              >
+                {creating ? (
+                  <div className="px-2 py-1">
+                    <Input
+                      autoFocus
+                      disabled={createSubmitting}
+                      placeholder={creating.type === 'file' ? 'new-file.txt' : 'new-folder'}
+                      onChange={(event) => setCreating({ ...creating, value: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') void handleCreate()
+                        if (event.key === 'Escape') setCreating(null)
+                      }}
+                      className="h-11"
+                      aria-label={creating.type === 'file' ? 'New file name' : 'New folder name'}
+                    />
+                  </div>
+                ) : isCurrentLoading && !directoryContents.has(currentPath) ? (
+                  <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                    Loading…
+                  </div>
+                ) : currentEntries.length === 0 ? (
+                  <div className="px-4 py-8 text-center text-sm text-muted-foreground">Empty</div>
+                ) : (
+                  <ul aria-label={`Files in ${currentName}`}>{currentEntries.map(renderRow)}</ul>
+                )}
+              </motion.div>
+            </AnimatePresence>
+          )}
+        </div>
+
+        <Sheet open={!!actionEntry} onOpenChange={(value) => !value && setActionEntry(null)}>
+          <SheetContent
+            side="bottom"
+            className="flex flex-col gap-0 p-2"
+            aria-label={actionEntry ? `Actions for ${actionEntry.name}` : undefined}
+            onCloseAutoFocus={fileActionsSheetCloseAutoFocus}
+          >
+            {actionEntry && (
+              <>
+                <SheetHeader className="space-y-0 px-2 py-2 text-left">
+                  <SheetTitle className="truncate text-sm">{actionEntry.name}</SheetTitle>
+                </SheetHeader>
+                <button
+                  type="button"
+                  className="flex h-11 items-center gap-2 rounded-md px-2 text-sm hover:bg-accent"
+                  onClick={() => {
+                    setRenaming({ path: actionEntry.path, value: actionEntry.name })
+                    setActionEntry(null)
+                  }}
+                >
+                  <Pencil size={16} /> Rename
+                </button>
+                <button
+                  type="button"
+                  className="flex h-11 items-center gap-2 rounded-md px-2 text-sm hover:bg-accent"
+                  onClick={() => {
+                    const entry = actionEntry
+                    setActionEntry(null)
+                    void handleDuplicate(entry)
+                  }}
+                >
+                  <Copy size={16} /> Duplicate
+                </button>
+                <button
+                  type="button"
+                  className="flex h-11 items-center gap-2 rounded-md px-2 text-sm text-destructive hover:bg-destructive/10"
+                  onClick={() => {
+                    setPendingDelete(actionEntry)
+                    setActionEntry(null)
+                  }}
+                >
+                  <Trash2 size={16} /> Delete
+                </button>
+              </>
+            )}
+          </SheetContent>
+        </Sheet>
+      </SheetContent>
+
+      <AlertDialog
+        open={!!pendingDelete}
+        onOpenChange={(dialogOpen) => {
+          if (!dialogOpen) setPendingDelete(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {pendingDelete?.name ?? ''}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDelete?.type === 'directory'
+                ? 'This will delete the folder and all its contents. This cannot be undone.'
+                : 'This will delete the file. This cannot be undone.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive-fill text-destructive-foreground hover:bg-destructive-fill/90"
+              onClick={() => {
+                if (pendingDelete) void handleDelete(pendingDelete)
+                setPendingDelete(null)
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Sheet>
+  )
+}

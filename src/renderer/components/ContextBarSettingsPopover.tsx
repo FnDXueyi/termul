@@ -1,7 +1,9 @@
-import { Settings } from 'lucide-react'
+import { Settings } from '@/components/icons'
+import { STATUS_BAR_HIT_GLYPH, STATUS_BAR_HIT_TARGET } from '@/components/status-bar-hit'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { useUpdateContextBarSetting } from '@/hooks/use-context-bar-settings'
+import { cn } from '@/lib/utils'
 import { useContextBarSettingsStore } from '@/stores/context-bar-settings-store'
 import type { ContextBarSettings } from '@/types/settings'
 
@@ -32,15 +34,23 @@ export function ContextBarSettingsPopover(): React.JSX.Element {
     <Popover>
       <PopoverTrigger asChild>
         <button
-          className="flex items-center hover:bg-white/10 px-2 py-0.5 rounded cursor-pointer transition-colors"
+          type="button"
+          className={cn(STATUS_BAR_HIT_TARGET, 'cursor-pointer')}
           aria-label="Context bar settings"
         >
-          <Settings size={14} />
+          <span className={STATUS_BAR_HIT_GLYPH}>
+            <Settings size={12} className="shrink-0" />
+          </span>
         </button>
       </PopoverTrigger>
       <PopoverContent side="top" align="end" className="w-56">
         <div className="space-y-1">
           <h4 className="font-medium text-sm mb-2">Show in Context Bar</h4>
+          <SettingToggle
+            label="Project Name"
+            checked={settings.showProjectName}
+            onCheckedChange={() => handleToggle('showProjectName')}
+          />
           <SettingToggle
             label="Git Branch"
             checked={settings.showGitBranch}

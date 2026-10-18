@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import type * as connectionStatusStoreModule from '@/stores/connection-status-store'
 import WorkspaceLayout from './WorkspaceLayout'
 
 const {
@@ -19,10 +20,13 @@ const {
   mockUnwatchDirectory,
   mockKeyboardOnShortcut,
   mockUpdatePanelVisibility,
-  mockWaitForPendingAppSettingsPersistence,
   mockWaitForPendingSessionIndexWrite,
-  mockToastError
+  mockFlushSessionHistory,
+  mockToastError,
+  mockListen,
+  mockWireConnectionStatusTracking
 } = vi.hoisted(() => ({
+  mockWireConnectionStatusTracking: vi.fn(),
   activeProject: {
     id: 'project-1',
     name: 'Project 1',
@@ -61,6 +65,8 @@ const {
   },
   mockWorkspaceStoreState: {
     activePaneId: 'pane-root',
+    activeProjectId: '',
+    parkedTrees: {},
     agentLauncherPaneId: null,
     root: { type: 'leaf', id: 'pane-root', tabs: [], activeTabId: null },
     syncTerminalTabs: vi.fn(),
@@ -71,6 +77,7 @@ const {
   },
   mockFileExplorerStoreState: {
     setRootPath: vi.fn(),
+    setWorktreeRoot: vi.fn(),
     setRootLoadError: vi.fn(),
     toggleVisibility: vi.fn()
   },
@@ -81,10 +88,22 @@ const {
   mockUnwatchDirectory: vi.fn(async () => ({ success: true })),
   mockKeyboardOnShortcut: vi.fn(() => vi.fn()),
   mockUpdatePanelVisibility: vi.fn(async () => undefined),
-  mockWaitForPendingAppSettingsPersistence: vi.fn(async () => undefined),
   mockWaitForPendingSessionIndexWrite: vi.fn(async () => undefined),
-  mockToastError: vi.fn()
+  mockFlushSessionHistory: vi.fn(async () => undefined),
+  mockToastError: vi.fn(),
+  mockListen: vi.fn(async () => vi.fn())
 }))
+
+// Story 10: spy on the connection-health wiring WorkspaceLayout must invoke
+// once on mount (the store stays real — only the wiring entry point is spied).
+vi.mock('@/stores/connection-status-store', async (importOriginal) => {
+  const actual = await importOriginal<typeof connectionStatusStoreModule>()
+  return { ...actual, wireConnectionStatusTracking: mockWireConnectionStatusTracking }
+})
+
+// The shell resolves its working copy through the (heavily mocked) stores;
+// these suites exercise layout behaviour, so resolve to the project folder.
+vi.mock('@/hooks/use-active-working-copy', () => ({ useActiveWorkingCopy: () => null }))
 
 vi.mock('@/stores/project-store', () => ({
   useProjectsLoaded: () => true,
@@ -145,6 +164,10 @@ vi.mock('@/stores/editor-store', () => ({
   }
 }))
 
+// The shell unread tracker reads the real pane tree and acp store; this suite
+// mocks the workspace store wholesale and does not exercise it.
+vi.mock('@/hooks/use-shell-unread-tracker', () => ({ useShellUnreadTracker: () => {} }))
+
 vi.mock('@/stores/workspace-store', () => {
   const useWorkspaceStore = (selector?: (s: typeof mockWorkspaceStoreState) => unknown) =>
     selector ? selector(mockWorkspaceStoreState) : mockWorkspaceStoreState
@@ -184,10 +207,11 @@ vi.mock('@/stores/keyboard-shortcuts-store', () => ({
 }))
 
 vi.mock('@/stores/app-settings-store', () => ({
+  useAppSettingsStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({ settings: { shellLayout: 'classic' }, isLoaded: true }),
   useTerminalFontSize: () => 14,
   useUiZoomLevel: () => 1,
   useDefaultShell: () => 'bash',
-  useMaxTerminalsPerProject: () => 10,
   useConfirmTerminalClose: () => true,
   useColorTheme: () => 'termul',
   useAppearanceMode: () => 'dark'
@@ -216,12 +240,16 @@ vi.mock('@/hooks/use-command-history', () => ({
 vi.mock('@/hooks/use-app-settings', () => ({
   useUpdateAppSetting: () => vi.fn(),
   useUpdateAppSettings: () => vi.fn(),
-  useUpdatePanelVisibility: () => mockUpdatePanelVisibility,
-  waitForPendingAppSettingsPersistence: mockWaitForPendingAppSettingsPersistence
+  useUpdatePanelVisibility: () => mockUpdatePanelVisibility
 }))
 
 vi.mock('@/lib/acp-history-persistence', () => ({
+  flushSessionHistory: mockFlushSessionHistory,
   waitForPendingSessionIndexWrite: mockWaitForPendingSessionIndexWrite
+}))
+
+vi.mock('@/lib/tauri-event', () => ({
+  listen: mockListen
 }))
 
 vi.mock('@/hooks/use-file-watcher', () => ({
@@ -232,28 +260,32 @@ vi.mock('@/hooks/use-editor-persistence', () => ({
   useEditorPersistence: () => undefined
 }))
 
-vi.mock('@/components/ProjectSidebar', () => ({
-  ProjectSidebar: () => <div data-testid="project-sidebar" />
+// P17: shared canonical mock shape for the Story 6 sync hook + banner —
+// identical inline factories across the three WorkspaceLayout suites.
+
+// The desktop frame is stubbed to its two slots: these suites exercise the
+// close flows wired in WorkspaceLayout, not the Rail / Side panel chrome.
+vi.mock('@/components/shell/ShellFrame', () => ({
+  ShellFrame: ({
+    workspaceMain,
+    appModals
+  }: {
+    workspaceMain: React.ReactNode
+    appModals: React.ReactNode
+  }) => (
+    <div data-testid="shell-frame">
+      {workspaceMain}
+      {appModals}
+    </div>
+  )
 }))
 
 vi.mock('@/components/workspace/PaneRenderer', () => ({
   PaneRenderer: () => <div data-testid="pane-renderer" />
 }))
 
-vi.mock('@/components/file-explorer/FileExplorer', () => ({
-  FileExplorer: () => <div data-testid="file-explorer" />
-}))
-
 vi.mock('@/components/StatusBar', () => ({
   StatusBar: () => <div data-testid="status-bar" />
-}))
-
-vi.mock('@/components/TitleBar', () => ({
-  TitleBar: () => <div data-testid="title-bar" />
-}))
-
-vi.mock('@/components/ActivityRail', () => ({
-  ActivityRail: () => <div data-testid="activity-rail" />
 }))
 
 vi.mock('@/components/NewProjectModal', () => ({
@@ -360,6 +392,7 @@ function renderLayout() {
 
 describe('WorkspaceLayout close persistence', () => {
   beforeEach(() => {
+    mockWireConnectionStatusTracking.mockClear()
     vi.clearAllMocks()
     mockEditorStoreState.activeFilePath = null
     mockEditorStoreState.openFiles = new Map()
@@ -367,9 +400,49 @@ describe('WorkspaceLayout close persistence', () => {
     mockEditorStoreState.saveAllDirty.mockResolvedValue(undefined)
     mockFlushPendingWrites.mockResolvedValue({ success: true, data: undefined })
     mockUpdatePanelVisibility.mockResolvedValue(undefined)
-    mockWaitForPendingAppSettingsPersistence.mockResolvedValue(undefined)
     mockWaitForPendingSessionIndexWrite.mockResolvedValue(undefined)
+    mockFlushSessionHistory.mockResolvedValue(undefined)
     mockCloseRequested.mockImplementation(() => vi.fn())
+    mockListen.mockResolvedValue(vi.fn())
+  })
+
+  it('routes tray quit through the same persistence flush as a window quit', async () => {
+    renderLayout()
+
+    await waitFor(() => {
+      expect(mockListen).toHaveBeenCalledWith('tray:quit-requested', expect.any(Function))
+    })
+    const trayQuitHandler = mockListen.mock.calls.find(
+      ([event]) => event === 'tray:quit-requested'
+    )?.[1] as (() => void) | undefined
+
+    await act(async () => {
+      trayQuitHandler?.()
+    })
+
+    await waitFor(() => {
+      expect(mockFlushPendingWrites).toHaveBeenCalledTimes(1)
+      expect(mockRespondToClose).toHaveBeenCalledWith('close')
+    })
+  })
+
+  it('routes tray quit through the unsaved-file prompt', async () => {
+    mockEditorStoreState.getDirtyFileCount.mockReturnValue(2)
+    renderLayout()
+
+    await waitFor(() => {
+      expect(mockListen).toHaveBeenCalledWith('tray:quit-requested', expect.any(Function))
+    })
+    const trayQuitHandler = mockListen.mock.calls.find(
+      ([event]) => event === 'tray:quit-requested'
+    )?.[1] as (() => void) | undefined
+
+    await act(async () => {
+      trayQuitHandler?.()
+    })
+
+    expect(await screen.findByText('Unsaved Changes')).toBeInTheDocument()
+    expect(mockRespondToClose).not.toHaveBeenCalled()
   })
 
   it('flushes pending persistence writes before closing when there are no dirty files', async () => {
@@ -398,6 +471,37 @@ describe('WorkspaceLayout close persistence', () => {
 
     await waitFor(() => {
       expect(mockWaitForPendingSessionIndexWrite).toHaveBeenCalledTimes(1)
+      expect(mockRespondToClose).toHaveBeenCalledWith('close')
+    })
+  })
+
+  it('flushes the Rust-backed ACP history before closing', async () => {
+    renderLayout()
+
+    const closeHandler = (mockCloseRequested.mock.calls as unknown as Array<[() => void]>)[0]?.[0]
+
+    await act(async () => {
+      closeHandler?.()
+    })
+
+    await waitFor(() => {
+      expect(mockFlushSessionHistory).toHaveBeenCalledTimes(1)
+      expect(mockRespondToClose).toHaveBeenCalledWith('close')
+    })
+  })
+
+  it('still closes when the Rust-backed ACP history flush rejects', async () => {
+    mockFlushSessionHistory.mockRejectedValueOnce(new Error('flush failed'))
+    renderLayout()
+
+    const closeHandler = (mockCloseRequested.mock.calls as unknown as Array<[() => void]>)[0]?.[0]
+
+    await act(async () => {
+      closeHandler?.()
+    })
+
+    await waitFor(() => {
+      expect(mockRespondToClose).toHaveBeenCalledTimes(1)
       expect(mockRespondToClose).toHaveBeenCalledWith('close')
     })
   })
@@ -466,5 +570,13 @@ describe('WorkspaceLayout close persistence', () => {
       expect(mockFlushPendingWrites).toHaveBeenCalledTimes(1)
       expect(mockRespondToClose).toHaveBeenCalledWith('close')
     })
+  })
+
+  // Story 10: the global connection-health feeds are wired from the layout
+  // exactly once per mount — losing this call leaves the StatusBar
+  // indicator, terminal overlay, and Explorer recovery inert.
+  it('wires connection-status tracking once on mount (Story 10)', () => {
+    renderLayout()
+    expect(mockWireConnectionStatusTracking).toHaveBeenCalledTimes(1)
   })
 })

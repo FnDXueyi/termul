@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  mockProject,
+  resetTerminalStore,
+  seedProjectStore,
+  seedTerminalStore
+} from '@/lib/test-utils/store'
+import { mockTerminal } from '@/lib/test-utils/terminal'
+import { serializeTerminalsForProject } from '../hooks/useTerminalAutoSave'
 import { useProjectStore } from './project-store'
 import {
   HIDDEN_BUFFER_TRUNCATION_DELAY,
@@ -10,35 +18,47 @@ import {
 describe('terminal-store', () => {
   beforeEach(() => {
     // Reset stores to initial state before each test
-    useProjectStore.setState({
-      projects: [
-        { id: '1', name: 'Project 1', color: 'blue', isActive: true },
-        { id: '2', name: 'Project 2', color: 'green' }
+    seedProjectStore(
+      [
+        mockProject({ id: '1', name: 'Project 1', isActive: true }),
+        mockProject({ id: '2', name: 'Project 2', color: 'green' })
       ],
-      activeProjectId: '1'
-    })
+      '1'
+    )
 
-    useTerminalStore.setState({
-      terminals: [
-        { id: 't1', name: 'Terminal 1', projectId: '1', shell: 'powershell', output: [] },
-        { id: 't2', name: 'Terminal 2', projectId: '1', shell: 'powershell', output: [] },
-        { id: 't3', name: 'Terminal 3', projectId: '2', shell: 'bash', output: [] }
+    seedTerminalStore(
+      [
+        mockTerminal({
+          id: 't1',
+          name: 'Terminal 1',
+          projectId: '1',
+          shell: 'powershell',
+          output: []
+        }),
+        mockTerminal({
+          id: 't2',
+          name: 'Terminal 2',
+          projectId: '1',
+          shell: 'powershell',
+          output: []
+        }),
+        mockTerminal({ id: 't3', name: 'Terminal 3', projectId: '2', output: [] })
       ],
-      activeTerminalId: 't1'
-    })
+      { activeTerminalId: 't1' }
+    )
   })
 
   describe('initial state', () => {
     it('should have empty terminals array by default', () => {
       // Reset to true initial state (no beforeEach data)
-      useTerminalStore.setState({ terminals: [], activeTerminalId: '' })
+      resetTerminalStore()
       const { terminals } = useTerminalStore.getState()
       expect(terminals).toEqual([])
     })
 
     it('should have empty activeTerminalId by default', () => {
       // Reset to true initial state (no beforeEach data)
-      useTerminalStore.setState({ terminals: [], activeTerminalId: '' })
+      resetTerminalStore()
       const { activeTerminalId } = useTerminalStore.getState()
       expect(activeTerminalId).toBe('')
     })
@@ -85,6 +105,27 @@ describe('terminal-store', () => {
       expect(newTerminal.projectId).toBe('1')
       expect(newTerminal.shell).toBe('bash')
       expect(newTerminal.id).toBeTruthy()
+    })
+
+    it('gives terminals added in the same millisecond distinct ids', () => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(new Date('2026-10-13T00:00:00.000Z'))
+        const { addTerminal } = useTerminalStore.getState()
+        const first = addTerminal('A', '1')
+        const second = addTerminal('B', '1')
+        expect(first.id).not.toBe(second.id)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('can add a terminal without making it the active one', () => {
+      const { addTerminal, selectTerminal } = useTerminalStore.getState()
+      const local = addTerminal('Local', '1')
+      selectTerminal(local.id)
+      addTerminal('Background', 'ssh-p1', 'ssh', undefined, undefined, { activate: false })
+      expect(useTerminalStore.getState().activeTerminalId).toBe(local.id)
     })
 
     it('should set activeTerminalId to new terminal', () => {
@@ -453,6 +494,117 @@ describe('terminal-store', () => {
       expect(consumeTranscript('pty-transcript-1')).toBe('chunk')
       expect(peekTranscript('pty-transcript-1')).toBe('')
     })
+
+    it('leaves transcriptTrimmed unset while the transcript stays under the cap', () => {
+      const { setTerminalPtyId, appendTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-under')
+
+      appendTranscript('pty-trim-flag-under', 'line 1\n')
+      appendTranscript('pty-trim-flag-under', 'x'.repeat(MAX_TRANSCRIPT_CHARS - 8))
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcript?.length).toBe(MAX_TRANSCRIPT_CHARS - 1)
+      expect(terminal?.transcript?.startsWith('line 1\n')).toBe(true)
+      expect(terminal?.transcriptTrimmed).toBeFalsy()
+    })
+
+    it('sets transcriptTrimmed when appendTranscript trims past the cap', () => {
+      const { setTerminalPtyId, appendTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-over')
+
+      appendTranscript('pty-trim-flag-over', `head\n${'x'.repeat(MAX_TRANSCRIPT_CHARS - 10)}\n`)
+      appendTranscript('pty-trim-flag-over', 'tail line\n')
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcriptTrimmed).toBe(true)
+      expect(terminal?.transcript?.includes('head')).toBe(false)
+      expect(terminal?.transcript?.endsWith('tail line\n')).toBe(true)
+    })
+
+    it('line-aligns and flags a transcript that lands exactly on the cap', () => {
+      const { setTerminalPtyId, appendTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-exact')
+
+      // A coalesced buffer the detached-output hook clipped to exactly the cap:
+      // its head line is partial, so it must be dropped.
+      const partialHead = 'clipped-head-line\n'
+      const body = `${'y'.repeat(MAX_TRANSCRIPT_CHARS - partialHead.length - 1)}\n`
+      expect((partialHead + body).length).toBe(MAX_TRANSCRIPT_CHARS)
+      appendTranscript('pty-trim-flag-exact', partialHead + body)
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcript).toBe(body)
+      expect(terminal?.transcriptTrimmed).toBe(true)
+    })
+
+    it('clears transcriptTrimmed together with the transcript in consumeTranscript', () => {
+      const { setTerminalPtyId, appendTranscript, consumeTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-consume')
+
+      appendTranscript('pty-trim-flag-consume', `head\n${'x'.repeat(MAX_TRANSCRIPT_CHARS)}`)
+      const trimmedLength =
+        useTerminalStore.getState().terminals.find((t) => t.id === 't1')?.transcript?.length ?? 0
+      expect(trimmedLength).toBe(MAX_TRANSCRIPT_CHARS)
+
+      const stillTrimmed = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(stillTrimmed?.transcriptTrimmed).toBe(true)
+
+      expect(consumeTranscript('pty-trim-flag-consume').length).toBe(MAX_TRANSCRIPT_CHARS)
+      const consumed = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(consumed?.transcript).toBeUndefined()
+      expect(consumed?.transcriptTrimmed).toBeFalsy()
+
+      appendTranscript('pty-trim-flag-consume', 'fresh\n')
+      const fresh = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(fresh?.transcript).toBe('fresh\n')
+      expect(fresh?.transcriptTrimmed).toBeFalsy()
+    })
+
+    it('keeps transcriptTrimmed through a small append after a trim', () => {
+      const { setTerminalPtyId, appendTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-sticky')
+      useTerminalStore.setState((state) => ({
+        terminals: state.terminals.map((t) =>
+          t.id === 't1' ? { ...t, transcript: 'tail\n', transcriptTrimmed: true } : t
+        )
+      }))
+
+      appendTranscript('pty-trim-flag-sticky', 'more\n')
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcript).toBe('tail\nmore\n')
+      expect(terminal?.transcriptTrimmed).toBe(true)
+    })
+
+    it('clears transcriptTrimmed on consume even when the trim left an empty transcript', () => {
+      const { setTerminalPtyId, consumeTranscript } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-empty')
+      useTerminalStore.setState((state) => ({
+        terminals: state.terminals.map((t) =>
+          t.id === 't1' ? { ...t, transcript: '', transcriptTrimmed: true } : t
+        )
+      }))
+
+      expect(consumeTranscript('pty-trim-flag-empty')).toBe('')
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcriptTrimmed).toBeFalsy()
+    })
+
+    it('clears transcriptTrimmed when the terminal restarts', () => {
+      const { setTerminalPtyId, restartTerminal } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-trim-flag-restart')
+      useTerminalStore.setState((state) => ({
+        terminals: state.terminals.map((t) =>
+          t.id === 't1' ? { ...t, transcript: 'tail\n', transcriptTrimmed: true } : t
+        )
+      }))
+
+      restartTerminal('t1')
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.transcript).toBeUndefined()
+      expect(terminal?.transcriptTrimmed).toBeFalsy()
+    })
   })
 
   describe('updateTerminalScrollback', () => {
@@ -561,6 +713,7 @@ describe('terminal-store', () => {
       expect(terminal?.transcript?.startsWith('x')).toBe(true)
       expect(terminal?.transcript?.endsWith('x')).toBe(true)
       expect(terminal?.transcript?.includes('stale-header')).toBe(false)
+      expect(terminal?.transcriptTrimmed).toBe(true)
     })
 
     it('truncates hidden buffers after the configured delay and keeps transcript aligned', () => {
@@ -627,6 +780,59 @@ describe('terminal-store', () => {
 
         const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
         expect(terminal?.transcript?.split(/\r\n|\r|\n/)).toHaveLength(TRUNCATED_BUFFER_SIZE)
+        expect(terminal?.transcriptTrimmed).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('leaves transcriptTrimmed unset when the hidden truncation keeps the transcript intact', () => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(new Date('2026-05-02T00:00:00.000Z'))
+
+        const { setTerminalPtyId, appendTranscript, setAppHidden, truncateHiddenTerminalBuffers } =
+          useTerminalStore.getState()
+        setTerminalPtyId('t1', 'pty-hidden-transcript-small')
+        // Longer than TRUNCATED_BUFFER_SIZE chars but well under that many
+        // lines, with CRLF and bare-CR separators: nothing may be rewritten.
+        const transcript = Array.from(
+          { length: 200 },
+          (_, index) => `line-${index + 1} ${'z'.repeat(40)}\r\nprogress\r`
+        ).join('')
+        expect(transcript.length).toBeGreaterThan(TRUNCATED_BUFFER_SIZE)
+        appendTranscript('pty-hidden-transcript-small', transcript)
+
+        setAppHidden(true)
+        vi.advanceTimersByTime(HIDDEN_BUFFER_TRUNCATION_DELAY + 1)
+        truncateHiddenTerminalBuffers()
+
+        const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+        expect(terminal?.transcript).toBe(transcript)
+        expect(terminal?.transcriptTrimmed).toBeFalsy()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('keeps the original separators of the retained lines when hidden truncation drops a head', () => {
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(new Date('2026-05-02T00:00:00.000Z'))
+
+        const { setTerminalPtyId, appendTranscript, setAppHidden, truncateHiddenTerminalBuffers } =
+          useTerminalStore.getState()
+        setTerminalPtyId('t1', 'pty-hidden-transcript-crlf')
+        const lines = Array.from({ length: TRUNCATED_BUFFER_SIZE + 10 }, (_, i) => `line-${i + 1}`)
+        appendTranscript('pty-hidden-transcript-crlf', lines.join('\r\n'))
+
+        setAppHidden(true)
+        vi.advanceTimersByTime(HIDDEN_BUFFER_TRUNCATION_DELAY + 1)
+        truncateHiddenTerminalBuffers()
+
+        const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+        expect(terminal?.transcript).toBe(lines.slice(-TRUNCATED_BUFFER_SIZE).join('\r\n'))
+        expect(terminal?.transcriptTrimmed).toBe(true)
       } finally {
         vi.useRealTimers()
       }
@@ -833,6 +1039,137 @@ describe('terminal-store', () => {
       useTerminalStore.getState().setTerminalNeedsAttention('does-not-exist', true)
       const after = useTerminalStore.getState().terminals
       expect(after).toBe(before)
+    })
+  })
+
+  // ========== CAP-3: reclaimable terminal lease (claim) lifecycle ==========
+  // The claim credential is in-memory only: set on spawn/rotate, cleared on
+  // kill/close/restart/clearTerminalPtyId, and NEVER written to persistence.
+
+  describe('CAP-3 terminal claim lifecycle', () => {
+    it('setTerminalClaim sets the claim on the terminal owning the ptyId', () => {
+      const { setTerminalPtyId, setTerminalClaim } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-claim')
+      setTerminalClaim('pty-cap3-claim', 'lease-credential-1')
+
+      const { terminals } = useTerminalStore.getState()
+      expect(terminals.find((t) => t.id === 't1')?.claim).toBe('lease-credential-1')
+      expect(terminals.find((t) => t.id === 't2')?.claim).toBeUndefined()
+      expect(terminals.find((t) => t.id === 't3')?.claim).toBeUndefined()
+    })
+
+    it('setTerminalClaim is a no-op for an unknown ptyId', () => {
+      const { setTerminalPtyId, setTerminalClaim } = useTerminalStore.getState()
+      setTerminalPtyId('t1', 'pty-cap3-known')
+
+      const before = useTerminalStore.getState().terminals
+      setTerminalClaim('pty-cap3-unknown', 'lease-orphan')
+      const after = useTerminalStore.getState().terminals
+
+      // Same state reference: nothing was rewritten for a ptyId nobody owns.
+      expect(after).toBe(before)
+      expect(after.find((t) => t.id === 't1')?.claim).toBeUndefined()
+      expect(after.some((t) => t.claim === 'lease-orphan')).toBe(false)
+    })
+
+    it('clears the claim when setTerminalClaim is called with undefined', () => {
+      const { setTerminalPtyId, setTerminalClaim } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-clear')
+      setTerminalClaim('pty-cap3-clear', 'lease-to-clear')
+      expect(useTerminalStore.getState().terminals.find((t) => t.id === 't1')?.claim).toBe(
+        'lease-to-clear'
+      )
+
+      setTerminalClaim('pty-cap3-clear', undefined)
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.claim).toBeUndefined()
+      // The ptyId binding survives claim clearing — only the lease is gone.
+      expect(terminal?.ptyId).toBe('pty-cap3-clear')
+    })
+
+    it('rotation semantics: setting a new claim replaces the previous credential', () => {
+      const { setTerminalPtyId, setTerminalClaim } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-rotate')
+      setTerminalClaim('pty-cap3-rotate', 'lease-generation-1')
+      setTerminalClaim('pty-cap3-rotate', 'lease-generation-2')
+
+      const { terminals } = useTerminalStore.getState()
+      expect(terminals.find((t) => t.id === 't1')?.claim).toBe('lease-generation-2')
+      // The rotated-out credential must not linger on any terminal record.
+      expect(terminals.some((t) => t.claim === 'lease-generation-1')).toBe(false)
+    })
+
+    it('clearTerminalPtyId drops the claim bound to that PTY', () => {
+      const { setTerminalPtyId, setTerminalClaim, clearTerminalPtyId } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-drop')
+      setTerminalClaim('pty-cap3-drop', 'lease-bound-to-pty')
+
+      clearTerminalPtyId('pty-cap3-drop')
+
+      const terminal = useTerminalStore.getState().terminals.find((t) => t.id === 't1')
+      expect(terminal?.ptyId).toBeUndefined()
+      expect(terminal?.claim).toBeUndefined()
+    })
+
+    it('closeTerminal removes the record carrying the claim', () => {
+      const { setTerminalPtyId, setTerminalClaim, closeTerminal } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-close')
+      setTerminalClaim('pty-cap3-close', 'lease-on-closed-terminal')
+
+      closeTerminal('t1', '1')
+
+      const { terminals } = useTerminalStore.getState()
+      expect(terminals.find((t) => t.id === 't1')).toBeUndefined()
+      expect(terminals.some((t) => t.claim === 'lease-on-closed-terminal')).toBe(false)
+    })
+
+    it('restartTerminal drops the stale claim of the replaced PTY', () => {
+      const { setTerminalPtyId, setTerminalClaim, restartTerminal } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-restart')
+      setTerminalClaim('pty-cap3-restart', 'lease-stale-after-restart')
+
+      restartTerminal('t1')
+
+      const { terminals } = useTerminalStore.getState()
+      const restarted = terminals.find((t) => t.id === 't1')
+      // The old lease belonged to the old PTY — the record gets a fresh
+      // placeholder ptyId and no claim until the restart re-spawns.
+      expect(restarted?.claim).toBeUndefined()
+      expect(restarted?.ptyId).toBeDefined()
+      expect(restarted?.ptyId).not.toBe('pty-cap3-restart')
+      expect(terminals.some((t) => t.claim === 'lease-stale-after-restart')).toBe(false)
+    })
+
+    it('excludes the claim from the auto-save persisted payload (persistence exclusion)', () => {
+      const claimCredential = 'cap3-lease-credential-0123456789abcdef'
+      const { setTerminalPtyId, setTerminalClaim, appendTranscript } = useTerminalStore.getState()
+
+      setTerminalPtyId('t1', 'pty-cap3-persist')
+      setTerminalClaim('pty-cap3-persist', claimCredential)
+      appendTranscript('pty-cap3-persist', 'persisted output line 1\npersisted output line 2\n')
+
+      const { terminals, activeTerminalId } = useTerminalStore.getState()
+      const layout = serializeTerminalsForProject(terminals, '1', activeTerminalId)
+
+      const persisted = layout.terminals.find((t) => t.id === 't1')
+      expect(persisted).toBeDefined()
+      // Ordinary continuity data still persists...
+      expect(persisted?.transcript).toBe('persisted output line 1\npersisted output line 2\n')
+      expect(persisted?.scrollback).toEqual(['persisted output line 1', 'persisted output line 2'])
+      // ...but the lease credential never does.
+      expect(persisted).not.toHaveProperty('claim')
+      expect(persisted).not.toHaveProperty('ptyId')
+
+      const serialized = JSON.stringify(layout)
+      expect(serialized).not.toContain(claimCredential)
+      expect(serialized).not.toContain('"claim"')
     })
   })
 })

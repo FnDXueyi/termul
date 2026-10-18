@@ -1,23 +1,31 @@
 //! Agent Skills discovery — Zed-compatible `SKILL.md` packages under
 //! `~/.agents/skills/` (global) and `{project}/.agents/skills/` (project-local).
+//!
+//! Surfaced to the renderer slash-command menu and the Settings list via
+//! `commands.rs`. An installed skill stays in the menu. A harness command that
+//! repeats it — the same name, or a re-promoted `skill:<name>` command — is
+//! hidden. Comparison is case-insensitive (see `slash-menu-model`).
 
 pub mod commands;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSkillSummary {
     pub name: String,
     pub description: String,
     /// `"global"` or `"project"`.
     pub scope: String,
+    /// Absolute path to the skill's `SKILL.md` so the agent can read the
+    /// instructions from disk at prompt time (no body is shipped over the wire).
+    pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSkillContent {
     pub name: String,
@@ -25,6 +33,8 @@ pub struct AgentSkillContent {
     pub scope: String,
     /// Markdown body after YAML frontmatter.
     pub body: String,
+    /// Absolute path to the skill's `SKILL.md`.
+    pub path: String,
 }
 
 fn home_skills_root() -> Result<PathBuf, String> {
@@ -64,7 +74,7 @@ pub fn parse_skill_md(content: &str) -> Result<(HashMap<String, String>, String)
         return Ok((HashMap::new(), content.trim().to_string()));
     }
 
-    let rest = trimmed.strip_prefix("---").unwrap_or(trimmed).trim_start();
+    let rest = trimmed.strip_prefix("---").unwrap_or(trimmed);
     let end = rest
         .find("\n---")
         .ok_or_else(|| "SKILL.md frontmatter is not closed with '---'".to_string())?;
@@ -103,9 +113,32 @@ fn scan_skills_dir(
         return Ok(());
     }
 
-    for entry in fs::read_dir(dir).map_err(|e| format!("read skills dir {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("failed to read skills directory {}: {e}", dir.display());
+            return Ok(());
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                log::warn!("failed to read a skills directory entry: {e}");
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                log::warn!(
+                    "failed to read file type for {}: {e}",
+                    entry.path().display()
+                );
+                continue;
+            }
+        };
         if !file_type.is_dir() {
             continue;
         }
@@ -116,9 +149,20 @@ fn scan_skills_dir(
             continue;
         }
 
-        let raw = fs::read_to_string(&skill_md)
-            .map_err(|e| format!("read {}: {e}", skill_md.display()))?;
-        let (frontmatter, _) = parse_skill_md(&raw)?;
+        let raw = match fs::read_to_string(&skill_md) {
+            Ok(raw) => raw,
+            Err(e) => {
+                log::warn!("failed to read {}: {e}", skill_md.display());
+                continue;
+            }
+        };
+        let (frontmatter, _) = match parse_skill_md(&raw) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                log::warn!("failed to parse {}: {e}", skill_md.display());
+                continue;
+            }
+        };
         let name = frontmatter
             .get("name")
             .cloned()
@@ -128,6 +172,12 @@ fn scan_skills_dir(
             continue;
         }
         let description = frontmatter.get("description").cloned().unwrap_or_default();
+        // Absolute SKILL.md path derived from the (already-absolute) scan root,
+        // so the renderer-side wire prompt can cite it for the agent to read at
+        // prompt time. Not canonicalized: `fs::canonicalize` would yield a
+        // `\\?\`-prefixed UNC path on Windows that is ugly to cite in the wire
+        // prompt, and the scan root is already absolute.
+        let path = skill_md.to_string_lossy().to_string();
 
         out.insert(
             name.clone(),
@@ -135,6 +185,7 @@ fn scan_skills_dir(
                 name,
                 description,
                 scope: scope.to_string(),
+                path,
             },
         );
     }
@@ -143,26 +194,57 @@ fn scan_skills_dir(
 }
 
 /// List installed skills. Project-local entries override global names.
-pub fn list_agent_skills(project_root: Option<&str>) -> Result<Vec<AgentSkillSummary>, String> {
+///
+/// `home_root` is the global skills root (`~/.agents/skills`) to scan, injected
+/// so tests can supply a temp home without mutating the process-wide `HOME`
+/// (which would race with other tests reading `home_skills_root()`).
+pub fn list_agent_skills_with_home(
+    home_root: &Path,
+    project_root: Option<&str>,
+) -> Result<Vec<AgentSkillSummary>, String> {
+    log::debug!("listing agent skills, project_root={project_root:?}");
     let mut by_name: HashMap<String, AgentSkillSummary> = HashMap::new();
 
-    scan_skills_dir(&home_skills_root()?, "global", &mut by_name)?;
+    scan_skills_dir(home_root, "global", &mut by_name)?;
 
     if let Some(root) = project_root.filter(|s| !s.is_empty()) {
-        let project_skills = PathBuf::from(root).join(".agents").join("skills");
+        // Reject a relative project root early: a relative path would scan the
+        // process CWD (undefined for a Tauri command) rather than the intended
+        // project. The renderer always passes an absolute `session.cwd`.
+        let root_path = PathBuf::from(root);
+        if !root_path.is_absolute() {
+            return Err(format!("project root must be absolute, got: {root}"));
+        }
+        let project_skills = root_path.join(".agents").join("skills");
         scan_skills_dir(&project_skills, "project", &mut by_name)?;
     }
 
     let mut skills: Vec<AgentSkillSummary> = by_name.into_values().collect();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
+    log::debug!("listed {} agent skill(s)", skills.len());
     Ok(skills)
 }
 
-fn resolve_skill_path(name: &str, project_root: Option<&str>) -> Result<(PathBuf, String), String> {
+/// List installed skills using the real user home (`~/.agents/skills`).
+pub fn list_agent_skills(project_root: Option<&str>) -> Result<Vec<AgentSkillSummary>, String> {
+    list_agent_skills_with_home(&home_skills_root()?, project_root)
+}
+
+fn resolve_skill_path_with_home(
+    name: &str,
+    project_root: Option<&str>,
+    home_root: &Path,
+) -> Result<(PathBuf, String), String> {
     validate_skill_name(name)?;
 
     if let Some(root) = project_root.filter(|s| !s.is_empty()) {
-        let project_skill = PathBuf::from(root)
+        // Reject a relative project root before constructing skill paths (mirrors
+        // the check in `list_agent_skills_with_home`).
+        let root_path = PathBuf::from(root);
+        if !root_path.is_absolute() {
+            return Err(format!("project root must be absolute, got: {root}"));
+        }
+        let project_skill = root_path
             .join(".agents")
             .join("skills")
             .join(name)
@@ -172,7 +254,7 @@ fn resolve_skill_path(name: &str, project_root: Option<&str>) -> Result<(PathBuf
         }
     }
 
-    let global_skill = home_skills_root()?.join(name).join("SKILL.md");
+    let global_skill = home_root.join(name).join("SKILL.md");
     if global_skill.is_file() {
         return Ok((global_skill, "global".to_string()));
     }
@@ -181,12 +263,23 @@ fn resolve_skill_path(name: &str, project_root: Option<&str>) -> Result<(PathBuf
 }
 
 /// Read a skill's markdown body. Project-local overrides global.
-pub fn read_agent_skill(
+///
+/// `home_root` is injected (see `list_agent_skills_with_home`) so tests can
+/// resolve a global skill against a temp home without mutating `HOME`.
+pub fn read_agent_skill_with_home(
     name: &str,
+    home_root: &Path,
     project_root: Option<&str>,
 ) -> Result<AgentSkillContent, String> {
-    let (path, scope) = resolve_skill_path(name, project_root)?;
-    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let (path, scope) =
+        resolve_skill_path_with_home(name, project_root, home_root).map_err(|e| {
+            log::warn!("agent skill '{name}' could not be resolved: {e}");
+            e
+        })?;
+    let raw = fs::read_to_string(&path).map_err(|e| {
+        log::warn!("failed to read skill '{}': {e}", path.display());
+        format!("read {}: {e}", path.display())
+    })?;
     let (frontmatter, body) = parse_skill_md(&raw)?;
     let skill_name = frontmatter
         .get("name")
@@ -194,109 +287,24 @@ pub fn read_agent_skill(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| name.to_string());
     let description = frontmatter.get("description").cloned().unwrap_or_default();
+    let path = path.to_string_lossy().to_string();
 
     Ok(AgentSkillContent {
         name: skill_name,
         description,
         scope,
         body,
+        path,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn parse_skill_md_splits_frontmatter() {
-        let raw = "---\nname: demo\ndescription: A demo skill\n---\n\n## Steps\n\nDo things.\n";
-        let (fm, body) = parse_skill_md(raw).unwrap();
-        assert_eq!(fm.get("name").map(String::as_str), Some("demo"));
-        assert_eq!(
-            fm.get("description").map(String::as_str),
-            Some("A demo skill")
-        );
-        assert!(body.contains("## Steps"));
-    }
-
-    #[test]
-    fn list_and_read_project_skill() {
-        let temp = std::env::temp_dir().join(format!("termul-skill-test-{}", std::process::id()));
-        let skill_dir = temp.join(".agents").join("skills").join("demo-skill");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: demo-skill\ndescription: Demo\n---\n\nRun the demo.\n",
-        )
-        .unwrap();
-
-        let root = temp.to_string_lossy().to_string();
-        let listed = list_agent_skills(Some(&root)).unwrap();
-        assert!(listed
-            .iter()
-            .any(|s| s.name == "demo-skill" && s.scope == "project"));
-
-        let content = read_agent_skill("demo-skill", Some(&root)).unwrap();
-        assert_eq!(content.name, "demo-skill");
-        assert_eq!(content.body.trim(), "Run the demo.");
-
-        let _ = fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn read_agent_skill_rejects_path_traversal_names() {
-        let temp = std::env::temp_dir().join(format!("termul-skill-sec-{}", std::process::id()));
-        let skill_dir = temp.join(".agents").join("skills").join("safe-skill");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: safe-skill\n---\n\nok\n",
-        )
-        .unwrap();
-        let root = temp.to_string_lossy().to_string();
-
-        for malicious in [
-            "../../../etc/passwd",
-            "foo/../bar",
-            "..",
-            ".",
-            "bad/name",
-            "bad\\name",
-        ] {
-            let err = read_agent_skill(malicious, Some(&root)).unwrap_err();
-            assert!(
-                err.contains("invalid skill name") || err.contains("not found"),
-                "expected rejection for {malicious}, got: {err}"
-            );
-        }
-
-        let _ = fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn list_agent_skills_ignores_invalid_directory_names() {
-        let temp =
-            std::env::temp_dir().join(format!("termul-skill-list-sec-{}", std::process::id()));
-        let skills_root = temp.join(".agents").join("skills");
-        fs::create_dir_all(skills_root.join("valid-skill")).unwrap();
-        fs::write(
-            skills_root.join("valid-skill").join("SKILL.md"),
-            "---\nname: valid-skill\n---\n\nok\n",
-        )
-        .unwrap();
-        fs::create_dir_all(skills_root.join("Invalid")).unwrap();
-        fs::write(
-            skills_root.join("Invalid").join("SKILL.md"),
-            "---\nname: Invalid\n---\n\nno\n",
-        )
-        .unwrap();
-
-        let root = temp.to_string_lossy().to_string();
-        let listed = list_agent_skills(Some(&root)).unwrap();
-        assert!(listed.iter().any(|s| s.name == "valid-skill"));
-        assert!(!listed.iter().any(|s| s.name == "Invalid"));
-
-        let _ = fs::remove_dir_all(temp);
-    }
+/// Read a skill's markdown body using the real user home (`~/.agents/skills`).
+pub fn read_agent_skill(
+    name: &str,
+    project_root: Option<&str>,
+) -> Result<AgentSkillContent, String> {
+    read_agent_skill_with_home(name, &home_skills_root()?, project_root)
 }
+
+#[cfg(test)]
+mod tests;

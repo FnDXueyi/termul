@@ -1,8 +1,10 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { ExternalLink, Sparkles, X } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect, useMemo } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useId, useMemo } from 'react'
+import { ExternalLink, Sparkles, X } from '@/components/icons'
+import { Button } from '@/components/ui/button'
 import { renderChatMarkdown } from '@/lib/chat-markdown'
 import { openerApi } from '@/lib/tauri-opener-api'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 
 interface WhatsNewModalProps {
   isOpen: boolean
@@ -19,6 +21,10 @@ export function WhatsNewModal({
   htmlUrl,
   onClose
 }: WhatsNewModalProps): React.JSX.Element {
+  // Mobile web shell: system back dismisses this modal (inert on desktop).
+  const overlayId = `whats-new-modal:${useId()}`
+  useOverlayRegistration(overlayId, isOpen, onClose, { mobileShellOnly: true })
+
   useEffect(() => {
     if (!isOpen) return
 
@@ -63,7 +69,7 @@ export function WhatsNewModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+          className="fixed inset-0 bg-overlay/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={onClose}
         >
           <motion.div
@@ -132,22 +138,14 @@ export function WhatsNewModal({
             {/* Footer */}
             <div className="px-4 py-3 bg-secondary/50 flex justify-end gap-2 border-t border-border flex-wrap">
               {htmlUrl && (
-                <button
-                  type="button"
-                  onClick={handleViewOnGitHub}
-                  className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
-                >
-                  <ExternalLink size={13} />
-                  <span>View on GitHub</span>
-                </button>
+                <Button type="button" variant="ghost" size="sm" onClick={handleViewOnGitHub}>
+                  <ExternalLink />
+                  View on GitHub
+                </Button>
               )}
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-3 py-1.5 text-xs font-medium rounded bg-primary text-primary-foreground hover:bg-primary/90 shadow-md shadow-primary/20 transition-all"
-              >
+              <Button type="button" size="sm" onClick={onClose}>
                 Got it
-              </button>
+              </Button>
             </div>
           </motion.div>
         </motion.div>

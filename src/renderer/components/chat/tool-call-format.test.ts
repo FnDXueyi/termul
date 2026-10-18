@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { PermissionOption } from '@/lib/acp-api'
+import parity from './diff-line-counts.fixtures.json'
 import {
   diffLineCounts,
   diffLines,
+  firstChange,
   isAllowOption,
   isRejectOption,
   kindIcon,
+  pickPrimaryAllowOption,
   pickRejectOption,
   statusStyle
 } from './tool-call-format'
@@ -36,38 +39,192 @@ describe('statusStyle', () => {
 })
 
 describe('diffLines / diffLineCounts', () => {
-  it('emits removed lines then added lines', () => {
+  it('computes actual changed lines between old and new file contents', () => {
+    // oldText: a, b  →  newText: a, c
+    // LCS: [a] → removed: [b], added: [c]
     const lines = diffLines({ oldText: 'a\nb', newText: 'a\nc' })
-    expect(lines).toEqual([
-      { type: 'removed', text: 'a' },
-      { type: 'removed', text: 'b' },
-      { type: 'added', text: 'a' },
-      { type: 'added', text: 'c' }
-    ])
+    const types = lines.map((l) => l.type)
+    const texts = lines.map((l) => l.text)
+    expect(types).toContain('removed')
+    expect(types).toContain('added')
+    expect(types).toContain('context')
+    expect(texts).toContain('b')
+    expect(texts).toContain('c')
+    expect(diffLineCounts({ oldText: 'a\nb', newText: 'a\nc' })).toEqual({ added: 1, removed: 1 })
   })
-  it('treats absent oldText as a new file', () => {
+  it('treats absent oldText as a new file (all lines added)', () => {
     const lines = diffLines({ oldText: null, newText: 'x\ny' })
     expect(lines.every((l) => l.type === 'added')).toBe(true)
     expect(diffLineCounts({ oldText: null, newText: 'x\ny' })).toEqual({ added: 2, removed: 0 })
   })
-  it('skips an empty side entirely', () => {
-    expect(diffLines({ oldText: 'a', newText: '' })).toEqual([{ type: 'removed', text: 'a' }])
+  it('treats empty newText as a full deletion', () => {
+    const lines = diffLines({ oldText: 'a', newText: '' })
+    expect(lines).toEqual([{ type: 'removed', text: 'a', oldLine: 1 }])
+    expect(diffLineCounts({ oldText: 'a', newText: '' })).toEqual({ added: 0, removed: 1 })
   })
   it('strips trailing CR from CRLF lines', () => {
     expect(diffLines({ oldText: null, newText: 'a\r\nb' })).toEqual([
-      { type: 'added', text: 'a' },
-      { type: 'added', text: 'b' }
+      { type: 'added', text: 'a', newLine: 1 },
+      { type: 'added', text: 'b', newLine: 2 }
     ])
   })
-  it('counts both sides', () => {
-    expect(diffLineCounts({ oldText: 'a\nb\nc', newText: 'a' })).toEqual({ added: 1, removed: 3 })
+  it('counts actual changed lines, not total lines', () => {
+    // 150-line file where only 3 lines changed → should show +3 −3, not +150 −150
+    const oldLines = Array.from({ length: 150 }, (_, i) => `line ${i + 1}`)
+    const newLines = [...oldLines]
+    newLines[49] = 'changed line 50' // line 50 modified
+    newLines[99] = 'changed line 100' // line 100 modified
+    newLines[149] = 'changed line 150' // line 150 modified
+    const oldText = oldLines.join('\n')
+    const newText = newLines.join('\n')
+    const counts = diffLineCounts({ oldText, newText })
+    expect(counts).toEqual({ added: 3, removed: 3 })
+  })
+  it('reports identical files as zero changes', () => {
+    expect(diffLineCounts({ oldText: 'a\nb\nc', newText: 'a\nb\nc' })).toEqual({
+      added: 0,
+      removed: 0
+    })
   })
   it('ignores the trailing empty segment for newline-terminated text', () => {
-    expect(diffLines({ oldText: 'a\n', newText: 'b\n' })).toEqual([
-      { type: 'removed', text: 'a' },
-      { type: 'added', text: 'b' }
-    ])
     expect(diffLineCounts({ oldText: 'a\n', newText: 'b\n' })).toEqual({ added: 1, removed: 1 })
+  })
+  it('includes context lines around changes', () => {
+    const lines = diffLines({ oldText: 'a\nb\nc\nd\ne', newText: 'a\nb\nX\nd\ne' })
+    // Line 3 changed (c → X), so context lines 1,2,4,5 should appear
+    const types = lines.map((l) => l.type)
+    const texts = lines.map((l) => l.text)
+    expect(types).toContain('context')
+    expect(types).toContain('removed')
+    expect(types).toContain('added')
+    expect(texts).toContain('c')
+    expect(texts).toContain('X')
+  })
+  it('shows ellipsis marker between non-adjacent change regions', () => {
+    const oldLines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`)
+    const newLines = [...oldLines]
+    newLines[0] = 'changed 1' // line 1
+    newLines[19] = 'changed 20' // line 20
+    const lines = diffLines({ oldText: oldLines.join('\n'), newText: newLines.join('\n') })
+    const ellipsis = lines.find((l) => l.type === 'context' && l.text === '···')
+    expect(ellipsis).toBeDefined()
+  })
+  it('includes line numbers on diff lines', () => {
+    const lines = diffLines({ oldText: 'a\nb\nc', newText: 'a\nB\nc\nd' })
+    const removed = lines.find((l) => l.type === 'removed')
+    const added = lines.find((l) => l.type === 'added')
+    expect(typeof removed?.oldLine).toBe('number')
+    expect(typeof added?.newLine).toBe('number')
+  })
+  it('diffs a 13k-line file with sparse edits in bounded work', () => {
+    // Regression: the full-file LCS allocated (m+1)*(n+1) cells (~1.4GB for
+    // 13k lines) and hung the renderer for seconds per tool card.
+    const oldLines = Array.from({ length: 13_000 }, (_, i) => `line ${i + 1}`)
+    const newLines = [...oldLines]
+    newLines[10] = 'changed near the top'
+    newLines[6_500] = 'changed in the middle'
+    newLines.splice(12_000, 3, 'rewritten tail a', 'rewritten tail b')
+    const lines = diffLines({ oldText: oldLines.join('\n'), newText: newLines.join('\n') })
+    const types = new Set(lines.map((l) => l.type))
+    expect(types).toContain('removed')
+    expect(types).toContain('added')
+    expect(types).toContain('context')
+    expect(lines.map((l) => l.text)).toContain('changed in the middle')
+    expect(diffLineCounts({ oldText: oldLines.join('\n'), newText: newLines.join('\n') })).toEqual({
+      added: 4,
+      removed: 5
+    })
+  })
+  it('handles pure insertions and deletions in the middle of a file', () => {
+    // After prefix/suffix trim one side is empty — the diff must still emit
+    // the inserted/removed lines rather than an empty result.
+    const added = diffLines({ oldText: 'a\nb', newText: 'a\nX\nY\nb' })
+    expect(added.filter((l) => l.type === 'added').map((l) => l.text)).toEqual(['X', 'Y'])
+    const removed = diffLines({ oldText: 'a\nX\nY\nb', newText: 'a\nb' })
+    expect(removed.filter((l) => l.type === 'removed').map((l) => l.text)).toEqual(['X', 'Y'])
+    expect(diffLineCounts({ oldText: 'a\nb', newText: 'a\nX\nY\nb' })).toEqual({
+      added: 2,
+      removed: 0
+    })
+  })
+  it('falls back to removed+added when two huge files share no anchors', () => {
+    // Oversized, zero common lines: bounded diff stays truthful rather than
+    // running an unbounded quadratic.
+    const oldText = Array.from({ length: 3_000 }, (_, i) => `old ${i}`).join('\n')
+    const newText = Array.from({ length: 3_000 }, (_, i) => `new ${i}`).join('\n')
+    const lines = diffLines({ oldText, newText })
+    expect(lines.every((l) => l.type === 'removed' || l.type === 'added')).toBe(true)
+    expect(diffLineCounts({ oldText, newText })).toEqual({ added: 3_000, removed: 3_000 })
+  })
+})
+
+type FixtureLine =
+  | string
+  | { prefix: string; from: number; to: number }
+  | { line: string; times: number }
+
+interface FixtureSide {
+  eol?: string
+  lines: FixtureLine[]
+}
+
+interface ParityFixture {
+  name: string
+  oldText: FixtureSide | null
+  newText: FixtureSide
+  expected: { added: number; removed: number }
+}
+
+function expandLine(line: FixtureLine): string[] {
+  if (typeof line === 'string') return [line]
+  if ('times' in line) return Array.from({ length: line.times }, () => line.line)
+  const step = line.from <= line.to ? 1 : -1
+  return Array.from(
+    { length: Math.abs(line.to - line.from) + 1 },
+    (_, k) => `${line.prefix}${line.from + k * step}`
+  )
+}
+
+function fixtureText(side: FixtureSide | null): string | null {
+  if (side === null) return null
+  const eol = side.eol ?? '\n'
+  return side.lines
+    .flatMap(expandLine)
+    .map((line) => line + eol)
+    .join('')
+}
+
+const parityFixtures: ParityFixture[] = parity.fixtures
+
+describe('diffLineCounts host parity fixtures', () => {
+  it.each(parityFixtures)('$name', ({ oldText, newText, expected }) => {
+    const newTextValue = fixtureText(newText) ?? ''
+    expect(diffLineCounts({ oldText: fixtureText(oldText), newText: newTextValue })).toEqual(
+      expected
+    )
+  })
+})
+
+describe('firstChange', () => {
+  it('points at the first added line of a new file', () => {
+    expect(firstChange(diffLines({ oldText: null, newText: 'a\nb\n' }))).toEqual({
+      index: 0,
+      line: 1
+    })
+  })
+
+  it('skips leading context to the first change', () => {
+    const lines = diffLines({ oldText: 'a\nb\nc\nd\ne\n', newText: 'a\nb\nc\nd\nE\n' })
+    expect(firstChange(lines)).toEqual({ index: 3, line: 5 })
+  })
+
+  it('places a removal after the last new-file line before it', () => {
+    const lines = diffLines({ oldText: 'a\nb\nc\n', newText: 'a\nc\n' })
+    expect(firstChange(lines)).toEqual({ index: 1, line: 2 })
+  })
+
+  it('returns null when nothing changed', () => {
+    expect(firstChange([{ type: 'context', text: 'a', oldLine: 1, newLine: 1 }])).toBeNull()
   })
 })
 
@@ -85,5 +242,18 @@ describe('permission option helpers', () => {
   it('picks a reject option when present, null otherwise', () => {
     expect(pickRejectOption(options)?.optionId).toBe('r1')
     expect(pickRejectOption(options.slice(0, 2))).toBeNull()
+  })
+  it('prefers reject_once over reject_always for dismiss', () => {
+    const withAlwaysFirst: PermissionOption[] = [
+      { optionId: 'ra', name: 'Reject always', kind: 'reject_always' },
+      { optionId: 'ro', name: 'Reject once', kind: 'reject_once' }
+    ]
+    expect(pickRejectOption(withAlwaysFirst)?.optionId).toBe('ro')
+    expect(pickRejectOption(withAlwaysFirst.slice(0, 1))?.optionId).toBe('ra')
+  })
+  it('picks allow_once as the primary allow when present', () => {
+    expect(pickPrimaryAllowOption(options)?.optionId).toBe('a1')
+    expect(pickPrimaryAllowOption(options.slice(1, 2))?.optionId).toBe('a2')
+    expect(pickPrimaryAllowOption([])).toBeNull()
   })
 })

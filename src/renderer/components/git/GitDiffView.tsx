@@ -1,6 +1,14 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
-import { getLanguageForFile, tokenizeLine } from '@/lib/diff-syntax-highlight'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { WriteGate } from '@/components/ui/write-gate'
+import { useServerAdmitsRemoteWrites } from '@/hooks/use-server-admits-remote-writes'
+import { buildHunkPatches, buildLinePatch, type HunkPatch } from '@/lib/build-hunk-patch'
+import {
+  getLanguageForFile,
+  isParserReady,
+  preloadParser,
+  tokenizeLine
+} from '@/lib/diff-syntax-highlight'
 import {
   type GitDiffViewMode,
   type ParsedDiffLine,
@@ -14,13 +22,26 @@ interface GitDiffViewProps {
   diff: string
   mode: GitDiffViewMode
   filePath?: string
+  /**
+   * Which side of the diff is displayed: working-tree changes (`unstaged`,
+   * hunk action stages) or staged changes (`staged`, hunk action unstages).
+   * When omitted, no per-hunk action is rendered.
+   */
+  diffSide?: 'unstaged' | 'staged'
+  /** Per-hunk stage callback. Receives a single-hunk patch built from `diff`. */
+  onStageHunk?: (patch: string) => void
+  /** Per-hunk unstage callback. */
+  onUnstageHunk?: (patch: string) => void
 }
+
+/** Which side a hunk action should target for the given diff side. */
+type HunkAction = 'stage' | 'unstage'
 
 function lineClass(kind: ParsedDiffLine['kind']): string {
   return cn(
     'px-2 py-0.5 min-h-[1.25rem]',
-    kind === 'addition' && 'bg-green-500/10 text-green-400',
-    kind === 'deletion' && 'bg-red-500/10 text-red-400',
+    kind === 'addition' && 'bg-diff-added/10 text-diff-added',
+    kind === 'deletion' && 'bg-destructive/10 text-destructive',
     (kind === 'header' || kind === 'meta') && 'text-muted-foreground italic bg-muted/20',
     kind === 'context' && 'text-foreground/90'
   )
@@ -64,8 +85,8 @@ function WordDiffSpan({
     <span
       className={cn(
         'rounded-sm',
-        kind === 'deletion' && 'bg-red-500/25',
-        kind === 'addition' && 'bg-green-500/25'
+        kind === 'deletion' && 'bg-destructive/25',
+        kind === 'addition' && 'bg-diff-added/25'
       )}
     >
       {text}
@@ -193,12 +214,126 @@ function computeInlineWordDiffRanges(
   return result
 }
 
-function InlineDiff({ diff, language }: { diff: string; language: string }): React.JSX.Element {
+function HunkActionBar({
+  action,
+  onAction,
+  selectedCount,
+  onSelectedAction
+}: {
+  action: HunkAction
+  onAction?: () => void
+  selectedCount?: number
+  onSelectedAction?: () => void
+}): React.JSX.Element | null {
+  const admitted = useServerAdmitsRemoteWrites()
+  if (!onAction && !onSelectedAction) return null
+  const verb = action === 'stage' ? 'Stage' : 'Unstage'
+  const buttonClass =
+    'inline-flex items-center rounded-md border border-border bg-background px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide text-muted-foreground transition-colors duration-150 ease-out hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40 disabled:cursor-not-allowed'
+  return (
+    <>
+      {onAction ? (
+        <WriteGate gated={!admitted} className="ml-2">
+          <button
+            type="button"
+            onClick={onAction}
+            disabled={!admitted}
+            className={cn(buttonClass, admitted && 'ml-2')}
+            title={`${verb} hunk`}
+            aria-label={`${verb} hunk`}
+          >
+            {verb} hunk
+          </button>
+        </WriteGate>
+      ) : null}
+      {onSelectedAction && selectedCount && selectedCount > 0 ? (
+        <WriteGate gated={!admitted} className="ml-2">
+          <button
+            type="button"
+            onClick={onSelectedAction}
+            disabled={!admitted}
+            className={cn(buttonClass, admitted && 'ml-2')}
+            title={`${verb} selected lines`}
+            aria-label={`${verb} selected lines`}
+          >
+            {verb} selected ({selectedCount})
+          </button>
+        </WriteGate>
+      ) : null}
+    </>
+  )
+}
+
+function InlineDiff({
+  diff,
+  filePath,
+  language,
+  hunkByIndex,
+  action,
+  onAction,
+  selectedLines,
+  onToggleLine,
+  selectionEnabled
+}: {
+  diff: string
+  filePath: string
+  language: string
+  hunkByIndex: Map<number, HunkPatch>
+  action?: HunkAction
+  onAction?: (patch: string) => void
+  selectedLines: ReadonlySet<number>
+  onToggleLine: (index: number) => void
+  selectionEnabled: boolean
+}): React.JSX.Element {
   const lines = useMemo(() => parseUnifiedDiffInline(diff), [diff])
   const wordDiffRanges = useMemo(() => computeInlineWordDiffRanges(lines), [lines])
 
+  // Per-hunk count of selected +/- lines (context lines are not selectable).
+  const selectedCountByHunk = useMemo(() => {
+    const counts = new Map<number, number>()
+    for (const hunk of hunkByIndex.values()) {
+      let count = 0
+      for (const index of hunk.bodyLineIndices) {
+        const raw = lines[index]?.raw ?? ''
+        if (selectedLines.has(index) && (raw.startsWith('+') || raw.startsWith('-'))) {
+          count += 1
+        }
+      }
+      if (count > 0) counts.set(hunk.headerIndex, count)
+    }
+    return counts
+  }, [hunkByIndex, lines, selectedLines])
+
   return (
     <div className="flex p-4 font-mono text-xs min-w-full" style={{ tabSize: 4, MozTabSize: 4 }}>
+      {/* Phase 2 (#257): line-selection toggle gutter. Only +/- lines are
+          selectable; the strip is separate from the line numbers so plain
+          text selection (copy) is not hijacked. */}
+      <div className="flex-shrink-0 select-none">
+        {lines.map((line, i) => {
+          const selectable =
+            selectionEnabled && (line.kind === 'deletion' || line.kind === 'addition')
+          if (!selectable) {
+            return <div key={`tog-${i}`} className="w-4 py-0.5 min-h-[1.25rem]" />
+          }
+          const selected = selectedLines.has(i)
+          return (
+            <button
+              key={`tog-${i}`}
+              type="button"
+              onClick={() => onToggleLine(i)}
+              aria-pressed={selected}
+              aria-label={`${selected ? 'Clear' : 'Select'} line for partial staging`}
+              className={cn(
+                'w-4 py-0.5 min-h-[1.25rem] flex items-center justify-center text-4xs leading-none cursor-pointer',
+                selected ? 'text-foreground' : 'text-transparent hover:text-muted-foreground/50'
+              )}
+            >
+              {selected ? '●' : '·'}
+            </button>
+          )
+        })}
+      </div>
       {/* Line number gutters */}
       <div className="flex-shrink-0 select-none border-r border-border/40">
         {lines.map((line, i) => (
@@ -233,14 +368,16 @@ function InlineDiff({ diff, language }: { diff: string; language: string }): Rea
               : line.kind === 'addition'
                 ? (diffRanges?.added ?? [])
                 : []
+          const isSelected = selectedLines.has(i)
 
           return (
             <div
               key={i}
               className={cn(
                 lineClass(line.kind),
-                line.kind === 'deletion' && changedRanges.length > 0 && 'bg-red-500/15',
-                line.kind === 'addition' && changedRanges.length > 0 && 'bg-green-500/15'
+                line.kind === 'deletion' && changedRanges.length > 0 && 'bg-destructive/15',
+                line.kind === 'addition' && changedRanges.length > 0 && 'bg-diff-added/15',
+                isSelected && 'bg-foreground/[0.06] outline outline-1 outline-border'
               )}
             >
               {isHunkBody ? (
@@ -250,6 +387,29 @@ function InlineDiff({ diff, language }: { diff: string; language: string }): Rea
                   changedRanges={changedRanges}
                   kind={line.kind as 'deletion' | 'addition' | 'context'}
                 />
+              ) : line.kind === 'header' && line.raw.startsWith('@@') ? (
+                <span className="flex items-center">
+                  <span className="flex-1">{line.raw}</span>
+                  {action ? (
+                    <HunkActionBar
+                      action={action}
+                      onAction={
+                        hunkByIndex.has(i) && onAction
+                          ? () => onAction(hunkByIndex.get(i)!.patch)
+                          : undefined
+                      }
+                      selectedCount={selectedCountByHunk.get(i) ?? 0}
+                      onSelectedAction={
+                        hunkByIndex.has(i) && onAction
+                          ? () => {
+                              const partial = buildLinePatch(diff, filePath, i, selectedLines)
+                              if (partial) onAction(partial)
+                            }
+                          : undefined
+                      }
+                    />
+                  ) : null}
+                </span>
               ) : (
                 line.raw || ' '
               )}
@@ -287,8 +447,8 @@ function SplitCell({
         className={cn(
           'flex-1 px-2 py-0.5 min-h-[1.25rem] whitespace-pre-wrap break-words',
           cell ? lineClass(cell.kind) : 'bg-muted/5',
-          cell?.kind === 'deletion' && changedRanges.length > 0 && 'bg-red-500/15',
-          cell?.kind === 'addition' && changedRanges.length > 0 && 'bg-green-500/15'
+          cell?.kind === 'deletion' && changedRanges.length > 0 && 'bg-destructive/15',
+          cell?.kind === 'addition' && changedRanges.length > 0 && 'bg-diff-added/15'
         )}
       >
         {cell ? (
@@ -310,7 +470,19 @@ function SplitCell({
   )
 }
 
-function SplitDiff({ diff, language }: { diff: string; language: string }): React.JSX.Element {
+function SplitDiff({
+  diff,
+  language,
+  hunkByRowIndex,
+  action,
+  onAction
+}: {
+  diff: string
+  language: string
+  hunkByRowIndex: Map<number, HunkPatch>
+  action?: HunkAction
+  onAction?: (patch: string) => void
+}): React.JSX.Element {
   const rows = useMemo(() => parseUnifiedDiffSplit(diff), [diff])
 
   const splitWordDiffRanges = useMemo(() => {
@@ -333,8 +505,26 @@ function SplitDiff({ diff, language }: { diff: string; language: string }): Reac
     <div className="p-4 font-mono text-xs" style={{ tabSize: 4, MozTabSize: 4 }}>
       {rows.map((row, i) =>
         row.fullWidth ? (
-          <div key={i} className={lineClass(row.fullWidth.kind)}>
-            {row.fullWidth.raw}
+          <div
+            key={i}
+            className={cn(
+              lineClass(row.fullWidth.kind),
+              row.fullWidth.kind === 'header' &&
+                row.fullWidth.raw.startsWith('@@') &&
+                'flex items-center'
+            )}
+          >
+            <span className="flex-1 whitespace-pre-wrap break-words">{row.fullWidth.raw}</span>
+            {row.fullWidth.kind === 'header' &&
+            row.fullWidth.raw.startsWith('@@') &&
+            action &&
+            hunkByRowIndex.has(i) &&
+            onAction ? (
+              <HunkActionBar
+                action={action}
+                onAction={() => onAction(hunkByRowIndex.get(i)!.patch)}
+              />
+            ) : null}
           </div>
         ) : (
           <div key={i} className="grid grid-cols-2 gap-0 border-b border-border/20">
@@ -357,14 +547,19 @@ function SplitDiff({ diff, language }: { diff: string; language: string }): Reac
   )
 }
 
-export function GitDiffView({ diff, mode, filePath }: GitDiffViewProps): React.JSX.Element {
+export function GitDiffView({
+  diff,
+  mode,
+  filePath,
+  diffSide,
+  onStageHunk,
+  onUnstageHunk
+}: GitDiffViewProps): React.JSX.Element {
   const language = useMemo(() => (filePath ? getLanguageForFile(filePath) : ''), [filePath])
 
   useEffect(() => {
     if (language) {
-      void import('@/lib/diff-syntax-highlight').then((mod) => {
-        void mod.preloadParser(filePath ?? '')
-      })
+      void preloadParser(filePath ?? '')
     }
   }, [language, filePath])
 
@@ -374,13 +569,11 @@ export function GitDiffView({ diff, mode, filePath }: GitDiffViewProps): React.J
     let mounted = true
     const checkReady = (): void => {
       if (!mounted) return
-      void import('@/lib/diff-syntax-highlight').then((mod) => {
-        if (mod.isParserReady(language)) {
-          setRenderTick((n) => n + 1)
-        } else {
-          setTimeout(checkReady, 50)
-        }
-      })
+      if (isParserReady(language)) {
+        setRenderTick((n) => n + 1)
+      } else {
+        setTimeout(checkReady, 50)
+      }
     }
     setTimeout(checkReady, 50)
     return () => {
@@ -388,8 +581,93 @@ export function GitDiffView({ diff, mode, filePath }: GitDiffViewProps): React.J
     }
   }, [language])
 
+  // Per-hunk stage/unstage (#257). Build single-hunk patches and index them
+  // by line/row so each rendered `@@` header can look up its patch.
+  const hunks = useMemo(() => buildHunkPatches(diff, filePath ?? ''), [diff, filePath])
+  const hunkByInlineIndex = useMemo(() => {
+    const m = new Map<number, HunkPatch>()
+    for (const h of hunks) m.set(h.headerIndex, h)
+    return m
+  }, [hunks])
+  const hunkBySplitRowIndex = useMemo(() => {
+    const m = new Map<number, HunkPatch>()
+    const rows = parseUnifiedDiffSplit(diff)
+    let hunkIdx = 0
+    rows.forEach((row, i) => {
+      if (row.fullWidth?.raw.startsWith('@@') && hunks[hunkIdx]) {
+        m.set(i, hunks[hunkIdx])
+        hunkIdx += 1
+      }
+    })
+    return m
+  }, [diff, hunks])
+
+  // The displayed side decides whether a hunk action stages or unstages.
+  // Actions are only exposed when the matching callback is wired — a rendered
+  // button without a callback would clear the selection without applying
+  // anything (review feedback).
+  const rawAction =
+    diffSide === 'unstaged' ? onStageHunk : diffSide === 'staged' ? onUnstageHunk : undefined
+  const selectionEnabled = rawAction !== undefined
+  const action: HunkAction | undefined = rawAction
+    ? diffSide === 'unstaged'
+      ? 'stage'
+      : 'unstage'
+    : undefined
+
+  // Phase 2 (#257): per-line selection for partial staging. Indices are
+  // positions in the raw diff string — the same key `buildLinePatch` uses.
+  // Selection resets whenever the diff changes (post-stage refetch) and is
+  // cleared after any apply so stale toggles never linger.
+  const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set())
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberate reset-on-diff and on apply-availability — selection must not survive a refetch or a callback unmount (review: stale selections could reactivate if the callback returns for the same diff)
+  useEffect(() => {
+    setSelectedLines(new Set())
+  }, [diff, filePath, mode, action, selectionEnabled])
+  const toggleLine = useCallback((index: number) => {
+    setSelectedLines((prev) => {
+      const next = new Set(prev)
+      if (next.has(index)) {
+        next.delete(index)
+      } else {
+        next.add(index)
+      }
+      return next
+    })
+  }, [])
+  const onAction = useCallback(
+    (patch: string) => {
+      setSelectedLines(new Set())
+      rawAction?.(patch)
+    },
+    [rawAction]
+  )
+
   if (mode === 'split') {
-    return <SplitDiff diff={diff} language={language} />
+    return (
+      <SplitDiff
+        diff={diff}
+        language={language}
+        hunkByRowIndex={hunkBySplitRowIndex}
+        action={action}
+        onAction={onAction}
+      />
+    )
   }
-  return <InlineDiff diff={diff} language={language} />
+  return (
+    <InlineDiff
+      diff={diff}
+      filePath={filePath ?? ''}
+      language={language}
+      hunkByIndex={hunkByInlineIndex}
+      action={action}
+      onAction={onAction}
+      selectedLines={selectedLines}
+      onToggleLine={toggleLine}
+      // Line selection is only meaningful when an apply callback exists
+      // (the mobile GitPanel path omits the stage/unstage handlers, so its
+      // diff view must not offer selections that nothing can consume).
+      selectionEnabled={selectionEnabled}
+    />
+  )
 }

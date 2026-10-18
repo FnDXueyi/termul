@@ -20,26 +20,23 @@ pub struct ParsedSSHProfile {
     pub imported_from: Option<String>,
 }
 
+/// `~/.ssh`, resolving home the way OpenSSH does on each platform
+/// (`USERPROFILE` first on Windows). Shared by config, keys and known_hosts.
+pub(crate) fn ssh_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok();
+    #[cfg(not(target_os = "windows"))]
+    let home = env::var("HOME").ok();
+    home.map(|home| PathBuf::from(home).join(".ssh"))
+}
+
 /// Get the path to ~/.ssh/config
 fn get_ssh_config_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        env::var("USERPROFILE")
-            .or_else(|_| env::var("HOME"))
-            .ok()
-            .map(|home| PathBuf::from(home).join(".ssh").join("config"))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        env::var("HOME")
-            .ok()
-            .map(|home| PathBuf::from(home).join(".ssh").join("config"))
-    }
+    ssh_dir().map(|dir| dir.join("config"))
 }
 
 /// Expand ~ in paths to the user's home directory
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") || path.starts_with("~\\") {
         let home = {
             #[cfg(target_os = "windows")]
@@ -178,12 +175,13 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<ParsedSSHProfile> {
                     profiles.push(profile);
                 }
             }
-            
+
             // Split multi-host lines: "Host a b c" should create 3 profiles
-            let hosts: Vec<&str> = value.split_whitespace()
+            let hosts: Vec<&str> = value
+                .split_whitespace()
                 .filter(|h| !h.contains('*') && !h.contains('?')) // Skip wildcards
                 .collect();
-            
+
             if hosts.is_empty() {
                 current_host = None;
                 current_options.clear();
@@ -217,82 +215,4 @@ pub fn parse_ssh_config_content(content: &str) -> Vec<ParsedSSHProfile> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_basic_config() {
-        let content = r#"
-Host myserver
-    HostName 192.168.1.100
-    User admin
-    Port 2222
-    IdentityFile ~/.ssh/id_rsa
-
-Host production
-    HostName prod.example.com
-    User deploy
-"#;
-
-        let profiles = parse_ssh_config_content(content);
-        assert_eq!(profiles.len(), 2);
-
-        assert_eq!(profiles[0].name, "myserver");
-        assert_eq!(profiles[0].host, "192.168.1.100");
-        assert_eq!(profiles[0].port, 2222);
-        assert_eq!(profiles[0].username, "admin");
-        assert_eq!(profiles[0].auth_method, "key");
-        assert!(profiles[0].private_key_path.is_some());
-
-        assert_eq!(profiles[1].name, "production");
-        assert_eq!(profiles[1].host, "prod.example.com");
-        assert_eq!(profiles[1].port, 22);
-        assert_eq!(profiles[1].username, "deploy");
-        assert_eq!(profiles[1].auth_method, "password");
-    }
-
-    #[test]
-    fn test_skip_wildcard_hosts() {
-        let content = r#"
-Host *
-    ServerAliveInterval 60
-
-Host myserver
-    HostName 10.0.0.1
-    User root
-"#;
-
-        let profiles = parse_ssh_config_content(content);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].name, "myserver");
-    }
-
-    #[test]
-    fn test_empty_config() {
-        let profiles = parse_ssh_config_content("");
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn test_comments_only() {
-        let content = "# This is a comment\n# Another comment\n";
-        let profiles = parse_ssh_config_content(content);
-        assert!(profiles.is_empty());
-    }
-
-    #[test]
-    fn test_equals_separator() {
-        let content = r#"
-Host equaltest
-    HostName=example.com
-    User=testuser
-    Port=3022
-"#;
-
-        let profiles = parse_ssh_config_content(content);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].host, "example.com");
-        assert_eq!(profiles[0].username, "testuser");
-        assert_eq!(profiles[0].port, 3022);
-    }
-}
+mod tests;

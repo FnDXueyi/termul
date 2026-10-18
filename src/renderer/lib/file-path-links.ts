@@ -1,4 +1,5 @@
 import { filesystemApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
 import { useEditorStore } from '@/stores/editor-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 
@@ -39,9 +40,21 @@ export interface TerminalPathLink {
 }
 
 const FILE_PATH_LINK_REGEX =
-  /(?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|\\\\|\/)?(?:[^\s\\/:*?"<>|`]+[\\/])*[^\s\\/:*?"<>|`]+(?:\.[A-Za-z0-9_-]+)?(?::\d+(?::\d+)?)?/g
+  /(?:\.{1,2}[\\/]|[A-Za-z]:[\\/]|\\\\|\/)?(?:[^\s\\/:*?"<>|`]+[\\/])+[^\s\\/:*?"<>|`]+(?:\.[A-Za-z0-9_-]+)?(?::\d+(?::\d+)?)?/g
 
 const URI_SCHEME_REGEX = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//
+
+const PATH_PREFIX_REGEX = /^(?:\.{1,2}\/|~\/|[A-Za-z]:\/|\/)/
+
+const DOT_DIRECTORY_REGEX = /^\.[A-Za-z]/
+
+const LINE_POSITION_SUFFIX_REGEX =
+  /(?::(?<line>\d+)(?::(?<column>\d+))?|#L(?<fragmentLine>\d+)(?:C(?<fragmentColumn>\d+))?(?:-L?\d+(?:C\d+)?)?)$/i
+
+const FILE_EXTENSION_REGEX = /\.[^.]+$/
+
+/** OS "path does not exist" read errors — the only probe failure that may skip a root. */
+const MISSING_PATH_ERROR_REGEX = /no such file|cannot find the (file|path)|the system cannot find/i
 
 const WRAPPER_PAIRS: Array<[string, string]> = [
   ['`', '`'],
@@ -63,18 +76,104 @@ function looksLikeFilePath(text: string): boolean {
   return text.includes('/') || text.includes('\\') || /^[A-Za-z]:/.test(text)
 }
 
-function isUrlAdjacentPathMatch(line: string, start: number, text: string): boolean {
-  if (!text.startsWith('/')) {
-    return false
+/**
+ * Requires at least one strong path-likeness signal so prose slash-pairs like
+ * `text/text` or `2.5/3.0` do not linkify: an explicit path prefix (including
+ * `~/`), a `:line[:col]` suffix, a lettered file extension on the final
+ * segment (computed after stripping the line suffix), a dot-directory first
+ * segment like `.git`, or at least three segments where at least one segment
+ * contains a letter.
+ */
+export function hasPathEvidence(text: string): boolean {
+  const normalized = normalizePathSeparators(text)
+
+  if (PATH_PREFIX_REGEX.test(normalized)) {
+    return true
   }
 
+  if (LINE_POSITION_SUFFIX_REGEX.exec(normalized)?.groups?.line !== undefined) {
+    return true
+  }
+
+  const segments = stripLinePosition(normalized).split('/').filter(Boolean)
+  const lastSegment = segments[segments.length - 1] ?? ''
+  const extension = lastSegment.match(FILE_EXTENSION_REGEX)?.[0]
+
+  if (extension && /\p{L}/u.test(extension)) {
+    return true
+  }
+
+  const firstSegment = segments[0] ?? ''
+
+  if (DOT_DIRECTORY_REGEX.test(firstSegment)) {
+    return true
+  }
+
+  return segments.length >= 3 && segments.some((segment) => /[A-Za-z]/.test(segment))
+}
+
+function trimTrailingPathPunctuation(value: string): string {
+  let result = value.replace(/[.,;!?]+$/, '')
+
+  for (const [opening, closing] of WRAPPER_PAIRS) {
+    while (result.endsWith(closing) && !result.includes(opening)) {
+      result = result.slice(0, -1)
+    }
+  }
+
+  return result
+}
+
+function isUrlAdjacentPathMatch(line: string, start: number, text: string): boolean {
   const tokenStart = line.slice(0, start).search(/\S+$/)
   if (tokenStart < 0) {
     return false
   }
 
-  const tokenPrefix = line.slice(tokenStart, start + 1).replace(/^[`"'([{]+/, '')
+  const tokenPrefix = line
+    .slice(tokenStart, start + (text.startsWith('/') ? 1 : 0))
+    .replace(/^[`"'([{]+/, '')
   return URI_SCHEME_REGEX.test(tokenPrefix)
+}
+
+export interface FilePathMatch {
+  text: string
+  start: number
+}
+
+/** Finds file-like path tokens while excluding URL host/path fragments. */
+export function findFilePathMatches(line: string): FilePathMatch[] {
+  if (!line.includes('/') && !line.includes('\\') && !line.includes(':')) {
+    return []
+  }
+
+  const matches: FilePathMatch[] = []
+
+  for (const match of line.matchAll(FILE_PATH_LINK_REGEX)) {
+    let text = trimTrailingPathPunctuation(match[0])
+    let start = match.index ?? -1
+    const wrapper = WRAPPER_PAIRS.find(
+      ([opening, closing]) => text.startsWith(opening) && line[start + text.length] === closing
+    )
+    if (wrapper) {
+      text = text.slice(wrapper[0].length)
+      start += wrapper[0].length
+    }
+
+    if (
+      !text ||
+      !looksLikeFilePath(text) ||
+      !hasPathEvidence(text) ||
+      start < 0 ||
+      isUrlAdjacentPathMatch(line, start, text)
+    ) {
+      continue
+    }
+
+    matches.push({ text, start })
+  }
+
+  return matches
 }
 
 /** Extracts file-like links from a rendered terminal line for Ctrl/Cmd+Click activation. */
@@ -86,34 +185,14 @@ export function buildTerminalPathLinks(
   lineNumber: number,
   onActivate: (event: MouseEvent, text: string) => void | Promise<void>
 ): TerminalPathLink[] {
-  if (!line.includes('/') && !line.includes('\\') && !line.includes(':')) {
-    return []
-  }
-
-  const links: TerminalPathLink[] = []
-
-  for (const match of line.matchAll(FILE_PATH_LINK_REGEX)) {
-    const text = match[0]
-    if (!text || !looksLikeFilePath(text)) {
-      continue
-    }
-
-    const start = match.index ?? -1
-    if (start < 0 || isUrlAdjacentPathMatch(line, start, text)) {
-      continue
-    }
-
-    links.push({
-      range: {
-        start: { x: start + 1, y: lineNumber },
-        end: { x: start + text.length, y: lineNumber }
-      },
-      text,
-      activate: onActivate
-    })
-  }
-
-  return links
+  return findFilePathMatches(line).map(({ text, start }) => ({
+    range: {
+      start: { x: start + 1, y: lineNumber },
+      end: { x: start + text.length, y: lineNumber }
+    },
+    text,
+    activate: onActivate
+  }))
 }
 
 function normalizeAbsolutePath(value: string): string {
@@ -267,19 +346,20 @@ export function trimWrappedPath(value: string): string {
   return result
 }
 
-/** Removes trailing :line or :line:column suffixes from a path token. */
-export function stripLineColumnSuffix(value: string): string {
-  return value.replace(/:(\d+)(?::\d+)?$/, '')
+export function stripLinePosition(value: string): string {
+  return value.replace(LINE_POSITION_SUFFIX_REGEX, '')
 }
 
-function parseLineColumnSuffix(value: string): { line?: number; column?: number } {
-  const match = value.match(/:(\d+)(?::(\d+))?$/)
+function parseLinePosition(value: string): { line?: number; column?: number } {
+  const match = value.match(LINE_POSITION_SUFFIX_REGEX)
   if (!match) {
     return {}
   }
 
-  const line = Number.parseInt(match[1], 10)
-  const parsedColumn = match[2] ? Number.parseInt(match[2], 10) : null
+  const groups = match.groups ?? {}
+  const line = Number.parseInt(groups.line ?? groups.fragmentLine, 10)
+  const rawColumn = groups.column ?? groups.fragmentColumn
+  const parsedColumn = rawColumn ? Number.parseInt(rawColumn, 10) : null
 
   return {
     line: Number.isFinite(line) && line > 0 ? line : undefined,
@@ -292,7 +372,7 @@ function parseLineColumnSuffix(value: string): { line?: number; column?: number 
 
 /** Normalizes a terminal token into a file path candidate before filesystem resolution. */
 export function extractPathCandidate(value: string): string {
-  return stripLineColumnSuffix(trimWrappedPath(value))
+  return stripLinePosition(trimWrappedPath(value))
 }
 
 /** Resolves a terminal path token to an existing file using terminal and project context. */
@@ -326,9 +406,40 @@ export async function resolveFilePathCandidate(
   )
 
   let sawDirectoryCandidate = false
+  let loggedForbiddenFallback = false
 
   for (const { absolutePath, infoResult } of infoResults) {
     if (!infoResult.success) {
+      // `/fs/info` is loopback-guarded server-side while `/fs/read` is
+      // deliberately not, so remote peers (shared-live, standalone without
+      // --allow-remote-writes) get FORBIDDEN here even when the file exists.
+      // Probe the candidate with `readFile` — the same route `openFile`
+      // uses — so only verified, readable files resolve and absent paths
+      // keep their honest failure instead of opening a wrong file.
+      if (infoResult.code === 'FORBIDDEN') {
+        if (!loggedForbiddenFallback) {
+          loggedForbiddenFallback = true
+          void logFrontendError({
+            level: 'warn',
+            source: 'filePathLinks.resolveFilePathCandidate',
+            message: `getFileInfo FORBIDDEN for ${absolutePath}; verifying candidates via readFile`
+          })
+        }
+        const readResult = await filesystemApi.readFile(absolutePath)
+        if (readResult.success) {
+          return { ok: true, path: absolutePath }
+        }
+        // Only absence may fall through to the next root: any other read
+        // failure means this path exists but cannot be verified, so stop
+        // here and let openFile surface the real error — falling through
+        // would silently resolve a different root's file at the same
+        // relative path.
+        if (/cannot read a directory/i.test(readResult.error)) {
+          sawDirectoryCandidate = true
+        } else if (!MISSING_PATH_ERROR_REGEX.test(readResult.error)) {
+          return { ok: true, path: absolutePath }
+        }
+      }
       continue
     }
 
@@ -365,6 +476,18 @@ function getErrorMessage(
   }
 }
 
+/**
+ * The stored cursor position only applies when an editor first mounts, so an
+ * already-open file needs the `termul:reveal-line` event to move. The window
+ * slot covers an editor that mounts after this event fires.
+ */
+function revealEditorLine(filePath: string, lineNumber: number): void {
+  const detail = { filePath, lineNumber }
+  ;(window as unknown as { __termulPendingRevealLine?: typeof detail }).__termulPendingRevealLine =
+    detail
+  window.dispatchEvent(new CustomEvent('termul:reveal-line', { detail }))
+}
+
 /** Opens a resolved file path from terminal output and adds it to the editor workspace. */
 export async function openFilePathFromTerminal(
   rawCandidate: string,
@@ -381,10 +504,21 @@ export async function openFilePathFromTerminal(
   }
 
   const wrappedCandidate = trimWrappedPath(rawCandidate)
-  const position = parseLineColumnSuffix(wrappedCandidate)
+  const position = parseLinePosition(wrappedCandidate)
 
   try {
     await useEditorStore.getState().openFile(resolution.path)
+
+    // openFile can return without storing when the tab limit is hit and no
+    // tab is evictable — verify the file actually landed before reporting
+    // success or adding a workspace tab.
+    if (!useEditorStore.getState().openFiles.has(resolution.path)) {
+      return {
+        ok: false,
+        reason: 'open-failed',
+        message: `Failed to open file: ${extractPathCandidate(rawCandidate)} (editor tab limit reached)`
+      }
+    }
 
     if (position.line) {
       useEditorStore
@@ -393,6 +527,7 @@ export async function openFilePathFromTerminal(
     }
 
     useWorkspaceStore.getState().addEditorTab(resolution.path)
+    if (position.line) revealEditorLine(resolution.path, position.line)
     return { ok: true }
   } catch (error) {
     const details = error instanceof Error ? error.message : String(error)

@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { openAgentChatPlaced } from '@/lib/open-agent-chat'
 import { useEditorStore } from '@/stores/editor-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
 import { editorTabId, findPaneById, useWorkspaceStore } from '@/stores/workspace-store'
@@ -15,10 +16,22 @@ export interface ReorderPreview {
   position: TabReorderPosition
 }
 
+/**
+ * Signal recorded when a drop commits. Split-layout tweens key off this to
+ * distinguish drop-created panel changes from unrelated remounts (fullscreen
+ * toggle, project restore) — see use-pane-split-animation.ts.
+ */
+export interface PaneDropInfo {
+  targetPaneId: string
+  position: DropPosition
+  at: number
+}
+
 interface PaneDndContextValue {
   isDragging: boolean
   dragPayload: DragPayload | null
   previewTarget: DropPreviewTarget | null
+  lastDrop: PaneDropInfo | null
   setPreviewTarget: (paneId: string, position: DropPosition) => void
   clearPreviewTarget: (paneId?: string, position?: DropPosition) => void
   reorderPreview: ReorderPreview | null
@@ -26,6 +39,7 @@ interface PaneDndContextValue {
   clearReorderPreview: () => void
   startTabDrag: (tabId: string, paneId: string, event: React.DragEvent) => void
   startFileDrag: (filePath: string, event: React.DragEvent) => void
+  startChatDrag: (sessionId: string, event: React.DragEvent) => void
   handleDrop: (targetPaneId: string, position: DropPosition, event: React.DragEvent) => void
   handleTabReorder: (
     sourcePaneId: string,
@@ -36,12 +50,29 @@ interface PaneDndContextValue {
 
 const PaneDndContext = createContext<PaneDndContextValue | null>(null)
 
+const noop = (): void => {}
+const noopPane = (): void => {}
+
+const fallbackContext: PaneDndContextValue = {
+  isDragging: false,
+  dragPayload: null,
+  previewTarget: null,
+  lastDrop: null,
+  setPreviewTarget: noop,
+  clearPreviewTarget: noopPane,
+  reorderPreview: null,
+  setReorderPreview: noop,
+  clearReorderPreview: noop,
+  startTabDrag: noop,
+  startFileDrag: noop,
+  startChatDrag: noop,
+  handleDrop: noop,
+  handleTabReorder: noop
+}
+
 export function usePaneDnd(): PaneDndContextValue {
   const ctx = useContext(PaneDndContext)
-  if (!ctx) {
-    throw new Error('usePaneDnd must be used within a PaneDndProvider')
-  }
-  return ctx
+  return ctx ?? fallbackContext
 }
 
 interface PaneDndProviderProps {
@@ -78,6 +109,16 @@ function parseDragPayload(raw: string): DragPayload | null {
       }
     }
 
+    if (payload.type === 'chat') {
+      if (typeof payload.sessionId !== 'string' || payload.sessionId === '') {
+        return null
+      }
+      return {
+        type: 'chat',
+        sessionId: payload.sessionId
+      }
+    }
+
     return null
   } catch {
     return null
@@ -89,6 +130,7 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
   const [dragPayload, setDragPayload] = useState<DragPayload | null>(null)
   const [previewTarget, setPreviewTargetState] = useState<DropPreviewTarget | null>(null)
   const [reorderPreview, setReorderPreviewState] = useState<ReorderPreview | null>(null)
+  const [lastDrop, setLastDropState] = useState<PaneDropInfo | null>(null)
 
   const clearPreviewTarget = useCallback((paneId?: string, position?: DropPosition) => {
     setPreviewTargetState((current) => {
@@ -155,6 +197,9 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
       setDragPayload(payload)
       setIsDragging(true)
       clearPreviewTarget()
+      // A new drag voids the previous drop signal so a stale `lastDrop` can
+      // never gate an unrelated pane-tree change.
+      setLastDropState(null)
     },
     [clearPreviewTarget]
   )
@@ -170,6 +215,23 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
       setDragPayload(payload)
       setIsDragging(true)
       clearPreviewTarget()
+      setLastDropState(null)
+    },
+    [clearPreviewTarget]
+  )
+
+  const startChatDrag = useCallback(
+    (sessionId: string, event: React.DragEvent) => {
+      const payload: DragPayload = {
+        type: 'chat',
+        sessionId
+      }
+      event.dataTransfer.setData('application/json', JSON.stringify(payload))
+      event.dataTransfer.effectAllowed = 'move'
+      setDragPayload(payload)
+      setIsDragging(true)
+      clearPreviewTarget()
+      setLastDropState(null)
     },
     [clearPreviewTarget]
   )
@@ -195,10 +257,30 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
       const store = useWorkspaceStore.getState()
 
       if (payload.type === 'tab' && payload.tabId && payload.sourcePaneId) {
+        // The move/split actions early-return on drops they reject — stamp
+        // the signal only when the tree actually changed, otherwise a fresh
+        // lastDrop could gate an unrelated mount inside the freshness window
+        // (e.g. a fullscreen remount replaying the grow-in).
+        const prevRoot = store.root
         if (position === 'center') {
           store.moveTabToPane(payload.tabId, payload.sourcePaneId, targetPaneId)
         } else {
           store.moveTabToNewSplit(payload.tabId, payload.sourcePaneId, targetPaneId, position)
+        }
+        if (useWorkspaceStore.getState().root !== prevRoot) {
+          setLastDropState({ targetPaneId, position, at: Date.now() })
+        }
+      }
+
+      if (payload.type === 'chat' && payload.sessionId) {
+        // Same rule as tab drops: stamp only when the tree actually changed.
+        const prevRoot = store.root
+        openAgentChatPlaced(payload.sessionId, 'pane-dnd', {
+          paneId: targetPaneId,
+          zone: position
+        })
+        if (useWorkspaceStore.getState().root !== prevRoot) {
+          setLastDropState({ targetPaneId, position, at: Date.now() })
         }
       }
 
@@ -209,17 +291,33 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
           .openFile(filePath)
           .then(() => {
             const currentStore = useWorkspaceStore.getState()
-            const tabId = editorTabId(filePath)
-            const tab: WorkspaceTab = { type: 'editor', id: tabId, filePath }
 
-            if (position === 'center') {
-              currentStore.addTabToPane(targetPaneId, tab)
+            // The target pane may have been removed while openFile was in
+            // flight — no pane, no commit, no signal.
+            if (!findPaneById(currentStore.root, targetPaneId)) {
               return
             }
 
-            const direction =
-              position === 'left' || position === 'right' ? 'horizontal' : 'vertical'
-            currentStore.splitPane(targetPaneId, direction, tab, position)
+            const tabId = editorTabId(filePath)
+            const tab: WorkspaceTab = { type: 'editor', id: tabId, filePath }
+
+            // openFile resolves asynchronously — stamp the drop signal at
+            // commit time (and only when the tree actually changed) so the
+            // freshness window starts when the drop takes effect, not when
+            // it landed.
+            const prevRoot = currentStore.root
+
+            if (position === 'center') {
+              currentStore.addTabToPane(targetPaneId, tab)
+            } else {
+              const direction =
+                position === 'left' || position === 'right' ? 'horizontal' : 'vertical'
+              currentStore.splitPane(targetPaneId, direction, tab, position)
+            }
+
+            if (useWorkspaceStore.getState().root !== prevRoot) {
+              setLastDropState({ targetPaneId, position, at: Date.now() })
+            }
           })
           .catch(() => {
             // File couldn't be opened (binary, too large, etc.) — silently ignore
@@ -287,24 +385,43 @@ export function PaneDndProvider({ children }: PaneDndProviderProps): React.JSX.E
     [dragPayload, clearReorderPreview]
   )
 
-  return (
-    <PaneDndContext.Provider
-      value={{
-        isDragging,
-        dragPayload,
-        previewTarget,
-        setPreviewTarget,
-        clearPreviewTarget,
-        reorderPreview,
-        setReorderPreview,
-        clearReorderPreview,
-        startTabDrag,
-        startFileDrag,
-        handleDrop,
-        handleTabReorder
-      }}
-    >
-      {children}
-    </PaneDndContext.Provider>
+  // Memoized: PaneSplitRenderer subscribes via usePaneDnd — a fresh object
+  // every render would re-render every split group on each previewTarget
+  // hover during a drag.
+  const contextValue = useMemo<PaneDndContextValue>(
+    () => ({
+      isDragging,
+      dragPayload,
+      previewTarget,
+      lastDrop,
+      setPreviewTarget,
+      clearPreviewTarget,
+      reorderPreview,
+      setReorderPreview,
+      clearReorderPreview,
+      startTabDrag,
+      startFileDrag,
+      startChatDrag,
+      handleDrop,
+      handleTabReorder
+    }),
+    [
+      isDragging,
+      dragPayload,
+      previewTarget,
+      lastDrop,
+      reorderPreview,
+      setPreviewTarget,
+      clearPreviewTarget,
+      setReorderPreview,
+      clearReorderPreview,
+      startTabDrag,
+      startFileDrag,
+      startChatDrag,
+      handleDrop,
+      handleTabReorder
+    ]
   )
+
+  return <PaneDndContext.Provider value={contextValue}>{children}</PaneDndContext.Provider>
 }

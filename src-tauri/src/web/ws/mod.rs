@@ -1,0 +1,803 @@
+//! WS relay protocol — frame envelopes, seq, event log, cursor, tiers (Story 1.4+1.6).
+//!
+//! One multiplexed bidirectional WebSocket per browser connection carries all
+//! sessions (AC1). The wire contract is defined here and mirrored 1:1 in
+//! `src/shared/types/web-protocol.types.ts` (AC2).
+//!
+//! # Wire casing (AC3 — deviation from architecture text, MUST follow)
+//!
+//! The **envelope** fields (`sid`, `seq`, `type`, `payload`) are snake_case.
+//! The **payload** is the existing camelCase-serialized ACP event struct
+//! `Value` (`fan_out` serializes ONCE, fans out N). This module does NOT
+//! re-case payloads.
+//!
+//! # OS vs human cap boundary (AC8)
+//!
+//! The server is the ACP client-of-record (thin relay, not pure ACP-over-WS).
+//! OS caps ([`OS_FULFILLED_CAPS`]) are fulfilled by the server; only human caps
+//! ([`HUMAN_RELAYED_CAPS`]) are relayed to the browser. A browser WS request
+//! for an OS cap is rejected with `err.code: "unsupported"`.
+//!
+//! # Scope fence
+//!
+//! `authenticate` first validates `protocolVersion` ([`WS_PROTOCOL_VERSION`])
+//! and the `deviceId` / `clientInstanceId` identity (see
+//! [`validate_authenticate_handshake`]) — on gated AND ungated hosts — and
+//! refuses `protocol_version_mismatch` / `invalid_client_identity`, staying
+//! pre-auth. It then validates the single-token web auth gate (CAP-1 interim,
+//! QA remediation Story 1) when `AppState.web_auth` is `Some` — a wrong/absent
+//! token is refused `unauthorized` and the connection stays pre-auth (retry
+//! allowed). Ungated servers (`web_auth: None`) accept any token after the
+//! handshake checks pass. `subscribe` is wired (Story 1.6):
+//! binds the connection to a session log with optional `lastSeq` cursor
+//! replay. Unknown request types return `err.code: "not_implemented"`.
+
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use axum::extract::ws::{Message, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
+use axum::response::IntoResponse;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tracing::{debug, info, warn};
+
+use crate::acp::config::AgentConfig;
+use crate::acp::provider_errors::ProviderErrorKind;
+use crate::acp::{AcpManager, SessionCreationContext};
+// Only the harness and the ws tests name these (through `super::*`).
+#[cfg(test)]
+use crate::acp::{AgentId, SessionId};
+use crate::pty::PtyManager;
+use crate::trackers::{CwdTracker, ExitCodeTracker, GitTracker, TerminalEventHub};
+use crate::web::auth::WebAuth;
+use crate::web::capabilities::{Carrier, CapabilityPolicy};
+use crate::web::connection_runtime::ConnectionRuntime;
+use crate::web::project_registry::ProjectRegistry;
+use crate::web::sink::{ClientId, EventStream, ReplayResult, StreamItem, WsRelaySink};
+use crate::web::store::WebStore;
+
+mod access;
+mod agents;
+pub mod channel;
+mod chat_reads;
+mod claude_accounts;
+mod commands;
+mod dispatch;
+mod lifecycle;
+mod projects;
+mod prompts;
+mod relay;
+mod sessions;
+mod store;
+mod subscribe;
+mod watch;
+
+// Handler submodules expose their items as `pub(super)`; these private
+// glob re-exports keep bare-name lookups working for sibling submodules and
+// for `tests.rs`' `use super::*` without widening visibility past `ws`.
+use access::*;
+use agents::*;
+use chat_reads::*;
+use claude_accounts::*;
+use commands::*;
+use dispatch::*;
+use lifecycle::*;
+use projects::*;
+use prompts::*;
+use relay::*;
+use sessions::*;
+use store::*;
+use subscribe::*;
+use watch::*;
+
+// The wire-contract `pub` surface stays reachable at `web::ws::*`.
+pub use relay::{ws_upgrade, AUTH_REQUIRED_TYPE, WS_BATCH_TYPE, WS_GAP_TYPE, WS_HEARTBEAT_TYPE};
+pub(crate) use relay::{EnqueueOutcome, Outbound, OutboundSender};
+#[cfg(test)]
+pub(crate) use relay::{outbound_channel, OutboundReceiver, OUTBOUND_QUEUE_CAPACITY};
+
+// ---------------------------------------------------------------------------
+// Sequenced event — the wire envelope (AC2 + AC3)
+// ---------------------------------------------------------------------------
+
+/// A sequenced event ready for fan-out + cursor replay.
+///
+/// Serializes to the WS event envelope `{sid, seq, type, payload}` (snake_case
+/// envelope; `payload` is the camelCase ACP event struct `Value` passed through
+/// verbatim). `seq` is `0` for agent-level (`sid: None`) + relay-level events.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequencedEvent {
+    /// Session id, or `None` for agent-level / relay-level events.
+    pub sid: Option<String>,
+    /// Per-session monotonic sequence (starts at 1). `0` for agent-level.
+    pub seq: u64,
+    /// Event `type` (prefix-dropped snake_case, e.g. `message_chunk`).
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// The camelCase ACP event struct value (passed through verbatim).
+    pub payload: Value,
+}
+
+impl SequencedEvent {
+    /// Build a sequenced event from a prefix-dropped type + payload.
+    #[must_use]
+    pub fn new(sid: Option<String>, seq: u64, type_: impl Into<String>, payload: Value) -> Self {
+        Self {
+            sid,
+            seq,
+            type_: type_.into(),
+            payload,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reliability tier registry (AC5) — single Rust enum + tier_of
+// ---------------------------------------------------------------------------
+
+/// The three delivery tiers for a WS event type. Mirrors the TS
+/// `WS_RELAY_TIERS` const.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReliabilityTier {
+    /// Dropped for a slow client, followed by a `gap` frame (high-frequency
+    /// streams the client can rebuild from a snapshot).
+    Lossy,
+    /// Never dropped silently: a subscriber that cannot take it loses its
+    /// connection and resumes by cursor.
+    Reliable,
+    /// Dedup by turn-id before enqueue.
+    Idempotent,
+}
+
+/// Map a prefix-dropped event `type` to its [`ReliabilityTier`].
+///
+/// Lossy: `message_chunk`, `tool_call_update`, `commands_update`, `plan_update`.
+/// Idempotent: `prompt_complete`.
+/// Reliable: everything else (including `permission_request` + all request↔reply,
+/// though request↔reply reliability is enforced at the request layer, not here).
+/// Unknown types default to [`ReliabilityTier::Reliable`] (the safe choice —
+/// never drop an event the relay does not recognize).
+#[must_use]
+pub fn tier_of(type_: &str) -> ReliabilityTier {
+    match type_ {
+        "message_chunk" | "tool_call_update" | "commands_update" | "plan_update" => {
+            ReliabilityTier::Lossy
+        }
+        "prompt_complete" => ReliabilityTier::Idempotent,
+        _ => ReliabilityTier::Reliable,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request / reply / error envelope structs (AC2 + AC10)
+// ---------------------------------------------------------------------------
+
+/// The `authenticate` protocol version this host speaks. Mirrors the TS
+/// `WS_PROTOCOL_VERSION`. Bump it on any wire-contract change (AD-15).
+pub const WS_PROTOCOL_VERSION: u32 = 7;
+
+/// Longest accepted `deviceId` / `clientInstanceId`, in bytes.
+pub const MAX_CLIENT_ID_LEN: usize = 128;
+
+/// Client identity presented on `authenticate` (AD-4). Neither id is a
+/// credential, and the host stores both exactly as received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientIdentity {
+    /// Per install / browser profile; partitions view state and presence.
+    pub device_id: String,
+    /// Per tab or window; stamps writes.
+    pub client_instance_id: String,
+}
+
+impl ClientIdentity {
+    /// Log-safe label for one id: the first 8 characters. The ids are stable
+    /// per profile, so the full values stay out of service logs.
+    #[must_use]
+    pub fn log_label(id: &str) -> String {
+        id.chars().take(8).collect()
+    }
+}
+
+/// Why an `authenticate` handshake was refused before the token gate ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeRefusal {
+    /// Stable `/ws` error code ([`WsErrorCode::ProtocolVersionMismatch`] or
+    /// [`WsErrorCode::InvalidClientIdentity`]); `/terminal/ws` maps it to its
+    /// SCREAMING wire string via [`HandshakeRefusal::terminal_code`].
+    pub code: WsErrorCode,
+    /// The payload field that failed (`protocolVersion`, `deviceId`,
+    /// `clientInstanceId`) — safe to log.
+    pub check: &'static str,
+    /// Human-readable message for the refusal reply.
+    pub message: String,
+}
+
+impl HandshakeRefusal {
+    /// The `/terminal/ws` SCREAMING_SNAKE_CASE wire code for this refusal.
+    #[must_use]
+    pub const fn terminal_code(&self) -> &'static str {
+        match self.code {
+            WsErrorCode::ProtocolVersionMismatch => "PROTOCOL_VERSION_MISMATCH",
+            _ => "INVALID_CLIENT_IDENTITY",
+        }
+    }
+}
+
+/// Validate the `authenticate` payload's `protocolVersion`, `deviceId` and
+/// `clientInstanceId` (shared by `/ws` and `/terminal/ws`). Runs BEFORE any
+/// token check so a stale tab learns it must reload even on a token mismatch.
+/// A missing, non-numeric or different `protocolVersion` is a mismatch; each
+/// id must be a non-empty string of at most [`MAX_CLIENT_ID_LEN`] bytes with
+/// no control characters (the host logs ids, so a newline must not forge a
+/// log line). The ids are returned exactly as received (the host never mints
+/// or rewrites).
+pub fn validate_authenticate_handshake(payload: &Value) -> Result<ClientIdentity, HandshakeRefusal> {
+    if payload["protocolVersion"].as_u64() != Some(u64::from(WS_PROTOCOL_VERSION)) {
+        return Err(HandshakeRefusal {
+            code: WsErrorCode::ProtocolVersionMismatch,
+            check: "protocolVersion",
+            message: format!(
+                "protocol version mismatch: this host speaks version {WS_PROTOCOL_VERSION}; reload the client"
+            ),
+        });
+    }
+    let client_id = |field: &'static str| -> Result<String, HandshakeRefusal> {
+        match payload[field].as_str() {
+            Some(value)
+                if !value.is_empty()
+                    && value.len() <= MAX_CLIENT_ID_LEN
+                    && !value.chars().any(char::is_control) =>
+            {
+                Ok(value.to_string())
+            }
+            _ => Err(HandshakeRefusal {
+                code: WsErrorCode::InvalidClientIdentity,
+                check: field,
+                message: format!(
+                    "{field} must be a non-empty string of at most {MAX_CLIENT_ID_LEN} bytes without control characters"
+                ),
+            }),
+        }
+    };
+    Ok(ClientIdentity {
+        device_id: client_id("deviceId")?,
+        client_instance_id: client_id("clientInstanceId")?,
+    })
+}
+
+/// A WS request frame `{id, type, payload, command_id?}` sent client→server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WsRequest {
+    /// Client-chosen correlation id (echoed in the reply).
+    pub id: String,
+    /// Request `type` (prefix-dropped snake_case).
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Request payload (shape depends on `type`).
+    #[serde(default = "Value::default")]
+    pub payload: Value,
+    /// Client-minted command id for a mutating request (1-128 characters of
+    /// `[A-Za-z0-9_-]`). Ledgered commands are recorded under it before they
+    /// run; `send_prompt`'s `turnId` is its command id. A request without one
+    /// keeps the pre-receipt behavior.
+    #[serde(default)]
+    pub command_id: Option<String>,
+}
+
+/// A WS reply frame `{id, ok, payload?, err?}` sent server→client.
+#[derive(Debug, Clone, Serialize)]
+pub struct WsReply {
+    /// Echoes the request `id`.
+    pub id: String,
+    /// `true` for success, `false` for failure.
+    pub ok: bool,
+    /// Success payload (omitted on failure).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    /// Failure detail (omitted on success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub err: Option<WsError>,
+    /// Receipt visibility marker: the session log seq the effect is visible
+    /// at, set on ok replies of session-scoped commands (other replies omit
+    /// it until watch revisions exist).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_at: Option<Value>,
+}
+
+impl WsReply {
+    /// Build a success reply.
+    #[must_use]
+    pub fn ok(id: impl Into<String>, payload: Option<Value>) -> Self {
+        Self {
+            id: id.into(),
+            ok: true,
+            payload,
+            err: None,
+            visible_at: None,
+        }
+    }
+
+    /// Build a failure reply with a stable code + human message.
+    #[must_use]
+    pub fn err(id: impl Into<String>, code: WsErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            ok: false,
+            payload: None,
+            visible_at: None,
+            err: Some(WsError {
+                code: code.as_str().to_string(),
+                message: message.into(),
+                details: None,
+            }),
+        }
+    }
+
+    /// Build a failure reply whose `err.details` carries structured context
+    /// (the `project_busy` entity list).
+    #[must_use]
+    pub fn err_with_details(
+        id: impl Into<String>,
+        code: WsErrorCode,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        let mut reply = Self::err(id, code, message);
+        if let Some(err) = reply.err.as_mut() {
+            err.details = Some(details);
+        }
+        reply
+    }
+
+    /// Build a failure reply with a raw (SCREAMING_SNAKE_CASE) code string.
+    ///
+    /// CAP-6 / Story 9: the install handler carries transport-identical codes
+    /// (`INTEGRITY_MISMATCH`, `INTEGRITY_METADATA_MISSING`, …) matching the
+    /// Tauri `IpcResult.code` + HTTP `IpcBody.code` byte-for-byte. The
+    /// protocol-level `WsErrorCode` enum is snake_case (e.g. `unsupported`),
+    /// so the install codes cannot be expressed as enum variants without
+    /// breaking the wire contract. This constructor accepts a raw string so
+    /// the install handler's `err.code` is byte-identical across transports.
+    #[must_use]
+    pub fn err_with_code(
+        id: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            ok: false,
+            payload: None,
+            visible_at: None,
+            err: Some(WsError {
+                code: code.into(),
+                message: message.into(),
+                details: None,
+            }),
+        }
+    }
+}
+
+/// The `err` object inside a failing [`WsReply`].
+#[derive(Debug, Clone, Serialize)]
+pub struct WsError {
+    /// Stable machine string (one of [`WsErrorCode`]).
+    pub code: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Optional structured context for the code (additive): a `project_busy`
+    /// refusal lists the bound entities as
+    /// `{"sessions":[sessionId…],"terminals":[terminalId…]}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+/// The stable `err.code` machine strings (AC2). Mirrors the TS
+/// `WS_ERROR_CODES` const. Serialized as snake_case via [`WsErrorCode::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsErrorCode {
+    NotFound,
+    Unauthorized,
+    RateLimited,
+    AgentCrashed,
+    PermissionDenied,
+    Stale,
+    Duplicate,
+    Unsupported,
+    NotImplemented,
+    /// The agent rejected session entry (`session/new` / `session/load` /
+    /// `session/resume`) with ACP `AuthRequired` (-32000) — the user must
+    /// authenticate first. Additive (Story 7): receivers that ignore unknown
+    /// codes stay compatible.
+    AgentAuthRequired,
+    /// `session/load` / `session/resume` targeted a session owned by a
+    /// DIFFERENT live agent with a turn in flight (issue #837 split-brain
+    /// guard). Additive: receivers that ignore unknown codes stay compatible.
+    SessionOwnedByOther,
+    /// `authenticate` carried a missing or different `protocolVersion`
+    /// ([`WS_PROTOCOL_VERSION`]). The client must reload; no compatibility
+    /// shim exists (AD-15).
+    ProtocolVersionMismatch,
+    /// `authenticate` carried a missing, empty or oversized `deviceId` /
+    /// `clientInstanceId` (AD-4). The host never mints either id.
+    InvalidClientIdentity,
+    /// A host terminal cap (per project or global) refused a spawn. The
+    /// terminal carriers (`/terminal/ws`, desktop `terminal_spawn`) answer it
+    /// as the SCREAMING form `TERMINAL_LIMIT`; this is the `/ws` spelling.
+    TerminalLimit,
+    /// Reserved: project remove/archive refused while sessions or PTYs bound
+    /// to the project are live. Handler behavior lands with the project
+    /// registry work.
+    ProjectBusy,
+    /// A command resend found no stored outcome (evicted ledger entry,
+    /// interrupted handler); the command is never re-executed (AD-5).
+    OutcomeUnknown,
+    /// Reserved: branch switch / worktree removal refused while a session
+    /// with its cwd inside the target path has an active turn.
+    DestructiveOpBlocked,
+    /// The upstream provider refused the call for quota / usage limits.
+    ProviderQuotaExceeded,
+    /// The upstream provider refused the call for a session limit.
+    ProviderSessionLimit,
+    /// The upstream provider rejected the request with a 4xx class error.
+    ProviderRequestRejected,
+    /// The connection lacks the capability the request needs (view-only
+    /// connection attempting a mutation outside `device/<deviceId>/`).
+    Forbidden,
+    /// `respond_permission` / `answer_question` named a ticket that was
+    /// already resolved (answered by this or another connection, or released
+    /// when its turn, session or agent ended). Tombstones are bounded: an
+    /// older ticket reads `stale`.
+    AlreadyResolved,
+    /// A spawn failed deterministically: the agent binary is missing, not
+    /// installed, or cannot start (AD-5). Definite — never retried
+    /// automatically.
+    AgentUnavailable,
+    /// A spawn named an unusable agent config: empty name, command or
+    /// `configId` (AD-5). Definite — never retried automatically.
+    InvalidAgentConfig,
+    /// A `commandId` was resent with a different request than the one it was
+    /// first used for (AD-5). Never replayed, never executed.
+    CommandConflict,
+    /// A request's `commandId` is malformed: not 1-128 characters of
+    /// `[A-Za-z0-9_-]`.
+    InvalidCommandId,
+}
+
+impl WsErrorCode {
+    /// The stable snake_case wire string for this code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Unauthorized => "unauthorized",
+            Self::RateLimited => "rate_limited",
+            Self::AgentCrashed => "agent_crashed",
+            Self::PermissionDenied => "permission_denied",
+            Self::Stale => "stale",
+            Self::Duplicate => "duplicate",
+            Self::Unsupported => "unsupported",
+            Self::NotImplemented => "not_implemented",
+            Self::AgentAuthRequired => "agent_auth_required",
+            Self::SessionOwnedByOther => "session_owned_by_other",
+            Self::ProtocolVersionMismatch => "protocol_version_mismatch",
+            Self::InvalidClientIdentity => "invalid_client_identity",
+            Self::TerminalLimit => "terminal_limit",
+            Self::ProjectBusy => "project_busy",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::DestructiveOpBlocked => "destructive_op_blocked",
+            Self::ProviderQuotaExceeded => "provider_quota_exceeded",
+            Self::ProviderSessionLimit => "provider_session_limit",
+            Self::ProviderRequestRejected => "provider_request_rejected",
+            Self::Forbidden => "forbidden",
+            Self::AlreadyResolved => "already_resolved",
+            Self::AgentUnavailable => "agent_unavailable",
+            Self::InvalidAgentConfig => "invalid_agent_config",
+            Self::CommandConflict => "command_conflict",
+            Self::InvalidCommandId => "invalid_command_id",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OS vs human cap boundary (AC8)
+// ---------------------------------------------------------------------------
+
+/// ACP caps the SERVER fulfills locally (the browser cannot perform them).
+/// `terminal/*` is a prefix — every cap under `terminal/` is OS-fulfilled.
+pub const OS_FULFILLED_CAPS: &[&str] = &["fs/read_text_file", "fs/write_text_file", "terminal/*"];
+
+/// ACP caps RELAYED to the browser (human-in-the-loop).
+pub const HUMAN_RELAYED_CAPS: &[&str] = &["session_notification", "request_permission"];
+
+/// Whether `cap` matches an OS-fulfilled cap entry (exact, or prefix match for
+/// entries ending in `/*`). Enforced at the request-handling layer (AC8).
+#[must_use]
+pub fn is_os_fulfilled_cap(cap: &str) -> bool {
+    OS_FULFILLED_CAPS.iter().copied().any(|entry| {
+        entry == cap || entry.ends_with("/*") && cap.starts_with(&entry[..entry.len() - 1])
+    })
+}
+
+/// Whether `cap` matches a human-relayed cap entry (exact match).
+#[must_use]
+pub fn is_human_relayed_cap(cap: &str) -> bool {
+    HUMAN_RELAYED_CAPS.iter().copied().any(|entry| entry == cap)
+}
+
+/// Map an `AcpManager` prompt error to a stable WS `err.code` (Story 1.7 T7.1).
+///
+/// `AcpManager::send_prompt` (via `DriverState::try_begin_turn`) rejects a
+/// concurrent prompt on the same session with the string
+/// `"ACP_TURN_IN_PROGRESS: session {id}"`. The renderer keys on that stable
+/// code (`ACP_TURN_IN_PROGRESS_CODE`). For the WS path (Story 1.8's
+/// `send_prompt`), this maps it to [`WsErrorCode::RateLimited`] (the closest
+/// stable `err.code` for "try again shortly" — the architecture's set has no
+/// dedicated turn-busy code). Returns `None` for any other error string.
+#[must_use]
+pub fn map_prompt_error_code(err: &str) -> Option<WsErrorCode> {
+    if err.starts_with("ACP_TURN_IN_PROGRESS") {
+        Some(WsErrorCode::RateLimited)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Router state (AC1 + AC7)
+// ---------------------------------------------------------------------------
+
+/// Shared Axum state for the standalone server: the ACP manager + the live
+/// WS relay sink + the host's durable project registry. Typed
+/// struct (preferred over tuple state past 2 fields).
+#[derive(Clone)]
+pub struct AppState {
+    /// The ACP manager (server is the ACP client-of-record).
+    pub acp: Arc<AcpManager>,
+    /// Interactive PTYs exposed on the separate `/terminal/ws` endpoint.
+    pub pty: Arc<PtyManager>,
+    pub terminal_events: TerminalEventHub,
+    pub cwd_tracker: Arc<CwdTracker>,
+    pub git_tracker: Arc<GitTracker>,
+    pub exit_code_tracker: Arc<ExitCodeTracker>,
+    /// The live WS relay sink (owns per-session logs + seq counters + subs).
+    pub relay: Arc<WsRelaySink>,
+    /// The host's durable project registry — source for `GET /projects`,
+    /// default-project resolution and the fs/git boundary.
+    pub registry: Arc<ProjectRegistry>,
+    /// Deployment history provider exposed to authenticated browser clients.
+    pub history_mode: HistoryMode,
+    /// Host-owned ACP catalog service (CAP-6 / Story 8). `None` when the
+    /// desktop could not open `AcpCatalogService` at startup (degraded mode —
+    /// routes return `ACP_CATALOG_UNAVAILABLE`). The web/remote client reads
+    /// the resolved catalog through `GET /acp/catalog` + WS
+    /// `list_acp_catalog`; the desktop renderer sends the same WS requests over
+    /// its channel carrier.
+    pub acp_catalog: Option<Arc<crate::acp::AcpCatalogService>>,
+    /// Host-owned verified-atomic ACP install service (CAP-6 / Story 9). `None`
+    /// when the desktop could not open `AcpInstallService` at startup (degraded
+    /// mode — the `install_acp_agent` handler returns
+    /// `ACP_INSTALL_UNAVAILABLE`). The web/remote client installs a catalog
+    /// agent through `POST /acp/install` (catalog_api sibling) + WS
+    /// `install_acp_agent`; the desktop renderer sends the same WS request over
+    /// its channel carrier.
+    pub acp_install: Option<Arc<crate::acp::install::AcpInstallService>>,
+    /// Issue #613: server-side generic key-value store for web-client state
+    /// (terminal layout, settings, editor state, command history, snapshots,
+    /// SSH profiles). `None` when a server does not attach a store — the
+    /// `store_*` WS handlers return `STORE_UNAVAILABLE` (degraded mode). The
+    /// standalone binary + desktop shared-live host both attach one.
+    pub store: Option<Arc<WebStore>>,
+    /// Operator opt-in: admit non-loopback peers on the loopback-guarded
+    /// write routes (fs/git/workspace/projects/host-state). Default `false`
+    /// (the CWE-306 guard stays on); set `true` only by the standalone
+    /// `termul-server` `--allow-remote-writes` flag. The desktop shared-live
+    /// host leaves this `false` (LAN clients stay view-only for mutations).
+    pub allow_remote_writes: bool,
+    /// Deployment-mode deny: when `true`, the write guard refuses ALL write
+    /// routes BEFORE evaluating the peer address or `allow_remote_writes`.
+    /// Set `true` by the desktop shared-live host — it binds localhost and a
+    /// cloudflared quick-tunnel forwards public traffic to it from a loopback
+    /// source, so `is_loopback()` cannot distinguish cloudflared-forwarded
+    /// requests from genuine local callers. The standalone `termul-server`
+    /// sets this `false` (its `--allow-remote-writes` opt-in is the
+    /// admission path there). Closes the cloudflared loopback bypass.
+    pub shared_live_writes_denied: bool,
+    /// Pending MCP OAuth flows keyed by server URL. Used by the web OAuth
+    /// callback route to complete the token exchange after the browser
+    /// redirect. The desktop path doesn't use this (it runs the full flow
+    /// synchronously in the `acp_mcp_oauth_start` command).
+    pub pending_oauth_flows: Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<String, crate::acp::mcp_oauth::PendingOAuthFlow>,
+        >,
+    >,
+    /// Base URL for OAuth redirect URIs on the web path. The standalone
+    /// server derives this from its bind address; the desktop shared-live
+    /// host uses the cloudflared tunnel URL. The OAuth callback route lives
+    /// at `{base}/oauth/callback`.
+    pub oauth_base_url: String,
+    /// The web auth gate (CAP-1 interim, QA remediation Story 1). `Some` on
+    /// a gated server (explicit token configured, or public bind with a
+    /// generated/loaded token — see `web::auth::resolve`): the pre-auth
+    /// `authenticate` branch validates `payload.token` in constant time, and
+    /// `/terminal/ws` + the gated HTTP API routes enforce the same token.
+    /// `None` keeps the legacy ungated behavior (accept-any-token
+    /// `authenticate`, no `/terminal/ws` connection gate).
+    pub web_auth: Option<Arc<WebAuth>>,
+    /// Host shutdown coordination + per-connection overflow tolerance, shared
+    /// by every upgraded `/ws` and `/terminal/ws` socket (AD-19).
+    pub connections: ConnectionRuntime,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMode {
+    Server,
+    LiveOnly,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePolicy {
+    /// Authoritative absolute server turn ceiling, in ms. `0` is the
+    /// **unlimited** sentinel — no hard cap is imposed (the default). A
+    /// non-zero value is the bounded hard-cap deadline the client should not
+    /// let its inactivity refresh extend past.
+    pub turn_timeout_ms: u64,
+    /// Inactivity budget, in ms, refreshed on matching-session activity. `0`
+    /// is the **unlimited** sentinel — the client imposes no inactivity timer
+    /// (the default). A non-zero value is the bounded inactivity window.
+    pub prompt_inactivity_timeout_ms: u64,
+    pub ping_interval_ms: u64,
+    pub pong_timeout_ms: u64,
+}
+
+impl RuntimePolicy {
+    #[must_use]
+    pub fn resolved() -> Self {
+        let turn_timeout = crate::acp::manager::resolved_turn_timeout(); // Option
+        let turn_idle = crate::acp::manager::turn_idle_timeout(); // Option
+                                                                  // `turn_timeout_ms`: 0 = unlimited (no hard cap) sentinel; otherwise
+                                                                  // the bounded hard cap in ms.
+        let turn_timeout_ms = turn_timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+        // Inactivity budget published to the client. Preserve the original
+        // `hard/2` derivation when a hard cap is configured (bounded, strictly
+        // shorter than the ceiling); otherwise use the idle timeout when it is
+        // configured (bounded); otherwise 0 (unlimited — no client-side
+        // inactivity timer). 0 keeps the client's `setTimeout` well under the
+        // browser 32-bit ceiling and defers entirely to the server.
+        let prompt_inactivity_timeout_ms = match (turn_timeout, turn_idle) {
+            (Some(hard), _) => (hard.as_millis() as u64 / 2).max(1),
+            (None, Some(idle)) => idle.as_millis() as u64,
+            (None, None) => 0,
+        };
+        Self {
+            turn_timeout_ms,
+            prompt_inactivity_timeout_ms,
+            ping_interval_ms: PING_INTERVAL.as_millis() as u64,
+            pong_timeout_ms: PONG_TIMEOUT.as_millis() as u64,
+        }
+    }
+}
+
+/// Cheaply extract the `type` field of a client WS text frame (CAP-3 control
+/// signals). Returns `None` for non-JSON or frames without a string `type`.
+/// The read task uses this to recognize id-less `background`/`foreground`
+/// lifecycle frames before the strict `WsRequest` parse (which requires `id`).
+pub(super) fn peer_frame_type(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    value.get("type")?.as_str().map(str::to_owned)
+}
+
+/// Monotonic millis elapsed since `epoch`, read from the tokio clock so a
+/// paused test runtime (`start_paused`) advances the watchdog
+/// deterministically. Each relay connection captures its own `epoch` and uses
+/// it for every watchdog timestamp, so the value never depends on process-wide
+/// state or on which runtime first called it (several paused test runtimes
+/// each own an independent clock). Unlike `SystemTime` it cannot jump
+/// backwards, and `saturating_sub` keeps the compare safe regardless.
+pub(super) fn elapsed_ms(epoch: tokio::time::Instant) -> u64 {
+    epoch.elapsed().as_millis() as u64
+}
+
+/// Map an `AcpManager` `Err(String)` to a `WsReply` err. Story 1.8 review:
+/// map recognizable agent-manager error strings to their stable `err.code`
+/// (so the browser's error routing keys on the right category — not every
+/// runtime failure is "not_implemented"). `send_prompt`'s concurrent-turn
+/// rejection (`"ACP_TURN_IN_PROGRESS: …"`) → `RateLimited`; agent-side ACP
+/// `AuthRequired` (-32000) failures — tagged `"ACP_AUTH_REQUIRED: …"` at the
+/// manager boundary, or the bare default `"Authentication required"` message
+/// (exact match) for pre-collapsed paths — → `AgentAuthRequired` (Story 7);
+/// `"unknown agent: …"` / `"unknown permission request: …"` and agent-side
+/// `ResourceNotFound` (-32002, tagged `"ACP_RESOURCE_NOT_FOUND: …"`) → `NotFound`;
+/// capability-gate failures (`"agent does not support …"`) → `Unsupported`;
+/// `"ACP_PROVIDER_*: …"` provider failures → `provider_quota_exceeded` /
+/// `provider_session_limit` / `provider_request_rejected`.
+/// Unrecognized errors fall back to `NotImplemented` (preserves the human
+/// message verbatim).
+pub(super) fn acp_err_to_reply(id: String, err: String) -> WsReply {
+    if let Some(code) = map_prompt_error_code(&err) {
+        return WsReply::err(id, code, err);
+    }
+    // AD-5 deterministic spawn rejections: the stable code carries the verdict,
+    // so the message drops the manager's transport prefix.
+    if let Some((failure, message)) = crate::acp::manager::classify_spawn_error(&err) {
+        let code = match failure {
+            crate::acp::manager::SpawnFailure::AgentUnavailable => WsErrorCode::AgentUnavailable,
+            crate::acp::manager::SpawnFailure::InvalidAgentConfig => {
+                WsErrorCode::InvalidAgentConfig
+            }
+        };
+        return WsReply::err(id, code, message.to_string());
+    }
+    // Upstream provider refusals: the stable code carries the verdict, so the
+    // message drops the manager's transport prefix.
+    if let Some((kind, message)) = crate::acp::provider_errors::split_provider_tag(&err) {
+        let code = match kind {
+            ProviderErrorKind::QuotaExceeded => WsErrorCode::ProviderQuotaExceeded,
+            ProviderErrorKind::SessionLimit => WsErrorCode::ProviderSessionLimit,
+            ProviderErrorKind::RequestRejected => WsErrorCode::ProviderRequestRejected,
+        };
+        return WsReply::err(id, code, message.to_string());
+    }
+    // Issue #837 split-brain guard: the manager tags a rejected reopen with
+    // `ACP_SESSION_OWNED_BY_OTHER` when the session belongs to a different
+    // live agent mid-turn.
+    if err.starts_with(crate::acp::manager::ACP_SESSION_OWNED_BY_OTHER) {
+        return WsReply::err(id, WsErrorCode::SessionOwnedByOther, err);
+    }
+    if let Some(message) = err
+        .strip_prefix(crate::acp::manager::ACP_RESOURCE_NOT_FOUND_PREFIX)
+        .and_then(|rest| rest.strip_prefix(": "))
+    {
+        return WsReply::err(id, WsErrorCode::NotFound, message.to_string());
+    }
+    let code = if err
+        .strip_prefix(crate::acp::manager::ACP_AUTH_REQUIRED_PREFIX)
+        .is_some_and(|rest| rest.starts_with(": "))
+        || err == "Authentication required"
+    {
+        WsErrorCode::AgentAuthRequired
+    } else if err.starts_with("unknown agent") || err.contains("unknown permission request") {
+        WsErrorCode::NotFound
+    } else if err.contains("agent does not support") || err.contains("capability") {
+        WsErrorCode::Unsupported
+    } else {
+        WsErrorCode::NotImplemented
+    };
+    WsReply::err(id, code, err)
+}
+
+/// Serialize a `Serialize` success value into a `WsReply::ok` payload, or reply
+/// `err` on serialization failure (never `null` — mirrors `fan_out` semantics).
+pub(super) fn ok_with_payload<T: serde::Serialize>(id: String, value: &T) -> WsReply {
+    match serde_json::to_value(value) {
+        Ok(v) => WsReply::ok(id, Some(v)),
+        Err(e) => WsReply::err(
+            id,
+            WsErrorCode::Unsupported,
+            format!("failed to serialize reply payload: {e}"),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod capability_tests;
+#[cfg(test)]
+mod project_binding_tests;
+#[cfg(test)]
+mod project_command_tests;
+#[cfg(test)]
+mod provider_error_tests;
+#[cfg(test)]
+mod registry_check_tests;
+#[cfg(test)]
+mod spawn_rejection_tests;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+pub(crate) mod harness;

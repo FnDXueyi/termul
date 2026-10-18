@@ -1,19 +1,31 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useEffect } from 'react'
 import { createHashRouter, RouterProvider } from 'react-router-dom'
+import { BrowserAuthDialogHost } from '@/components/agents/BrowserAuthDialog'
+import { BrowserConsentCardHost } from '@/components/agents/BrowserConsentCardHost'
+import { CodexCliAuthSync } from '@/components/agents/CodexCliAuthSync'
+import { ChatRoute } from '@/components/ChatRoute'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { Toaster as Sonner } from '@/components/ui/sonner'
-import { Toaster } from '@/components/ui/toaster'
+import { GlobalContextMenu } from '@/components/GlobalContextMenu'
+import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { useAcpUpdateChecks } from '@/hooks/use-acp-update-checks'
+import { usePreventDevToolsShortcuts } from '@/hooks/use-prevent-devtools-shortcuts'
+import { usePreventNativeContextMenu } from '@/hooks/use-prevent-native-context-menu'
 import { useWindowState } from '@/hooks/use-window-state'
+import { primeServerCapability } from '@/lib/tauri-runtime'
+import { getCurrentWindow } from '@/lib/tauri-window'
+import { ensureClientIdentity } from '@/lib/web-client-identity'
 import { useUpdateToast } from './components/UpdateAvailableToast'
 import { WhatsNewModal } from './components/WhatsNewModal'
 import { useAcpAgents } from './hooks/use-acp-agents'
 import { useAcpHistory } from './hooks/use-acp-history'
 import { useAcpListeners } from './hooks/use-acp-listeners'
 import { useAcpMcp } from './hooks/use-acp-mcp'
+import { useAcpSessionResume } from './hooks/use-acp-session-resume'
+import { useAgentChatNotification } from './hooks/use-agent-chat-notification'
 import { useAppSettingsLoader } from './hooks/use-app-settings'
+import { useChatNotifications } from './hooks/use-chat-notifications'
 import { useAppliedColorThemeSync } from './hooks/use-color-theme'
 import { useContextBarSettings } from './hooks/use-context-bar-settings'
 import { useCrashRecovery } from './hooks/use-crash-recovery'
@@ -21,24 +33,31 @@ import { useCwd } from './hooks/use-cwd'
 import { useExitCode } from './hooks/use-exit-code'
 import { useGitBranch } from './hooks/use-git-branch'
 import { useGitStatus } from './hooks/use-git-status'
+import { useGitStatusRefresh } from './hooks/use-git-status-refresh'
 import { useKeyboardShortcutsLoader } from './hooks/use-keyboard-shortcuts'
 import { useMenuUpdaterListener } from './hooks/use-menu-updater-listener'
+import { usePersistenceErrorToasts } from './hooks/use-persistence-error-toasts'
 import { usePreventFileDropNavigation } from './hooks/use-prevent-file-drop-navigation'
-import { useProjectsAutoSave, useProjectsLoader } from './hooks/use-projects-persistence'
+import { useProjectGitBranch } from './hooks/use-project-git-branch'
+import { useProjectIcon } from './hooks/use-project-icon'
+import { useProjectRegistry } from './hooks/use-project-registry'
 import { useRemoteProjects } from './hooks/use-remote-projects'
+import { useShellLayoutHydration } from './hooks/use-shell-layout-hydration'
+import { useSmoothWheelScroll } from './hooks/use-smooth-wheel-scroll'
+import { useSSHSessionEvents } from './hooks/use-ssh-session-events'
 import { useTerminalDetachedOutput } from './hooks/use-terminal-detached-output'
 import { useTerminalExitNotification } from './hooks/use-terminal-exit-notification'
+import { useTerminalIdleNotification } from './hooks/use-terminal-idle-notification'
 import { useTerminalRestore } from './hooks/use-terminal-restore'
 import { useAppliedUiZoomSync } from './hooks/use-ui-zoom'
 import { useUpdateCheck } from './hooks/use-updater'
 import { useVisibilityState } from './hooks/use-visibility-state'
 import { useWhatsNew } from './hooks/use-whats-new'
+import { useWorktreeBranchRenamed } from './hooks/use-worktree-branch-renamed'
 import { useTerminalAutoSave } from './hooks/useTerminalAutoSave'
 import WorkspaceLayout from './layouts/WorkspaceLayout'
 import { initNotificationPermissions } from './lib/tauri-notification-api'
-import AppPreferences from './pages/AppPreferences'
 import NotFound from './pages/NotFound'
-import ProjectSettings from './pages/ProjectSettings'
 import WorkspaceDashboard from './pages/WorkspaceDashboard'
 import WorkspaceSnapshots from './pages/WorkspaceSnapshots'
 
@@ -46,12 +65,26 @@ const queryClient = new QueryClient()
 
 // Component to handle app-level effects like auto-save
 function AppEffects(): null {
+  // Versioned handshake identity (AD-4, AD-15): mint `deviceId` (localStorage)
+  // and `clientInstanceId` (sessionStorage) at boot, before the first WS
+  // handshake. Both roots call this — keep them in parity.
+  useEffect(() => {
+    ensureClientIdentity()
+  }, [])
+
+  // Toast when a store write fails (value too large, partition full, ...).
+  // Mounted on both renderer roots for parity.
+  usePersistenceErrorToasts()
   useTerminalAutoSave()
   useTerminalRestore()
   useCrashRecovery()
   useTerminalDetachedOutput()
+  useSSHSessionEvents()
   useCwd()
   useGitBranch()
+  useProjectGitBranch()
+  useGitStatusRefresh()
+  useProjectIcon()
   useGitStatus()
   useExitCode()
   useContextBarSettings()
@@ -59,24 +92,57 @@ function AppEffects(): null {
   useAppliedColorThemeSync()
   useAppliedUiZoomSync()
   useKeyboardShortcutsLoader()
-  useProjectsLoader()
-  useProjectsAutoSave()
+  useProjectRegistry()
+  useShellLayoutHydration()
   useMenuUpdaterListener()
   useUpdateCheck()
   useUpdateToast()
   useVisibilityState()
   useTerminalExitNotification()
+  useTerminalIdleNotification()
+  useAgentChatNotification()
   useRemoteProjects()
   useAcpListeners()
   useAcpAgents()
   useAcpHistory()
+  // Story 16: host worktree branch renames reconcile + refresh (both roots).
+  useWorktreeBranchRenamed()
+  useAcpSessionResume()
+  // #853: chat notifications (turn finished / permission waiting / question
+  // waiting), gated on the user not already watching the chat. Mounted on
+  // both renderer roots for parity.
+  useChatNotifications()
   useAcpMcp()
   usePreventFileDropNavigation()
+  // Suppress the native webview context menu app-wide (BUBBLE phase) so
+  // portaled overlays (toasts, modals) outside <GlobalContextMenu>'s Radix
+  // trigger subtree don't show the native Inspect/Back menu. Bubble — not
+  // capture — so Radix's trigger (composeEventHandlers, defaultPrevented
+  // check) still opens the global menu. Defense-in-depth alongside
+  // <GlobalContextMenu>.
+  usePreventNativeContextMenu()
+  // Smooth inertial wheel scrolling for DOM scroll areas — bubble-phase
+  // document listener; xterm/CodeMirror/virtuoso scrollers and
+  // `[data-smooth-scroll="off"]` subtrees are excluded, element-level wheel
+  // consumers are respected via defaultPrevented, and the interceptor is
+  // inert under prefers-reduced-motion. Wheel input only — touch, keyboard,
+  // and scrollbar drags stay native. Mounted on both roots for parity.
+  useSmoothWheelScroll()
+  // Desktop-only: block devtools/view-source shortcuts (F12, Ctrl+Shift+I/J/C,
+  // Ctrl+U) in production. Web/remote (App.tsx) must never mount this hook.
+  usePreventDevToolsShortcuts()
 
   // Initialize desktop notification permissions once at app startup
   // so the OS permission prompt appears early, not on first terminal exit
   useEffect(() => {
     initNotificationPermissions()
+  }, [])
+
+  // AGENTS.md parity: seed the server-capability cache at boot (desktop
+  // short-circuits to admitted=true via `isTauriContext()`, no fetch). Web
+  // root (App.tsx) calls this too — both roots stay consistent.
+  useEffect(() => {
+    primeServerCapability()
   }, [])
 
   return null
@@ -89,9 +155,8 @@ const router = createHashRouter(
       element: <WorkspaceLayout />,
       children: [
         { index: true, element: <WorkspaceDashboard /> },
-        { path: 'snapshots', element: <WorkspaceSnapshots /> },
-        { path: 'settings', element: <ProjectSettings /> },
-        { path: 'preferences', element: <AppPreferences /> }
+        { path: 'c/:sessionId', element: <ChatRoute /> },
+        { path: 'snapshots', element: <WorkspaceSnapshots /> }
       ]
     },
     { path: '*', element: <NotFound /> }
@@ -106,6 +171,8 @@ const router = createHashRouter(
 export default function TauriApp(): React.JSX.Element {
   const isWindowStateReady = useWindowState()
   const whatsNew = useWhatsNew()
+  // Background Update Check: advisory only, never auto-applies (Q8/Q10).
+  useAcpUpdateChecks()
 
   useEffect(() => {
     if (!isWindowStateReady) return
@@ -127,19 +194,29 @@ export default function TauriApp(): React.JSX.Element {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <ErrorBoundary context="App Root">
-          <AppEffects />
-          <Toaster />
-          <Sonner />
-          <RouterProvider router={router} future={{ v7_startTransition: true }} />
-          <WhatsNewModal
-            isOpen={whatsNew.isOpen}
-            version={whatsNew.version}
-            notes={whatsNew.notes}
-            htmlUrl={whatsNew.htmlUrl}
-            onClose={whatsNew.close}
-          />
-        </ErrorBoundary>
+        <GlobalContextMenu>
+          <ErrorBoundary context="App Root">
+            <AppEffects />
+            <Toaster />
+            {/* Headless ACP auth: global host for the browser-open paste-back
+                dialog (spec-acp-terminal-auth) — auth can be triggered from a
+                chat panel or warm pool, not just the launcher. */}
+            <BrowserAuthDialogHost />
+            <CodexCliAuthSync />
+            {/* Agent browser-automation consent fallback (CAP-5): corner card
+                for pending consents no visible chat-panel card hosts; the
+                in-pane strip and in-chat card own the prompt otherwise. */}
+            <BrowserConsentCardHost />
+            <RouterProvider router={router} future={{ v7_startTransition: true }} />
+            <WhatsNewModal
+              isOpen={whatsNew.isOpen}
+              version={whatsNew.version}
+              notes={whatsNew.notes}
+              htmlUrl={whatsNew.htmlUrl}
+              onClose={whatsNew.close}
+            />
+          </ErrorBoundary>
+        </GlobalContextMenu>
       </TooltipProvider>
     </QueryClientProvider>
   )

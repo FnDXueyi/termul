@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { AcpTransportError } from '@/lib/acp-transport'
 import {
   ACP_TURN_IN_PROGRESS_CODE,
   appendQueuedPrompt,
   buildRecoverPromptToQueuePatch,
   dropPromptQueueForSession,
+  isAgentDeadError,
   isPromptTurnInProgressError,
   sessionTurnBusy,
   waitForTurnClear
@@ -15,6 +17,31 @@ describe('prompt-queue-orchestration', () => {
       true
     )
     expect(isPromptTurnInProgressError(new Error('network failed'))).toBe(false)
+  })
+
+  it('matches the web/WS rate_limited turn-in-progress form', () => {
+    // The WS relay maps the same turn-busy condition to `WsErrorCode::RateLimited`
+    // and the transport surfaces it as `AcpTransportError('rate_limited', …)`.
+    // `runPromptTurn` must recover this form just like the IPC `ACP_TURN_IN_PROGRESS` string.
+    expect(
+      isPromptTurnInProgressError(
+        new AcpTransportError('rate_limited', 'a prompt turn is already in progress')
+      )
+    ).toBe(true)
+    // Unrelated transient codes must NOT be misclassified as turn-busy.
+    expect(isPromptTurnInProgressError(new AcpTransportError('closed', 'transport gone'))).toBe(
+      false
+    )
+    expect(isPromptTurnInProgressError(new AcpTransportError('timeout', 'slow link'))).toBe(false)
+    expect(isPromptTurnInProgressError(new Error('network failed'))).toBe(false)
+  })
+
+  it('classifies agent-dead rejections from the driver thread', () => {
+    expect(isAgentDeadError(new Error('agent thread dropped the reply'))).toBe(true)
+    expect(isAgentDeadError(new Error('agent thread is no longer running'))).toBe(true)
+    // A bounded turn timeout is NOT an agent-dead rejection (it has a typed reply).
+    expect(isAgentDeadError(new Error('turn timeout: session x exceeded 600s'))).toBe(false)
+    expect(isAgentDeadError(new Error('network failed'))).toBe(false)
   })
 
   it('treats openTurnId or activeTurn as busy', () => {
@@ -63,6 +90,40 @@ describe('prompt-queue-orchestration', () => {
       openTurnId: 'prior',
       activeTurn: true,
       lastError: null
+    })
+  })
+
+  it('gh-821: a recover-to-queue patch clears the error code and data with the error', () => {
+    const patch = buildRecoverPromptToQueuePatch(
+      {
+        sessions: {
+          s1: {
+            openTurnId: 'attempt',
+            activeTurn: true,
+            lastError: 'Internal error',
+            lastErrorCode: -32603,
+            lastErrorData: { reason: 'login' }
+          }
+        },
+        messages: { s1: [{ id: 'msg-1' }] },
+        promptQueues: {}
+      },
+      {
+        sessionId: 's1',
+        userMessage: { id: 'msg-1' },
+        blocks: [{ type: 'text', text: 'retry' }],
+        previousOpenTurnId: null,
+        attemptedTurnId: 'attempt',
+        createQueueId: () => 'q-recover'
+      }
+    )
+
+    expect(patch.sessions.s1).toEqual({
+      openTurnId: null,
+      activeTurn: false,
+      lastError: null,
+      lastErrorCode: null,
+      lastErrorData: undefined
     })
   })
 

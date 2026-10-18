@@ -1,21 +1,24 @@
 //! ACP `Client`-role behavior: capability advertisement, inbound request
-//! handling (permission, filesystem), session-update fan-out, and terminal
-//! stubs.
+//! handling (permission, filesystem), and session-update fan-out. Terminal
+//! handlers are registered in `manager/driver.rs` and backed by `terminal.rs`.
 //!
-//! In `agent-client-protocol` 0.12 there is no `Client` *trait* to implement;
-//! instead the client role is expressed by registering handler closures on a
+//! `agent-client-protocol` has no `Client` *trait* to implement; instead the
+//! client role is expressed by registering handler closures on a
 //! `Client.builder()` and driving it via `connect_with`. The functions here are
 //! the reusable bodies those closures call, kept separate from the connection
-//! wiring in `manager.rs` so they can be unit-tested in isolation.
+//! wiring in `manager/` so they can be unit-tested in isolation.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use agent_client_protocol as acp;
-use agent_client_protocol::schema::{
-    ClientCapabilities, FileSystemCapabilities, Meta, ReadTextFileRequest, ReadTextFileResponse,
-    SessionNotification, SessionUpdate, WriteTextFileRequest, WriteTextFileResponse,
+use agent_client_protocol::schema::v1::{
+    AuthCapabilities, BooleanConfigOptionCapabilities, ClientCapabilities,
+    ClientSessionCapabilities, ElicitationCapabilities, ElicitationFormCapabilities,
+    ElicitationUrlCapabilities, FileSystemCapabilities, Meta, ReadTextFileRequest,
+    ReadTextFileResponse, SessionConfigOptionsCapabilities, SessionNotification, SessionUpdate,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
-use tauri::AppHandle;
 
 use crate::acp::config::AgentId;
 use crate::acp::events::{
@@ -23,6 +26,7 @@ use crate::acp::events::{
     ModeUpdateEvent, PlanUpdateEvent, SessionInfoUpdateEvent, ToolCallEvent, ToolCallUpdateEvent,
     UsageCostEvent, UsageUpdateEvent,
 };
+use crate::web::EventSink;
 
 /// Cursor ACP extension: when present on `clientCapabilities._meta`, Cursor
 /// exposes Fast / thought-level as separate session `configOptions` instead of
@@ -31,6 +35,10 @@ use crate::acp::events::{
 /// Not part of the ACP spec; advertised via the standard `_meta` extensibility
 /// hook. Unknown agents ignore unrecognized `_meta` keys.
 const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
+
+/// Codex (and other non-AIR clients) stream command output on this `_meta`
+/// key. Advertising it keeps the chunk channel stable.
+const TERMINAL_OUTPUT_DELTA_META_KEY: &str = "terminal_output_delta";
 
 /// Build the client capabilities advertised to the agent during `initialize`.
 ///
@@ -44,41 +52,52 @@ const PARAMETERIZED_MODEL_PICKER_META_KEY: &str = "parameterizedModelPicker";
 /// `configOptions`. Harmless for agents that ignore unknown `_meta` keys.
 #[must_use]
 pub fn client_capabilities(allow_terminal: bool) -> ClientCapabilities {
-    let meta = Meta::from_iter([(
-        PARAMETERIZED_MODEL_PICKER_META_KEY.into(),
-        serde_json::Value::Bool(true),
-    )]);
+    let meta = Meta::from_iter([
+        (
+            PARAMETERIZED_MODEL_PICKER_META_KEY.into(),
+            serde_json::Value::Bool(true),
+        ),
+        (
+            TERMINAL_OUTPUT_DELTA_META_KEY.into(),
+            serde_json::Value::Bool(true),
+        ),
+    ]);
     ClientCapabilities::new()
         .fs(FileSystemCapabilities::new()
             .read_text_file(true)
             .write_text_file(true))
         .terminal(allow_terminal)
+        // `unstable_auth_methods` (spec-acp-terminal-auth): advertise terminal
+        // auth support so agents like devin expose their designed headless
+        // path (`devin-terminal-login`) instead of only browser methods.
+        .auth(AuthCapabilities::new().terminal(true))
+        .session(ClientSessionCapabilities::new().config_options(
+            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
+        ))
+        .elicitation(
+            ElicitationCapabilities::new()
+                .form(ElicitationFormCapabilities::new())
+                .url(ElicitationUrlCapabilities::new()),
+        )
         .meta(meta)
 }
 
-/// Resolve an agent-supplied absolute path against a session's workspace root,
-/// rejecting anything that escapes the root.
+/// Resolve an agent-supplied absolute path, rejecting lexical `..` traversal
+/// and canonicalizing for symlink resolution.
 ///
-/// Defeats both lexical `..` traversal (rejected outright) and symlink
-/// traversal (the longest existing ancestor is canonicalized and must remain
-/// within the canonicalized root). Returns the original requested path on
-/// success; the caller performs the actual read/write on it.
-///
-/// `root` is the session `cwd`. When it is `None` (session unknown / not yet
-/// scoped) the request is rejected — we never service an unscoped fs request.
-async fn scope_to_workspace(
-    requested: &Path,
-    root: Option<&Path>,
-) -> Result<PathBuf, acp::Error> {
+/// The project-root prefix-containment check that previously lived here was
+/// removed by explicit decision (spec-remove-web-fs-path-jail) so that any
+/// absolute path the agent requests is resolved and served. The retained
+/// guards are: `..`-component rejection (defense-in-depth) and path
+/// canonicalization / ancestor-walking (symlink resolution). When `root` is
+/// `None` the absolute path is resolved directly (no longer denied). `root`
+/// remains in the signature as the session `cwd` for future relative-path
+/// resolution; it is not used for containment.
+async fn scope_to_workspace(requested: &Path, _root: Option<&Path>) -> Result<PathBuf, acp::Error> {
     if !requested.is_absolute() {
         return Err(acp::Error::invalid_params()
             .data(format!("path must be absolute: {}", requested.display())));
     }
-
-    let Some(root) = root else {
-        return Err(acp::Error::invalid_params()
-            .data("no workspace is associated with this session; fs access denied"));
-    };
 
     // Lexical `..` can escape regardless of symlinks; reject early.
     if requested
@@ -91,13 +110,6 @@ async fn scope_to_workspace(
         )));
     }
 
-    let canon_root = tokio::fs::canonicalize(root).await.map_err(|e| {
-        acp::util::internal_error(format!(
-            "failed to resolve workspace root {}: {e}",
-            root.display()
-        ))
-    })?;
-
     // Walk up to the longest existing ancestor and canonicalize it (resolving
     // any symlinks). The (possibly not-yet-existing) suffix cannot escape
     // because we already rejected `..` components.
@@ -105,29 +117,16 @@ async fn scope_to_workspace(
     // NOTE: a residual TOCTOU window exists between this check and the caller's
     // I/O (a concurrent symlink swap could redirect the resolved path). Fully
     // closing it requires descriptor-relative `openat`/cap-std I/O, which is a
-    // larger change deferred intentionally: this is a local desktop trust
-    // boundary already gated by the per-agent `terminal`/fs capability and the
-    // `..`-reject + canonicalize+starts_with checks here, so the marginal risk
-    // does not justify a cap-std migration in this pass.
+    // larger change deferred intentionally.
     let mut ancestor = requested;
     loop {
         match tokio::fs::canonicalize(ancestor).await {
-            Ok(canon) => {
-                if !canon.starts_with(&canon_root) {
-                    return Err(acp::Error::invalid_params().data(format!(
-                        "path escapes the session workspace: {}",
-                        requested.display()
-                    )));
-                }
-                break;
-            }
+            Ok(_) => break,
             Err(_) => match ancestor.parent() {
                 Some(parent) if parent != ancestor => ancestor = parent,
                 _ => {
-                    return Err(acp::Error::invalid_params().data(format!(
-                        "path escapes the session workspace: {}",
-                        requested.display()
-                    )));
+                    return Err(acp::Error::invalid_params()
+                        .data(format!("path cannot be resolved: {}", requested.display())));
                 }
             },
         }
@@ -138,10 +137,11 @@ async fn scope_to_workspace(
 
 /// Handle an inbound `fs/read_text_file` request from the agent.
 ///
-/// Scopes the read to the session workspace `root`, honors the optional 1-based
-/// `line` start and `limit` line count, and preserves the file's original line
-/// terminators when slicing. Returns an ACP error for relative paths, paths
-/// that escape the workspace, or filesystem failures.
+/// Resolves the request path (rejecting `..`, canonicalizing for symlink
+/// resolution), honors the optional 1-based `line` start and `limit` line
+/// count, and preserves the file's original line terminators when slicing.
+/// Returns an ACP error for relative paths, `..` traversal, or filesystem
+/// failures.
 pub async fn handle_read_text_file(
     req: &ReadTextFileRequest,
     root: Option<&Path>,
@@ -172,9 +172,9 @@ pub async fn handle_read_text_file(
 
 /// Handle an inbound `fs/write_text_file` request from the agent.
 ///
-/// Scopes the write to the session workspace `root` and creates parent
-/// directories as needed. Returns an ACP error for relative paths, paths that
-/// escape the workspace, or filesystem failures.
+/// Resolves the request path (rejecting `..`, canonicalizing for symlink
+/// resolution) and creates parent directories as needed. Returns an ACP
+/// error for relative paths, `..` traversal, or filesystem failures.
 pub async fn handle_write_text_file(
     req: &WriteTextFileRequest,
     root: Option<&Path>,
@@ -199,28 +199,47 @@ pub async fn handle_write_text_file(
     Ok(WriteTextFileResponse::new())
 }
 
+fn chunk_message_id(chunk: &agent_client_protocol::schema::v1::ContentChunk) -> Option<String> {
+    chunk.message_id.as_ref().map(|id| id.0.to_string())
+}
+
 /// Translate an inbound `session/update` notification into the matching
-/// `acp:*` Tauri event and emit it.
+/// `acp:*` event and fan it out through the dispatcher's sinks.
 ///
 /// Unknown / unhandled update variants are ignored (the enum is
 /// `#[non_exhaustive]`, so a catch-all is required).
-pub fn emit_session_update(app: &AppHandle, agent_id: &AgentId, notification: SessionNotification) {
+///
+/// Every event here is session-scoped, so `sid` is `Some(session_id)`. The
+/// payload struct is built first and then borrowed, so `session_id` moves into
+/// the struct once and the `sid` borrows from it — no extra clone, no borrow
+/// conflict (serialize-once-fan-out-N is preserved by [`events::fan_out`]).
+pub fn emit_session_update(
+    sinks: &[Arc<dyn EventSink>],
+    agent_id: &AgentId,
+    notification: SessionNotification,
+) {
     let session_id = crate::acp::config::SessionId::from(notification.session_id);
 
     match notification.update {
-        SessionUpdate::UserMessageChunk(chunk) => events::emit(
-            app,
-            events::EVENT_MESSAGE_CHUNK,
-            MessageChunkEvent {
+        SessionUpdate::UserMessageChunk(chunk) => {
+            let message_id = chunk_message_id(&chunk);
+            let event = MessageChunkEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 role: ChunkRole::User,
                 content: chunk.content,
-            },
-        ),
+                message_id,
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_MESSAGE_CHUNK,
+                &event,
+            );
+        }
         SessionUpdate::AgentMessageChunk(chunk) => {
             let preview = match &chunk.content {
-                agent_client_protocol::schema::ContentBlock::Text(text) => {
+                agent_client_protocol::schema::v1::ContentBlock::Text(text) => {
                     let t: &str = text.text.as_ref();
                     if t.chars().count() > 40 {
                         let truncated: String = t.chars().take(40).collect();
@@ -233,111 +252,144 @@ pub fn emit_session_update(app: &AppHandle, agent_id: &AgentId, notification: Se
             };
             log::debug!(
                 "[acp] agent {agent_id} session {} agent_message_chunk: {preview}",
-                session_id.0
+                crate::logging::redact_session_id(&session_id.0)
             );
-            events::emit(
-                app,
+            let message_id = chunk_message_id(&chunk);
+            let event = MessageChunkEvent {
+                agent_id: agent_id.clone(),
+                session_id,
+                role: ChunkRole::Agent,
+                content: chunk.content,
+                message_id,
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
                 events::EVENT_MESSAGE_CHUNK,
-                MessageChunkEvent {
-                    agent_id: agent_id.clone(),
-                    session_id,
-                    role: ChunkRole::Agent,
-                    content: chunk.content,
-                },
-            )
+                &event,
+            );
         }
-        SessionUpdate::AgentThoughtChunk(chunk) => events::emit(
-            app,
-            events::EVENT_MESSAGE_CHUNK,
-            MessageChunkEvent {
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            let message_id = chunk_message_id(&chunk);
+            let event = MessageChunkEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 role: ChunkRole::Thought,
                 content: chunk.content,
-            },
-        ),
-        SessionUpdate::ToolCall(tool_call) => events::emit(
-            app,
-            events::EVENT_TOOL_CALL,
-            ToolCallEvent {
+                message_id,
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_MESSAGE_CHUNK,
+                &event,
+            );
+        }
+        SessionUpdate::ToolCall(tool_call) => {
+            let event = ToolCallEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 tool_call,
-            },
-        ),
-        SessionUpdate::ToolCallUpdate(update) => events::emit(
-            app,
-            events::EVENT_TOOL_CALL_UPDATE,
-            ToolCallUpdateEvent {
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_TOOL_CALL,
+                &event,
+            );
+        }
+        SessionUpdate::ToolCallUpdate(update) => {
+            let event = ToolCallUpdateEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 update,
-            },
-        ),
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_TOOL_CALL_UPDATE,
+                &event,
+            );
+        }
         SessionUpdate::Plan(plan) => {
             // ACP agent-plan: each update is a full replace; forward verbatim.
             // https://agentclientprotocol.com/protocol/v1/agent-plan
-            events::emit(
-                app,
+            let event = PlanUpdateEvent {
+                agent_id: agent_id.clone(),
+                session_id,
+                plan,
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
                 events::EVENT_PLAN_UPDATE,
-                PlanUpdateEvent {
-                    agent_id: agent_id.clone(),
-                    session_id,
-                    plan,
-                },
-            )
+                &event,
+            );
         }
-        SessionUpdate::AvailableCommandsUpdate(update) => events::emit(
-            app,
-            events::EVENT_COMMANDS_UPDATE,
-            CommandsUpdateEvent {
+        SessionUpdate::AvailableCommandsUpdate(update) => {
+            let event = CommandsUpdateEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 available_commands: update.available_commands,
-            },
-        ),
-        SessionUpdate::CurrentModeUpdate(update) => events::emit(
-            app,
-            events::EVENT_MODE_UPDATE,
-            ModeUpdateEvent {
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_COMMANDS_UPDATE,
+                &event,
+            );
+        }
+        SessionUpdate::CurrentModeUpdate(update) => {
+            let event = ModeUpdateEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 current_mode_id: update.current_mode_id,
                 available_modes: Vec::new(),
-            },
-        ),
-        SessionUpdate::ConfigOptionUpdate(update) => events::emit(
-            app,
-            events::EVENT_CONFIG_OPTIONS_UPDATE,
-            ConfigOptionsUpdateEvent {
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_MODE_UPDATE,
+                &event,
+            );
+        }
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            let event = ConfigOptionsUpdateEvent {
                 agent_id: agent_id.clone(),
                 session_id,
                 config_options: update.config_options,
-            },
-        ),
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
+                events::EVENT_CONFIG_OPTIONS_UPDATE,
+                &event,
+            );
+        }
         SessionUpdate::SessionInfoUpdate(update) => {
-            // `title` is `MaybeUndefined<String>`: Undefined = not sent (skip),
-            // Null = explicitly cleared (emit None), Value = set (emit Some).
-            match update.title.as_opt_ref() {
-                None => {} // Undefined — no title field sent, skip
-                Some(None) => events::emit(
-                    app,
+            // `title` is `MaybeUndefined<String>`: Undefined = omit the field,
+            // Null = explicitly cleared, Value = set. OpenCode 2 compaction
+            // and retry markers arrive on `_meta` with no title.
+            let title = match update.title.as_opt_ref() {
+                None => None,
+                Some(None) => Some(None),
+                Some(Some(title)) => Some(Some(title.clone())),
+            };
+            let notices = events::opencode_notices(update.meta.as_ref());
+            if title.is_some() || notices.compaction.is_some() || notices.retry.is_some() {
+                let event = SessionInfoUpdateEvent {
+                    agent_id: agent_id.clone(),
+                    session_id,
+                    title,
+                    compaction: notices.compaction,
+                    retry: notices.retry,
+                };
+                events::fan_out(
+                    sinks,
+                    Some(event.session_id.0.as_str()),
                     events::EVENT_SESSION_INFO_UPDATE,
-                    SessionInfoUpdateEvent {
-                        agent_id: agent_id.clone(),
-                        session_id,
-                        title: None,
-                    },
-                ),
-                Some(Some(t)) => events::emit(
-                    app,
-                    events::EVENT_SESSION_INFO_UPDATE,
-                    SessionInfoUpdateEvent {
-                        agent_id: agent_id.clone(),
-                        session_id,
-                        title: Some(t.clone()),
-                    },
-                ),
+                    &event,
+                );
             }
         }
         SessionUpdate::UsageUpdate(update) => {
@@ -345,16 +397,21 @@ pub fn emit_session_update(app: &AppHandle, agent_id: &AgentId, notification: Se
                 amount: c.amount,
                 currency: c.currency,
             });
-            events::emit(
-                app,
+            let rate_limit =
+                crate::acp::claude_accounts::usage::claude_rate_limit(update.meta.as_ref());
+            let event = UsageUpdateEvent {
+                agent_id: agent_id.clone(),
+                session_id,
+                used: update.used,
+                size: update.size,
+                cost,
+                rate_limit,
+            };
+            events::fan_out(
+                sinks,
+                Some(event.session_id.0.as_str()),
                 events::EVENT_USAGE_UPDATE,
-                UsageUpdateEvent {
-                    agent_id: agent_id.clone(),
-                    session_id,
-                    used: update.used,
-                    size: update.size,
-                    cost,
-                },
+                &event,
             );
         }
         // Any future (non_exhaustive) variants have no dedicated event;
@@ -369,157 +426,4 @@ pub fn emit_session_update(app: &AppHandle, agent_id: &AgentId, notification: Se
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn client_capabilities_advertise_fs_and_gate_terminal() {
-        let caps = client_capabilities(true);
-        assert!(caps.fs.read_text_file);
-        assert!(caps.fs.write_text_file);
-        assert!(caps.terminal);
-        // Default-deny: terminal is omitted unless the agent opted in.
-        let denied = client_capabilities(false);
-        assert!(denied.fs.read_text_file);
-        assert!(!denied.terminal);
-    }
-
-    #[test]
-    fn client_capabilities_advertise_parameterized_model_picker_meta() {
-        let caps = client_capabilities(false);
-        let meta = caps.meta.expect("expected client capabilities _meta");
-        assert_eq!(
-            meta.get(PARAMETERIZED_MODEL_PICKER_META_KEY),
-            Some(&serde_json::Value::Bool(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn read_text_file_rejects_relative_path() {
-        let req = ReadTextFileRequest::new("sess", "relative/path.txt");
-        let root = std::env::temp_dir();
-        let err = handle_read_text_file(&req, Some(root.as_path()))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, acp::ErrorCode::InvalidParams);
-    }
-
-    #[tokio::test]
-    async fn read_without_workspace_root_is_denied() {
-        // An absolute path with no associated session root must be rejected.
-        let dir = std::env::temp_dir().join(format!("acp-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("file.txt");
-        std::fs::write(&path, "secret").unwrap();
-
-        let req = ReadTextFileRequest::new("sess", &path);
-        let err = handle_read_text_file(&req, None).await.unwrap_err();
-        assert_eq!(err.code, acp::ErrorCode::InvalidParams);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn read_outside_workspace_is_rejected() {
-        // Two sibling dirs: workspace and a secret dir outside it.
-        let base = std::env::temp_dir().join(format!("acp-test-{}", uuid::Uuid::new_v4()));
-        let workspace = base.join("workspace");
-        let outside = base.join("outside");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        let secret = outside.join("secret.txt");
-        std::fs::write(&secret, "top secret").unwrap();
-
-        // Direct absolute path outside the workspace root.
-        let req = ReadTextFileRequest::new("sess", &secret);
-        let err = handle_read_text_file(&req, Some(workspace.as_path()))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, acp::ErrorCode::InvalidParams);
-
-        // `..` traversal out of the workspace is also rejected.
-        let escape = workspace.join("..").join("outside").join("secret.txt");
-        let req = ReadTextFileRequest::new("sess", &escape);
-        let err = handle_read_text_file(&req, Some(workspace.as_path()))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, acp::ErrorCode::InvalidParams);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn write_outside_workspace_is_rejected() {
-        let base = std::env::temp_dir().join(format!("acp-test-{}", uuid::Uuid::new_v4()));
-        let workspace = base.join("workspace");
-        let outside = base.join("outside");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-
-        let target = outside.join("evil.txt");
-        let req = WriteTextFileRequest::new("sess", &target, "pwned");
-        let err = handle_write_text_file(&req, Some(workspace.as_path()))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, acp::ErrorCode::InvalidParams);
-        assert!(!target.exists(), "write must not have escaped the workspace");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn write_then_read_roundtrips() {
-        let workspace = std::env::temp_dir().join(format!("acp-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let path = workspace.join("nested").join("file.txt");
-
-        let write_req = WriteTextFileRequest::new("sess", &path, "line1\nline2\nline3");
-        handle_write_text_file(&write_req, Some(workspace.as_path()))
-            .await
-            .unwrap();
-
-        let read_req = ReadTextFileRequest::new("sess", &path);
-        let resp = handle_read_text_file(&read_req, Some(workspace.as_path()))
-            .await
-            .unwrap();
-        assert_eq!(resp.content, "line1\nline2\nline3");
-
-        // line/limit slicing: start at line 2, take 1 line.
-        let sliced = ReadTextFileRequest::new("sess", &path)
-            .line(2u32)
-            .limit(1u32);
-        let resp = handle_read_text_file(&sliced, Some(workspace.as_path()))
-            .await
-            .unwrap();
-        // Slicing preserves the original terminator on the sliced line.
-        assert_eq!(resp.content, "line2\n");
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-
-    #[tokio::test]
-    async fn slicing_preserves_crlf_and_trailing_newline() {
-        let workspace = std::env::temp_dir().join(format!("acp-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let path = workspace.join("crlf.txt");
-
-        // CRLF file ending in a trailing newline.
-        std::fs::write(&path, "a\r\nb\r\nc\r\n").unwrap();
-
-        // Take all three lines starting at line 1: must be byte-identical.
-        let req = ReadTextFileRequest::new("sess", &path).line(1u32).limit(3u32);
-        let resp = handle_read_text_file(&req, Some(workspace.as_path()))
-            .await
-            .unwrap();
-        assert_eq!(resp.content, "a\r\nb\r\nc\r\n");
-
-        // Take the middle line: keep its CRLF terminator.
-        let req = ReadTextFileRequest::new("sess", &path).line(2u32).limit(1u32);
-        let resp = handle_read_text_file(&req, Some(workspace.as_path()))
-            .await
-            .unwrap();
-        assert_eq!(resp.content, "b\r\n");
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-}
+mod tests;

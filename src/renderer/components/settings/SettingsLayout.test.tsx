@@ -50,23 +50,33 @@ beforeEach(() => {
 const categories: SettingsCategory[] = [
   { id: 'appearance', label: 'Appearance' },
   { id: 'shell', label: 'Shell' },
+  { id: 'mcp-servers', label: 'MCP Servers' },
   { id: 'updates', label: 'Updates' }
 ]
 
 const searchIndex: SettingsSearchEntry[] = [
   { categoryId: 'appearance', label: 'Font Family', description: 'monospace font' },
   { categoryId: 'shell', label: 'Default Shell', keywords: ['bash'] },
+  {
+    categoryId: 'mcp-servers',
+    label: 'MCP Servers',
+    description: 'Manage stdio, HTTP, and SSE servers.',
+    keywords: ['model context protocol']
+  },
   { categoryId: 'updates', label: 'Auto-update', description: 'check for updates' }
 ]
 
 function renderLayout() {
   return render(
-    <SettingsLayout categories={categories} searchIndex={searchIndex}>
+    <SettingsLayout title="Settings" categories={categories} searchIndex={searchIndex}>
       <SettingsSection id="appearance">
         <h2>Appearance</h2>
       </SettingsSection>
       <SettingsSection id="shell">
         <h2>Shell</h2>
+      </SettingsSection>
+      <SettingsSection id="mcp-servers">
+        <h2>MCP Servers</h2>
       </SettingsSection>
       <SettingsSection id="updates">
         <h2>Updates</h2>
@@ -121,6 +131,8 @@ describe('SettingsLayout', () => {
     const search = screen.getByLabelText('Search settings')
     fireEvent.change(search, { target: { value: 'bash' } })
     expect(screen.getByText('Default Shell')).toBeInTheDocument()
+    fireEvent.change(search, { target: { value: 'model context protocol' } })
+    expect(screen.getAllByText('MCP Servers').length).toBeGreaterThan(0)
   })
 
   it('shows an empty state when no settings match', () => {
@@ -165,5 +177,34 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByRole('button', { name: 'Updates' })).toHaveAttribute('aria-current', 'true')
     expect(screen.getByRole('button', { name: 'Shell' })).not.toHaveAttribute('aria-current')
+  })
+
+  it('active category is a neutral keycap with constant weight; idle rows hover at 3%', () => {
+    renderLayout()
+    const active = screen.getByRole('button', { name: 'Appearance' })
+    const idle = screen.getByRole('button', { name: 'Shell' })
+    expect(active.className).toContain('keycap')
+    expect(active.className).toContain('h-8')
+    expect(active.className).not.toMatch(/bg-primary|text-primary|font-medium/)
+    expect(idle.className).toContain('hover:bg-foreground/[0.03]')
+    expect(idle.className).toContain('text-secondary-foreground')
+  })
+
+  it('renders the panel header label and sets a Reset category apart', () => {
+    render(
+      <SettingsLayout
+        title="Preferences"
+        categories={[...categories, { id: 'reset', label: 'Reset Settings' }]}
+        searchIndex={searchIndex}
+      >
+        <SettingsSection id="appearance">
+          <h2>Appearance</h2>
+        </SettingsSection>
+      </SettingsLayout>
+    )
+    expect(screen.getByText('Preferences').className).toContain('label-panel')
+    expect(screen.getByPlaceholderText('Search settings')).toBeInTheDocument()
+    const divider = screen.getByTestId('settings-category-divider')
+    expect(divider.nextElementSibling).toHaveTextContent('Reset Settings')
   })
 })

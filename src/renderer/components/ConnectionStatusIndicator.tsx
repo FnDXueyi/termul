@@ -1,0 +1,142 @@
+import type { ReactNode } from 'react'
+import { AgentConnectionLamp } from '@/components/chat/AgentConnectionLamp'
+import { STATUS_BAR_HIT_GLYPH, STATUS_BAR_HIT_TARGET } from '@/components/status-bar-hit'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { isTauriContext } from '@/lib/tauri-runtime'
+import {
+  type ConnectionChannelState,
+  retryHostOffline,
+  useShownConnectionStore
+} from '@/stores/connection-status-store'
+
+/** Rollup severity — higher wins when the two channels disagree. */
+const SEVERITY: Record<ConnectionChannelState, number> = {
+  connected: 0,
+  connecting: 1,
+  reconnecting: 2,
+  disconnected: 3,
+  'host-offline': 4
+}
+
+/** Visible and announced strings of the `host-offline` state. */
+export const HOST_OFFLINE_SUMMARY = 'Host offline'
+export const HOST_OFFLINE_RETRY_LABEL = 'Retry'
+export const HOST_OFFLINE_TOOLTIP = 'Host offline. Select to retry.'
+
+/**
+ * The connected summary of the labelled (drawer footer) indicator: "Connected ·
+ * host:port", naming the host this client talks to. An empty host (no
+ * `window.location.host`) reads plain "Connected".
+ */
+export function formatConnectedSummary(host: string): string {
+  const trimmed = host.trim()
+  return trimmed ? `Connected · ${trimmed}` : 'Connected'
+}
+
+interface ConnectionStatusIndicatorProps {
+  /**
+   * Render the summary as visible text beside a decorative lamp (the mobile
+   * drawer footer, where the tooltip is unreachable by touch). The status
+   * region's content is that text, so there is no `aria-label` and no tooltip
+   * button. Default false keeps the StatusBar render unchanged.
+   */
+  showLabel?: boolean
+}
+
+/**
+ * Story 10 (F1): global connection-health indicator for the web client — a
+ * StatusBar lamp showing the worst of the control (`/ws`) and terminal
+ * (`/terminal/ws`) channels. Status tone (connection / warning /
+ * destructive) plus pulse encode state. Hidden on Tauri desktop: both
+ * channels are direct IPC there, so an indicator would be noise.
+ */
+export function ConnectionStatusIndicator({
+  showLabel = false
+}: ConnectionStatusIndicatorProps): ReactNode {
+  const controlChannel = useShownConnectionStore((state) => state.controlChannel)
+  const terminalChannel = useShownConnectionStore((state) => state.terminalChannel)
+
+  // Desktop: no WS channels — render nothing. (Hook order is safe: both
+  // subscriptions run before this early return.)
+  if (isTauriContext()) return null
+
+  const worst =
+    SEVERITY[controlChannel] >= SEVERITY[terminalChannel] ? controlChannel : terminalChannel
+  const hostOffline = worst === 'host-offline'
+  const degraded: string[] = []
+  if (controlChannel !== 'connected') degraded.push(`Control channel: ${controlChannel}`)
+  if (terminalChannel !== 'connected') degraded.push(`Terminal channel: ${terminalChannel}`)
+  const summary = hostOffline
+    ? HOST_OFFLINE_SUMMARY
+    : degraded.length > 0
+      ? degraded.join('; ')
+      : 'Connected'
+
+  if (showLabel) {
+    // Degraded text is unchanged; only the connected reading names the host.
+    const labelSummary =
+      degraded.length > 0 ? summary : formatConnectedSummary(window.location.host)
+    return (
+      <span
+        role="status"
+        aria-live="polite"
+        className="inline-flex min-w-0 items-center gap-2 text-2xs text-muted-foreground"
+      >
+        <AgentConnectionLamp
+          connected={worst === 'connected'}
+          reconnecting={worst === 'connecting' || worst === 'reconnecting'}
+          hostOffline={hostOffline}
+          decorative
+          size={8}
+        />
+        <span className="min-w-0 break-words">{labelSummary}</span>
+        {hostOffline && (
+          <button
+            type="button"
+            onClick={retryHostOffline}
+            className="shrink-0 rounded-sm px-1 text-2xs font-medium text-foreground underline underline-offset-2 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {HOST_OFFLINE_RETRY_LABEL}
+          </button>
+        )}
+      </span>
+    )
+  }
+
+  return (
+    // role="status" announces state changes politely; the inner button is the
+    // keyboard-focusable tooltip trigger (natively focusable — no tabIndex),
+    // so the degraded-channel summary is reachable without a mouse. The
+    // trigger keeps an 8px lamp: desktop pads a 24px slot with ::after, and
+    // coarse pointers use a 44px border box that does not grow the 28px bar
+    // (#881, see status-bar-hit).
+    <span
+      role="status"
+      aria-live="polite"
+      aria-label={summary}
+      className="inline-flex shrink-0 items-center"
+    >
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label={hostOffline ? HOST_OFFLINE_TOOLTIP : summary}
+            onClick={hostOffline ? retryHostOffline : undefined}
+            className={STATUS_BAR_HIT_TARGET}
+          >
+            <span className={STATUS_BAR_HIT_GLYPH}>
+              <AgentConnectionLamp
+                connected={worst === 'connected'}
+                reconnecting={worst === 'connecting' || worst === 'reconnecting'}
+                hostOffline={hostOffline}
+                decorative
+                size={8}
+              />
+            </span>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{hostOffline ? HOST_OFFLINE_TOOLTIP : summary}</TooltipContent>
+      </Tooltip>
+    </span>
+  )
+}

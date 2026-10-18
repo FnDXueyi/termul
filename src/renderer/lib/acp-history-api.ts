@@ -1,0 +1,63 @@
+import type { IpcResult } from '@shared/types/ipc.types'
+import { invoke } from '@tauri-apps/api/core'
+import type { SessionIndexEntry, SessionPayload } from '@/lib/acp-history-persistence'
+
+export interface DesktopHistoryListResult {
+  sessions: SessionIndexEntry[]
+  legacyImportComplete: boolean
+}
+
+async function invokeHistory<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  let result: IpcResult<T>
+  try {
+    result = await invoke<IpcResult<T>>(command, args)
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : String(error))
+  }
+  if (!result.success) throw new Error(result.error)
+  return result.data
+}
+
+export const acpHistoryApi = {
+  list(): Promise<DesktopHistoryListResult> {
+    return invokeHistory<DesktopHistoryListResult>('acp_history_list')
+  },
+
+  get(sessionId: string): Promise<SessionPayload | null> {
+    return invokeHistory<SessionPayload | null>('acp_history_get', { sessionId })
+  },
+
+  /** Tail-first variant of `get`: fetches only the last `limit` messages. */
+  getTail(sessionId: string, limit: number): Promise<SessionPayload | null> {
+    return invokeHistory<SessionPayload | null>('acp_history_get_tail', { sessionId, limit })
+  },
+
+  /** Legacy-store reads for the one-time KV wipe migration only. */
+  listLegacy(): Promise<DesktopHistoryListResult> {
+    return invokeHistory<DesktopHistoryListResult>('acp_history_list_legacy')
+  },
+
+  getLegacy(sessionId: string): Promise<SessionPayload | null> {
+    return invokeHistory<SessionPayload | null>('acp_history_get_legacy', { sessionId })
+  },
+
+  async save(sessionId: string, payload: SessionPayload): Promise<void> {
+    await invokeHistory<void>('acp_history_save', { sessionId, payload })
+  },
+
+  /**
+   * `acp_history_delete` — `true` when the record was deleted, `false` when it
+   * was already absent (idempotent no-op). Genuine failures reject.
+   */
+  async delete(sessionId: string): Promise<boolean> {
+    return invokeHistory<boolean>('acp_history_delete', { sessionId })
+  },
+
+  async flush(): Promise<void> {
+    await invokeHistory<void>('acp_history_flush')
+  },
+
+  async markLegacyImportComplete(): Promise<void> {
+    await invokeHistory<void>('acp_history_mark_legacy_import_complete')
+  }
+}

@@ -1,4 +1,5 @@
-//! Tauri event payloads emitted by the ACP backend to the renderer.
+//! Event payloads emitted by the ACP backend. They fan out through the event
+//! sinks; the WS relay serves them to the renderer and to browsers.
 //!
 //! Every payload derives `Serialize + Clone` and uses `#[serde(rename_all =
 //! "camelCase")]` so the wire shape matches the renderer contract. Schema
@@ -9,12 +10,117 @@
 //! so the manager and any future renderer bridge stay in sync.
 
 use crate::acp::config::{AgentId, SessionId};
-use agent_client_protocol::schema::{
-    AgentCapabilities, AvailableCommand, ContentBlock, PermissionOption, Plan, SessionConfigOption,
-    SessionMode, SessionModeId, SessionModelState, StopReason, ToolCall, ToolCallUpdate,
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, AvailableCommand, ContentBlock, EnumOption, Meta, PermissionOption, Plan,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionMode, SessionModeId, StopReason, ToolCall, ToolCallUpdate,
 };
-use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use serde::{Deserialize, Serialize};
+
+/// Re-export the transport-neutral fan-out helper so the `acp` dispatcher emits
+/// through `Vec<Arc<dyn EventSink>>` instead of `AppHandle::emit` directly
+/// (Story 1.1 / architecture D2). Call sites read `events::fan_out(sinks, sid,
+/// events::EVENT_*, &payload)` — the `events::` namespace is preserved, the
+/// `app` parameter is gone.
+///
+/// No code under `src-tauri/src/acp/` calls `AppHandle::emit` for `acp:*`
+/// events: every one goes through the sinks. See AC7.
+pub(crate) use crate::web::fan_out;
+
+/// A single selectable model advertised by an ACP agent.
+///
+/// Mirror of the pre-1.3 schema `SessionModel` wire shape (`{ modelId, name,
+/// description? }`). Models are no longer a dedicated protocol type since ACP
+/// 0.14 — they are a `SessionConfigOption` with `category = "model"` — so
+/// Termul reconstructs this legacy view from `config_options` to keep the
+/// renderer's Model Picker contract byte-compatible.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModel {
+    pub model_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Snapshot of an agent's model selector, derived from its `config_options`.
+///
+/// Wire-identical to the pre-1.3 schema `SessionModelState`
+/// (`{ currentModelId, availableModels[] }`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelState {
+    pub current_model_id: String,
+    pub available_models: Vec<SessionModel>,
+}
+
+/// Derive the legacy `SessionModelState` view from an agent's
+/// `config_options`: find the `select`-kind option whose `category` is
+/// `Model` and map its `currentValue` + `options[]` to the old shape.
+///
+/// Returns `None` when the agent advertises no model selector (either no
+/// `config_options` or no `Model`-category `select` option).
+#[allow(clippy::module_name_repetitions)]
+pub(crate) fn models_from_config_options(
+    opts: Option<&[SessionConfigOption]>,
+) -> Option<SessionModelState> {
+    let opts = opts?;
+    let opt = opts
+        .iter()
+        .find(|o| o.category == Some(SessionConfigOptionCategory::Model))?;
+    let select = match &opt.kind {
+        SessionConfigKind::Select(s) => s,
+        _ => return None,
+    };
+    let current_model_id = select.current_value.0.as_ref().to_string();
+    let available_models = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(items) => items
+            .iter()
+            .map(|o| SessionModel {
+                model_id: o.value.0.as_ref().to_string(),
+                name: o.name.clone(),
+                description: o.description.clone(),
+            })
+            .collect::<Vec<_>>(),
+        // Flatten grouped model selectors (e.g. models organized by provider)
+        // into the same flat `available_models` list the picker expects.
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|g| g.options.iter())
+            .map(|o| SessionModel {
+                model_id: o.value.0.as_ref().to_string(),
+                name: o.name.clone(),
+                description: o.description.clone(),
+            })
+            .collect(),
+        // Future-proof against new `SessionConfigSelectOptions` variants the
+        // schema may add (the enum is `#[non_exhaustive]`); none today.
+        _ => return None,
+    };
+    if available_models.is_empty() {
+        return None;
+    }
+    Some(SessionModelState {
+        current_model_id,
+        available_models,
+    })
+}
+
+/// Derive the agent-advertised configId of the Model selector from a session's
+/// `config_options` (the `id` of the `select`-kind option whose `category` is
+/// `Model`). Returns `None` when the agent advertises no model selector.
+///
+/// ACP 0.14 made model selection a `session/set_config_option` call, whose
+/// `configId` is the agent-provided option id (conventionally `"model"` but not
+/// guaranteed). This extracts the real id so `set_model` targets it precisely.
+#[allow(clippy::module_name_repetitions)]
+pub(crate) fn model_config_id_from_options(opts: Option<&[SessionConfigOption]>) -> Option<String> {
+    let opts = opts?;
+    let opt = opts
+        .iter()
+        .find(|o| o.category == Some(SessionConfigOptionCategory::Model))?;
+    Some(opt.id.0.as_ref().to_string())
+}
 
 /// Event name: an agent subprocess was spawned and `initialize` completed.
 pub const EVENT_AGENT_SPAWNED: &str = "acp:agent_spawned";
@@ -36,10 +142,28 @@ pub const EVENT_MODE_UPDATE: &str = "acp:mode_update";
 pub const EVENT_CONFIG_OPTIONS_UPDATE: &str = "acp:config_options_update";
 /// Event name: the agent requested a permission decision from the user.
 pub const EVENT_PERMISSION_REQUEST: &str = "acp:permission_request";
+/// Event name: an agent asked a structured question (issue #411).
+///
+/// The renderer shows a morphing `AskUserQuestion` panel (choice cards,
+/// checkboxes, approval buttons) instead of a free-text prompt; the user's
+/// answer flows back via the `answer_question` request, mirroring the
+/// permission machinery exactly-once.
+pub const EVENT_QUESTION_REQUEST: &str = "acp:question_request";
+/// Event name: a pending question can no longer be answered while its turn
+/// goes on (issue #784: the agent hung up its `ask_user` call). The relay
+/// releases its ticket and the renderer drops its panel.
+pub const EVENT_QUESTION_CANCELLED: &str = "acp:question_cancelled";
+/// Event name: the agent requested structured user input (elicitation).
+pub const EVENT_ELICITATION_REQUEST: &str = "acp:elicitation_request";
 /// Event name: a prompt turn finished with a stop reason.
 pub const EVENT_PROMPT_COMPLETE: &str = "acp:prompt_complete";
 /// Event name: a non-fatal error occurred while talking to the agent.
 pub const EVENT_AGENT_ERROR: &str = "acp:agent_error";
+/// Event name: the agent subprocess crashed (Story 1.9 FR26) — a typed crash
+/// event distinct from `agent_error` (non-fatal) + `agent_disconnected`
+/// (always). Emitted BEFORE `agent_disconnected` so the renderer can
+/// distinguish "crash" from a clean disconnect + set `status: 'error'`.
+pub const EVENT_AGENT_CRASHED: &str = "acp:agent_crashed";
 /// Event name: a session was closed (explicitly, or because its agent
 /// disconnected/crashed).
 pub const EVENT_SESSION_CLOSED: &str = "acp:session_closed";
@@ -47,8 +171,26 @@ pub const EVENT_SESSION_CLOSED: &str = "acp:session_closed";
 pub const EVENT_AGENT_DISCONNECTED: &str = "acp:agent_disconnected";
 /// Event name: the agent updated session metadata (e.g. title).
 pub const EVENT_SESSION_INFO_UPDATE: &str = "acp:session_info_update";
+/// Event name: a durable agent-switch marker was recorded (CAP-2). The host
+/// authors it once: the relay numbers it, appends it to the durable log and
+/// delivers it live under that same seq.
+pub const EVENT_AGENT_SWITCH: &str = "acp:agent_switch";
+/// Host-authored durable title record (relay-only: the desktop renderer gets
+/// the `acp:session_info_update` twin instead).
+pub const EVENT_LOCAL_TITLE_GENERATED: &str = "acp:local_title_generated";
+/// Event name: a worktree's branch was renamed by the host (story 16,
+/// CAP-5). Agent-level (`sid = None`); the payload is
+/// [`WorktreeBranchRenamedEvent`]. Every client reconciles worktrees and
+/// refreshes the session index.
+pub const EVENT_WORKTREE_BRANCH_RENAMED: &str = "acp:worktree_branch_renamed";
 /// Event name: the agent reported context window utilization (and optional cost).
 pub const EVENT_USAGE_UPDATE: &str = "acp:usage_update";
+/// Event name: the agent tried to open a browser URL on a headless host and
+/// the POSIX browser shim captured it (spec-acp-terminal-auth). Agent-level
+/// (`sid = None`); the payload carries `{agentId, url}` so the renderer can
+/// show the auth URL + paste-back affordance.
+#[cfg(unix)]
+pub const EVENT_BROWSER_OPEN_REQUEST: &str = "acp:browser_open_request";
 
 /// Which side a streamed content chunk belongs to.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -62,12 +204,65 @@ pub enum ChunkRole {
     Thought,
 }
 
+/// An authentication method advertised by the agent in its `initialize`
+/// response, propagated verbatim (opaque `id`/`name`/optional `description`)
+/// plus the method `type` discriminator so the renderer can present the right
+/// action — a Sign-in button for `agent`, a terminal tab for `terminal`, or an
+/// env-var prompt for `env_var` — and call `authenticate(methodId)` before
+/// `session/new`.
+/// Wire contract (camelCase): `{id, name, description?, type, args?, env?}`
+/// where `type` ∈ `'agent' | 'terminal' | 'env_var'`. `args: string[]` and
+/// `env: Record<string,string>` are present only for `terminal` methods (the
+/// command argv + env the renderer must run in a real terminal). `env_var`
+/// forwards `type` only — the renderer shows a disabled "not supported" entry
+/// (respawn-with-env is out of scope). No agent-type filtering is applied —
+/// every advertised method is forwarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Method discriminator: `'agent'` (browser/in-app), `'terminal'` (run
+    /// `args` in a terminal), or `'env_var'` (supply env vars — forwarded as
+    /// type-only; the renderer disables it).
+    pub r#type: String,
+    /// Terminal-method argv (present only when `type == "terminal"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Terminal-method env (present only when `type == "terminal"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
+}
+
+/// `acp:browser_open_request` — the POSIX browser shim captured an agent's
+/// browser-open URL on a headless host (spec-acp-terminal-auth). Agent-level
+/// (`sid = None`); the renderer shows the URL + a paste-back field for the
+/// failed loopback redirect.
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserOpenRequestEvent {
+    pub agent_id: AgentId,
+    /// The full auth URL the agent tried to open (carries OAuth state — the
+    /// renderer needs it verbatim; it is never logged).
+    pub url: String,
+}
+
 /// `acp:agent_spawned`
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSpawnedEvent {
     pub agent_id: AgentId,
     pub capabilities: AgentCapabilities,
+    /// Every authentication method the agent advertised at `initialize` (empty
+    /// when the agent requires no authentication). Always serialized (as `[]`
+    /// when empty) so the renderer sees a stable field.
+    pub auth_methods: Vec<AuthMethodInfo>,
+    /// True only when the host validated and prepared authentication for its
+    /// managed Claude ACP installation before starting the agent.
+    pub host_auth_ready: bool,
 }
 
 /// `acp:session_created`
@@ -77,7 +272,7 @@ pub struct SessionCreatedEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub modes: Option<agent_client_protocol::schema::SessionModeState>,
+    pub modes: Option<agent_client_protocol::schema::v1::SessionModeState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<SessionModelState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +287,9 @@ pub struct MessageChunkEvent {
     pub session_id: SessionId,
     pub role: ChunkRole,
     pub content: ContentBlock,
+    /// ACP `messageId`. Chunks with the same id belong to one message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// `acp:tool_call`
@@ -156,11 +354,336 @@ pub struct ConfigOptionsUpdateEvent {
 pub struct PermissionRequestEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
-    /// Correlation id used by `acp_respond_permission` to route the user's choice
+    /// Correlation id used by `respond_permission` to route the user's choice
     /// back to the waiting agent request.
     pub request_id: String,
     pub tool_call: ToolCallUpdate,
     pub options: Vec<PermissionOption>,
+}
+
+/// `acp:question_request` (issue #411)
+///
+/// A structured question from an agent. `question_id` is a stable correlation
+/// id generated server-side (`q-{uuid}`) — the user's answer routes back
+/// through it exactly once. `options` carry an explicit `cardinality`
+/// (`single` | `multi` | absent → `single`) so the renderer can morph the
+/// input area into choice cards, checkboxes, or approval buttons.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskUserQuestionEvent {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub question_id: String,
+    pub question: String,
+    pub options: Vec<QuestionOption>,
+    /// Show a free-text field (issue #784, `ask_user`). Absent on the
+    /// `_session/question` path, which has no free text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_free_text: Option<bool>,
+    /// Pick more than one option (issue #784). Absent means single choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_select: Option<bool>,
+}
+
+/// `acp:question_cancelled` (issue #784)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionCancelledEvent {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub question_id: String,
+}
+
+/// `acp:elicitation_request`
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationRequestEvent {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub request_id: String,
+    /// `form` or `url`.
+    pub mode: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub fields: Vec<ElicitationField>,
+    /// `_meta["cognition.ai/allowOther"] == true` — when set, the renderer adds
+    /// an "Other" free-text affordance to each question card; its text submits
+    /// as a non-option value (issue #935). Always serialized so the renderer
+    /// sees a stable boolean.
+    pub allow_other: bool,
+}
+
+/// One selectable option of an `enum`/`multi-enum` [`ElicitationField`].
+///
+/// `value` is the wire value that round-trips in the elicitation `content` map;
+/// `label` is the human-readable text; `description` is optional context
+/// (omitted from the wire when absent — mirrors [`QuestionOption`]).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationOption {
+    pub value: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One primitive field of an elicitation form.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationField {
+    pub name: String,
+    /// `string`, `number`, `integer`, `boolean`, `enum`, or `multi-enum`.
+    /// `multi-enum` is a multi-select (`type:"array"`) property whose answer
+    /// flows back as a string array.
+    pub kind: String,
+    pub required: bool,
+    /// Property `title` — the header chip for question-style elicitations
+    /// (issue #935); the renderer falls back to `name` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Property `description` — the question/help text under the chip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub options: Vec<ElicitationOption>,
+}
+
+/// Map an untitled `enum` string (single-select `enum` or multi-select
+/// `items.enum`) to the option contract: `value`/`label` are the raw string,
+/// `description` is absent.
+fn elicitation_plain_option(value: &str) -> ElicitationOption {
+    ElicitationOption {
+        value: value.to_string(),
+        label: value.to_string(),
+        description: None,
+    }
+}
+
+/// Map a titled [`EnumOption`] (single-select `oneOf` or multi-select
+/// `items.anyOf`) to the option contract (issue #935).
+///
+/// `value` is the wire `const` (it round-trips in `content`). `label` is the
+/// option's `title` ONLY when a real `description` is also present — Devin's
+/// `ask_user_question` puts the label in `const` and the descriptive sentence
+/// in `title` (`{const:"Red",title:"Use the red color"}`), so with no
+/// `description` field the label falls back to `const`. `description` is
+/// `option.description ?? option.title` (always present for titled options).
+///
+/// Known trade-off: a spec-conformant `{const:"us",title:"United States"}`
+/// (opaque const, no description) shows the const as the label — the two
+/// wire shapes are indistinguishable without a `description`, and Devin's
+/// shape is the one this renderer was built against.
+fn elicitation_enum_option(option: &EnumOption) -> ElicitationOption {
+    let (label, description) = match &option.description {
+        Some(description) => (option.title.clone(), description.clone()),
+        None => (option.value.clone(), option.title.clone()),
+    };
+    ElicitationOption {
+        value: option.value.clone(),
+        label,
+        description: Some(description),
+    }
+}
+
+/// Drop duplicate option values (first wins) — two options sharing a `const`
+/// would collide as React keys and toggle together in the renderer.
+fn dedupe_options(options: &mut Vec<ElicitationOption>) {
+    let mut seen = std::collections::HashSet::new();
+    options.retain(|option| seen.insert(option.value.clone()));
+}
+
+/// Extract the `cognition.ai/allowOther` flag from an elicitation request's
+/// `_meta` (issue #935). Only a literal boolean `true` enables the renderer's
+/// "Other" free-text affordance — absent, `false`, and non-boolean values all
+/// read as `false`.
+pub(crate) fn elicitation_allow_other(meta: Option<&Meta>) -> bool {
+    meta.and_then(|meta| meta.get("cognition.ai/allowOther"))
+        == Some(&serde_json::Value::Bool(true))
+}
+
+/// Flatten a form schema into the primitive fields the chat dialog can render.
+///
+/// `allow_other` is the request's `cognition.ai/allowOther` flag: an enum-like
+/// field with an empty option list is only representable when free text can
+/// stand in for the missing options.
+///
+/// Returns `None` when a **required** property uses a schema variant the dialog
+/// cannot represent (unknown property `type`, or a multi-select whose `items`
+/// is neither plain strings nor titled `anyOf` options) — the caller cancels
+/// the elicitation. Unrepresentable *optional* properties are dropped, not
+/// fatal.
+///
+/// Field order: `schema.properties` is a `BTreeMap` (lexicographic, so `q10`
+/// would sort before `q2`); the agent's declared order survives only in
+/// `required` — required fields emit first in `required` order, then the
+/// optional remainder in schema order.
+pub(crate) fn elicitation_fields(
+    schema: &agent_client_protocol::schema::v1::ElicitationSchema,
+    allow_other: bool,
+) -> Option<Vec<ElicitationField>> {
+    use agent_client_protocol::schema::v1::{ElicitationPropertySchema, MultiSelectItems};
+    let required = schema.required.clone().unwrap_or_default();
+    let mut by_name: std::collections::BTreeMap<String, ElicitationField> = schema
+        .properties
+        .iter()
+        .filter_map(|(name, property)| {
+            let (kind, title, description, mut options) = match property {
+                ElicitationPropertySchema::String(value) => {
+                    let mut options: Vec<ElicitationOption> = value
+                        .enum_values
+                        .clone()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|option| elicitation_plain_option(option))
+                        .collect();
+                    if options.is_empty() {
+                        if let Some(one_of) = &value.one_of {
+                            options = one_of.iter().map(elicitation_enum_option).collect();
+                        }
+                    }
+                    let kind = if options.is_empty() { "string" } else { "enum" };
+                    (
+                        kind.to_string(),
+                        value.title.clone(),
+                        value.description.clone(),
+                        options,
+                    )
+                }
+                ElicitationPropertySchema::Number(value) => (
+                    "number".to_string(),
+                    value.title.clone(),
+                    value.description.clone(),
+                    Vec::new(),
+                ),
+                ElicitationPropertySchema::Integer(value) => (
+                    "integer".to_string(),
+                    value.title.clone(),
+                    value.description.clone(),
+                    Vec::new(),
+                ),
+                ElicitationPropertySchema::Boolean(value) => (
+                    "boolean".to_string(),
+                    value.title.clone(),
+                    value.description.clone(),
+                    Vec::new(),
+                ),
+                ElicitationPropertySchema::Array(value) => {
+                    // Multi-select (`type:"array"`): `items` decides whether the
+                    // option list is representable — plain `enum` strings and
+                    // titled `anyOf` options both map to `multi-enum`; any other
+                    // `items` shape is unrepresentable (drop this field; the
+                    // required check below cancels the request if it was
+                    // required) — issue #935.
+                    let options: Vec<ElicitationOption> = match &value.items {
+                        MultiSelectItems::String(items) => items
+                            .values
+                            .iter()
+                            .map(|item| elicitation_plain_option(item))
+                            .collect(),
+                        MultiSelectItems::Titled(items) => {
+                            items.options.iter().map(elicitation_enum_option).collect()
+                        }
+                        _ => return None,
+                    };
+                    // An option-less multi-select is unanswerable when free
+                    // text cannot stand in (no Other affordance) — treat it
+                    // as unrepresentable rather than emitting a dead field.
+                    if options.is_empty() && !allow_other {
+                        return None;
+                    }
+                    (
+                        "multi-enum".to_string(),
+                        value.title.clone(),
+                        value.description.clone(),
+                        options,
+                    )
+                }
+                ElicitationPropertySchema::Other(_) | _ => {
+                    return None;
+                }
+            };
+            dedupe_options(&mut options);
+            Some((
+                name.clone(),
+                ElicitationField {
+                    required: required.iter().any(|field| field == name),
+                    name: name.clone(),
+                    kind,
+                    title,
+                    description,
+                    options,
+                },
+            ))
+        })
+        .collect();
+    let covered: std::collections::HashSet<&str> = by_name.keys().map(String::as_str).collect();
+    if required.iter().any(|name| !covered.contains(name.as_str())) {
+        return None;
+    }
+    // Required fields first in the agent's declared `required` order (the
+    // only order preserved through the BTreeMap properties map), then the
+    // optional remainder in schema order.
+    let mut fields: Vec<ElicitationField> = Vec::with_capacity(by_name.len());
+    for name in &required {
+        if let Some(field) = by_name.remove(name) {
+            fields.push(field);
+        }
+    }
+    fields.extend(by_name.into_values());
+    Some(fields)
+}
+
+/// One selectable option of an [`AskUserQuestionEvent`].
+///
+/// `value` is the opaque id the agent consumes (stable, single-use); `label`
+/// is the human-readable text; `description` is optional context; `cardinality`
+/// is `single` (default) or `multi`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionOption {
+    pub value: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cardinality: Option<String>,
+}
+
+/// Host-authored turn terminators (story 1 / AD-5): a turn that ends without
+/// an ACP stop reason still gets exactly one durable `prompt_complete`.
+/// Serialized lowercase (`error`, `timeout`, `crashed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnFailureStop {
+    /// The agent RPC failed, or the turn could not be started after the host
+    /// accepted it.
+    Error,
+    /// The idle or hard turn deadline elapsed.
+    Timeout,
+    /// The agent connection ended with the turn still active.
+    Crashed,
+}
+
+/// `acp:prompt_complete` stop reason: an ACP stop reason (unchanged wire
+/// shape, e.g. `end_turn`) or a host terminator ([`TurnFailureStop`]).
+/// Untagged so existing ACP stop reasons serialize byte-identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum PromptStopReason {
+    Acp(StopReason),
+    Host(TurnFailureStop),
+}
+
+impl From<StopReason> for PromptStopReason {
+    fn from(value: StopReason) -> Self {
+        Self::Acp(value)
+    }
+}
+
+impl From<TurnFailureStop> for PromptStopReason {
+    fn from(value: TurnFailureStop) -> Self {
+        Self::Host(value)
+    }
 }
 
 /// `acp:prompt_complete`
@@ -169,7 +692,221 @@ pub struct PermissionRequestEvent {
 pub struct PromptCompleteEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
-    pub stop_reason: StopReason,
+    pub stop_reason: PromptStopReason,
+    /// Story 1.8 T3.2 (FR11): the client turn-id echoed back so the renderer's
+    /// `seenTurnIds` dedup fires (no duplicate completion on reconnect replay).
+    /// `None` for the desktop path + older clients (dedup is a no-op). Serialized
+    /// as `turnId` (camelCase payload); absent on the wire when `None`
+    /// (`skip_serializing_if = "Option::is_none"` — byte-identical to pre-1.8
+    /// desktop payloads when unset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// The failure behind an `error` or `timeout` terminator, so the durable
+    /// record can rebuild the error banner after a reload. Absent for every
+    /// terminator that has no error detail of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnErrorSummary>,
+}
+
+/// The part of a failed turn's `acp:agent_error` that its durable terminator
+/// keeps. No `data`: it is agent-authored and unbounded, and the log's
+/// key-name redaction cannot see a secret inside an arbitrary value.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnErrorSummary {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<&'static str>,
+}
+
+/// An error flattened for the manager's `Err(String)` / event boundaries while
+/// keeping the JSON-RPC `code` and `data` of an `agent_client_protocol::Error`.
+///
+/// `message` is exactly the prior `Error::to_string()` (`Display`, which
+/// appends pretty `data`) and stays on the host; the events that reach clients
+/// carry [`Self::client_message`] and redacted `data` instead. `code` / `data`
+/// are `None` for non-RPC failures (timeouts, flush failures, plain strings).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AcpErrorDetail {
+    pub message: String,
+    pub code: Option<i32>,
+    pub data: Option<serde_json::Value>,
+    /// Byte length of the RPC error's own message (its code when empty) at
+    /// the start of `message`, which `Display` follows with any `data`.
+    /// `None` for non-RPC failures. A length, not a copy, keeps the type
+    /// under clippy's `result_large_err` size.
+    pub rpc_message_len: Option<u32>,
+    /// Typed marker for an idle/hard turn deadline (set only by
+    /// `From<TurnTimeout>`); the turn terminator is `timeout` instead of
+    /// `error`. Never derived from the message text.
+    pub timed_out: bool,
+    /// Typed marker for a request that failed because the agent's transport
+    /// closed before it answered (the SDK's `is_incoming_transport_closed`
+    /// discriminator, not message text): the agent went away mid-turn, so the
+    /// terminator is `crashed`.
+    pub connection_closed: bool,
+}
+
+impl From<&agent_client_protocol::Error> for AcpErrorDetail {
+    fn from(error: &agent_client_protocol::Error) -> Self {
+        Self {
+            message: error.to_string(),
+            code: Some(i32::from(error.code)),
+            data: error.data.clone(),
+            rpc_message_len: u32::try_from(if error.message.is_empty() {
+                i32::from(error.code).to_string().len()
+            } else {
+                error.message.len()
+            })
+            .ok(),
+            timed_out: false,
+            connection_closed: agent_client_protocol::is_incoming_transport_closed(error),
+        }
+    }
+}
+
+impl From<agent_client_protocol::Error> for AcpErrorDetail {
+    fn from(error: agent_client_protocol::Error) -> Self {
+        Self::from(&error)
+    }
+}
+
+impl From<String> for AcpErrorDetail {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+            data: None,
+            rpc_message_len: None,
+            timed_out: false,
+            connection_closed: false,
+        }
+    }
+}
+
+impl AcpErrorDetail {
+    /// Replace the message with a generic one and drop the structured
+    /// `code` / `data` (used when failure details must not reach the renderer).
+    #[must_use]
+    pub fn masked(self, generic_message: &str) -> Self {
+        Self {
+            message: generic_message.to_string(),
+            code: None,
+            data: None,
+            rpc_message_len: None,
+            timed_out: self.timed_out,
+            connection_closed: self.connection_closed,
+        }
+    }
+
+    /// The RPC error's own message without the `data` that `message`
+    /// appends, else the whole message.
+    #[must_use]
+    pub fn rpc_message(&self) -> &str {
+        self.rpc_message_len
+            .and_then(|len| self.message.get(..len as usize))
+            .unwrap_or(&self.message)
+    }
+
+    /// The RPC error's own message as clients see it: secret-looking text
+    /// masked and the length capped.
+    #[must_use]
+    pub fn client_message(&self) -> String {
+        crate::acp::manager::stderr_ring::redact_line(self.rpc_message())
+            .chars()
+            .take(CLIENT_ERROR_MESSAGE_MAX_CHARS)
+            .collect()
+    }
+
+    /// The host terminator for a turn that ended with this error.
+    #[must_use]
+    pub fn turn_stop(&self) -> TurnFailureStop {
+        if self.timed_out {
+            TurnFailureStop::Timeout
+        } else if self.connection_closed {
+            TurnFailureStop::Crashed
+        } else {
+            TurnFailureStop::Error
+        }
+    }
+
+    /// Build the `acp:agent_error` payload for this error.
+    #[must_use]
+    pub fn into_agent_error(
+        self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> AgentErrorEvent {
+        let provider_code = crate::acp::provider_errors::classify_provider_error(&self)
+            .map(crate::acp::provider_errors::ProviderErrorKind::code);
+        AgentErrorEvent {
+            agent_id,
+            session_id,
+            message: self.client_message(),
+            code: self.code,
+            data: self.data.as_ref().map(client_error_data),
+            provider_code,
+        }
+    }
+
+    /// Build the `acp:agent_crashed` payload for this error.
+    #[must_use]
+    pub fn into_agent_crashed(
+        self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+    ) -> AgentCrashedEvent {
+        AgentCrashedEvent {
+            agent_id,
+            session_id,
+            message: self.client_message(),
+            code: self.code,
+            data: self.data.as_ref().map(client_error_data),
+        }
+    }
+}
+
+/// Most characters of an agent error message that leave the host.
+const CLIENT_ERROR_MESSAGE_MAX_CHARS: usize = 1_000;
+
+/// Most characters of serialized agent error `data` that leave the host.
+const CLIENT_ERROR_DATA_MAX_CHARS: usize = 4_000;
+
+/// Agent error `data` as clients see it: secret-named keys dropped (the
+/// session log's redaction), secret-looking text masked, and data larger than
+/// the cap sent as a truncated JSON string.
+fn client_error_data(data: &serde_json::Value) -> serde_json::Value {
+    fn mask_strings(value: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::String(text) => {
+                Value::String(crate::acp::manager::stderr_ring::redact_line(&text))
+            }
+            Value::Array(values) => Value::Array(values.into_iter().map(mask_strings).collect()),
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, mask_strings(value)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    let redacted = mask_strings(crate::acp::session_persistence::sanitize_value(None, data));
+    let text = redacted.to_string();
+    if text.chars().count() <= CLIENT_ERROR_DATA_MAX_CHARS {
+        return redacted;
+    }
+    let mut truncated: String = text.chars().take(CLIENT_ERROR_DATA_MAX_CHARS).collect();
+    truncated.push('…');
+    serde_json::Value::String(truncated)
+}
+
+impl std::fmt::Display for AcpErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// `acp:agent_error`
@@ -180,6 +917,63 @@ pub struct AgentErrorEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
     pub message: String,
+    /// JSON-RPC error `code` when the failure is an agent RPC error; absent
+    /// on the wire for non-RPC failures (timeouts, flush failures, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// JSON-RPC error `data`, redacted and capped; absent on the wire when the
+    /// error carried none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    /// Stable provider failure code (`provider_quota_exceeded`,
+    /// `provider_session_limit` or `provider_request_rejected`) when the error
+    /// classifies as an upstream provider failure; absent otherwise. Consumers
+    /// key on this instead of parsing `message`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<&'static str>,
+}
+
+/// `acp:agent_crashed` (Story 1.9 FR26)
+///
+/// Emitted when the agent subprocess crashes mid-turn (the supervisor — i.e.
+/// the `run_agent` teardown — detects child exit via the SDK connection
+/// resolving with `Err`). Outstanding turn oneshots fail with this event;
+/// `acp-store` sets `status: 'error'` + the UI shows a manual-restart action
+/// (no silent respawn, honoring ADR-003). Emitted BEFORE `agent_disconnected`.
+/// `session_id` is `None` (the crash is agent-level, `sid = None`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCrashedEvent {
+    pub agent_id: AgentId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    pub message: String,
+    /// JSON-RPC error `code` of the connection-ending error, when it was an
+    /// RPC error. Absent on the wire otherwise (and for masked failures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// JSON-RPC error `data` of the connection-ending error, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// Why an agent (or one of its sessions) ended. Additive on the wire so every
+/// viewer can tell a deliberate stop from a crash.
+///
+/// `closed` is used only for an explicit `close_session`; the other three
+/// describe agent-level endings. Process shutdown stays silent and has no
+/// reason.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentExitReason {
+    /// An explicit kill from a client.
+    Killed,
+    /// The idle reaper stopped the agent after its quiet window.
+    Reaped,
+    /// The agent process or its connection died on its own.
+    Crashed,
+    /// A single session was closed explicitly; the agent keeps running.
+    Closed,
 }
 
 /// `acp:agent_disconnected`
@@ -187,31 +981,199 @@ pub struct AgentErrorEvent {
 #[serde(rename_all = "camelCase")]
 pub struct AgentDisconnectedEvent {
     pub agent_id: AgentId,
+    pub reason: AgentExitReason,
 }
 
 /// `acp:session_closed`
 ///
-/// Emitted when a session ends — either via an explicit close or because the
-/// owning agent disconnected/crashed while the session was active.
+/// Emitted when a session ends — via an explicit close, or because the owning
+/// agent was killed, reaped or crashed while the session was active.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionClosedEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
+    pub reason: AgentExitReason,
+}
+
+/// OpenCode compaction marker carried on `session_info_update` `_meta`.
+///
+/// OpenCode 2 sends this when the client does not advertise
+/// `session.compaction`. `status` is `started`, `completed`, or `failed`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeCompactionNotice {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// OpenCode retry marker carried on `session_info_update` `_meta`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeRetryNotice {
+    pub attempt: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Notices parsed from OpenCode `_meta` keys on a session-info update.
+///
+/// `retry == None` means the key was absent (no change). `retry == Some(None)`
+/// means OpenCode sent `null` and the client should clear the retry line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OpenCodeNotices {
+    pub compaction: Option<OpenCodeCompactionNotice>,
+    pub retry: Option<Option<OpenCodeRetryNotice>>,
+}
+
+fn notice_error_message(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .map(str::to_string)
+}
+
+/// Read OpenCode compaction and retry markers from ACP `_meta`.
+///
+/// Unknown shapes are dropped with a warning. The raw payload is not logged.
+pub(crate) fn opencode_notices(meta: Option<&Meta>) -> OpenCodeNotices {
+    let Some(meta) = meta else {
+        return OpenCodeNotices::default();
+    };
+    let compaction = match meta.get("opencode/compaction") {
+        None => None,
+        Some(value) => match compaction_notice(value) {
+            Ok(notice) => Some(notice),
+            Err(reason) => {
+                log::warn!("[acp] opencode compaction marker dropped reason={reason}");
+                None
+            }
+        },
+    };
+    let retry = match meta.get("opencode/retry") {
+        None => None,
+        Some(value) if value.is_null() => Some(None),
+        Some(value) => match retry_notice(value) {
+            Ok(notice) => Some(Some(notice)),
+            Err(reason) => {
+                log::warn!("[acp] opencode retry marker dropped reason={reason}");
+                None
+            }
+        },
+    };
+    OpenCodeNotices { compaction, retry }
+}
+
+fn compaction_notice(value: &serde_json::Value) -> Result<OpenCodeCompactionNotice, &'static str> {
+    let status = value
+        .get("status")
+        .and_then(|status| status.as_str())
+        .ok_or("missing-status")?;
+    if !matches!(status, "started" | "completed" | "failed") {
+        return Err("unknown-status");
+    }
+    Ok(OpenCodeCompactionNotice {
+        status: status.to_string(),
+        message_id: value
+            .get("messageId")
+            .and_then(|id| id.as_str())
+            .map(str::to_string),
+        reason: value
+            .get("reason")
+            .and_then(|reason| reason.as_str())
+            .map(str::to_string),
+        error_message: notice_error_message(value),
+    })
+}
+
+fn retry_notice(value: &serde_json::Value) -> Result<OpenCodeRetryNotice, &'static str> {
+    let attempt = value
+        .get("attempt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing-attempt")?;
+    Ok(OpenCodeRetryNotice {
+        attempt,
+        next_retry_at: value
+            .get("nextRetryAt")
+            .and_then(|at| at.as_str())
+            .map(str::to_string),
+        error_message: notice_error_message(value),
+    })
 }
 
 /// `acp:session_info_update`
 ///
 /// Emitted when the agent updates session metadata (e.g. an auto-generated
-/// title) via the ACP `session_info_update` notification. `title` is `None`
-/// when the agent explicitly cleared it (serialized as `"title": null` on the
-/// wire), and `Some(String)` when set.
+/// title) via the ACP `session_info_update` notification.
+///
+/// `title` is tri-state on the wire: omitted when the agent did not send a
+/// title, `"title": null` when the agent cleared it, and a string when set.
+/// The outer `Option` is the omit case (`None`); `Some(None)` is the clear.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfoUpdateEvent {
     pub agent_id: AgentId,
     pub session_id: SessionId,
-    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<OpenCodeCompactionNotice>,
+    /// `None` omits the field. `Some(None)` serializes as `null` (clear).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<Option<OpenCodeRetryNotice>>,
+}
+
+impl SessionInfoUpdateEvent {
+    /// Title-only update. `title == None` clears the title (`"title": null`).
+    pub(crate) fn title_only(
+        agent_id: AgentId,
+        session_id: SessionId,
+        title: Option<String>,
+    ) -> Self {
+        Self {
+            agent_id,
+            session_id,
+            title: Some(title),
+            compaction: None,
+            retry: None,
+        }
+    }
+}
+
+/// `acp:worktree_branch_renamed` (story 16, CAP-5) — emitted once, agent-level,
+/// after the host renamed a worktree's git branch and rewrote every session on
+/// that worktree. Carries paths and branch names; it is a wire event only,
+/// never logged above `debug`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeBranchRenamedEvent {
+    pub worktree_path: String,
+    pub old_branch: String,
+    pub new_branch: String,
+}
+
+/// `acp:agent_switch` (CAP-2) — a durable agent-switch marker. The relay
+/// numbers it, appends it to the durable log and delivers it live under the
+/// same seq (`record_host_event`), so replay dedup is the seq watermark's job.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSwitchEvent {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub from_config_id: String,
+    pub to_config_id: String,
+    /// The NEW session id the conversation continues in (CAP-7 reopen reads
+    /// this from the durable record; the event mirrors it for live clients).
+    pub new_session_id: String,
+    pub summary_text: String,
 }
 
 /// Cumulative session cost reported by the agent (optional on `UsageUpdateEvent`).
@@ -236,148 +1198,15 @@ pub struct UsageUpdateEvent {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<UsageCostEvent>,
+    /// Claude plan rate-limit state, when the Claude ACP adapter sends it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<crate::acp::claude_accounts::usage::ClaudeRateLimit>,
 }
 
-/// Emit a payload to the renderer, logging (but not propagating) any error.
-///
-/// Emission failures are non-fatal: they only mean no renderer is listening, so
-/// we must never let them tear down the agent driver thread.
-pub fn emit<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: P) {
-    if let Err(e) = app.emit(event, payload) {
-        log::error!("[acp] failed to emit event {event}: {e}");
-    }
-}
+// Story 1.1 (AC7): the legacy `events::emit(app, event, payload)` free function
+// was REMOVED. All emission now goes through [`fan_out`] against the
+// dispatcher's `Vec<Arc<dyn EventSink>>`, so no `app.emit("acp:..")` call
+// site may be introduced for these events.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn agent_spawned_serializes_camel_case() {
-        let event = AgentSpawnedEvent {
-            agent_id: AgentId("agent-1".to_string()),
-            capabilities: AgentCapabilities::default(),
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["agentId"], "agent-1");
-        // AgentCapabilities serializes load_session as camelCase `loadSession`.
-        assert_eq!(value["capabilities"]["loadSession"], false);
-    }
-
-    #[test]
-    fn session_created_omits_none_fields() {
-        let event = SessionCreatedEvent {
-            agent_id: AgentId("agent-1".to_string()),
-            session_id: SessionId::new("sess-1"),
-            modes: None,
-            models: None,
-            config_options: None,
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["agentId"], "agent-1");
-        assert_eq!(value["sessionId"], "sess-1");
-        assert!(value.get("modes").is_none());
-        assert!(value.get("configOptions").is_none());
-    }
-
-    #[test]
-    fn message_chunk_serializes_role_and_content() {
-        let event = MessageChunkEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            role: ChunkRole::Agent,
-            content: ContentBlock::Text(agent_client_protocol::schema::TextContent::new("hi")),
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["role"], "agent");
-        assert_eq!(value["content"]["type"], "text");
-        assert_eq!(value["content"]["text"], "hi");
-    }
-
-    #[test]
-    fn permission_request_serializes_request_id() {
-        let event = PermissionRequestEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            request_id: "req-7".to_string(),
-            tool_call: agent_client_protocol::schema::ToolCallUpdate::new(
-                "tc-1",
-                agent_client_protocol::schema::ToolCallUpdateFields::new(),
-            ),
-            options: vec![],
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["requestId"], "req-7");
-        assert_eq!(value["sessionId"], "s");
-    }
-
-    #[test]
-    fn prompt_complete_serializes_stop_reason_snake_case() {
-        let event = PromptCompleteEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            stop_reason: StopReason::EndTurn,
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["stopReason"], "end_turn");
-    }
-
-    #[test]
-    fn session_info_update_serializes_camel_case() {
-        // With a title → serialized as `"title": "T"`
-        let event = SessionInfoUpdateEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            title: Some("T".to_string()),
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["agentId"], "a");
-        assert_eq!(value["sessionId"], "s");
-        assert_eq!(value["title"], "T");
-
-        // Without a title → serialized as `"title": null` (agent explicitly cleared)
-        let event_no_title = SessionInfoUpdateEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            title: None,
-        };
-        let value = serde_json::to_value(&event_no_title).unwrap();
-        assert_eq!(value["agentId"], "a");
-        assert_eq!(value["sessionId"], "s");
-        assert_eq!(value["title"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn usage_update_serializes_camel_case() {
-        let event = UsageUpdateEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            used: 53_000,
-            size: 200_000,
-            cost: Some(UsageCostEvent {
-                amount: 0.045,
-                currency: "USD".to_string(),
-            }),
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["agentId"], "a");
-        assert_eq!(value["sessionId"], "s");
-        assert_eq!(value["used"], 53_000);
-        assert_eq!(value["size"], 200_000);
-        assert_eq!(value["cost"]["amount"], 0.045);
-        assert_eq!(value["cost"]["currency"], "USD");
-    }
-
-    #[test]
-    fn usage_update_omits_none_cost() {
-        let event = UsageUpdateEvent {
-            agent_id: AgentId("a".to_string()),
-            session_id: SessionId::new("s"),
-            used: 1_000,
-            size: 128_000,
-            cost: None,
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert!(value.get("cost").is_none());
-    }
-}
+mod tests;

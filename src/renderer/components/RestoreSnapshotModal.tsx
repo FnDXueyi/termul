@@ -1,6 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, RotateCcw, X } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useId } from 'react'
+import { AlertTriangle, RotateCcw, X } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 import type { Snapshot } from '@/types/project'
 
 interface RestoreSnapshotModalProps {
@@ -20,6 +23,13 @@ export function RestoreSnapshotModal({
   onRestore,
   isRestoring
 }: RestoreSnapshotModalProps): React.JSX.Element {
+  // Mobile web shell: system back closes this modal through the page's own
+  // close, which vetoes while a restore is in flight (inert on desktop).
+  const overlayId = `restore-snapshot-modal:${useId()}`
+  useOverlayRegistration(overlayId, isOpen && snapshot !== null, onClose, {
+    mobileShellOnly: true
+  })
+
   // Handle Escape key to close modal
   useEffect(() => {
     if (!isOpen) return
@@ -61,7 +71,7 @@ export function RestoreSnapshotModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+          className="fixed inset-0 bg-overlay/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={onClose}
         >
           <motion.div
@@ -101,9 +111,9 @@ export function RestoreSnapshotModal({
               </p>
 
               {hasRunningProcesses && (
-                <div className="bg-yellow-900/20 border border-yellow-800/50 rounded p-3 flex items-start gap-2">
-                  <AlertTriangle size={16} className="text-yellow-400 mt-0.5 flex-shrink-0" />
-                  <div className="text-sm text-yellow-400">
+                <div className="bg-warning/10 border border-warning/50 rounded p-3 flex items-start gap-2">
+                  <AlertTriangle size={16} className="text-warning mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-warning">
                     <span className="font-medium">Warning:</span> You have terminals with running
                     processes. Restoring will terminate these processes.
                   </div>
@@ -113,21 +123,19 @@ export function RestoreSnapshotModal({
 
             {/* Footer */}
             <div className="px-4 py-3 bg-secondary/50 flex justify-end gap-2 border-t border-border">
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
                 onClick={onClose}
                 disabled={isRestoring}
-                className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
               >
                 Cancel
-              </button>
-              <button
-                onClick={handleRestore}
-                disabled={isRestoring}
-                className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 shadow-md shadow-primary/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-              >
-                <RotateCcw size={12} className={isRestoring ? 'animate-spin' : ''} />
+              </Button>
+              <Button type="button" size="sm" onClick={handleRestore} disabled={isRestoring}>
+                {isRestoring ? <Spinner size={12} decorative /> : <RotateCcw />}
                 {isRestoring ? 'Restoring...' : 'Restore'}
-              </button>
+              </Button>
             </div>
           </motion.div>
         </motion.div>

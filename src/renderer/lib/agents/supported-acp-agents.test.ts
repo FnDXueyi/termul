@@ -1,13 +1,26 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { StoredAgentConfig } from '@/lib/acp-agents-persistence'
 import type { RegistryAgent } from '@/lib/agents/acp-registry'
+import { registryConfigId } from '@/lib/agents/registry-config-id'
 import {
   buildSupportedAcpAgents,
   installedBinaryConfig,
+  isCustomAgentEntry,
   isSupportedAcpConfigId,
   manualBinaryConfig,
-  registryConfigId
+  migrateRetiredCodexConfig,
+  needsPersistedConfigUpdate,
+  resolveSupportedAcpAgents,
+  type SupportedAcpAgentEntry
 } from '@/lib/agents/supported-acp-agents'
+
+// CAP-6 / Story 8: `resolveSupportedAcpAgents` calls `acpCatalogApi.listCatalog()`
+// (the host-resolved catalog). Mock the facade so the wrapper is unit-tested in
+// isolation. The mock is hoisted + file-scoped; the existing
+// `buildSupportedAcpAgents` tests don't touch `acpCatalogApi`, so they're
+// unaffected.
+const { listCatalogMock } = vi.hoisted(() => ({ listCatalogMock: vi.fn() }))
+vi.mock('@/lib/api', () => ({ acpCatalogApi: { listCatalog: listCatalogMock } }))
 
 function agent(id: string, distribution: RegistryAgent['distribution'], name = id): RegistryAgent {
   return { id, name, version: '1.0.0', description: `${name} desc`, distribution }
@@ -152,6 +165,62 @@ describe('isSupportedAcpConfigId', () => {
   })
 })
 
+describe('isCustomAgentEntry', () => {
+  // Distinguish a custom (pasted) agent row from a catalog/registry row so the
+  // "Copy JSON" action only appears on custom agents (spec: "per saved custom
+  // agent row"). The check keys off the config's id, NOT the entry's id —
+  // catalog entries use `entry.id = agent.id` (no `acp-registry:` prefix).
+  function entryWith(config: StoredAgentConfig | null): SupportedAcpAgentEntry {
+    return {
+      id: 'any',
+      configId: config?.configId ?? 'any',
+      agent: agent('any', {}),
+      config,
+      status: 'ready',
+      install: null,
+      manualInstall: null,
+      runtimeLauncher: null,
+      unavailableReason: null
+    }
+  }
+  it('returns TRUE for a custom agent (config.id = custom-<uuid8>)', () => {
+    const custom: StoredAgentConfig = {
+      id: 'custom-abc12345',
+      configId: 'custom-abc12345',
+      name: 'H',
+      command: 'node',
+      args: [],
+      env: {},
+      allowTerminal: false
+    }
+    expect(isCustomAgentEntry(entryWith(custom))).toBe(true)
+  })
+  it('returns FALSE for a catalog override (config.id = acp-registry:<id>)', () => {
+    const override: StoredAgentConfig = {
+      id: 'acp-registry:gemini',
+      configId: 'acp-registry:gemini',
+      name: 'Gemini Override',
+      command: 'gemini',
+      args: [],
+      env: {},
+      allowTerminal: false
+    }
+    expect(isCustomAgentEntry(entryWith(override))).toBe(false)
+  })
+  it('returns FALSE for a catalog agent with a derived/hostInstalled config', () => {
+    // A host-installed catalog agent carries a config whose id IS
+    // `acp-registry:<id>` (from `toStoredConfig`), so it's NOT a custom agent.
+    const derived = installedBinaryConfig(agent('gemini', { binary: {} }, 'Gemini'), {
+      command: '/abs/gemini',
+      args: ['acp']
+    })
+    expect(isCustomAgentEntry(entryWith(derived))).toBe(false)
+  })
+  it('returns FALSE when no config is present (unavailable catalog agent)', () => {
+    expect(isCustomAgentEntry(entryWith(null))).toBe(false)
+  })
+})
+
 describe('manualBinaryConfig', () => {
   it('persists a user-provided binary path with registry args and env', () => {
     const config = manualBinaryConfig(
@@ -163,6 +232,7 @@ describe('manualBinaryConfig', () => {
     expect(config).toEqual({
       id: 'acp-registry:legacy',
       templateId: 'legacy',
+      configId: 'acp-registry:legacy',
       name: 'Legacy Agent',
       command: 'C:/tools/legacy.exe',
       args: ['acp'],
@@ -183,11 +253,628 @@ describe('installedBinaryConfig', () => {
     expect(config).toEqual({
       id: 'acp-registry:opencode',
       templateId: 'opencode',
+      configId: 'acp-registry:opencode',
       name: 'OpenCode',
       command: 'C:/termul/opencode.exe',
       args: ['acp'],
       env: { OPENCODE: '1' },
       allowTerminal: false
     })
+  })
+})
+
+describe('migrateRetiredCodexConfig', () => {
+  const base = {
+    id: 'acp-registry:codex-acp',
+    name: 'Codex',
+    command: 'npx',
+    env: { OPENAI_API_KEY: 'sk-test' },
+    allowTerminal: false
+  } satisfies StoredAgentConfig
+
+  it('rewrites the retired Zed package and keeps env', () => {
+    const next = migrateRetiredCodexConfig({
+      ...base,
+      args: ['-y', '@zed-industries/codex-acp']
+    })
+    expect(next?.args[1]).toBe('@agentclientprotocol/codex-acp@1.12.0')
+    expect(next?.env).toEqual({ OPENAI_API_KEY: 'sk-test' })
+    expect(next?.allowTerminal).toBe(false)
+  })
+
+  it('rewrites an unpinned official package', () => {
+    const next = migrateRetiredCodexConfig({
+      ...base,
+      args: ['-y', '@agentclientprotocol/codex-acp']
+    })
+    expect(next?.args[1]).toBe('@agentclientprotocol/codex-acp@1.12.0')
+  })
+
+  it('leaves a catalog pin unchanged', () => {
+    expect(
+      migrateRetiredCodexConfig({
+        ...base,
+        args: ['-y', '@agentclientprotocol/codex-acp@1.12.0']
+      })
+    ).toBeNull()
+  })
+})
+
+describe('needsPersistedConfigUpdate', () => {
+  it('replaces a legacy registry launcher with the host-installed command', () => {
+    expect(
+      needsPersistedConfigUpdate(
+        {
+          command: 'npx',
+          args: ['-y', '@agentclientprotocol/claude-agent-acp'],
+          env: { ANTHROPIC_API_KEY: '$ANTHROPIC_API_KEY' }
+        },
+        {
+          command: 'node',
+          args: ['/termul/cache/claude-agent-acp/dist/index.js'],
+          env: {}
+        }
+      )
+    ).toBe(true)
+  })
+
+  it('does not rewrite an unchanged saved config', () => {
+    expect(
+      needsPersistedConfigUpdate(
+        { command: 'node', args: ['agent.js'], env: { TERM: 'xterm' } },
+        { command: 'node', args: ['agent.js'], env: { TERM: 'xterm' } }
+      )
+    ).toBe(false)
+  })
+})
+
+// CAP-6 / Story 8: the host-resolved catalog wrapper. `resolveSupportedAcpAgents`
+// calls `acpCatalogApi.listCatalog()` and maps `CatalogAgent` →
+// `SupportedAcpAgentEntry`, consuming the host's `host.os`/`host.arch` (NOT the
+// renderer's `currentPlatformArch()` / `@tauri-apps/plugin-os`).
+describe('resolveSupportedAcpAgents', () => {
+  it('maps a host-resolved catalog agent to a supported entry', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: {
+          os: 'linux',
+          arch: 'x86_64',
+          runtimes: { npx: true, uvx: false, node: true, bun: false, python3: true }
+        },
+        agents: [
+          {
+            id: 'test',
+            name: 'Test',
+            version: '1.0.0',
+            description: 'test agent',
+            source: 'bundled',
+            distribution: { npx: { package: 'test@1.0.0' } },
+            runtimeRequirements: ['npx'],
+            status: 'ready',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(listCatalogMock).toHaveBeenCalledTimes(1)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      id: 'test',
+      configId: 'acp-registry:test',
+      status: 'ready'
+    })
+  })
+
+  it('prefers a persisted config and marks it ready', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'claude-acp',
+            name: 'Claude',
+            version: '1.0.0',
+            description: 'd',
+            source: 'bundled',
+            distribution: { npx: { package: 'claude' } },
+            runtimeRequirements: ['npx'],
+            status: 'needs-runtime',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const saved = persisted('claude-acp', 'Claude Override')
+
+    const entries = await resolveSupportedAcpAgents([saved])
+
+    expect(entries[0]?.config).toBe(saved)
+    // Persisted configs are always 'ready' regardless of the host's status.
+    expect(entries[0]?.status).toBe('ready')
+  })
+
+  it('migrates the old registry Claude launcher to the managed pinned install flow', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'claude-acp',
+            name: 'Claude Agent',
+            version: '0.78.0',
+            description: 'Claude ACP',
+            source: 'bundled',
+            distribution: {
+              npx: { package: '@agentclientprotocol/claude-agent-acp@0.78.0' }
+            },
+            runtimeRequirements: ['node', 'npm', 'claude'],
+            status: 'install-required',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const legacy = {
+      ...persisted('claude-acp'),
+      command: 'npx',
+      args: ['-y', '@agentclientprotocol/claude-agent-acp@0.52.0']
+    }
+
+    const entries = await resolveSupportedAcpAgents([legacy])
+
+    expect(entries[0]?.status).toBe('install-required')
+    expect(entries[0]?.config).toBeNull()
+    expect(entries[0]?.install).toEqual({
+      kind: 'managed-npm',
+      package: '@agentclientprotocol/claude-agent-acp@0.78.0'
+    })
+  })
+
+  it.each([
+    ['needs-runtime', { nodeMajor: 20, npm: true, claudeCli: true }],
+    ['manual-install', { nodeMajor: 22, npm: true, claudeCli: false }]
+  ] as const)('does not derive an unpinned Claude npx config when host status is %s', async (status, runtimes) => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: {
+          os: 'linux',
+          arch: 'x86_64',
+          runtimes: {
+            npx: true,
+            uvx: false,
+            node: true,
+            bun: false,
+            python3: true,
+            ...runtimes
+          }
+        },
+        agents: [
+          {
+            id: 'claude-acp',
+            name: 'Claude Agent',
+            version: '0.78.0',
+            description: 'Claude ACP',
+            source: 'bundled',
+            distribution: {
+              npx: { package: '@agentclientprotocol/claude-agent-acp@0.78.0' }
+            },
+            runtimeRequirements: ['node', 'npm', 'claude'],
+            status,
+            platformTargets: []
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(entries[0]?.status).toBe(status)
+    expect(entries[0]?.config).toBeNull()
+    expect(entries[0]?.install).toBeNull()
+  })
+
+  it('sets install info only when the host reports install-required', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: {
+          os: 'linux',
+          arch: 'x86_64',
+          runtimes: { npx: true, uvx: false, node: true, bun: false, python3: true }
+        },
+        agents: [
+          {
+            id: 'opencode',
+            name: 'Opencode',
+            version: '1.0.0',
+            description: 'd',
+            source: 'bundled',
+            distribution: {
+              binary: {
+                'linux-x86_64': {
+                  cmd: './opencode',
+                  archive: 'https://example.com/opencode.zip',
+                  sha256: 'a'.repeat(64),
+                  args: ['acp'],
+                  env: { OPENCODE: '1' }
+                }
+              }
+            },
+            runtimeRequirements: [],
+            status: 'install-required',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(entries[0]?.status).toBe('install-required')
+    expect(entries[0]?.install).toMatchObject({
+      kind: 'archive',
+      archiveUrl: 'https://example.com/opencode.zip',
+      cmd: './opencode',
+      args: ['acp'],
+      env: { OPENCODE: '1' }
+    })
+    expect(entries[0]?.manualInstall).toBeNull()
+  })
+
+  it('sets manualInstall (not install) when the host reports manual-install for a no-archive binary', async () => {
+    // The host reports `manual-install` only for a binary target WITHOUT an
+    // HTTPS archive (a no-sha256 archive is `install-required` now — the
+    // trusted Zed catalog makes the install available without verification).
+    // The renderer gates on the host's status so the install info reflects the
+    // host's resolution: `manualInstall` carries cmd/args/env (no download).
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: {
+          os: 'linux',
+          arch: 'x86_64',
+          runtimes: { npx: true, uvx: false, node: true, bun: false, python3: true }
+        },
+        agents: [
+          {
+            id: 'no-archive',
+            name: 'NoArchive',
+            version: '1.0.0',
+            description: 'd',
+            source: 'bundled',
+            distribution: {
+              binary: {
+                'linux-x86_64': {
+                  cmd: './no-archive',
+                  // NOTE: no `archive` — the host reports `manual-install`.
+                  args: ['acp'],
+                  env: { NO_ARCHIVE: '1' }
+                }
+              }
+            },
+            runtimeRequirements: [],
+            status: 'manual-install',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(entries[0]?.status).toBe('manual-install')
+    // `install` must be null (the host offers no download).
+    expect(entries[0]?.install).toBeNull()
+    // `manualInstall` carries the cmd/args/env (no archiveUrl — manual install
+    // does not download).
+    expect(entries[0]?.manualInstall).toMatchObject({
+      cmd: './no-archive',
+      args: ['acp'],
+      env: { NO_ARCHIVE: '1' }
+    })
+  })
+
+  it('builds a spawn config from host `installed` when a host-installed agent is ready (no renderer persistence)', async () => {
+    // The host overlays installed state: a host-installed binary agent is
+    // reported `ready` with an `installed` block carrying the host-resolved
+    // absolute `command`/`args`. The web client (no renderer persistence)
+    // must build a spawn config from that `installed` block — without it, the
+    // web could not reuse a host install.
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: {
+          os: 'linux',
+          arch: 'x86_64',
+          runtimes: { npx: true, uvx: false, node: true, bun: false, python3: true }
+        },
+        agents: [
+          {
+            id: 'host-installed',
+            name: 'HostInstalled',
+            version: '1.0.0',
+            description: 'd',
+            source: 'bundled',
+            distribution: {
+              binary: {
+                'linux-x86_64': {
+                  cmd: './host-installed',
+                  archive: 'https://example.com/host-installed.zip',
+                  args: ['acp'],
+                  env: { HOST: '1' }
+                }
+              }
+            },
+            runtimeRequirements: [],
+            status: 'ready',
+            platformTargets: [],
+            installed: {
+              command: '/abs/acp-registry-binaries/host-installed/host-installed',
+              args: ['acp']
+            }
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(entries[0]?.status).toBe('ready')
+    // The config is built from the host's installed command/args (NOT the
+    // distribution cmd), so the web can spawn the host-installed binary.
+    expect(entries[0]?.config).toMatchObject({
+      command: '/abs/acp-registry-binaries/host-installed/host-installed',
+      args: ['acp'],
+      env: { HOST: '1' }
+    })
+    expect(entries[0]?.install).toBeNull()
+    expect(entries[0]?.manualInstall).toBeNull()
+  })
+
+  it('degrades to an empty list when the catalog is unavailable', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: false,
+      error: 'store unavailable',
+      code: 'ACP_CATALOG_UNAVAILABLE'
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+    expect(entries).toEqual([])
+  })
+
+  it('surfaces a persisted custom agent alongside catalog agents (CAP-5)', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'gemini',
+            name: 'Gemini',
+            version: '1.0.0',
+            description: 'd',
+            source: 'bundled',
+            distribution: { npx: { package: 'gemini' } },
+            runtimeRequirements: ['npx'],
+            status: 'needs-runtime',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const custom: StoredAgentConfig = {
+      id: 'custom-abc',
+      configId: 'custom-abc',
+      name: 'Internal Helper',
+      command: 'node',
+      args: ['/path/to/agent.js'],
+      env: { API_KEY: '$INTERNAL_API_KEY' },
+      allowTerminal: false
+    }
+
+    const entries = await resolveSupportedAcpAgents([custom])
+
+    const customEntry = entries.find((e) => e.id === 'custom-abc')
+    expect(customEntry).toBeDefined()
+    expect(customEntry?.configId).toBe('custom-abc')
+    expect(customEntry?.status).toBe('ready')
+    expect(customEntry?.config).toBe(custom)
+    // Catalog agent still present.
+    expect(entries.some((e) => e.id === 'gemini')).toBe(true)
+  })
+
+  it('persisted custom agent wins on configId collision with a registry agent (CAP-5)', async () => {
+    // A persisted custom agent whose `configId` == a registry agent's configId
+    // (`acp-registry:<id>`) must win over the catalog version (status 'ready',
+    // the user's command/args/env). Persisted-wins is the inverse of the
+    // terminal-native "built-ins win".
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'gemini',
+            name: 'Gemini',
+            version: '1.0.0',
+            description: 'catalog version',
+            source: 'bundled',
+            distribution: { npx: { package: 'gemini' } },
+            runtimeRequirements: ['npx'],
+            status: 'needs-runtime',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const overriding: StoredAgentConfig = {
+      // custom agent (id NOT acp-registry:) but configId collides with the
+      // registry agent's configId on purpose.
+      id: 'custom-override',
+      configId: registryConfigId('gemini'),
+      name: 'Internal Helper',
+      command: 'node',
+      args: ['/path/to/internal.js'],
+      env: { API_KEY: '$API_KEY' },
+      allowTerminal: false
+    }
+
+    const entries = await resolveSupportedAcpAgents([overriding])
+
+    // Exactly one entry for the colliding configId — the persisted custom one
+    // wins (status 'ready', the user's command/args/env). The catalog loop
+    // consumes the custom config via its configId-keyed lookup, so the entry
+    // carries the catalog agent's id ('gemini') but the custom config. The
+    // custom agent is NOT double-appended as a separate row (seenConfigIds
+    // blocks it).
+    const matching = entries.filter((e) => e.configId === registryConfigId('gemini'))
+    expect(matching).toHaveLength(1)
+    expect(matching[0]?.status).toBe('ready')
+    expect(matching[0]?.config).toBe(overriding)
+    // The custom config is surfaced (Copy JSON keys off config.id, NOT
+    // entry.id, so it still identifies as a custom agent row).
+    expect(matching[0]?.config?.id).toBe('custom-override')
+    // No separate 'custom-override' entry — it merged into the gemini slot.
+    expect(entries.filter((e) => e.id === 'custom-override')).toHaveLength(0)
+  })
+
+  it('surfaces persisted custom agents when the catalog fetch fails (degrade-mode)', async () => {
+    listCatalogMock.mockResolvedValueOnce({
+      success: false,
+      error: 'store unavailable',
+      code: 'ACP_CATALOG_UNAVAILABLE'
+    })
+    const custom: StoredAgentConfig = {
+      id: 'custom-down',
+      configId: 'custom-down',
+      name: 'Offline Helper',
+      command: 'node',
+      args: [],
+      env: {},
+      allowTerminal: false
+    }
+
+    const entries = await resolveSupportedAcpAgents([custom])
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.id).toBe('custom-down')
+    expect(entries[0]?.configId).toBe('custom-down')
+    expect(entries[0]?.status).toBe('ready')
+    expect(entries[0]?.config).toBe(custom)
+  })
+
+  it('custom record wins over a registry override on configId collision regardless of input order', async () => {
+    // CodeRabbit: precedence must be deterministic, not input-order-dependent.
+    // A registry-backed override (id starts with `acp-registry:`) listed BEFORE
+    // a custom agent sharing the same configId must NOT shadow the custom one.
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'gemini',
+            name: 'Gemini',
+            version: '1.0.0',
+            description: 'catalog',
+            source: 'bundled',
+            distribution: { npx: { package: 'gemini' } },
+            runtimeRequirements: ['npx'],
+            status: 'needs-runtime',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const registryOverride: StoredAgentConfig = {
+      id: registryConfigId('gemini'),
+      configId: registryConfigId('gemini'),
+      name: 'Gemini Override',
+      command: 'gemini-bin',
+      args: [],
+      env: {},
+      allowTerminal: false
+    }
+    const custom: StoredAgentConfig = {
+      id: 'custom-wins',
+      configId: registryConfigId('gemini'),
+      name: 'Internal Helper',
+      command: 'node',
+      args: ['/agent.js'],
+      env: {},
+      allowTerminal: false
+    }
+
+    // Registry override FIRST, custom SECOND — custom must still win.
+    const entriesSecond = await resolveSupportedAcpAgents([registryOverride, custom])
+    const matchSecond = entriesSecond.find((e) => e.configId === registryConfigId('gemini'))
+    expect(matchSecond?.config).toBe(custom)
+
+    // Custom FIRST, registry override SECOND — custom still wins.
+    listCatalogMock.mockResolvedValueOnce({
+      success: true,
+      data: {
+        host: { os: 'linux', arch: 'x86_64', runtimes: {} },
+        agents: [
+          {
+            id: 'gemini',
+            name: 'Gemini',
+            version: '1.0.0',
+            description: 'catalog',
+            source: 'bundled',
+            distribution: { npx: { package: 'gemini' } },
+            runtimeRequirements: ['npx'],
+            status: 'needs-runtime',
+            platformTargets: []
+          }
+        ]
+      }
+    })
+    const entriesFirst = await resolveSupportedAcpAgents([custom, registryOverride])
+    const matchFirst = entriesFirst.find((e) => e.configId === registryConfigId('gemini'))
+    expect(matchFirst?.config).toBe(custom)
+  })
+})
+
+describe('resolveSupportedAcpAgents installedVersion', () => {
+  it('carries the host-installed manifest version into the entry for update detection', async () => {
+    listCatalogMock.mockResolvedValue({
+      success: true,
+      data: {
+        host: { os: 'macos', arch: 'aarch64', runtimes: {} },
+        agents: [
+          {
+            id: 'someagent',
+            name: 'Some Agent',
+            version: '1.1.0',
+            description: 'catalog',
+            source: 'bundled',
+            distribution: {
+              binary: {
+                'darwin-aarch64': { cmd: './someagent', archive: 'https://example.com/s.zip' }
+              }
+            },
+            runtimeRequirements: [],
+            status: 'ready',
+            platformTargets: [],
+            installed: {
+              command: '/abs/someagent/0.9.5/someagent',
+              args: ['acp'],
+              version: '0.9.5'
+            }
+          }
+        ]
+      }
+    })
+
+    const entries = await resolveSupportedAcpAgents([])
+
+    expect(entries[0]?.installedVersion).toBe('0.9.5')
   })
 })

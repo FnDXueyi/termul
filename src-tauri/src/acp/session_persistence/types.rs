@@ -1,0 +1,371 @@
+use super::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedSessionStatus {
+    Active,
+    Closed,
+    Error,
+}
+
+/// Provenance of a session's title, used to enforce title precedence
+/// (AD-1): `LocalAlias > BackgroundGenerated > AgentSupplied >
+/// DerivedFirstMessage > Untitled`. Once `title_source ==
+/// BackgroundGenerated`, subsequent `session_info_update` events do NOT
+/// overwrite the title. `LocalAlias` is reserved for a future local-rename
+/// feature; it is the highest precedence so a user-chosen name always wins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    BackgroundGenerated,
+    AgentSupplied,
+    DerivedFirstMessage,
+    LocalAlias,
+}
+
+/// Returns `true` when `source` is one of the precedence tiers the host must
+/// protect from a later `session_info_update` overwrite (AD-1/AD-5). Used by
+/// both `append_record` (durable defense) and the manager's notification
+/// closure (fan-out defense).
+#[must_use]
+pub fn is_protected_title_source(source: Option<&TitleSource>) -> bool {
+    matches!(
+        source,
+        Some(TitleSource::BackgroundGenerated) | Some(TitleSource::LocalAlias)
+    )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedEventRecord {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub seq: u64,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub recorded_at: u64,
+    pub payload: Value,
+}
+
+/// A tail replay plus the session's whole seq-sorted tool-call log (see
+/// `SessionPersistence::replay_tail_with_tool_records`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TailReplay {
+    /// The tail window records (identical to `replay_tail`).
+    pub records: Vec<PersistedEventRecord>,
+    /// Every `tool_call`/`tool_call_update` record of the session.
+    pub tool_records: Vec<PersistedEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetadata {
+    pub schema_version: u32,
+    pub storage_key: String,
+    pub session_id: String,
+    pub stable_agent_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub cwd: String,
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<TitleSource>,
+    pub created_at: u64,
+    pub last_activity_at: u64,
+    pub status: PersistedSessionStatus,
+    pub message_count: u64,
+    pub tool_count: u64,
+    pub last_seq: u64,
+    /// Issue #844c: the fold role of the currently-OPEN chunk run
+    /// ("agent"/"thought"), or None when no run is open. Tracked
+    /// incrementally by `append_record` under the SAME rules the payload
+    /// materializer folds by, so `message_count` == the materialized
+    /// messages length for live sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fold_open_role: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fold_counted: bool,
+    /// Agent-owned metadata mirror created from ACP `session/list`.
+    #[serde(default)]
+    pub discovered: bool,
+    /// Worktree path the agent runs in (CAP-3). Additive: old entries
+    /// deserialize with `None`. State isolation still keys on `cwd`; this
+    /// field powers the CAP-6 indicator + the deleted-worktree fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Host-recorded current model id (CAP-3). Additive: old entries
+    /// deserialize with `None`; discovered/imported sessions never have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Display-name snapshot of `model_id` taken when it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Who named the worktree branch (story 16, CAP-5). Host-internal: set
+    /// only at registration when this session created the worktree, never on
+    /// `SessionIndexEntry` or any wire type. Additive: old metadata loads
+    /// with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch_source: Option<WorktreeBranchSource>,
+    /// The branch the worktree was launched on (`chat/<chat id>`). The auto
+    /// rename guard compares it against the worktree's current git branch, so
+    /// a resumed session cannot rename a second time. Host-internal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_launch_branch: Option<String>,
+    /// The `commandId` of the `create_session` that made this session, so a
+    /// resend after ledger eviction or a host restart finds it instead of
+    /// creating a second one. Host-internal: never on `SessionIndexEntry` or
+    /// any wire type. Additive: old metadata loads with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    /// Identity of this session's log incarnation: a replay cursor
+    /// `(logEpoch, lastSeq)` is only valid against the epoch it was issued
+    /// under. Minted when the session is created; a legacy record without one
+    /// is minted when first loaded and written back at that load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_epoch: Option<String>,
+    /// Set once this log's allocated seq frontier has run ahead of what is on
+    /// disk (a non-durable event such as `permission_request` took a seq that
+    /// never reaches the JSONL). After a restart the allocator resumes from the
+    /// durable frontier and would reuse those seqs for different events, so a
+    /// load that finds this set rotates `log_epoch` and clears it. Host-internal:
+    /// never on `SessionIndexEntry` or any wire type.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub head_ahead_of_durable: bool,
+    /// Memoized "no open turn" verdict of the host-start sweep (see
+    /// `sweep.rs`), so `recover()` does not rescan a long log on every launch.
+    /// Always validated against the log before it is trusted. Host-internal:
+    /// never on `SessionIndexEntry` or any wire type. Additive: old metadata
+    /// loads with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep_checkpoint: Option<SweepCheckpoint>,
+}
+
+impl SessionMetadata {
+    pub(super) fn adopt_fold_counts(&mut self, counts: FoldCounts) {
+        self.message_count = counts.message_count;
+        self.tool_count = counts.tool_count;
+        self.fold_open_role = counts.state.open_role.map(str::to_string);
+        self.fold_counted = true;
+    }
+}
+
+/// Asserts that `messages.jsonl[0..len)` folds to no open turn (the
+/// `last_unmatched_user_prompt` rules) and that the last line ending
+/// at `len` carries `seq`. A log that only grew past `len` keeps the
+/// assertion; the line check catches a rewrite that shrank the log and then
+/// regrew it to the same length. Rewriters of the prefix (the seq-intruder
+/// salvage, the recover fallback) clear it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepCheckpoint {
+    pub len: u64,
+    pub seq: u64,
+}
+
+/// Provenance of a worktree branch name (story 16): `Auto` is the launcher's
+/// `chat/<chat id>` (eligible for one agent-supplied slug rename), `User`
+/// means a rename by hand claimed it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeBranchSource {
+    Auto,
+    User,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionIndexEntry {
+    pub storage_key: String,
+    pub session_id: String,
+    pub stable_agent_namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub cwd: String,
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<TitleSource>,
+    pub created_at: u64,
+    pub last_activity_at: u64,
+    pub status: PersistedSessionStatus,
+    pub message_count: u64,
+    pub tool_count: u64,
+    pub last_seq: u64,
+    #[serde(default)]
+    pub discovered: bool,
+    pub resume_eligible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    /// Host-recorded current model id (CAP-3). Additive: old entries
+    /// deserialize with `None`; discovered/imported sessions never have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Display-name snapshot of `model_id` taken when it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// The session log's epoch (see [`SessionMetadata::log_epoch`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_epoch: Option<String>,
+}
+
+impl From<&SessionMetadata> for SessionIndexEntry {
+    fn from(metadata: &SessionMetadata) -> Self {
+        Self {
+            storage_key: metadata.storage_key.clone(),
+            session_id: metadata.session_id.clone(),
+            stable_agent_namespace: metadata.stable_agent_namespace.clone(),
+            runtime_agent_id: metadata.runtime_agent_id.clone(),
+            project_id: metadata.project_id.clone(),
+            cwd: metadata.cwd.clone(),
+            title: metadata.title.clone(),
+            title_source: metadata.title_source.clone(),
+            created_at: metadata.created_at,
+            last_activity_at: metadata.last_activity_at,
+            status: metadata.status.clone(),
+            message_count: metadata.message_count,
+            tool_count: metadata.tool_count,
+            last_seq: metadata.last_seq,
+            discovered: metadata.discovered,
+            resume_eligible: metadata.stable_agent_namespace.is_some(),
+            worktree_path: metadata.worktree_path.clone(),
+            worktree_branch: metadata.worktree_branch.clone(),
+            model_id: metadata.model_id.clone(),
+            model_name: metadata.model_name.clone(),
+            log_epoch: metadata.log_epoch.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionIndexFile {
+    pub schema_version: u32,
+    pub sessions: Vec<SessionIndexEntry>,
+}
+
+/// Project id stamped on a session that no registered project owns (no
+/// explicit id, no registry match on its cwd, or a legacy record that predates
+/// project attribution). Renderers show these under an "Unassigned" bucket.
+pub const UNASSIGNED_PROJECT_ID: &str = "__unassigned__";
+
+/// The project id a new session record carries: the supplied non-empty id, else
+/// [`UNASSIGNED_PROJECT_ID`]. A session's project is stamped once at creation
+/// and never rewritten afterwards.
+#[must_use]
+pub(super) fn stamped_project_id(project_id: Option<String>) -> Option<String> {
+    Some(
+        project_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| UNASSIGNED_PROJECT_ID.to_string()),
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionRegistration {
+    pub session_id: String,
+    pub stable_agent_namespace: Option<String>,
+    pub runtime_agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub cwd: PathBuf,
+    pub worktree_path: Option<String>,
+    pub worktree_branch: Option<String>,
+    /// Model captured at session creation (stashed with an ephemeral
+    /// registration until promotion). `None` when the agent advertises none.
+    pub model: Option<SessionModelSnapshot>,
+    /// True when this registration is the session that CREATED its worktree
+    /// (host-detected via `worktree::take_launch_created`; story 16). Never
+    /// supplied by a client.
+    pub worktree_created: bool,
+    /// The client `commandId` of the creating request (stamped on the record;
+    /// see `SessionMetadata::command_id`). Never set for discovered sessions.
+    pub command_id: Option<String>,
+}
+
+/// A session's current model id plus a display-name snapshot (CAP-3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModelSnapshot {
+    pub model_id: String,
+    pub model_name: String,
+}
+
+/// Host-authored durable agent-switch marker payload (CAP-2). camelCase on
+/// the wire and in the JSONL record; `seq`/`recordedAt` live on the record
+/// envelope, not here. Field names deliberately avoid secret-looking
+/// substrings (`token`, `secret`, …) — `normalize_durable_payload`
+/// redacts those.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSwitchRecord {
+    pub session_id: String,
+    pub from_config_id: String,
+    pub to_config_id: String,
+    /// The NEW session id the conversation continues in (CAP-7 reopen
+    /// resolution reads this; may be empty on a corrupt record — degrades,
+    /// never fails the fold).
+    pub new_session_id: String,
+    pub summary_text: String,
+}
+
+#[derive(Debug)]
+pub enum SessionPersistenceError {
+    Io(io::Error),
+    Json(serde_json::Error),
+    UnsupportedVersion { found: u64 },
+    SessionNotFound,
+    CorruptSession,
+    InvalidStorageKey,
+    /// Durable appends no longer return this: a full writer queue diverts
+    /// into the session's overflow queue instead of rejecting (see
+    /// `session_persistence::WRITER_CAPACITY`). The variant remains for API
+    /// compatibility; its historical Display text ("session writer queue is
+    /// full") is retained.
+    QueueFull,
+    WriterStopped,
+    PersistenceUnhealthy(String),
+    StaleCursor { cursor: u64, last_seq: u64 },
+}
+
+impl std::fmt::Display for SessionPersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "session persistence io error: {error}"),
+            Self::Json(error) => write!(f, "session persistence json error: {error}"),
+            Self::UnsupportedVersion { found } => {
+                write!(f, "unsupported session schema version {found}")
+            }
+            Self::SessionNotFound => write!(f, "persisted session not found"),
+            Self::CorruptSession => write!(f, "persisted session is corrupt"),
+            Self::InvalidStorageKey => write!(f, "invalid session storage key"),
+            Self::QueueFull => write!(f, "session writer queue is full"),
+            Self::WriterStopped => write!(f, "session writer stopped"),
+            Self::PersistenceUnhealthy(message) => {
+                write!(f, "session persistence unhealthy: {message}")
+            }
+            Self::StaleCursor { cursor, last_seq } => write!(
+                f,
+                "cursor {cursor} is ahead of durable last sequence {last_seq}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionPersistenceError {}
+impl From<io::Error> for SessionPersistenceError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<serde_json::Error> for SessionPersistenceError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Json(value)
+    }
+}
+
+pub(super) type Result<T> = std::result::Result<T, SessionPersistenceError>;

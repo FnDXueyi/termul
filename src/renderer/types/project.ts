@@ -1,9 +1,9 @@
 // Import GitStatus from shared types to ensure consistency
 // between IPC contract and renderer domain models
-import type { GitStatus } from '@shared/types/ipc.types'
+import type { GitStatus, ProjectIcon, TerminalModes } from '@shared/types/ipc.types'
 
 // Re-export for convenience
-export type { GitStatus }
+export type { GitStatus, TerminalModes }
 
 export type ProjectColor =
   | 'blue'
@@ -22,6 +22,11 @@ export interface Worktree {
   branch: string
   path: string
   createdAt: string // ISO timestamp
+  /**
+   * Web-only, derived by the worktree reconciler: the worktree path lies outside
+   * the project folder. Never persisted (`toPersistedWorktree` drops it).
+   */
+  outsideProjectRoot?: boolean
 }
 
 export interface ProjectGroup {
@@ -38,21 +43,29 @@ export interface Project {
   color: ProjectColor
   path?: string
   isActive?: boolean
+  /**
+   * `true` when this is the host's default project (set by the host's
+   * `default_project_id`). Mirrors `ProjectSummary.isDefault` on the wire.
+   * Distinct from `isActive` (per-client, set locally by `selectProject`).
+   * Set by the `projects` watch feed (`summary.isDefault` → `Project.isDefault`).
+   */
+  isDefault?: boolean
   isArchived?: boolean
   gitBranch?: string
   lastOpened?: Date
   defaultShell?: string
   envVars?: EnvVariable[]
   worktrees?: Worktree[]
-  activeWorktreeId?: string | null
   isGitRepo?: boolean
   symlinkDirs?: string[] // Directories to symlink from project root into worktrees
-}
-
-// Helper getters for worktree operations
-export function getActiveWorktree(project: Project): Worktree | undefined {
-  if (!project.activeWorktreeId) return undefined
-  return project.worktrees?.find((w) => w.id === project.activeWorktreeId)
+  /**
+   * Resolved project icon (spec-project-icon): the `data:` URI payload from
+   * `project_icon_resolve` / `POST /project/icon` plus a renderer-stamped
+   * `fetchedAt` staleness clock. `undefined` renders the colored monogram.
+   * Persisted via `PersistedProject.icon` so it shows immediately on restart
+   * before re-resolution finishes.
+   */
+  icon?: ProjectIcon
 }
 
 export function isWorktreeTermulManaged(worktree: Worktree): boolean {
@@ -78,6 +91,18 @@ export interface Terminal {
   output?: TerminalLine[]
   pendingScrollback?: string[] // Legacy text snapshot to restore on terminal mount
   transcript?: string // Raw PTY transcript used for ANSI/styling-preserving restoration
+  /**
+   * True once `transcript` lost its head to a size or hidden-buffer trim since
+   * the last consume, so it no longer continues the screen a cached xterm
+   * holds. Cleared by `consumeTranscript`.
+   */
+  transcriptTrimmed?: boolean
+  /**
+   * Captured DEC private-mode snapshot (R3) to replay before `pendingScrollback`
+   * on terminal mount, so an alt-screen TUI (vim/tmux/less) restores its
+   * screen/modes. Optional — absence degrades to content-only restore.
+   */
+  pendingModes?: TerminalModes
   detachedOutput?: string // Raw PTY output captured while no renderer is mounted
   rendererAttachmentCount?: number // Number of mounted renderers bound to this PTY
   healthStatus?: TerminalHealthStatus // Terminal health status
@@ -96,6 +121,13 @@ export interface Terminal {
   agentProgram?: string // Resolved/declared program for restore re-spawn (no prompt)
   agentArgs?: string[] // baseArgs only (seed prompt intentionally excluded for restore)
   kind?: 'shell' | 'agent' // Session type marker; defaults to 'shell' when unset
+  /**
+   * CAP-3: the reclaimable-terminal lease credential issued at spawn.
+   * IN-MEMORY ONLY — never written to auto-save/snapshot persistence,
+   * localStorage, or any browser storage. Set on spawn/rotate, cleared on
+   * kill/close/restart/clearTerminalPtyId.
+   */
+  claim?: string
 }
 
 export interface TerminalLine {

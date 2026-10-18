@@ -1,33 +1,40 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
+  Edit2,
+  FolderPlus,
   Globe,
   History,
   Keyboard,
-  Layers,
   Monitor,
   Palette,
   Pin,
   Save,
   Settings,
   SlidersHorizontal,
-  Terminal
-} from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+  Terminal,
+  X
+} from '@/components/icons'
+import { ProjectIcon } from '@/components/ProjectIcon'
 import {
   Command,
   CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
-  CommandList,
-  CommandShortcut
+  CommandList
 } from '@/components/ui/command'
+import { Kbd } from '@/components/ui/kbd'
+import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { usePinnedCommandIds, useTogglePinnedCommand } from '@/hooks/use-pinned-commands'
 import { useRecentCommandIds, useSaveRecentCommand } from '@/hooks/use-recent-commands'
 import { getColorClasses } from '@/lib/colors'
+import { isTauriContext } from '@/lib/tauri-runtime'
+import { terminalProfileCommandLine } from '@/lib/terminal-profiles'
 import { cn } from '@/lib/utils'
 import type { Project, ProjectColor } from '@/types/project'
+import type { TerminalProfile } from '@/types/settings'
 
 type CommandShortcutId = 'newTerminal' | 'newBrowserTab' | 'commandHistory' | 'colorThemePicker'
 
@@ -37,10 +44,17 @@ interface CommandPaletteProps {
   projects: Project[]
   onSwitchProject: (id: string) => void
   onAddTerminal?: () => void
+  terminalProfiles?: TerminalProfile[]
+  onOpenTerminalProfile?: (profile: TerminalProfile) => void
   onShowAgentLauncher?: () => void
   onLaunchAgent?: () => void
   onSaveSnapshot?: () => void
   onNewBrowserTab?: () => void
+  /** OpenPencil canvas mode: opens the active project's `.op` document as
+   * the canvas tab. Hidden on the mobile web shell (no canvas on phones). */
+  onOpenCanvas?: () => void
+  /** Story 7: opens the New Project modal (mobile creation entry + desktop). */
+  onNewProject?: () => void
   onOpenProjectSettings?: () => void
   onOpenAppPreferences?: () => void
   onOpenCommandHistory?: () => void
@@ -93,10 +107,14 @@ export function CommandPalette({
   projects,
   onSwitchProject,
   onAddTerminal,
+  terminalProfiles,
+  onOpenTerminalProfile,
   onShowAgentLauncher,
   onLaunchAgent,
   onSaveSnapshot,
   onNewBrowserTab,
+  onOpenCanvas,
+  onNewProject,
   onOpenProjectSettings,
   onOpenAppPreferences,
   onOpenCommandHistory,
@@ -112,7 +130,11 @@ export function CommandPalette({
   const saveRecentCommand = useSaveRecentCommand()
   const pinnedCommandIds = usePinnedCommandIds()
   const togglePinnedCommand = useTogglePinnedCommand()
-
+  // Story 11 (QA F9): on the mobile web shell the palette is top-anchored at
+  // pt-[7vh] (thumb-unreachable), shows dead ↑↓/↵/Esc desktop key hints, and
+  // offers no visible close. Mobile repositions to the lower third, hides the
+  // kbd hints, and renders a touch-sized close button. Desktop unchanged.
+  const isMobile = useMobileWebShell()
   const commands: CommandDef[] = useMemo(
     () => [
       ...(onAddTerminal
@@ -125,6 +147,30 @@ export function CommandPalette({
               description: 'Open a new shell in the active pane',
               keywords: ['shell', 'console', 'pty', 'workspace'],
               execute: onAddTerminal
+            }
+          ]
+        : []),
+      ...(onOpenTerminalProfile && terminalProfiles
+        ? terminalProfiles.map((profile) => ({
+            id: `terminal-profile-${profile.id}`,
+            category: 'workspace' as const,
+            icon: <Terminal aria-hidden="true" size={16} />,
+            label: `New Terminal: ${profile.name}`,
+            description: terminalProfileCommandLine(profile),
+            keywords: ['profile', 'shell', 'terminal', profile.name, profile.shell],
+            execute: () => onOpenTerminalProfile(profile)
+          }))
+        : []),
+      ...(onNewProject
+        ? [
+            {
+              id: 'new-project',
+              category: 'workspace' as const,
+              icon: <FolderPlus aria-hidden="true" size={16} />,
+              label: 'New Project',
+              description: 'Create a new project workspace',
+              keywords: ['project', 'create', 'new', 'workspace', 'folder'],
+              execute: onNewProject
             }
           ]
         : []),
@@ -155,7 +201,7 @@ export function CommandPalette({
             }
           ]
         : []),
-      ...(onNewBrowserTab
+      ...(onNewBrowserTab && isTauriContext()
         ? [
             {
               id: 'new-browser-tab',
@@ -179,6 +225,22 @@ export function CommandPalette({
               description: 'Capture the current workspace layout',
               keywords: ['snapshot', 'checkpoint', 'layout', 'save'],
               execute: onSaveSnapshot
+            }
+          ]
+        : []),
+      // Canvas is unavailable on the phone-width shell — the command itself
+      // is hidden there (the facade also answers a typed UNSUPPORTED_SURFACE
+      // failure for direct calls).
+      ...(onOpenCanvas && !isMobile
+        ? [
+            {
+              id: 'open-canvas',
+              category: 'workspace' as const,
+              icon: <Edit2 aria-hidden="true" size={16} />,
+              label: 'Open Canvas',
+              description: "Open the project's .op design document as a canvas tab",
+              keywords: ['canvas', 'openpencil', 'design', 'op', 'drawing', 'vector'],
+              execute: onOpenCanvas
             }
           ]
         : []),
@@ -211,9 +273,7 @@ export function CommandPalette({
       ...projects.map((project, index) => ({
         id: `project-${project.id}`,
         category: 'projects' as const,
-        icon: (
-          <Layers aria-hidden="true" size={16} className={getColorClasses(project.color).text} />
-        ),
+        icon: <ProjectIcon project={project} size={16} />,
         label: project.name,
         description: project.path ?? 'Switch active workspace project',
         keywords: ['project', 'switch', project.name, project.path].filter(
@@ -251,7 +311,10 @@ export function CommandPalette({
             }
           ]
         : []),
-      ...(onOpenShortcutMenu
+      // No shortcut menu is mounted on the mobile web shell (it lives in the
+      // desktop Rail footer only), so the command is hidden there as
+      // open-canvas is. Pinned and Recent derive from this list.
+      ...(onOpenShortcutMenu && !isMobile
         ? [
             {
               id: 'open-shortcut-menu',
@@ -264,7 +327,7 @@ export function CommandPalette({
             }
           ]
         : []),
-      ...(onSSHConnect && sshProfiles
+      ...(isTauriContext() && onSSHConnect && sshProfiles
         ? sshProfiles.map((profile) => ({
             id: `ssh-${profile.id}`,
             category: 'tools' as const,
@@ -280,10 +343,15 @@ export function CommandPalette({
       projects,
       onSwitchProject,
       onAddTerminal,
+      terminalProfiles,
+      onOpenTerminalProfile,
       onShowAgentLauncher,
       onLaunchAgent,
       onSaveSnapshot,
       onNewBrowserTab,
+      onOpenCanvas,
+      isMobile,
+      onNewProject,
       onOpenProjectSettings,
       onOpenAppPreferences,
       onOpenCommandHistory,
@@ -394,32 +462,30 @@ export function CommandPalette({
         key={keyPrefix ? `${keyPrefix}:${cmd.id}` : cmd.id}
         value={keyPrefix ? `${keyPrefix}:${getSearchableValue(cmd)}` : getSearchableValue(cmd)}
         onSelect={() => executeCommand(cmd)}
-        className="group flex items-center justify-between gap-3 px-2.5 py-1.5 cursor-pointer rounded-md data-[selected='true']:bg-background data-[selected=true]:text-foreground"
+        className="group flex cursor-pointer items-center justify-between gap-3 rounded-lg px-2.5 py-2 data-[selected='true']:bg-foreground/[0.06] data-[selected=true]:text-foreground"
       >
         <div className="flex min-w-0 items-center gap-2.5">
           <span
             className={cn(
-              'flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-secondary/70 text-muted-foreground group-data-[selected=true]:text-foreground',
-              cmd.projectColor && getColorClasses(cmd.projectColor).bg
+              'flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-foreground/[0.03]',
+              cmd.projectColor
+                ? getColorClasses(cmd.projectColor).text
+                : 'text-muted-foreground group-data-[selected=true]:text-foreground'
             )}
           >
             {cmd.icon}
           </span>
           <span className="flex min-w-0 flex-col">
-            <span className="truncate text-sm font-medium leading-5">{cmd.label}</span>
+            <span className="truncate text-xs font-medium leading-5">{cmd.label}</span>
             {cmd.description && (
-              <span className="truncate text-xs leading-4 text-muted-foreground">
+              <span className="truncate text-2xs leading-4 text-muted-foreground">
                 {cmd.description}
               </span>
             )}
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {cmd.shortcut && (
-            <CommandShortcut className="rounded border border-border bg-secondary/70 px-1.5 py-0.5 font-mono text-3xs tracking-normal text-muted-foreground">
-              {cmd.shortcut}
-            </CommandShortcut>
-          )}
+          {cmd.shortcut && <Kbd className="px-1.5 py-0.5 font-mono">{cmd.shortcut}</Kbd>}
           <button
             type="button"
             aria-label={isPinned ? `Unpin ${cmd.label}` : `Pin ${cmd.label}`}
@@ -435,7 +501,7 @@ export function CommandPalette({
               void togglePin(cmd.id)
             }}
             className={cn(
-              'flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-secondary hover:text-foreground group-data-[selected=true]:text-foreground',
+              'flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-foreground/[0.06] hover:text-foreground group-data-[selected=true]:text-foreground',
               isPinned
                 ? 'text-foreground opacity-100'
                 : 'opacity-0 group-data-[selected=true]:opacity-100 group-hover:opacity-100'
@@ -455,28 +521,53 @@ export function CommandPalette({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[60] flex flex-col items-center pt-[7vh] bg-black/40 backdrop-blur-sm"
+          className={cn(
+            'fixed inset-0 z-[60] flex flex-col items-center bg-overlay/40 backdrop-blur-sm',
+            // Story 11 (QA F9): mobile anchor is the lower third (thumb
+            // zone) instead of the desktop pt-[7vh] top anchor, with the
+            // bottom safe-area inset honored.
+            isMobile ? 'justify-end pb-[max(2rem,env(safe-area-inset-bottom))] px-3' : 'pt-[7vh]'
+          )}
           onClick={onClose}
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.97, y: -8 }}
+            initial={{ opacity: 0, scale: 0.97, y: isMobile ? 8 : -8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: -8 }}
+            exit={{ opacity: 0, scale: 0.97, y: isMobile ? 8 : -8 }}
             transition={{ duration: 0.15 }}
-            className="w-full max-w-xl overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+            className="w-full max-w-[100vw] overflow-hidden rounded-xl border border-border bg-popover shadow-2xl md:max-w-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <Command
-              className="[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-3xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
+              className="[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-2xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
               shouldFilter={true}
             >
-              <CommandInput
-                ref={inputRef}
-                placeholder="Search commands, projects, settings..."
-                value={query}
-                onValueChange={setQuery}
-                className="h-10 py-2 text-sm"
-              />
+              <div className="relative">
+                <CommandInput
+                  ref={inputRef}
+                  placeholder="Search commands, projects, settings..."
+                  value={query}
+                  onValueChange={setQuery}
+                  className="h-12 py-2 text-sm"
+                />
+                {/* Story 11 (QA F5): visible touch-sized close — Escape is
+                    dead on phones and the backdrop tap target is not
+                    obvious while the OSK is up. 44px floor + hit-slop idiom. */}
+                {isMobile && (
+                  <button
+                    type="button"
+                    className="absolute right-1 top-1/2 z-10 flex size-11 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                    aria-label="Close command palette"
+                    title="Close command palette"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onClose()
+                    }}
+                  >
+                    <X aria-hidden="true" size={20} />
+                  </button>
+                )}
+              </div>
               <CommandList className="max-h-[52vh] px-1 py-1">
                 <CommandEmpty>No commands found.</CommandEmpty>
 
@@ -499,26 +590,30 @@ export function CommandPalette({
                 ))}
               </CommandList>
 
-              <div className="label-group flex items-center justify-end gap-3 border-t border-border bg-background px-3 py-2 text-muted-foreground">
-                <span className="flex items-center gap-3">
-                  <span className="flex items-center">
-                    <kbd className="mr-1 rounded bg-secondary px-1 text-foreground">↑↓</kbd>
-                    Navigate
-                  </span>
-                  <span className="flex items-center">
-                    <kbd className="mr-1 rounded bg-secondary px-1 text-foreground">↵</kbd>
-                    Select
-                  </span>
-                  <span className="flex items-center">
-                    <kbd className="mr-1 rounded bg-secondary px-1 text-foreground">Esc</kbd>
-                    Close
-                  </span>
-                </span>
-              </div>
+              {/* Story 11 (QA F9): ↑↓/↵/Esc kbd hints are dead affordances
+                  on touch (no hardware keyboard) — hide them on the mobile
+                  shell. Desktop keeps them byte-identical. */}
+              {!isMobile && (
+                <div className="flex h-9 items-center justify-end gap-3.5 border-t border-border px-3.5">
+                  <PaletteHint keys="↑↓" label="Move" />
+                  <PaletteHint keys="↵" label="Run" />
+                  <PaletteHint keys="Esc" label="Close" />
+                </div>
+              )}
             </Command>
           </motion.div>
         </motion.div>
       )}
     </AnimatePresence>
+  )
+}
+
+/** Footer key hint: a hairline Kbd and a short muted label. */
+function PaletteHint({ keys, label }: { keys: string; label: string }): React.JSX.Element {
+  return (
+    <span className="flex items-center gap-1.5 text-2xs text-muted-foreground">
+      <Kbd className="px-1.5">{keys}</Kbd>
+      {label}
+    </span>
   )
 }

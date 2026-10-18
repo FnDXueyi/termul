@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { persistenceApi } from '@/lib/api'
+import { STORE_VALUE_MAX_BYTES, storedValueBytes } from '@/lib/persistence-trim'
 import {
   isTerminalRestoreInProgress,
   saveTerminalLayout,
@@ -11,10 +13,16 @@ const { mockRecordTerminalContinuityEvent } = vi.hoisted(() => ({
   mockRecordTerminalContinuityEvent: vi.fn()
 }))
 
+import type { TerminalModes } from '@shared/types/ipc.types'
+import { resetTerminalStore } from '@/lib/test-utils/store'
+import { mockPersistedTerminal, mockTerminal } from '@/lib/test-utils/terminal'
 import type { Terminal } from '@/types/project'
-import type { PersistedTerminal } from '../../shared/types/persistence.types'
+import type {
+  PersistedTerminal,
+  PersistedTerminalLayout
+} from '../../shared/types/persistence.types'
 import { useTerminalStore } from '../stores/terminal-store'
-import { extractScrollback } from '../utils/terminal-registry'
+import { extractScrollback, getTerminalModes } from '../utils/terminal-registry'
 
 // Mock terminal-registry
 vi.mock('../utils/terminal-registry', () => ({
@@ -22,7 +30,9 @@ vi.mock('../utils/terminal-registry', () => ({
     // Return mock scrollback for testing
     if (terminalId === '1' || terminalId === 'pty-1') return ['line 1', 'line 2']
     return undefined
-  })
+  }),
+  // R3: no tracker registered in tests → undefined (content-only restore).
+  getTerminalModes: vi.fn(() => undefined)
 }))
 
 vi.mock('@/lib/terminal-continuity-instrumentation', () => ({
@@ -67,9 +77,15 @@ describe('useTerminalAutoSave', () => {
   describe('serializeTerminalsForProject', () => {
     it('should serialize terminals for a specific project', () => {
       const terminals: Terminal[] = [
-        { id: '1', name: 'Terminal 1', projectId: 'proj-1', shell: 'powershell', cwd: '/path/1' },
-        { id: '2', name: 'Terminal 2', projectId: 'proj-1', shell: 'bash' },
-        { id: '3', name: 'Terminal 3', projectId: 'proj-2', shell: 'zsh' }
+        mockTerminal({
+          id: '1',
+          name: 'Terminal 1',
+          projectId: 'proj-1',
+          shell: 'powershell',
+          cwd: '/path/1'
+        }),
+        mockTerminal({ id: '2', name: 'Terminal 2', projectId: 'proj-1', shell: 'bash' }),
+        mockTerminal({ id: '3', name: 'Terminal 3', projectId: 'proj-2', shell: 'zsh' })
       ]
 
       const result = serializeTerminalsForProject(terminals, 'proj-1', '1')
@@ -95,7 +111,7 @@ describe('useTerminalAutoSave', () => {
 
     it('should set activeTerminalId to null when active terminal not in project', () => {
       const terminals: Terminal[] = [
-        { id: '1', name: 'Terminal 1', projectId: 'proj-1', shell: 'powershell' }
+        mockTerminal({ id: '1', name: 'Terminal 1', projectId: 'proj-1', shell: 'powershell' })
       ]
 
       const result = serializeTerminalsForProject(terminals, 'proj-1', 'non-existent')
@@ -105,7 +121,7 @@ describe('useTerminalAutoSave', () => {
 
     it('should return empty terminals array for non-existent project', () => {
       const terminals: Terminal[] = [
-        { id: '1', name: 'Terminal 1', projectId: 'proj-1', shell: 'powershell' }
+        mockTerminal({ id: '1', name: 'Terminal 1', projectId: 'proj-1', shell: 'powershell' })
       ]
 
       const result = serializeTerminalsForProject(terminals, 'proj-999', '1')
@@ -127,14 +143,14 @@ describe('useTerminalAutoSave', () => {
 
     it('should not include output field in serialized terminals but include scrollback', () => {
       const terminals: Terminal[] = [
-        {
+        mockTerminal({
           id: '1',
           ptyId: 'pty-1',
           name: 'Terminal 1',
           projectId: 'proj-1',
           shell: 'powershell',
           output: [{ type: 'output', content: 'some output' }]
-        }
+        })
       ]
 
       const result = serializeTerminalsForProject(terminals, 'proj-1', '1')
@@ -147,13 +163,13 @@ describe('useTerminalAutoSave', () => {
 
     it('should prefer ptyId when extracting scrollback', () => {
       const terminals: Terminal[] = [
-        {
+        mockTerminal({
           id: '1',
           ptyId: 'pty-1',
           name: 'Terminal 1',
           projectId: 'proj-1',
           shell: 'powershell'
-        }
+        })
       ]
 
       serializeTerminalsForProject(terminals, 'proj-1', '1')
@@ -161,16 +177,64 @@ describe('useTerminalAutoSave', () => {
       expect(extractScrollback).toHaveBeenCalledWith('pty-1')
     })
 
+    it('captures DEC modes via getTerminalModes keyed by ptyId ?? id (R3)', () => {
+      const modes: TerminalModes = {
+        alternateScreen: true,
+        bracketedPaste: true,
+        applicationCursor: false,
+        mouseTracking: null,
+        sgrMouseMode: false,
+        sgrMousePixelsMode: false
+      }
+      vi.mocked(getTerminalModes).mockReturnValue(modes)
+
+      const terminals: Terminal[] = [
+        mockTerminal({
+          id: '1',
+          ptyId: 'pty-1',
+          name: 'Terminal 1',
+          projectId: 'proj-1',
+          shell: 'powershell'
+        })
+      ]
+
+      const result = serializeTerminalsForProject(terminals, 'proj-1', '1')
+
+      // R3: modes travel alongside scrollback, keyed by the same registry id.
+      expect(getTerminalModes).toHaveBeenCalledWith('pty-1')
+      expect(result.terminals[0].modes).toEqual(modes)
+
+      // Restore the content-only default for subsequent tests.
+      vi.mocked(getTerminalModes).mockReturnValue(undefined)
+    })
+
+    it('omits modes when no tracker is registered (content-only, R3 degrade)', () => {
+      const terminals: Terminal[] = [
+        mockTerminal({
+          id: '1',
+          ptyId: 'pty-1',
+          name: 'Terminal 1',
+          projectId: 'proj-1',
+          shell: 'powershell'
+        })
+      ]
+
+      const result = serializeTerminalsForProject(terminals, 'proj-1', '1')
+
+      expect(getTerminalModes).toHaveBeenCalledWith('pty-1')
+      expect(result.terminals[0]).not.toHaveProperty('modes')
+    })
+
     it('should prefer extracted scrollback over transcript when available', () => {
       const terminals: Terminal[] = [
-        {
+        mockTerminal({
           id: '1',
           ptyId: 'pty-1',
           name: 'Terminal 1',
           projectId: 'proj-1',
           shell: 'powershell',
           transcript: 'line 3\nline 4\n'
-        }
+        })
       ]
 
       const result = serializeTerminalsForProject(terminals, 'proj-1', '1')
@@ -183,11 +247,7 @@ describe('useTerminalAutoSave', () => {
 
   describe('syncScrollbackToStore', () => {
     beforeEach(() => {
-      useTerminalStore.setState({
-        terminals: [],
-        activeTerminalId: '',
-        ptyIdIndex: new Map()
-      })
+      resetTerminalStore()
     })
 
     it('should update pendingScrollback in store for each terminal', () => {
@@ -195,12 +255,11 @@ describe('useTerminalAutoSave', () => {
       const terminal = store.addTerminal('Terminal 1', 'proj-1', 'bash')
 
       const persistedTerminals: PersistedTerminal[] = [
-        {
+        mockPersistedTerminal({
           id: terminal.id,
           name: 'Terminal 1',
-          shell: 'bash',
           scrollback: ['new scrollback line 1', 'new scrollback line 2']
-        }
+        })
       ]
 
       syncScrollbackToStore(persistedTerminals)
@@ -221,12 +280,11 @@ describe('useTerminalAutoSave', () => {
       ])
 
       const persistedTerminals: PersistedTerminal[] = [
-        {
+        mockPersistedTerminal({
           id: terminal.id,
           name: 'Terminal 1',
-          shell: 'bash',
           scrollback: undefined
-        }
+        })
       ]
 
       syncScrollbackToStore(persistedTerminals)
@@ -239,12 +297,11 @@ describe('useTerminalAutoSave', () => {
 
     it('should handle non-existent terminal ids gracefully', () => {
       const persistedTerminals: PersistedTerminal[] = [
-        {
+        mockPersistedTerminal({
           id: 'non-existent-id',
           name: 'Ghost Terminal',
-          shell: 'bash',
           scrollback: ['some lines']
-        }
+        })
       ]
 
       expect(() => syncScrollbackToStore(persistedTerminals)).not.toThrow()
@@ -253,11 +310,7 @@ describe('useTerminalAutoSave', () => {
 
   describe('saveTerminalLayout', () => {
     beforeEach(() => {
-      useTerminalStore.setState({
-        terminals: [],
-        activeTerminalId: '',
-        ptyIdIndex: new Map()
-      })
+      resetTerminalStore()
     })
 
     it('should sync scrollback to store before writing to disk', async () => {
@@ -305,6 +358,63 @@ describe('useTerminalAutoSave', () => {
           extractedScrollbackLineCount: 2,
           persistedScrollbackLineCount: 2
         }
+      })
+    })
+
+    describe('value cap', () => {
+      const transcriptOf = (lines: number): string =>
+        Array.from(
+          { length: lines },
+          (_, i) => `out-${String(i).padStart(6, '0')} ${'.'.repeat(80)}\n`
+        ).join('')
+
+      afterEach(() => {
+        vi.restoreAllMocks()
+      })
+
+      function seedTerminalWithTranscript(transcript: string): string {
+        const store = useTerminalStore.getState()
+        const terminal = store.addTerminal('Terminal 1', 'proj-1', 'bash')
+        store.setTerminalPtyId(terminal.id, 'pty-1')
+        useTerminalStore.setState((state) => ({
+          terminals: state.terminals.map((t) => (t.id === terminal.id ? { ...t, transcript } : t))
+        }))
+        return terminal.id
+      }
+
+      it('writes a layout under the cap as it is', async () => {
+        const write = vi
+          .spyOn(persistenceApi, 'write')
+          .mockResolvedValue({ success: true, data: undefined })
+        const transcript = transcriptOf(100)
+        seedTerminalWithTranscript(transcript)
+
+        await saveTerminalLayout('proj-1')
+
+        const layout = write.mock.calls[0][1] as PersistedTerminalLayout
+        expect(layout.terminals[0].transcript).toBe(transcript)
+      })
+
+      it('trims the oldest output of a layout over the cap and keeps the newest', async () => {
+        const write = vi
+          .spyOn(persistenceApi, 'write')
+          .mockResolvedValue({ success: true, data: undefined })
+        const transcript = transcriptOf(5000) // ~450 KB
+        const id = seedTerminalWithTranscript(transcript)
+
+        await saveTerminalLayout('proj-1')
+
+        const [key, value] = write.mock.calls[0]
+        expect(key).toBe('terminals/proj-1')
+        const layout = value as PersistedTerminalLayout
+        expect(storedValueBytes(layout)).toBeLessThanOrEqual(STORE_VALUE_MAX_BYTES)
+        const saved = layout.terminals[0].transcript ?? ''
+        expect(saved.length).toBeGreaterThan(0)
+        expect(saved.length).toBeLessThan(transcript.length)
+        expect(transcript.endsWith(saved)).toBe(true)
+        // The in-memory transcript keeps everything: only the saved copy is cut.
+        const live = useTerminalStore.getState().terminals.find((t) => t.id === id)
+        expect(live?.transcript).toBe(transcript)
       })
     })
   })

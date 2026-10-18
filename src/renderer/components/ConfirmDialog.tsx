@@ -1,7 +1,20 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect } from 'react'
-import { cn } from '@/lib/utils'
+import { type KeyboardEvent, useCallback, useEffect, useId, useRef } from 'react'
+import { AlertTriangle } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { captureFocusReturnTarget } from '@/lib/focus-return'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
+
+/**
+ * Prefix of the id each open `ConfirmDialog` registers on the overlay stack, so
+ * a caller can tell from the store that a confirm is (still) open
+ * (`lib/confirm-focus-return`).
+ */
+export const CONFIRM_DIALOG_OVERLAY_PREFIX = 'confirm-dialog:'
+
+/** Elements Tab reaches, in DOM order (the focus trap wraps over these). */
+const TABBABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
 interface ConfirmDialogProps {
   isOpen: boolean
@@ -33,6 +46,50 @@ export function ConfirmDialog({
   onConfirm,
   onCancel
 }: ConfirmDialogProps): React.JSX.Element {
+  // Mobile web shell: system back cancels this dialog (inert on desktop).
+  const dialogId = useId()
+  const overlayId = `${CONFIRM_DIALOG_OVERLAY_PREFIX}${dialogId}`
+  useOverlayRegistration(overlayId, isOpen, onCancel, { mobileShellOnly: true })
+
+  // Focus moves into the dialog (Cancel for a danger confirm, so a stray
+  // Enter never destroys anything) and returns to where it was on close —
+  // when that element still exists; `lib/confirm-focus-return` handles the
+  // cases where it does not.
+  const returnFocusTo = useRef<HTMLElement | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const initialFocusRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!isOpen) return
+    returnFocusTo.current = captureFocusReturnTarget()
+    const focusInitial = () => {
+      const dialog = dialogRef.current
+      if (!dialog || dialog.contains(document.activeElement)) return
+      // Loading disables the initial button; the dialog itself holds focus then.
+      const initial = initialFocusRef.current
+      if (initial && !initial.disabled) initial.focus()
+      else dialog.focus()
+    }
+    // A layer closing as the confirm opens (a menu that raised it) may take
+    // focus back for a few frames; keep pulling it in until it settles.
+    let frames = 0
+    let raf = requestAnimationFrame(function pull() {
+      focusInitial()
+      if (++frames < 30) raf = requestAnimationFrame(pull)
+    })
+    // Modal: focus that leaves the dialog comes back.
+    const contain = (e: FocusEvent) => {
+      if (e.target instanceof Node && !dialogRef.current?.contains(e.target)) focusInitial()
+    }
+    document.addEventListener('focusin', contain)
+    return () => {
+      cancelAnimationFrame(raf)
+      document.removeEventListener('focusin', contain)
+      const target = returnFocusTo.current
+      returnFocusTo.current = null
+      if (target?.isConnected) target.focus()
+    }
+  }, [isOpen])
+
   // Handle Escape key to close dialog
   useEffect(() => {
     if (!isOpen) return
@@ -50,7 +107,26 @@ export function ConfirmDialog({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Tab') {
+        // Keep Tab inside the dialog (it is modal), over the children's
+        // controls as well as the footer buttons.
+        const tabbable = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(TABBABLE))
+        const first = tabbable[0]
+        const last = tabbable[tabbable.length - 1]
+        const active = document.activeElement
+        if (!first) {
+          // Nothing tabbable (all disabled while loading): stay on the dialog.
+          e.preventDefault()
+        } else if (e.shiftKey && (active === first || active === e.currentTarget)) {
+          e.preventDefault()
+          last.focus()
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault()
+          first.focus()
+        }
+      } else if (e.key === 'Enter' && e.target === e.currentTarget && !isLoading) {
+        // Only Enter on the dialog itself confirms: a focused control handles
+        // its own Enter (Cancel must not confirm, a checkbox must not either).
         e.preventDefault()
         onConfirm()
       } else if (e.key === 'Escape') {
@@ -58,7 +134,7 @@ export function ConfirmDialog({
         onCancel()
       }
     },
-    [onConfirm, onCancel]
+    [onConfirm, onCancel, isLoading]
   )
 
   return (
@@ -68,7 +144,8 @@ export function ConfirmDialog({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+          data-sibling-dialog
+          className="fixed inset-0 bg-overlay/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={onCancel}
         >
           <motion.div
@@ -79,19 +156,31 @@ export function ConfirmDialog({
             className="bg-card rounded-lg shadow-2xl w-[400px] border border-border overflow-hidden"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={handleKeyDown}
+            ref={dialogRef}
             tabIndex={-1}
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby={`${dialogId}-title`}
+            aria-describedby={`${dialogId}-message`}
           >
             {/* Content */}
             <div className="p-6">
               <div className="flex items-start gap-4">
                 {variant === 'danger' && (
-                  <div className="flex-shrink-0 w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center">
-                    <AlertTriangle className="w-5 h-5 text-red-500" />
+                  <div className="flex-shrink-0 w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center">
+                    <AlertTriangle className="w-5 h-5 text-destructive" />
                   </div>
                 )}
                 <div className="flex-1">
-                  <h3 className="text-sm font-semibold text-foreground mb-1">{title}</h3>
-                  <p className="text-sm text-muted-foreground">{message}</p>
+                  <h3
+                    id={`${dialogId}-title`}
+                    className="text-sm font-semibold text-foreground mb-1"
+                  >
+                    {title}
+                  </h3>
+                  <p id={`${dialogId}-message`} className="text-sm text-muted-foreground">
+                    {message}
+                  </p>
                   {children && <div className="mt-4">{children}</div>}
                 </div>
               </div>
@@ -99,34 +188,38 @@ export function ConfirmDialog({
 
             {/* Footer */}
             <div className="px-6 py-3 bg-secondary/50 flex justify-end gap-2 border-t border-border">
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
                 onClick={onCancel}
                 disabled={isLoading}
-                className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                ref={variant === 'danger' ? initialFocusRef : undefined}
               >
                 {cancelLabel}
-              </button>
+              </Button>
               {secondaryAction && (
-                <button
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
                   onClick={secondaryAction.onClick}
                   disabled={isLoading}
-                  className="px-3 py-1.5 text-xs font-medium rounded transition-all text-red-400 hover:text-red-300 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 >
                   {secondaryAction.label}
-                </button>
+                </Button>
               )}
-              <button
+              <Button
+                type="button"
+                size="sm"
+                variant={variant === 'danger' ? 'destructive' : 'default'}
                 onClick={onConfirm}
+                ref={variant === 'danger' ? undefined : initialFocusRef}
                 disabled={isLoading}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded transition-all disabled:opacity-50 disabled:cursor-not-allowed',
-                  variant === 'danger'
-                    ? 'bg-red-500 text-white hover:bg-red-600'
-                    : 'bg-primary text-primary-foreground hover:bg-primary/90'
-                )}
               >
                 {isLoading ? 'Loading...' : confirmLabel}
-              </button>
+              </Button>
             </div>
           </motion.div>
         </motion.div>

@@ -1,5 +1,7 @@
 import type { AppCloseRequestedCallback, IpcResult, WindowApi } from '@shared/types/ipc.types'
 import { getCurrentWindow, LogicalPosition, LogicalSize } from '@tauri-apps/api/window'
+import { logFrontendError } from './log-api'
+import { isWindows } from './platform'
 
 /**
  * Wrap window operations in IpcResult<T> pattern with try/catch
@@ -48,6 +50,16 @@ function isTauriContext(): boolean {
     typeof window !== 'undefined' &&
     typeof (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ !== 'undefined'
   )
+}
+
+// Registered app-close listeners (the close/hide decision owners). Other
+// close listeners prevent their own event only while one exists, so the
+// window still closes when no owner is mounted (issue #1146).
+let appCloseOwners = 0
+
+/** Whether an app-close listener currently owns the close/hide decision. */
+export function hasAppCloseOwner(): boolean {
+  return appCloseOwners > 0
 }
 
 /**
@@ -106,14 +118,46 @@ export function createTauriWindowApi(): WindowApi {
         }
       const window = getCurrentWindow()
       const unlisten = window.onCloseRequested(async (event) => {
+        if (!isWindows) {
+          // macOS/Linux close hides to the tray. Do not enter the renderer's
+          // destroy-after-flush quit flow; tray Quit emits a separate event.
+          event.preventDefault()
+          try {
+            await window.hide()
+          } catch (error) {
+            void logFrontendError({
+              source: 'tauri-window-api',
+              message: `Failed to hide window to tray: ${error instanceof Error ? error.message : String(error)}`,
+              stack: error instanceof Error ? error.stack : undefined
+            })
+          }
+          return
+        }
+
         const shouldClose = await callback()
         if (!shouldClose) {
           event.preventDefault()
         }
       })
+      // Count the owner before registration settles: an unprevented close in
+      // that window would quit the app, while an early count at worst ignores
+      // one click that arrives before this listener is live.
+      appCloseOwners += 1
+      let counted = true
+      const release = (): void => {
+        if (!counted) return
+        counted = false
+        appCloseOwners -= 1
+      }
+      void unlisten.catch(release)
       // Return sync cleanup function - unwrap the Promise
       return () => {
-        void unlisten.then((fn) => fn())
+        release()
+        // A failed registration is already handled (and released) above.
+        void unlisten.then(
+          (fn) => fn(),
+          () => undefined
+        )
       }
     },
 

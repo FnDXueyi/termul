@@ -1,7 +1,10 @@
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { X } from 'lucide-react'
+import { useId, useState } from 'react'
+import { X } from '@/components/icons'
+import { NativeWebviewOccluder } from '@/hooks/use-native-webview-occlusion'
 
 import { cn } from '@/lib/utils'
+import { useOverlayRegistration } from '@/stores/overlay-stack-store'
 
 interface ImageLightboxProps {
   /** Full-resolution image source shown when expanded. */
@@ -21,8 +24,14 @@ interface ImageLightboxProps {
  * supply the interactive element ourselves.
  */
 export function ImageLightbox({ src, alt, children }: ImageLightboxProps): React.JSX.Element {
+  // Open state is held here (not inside Radix) so the mobile web shell can
+  // register the lightbox in the overlay back stack. The Trigger stays, so
+  // focus returns to the thumbnail on close.
+  const [open, setOpen] = useState(false)
+  const id = `image-lightbox:${useId()}`
+  useOverlayRegistration(id, open, () => setOpen(false), { mobileShellOnly: true })
   return (
-    <DialogPrimitive.Root>
+    <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
       <DialogPrimitive.Trigger asChild>
         <button
           type="button"
@@ -33,7 +42,7 @@ export function ImageLightbox({ src, alt, children }: ImageLightboxProps): React
         </button>
       </DialogPrimitive.Trigger>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-overlay/85 backdrop-blur-sm data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
           aria-describedby={undefined}
           className={cn(
@@ -41,15 +50,16 @@ export function ImageLightbox({ src, alt, children }: ImageLightboxProps): React
             'data-[state=closed]:animate-out data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95'
           )}
         >
+          <NativeWebviewOccluder />
           <DialogPrimitive.Title className="sr-only">{alt}</DialogPrimitive.Title>
           <img
             src={src}
             alt={alt}
-            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl outline outline-1 -outline-offset-1 outline-white/10"
+            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl outline outline-1 -outline-offset-1 outline-primary-foreground/10"
           />
           <DialogPrimitive.Close
             aria-label="Close image"
-            className="fixed right-4 top-4 flex size-9 items-center justify-center rounded-full bg-white/10 text-white/90 backdrop-blur transition-colors hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+            className="fixed right-4 top-4 flex size-9 items-center justify-center rounded-full bg-primary-foreground/10 text-primary-foreground/90 backdrop-blur transition-colors hover:bg-primary-foreground/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-foreground/40"
           >
             <X className="size-4" />
           </DialogPrimitive.Close>

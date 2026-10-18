@@ -1,0 +1,296 @@
+//! Local-only Claude setup commands for the standalone `termul-server`
+//! (`termul-server claude ...`). Extracted from `server_main.rs`, which stays
+//! a thin wiring file (same pattern as the `onboard` module).
+//!
+//! These commands run before the server binds a socket, so API-key
+//! provisioning is never exposed through HTTP or WS. They refuse echoing TTY
+//! input, cap input size, and never print or log the key.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use crate::acp::{AcpCatalogService, AcpInstallService, ClaudeAgentService, ClaudeAuthMode};
+use crate::data_lock::DataLocks;
+use crate::web::ServerConfig;
+
+/// Dispatch `termul-server claude <args...>`. Handled by the binary before any
+/// tokio/app setup so the subcommand never reaches the server bootstrap.
+pub fn run(args: &[String]) -> ExitCode {
+    use std::io::{IsTerminal, Read};
+
+    let mut command_args = Vec::new();
+    let mut state_dir = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--state-dir" {
+            if index + 1 >= args.len() {
+                eprintln!("termul-server claude: --state-dir requires a path");
+                return ExitCode::from(2);
+            }
+            state_dir = Some(PathBuf::from(&args[index + 1]));
+            index += 2;
+        } else {
+            command_args.push(args[index].clone());
+            index += 1;
+        }
+    }
+    let state_dir = state_dir.unwrap_or_else(|| {
+        ServerConfig::from_args(Vec::<String>::new())
+            .map(|config| config.service_account_state_dir())
+            .unwrap_or_else(|_| std::env::temp_dir().join("termul"))
+    });
+    let install_root = state_dir.join("acp-registry-binaries");
+    let service = ClaudeAgentService::system(install_root.clone());
+
+    match command_args.as_slice() {
+        [area, action] if area == "auth" && action == "status" => {
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("termul-server claude: could not start runtime: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            match runtime.block_on(service.setup_status()) {
+                Ok(status) => {
+                    println!(
+                        "Claude Code CLI installed: {}",
+                        yes_no(status.cli_installed)
+                    );
+                    println!(
+                        "Claude Code CLI signed in: {}",
+                        status.cli_authenticated.map(yes_no).unwrap_or("unknown")
+                    );
+                    println!(
+                        "Authentication mode: {}",
+                        match status.auth_mode {
+                            ClaudeAuthMode::ClaudeCode => "Claude Code login",
+                            ClaudeAuthMode::ApiKey => "API key",
+                        }
+                    );
+                    println!(
+                        "API key stored in OS keychain: {}",
+                        if status.keychain_available {
+                            yes_no(status.api_key_configured)
+                        } else {
+                            "unavailable (OS keychain not reachable)"
+                        }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("termul-server claude: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        [area, action] if area == "auth" && action == "login" => match service.run_cli_login() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("termul-server claude: {error}");
+                ExitCode::from(1)
+            }
+        },
+        [area, action, mode] if area == "auth" && action == "mode" => {
+            let mode = match mode.as_str() {
+                "claude-code" => ClaudeAuthMode::ClaudeCode,
+                "api-key" => ClaudeAuthMode::ApiKey,
+                _ => {
+                    eprintln!("Use `claude-code` or `api-key`.");
+                    return ExitCode::from(2);
+                }
+            };
+            match service.set_auth_mode(mode) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("termul-server claude: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        [area, action] if area == "api-key" && action == "set" => {
+            let stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                eprintln!(
+                    "Refusing an echoing terminal input. Use a hidden prompt, then pipe the key to this command."
+                );
+                return ExitCode::from(2);
+            }
+            let mut input = stdin.take(8193);
+            let mut bytes = Vec::new();
+            if let Err(error) = input.read_to_end(&mut bytes) {
+                eprintln!("termul-server claude: could not read key from stdin: {error}");
+                return ExitCode::from(1);
+            }
+            if bytes.len() > 8192 {
+                eprintln!("termul-server claude: API key input is too large");
+                return ExitCode::from(2);
+            }
+            let key = match String::from_utf8(bytes) {
+                Ok(key) => key.trim().to_string(),
+                Err(_) => {
+                    eprintln!("termul-server claude: API key input must be UTF-8");
+                    return ExitCode::from(2);
+                }
+            };
+            match service.save_api_key(key) {
+                Ok(()) => {
+                    println!("Claude API key saved in the OS keychain.");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("termul-server claude: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        [area, action] if area == "api-key" && action == "delete" => {
+            match service.delete_api_key() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("termul-server claude: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        [area, rest @ ..] if area == "account" => run_account(&service, rest),
+        [action] if action == "install" => {
+            // `install` opens the live state dir's catalog + install stores.
+            // AD-14: refuse (instead of racing a running host) when another
+            // Termul host holds the data-dir lock; hold it until we exit.
+            let Some(_data_lock) = lock_state_dir(&state_dir) else {
+                return ExitCode::from(1);
+            };
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("termul-server claude: could not start runtime: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            let result = runtime.block_on(async {
+                let catalog = AcpCatalogService::open(state_dir.join("acp-catalog")).await?;
+                let installer = AcpInstallService::open(install_root, Arc::clone(&catalog)).await?;
+                installer
+                    .install_by_id("claude-acp")
+                    .await
+                    .map_err(|error| std::io::Error::other(error.message))
+            });
+            match result {
+                Ok(_) => {
+                    println!("Pinned Claude Agent ACP package installed.");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("termul-server claude: install failed: {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            eprintln!("{}", usage());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `termul-server claude account <list|add|login|rename|remove|default|project>`.
+/// Prints account names and ids only — never login details.
+fn run_account(service: &ClaudeAgentService, args: &[String]) -> ExitCode {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = match args.as_slice() {
+        ["list"] => {
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("termul-server claude: could not start runtime: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            runtime
+                .block_on(service.profile_list())
+                .map(|snapshot| {
+                    for row in &snapshot.profiles {
+                        let default = if row.id == snapshot.default_account_id {
+                            " (default)"
+                        } else {
+                            ""
+                        };
+                        let signed_in = row.signed_in.map(yes_no).unwrap_or("unknown");
+                        println!("{}  {}{default}  signed in: {signed_in}", row.id, row.name);
+                    }
+                    for (project, choice) in &snapshot.project_profiles {
+                        println!("project {project} uses {choice}");
+                    }
+                })
+        }
+        ["add", name] => service.insert_profile(name).map(|created| {
+            println!("Added account {} ({}).", created.name, created.id);
+            println!(
+                "Sign in with: termul-server claude account login {}",
+                created.id
+            );
+        }),
+        ["login", id] => service.run_account_cli_login(id),
+        ["rename", id, name] => service.rename_account(id, name),
+        ["remove", id] => match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(service.remove_account(id)).map(|moved| {
+                println!(
+                    "Removed. {} projects moved to the default account.",
+                    moved.len()
+                );
+            }),
+            Err(error) => Err(format!("could not start runtime: {error}")),
+        },
+        ["default", id] => service.set_default_account(id),
+        ["project", project, "default"] => service.set_project_account(project, None),
+        ["project", project, id] => service.set_project_account(project, Some(id)),
+        _ => {
+            eprintln!("{}", usage_text());
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("termul-server claude: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn usage_text() -> &'static str {
+    "Usage: termul-server claude [--state-dir PATH] account <list|add NAME|login ID|rename ID NAME|remove ID|default ID|project PROJECT_ID ID|default>"
+}
+
+/// Take the AD-14 data-dir lock for `termul-server claude install`. `None`
+/// after printing why it was refused.
+fn lock_state_dir(state_dir: &std::path::Path) -> Option<DataLocks> {
+    let mut locks = DataLocks::new();
+    match locks.lock_dir(state_dir) {
+        Ok(()) => Some(locks),
+        Err(error) if error.is_busy() => {
+            eprintln!(
+                "termul-server claude: install refused — a Termul host (termul-server or the desktop app) is running on this state directory: {error}"
+            );
+            None
+        }
+        Err(error) => {
+            eprintln!("termul-server claude: cannot lock the state directory: {error}");
+            None
+        }
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn usage() -> &'static str {
+    "Usage: termul-server claude [--state-dir PATH] <auth status|auth login|auth mode claude-code|api-key|api-key set|api-key delete|install|account ...>"
+}

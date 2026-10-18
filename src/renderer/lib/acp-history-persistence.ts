@@ -1,19 +1,33 @@
-/**
- * Persistence for ACP chat history.
- *
- * Layout (versioned JSON via persistenceApi):
- *   acp/sessions/index      → SessionIndexEntry[]
- *   acp/sessions/<id>       → SessionPayload { metadata, messages }
- *
- * The store is the runtime source of truth; this is a mirror. Payload writes are
- * debounced so streaming doesn't thrash the disk.
- */
+/** Desktop ACP history persistence boundary. */
+
+import { UNASSIGNED_PROJECT_ID } from '@shared/types/web-projects.types'
+import type { PersistedSessionSummary } from '@shared/types/web-protocol.types'
+import type { AvailableCommand, StopReason, ToolCall } from '@/lib/acp-api'
+import { acpHistoryApi } from '@/lib/acp-history-api'
+import { getAcpTransport } from '@/lib/acp-transport'
 import { persistenceApi } from '@/lib/api'
+import { logFrontendError } from '@/lib/log-api'
+import { sanitizeDisplayText } from '@/lib/skill-tokens'
 import type { ChatMessage, SessionStatus } from '@/stores/acp-store'
 
 export const SESSION_INDEX_KEY = 'acp/sessions/index'
-/** One-shot flag set after the v2 wipe (see `runHistoryWipeMigration`). */
 export const WIPE_MIGRATION_KEY = 'acp/sessions/migrated-v2'
+export const INACTIVE_PAYLOAD_CACHE_BUDGET = 3
+
+/**
+ * Maximum simultaneously pinned full-payload cache entries (pin cap).
+ * Beyond it the oldest pin is evicted: its cache entry drops back to the
+ * inactive budget (`INACTIVE_PAYLOAD_CACHE_BUDGET`) and scroll-up lazily
+ * refetches it from the host. Pins protect trimmed live sessions' scroll-up
+ * payload; the cap stops pins from accumulating without bound.
+ */
+export const MAX_PINNED_PAYLOADS = 8
+
+/** Default tail message count for lazy-load chat history open. Smaller than
+ * `MAX_LIVE_WINDOW_MESSAGES` (300) — only the recent transcript is needed
+ * for the user to read + chat; the full payload loads on scroll-up. */
+export const HISTORY_TAIL_MESSAGE_LIMIT = 50
+
 export function sessionPayloadKey(id: string): string {
   return `acp/sessions/${id}`
 }
@@ -24,40 +38,356 @@ export interface SessionIndexEntry {
   agentConfigId?: string
   title: string
   cwd: string
-  /**
-   * Owning `Project.id`. The Chats sidebar scopes the index per project +
-   * worktree (`(projectId, cwd)`) and falls back to projectId-only matching
-   * when the exact cwd yields nothing, so a chat whose cwd drifted since it
-   * was created is still shown (see `scopeSessionIndex`). See ADR 0002.
-   */
   projectId: string
   createdAt: number
   lastActivityAt: number
   messageCount: number
+  /**
+   * Highest persisted message `seq` for this session (R3 / parent-spec R2
+   * index-list completeness). Optional: absent on entries loaded from a Rust
+   * index that does not yet surface it (degrades to 0, the pre-R3 value).
+   * `get_session_cursor` remains the authoritative functional cursor.
+   */
+  lastSeq?: number
+  /**
+   * Identity of the session log incarnation `lastSeq` belongs to. Host-minted
+   * (absent on entries from older hosts); a cursor is only valid with it.
+   */
+  logEpoch?: string
   status: SessionStatus
+  /** Agent-owned metadata mirror created from ACP `session/list`; no local transcript. */
+  discovered?: boolean
+  /**
+   * Issue #838: true while a prompt turn is in progress on the host (a
+   * `user_prompt` without a matching `prompt_complete`). Additive: absent on
+   * older hosts; readers fall back to deriving the open turn from the
+   * transcript tail.
+   */
+  turnActive?: boolean
+  /**
+   * How the last turn failed, when it ended in an `error`, `timeout` or
+   * `crashed` terminator and no prompt followed. Present on session payloads
+   * only; absent on older hosts.
+   */
+  lastTurnError?: PersistedTurnError
+  /**
+   * Worktree path + branch the agent runs in (CAP-3). Additive: absent on
+   * pre-feature sessions. Powers the CAP-6 indicator + the deleted-worktree
+   * fallback; state isolation still keys on `cwd`.
+   */
+  worktreePath?: string
+  worktreeBranch?: string
+  /**
+   * Current model id + display-name snapshot (CAP-3). Additive: absent on old
+   * entries and on discovered/imported sessions. The host
+   * (`SessionPersistence`) is the durable writer. The renderer projection
+   * copies these fields forward and refreshes them from the live session so
+   * the sidebar does not keep the creation-time model.
+   */
+  modelId?: string
+  modelName?: string
+  /**
+   * Ordered agent-config ids this conversation ran with (story 3 /
+   * spec-in-chat-agent-switch): first = original, last = current. Additive
+   * derived cache — absent on unswitched chats (readers fall back to
+   * `agentConfigId`), recompute-derivable from the durable `agent_switch`
+   * markers (which stay authoritative), and never a mutation of
+   * `agentConfigId`'s historical attribution. Written through
+   * `persistSession` at switch time; appended (consecutive-deduped) on
+   * multi-switch.
+   */
+  agents?: string[]
+}
+
+/** The failure behind a failed turn's terminator, as the host recorded it. */
+export interface PersistedTurnError {
+  stopReason: StopReason
+  /** Absent when the host recorded no detail (a `crashed` terminator). */
+  message?: string
+  code?: number
+  providerCode?: string
 }
 
 export interface SessionPayload {
   metadata: SessionIndexEntry
   messages: ChatMessage[]
+  /**
+   * Durable tool calls mirrored alongside the transcript so history reopens
+   * and post-reload resumes restore the tool cards in the timeline. Written
+   * through `sanitizeToolCallsForPersistence` (no `rawOutput`, per-call size
+   * bound). Absent on payloads persisted before this field existed.
+   */
+  toolCalls?: ToolCall[]
+  /**
+   * CAP-2 (spec-in-chat-agent-switch): durable agent-switch markers, in seq
+   * order. Host-authored (`acp:agent_switch` / `record_agent_switch`); the
+   * renderer NEVER writes them. Absent on payloads persisted before this
+   * field existed (pre-feature chats → no separators, rendering unchanged).
+   */
+  switches?: AgentSwitchRecord[]
+  /**
+   * The session's last known slash-command list. Absent when the host knows
+   * of none, and on older hosts.
+   */
+  commands?: AvailableCommand[]
+  /** Seq of the `commands_update` record that set `commands`. */
+  commandsSeq?: number
 }
 
-/** Derive a chat title from the first user message; fallback to the provided title. */
+/**
+ * CAP-2: one durable agent-switch marker as materialized by the host fold.
+ * camelCase; `id` is the stable `switch:seq-<seq>` key (virtualizer key +
+ * remount-sensitive collapse state — the ThoughtGroup stable-key lesson).
+ * `newSessionId` degrades to `''` on a corrupt record.
+ */
+export interface AgentSwitchRecord {
+  id: string
+  fromConfigId: string
+  toConfigId: string
+  newSessionId: string
+  summaryText: string
+  timestamp: number
+  seq: number
+}
+
+/**
+ * Maximum serialized UTF-8 size of a single durable tool call. Calls exceeding
+ * the budget degrade to the structural subset so a giant diff or tool input
+ * cannot balloon the on-disk payload.
+ */
+export const PERSISTED_TOOL_CALL_BYTE_BUDGET = 32 * 1024
+
+/**
+ * Maximum number of tool calls persisted per session. Tool calls are never
+ * trimmed in the live window (messages have `MAX_LIVE_WINDOW_MESSAGES`), so the
+ * durable mirror keeps only the most recent calls — the same recency window a
+ * reader browses — bounding payload growth on very long sessions.
+ */
+export const PERSISTED_TOOL_CALLS_LIMIT = 500
+
+/** Agent-controlled titles are bounded so the degraded subset stays bounded. */
+const PERSISTED_TOOL_CALL_TITLE_LIMIT = 200
+
+const persistedTextEncoder = new TextEncoder()
+
+function boundedTitle(title: unknown): string | undefined {
+  if (typeof title !== 'string' || title.length === 0) return undefined
+  return title.length > PERSISTED_TOOL_CALL_TITLE_LIMIT
+    ? `${title.slice(0, PERSISTED_TOOL_CALL_TITLE_LIMIT)}…`
+    : title
+}
+
+/**
+ * Structural subset of a durable tool call: routing/status fields + timeline
+ * stamps only. Mid-flight statuses are persisted as `failed` — the turn that
+ * owned them has ended, and restoring `pending`/`in_progress` would reopen the
+ * card spinning forever.
+ */
+function structuralToolCall(toolCall: ToolCall): ToolCall {
+  const reduced: ToolCall = { toolCallId: toolCall.toolCallId }
+  const title = boundedTitle(toolCall.title)
+  if (title !== undefined) reduced.title = title
+  if (toolCall.kind !== undefined) reduced.kind = toolCall.kind
+  const status =
+    toolCall.status === 'pending' || toolCall.status === 'in_progress' ? 'failed' : toolCall.status
+  if (status !== undefined) reduced.status = status
+  if (typeof toolCall.timestamp === 'number') reduced.timestamp = toolCall.timestamp
+  if (typeof toolCall.seq === 'number') reduced.seq = toolCall.seq
+  return reduced
+}
+
+/**
+ * Mirror-ready tool calls for durable history. `rawOutput` (unbounded tool
+ * results) is never persisted, and only the known summary/render fields
+ * (`rawInput`, structured `content`) ride along — unknown agent fields are
+ * dropped at the boundary. Over-budget calls degrade to the structural subset
+ * instead of ballooning the payload; non-serializable calls degrade the same
+ * way (and the degradation is logged, never silent).
+ */
+export function sanitizeToolCallsForPersistence(
+  toolCalls: ToolCall[] | undefined
+): ToolCall[] | undefined {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return undefined
+  const degraded: string[] = []
+  const dropped: string[] = []
+  const sanitized: ToolCall[] = []
+  for (const toolCall of toolCalls.slice(-PERSISTED_TOOL_CALLS_LIMIT)) {
+    const candidate = structuralToolCall(toolCall)
+    if (toolCall.rawInput !== undefined) candidate.rawInput = toolCall.rawInput
+    if (toolCall.content !== undefined) candidate.content = toolCall.content
+    let persisted: ToolCall | undefined
+    try {
+      const bytes = persistedTextEncoder.encode(JSON.stringify(candidate)).byteLength
+      if (bytes <= PERSISTED_TOOL_CALL_BYTE_BUDGET) persisted = candidate
+    } catch {
+      // Non-serializable fields: fall through to the structural subset.
+    }
+    if (!persisted) {
+      // Over budget or non-serializable: degrade to the structural subset, then
+      // re-measure it. `toolCallId` is agent-sourced and unbounded, so even the
+      // subset can exceed the cap — omit the call entirely in that case so the
+      // per-call budget actually holds.
+      const structural = structuralToolCall(toolCall)
+      const structuralBytes = persistedTextEncoder.encode(JSON.stringify(structural)).byteLength
+      if (structuralBytes <= PERSISTED_TOOL_CALL_BYTE_BUDGET) {
+        degraded.push(toolCall.toolCallId)
+        persisted = structural
+      } else {
+        dropped.push(toolCall.toolCallId)
+      }
+    }
+    if (persisted) sanitized.push(persisted)
+  }
+  if (degraded.length > 0 || dropped.length > 0) {
+    const parts: string[] = []
+    if (degraded.length > 0) {
+      parts.push(`degraded ${degraded.length}: ${degraded.slice(0, 3).join(', ')}`)
+    }
+    if (dropped.length > 0) {
+      parts.push(`dropped ${dropped.length} over-size: ${dropped.slice(0, 3).join(', ')}`)
+    }
+    void logFrontendError({
+      level: 'warn',
+      source: 'acp.historyPersistence',
+      message: `Tool-call persistence budget enforced — ${parts.join('; ')}`
+    })
+  }
+  return sanitized.length > 0 ? sanitized : undefined
+}
+
+/** True for a restorable tool-call record: a non-null object with a string id. */
+function isRestorableToolCall(value: unknown): value is ToolCall {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as ToolCall
+  return typeof candidate.toolCallId === 'string' && candidate.toolCallId.length > 0
+}
+
+/** Filter a raw payload array down to restorable tool-call records. */
+function normalizedToolCalls(toolCalls: unknown): ToolCall[] {
+  if (!Array.isArray(toolCalls)) return []
+  return toolCalls.filter(isRestorableToolCall)
+}
+
+/**
+ * Highest `seq` across a payload's messages, tool calls, and switch markers
+ * (they share one timeline counter). Corrupt/partial payloads degrade to the
+ * fields present — a non-array `toolCalls`/`switches`, or one containing
+ * non-record entries (`null`, scalar, missing id), never throws on the
+ * reopen hot path.
+ */
+export function maxPayloadSeq(
+  payload: Pick<SessionPayload, 'messages' | 'toolCalls' | 'switches'>
+): number {
+  let maxSeq = 0
+  for (const message of payload.messages) {
+    if (typeof message.seq === 'number' && Number.isFinite(message.seq) && message.seq > maxSeq) {
+      maxSeq = message.seq
+    }
+  }
+  for (const toolCall of normalizedToolCalls(payload.toolCalls)) {
+    if (
+      typeof toolCall.seq === 'number' &&
+      Number.isFinite(toolCall.seq) &&
+      toolCall.seq > maxSeq
+    ) {
+      maxSeq = toolCall.seq
+    }
+  }
+  for (const switchRecord of normalizedSwitches(payload.switches)) {
+    if (switchRecord.seq > maxSeq) {
+      maxSeq = switchRecord.seq
+    }
+  }
+  return maxSeq
+}
+
+/** True for a restorable switch record: object + finite numeric seq + non-empty id. */
+function isRestorableSwitch(value: unknown): value is AgentSwitchRecord {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Partial<AgentSwitchRecord>
+  return (
+    typeof candidate.seq === 'number' &&
+    Number.isFinite(candidate.seq) &&
+    typeof candidate.id === 'string' &&
+    candidate.id.length > 0
+  )
+}
+
+/** Filter a raw payload array down to restorable switch records. */
+function normalizedSwitches(switches: unknown): AgentSwitchRecord[] {
+  if (!Array.isArray(switches)) return []
+  return switches.filter(isRestorableSwitch)
+}
+
+/** Restored switch markers for a payload, tolerant of legacy/corrupt shapes. */
+export function restoredSwitches(payload: Pick<SessionPayload, 'switches'>): AgentSwitchRecord[] {
+  return normalizedSwitches(payload.switches)
+}
+
+/** Restored tool calls for a payload, tolerant of legacy/corrupt shapes. */
+export function restoredToolCalls(payload: Pick<SessionPayload, 'toolCalls'>): ToolCall[] {
+  return normalizedToolCalls(payload.toolCalls)
+}
+
+function stablePayload(payload: SessionPayload): string {
+  return JSON.stringify(payload)
+}
+
+export function toPersistedSessionSummaries(
+  entries: SessionIndexEntry[]
+): PersistedSessionSummary[] {
+  return entries.map((entry) => ({
+    storageKey: entry.id,
+    sessionId: entry.id,
+    stableAgentNamespace: entry.agentConfigId ? `config:${entry.agentConfigId}` : null,
+    runtimeAgentId: entry.agentId || undefined,
+    projectId: entry.projectId || undefined,
+    cwd: entry.cwd,
+    title: entry.title,
+    createdAt: entry.createdAt,
+    lastActivityAt: entry.lastActivityAt,
+    status: entry.status === 'initializing' ? 'active' : entry.status,
+    messageCount: entry.messageCount,
+    discovered: entry.discovered,
+    toolCount: 0,
+    lastSeq: entry.lastSeq ?? 0,
+    resumeEligible: Boolean(entry.agentConfigId || entry.agentId),
+    worktreePath: entry.worktreePath,
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
+  }))
+}
+
 export function deriveTitle(messages: ChatMessage[], fallbackTitle: string): string {
-  const firstUser = messages.find((m) => m.role === 'user')
+  const firstUser = messages.find((message) => message.role === 'user')
   if (firstUser) {
-    const text = firstUser.blocks
-      .map((b) => (b.type === 'text' ? (b.text ?? '') : ''))
-      .join(' ')
-      .trim()
-    if (text.length > 0) return text.length > 40 ? `${text.slice(0, 40)}…` : text
+    // Stored display text may carry private-use pill sentinels (command/skill/
+    // file tokens) — sanitize to readable text so a command-first message
+    // yields a readable `/compact …` title instead of a blank-looking one.
+    const text = sanitizeDisplayText(
+      firstUser.blocks.map((block) => (block.type === 'text' ? (block.text ?? '') : '')).join(' ')
+    ).trim()
+    const firstLine = text.split(/\r?\n/, 1)[0].trim()
+    if (firstLine.length > 0) {
+      const characters = Array.from(firstLine)
+      return characters.length > 48 ? `${characters.slice(0, 48).join('')}…` : firstLine
+    }
   }
   return fallbackTitle
 }
 
 export type RecencyGroup = 'Today' | 'Yesterday' | 'Earlier'
 
-/** Bucket sessions by lastActivityAt relative to `now`. Sorted newest-first within groups. */
+/** The history bucket for sessions the host could not attribute to any project. */
+export const UNASSIGNED_GROUP = 'Unassigned'
+export type HistoryGroup = RecencyGroup | typeof UNASSIGNED_GROUP
+
+/** Index entries stamped with the host's unassigned-project sentinel. */
+export function unassignedSessions(entries: SessionIndexEntry[]): SessionIndexEntry[] {
+  return entries.filter((entry) => entry.projectId === UNASSIGNED_PROJECT_ID)
+}
+
 export function groupSessionsByRecency<T extends { lastActivityAt: number }>(
   entries: T[],
   now: number
@@ -66,183 +396,677 @@ export function groupSessionsByRecency<T extends { lastActivityAt: number }>(
   startOfToday.setHours(0, 0, 0, 0)
   const todayMs = startOfToday.getTime()
   const yesterdayMs = todayMs - 24 * 60 * 60 * 1000
-
-  const buckets: Record<RecencyGroup, T[]> = {
-    Today: [],
-    Yesterday: [],
-    Earlier: []
+  const buckets: Record<RecencyGroup, T[]> = { Today: [], Yesterday: [], Earlier: [] }
+  for (const entry of entries) {
+    if (entry.lastActivityAt >= todayMs) buckets.Today.push(entry)
+    else if (entry.lastActivityAt >= yesterdayMs) buckets.Yesterday.push(entry)
+    else buckets.Earlier.push(entry)
   }
-  for (const e of entries) {
-    if (e.lastActivityAt >= todayMs) buckets.Today.push(e)
-    else if (e.lastActivityAt >= yesterdayMs) buckets.Yesterday.push(e)
-    else buckets.Earlier.push(e)
-  }
-  const order: RecencyGroup[] = ['Today', 'Yesterday', 'Earlier']
-  return order
+  return (['Today', 'Yesterday', 'Earlier'] as const)
     .map((group) => ({
       group,
       entries: buckets[group].slice().sort((a, b) => b.lastActivityAt - a.lastActivityAt)
     }))
-    .filter((g) => g.entries.length > 0)
+    .filter(({ entries: grouped }) => grouped.length > 0)
 }
 
-/**
- * Scope the session index for the Chats sidebar (ADR 0002). Returns entries
- * whose `(projectId, cwd)` match the active project + worktree/root. When the
- * exact cwd filter yields nothing, falls back to projectId-only matching so a
- * chat whose worktree/cwd drifted since it was created (e.g. after restart or
- * worktree pruning) is still reachable instead of silently hidden. Returns `[]`
- * when `projectId` or `cwd` is empty.
- */
 export function scopeSessionIndex(
   entries: SessionIndexEntry[],
   projectId: string,
-  cwd: string
+  cwd: string,
+  worktreePaths: string[] = []
 ): SessionIndexEntry[] {
   if (!projectId || !cwd) return []
-  const exact = entries.filter((e) => e.projectId === projectId && e.cwd === cwd)
-  if (exact.length > 0) return exact
-  return entries.filter((e) => e.projectId === projectId)
+  // ADR 0002 scoping with worktree-inclusive reachability: in addition to an
+  // exact-cwd match, a session whose cwd is one of the active project's
+  // registered worktree paths stays listed. This keeps a worktree chat
+  // reachable from the project root view and across restarts where
+  // no worktree is picked (the sidebar would otherwise hide it because
+  // its cwd differs from the root). Falls back to projectId-only matching when
+  // the scoped set is empty, preserving the prior drift-tolerant behavior.
+  //
+  // `normalizeCwdForScope` is required: the host persists session cwds via Rust
+  // `Path::canonicalize`, which on Windows yields the verbatim `\\?\` prefix
+  // with backslash separators (`\\?\E:\…\wt`), while the project store's
+  // worktree paths come from `worktreeApi.list` in forward-slash form
+  // (`E:/…/wt`). A raw `===`/`Set.has` never equates the two and would
+  // silently hide worktree chats from the root view.
+  const normalizedCwd = normalizeCwdForScope(cwd)
+  const worktreePathSet =
+    worktreePaths.length > 0 ? new Set(worktreePaths.map(normalizeCwdForScope)) : null
+  const scoped = entries.filter((entry) => {
+    if (entry.projectId !== projectId) return false
+    const entryCwd = normalizeCwdForScope(entry.cwd)
+    if (entryCwd === normalizedCwd) return true
+    return worktreePathSet?.has(entryCwd) ?? false
+  })
+  return scoped.length > 0 ? scoped : entries.filter((entry) => entry.projectId === projectId)
 }
 
-export async function loadSessionIndex(): Promise<SessionIndexEntry[]> {
-  const res = await persistenceApi.read<SessionIndexEntry[]>(SESSION_INDEX_KEY)
-  if (res.success && Array.isArray(res.data)) return res.data
-  return []
+// Canonicalize a cwd/path for comparison: strip the Windows verbatim `\\?\`
+// prefix, collapse the extended UNC verbatim prefix `\\?\UNC\` to `//` so it
+// matches standard UNC `\\server\share`, unify separators to `/`, and trim
+// trailing slashes. Shared between `scopeSessionIndex` (session cwd vs project
+// worktree paths) and the launcher's worktree-registration dedup (new worktree
+// path vs already-stored paths), so a trailing-slash or verbatim-prefix form
+// mismatch can't defeat either check. No lowercasing — preserves case-sensitive
+// matching on POSIX where the prefix and backslashes never occur (the transform
+// is a no-op there).
+export function normalizeCwdForScope(p: string): string {
+  if (!p) return p
+  return (
+    p
+      // Extended UNC verbatim prefix `\\?\UNC\server\share` → `//server/share`:
+      // collapse to `//` BEFORE the generic verbatim-prefix strip so extended and
+      // standard UNC (`\\server\share`) normalize identically.
+      .replace(/^\\\\\?\\UNC\\/i, '//')
+      .replace(/^\\\\\?\\/, '')
+      .replace(/\\/g, '/')
+      .replace(/\/+$/, '')
+  )
+}
+
+function historyMode(): 'server' | 'live_only' | 'tauri_store' | undefined {
+  return getAcpTransport().historyMode?.()
 }
 
 /**
- * Track a session-index write so the close path can await it before
- * `window.destroy()`. Mirrors the `waitForPendingAppSettingsPersistence`
- * count/waiter pattern.
- *
- * Takes a **factory** (not a pre-started promise): the write does not begin
- * until prior tracked writes finish. This serializes concurrent persist/delete
- * writes to the same Tauri Store key, so a stale write (e.g. a persist issued
- * just before a delete) cannot land last and win the race.
- *
- * A write queued while the close path is draining is still awaited:
- * `waitForPendingSessionIndexWrite` first awaits the chain, then — if the
- * in-flight count is non-zero — waits on a waiter that resolves only when the
- * count reaches zero, so the last history update is not lost to
- * `window.destroy()`.
- *
- * Errors are logged and swallowed here so the chain never breaks and callers
- * do not need their own `.catch`.
+ * The title both host readers (desktop `acp_history` list, web summary
+ * conversion) give a session the host has not titled yet.
  */
-let pendingIndexWrite: Promise<void> = Promise.resolve()
-let pendingIndexWriteCount = 0
-let pendingIndexWriteWaiters: Array<() => void> = []
+export const UNTITLED_HOST_TITLE = 'Untitled Chat'
 
-function notifyIndexWriteSettled(): void {
-  if (pendingIndexWriteCount === 0 && pendingIndexWriteWaiters.length > 0) {
-    const waiters = pendingIndexWriteWaiters
-    pendingIndexWriteWaiters = []
-    for (const resolve of waiters) resolve()
+export function fromPersistedSessionSummary(entry: PersistedSessionSummary): SessionIndexEntry {
+  return {
+    id: entry.sessionId,
+    agentId: entry.runtimeAgentId ?? '',
+    agentConfigId: entry.stableAgentNamespace?.startsWith('config:')
+      ? entry.stableAgentNamespace.slice('config:'.length)
+      : undefined,
+    title: entry.title ?? UNTITLED_HOST_TITLE,
+    cwd: entry.cwd,
+    projectId: entry.projectId ?? '',
+    createdAt: entry.createdAt,
+    lastActivityAt: entry.lastActivityAt,
+    messageCount: entry.messageCount,
+    lastSeq: entry.lastSeq,
+    status: entry.status,
+    turnActive: entry.turnActive === true ? true : undefined,
+    discovered:
+      entry.discovered ??
+      (entry.messageCount === 0 && entry.toolCount === 0 && entry.lastSeq === 0),
+    worktreePath: entry.worktreePath,
+    worktreeBranch: entry.worktreeBranch,
+    modelId: entry.modelId,
+    modelName: entry.modelName
   }
 }
 
+export async function loadSessionIndex(): Promise<SessionIndexEntry[]> {
+  const transport = getAcpTransport()
+  let mode = transport.historyMode?.()
+  if (mode === 'live_only' && transport.listPersistedSessions) {
+    // Boot race (F13): the WS transport reports the pre-handshake default
+    // 'live_only' until connect()'s authenticate handshake negotiates the real
+    // mode ('server' on termul-server). Await the handshake and re-read the
+    // mode before concluding there is no server-side history. connect() is
+    // idempotent (fast-returns on an OPEN+authed socket); the Tauri transport
+    // has no historyMode, so this branch never triggers on desktop. connect()
+    // can reject when the server is unreachable (closed/timeout) — the
+    // rejection propagates to callers, which log a warning and preserve the
+    // current index; the existing reconnect refetch recovers.
+    try {
+      await transport.connect()
+    } catch (error) {
+      // Boundary log (CodeRabbit PR #699): surface handshake failures with
+      // safe context only — the negotiated history mode (never credentials or
+      // tokens; connect() rejections carry static AcpTransportError messages).
+      // The rejection still propagates so callers keep their existing
+      // preserve-and-recover behavior.
+      const description = error instanceof Error ? error.message : String(error)
+      void logFrontendError({
+        level: 'warn',
+        source: 'acp.historyPersistence',
+        message: `History-mode handshake failed in loadSessionIndex (negotiated mode: ${historyMode() ?? 'unknown'}): ${description}`
+      })
+      throw error
+    }
+    mode = historyMode()
+  }
+  if (mode === 'server' && transport.listPersistedSessions) {
+    return (await transport.listPersistedSessions()).map(fromPersistedSessionSummary)
+  }
+  if (mode === 'live_only') return []
+  return (await acpHistoryApi.list()).sessions
+}
+
+type PendingHistoryWaiter = {
+  resolve: () => void
+  reject: (error: unknown) => void
+}
+
+type PendingHistoryOperation =
+  | { kind: 'save'; payload: SessionPayload; waiters: PendingHistoryWaiter[] }
+  | { kind: 'delete'; waiters: PendingHistoryWaiter[] }
+
+const pendingHistoryOperations = new Map<string, PendingHistoryOperation>()
+const deletedSessionIds = new Set<string>()
+let historyDrain: Promise<void> | null = null
+let pendingGenericWrite: Promise<void> = Promise.resolve()
+let pendingGenericWriteCount = 0
 /**
- * Serialize and track a session-index write. Returns a promise that resolves
- * once this write (and all writes tracked before it) settle — callers that
- * need to sequence a follow-up (e.g. deleting the payload after the index
- * write) can `await` it.
+ * Memoized in-flight backend `acp_history_flush` promise. `beforeunload` +
+ * `pagehide` + `closeAppWithPersistenceFlush` can all fire on close,
+ * previously triggering 3× concurrent backend flush calls (race + the
+ * Windows `Access is denied` os-error-5 failure). Concurrent callers await
+ * the SAME promise so exactly one `acpHistoryApi.flush()` reaches the
+ * backend. Mirrors the `waitForPendingSessionIndexWrite` in-flight-promise
+ * pattern already in this file.
  */
+let pendingHistoryFlush: Promise<void> | null = null
+
+async function drainHistoryOperations(): Promise<void> {
+  while (pendingHistoryOperations.size > 0) {
+    const next = pendingHistoryOperations.entries().next().value as
+      | [string, PendingHistoryOperation]
+      | undefined
+    if (!next) break
+    const [sessionId, operation] = next
+    pendingHistoryOperations.delete(sessionId)
+    try {
+      if (operation.kind === 'save') {
+        await saveSessionPayload(sessionId, operation.payload)
+      } else {
+        await deleteSessionPayload(sessionId)
+        deletedSessionIds.delete(sessionId)
+      }
+      for (const waiter of operation.waiters) waiter.resolve()
+    } catch (error) {
+      if (operation.kind === 'delete') {
+        // Boundary log: queued delete failures surface in the renderer log;
+        // session id and error internals are excluded (never logged).
+        void logFrontendError({
+          level: 'error',
+          source: 'acp.historyPersistence',
+          message: 'Queued session delete failed — host record may persist'
+        })
+        // CAP-11: the delete failed, so the host record still exists — clear
+        // the tombstone so future saves for this session flow again (a stuck
+        // tombstone would suppress them forever).
+        deletedSessionIds.delete(sessionId)
+        for (const waiter of operation.waiters) waiter.reject(error)
+      } else {
+        console.error('[acp] failed to persist session history', error)
+        for (const waiter of operation.waiters) waiter.resolve()
+      }
+    }
+  }
+}
+
+function ensureHistoryDrain(): void {
+  if (historyDrain) return
+  historyDrain = drainHistoryOperations().finally(() => {
+    historyDrain = null
+    if (pendingHistoryOperations.size > 0) ensureHistoryDrain()
+  })
+}
+
+/** Coalesce streaming writes so only the latest full payload per session is retained. */
+export function queueSessionPayloadSave(id: string, payload: SessionPayload): Promise<void> {
+  if (deletedSessionIds.has(id)) return Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    const existing = pendingHistoryOperations.get(id)
+    const waiter = { resolve, reject }
+    const waiters = existing ? [...existing.waiters, waiter] : [waiter]
+    pendingHistoryOperations.set(id, { kind: 'save', payload, waiters })
+    ensureHistoryDrain()
+  })
+}
+
+/** Delete is ordered with writes and supersedes every stale pending save for the session. */
+export function queueSessionPayloadDelete(id: string): Promise<void> {
+  deletedSessionIds.add(id)
+  payloadCache.delete(id)
+  pinnedPayloads.delete(id)
+  planFences.delete(id)
+  return new Promise<void>((resolve, reject) => {
+    const existing = pendingHistoryOperations.get(id)
+    const waiter = { resolve, reject }
+    const waiters = existing ? [...existing.waiters, waiter] : [waiter]
+    pendingHistoryOperations.set(id, { kind: 'delete', waiters })
+    ensureHistoryDrain()
+  })
+}
+
+/** Compatibility tracker for non-session test/legacy callers. */
 export function trackPendingIndexWrite(write: () => Promise<void>): Promise<void> {
-  pendingIndexWriteCount += 1
-  const chained = pendingIndexWrite.then(async () => {
+  pendingGenericWriteCount += 1
+  const chained = pendingGenericWrite.then(async () => {
     try {
       await write()
-    } catch (e) {
-      console.error('[acp] failed to persist session index', e)
+    } catch (error) {
+      console.error('[acp] failed to persist session history', error)
     } finally {
-      pendingIndexWriteCount = Math.max(0, pendingIndexWriteCount - 1)
-      notifyIndexWriteSettled()
+      pendingGenericWriteCount = Math.max(0, pendingGenericWriteCount - 1)
     }
   })
-  pendingIndexWrite = chained
+  pendingGenericWrite = chained
   return chained
 }
 
 export async function waitForPendingSessionIndexWrite(): Promise<void> {
-  await pendingIndexWrite
-  if (pendingIndexWriteCount === 0) return
-  await new Promise<void>((resolve) => {
-    pendingIndexWriteWaiters.push(resolve)
-  })
+  while (historyDrain || pendingHistoryOperations.size > 0 || pendingGenericWriteCount > 0) {
+    await Promise.all([historyDrain ?? Promise.resolve(), pendingGenericWrite])
+  }
 }
 
-/** Test-only: reset the tracker between tests to avoid cross-test leakage. */
 export function _resetPendingIndexWriteTrackerForTesting(): void {
-  pendingIndexWrite = Promise.resolve()
-  pendingIndexWriteCount = 0
-  pendingIndexWriteWaiters = []
+  pendingHistoryOperations.clear()
+  deletedSessionIds.clear()
+  historyDrain = null
+  pendingGenericWrite = Promise.resolve()
+  pendingGenericWriteCount = 0
+  pendingHistoryFlush = null
 }
 
-export async function saveSessionIndex(entries: SessionIndexEntry[]): Promise<void> {
-  const res = await persistenceApi.write(SESSION_INDEX_KEY, entries)
-  if (!res.success) {
-    throw new Error(res.error ?? 'Failed to persist session index')
-  }
+export async function saveSessionIndex(_entries: SessionIndexEntry[]): Promise<void> {
+  // Index ownership moved to Rust; every payload save atomically updates it.
 }
 
-export async function loadSessionPayload(id: string): Promise<SessionPayload | null> {
-  const res = await persistenceApi.read<SessionPayload>(sessionPayloadKey(id))
-  if (res.success && res.data) return res.data
-  return null
+const payloadCache = new Map<string, SessionPayload>()
+const pinnedPayloads = new Set<string>()
+
+function touchPayload(id: string, payload: SessionPayload): void {
+  payloadCache.delete(id)
+  payloadCache.set(id, payload)
+  evictInactivePayloads()
 }
 
-export async function saveSessionPayload(id: string, payload: SessionPayload): Promise<void> {
-  // Debounced: coalesces streaming updates so disk isn't thrashed.
-  const res = await persistenceApi.writeDebounced(sessionPayloadKey(id), payload)
-  if (!res.success) {
-    throw new Error(res.error ?? 'Failed to persist session payload')
-  }
-}
-
-export async function deleteSessionPayload(id: string): Promise<void> {
-  const res = await persistenceApi.delete(sessionPayloadKey(id))
-  if (!res.success) {
-    throw new Error(res.error ?? 'Failed to delete session payload')
+function evictInactivePayloads(): void {
+  let inactive = [...payloadCache.keys()].filter((id) => !pinnedPayloads.has(id)).length
+  if (inactive <= INACTIVE_PAYLOAD_CACHE_BUDGET) return
+  for (const id of payloadCache.keys()) {
+    if (pinnedPayloads.has(id)) continue
+    payloadCache.delete(id)
+    inactive -= 1
+    if (inactive <= INACTIVE_PAYLOAD_CACHE_BUDGET) return
   }
 }
 
 /**
- * One-shot, idempotent wipe of pre-v2 chat history. Sessions persisted before
- * `projectId` was tracked (ADR 0002) cannot be backfilled reliably; the user
- * opted for a fresh start over noise. Gated by `acp/sessions/migrated-v2` so
- * it runs exactly once. Safe to call on every mount.
+ * Pin a session's cached full payload. `pinnedPayloads` insertion order is
+ * the pin age: when the cap (`MAX_PINNED_PAYLOADS`) is exceeded, the OLDEST
+ * pin is evicted via {@link unpinSessionPayload} semantics (drop from the
+ * pin set + evict-if-needed), so its cache entry falls back under the
+ * inactive-budget rule instead of being pinned forever. No-op for an
+ * already-pinned id (re-pinning does not refresh its age).
  */
-export async function runHistoryWipeMigration(): Promise<void> {
-  const flagRes = await persistenceApi.read<boolean>(WIPE_MIGRATION_KEY)
-  if (flagRes.success && flagRes.data === true) return
-  // Fail closed: only proceed when the wipe flag is explicitly missing. A
-  // transient storage error must NOT wipe history — combined with
-  // loadSessionIndex() returning [] on any read failure, proceeding here could
-  // write SESSION_INDEX_KEY = [] and set the flag, permanently hiding existing
-  // sessions. Throw so the caller (useAcpHistory) can skip the wipe and still
-  // load the index.
-  if (!flagRes.success && flagRes.code !== 'KEY_NOT_FOUND') {
-    throw new Error(flagRes.error ?? 'Failed to read wipe-migration flag')
-  }
-
-  const indexRes = await persistenceApi.read<SessionIndexEntry[]>(SESSION_INDEX_KEY)
-  if (!indexRes.success && indexRes.code !== 'KEY_NOT_FOUND') {
-    throw new Error(indexRes.error ?? 'Failed to read session index for wipe migration')
-  }
-  const index: SessionIndexEntry[] =
-    indexRes.success && Array.isArray(indexRes.data) ? indexRes.data : []
-
-  for (const entry of index) {
-    try {
-      await persistenceApi.delete(sessionPayloadKey(entry.id))
-    } catch {
-      /* best-effort; the index clear below is what actually hides them */
+export function markSessionPayloadPinned(id: string): void {
+  if (pinnedPayloads.has(id)) return
+  pinnedPayloads.add(id)
+  if (pinnedPayloads.size > MAX_PINNED_PAYLOADS) {
+    const oldest = pinnedPayloads.values().next().value
+    if (oldest !== undefined) {
+      unpinSessionPayload(oldest)
+      // Boundary log: session id excluded — no payload content logged.
+      void logFrontendError({
+        level: 'warn',
+        source: 'acp.historyPersistence',
+        message: `Pinned payload cache exceeded ${MAX_PINNED_PAYLOADS} — evicted oldest pin`
+      })
     }
   }
-  await saveSessionIndex([])
-  const setFlag = await persistenceApi.write(WIPE_MIGRATION_KEY, true)
-  if (!setFlag.success) {
-    throw new Error(setFlag.error ?? 'Failed to set wipe-migration flag')
+}
+
+/** Session ids whose cached payload is pinned right now. */
+export function getPinnedSessionPayloadIds(): string[] {
+  return [...pinnedPayloads]
+}
+
+export function unpinSessionPayload(id: string): void {
+  pinnedPayloads.delete(id)
+  evictInactivePayloads()
+}
+
+export function getCachedSessionPayload(id: string): SessionPayload | undefined {
+  const payload = payloadCache.get(id)
+  if (payload) touchPayload(id, payload)
+  return payload
+}
+
+export function setCachedSessionPayload(id: string, payload: SessionPayload): void {
+  touchPayload(id, payload)
+}
+
+export async function loadSessionPayload(id: string): Promise<SessionPayload | null> {
+  const transport = getAcpTransport()
+  const mode = transport.historyMode?.()
+  if (mode === 'server' && transport.getSessionPayload) {
+    const payload = withPlanFences(id, await transport.getSessionPayload(id))
+    if (payload) touchPayload(id, payload)
+    return payload
+  }
+  const cached = payloadCache.get(id)
+  if (cached) {
+    touchPayload(id, cached)
+    return cached
+  }
+  if (mode === 'live_only') return null
+  const payload = withPlanFences(id, await acpHistoryApi.get(id))
+  if (payload) touchPayload(id, payload)
+  return payload
+}
+
+/**
+ * Re-read a session's full payload from the host, replacing the cached copy
+ * in place (pin and plan fences kept). `null` in server and `live_only` modes.
+ */
+export async function reloadSessionPayloadFromHost(id: string): Promise<SessionPayload | null> {
+  const transport = getAcpTransport()
+  const mode = transport.historyMode?.()
+  if ((mode === 'server' && transport.getSessionPayload) || mode === 'live_only') return null
+  const stale = payloadCache.get(id)
+  if (stale) rememberPlanFences(id, stale)
+  const payload = withPlanFences(id, await acpHistoryApi.get(id))
+  if (payload) touchPayload(id, payload)
+  void logFrontendError({
+    level: 'info',
+    source: 'acp.historyPersistence',
+    message: `Re-read session ${id.slice(0, 8)}… from the host: the cached copy ended at seq ${stale?.metadata.lastSeq ?? 'unknown'}, the host is at seq ${payload?.metadata.lastSeq ?? 'unknown'}`
+  })
+  return payload
+}
+
+/**
+ * Tail-first variant of {@link loadSessionPayload}: fetches only the last
+ * `limit` messages + matching tool calls so the renderer can install the
+ * recent transcript immediately and lazy-load the full payload on scroll-up.
+ *
+ * Always asks the host: every caller (reopen, crash retry, account-switch
+ * restart, web resume, launch recovery) needs the session as the host holds it
+ * now. A cached full payload is not that: since host-owned history (CAP-2),
+ * live events no longer refresh it, so a copy cached by an earlier scroll-up
+ * misses everything streamed after it and would replace the live transcript.
+ * The tail itself is never cached; the session's cached full payload is
+ * dropped before the read (see {@link takeCachedPayload}). Plan fences that
+ * only that copy carried are kept and merged into the host read.
+ */
+export async function loadSessionPayloadTail(
+  id: string,
+  limit: number = HISTORY_TAIL_MESSAGE_LIMIT
+): Promise<SessionPayload | null> {
+  // Transport tail (web/remote) → API tail (desktop) → null.
+  const transport = getAcpTransport()
+  const mode = transport.historyMode?.()
+  // No host history to re-read: the cache stays as it is.
+  if (mode === 'live_only') return null
+  const cached = takeCachedPayload(id)
+  const tail = withPlanFences(
+    id,
+    mode === 'server' && transport.getSessionPayloadTail
+      ? await transport.getSessionPayloadTail(id, limit)
+      : await acpHistoryApi.getTail(id, limit)
+  )
+  const cachedMeta = cached?.metadata
+  if (
+    cachedMeta &&
+    tail &&
+    (cachedMeta.lastSeq !== tail.metadata.lastSeq || cachedMeta.logEpoch !== tail.metadata.logEpoch)
+  ) {
+    void logFrontendError({
+      level: 'info',
+      source: 'acp.historyPersistence',
+      message: `Re-read session ${id.slice(0, 8)}… from the host: the dropped cached copy ended at seq ${cachedMeta.lastSeq ?? 'unknown'}, the host is at seq ${tail.metadata.lastSeq ?? 'unknown'}`
+    })
+  }
+  return tail
+}
+
+/**
+ * Remove (and unpin) a session's cached full payload before a host re-read,
+ * returning it. Whether it is stale is not knowable from the cache: a reply
+ * still streaming when it was cached keeps its first chunk's seq. Without it,
+ * the fallback full read after a failed tail read and the next desktop
+ * scroll-up both refetch from the host instead of the old snapshot.
+ */
+function takeCachedPayload(id: string): SessionPayload | undefined {
+  const cached = payloadCache.get(id)
+  payloadCache.delete(id)
+  pinnedPayloads.delete(id)
+  if (cached) rememberPlanFences(id, cached)
+  return cached
+}
+
+type ContentBlock = ChatMessage['blocks'][number]
+
+/** A text block that IS a `termul-plan` fence (mirrors `isTermulPlanFenceBlock`). */
+const PLAN_FENCE_BLOCK = /^```termul-plan\r?\n[\s\S]*?\r?\n```$/
+
+const isPlanFenceBlock = (block: ContentBlock): boolean =>
+  block.type === 'text' && typeof block.text === 'string' && PLAN_FENCE_BLOCK.test(block.text)
+
+/**
+ * Plan-snapshot fences by session, then message id. `_onPromptComplete` stamps
+ * the fence on the cached payload only (the host never stores it), so when a
+ * host re-read drops that copy the fences are kept here and merged back.
+ */
+const planFences = new Map<string, Map<string, ContentBlock>>()
+
+function rememberPlanFences(id: string, payload: SessionPayload): void {
+  for (const message of payload.messages) {
+    if (message.role !== 'agent') continue
+    const fence = message.blocks.find(isPlanFenceBlock)
+    if (!fence) continue
+    let byMessage = planFences.get(id)
+    if (!byMessage) {
+      byMessage = new Map()
+      planFences.set(id, byMessage)
+    }
+    byMessage.set(message.id, fence)
+  }
+}
+
+/** Add remembered fences to host messages (by id) that do not carry one. */
+function withPlanFences(id: string, payload: SessionPayload | null): SessionPayload | null {
+  const byMessage = planFences.get(id)
+  if (!payload || !byMessage || byMessage.size === 0) return payload
+  let changed = false
+  const messages = payload.messages.map((message) => {
+    const fence = byMessage.get(message.id)
+    if (!fence || message.blocks.some(isPlanFenceBlock)) return message
+    changed = true
+    const lastText = [...message.blocks]
+      .reverse()
+      .find((block) => block.type === 'text' && (block.text ?? '').length > 0)
+    // The fence opener must start a line once text blocks are joined.
+    const separator: ContentBlock[] =
+      lastText && !(lastText.text ?? '').endsWith('\n') ? [{ type: 'text', text: '\n' }] : []
+    return { ...message, blocks: [...message.blocks, ...separator, fence] }
+  })
+  return changed ? { ...payload, messages } : payload
+}
+
+export async function saveSessionPayload(id: string, payload: SessionPayload): Promise<void> {
+  // CAP-2: the host event/session layer is now the sole author of durable
+  // history in every mode (desktop shared-live included). Renderer payload
+  // writes are retired; this stays a no-op so any residual queued save never
+  // reaches a store. The payload cache still records the projection locally.
+  if (deletedSessionIds.has(id)) return
+  touchPayload(id, payload)
+}
+
+export async function deleteSessionPayload(id: string): Promise<void> {
+  payloadCache.delete(id)
+  pinnedPayloads.delete(id)
+  planFences.delete(id)
+  const mode = historyMode()
+  // CAP-11: server mode deletes through the WS transport (`delete_session`) —
+  // previously a silent no-op that left the host record on disk.
+  if (mode === 'server') {
+    const transport = getAcpTransport()
+    if (typeof transport.deleteSession !== 'function') {
+      // A server-mode transport without deleteSession is a misconfiguration,
+      // not a no-op — fail loudly instead of leaving the host record behind.
+      throw new Error(
+        'server-mode history delete requires a transport with deleteSession (WS delete_session)'
+      )
+    }
+    try {
+      // Boolean contract (finding 6): `true` = deleted, `false` = the record
+      // was already absent — both are the desired end state, so the result
+      // itself needs no branching; genuine failures reject below.
+      await transport.deleteSession(id)
+    } catch (error) {
+      // Rollout twin of the boolean contract: an older server still reports
+      // an absent record as a `not_found` error — the desired end state
+      // already holds, so treat it as success.
+      if ((error as { code?: unknown } | null)?.code === 'not_found') return
+      // Boundary log: session id and error internals (server messages, URLs,
+      // credentials) are intentionally excluded — never logged.
+      void logFrontendError({
+        level: 'error',
+        source: 'acp.historyPersistence',
+        message: 'Server-mode session delete failed — host record may persist'
+      })
+      throw error
+    }
+    return
+  }
+  if (mode === 'live_only') return
+  // Boolean contract (finding 6): the host answers `IpcResult<boolean>` —
+  // `true` = deleted, `false` = record already absent (idempotent no-op).
+  // Both are the desired end state, so resolution is success and only a
+  // genuine failure rejects. This replaces the old error-string sniffing
+  // (`message.includes('persisted session not found')`), which coupled the
+  // renderer to the host's error text.
+  await acpHistoryApi.delete(id)
+}
+
+export async function flushSessionHistory(): Promise<void> {
+  const mode = historyMode()
+  if (mode === 'server' || mode === 'live_only') return
+  // Memoize the in-flight flush promise so `beforeunload` + `pagehide` +
+  // `closeAppWithPersistenceFlush` (which can all fire on close) await the
+  // SAME backend `acp_history_flush` call instead of racing 3× concurrent
+  // flushes (the race produced the Windows `Access is denied` os-error-5
+  // failure). A later caller attaches to the in-flight promise and resolves
+  // with it; the promise is cleared on settle so a fresh flush after close
+  // is not deduped against a stale one.
+  if (pendingHistoryFlush) return pendingHistoryFlush
+  const flushPromise = (async () => {
+    await waitForPendingSessionIndexWrite()
+    await acpHistoryApi.flush()
+  })()
+  pendingHistoryFlush = flushPromise
+  try {
+    await flushPromise
+  } finally {
+    // Clear so a subsequent close-path flush (e.g. a second window close
+    // after the first settled) can invoke the backend again.
+    if (pendingHistoryFlush === flushPromise) {
+      pendingHistoryFlush = null
+    }
+  }
+}
+
+export function _clearPayloadCacheForTesting(): void {
+  payloadCache.clear()
+  pinnedPayloads.clear()
+  planFences.clear()
+}
+
+export async function runHistoryWipeMigration(): Promise<void> {
+  const mode = historyMode()
+  if (mode === 'server' || mode === 'live_only') return
+
+  // Reads/verification target the LEGACY store (read-your-writes). Host
+  // convergence happens inside `save` / `markLegacyImportComplete`.
+  const rustState = await acpHistoryApi.listLegacy()
+  if (rustState.legacyImportComplete) return
+
+  const indexResult = await persistenceApi.read<SessionIndexEntry[]>(SESSION_INDEX_KEY)
+  if (!indexResult.success && indexResult.code !== 'KEY_NOT_FOUND') {
+    throw new Error(indexResult.error)
+  }
+  if (indexResult.success && !Array.isArray(indexResult.data)) {
+    throw new Error('Legacy session index is not an array')
+  }
+  const legacyIndex = indexResult.success ? indexResult.data : []
+  const payloads: SessionPayload[] = []
+  for (const entry of legacyIndex) {
+    const payloadResult = await persistenceApi.read<SessionPayload>(sessionPayloadKey(entry.id))
+    if (!payloadResult.success || !payloadResult.data) {
+      throw new Error(payloadResult.success ? 'Legacy payload is empty' : payloadResult.error)
+    }
+    if (payloadResult.data.metadata.id !== entry.id) {
+      throw new Error(`Legacy payload id mismatch for ${entry.id}`)
+    }
+    if (payloadResult.data.messages.length !== entry.messageCount) {
+      throw new Error(`Legacy payload message count mismatch for ${entry.id}`)
+    }
+    payloads.push(payloadResult.data)
+  }
+
+  const legacyById = new Map(payloads.map((payload) => [payload.metadata.id, payload]))
+  for (const entry of rustState.sessions) {
+    const legacy = legacyById.get(entry.id)
+    if (!legacy) continue
+    const existing = await acpHistoryApi.getLegacy(entry.id)
+    if (!existing || stablePayload(existing) !== stablePayload(legacy)) {
+      throw new Error(`Durable history differs from legacy session ${entry.id}; import left intact`)
+    }
+  }
+  for (const payload of payloads) {
+    if (!rustState.sessions.some((entry) => entry.id === payload.metadata.id)) {
+      await acpHistoryApi.save(payload.metadata.id, payload)
+    }
+  }
+
+  const verified = await acpHistoryApi.listLegacy()
+  for (const legacy of payloads) {
+    const verifiedEntry = verified.sessions.find((entry) => entry.id === legacy.metadata.id)
+    if (
+      !verifiedEntry ||
+      verifiedEntry.messageCount !== legacy.messages.length ||
+      verifiedEntry.title !== legacy.metadata.title ||
+      verifiedEntry.projectId !== legacy.metadata.projectId ||
+      verifiedEntry.cwd !== legacy.metadata.cwd
+    ) {
+      throw new Error(`Legacy import metadata verification failed for ${legacy.metadata.id}`)
+    }
+    const durable = await acpHistoryApi.getLegacy(legacy.metadata.id)
+    if (!durable || stablePayload(durable) !== stablePayload(legacy)) {
+      throw new Error(`Legacy payload verification failed for ${legacy.metadata.id}`)
+    }
+  }
+
+  try {
+    for (const entry of legacyIndex) {
+      const result = await persistenceApi.delete(sessionPayloadKey(entry.id))
+      if (!result.success) throw new Error(result.error)
+    }
+    if (indexResult.success) {
+      const result = await persistenceApi.delete(SESSION_INDEX_KEY)
+      if (!result.success) throw new Error(result.error)
+    }
+    await acpHistoryApi.markLegacyImportComplete()
+  } catch (error) {
+    // Fail closed even if cleanup fails part-way: restore the complete legacy
+    // source so the next launch can retry instead of inheriting a partial set.
+    const rollbackFailures: string[] = []
+    for (const payload of payloads) {
+      const result = await persistenceApi.write(sessionPayloadKey(payload.metadata.id), payload)
+      if (!result.success) rollbackFailures.push(result.error)
+    }
+    if (indexResult.success) {
+      const result = await persistenceApi.write(SESSION_INDEX_KEY, legacyIndex)
+      if (!result.success) rollbackFailures.push(result.error)
+    }
+    if (rollbackFailures.length > 0) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; rollback failed: ${rollbackFailures.join('; ')}`
+      )
+    }
+    throw error
   }
 }

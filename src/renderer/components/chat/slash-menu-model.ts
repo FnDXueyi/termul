@@ -10,12 +10,18 @@ import type {
   SessionMode,
   SessionModeState
 } from '@/lib/acp-api'
+import { isComposerTriggerBoundary } from '@/lib/skill-tokens'
 import type { AgentSkillSummary } from '@/lib/skills-api'
+import {
+  dropDuplicateSingletonConfigOptions,
+  flattenConfigOptionValues
+} from './chat-input-bar-config'
 
 export interface SlashCommandItem {
   kind: 'command'
   name: string
   description: string | null
+  hint: string | null
 }
 
 export interface SlashConfigItem {
@@ -40,6 +46,9 @@ export interface SlashSkillItem {
   name: string
   description: string | null
   scope: string
+  /** Absolute `SKILL.md` path, captured at pick time so the composer can record
+   * it for the wire prompt without an IPC read at send. */
+  path: string
 }
 
 export type SlashItem = SlashCommandItem | SlashConfigItem | SlashModeItem | SlashSkillItem
@@ -79,45 +88,91 @@ function headingForCategory(category: string | null | undefined, fallbackName: s
   return fallbackName
 }
 
+/** Prefix some harnesses use when they publish a discovered skill as a
+ * command (`skill:<name>`, e.g. Devin). */
+const PROMOTED_SKILL_COMMAND_PREFIX = 'skill:'
+
+/** Strip the agent skill-promotion prefix, if present. Case-insensitive on
+ * the prefix (agent command names are unconstrained); the suffix is trimmed
+ * and lowercased for comparison against skill names. */
+function promotedSkillName(name: string): string | null {
+  if (!name.toLowerCase().startsWith(PROMOTED_SKILL_COMMAND_PREFIX)) return null
+  const suffix = name.slice(PROMOTED_SKILL_COMMAND_PREFIX.length).trim().toLowerCase()
+  return suffix || null
+}
+
+function skillKey(name: string): string {
+  return name.trim().toLowerCase()
+}
+
+/** True when this ACP command names an installed skill. A bare name and a
+ * `skill:<name>` suffix both count. Comparison is case-insensitive. */
+function commandNamesInstalledSkill(commandName: string, skillNames: Set<string>): boolean {
+  const bare = skillKey(commandName)
+  if (bare && skillNames.has(bare)) return true
+  const promoted = promotedSkillName(commandName)
+  return promoted !== null && skillNames.has(promoted)
+}
+
 /**
  * Build ordered menu sections from the active session's ACP state.
  *
- * Order: Commands first, then each config option as its own section (preserving
- * the agent's array order). When `configOptions` is non-empty, the legacy
- * `modes` section is omitted entirely (precedence). When it is empty, a single
- * legacy Modes section is emitted if modes exist.
+ * Order: Skills first, then Commands, then each config option as its own
+ * section (preserving the agent's array order). When `configOptions` is
+ * non-empty, the legacy `modes` section is omitted entirely (precedence).
+ * When it is empty, a single legacy Modes section is emitted if modes exist.
  */
 export function buildSlashSections(input: SlashMenuInput): SlashSection[] {
   const { commands, configOptions, modes, skills = [], filter } = input
   const sections: SlashSection[] = []
 
-  const skillItems: SlashItem[] = skills
-    .filter((s) => matches(filter, s.name, s.description))
-    .map((s) => ({
-      kind: 'skill',
-      name: s.name,
-      description: s.description || null,
-      scope: s.scope
-    }))
+  // First-wins dedupe for promoted singleton categories (#444): a duplicate
+  // `thought_level`/`model` option must not emit a second "Thinking Level"/
+  // "Model" section next to the promoted chip's section.
+  const dedupedConfigOptions = dropDuplicateSingletonConfigOptions(configOptions)
+
+  // The text filter runs after the skill/command dedupe. An installed skill
+  // hides its harness command even when the current filter hides the skill
+  // row, so the same skill cannot come back as a command.
+  const installedSkillNames = new Set(
+    skills.map((skill) => skillKey(skill.name)).filter((name) => name.length > 0)
+  )
+  const visibleSkills = skills.filter((s) => matches(filter, s.name, s.description))
+  const skillItems: SlashItem[] = visibleSkills.map((s) => ({
+    kind: 'skill',
+    name: s.name,
+    description: s.description || null,
+    scope: s.scope,
+    path: s.path
+  }))
   if (skillItems.length > 0) {
     sections.push({ id: 'skills', heading: 'Skills', items: skillItems })
   }
 
+  // Disk skills are the skill rows. Hide a harness command that repeats one:
+  // the same name, or a re-promotion `skill:<name>`. A `skill:` command whose
+  // suffix termul did not discover stays listed.
   const commandItems: SlashItem[] = commands
+    .filter((c) => !commandNamesInstalledSkill(c.name, installedSkillNames))
     .filter((c) => matches(filter, c.name, c.description))
-    .map((c) => ({ kind: 'command', name: c.name, description: c.description ?? null }))
+    .map((c) => ({
+      kind: 'command',
+      name: c.name,
+      description: c.description ?? null,
+      hint: c.input?.hint?.trim() || null
+    }))
   if (commandItems.length > 0) {
     sections.push({ id: 'commands', heading: 'Commands', items: commandItems })
   }
 
-  if (configOptions.length > 0) {
-    for (const option of configOptions) {
-      const items: SlashItem[] = option.options
+  if (dedupedConfigOptions.length > 0) {
+    for (const option of dedupedConfigOptions) {
+      const items: SlashItem[] = flattenConfigOptionValues(option)
         .filter((v) => matches(filter, v.name, v.description, option.name))
         .map((v) => ({
           kind: 'config',
           configId: option.id,
-          valueId: v.value,
+          valueId: v.value ?? '',
           label: v.name,
           description: v.description ?? null,
           selected: v.value === option.currentValue
@@ -153,9 +208,46 @@ export function isSlashTrigger(value: string): boolean {
   return /^\/\S*$/.test(value)
 }
 
-/** Extract the filter text after a leading `/` (empty string for a lone `/`). */
-export function slashFilter(value: string): string {
-  return isSlashTrigger(value) ? value.slice(1) : ''
+/** Result of detecting a slash trigger token at any position in the input. */
+export interface SlashTriggerMatch {
+  /** Start index of the `/` character. */
+  start: number
+  /** End index (exclusive) of the trigger token. */
+  end: number
+  /** The text after the leading `/` (empty string for a lone `/`). */
+  filter: string
+}
+
+/**
+ * Detect the slash token that contains the caret.
+ *
+ * The token is a `/` plus the following non-space characters. The character
+ * before that `/` is the start of the text, a space, or a line break. Text
+ * after the token does not hide the menu. A `/` inside a word does not match.
+ * When `caret` is omitted, the caret is the end of `value`.
+ */
+export function findSlashTrigger(
+  value: string,
+  caret: number = value.length
+): SlashTriggerMatch | null {
+  if (caret <= 0 || caret > value.length) return null
+  const previous = value[caret - 1]
+  if (previous === undefined || /\s/.test(previous)) return null
+  let start = caret - 1
+  while (start > 0 && !isComposerTriggerBoundary(value, start)) start -= 1
+  if (value[start] !== '/') return null
+  if (caret <= start) return null
+  return { start, end: caret, filter: value.slice(start + 1, caret) }
+}
+
+/** Extract the filter text from the slash token at the caret. */
+export function slashFilter(value: string, caret?: number): string {
+  return findSlashTrigger(value, caret)?.filter ?? ''
+}
+
+/** True when the caret sits in a slash token. */
+export function isSlashTriggerAny(value: string, caret?: number): boolean {
+  return findSlashTrigger(value, caret) !== null
 }
 
 /** Replace a leading `/token` with `/<name> ` when a command is chosen. */

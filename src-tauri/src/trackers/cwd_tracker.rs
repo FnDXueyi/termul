@@ -1,9 +1,9 @@
 use parking_lot::RwLock;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+
+use super::{TerminalEvent, TerminalEventHub};
 
 const POLL_INTERVAL_MS: u64 = 500;
 
@@ -13,14 +13,6 @@ struct CwdState {
     terminal_id: String,
     pid: u32,
     last_known_cwd: String,
-}
-
-/// Event emitted when a terminal's CWD changes
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CwdChangedEvent {
-    pub terminal_id: String,
-    pub cwd: String,
 }
 
 /// Tracks the current working directory (CWD) of terminal processes.
@@ -34,8 +26,9 @@ pub struct CwdTracker {
     /// Map of terminal_id to their CWD state
     tracked_terminals: Arc<RwLock<HashMap<String, CwdState>>>,
 
-    /// Tauri app handle for emitting events
-    app_handle: AppHandle,
+    /// Transport-neutral event fan-out (Tauri renderer + web subscribers).
+    events: TerminalEventHub,
+    git_tracker: Arc<RwLock<Option<std::sync::Weak<super::git_tracker::GitTracker>>>>,
 
     /// Handle to the polling task (wrapped in Arc<RwLock> for interior mutability)
     poll_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -54,16 +47,21 @@ impl CwdTracker {
     /// Creates a new CWD tracker.
     ///
     /// # Arguments
-    /// * `app_handle` - Tauri app handle for emitting events
-    pub fn new(app_handle: AppHandle) -> Self {
+    /// * `events` - transport-neutral terminal event hub
+    pub fn new(events: TerminalEventHub) -> Self {
         Self {
             tracked_terminals: Arc::new(RwLock::new(HashMap::new())),
-            app_handle,
+            events,
+            git_tracker: Arc::new(RwLock::new(None)),
             poll_handle: Arc::new(RwLock::new(None)),
             is_polling_started: Arc::new(AtomicBool::new(false)),
             is_visible: Arc::new(AtomicBool::new(true)),
             poll_count: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_git_tracker(&self, git_tracker: &Arc<super::git_tracker::GitTracker>) {
+        *self.git_tracker.write() = Some(Arc::downgrade(git_tracker));
     }
 
     /// Detects the current working directory for a given process ID.
@@ -203,7 +201,8 @@ impl CwdTracker {
     fn start_polling(&self) {
         let tracked = self.tracked_terminals.clone();
         let is_visible = self.is_visible.clone();
-        let app_handle = self.app_handle.clone();
+        let events = self.events.clone();
+        let git_tracker = self.git_tracker.clone();
         let poll_handle = self.poll_handle.clone();
         let poll_count = self.poll_count.clone();
 
@@ -240,14 +239,16 @@ impl CwdTracker {
                             // Only emit event if CWD actually changed
                             if state.last_known_cwd != new_cwd {
                                 state.last_known_cwd = new_cwd.clone();
+                                if let Some(git) =
+                                    git_tracker.read().as_ref().and_then(|g| g.upgrade())
+                                {
+                                    git.update_terminal_cwd(&terminal_id, new_cwd.clone());
+                                }
 
-                                // Emit the event
-                                let event = CwdChangedEvent {
+                                events.emit(TerminalEvent::CwdChanged {
                                     terminal_id: terminal_id.clone(),
                                     cwd: new_cwd,
-                                };
-
-                                let _ = app_handle.emit("terminal-cwd-changed", event);
+                                });
                             }
                         }
                     }
@@ -298,164 +299,4 @@ impl CwdTracker {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_detect_cwd_unix() {
-        #[cfg(unix)]
-        {
-            // Test with current process
-            let pid = std::process::id();
-            let cwd = CwdTracker::detect_cwd(pid);
-            assert!(cwd.is_some());
-
-            // Test with invalid PID
-            let invalid_cwd = CwdTracker::detect_cwd(999_999);
-            assert!(invalid_cwd.is_none());
-        }
-
-        #[cfg(not(unix))]
-        {
-            // On Windows, should always return None
-            let cwd = CwdTracker::detect_cwd(std::process::id());
-            assert!(cwd.is_none());
-        }
-    }
-
-    #[test]
-    fn test_cwd_state_creation() {
-        let state = CwdState {
-            terminal_id: "test-term".to_string(),
-            pid: 1234,
-            last_known_cwd: "/home/user".to_string(),
-        };
-
-        assert_eq!(state.terminal_id, "test-term");
-        assert_eq!(state.pid, 1234);
-        assert_eq!(state.last_known_cwd, "/home/user");
-    }
-
-    #[test]
-    fn test_start_tracking() {
-        // Create a mock AppHandle - in real tests, use Tauri's test utilities
-        // For now, we skip this test as it requires a valid AppHandle
-        // This is a placeholder showing the test structure
-    }
-
-    // Regression tests for CWD Tracker polling and visibility behavior
-    // These tests verify the runtime behavior described in Task 6
-
-    #[test]
-    fn test_polling_starts_after_start_tracking() {
-        // Note: This test requires a valid AppHandle to run.
-        // In a full integration test, we would:
-        // 1. Create a CwdTracker with a mock AppHandle
-        // 2. Call start_tracking() with a terminal ID and PID
-        // 3. Verify is_polling_active() returns true
-        // 4. Verify tracked_count() returns 1
-
-        // The atomic flag ensures polling only starts once
-        // even if start_tracking is called multiple times
-
-        // For unit testing the atomic flag behavior:
-        let is_polling_started = std::sync::atomic::AtomicBool::new(false);
-
-        // First call should succeed (compare_exchange returns Ok)
-        let result =
-            is_polling_started.compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed);
-        assert!(result.is_ok());
-
-        // Second call should fail (already started)
-        let result =
-            is_polling_started.compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_visibility_pause_resume_behavior() {
-        // Note: This test requires a CwdTracker instance.
-        // The visibility flag controls whether polling is active:
-        // - When is_visible is false, the polling loop skips CWD detection
-        // - When is_visible is true, the polling loop checks CWD
-
-        // Test the atomic visibility flag behavior
-        let is_visible = std::sync::atomic::AtomicBool::new(true);
-
-        // Initially visible
-        assert!(is_visible.load(Ordering::Relaxed));
-
-        // Hide (pause polling)
-        is_visible.store(false, Ordering::Relaxed);
-        assert!(!is_visible.load(Ordering::Relaxed));
-
-        // Show (resume polling)
-        is_visible.store(true, Ordering::Relaxed);
-        assert!(is_visible.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_poll_counter_increments() {
-        // Test the poll counter behavior used for testing/debugging
-        let poll_count = std::sync::atomic::AtomicBool::new(false);
-
-        // Initially false
-        assert!(!poll_count.load(Ordering::Relaxed));
-
-        // XOR with true toggles the value
-        poll_count.fetch_xor(true, Ordering::Relaxed);
-        assert!(poll_count.load(Ordering::Relaxed));
-
-        // XOR with true toggles again
-        poll_count.fetch_xor(true, Ordering::Relaxed);
-        assert!(!poll_count.load(Ordering::Relaxed));
-
-        // AND with false resets to false
-        poll_count.store(true, Ordering::Relaxed);
-        let previous = poll_count.fetch_and(false, Ordering::Relaxed);
-        assert!(previous);
-        assert!(!poll_count.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn test_visibility_skips_polling() {
-        // This test demonstrates the visibility-based polling behavior
-        let is_visible = std::sync::atomic::AtomicBool::new(true);
-        let mut poll_executed = false;
-
-        // Simulate polling loop logic
-        if is_visible.load(Ordering::Relaxed) {
-            poll_executed = true;
-        }
-
-        assert!(poll_executed);
-
-        // Now hide
-        is_visible.store(false, Ordering::Relaxed);
-        poll_executed = false;
-
-        // Polling should be skipped
-        if is_visible.load(Ordering::Relaxed) {
-            poll_executed = true;
-        }
-
-        assert!(!poll_executed);
-    }
-
-    #[test]
-    fn test_cwd_changed_event_shape() {
-        // Verify the CwdChangedEvent has the correct shape for serialization
-        let event = CwdChangedEvent {
-            terminal_id: "term-123".to_string(),
-            cwd: "/home/user/projects".to_string(),
-        };
-
-        assert_eq!(event.terminal_id, "term-123");
-        assert_eq!(event.cwd, "/home/user/projects");
-
-        // The #[serde(rename_all = "camelCase")] attribute ensures
-        // the JSON output uses camelCase for field names
-        // This is tested by the type signature alone in unit tests
-        // Integration tests would verify the actual JSON serialization
-    }
-}
+mod tests;

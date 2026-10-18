@@ -5,7 +5,7 @@ import { flushEditorContent } from '@/lib/editor-content-flush'
 import { MarkdownEditor } from './MarkdownEditor'
 
 vi.mock('@blocknote/react', () => ({
-  BlockNoteViewRaw: () => null
+  BlockNoteViewRaw: () => <div data-testid="blocknote-view" />
 }))
 
 vi.mock('@/hooks/use-blocknote', () => ({
@@ -62,10 +62,25 @@ describe('MarkdownEditor frontmatter strip/rejoin/flush', () => {
         replaceContent,
         flushPendingContent,
         capturePendingContent,
-        getHeadings: () => [],
+        headings: [],
         scrollToBlock: vi.fn()
       }
     })
+  })
+
+  it('keeps Properties and BlockNote inside the scoped document shell', () => {
+    const { getByLabelText, getByTestId } = render(
+      <MarkdownEditor filePath="/docs/spec.md" content={FM_CONTENT} isVisible onChange={vi.fn()} />
+    )
+
+    const scrollRoot = getByTestId('blocknote-view').closest('.markdown-editor')
+    const documentShell = getByTestId('blocknote-view').closest('.markdown-editor-document')
+
+    expect(scrollRoot).toBeTruthy()
+    expect(documentShell).toBeTruthy()
+    expect(documentShell?.classList.contains('flex')).toBe(true)
+    expect(documentShell?.classList.contains('flex-col')).toBe(true)
+    expect(documentShell?.contains(getByLabelText('Properties'))).toBe(true)
   })
 
   it('passes body-only into useBlockNote and rejoins FM on body onChange', () => {
@@ -104,6 +119,46 @@ describe('MarkdownEditor frontmatter strip/rejoin/flush', () => {
     const full = onChange.mock.calls.at(-1)?.[0] as string
     expect(full).toContain('title: Spec')
     expect(full).toContain('# Heading\n\nBody text.\n')
+  })
+
+  it('locks the Properties block (inert + aria-disabled) when readOnly and drops its edits', async () => {
+    const onChange = vi.fn()
+    const { getByLabelText } = render(
+      <MarkdownEditor
+        filePath="/docs/spec.md"
+        content={FM_CONTENT}
+        isVisible
+        readOnly
+        onChange={onChange}
+      />
+    )
+
+    const wrapper = getByLabelText('title').closest('[aria-disabled]')
+    expect(wrapper).toBeTruthy()
+    expect(wrapper?.getAttribute('aria-disabled')).toBe('true')
+    expect(wrapper?.hasAttribute('inert')).toBe(true)
+
+    const titleInput = getByLabelText('title')
+    await act(async () => {
+      fireEvent.change(titleInput, { target: { value: 'Updated' } })
+      fireEvent.blur(titleInput)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    act(() => {
+      capturedOptions.onChange('# Heading\n\nTyped.\n')
+    })
+
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('leaves the Properties block interactive when not readOnly', () => {
+    const { getByLabelText } = render(
+      <MarkdownEditor filePath="/docs/spec.md" content={FM_CONTENT} isVisible onChange={vi.fn()} />
+    )
+
+    expect(getByLabelText('title').closest('[inert]')).toBeNull()
+    expect(getByLabelText('title').closest('[aria-disabled]')).toBeNull()
   })
 
   it('Properties edit captures body once and emits rejoined FM without replaceContent', async () => {

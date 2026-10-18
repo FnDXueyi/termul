@@ -1,0 +1,491 @@
+use super::*;
+
+pub(super) fn writer_loop(
+    inner: Arc<Inner>,
+    metadata: Arc<Mutex<SessionMetadata>>,
+    unhealthy: Arc<Mutex<Option<String>>>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rx: std::sync::mpsc::Receiver<WriterCommand>,
+) {
+    let session_id = metadata.lock().session_id.clone();
+    log::debug!(
+        "[acp-history] session writer started capacity={WRITER_CAPACITY} session={}",
+        crate::logging::redact_session_id(&session_id)
+    );
+    // Cleared on every exit path, including a panic during append, so senders
+    // observe a stopped writer instead of blocking forever on a dead thread.
+    struct AliveGuard(std::sync::Arc<std::sync::atomic::AtomicBool>, String);
+    impl Drop for AliveGuard {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+            log::debug!(
+                "[acp-history] session writer stopped session={}",
+                crate::logging::redact_session_id(&self.1)
+            );
+        }
+    }
+    let _alive = AliveGuard(alive, session_id);
+    let mut tails = TailState::default();
+    // The head-ahead mark could not be written (see `PersistMetadata`): the
+    // error text it left in `unhealthy`.
+    let mut mark_unsaved: Option<String> = None;
+    while let Ok(command) = rx.recv() {
+        #[cfg(test)]
+        {
+            if let Some(gate) = inner.writer_gate.lock().clone() {
+                gate.wait();
+            }
+            if let Some(gate) = inner.writer_gate_hook.lock().clone() {
+                gate.wait();
+            }
+        }
+        let result = match command {
+            WriterCommand::Append(record) => append_record(&inner.root, &metadata, &mut tails, record),
+            WriterCommand::Flush(reply) => {
+                let result = sync_session_files(&inner.root, &metadata);
+                let _ = reply.send(result.clone_for_reply());
+                result
+            }
+            WriterCommand::PersistMetadata => {
+                let snapshot = metadata.lock().clone();
+                // A failure here marks the writer unhealthy. The mark stays set
+                // in memory and the loop below retries the write after the next
+                // command, so a later flush or close still carries it to disk.
+                let result = persist_metadata_at_root(&inner.root, &snapshot);
+                mark_unsaved = result.as_ref().err().map(ToString::to_string);
+                result
+            }
+            WriterCommand::Finalize(status, reply) => {
+                close_writer(&inner, &metadata, &mut tails, &unhealthy, Some(status), false, reply);
+                return;
+            }
+            WriterCommand::Shutdown(reply) => {
+                close_writer(&inner, &metadata, &mut tails, &unhealthy, None, false, reply);
+                break;
+            }
+            // Process shutdown: marker (if the turn is open) then status
+            // Closed. The command is behind queued appends, so those chunks
+            // are already on disk when the scan runs.
+            WriterCommand::ShutdownInterrupted(reply) => {
+                close_writer(
+                    &inner,
+                    &metadata,
+                    &mut tails,
+                    &unhealthy,
+                    Some(PersistedSessionStatus::Closed),
+                    true,
+                    reply,
+                );
+                break;
+            }
+        };
+        if let Err(error) = result {
+            *unhealthy.lock() = Some(error.to_string());
+        } else if let Some(message) = mark_unsaved.take() {
+            // Retry once per command: the disk may have recovered.
+            let snapshot = metadata.lock().clone();
+            match persist_metadata_at_root(&inner.root, &snapshot) {
+                Ok(()) => {
+                    // The failure this retry heals was the only reason for the
+                    // unhealthy mark; one set by a failed append stays.
+                    let mut unhealthy = unhealthy.lock();
+                    if unhealthy.as_deref() == Some(message.as_str()) {
+                        *unhealthy = None;
+                    }
+                }
+                Err(_) => mark_unsaved = Some(message),
+            }
+        }
+    }
+}
+
+/// Stop the writer after optionally appending the #842 interrupted marker.
+///
+/// `mark_interrupted` runs only once every `Append` queued ahead of this
+/// command has been written, so the marker follows the final persisted
+/// chunks. A scan failure is warn-logged and does not fail the close —
+/// one unreadable transcript must not block shutdown of the rest.
+fn close_writer(
+    inner: &Inner,
+    metadata: &Arc<Mutex<SessionMetadata>>,
+    tails: &mut TailState,
+    unhealthy: &Arc<Mutex<Option<String>>>,
+    status: Option<PersistedSessionStatus>,
+    mark_interrupted: bool,
+    reply: oneshot::Sender<Result<()>>,
+) {
+    if mark_interrupted {
+        let authority = inner.seq_authority.lock().clone();
+        append_interrupted_marker_if_open(&inner.root, metadata, tails, authority.as_deref());
+    }
+    let snapshot = {
+        let mut current = metadata.lock();
+        if let Some(status) = status {
+            current.status = status;
+        }
+        current.clone()
+    };
+    let result = persist_metadata_at_root(&inner.root, &snapshot)
+        .and_then(|()| sync_session_files(&inner.root, metadata));
+    let _ = reply.send(result.clone_for_reply());
+    if let Err(error) = result {
+        *unhealthy.lock() = Some(error.to_string());
+    }
+}
+
+/// Issue #842: append `prompt_complete { stopReason: "interrupted" }` when
+/// the last `user_prompt` has no matching completion. The seq comes from the
+/// session's [`SeqAuthority`] when one is installed (the relay is then the sole
+/// allocator), floored at the seq of the last line of either log so it cannot
+/// collide with a record that was still queued when shutdown began. With no
+/// authority (no relay, hence no second allocator) it is `last_seq + 1`. A
+/// marker failure is logged and skipped.
+pub(super) fn append_interrupted_marker_if_open(
+    root: &Path,
+    metadata: &Arc<Mutex<SessionMetadata>>,
+    tails: &mut TailState,
+    authority: Option<&dyn SeqAuthority>,
+) {
+    let (session_id, storage_key) = {
+        let current = metadata.lock();
+        (current.session_id.clone(), current.storage_key.clone())
+    };
+    let dir = root.join(&storage_key);
+    let scan = fs::File::open(dir.join(MESSAGES_FILE)).and_then(|mut file| {
+        let len = file.metadata()?.len();
+        scan_fold_tail(&mut file, len, 0, &session_id)
+    });
+    let scan = match scan {
+        Ok(scan) if !scan.unreadable => scan,
+        Ok(_) => {
+            log::warn!(
+                "[acp-history] interrupted-marker scan found an unreadable turn record \
+                 for session {} (leaving history as-is)",
+                crate::logging::redact_session_id(&session_id)
+            );
+            return;
+        }
+        Err(error) => {
+            log::warn!(
+                "[acp-history] interrupted-marker scan failed for session {}: {error} \
+                 (leaving history as-is)",
+                crate::logging::redact_session_id(&session_id)
+            );
+            return;
+        }
+    };
+    let Some(turn_id) = scan.open_turn() else {
+        return;
+    };
+    let turn_id = turn_id.and_then(Value::as_str).map(str::to_owned);
+    let tool_calls_last = fs::File::open(dir.join(TOOL_CALLS_FILE)).and_then(|mut file| {
+        let len = file.metadata()?.len();
+        last_line_seq(&mut file, len, &session_id)
+    });
+    let tool_calls_last = match tool_calls_last {
+        Ok(seq) => seq.unwrap_or(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            log::warn!(
+                "[acp-history] interrupted-marker tool-call tail probe failed for session {}: \
+                 {error} (leaving history as-is)",
+                crate::logging::redact_session_id(&session_id)
+            );
+            return;
+        }
+    };
+    let messages_last = scan.last_line.map_or(0, |line| line.seq);
+    let floor = metadata
+        .lock()
+        .last_seq
+        .max(messages_last)
+        .max(tool_calls_last);
+    // With a relay installed it is the sole allocator; without one (no live
+    // stream to disagree with) the durable frontier is the only authority.
+    let seq = match authority {
+        Some(authority) => authority.allocate_after(&session_id, floor),
+        None => floor + 1,
+    };
+    let mut payload = serde_json::json!({
+        "sessionId": session_id,
+        "stopReason": "interrupted",
+    });
+    if let Some(turn_id) = turn_id {
+        payload["turnId"] = serde_json::Value::String(turn_id);
+    }
+    let payload = normalize_durable_payload("prompt_complete", &payload);
+    let record = PersistedEventRecord {
+        schema_version: SESSION_SCHEMA_VERSION,
+        session_id: session_id.clone(),
+        seq,
+        type_: "prompt_complete".to_string(),
+        recorded_at: now_millis(),
+        payload,
+    };
+    if let Err(error) = append_record(root, metadata, tails, record) {
+        log::warn!(
+            "[acp-history] failed to append interrupted marker for session {}: {error}",
+            crate::logging::redact_session_id(&session_id)
+        );
+    } else {
+        log::info!(
+            "[acp-history] appended interrupted prompt_complete marker session={} seq={}",
+            crate::logging::redact_session_id(&session_id),
+            seq
+        );
+    }
+}
+
+pub(super) trait CloneForReply<T> {
+    fn clone_for_reply(&self) -> Result<T>;
+}
+impl CloneForReply<()> for Result<()> {
+    fn clone_for_reply(&self) -> Result<()> {
+        match self {
+            Ok(()) => Ok(()),
+            Err(error) => Err(SessionPersistenceError::PersistenceUnhealthy(
+                error.to_string(),
+            )),
+        }
+    }
+}
+
+/// Which JSONL logs the writer has already proven newline-terminated.
+///
+/// `Some(len)` = the log was exactly `len` bytes and ended with `\n` after
+/// this writer's own last successful append, so while the file is still that
+/// long the next append needs no seek + read probe (the length itself is
+/// re-checked with one `fstat`, which also catches a salvage rewrite of the
+/// file). `None` = unknown (a fresh writer, or any failed append / rollback):
+/// the next append re-verifies the tail and repairs it inline before writing.
+#[derive(Default)]
+pub(super) struct TailState {
+    pub(super) messages: Option<u64>,
+    pub(super) tool_calls: Option<u64>,
+}
+
+impl TailState {
+    fn slot(&mut self, tool_event: bool) -> &mut Option<u64> {
+        if tool_event {
+            &mut self.tool_calls
+        } else {
+            &mut self.messages
+        }
+    }
+}
+
+pub(super) fn append_record(
+    root: &Path,
+    metadata: &Arc<Mutex<SessionMetadata>>,
+    tails: &mut TailState,
+    record: PersistedEventRecord,
+) -> Result<()> {
+    let mut current = metadata.lock();
+    if record.session_id != current.session_id
+        || record.schema_version != SESSION_SCHEMA_VERSION
+        || record.seq <= current.last_seq
+    {
+        return Err(SessionPersistenceError::CorruptSession);
+    }
+    let tool_event = is_tool_event(&record.type_);
+    let dir = root.join(&current.storage_key);
+    let path = dir.join(if tool_event {
+        TOOL_CALLS_FILE
+    } else {
+        MESSAGES_FILE
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)?;
+    // Never concatenate onto an unterminated tail (ACPM-F7): a tail left
+    // without `\n` by a crash or a failed rollback would otherwise fuse with
+    // this record into one permanently unparseable line. Repair it inline
+    // (terminate an intact record / quarantine + truncate a torn fragment —
+    // the same repair the open path runs) so a live writer never wedges until
+    // the next restart; refuse only if the tail is still unterminated. The
+    // probe runs only while the tail state is unknown (first append after
+    // open, or after any failed append); a successful append leaves the tail
+    // terminated and records its end offset, so the hot path skips it.
+    let slot = tails.slot(tool_event);
+    // The cached end offset is only trusted while the file is still exactly
+    // that long: a replay-triggered salvage atomically REPLACES the live log
+    // with a shorter one (and a rollback `set_len(len)` against a stale,
+    // larger offset would zero-extend it). One `fstat` validates the cache;
+    // any mismatch (or unknown state) falls back to the full tail probe.
+    let current_len = file.metadata()?.len();
+    let len = match *slot {
+        Some(cached) if cached == current_len => current_len,
+        _ => {
+            let mut len = current_len;
+            if !ends_with_newline_or_empty(&mut file, len)? {
+                let preserved_seq = repair_jsonl_torn_tail(&path);
+                len = file.metadata()?.len();
+                if !ends_with_newline_or_empty(&mut file, len)? {
+                    return Err(SessionPersistenceError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "refusing to append after an unterminated JSONL tail",
+                    )));
+                }
+                // An intact record preserved by the repair is part of the
+                // log: advance the sequence bookkeeping past it so nothing
+                // (this append, a later interrupted marker) reuses its seq.
+                if let Some(preserved_seq) = preserved_seq {
+                    if preserved_seq > current.last_seq {
+                        current.last_seq = preserved_seq;
+                    }
+                    if record.seq <= current.last_seq {
+                        return Err(SessionPersistenceError::CorruptSession);
+                    }
+                }
+            }
+            len
+        }
+    };
+    // Unknown until this append fully succeeds.
+    *slot = None;
+    // Record + newline in ONE write: a crash can no longer land between them,
+    // and a failed (e.g. ENOSPC) partial write is rolled back to the last
+    // terminated record when the platform allows it; when the rollback is
+    // refused (Windows append-only handle) the tail is repaired inline.
+    let mut bytes = serde_json::to_vec(&record)?;
+    bytes.push(b'\n');
+    if let Err(error) = file.write_all(&bytes) {
+        if file.set_len(len).is_err() {
+            repair_jsonl_torn_tail(&path);
+        }
+        return Err(error.into());
+    }
+    file.flush()?;
+    *tails.slot(tool_event) = Some(len + bytes.len() as u64);
+    current.last_seq = record.seq;
+    current.last_activity_at = record.recorded_at;
+    if is_tool_event(&record.type_) {
+        current.tool_count += 1;
+        // A tool call is a fold boundary: it closes the open chunk run (the
+        // next chunk opens a fresh bubble). `tool_call_update` is NOT — it
+        // never splits a run in the materializer.
+        if record.type_ == "tool_call" {
+            current.fold_open_role = None;
+        }
+    } else {
+        // Issue #844c: `message_count` mirrors the payload materializer's
+        // fold EXACTLY — a record counts iff `fold_step` says it opens a
+        // bubble. The old rule (any non-tool non-switch record) counted
+        // usage/plan/mode updates too, so the index drifted above the
+        // materialized `messages.len()` for every session with metadata
+        // events. `fold_open_role` tracks the open chunk run so coalesced
+        // `message_chunk`s do not double-count.
+        // Map the persisted open-role string to its static fold-bucket
+        // label before the mutable mutations below (a `&str` borrowed from
+        // `current` cannot live past them).
+        let open_role: Option<&'static str> = match current.fold_open_role.as_deref() {
+            Some("thought") => Some("thought"),
+            Some("agent") => Some("agent"),
+            _ => None,
+        };
+        let state = FoldState { open_role };
+        let (next, opens_message) = fold_step(state, &record.type_, &record.payload);
+        if opens_message {
+            current.message_count += 1;
+        }
+        current.fold_open_role = next.open_role.map(str::to_string);
+    }
+    if record.type_ == "user_prompt" && current.title.is_none() {
+        current.title = Some(derive_title(&record.payload));
+        current.title_source = Some(TitleSource::DerivedFirstMessage);
+    }
+    if record.type_ == "local_title_generated" {
+        // AD-1: BackgroundGenerated wins over AgentSupplied and
+        // DerivedFirstMessage. The host's background title-gen flow is the
+        // sole emitter of this durable event (the manager enqueues it after a
+        // successful background turn). A non-empty title here always wins
+        // because the manager skips persistence when normalize_title returns
+        // the "Untitled Chat" fallback floor (AD-6).
+        let bg_title = record
+            .payload
+            .get("title")
+            .and_then(Value::as_str)
+            .map(normalize_title);
+        if let Some(title) = bg_title {
+            current.title = Some(title);
+            current.title_source = Some(TitleSource::BackgroundGenerated);
+        }
+    }
+    if record.type_ == "session_info_update" {
+        // AD-1: once BackgroundGenerated/LocalAlias owns the title, a later
+        // agent-supplied session_info_update must NOT overwrite it. Also set
+        // the provenance to AgentSupplied on the non-protected path so a
+        // subsequent background title (which DOES overwrite AgentSupplied)
+        // still wins over the agent's pick.
+        let agent_title = record
+            .payload
+            .get("title")
+            .and_then(Value::as_str)
+            .map(normalize_title);
+        if !is_protected_title_source(current.title_source.as_ref()) {
+            current.title = agent_title;
+            current.title_source = Some(TitleSource::AgentSupplied);
+        }
+    }
+    if let Some(snapshot) = super::model::snapshot_from_record(&record) {
+        // CAP-3: every model change source (host set_model / set_config_option,
+        // agent-initiated updates) reaches here as a durable
+        // `config_options_update`. Unparseable options keep the old value.
+        let changed = super::model::apply_snapshot(&mut current, snapshot);
+        log::debug!(
+            "[acp-history] model derived from config_options_update changed={changed} session={}",
+            crate::logging::redact_session_id(&record.session_id)
+        );
+    }
+    Ok(())
+}
+
+/// Whether the log is empty or its last byte is `\n` (a terminated tail).
+fn ends_with_newline_or_empty(file: &mut fs::File, len: u64) -> io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    if len == 0 {
+        return Ok(true);
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1))?;
+    file.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
+}
+
+pub(super) fn sync_session_files(
+    root: &Path,
+    metadata: &Arc<Mutex<SessionMetadata>>,
+) -> Result<()> {
+    let current = metadata.lock().clone();
+    let dir = root.join(&current.storage_key);
+    for name in [MESSAGES_FILE, TOOL_CALLS_FILE] {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(name))?
+            .sync_all()?;
+    }
+    persist_metadata_at_root(root, &current)
+}
+
+pub(super) fn persist_metadata_at_root(root: &Path, metadata: &SessionMetadata) -> Result<()> {
+    let path = root.join(&metadata.storage_key).join(METADATA_FILE);
+    atomic_file::replace(&path, &serde_json::to_vec_pretty(metadata)?)?;
+    Ok(())
+}
+
+pub(super) fn ensure_log_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.sync_all()?;
+    }
+    Ok(())
+}

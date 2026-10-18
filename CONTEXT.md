@@ -1,16 +1,151 @@
-# Context
+# Termul
 
-## Glossary
+Termul is a Tauri 2 desktop app with a React/TypeScript renderer and Rust runtime: a terminal-based agent chat client that spawns external AI coding agents over the Agent Client Protocol (ACP) and shares them across desktop and browser surfaces.
 
-- **Agent Chat**: A chat-thread workspace surface for ACP-backed coding agents. It does not launch terminal-native CLI agents.
-- **ACP Agent**: A supported Agent Client Protocol configuration derived automatically for Agent Chat; Application Preferences only shows availability/status.
-- **Model Picker**: The new-thread control that selects an ACP Agent and, when advertised by that ACP session, one of its model config values.
-- **Variant Picker**: The control for an ACP session's `thought_level` config option, such as low, medium, high, or max thinking depth.
-- **Agent Picker**: The control for ACP session modes, such as Build or Plan, within the selected ACP Agent.
-- **Attachment**: A file or image the user stages in the Agent Chat composer before sending. On send, each Attachment becomes one ACP content block.
-- **Resource Link**: An ACP `resource_link` content block that references a file by its filesystem path; the ACP Agent opens and reads the file with its own tools. Produced when the file's path is known (the OS file picker). No prompt capability is required.
-- **Embedded Resource**: An ACP `resource` content block that carries a file's inline text content. Produced when only the file's bytes are known and no path exists (drag-and-drop or paste). Requires the ACP Agent's `embeddedContext` prompt capability.
-- **File Mention**: An `@`-prefixed token typed mid-text in the Agent Chat composer that opens a codebase filename-search picker scoped to the session's working root. Selecting a result stages a `file-ref` Attachment (an ACP `resource_link`) and removes the token from the composer text. A discovery channel for Attachments — not a separate transport or content-block type.
-_Avoid_: file reference, mention-link, inline file chip
-- **Chat History Scope**: The `(projectId, cwd)` pair that partitions persisted Agent Chat sessions. A session is visible only when both the active `Project.id` and the active working directory (main checkout path or a `Worktree.path`) match the session's stored values. See ADR 0002.
-- **Chat History Wipe Migration**: A one-shot, first-run-after-upgrade step that clears all pre-existing `acp/sessions/*` records because they predate the `projectId` field and cannot be backfilled. Gated by the `acp/sessions/migrated-v2` flag.
+## Language
+
+### ACP agent catalog & updates
+
+**ACP Registry**:
+The upstream catalog of ACP agents (id, name, version, distribution) served from the ACP CDN. The protocol itself has no update mechanism; distribution happens entirely through this catalog.
+_Avoid_: marketplace, store
+
+**Bundled Registry**:
+The frozen registry snapshot shipped inside the app; the default trusted source for agent launch data.
+_Avoid_: local registry, built-in catalog
+
+**Remote Snapshot**:
+A freshly fetched registry snapshot from the CDN. Advisory only: it never changes what Termul spawns until the user applies it.
+_Avoid_: latest registry, live catalog
+
+**Applied Registry**:
+A Remote Snapshot the user explicitly opted into. It governs which agent versions and distribution metadata Termul derives launch configs from.
+_Avoid_: active CDN, promoted snapshot
+
+**Agent Catalog**:
+The host-resolved view of the active registry: per OS/arch availability, runtime detection, and install state.
+_Avoid_: registry (it is derived, not the source), agent list
+
+**Persisted Agent Config**:
+A saved agent launch configuration that takes precedence over registry-derived data. Registry updates do not touch it unless the user applies an update.
+_Avoid_: stored agent, saved config
+
+**Pinned Version**:
+The exact agent version embedded in a launch spec (e.g. a package reference). Termul pins exact versions rather than floating ranges.
+_Avoid_: locked version, semver range
+
+**Updatable Agent**:
+A registry agent with a trusted version source: an npx/uvx Pinned Version or a host-installed binary recorded in the install manifest.
+_Avoid_: managed agent, auto-update agent
+
+**Custom Agent**:
+A user-supplied agent configuration outside the registry. It has no version source and is never updatable.
+_Avoid_: manual agent, user agent
+
+**Update Check**:
+Advisory detection of version drift between the active registry and the latest Remote Snapshot. It never changes spawn behavior.
+_Avoid_: update scan, refresh
+
+**Update Application**:
+The user-initiated act of overwriting the registry-derived fields of a Persisted Agent Config with data from the Applied Registry. User-added environment values are preserved.
+_Avoid_: Agent Install, sync, upgrade
+
+**Agent Install**:
+The user-initiated installation of a registry-pinned ACP agent distribution into a Termul-managed cache on the host that runs the agent. For Claude ACP, this installs only the npm adapter package; the separate Claude Code CLI remains an operator-installed prerequisite.
+_Avoid_: global install, install on the browser client, Update Application
+
+### Agent chats
+
+**Project**:
+One workspace root in the sidebar.
+_Avoid_: folder, repo
+
+**Agent chat**:
+The open conversation tab for one Session.
+_Avoid_: agent, thread
+
+**Agent process**:
+The running ACP agent for one Agent chat.
+_Avoid_: shared agent, disconnect
+
+**Agent process stop**:
+The Agent process has exited, so that Agent chat cannot send.
+_Avoid_: disconnect, connection drop
+
+**Closing**:
+An Agent chat that stays open while its current turn finishes, after which its Agent process stops.
+_Avoid_: hidden chat, disconnect
+
+**Resume**:
+The act of starting a new Agent process for the same Session after an Agent process stop.
+_Avoid_: reconnect
+
+**Attention**:
+A Project or Agent chat that has a pending permission, a pending question, or a stopped Agent chat that cannot resume by itself.
+_Avoid_: badge, unread, notification
+
+**Session**:
+The stored conversation that one Agent chat shows.
+_Avoid_: history item, transcript
+
+### Providers & accounts
+
+**Provider**:
+The vendor of an agent that the user signs in to, for example Claude Code. A Provider has one or more Accounts.
+_Avoid_: agent (the agent is the ACP program, not the vendor), account
+
+**Account**:
+One subscription login under a Provider, with its own usage limits. The user gives each Account a short name, and Termul shows that name instead of the email address.
+_Avoid_: provider, profile, API key
+
+**Project Account**:
+The Account that the Agent chats of one Project use. Different Projects can use different Accounts at the same time, for example a work Project and a personal Project.
+_Avoid_: active account, current account
+
+**Default Account**:
+The Account that a Project uses when the user has not chosen a Project Account for it. There is always exactly one Default Account while any Account exists.
+_Avoid_: main account, primary account
+
+**Usage window**:
+A period in which an Account's usage is counted against a limit, for example the 5-hour window or the weekly window. Each window has a utilization and a reset time.
+_Avoid_: quota, rate limit (a rate limit is the event of reaching the limit)
+
+**Limit warning**:
+The notice that an Account is near the limit of a Usage window, shown before work stops.
+_Avoid_: rate limit error
+
+**Limit reached**:
+The state where an Account cannot run more turns until a Usage window resets.
+_Avoid_: crash, disconnect, Agent process stop
+
+**Account switch**:
+The act of changing a Project Account. The open Agent chats of that Project continue on the new Account, and the conversation stays visible. The new Project Account stays until the user changes it again.
+_Avoid_: logout, re-login, reconnect
+
+### Iconography
+
+**Functional UI icon**:
+A symbol that represents an action, state, or navigation item in Termul’s interface.
+_Avoid_: brand mark, file-type icon
+
+**File-type icon**:
+A symbol used to identify a file or folder category in a file tree.
+_Avoid_: functional UI icon
+
+**Brand mark**:
+A logo or identity symbol belonging to Termul, an operating system, or a third-party agent/provider.
+_Avoid_: functional UI icon
+
+### Workspace chrome
+
+**App chrome**:
+The non-grid shell of the workspace: sidebar, tab bar, and status bar.
+_Avoid_: window chrome, UI chrome
+
+**Terminal grid**:
+The cell surface of a terminal pane. It shares the app background colour.
+_Avoid_: xterm canvas, black box, terminal canvas
+
+**Terminal background**:
+The shared surface colour of the Terminal grid and the pane around it. It is the same colour as the app background.
+_Avoid_: canvas clear colour, ANSI default background

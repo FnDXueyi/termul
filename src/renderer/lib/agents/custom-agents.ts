@@ -16,6 +16,8 @@ import {
   type TerminalAgentDefinition
 } from '@/lib/agents/agent-registry'
 import { persistenceApi } from '@/lib/api'
+import { type SharedKeyChange, syncSharedKey } from '@/lib/shared-key-sync'
+import { randomUUID } from '@/lib/uuid'
 
 let customAgentsById = new Map<string, TerminalAgentDefinition>()
 let customAgentsCacheVersion = 0
@@ -90,7 +92,7 @@ export function validateCustomAgent(input: CustomAgentInput): string | null {
 /** Normalize a validated input into a stored `TerminalAgentDefinition`. */
 export function toAgentDefinition(input: CustomAgentInput): TerminalAgentDefinition {
   return {
-    id: input.id ?? `custom-${crypto.randomUUID().slice(0, 8)}`,
+    id: input.id ?? `custom-${randomUUID().slice(0, 8)}`,
     name: input.name.trim(),
     command: input.command.trim(),
     baseArgs: input.baseArgs ?? [],
@@ -103,12 +105,33 @@ export function toAgentDefinition(input: CustomAgentInput): TerminalAgentDefinit
   }
 }
 
+/** Defensive: force isBuiltIn:false on load so a tampered file can't shadow built-ins. */
+function asCustomAgents(data: PersistedCustomAgents): TerminalAgentDefinition[] {
+  return data.agents.map((a) => ({ ...a, isBuiltIn: false as const }))
+}
+
+let customAgentsSyncStarted = false
+
+/** Show a change another device or tab saved; started once, after the first read. */
+function startCustomAgentsSync(): void {
+  if (customAgentsSyncStarted) return
+  customAgentsSyncStarted = true
+  syncSharedKey<PersistedCustomAgents>(
+    PersistenceKeys.customAgents,
+    (change: SharedKeyChange<PersistedCustomAgents>) => {
+      if (!change.exists) updateCustomAgentsCache([])
+      else if (Array.isArray(change.data?.agents))
+        updateCustomAgentsCache(asCustomAgents(change.data))
+    }
+  )
+}
+
 /** Load persisted custom agents (empty when none / on first run). */
 export async function loadCustomAgents(): Promise<TerminalAgentDefinition[]> {
   const result = await persistenceApi.read<PersistedCustomAgents>(PersistenceKeys.customAgents)
+  startCustomAgentsSync()
   if (result.success && Array.isArray(result.data?.agents)) {
-    // Defensive: force isBuiltIn:false on load so a tampered file can't shadow built-ins.
-    const agents = result.data.agents.map((a) => ({ ...a, isBuiltIn: false as const }))
+    const agents = asCustomAgents(result.data)
     updateCustomAgentsCache(agents)
     return agents
   }

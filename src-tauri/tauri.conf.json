@@ -1,12 +1,12 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
 	"productName": "Termul Manager",
-	"version": "0.4.8",
+	"version": "0.4.21",
 	"identifier": "com.termul-manager.app",
 	"build": {
 		"beforeDevCommand": "npx vite --config vite.config.tauri.ts",
 		"devUrl": "http://localhost:5180/tauri-index.html",
-		"beforeBuildCommand": "npx vite build --config vite.config.tauri.ts",
+		"beforeBuildCommand": "npx vite build --config vite.config.web.ts && npx vite build --config vite.config.tauri.ts",
 		"frontendDist": "../dist-tauri"
 	},
 	"app": {
@@ -33,7 +33,7 @@
 			}
 		],
 		"security": {
-			"csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost ws://localhost:* ws://127.0.0.1:* https://api.github.com; worker-src 'self' blob:; img-src 'self' asset: http://asset.localhost data: https://picsum.photos; font-src 'self' data:; media-src 'self' blob:;"
+			"csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost ws://localhost:* ws://127.0.0.1:* http://127.0.0.1:* https://api.github.com; frame-src http://127.0.0.1:*; worker-src 'self' blob:; img-src 'self' asset: http://asset.localhost data: https://picsum.photos; font-src 'self' data:; media-src 'self' blob:;"
 		}
 	},
 	"plugins": {

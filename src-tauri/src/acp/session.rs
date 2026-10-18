@@ -14,11 +14,23 @@
 //! handler closures require; in practice all access happens on the one driver
 //! thread, so the lock is uncontended.
 
-use agent_client_protocol::schema::RequestPermissionResponse;
+use agent_client_protocol::schema::v1::{
+    AvailableCommand, CreateElicitationResponse, RequestPermissionResponse,
+};
 use agent_client_protocol::Responder;
+use parking_lot::Mutex;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use tokio::sync::oneshot;
+use std::sync::Arc;
+use tokio::sync::{oneshot, watch};
+
+use crate::acp::session_persistence::SessionRegistration;
+
+mod activity;
+mod commands;
+pub(crate) use activity::ActivityClock;
+pub use activity::AgentActivity;
 
 /// A permission request awaiting the user's decision.
 ///
@@ -29,24 +41,218 @@ pub(crate) struct PendingPermission {
     pub responder: Responder<RequestPermissionResponse>,
 }
 
+/// A structured question (issue #411) awaiting the user's answer.
+///
+/// The `responder` completes the agent's in-flight `_session/question` extension
+/// request once the user answers (or the turn is cancelled / drained). The
+/// response is an untyped JSON value (the ACP extension surface has no typed
+/// question response), so the `serde_json::Value` is `Send` and can cross the
+/// driver thread boundary inside `DriverState`'s `Arc<Mutex<..>>`.
+pub(crate) struct PendingQuestion {
+    pub session_id: String,
+    pub question_id: String,
+    pub responder: Responder<Value>,
+}
+
+/// A form or URL elicitation waiting for the user.
+pub(crate) struct PendingElicitation {
+    pub session_id: String,
+    pub responder: Responder<CreateElicitationResponse>,
+}
+
 /// Mutable state shared across a single agent's driver thread.
 #[derive(Default)]
 pub(crate) struct DriverState {
     /// Permission requests keyed by a globally-unique correlation id.
     pending_permissions: HashMap<String, PendingPermission>,
+    /// Structured questions (issue #411) keyed by a globally-unique question id.
+    pending_questions: HashMap<String, PendingQuestion>,
+    pending_elicitations: HashMap<String, PendingElicitation>,
     /// Canonicalized workspace root per active session, used to sandbox `fs`
     /// reads/writes to the session's `cwd`.
     session_roots: HashMap<String, PathBuf>,
+    /// Authoritative set of non-durable sessions created by the manager.
+    ephemeral_sessions: HashSet<String>,
     /// Sessions with an in-flight prompt turn. The value holds the cancel
     /// signal sender; it is taken (set to `None`) once a cancel has been
     /// signalled, but the key remains until the turn task finishes so a
     /// concurrent turn cannot slip in during the post-cancel grace window.
     active_turns: HashMap<String, Option<oneshot::Sender<()>>>,
+    /// Client turn id of each active turn (`None` for turnless callers).
+    /// Same lifecycle as `active_turns`; read by the teardown terminator.
+    active_turn_ids: HashMap<String, Option<String>>,
+    /// In-flight idle-reset signal senders per active turn. The
+    /// `session/update`/`tool_call` notification callback fires these
+    /// (non-blocking) so the turn task's idle deadline resets on agent
+    /// activity — a wedged (silent) turn hits the idle timeout fast, an active
+    /// (streaming) turn never does. Mirrors `active_turns`' lifecycle: created
+    /// in `try_begin_turn`, dropped in `finish_turn`.
+    idle_resets: HashMap<String, watch::Sender<()>>,
+    /// One-shot waiters registered by turn-scoped operations. `finish_turn`
+    /// removes and resolves the full waiter list exactly once.
+    turn_idle_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
     /// Sessions associated with each tool call id for this connection. ACP tool
     /// call ids are session-scoped, so a set preserves collisions as ambiguous.
     /// Bindings remain for the connection lifetime so delayed updates cannot be
     /// reassigned to a different active turn after their original turn ends.
     tool_call_sessions: HashMap<String, HashSet<String>>,
+    /// Per-session configId of the agent-advertised Model selector. ACP 0.14
+    /// replaced `session/set_model` with `session/set_config_option`, whose
+    /// `configId` is the agent-provided option id (conventionally `"model"` but
+    /// not guaranteed). Caching it per session lets `set_model` target the
+    /// agent's actual model selector id instead of hardcoding `"model"`.
+    model_config_ids: HashMap<String, String>,
+    /// Sessions whose model list came only from the legacy `models` field
+    /// (issue #822). Such lists are read-only: `set_model` has no protocol path
+    /// for them, so it fails fast instead of sending a bogus config-option call.
+    legacy_model_sessions: HashSet<String>,
+    /// Per-session replay windows for in-flight `session/load` /
+    /// `session/resume` requests (story 3: replay contract). While a window is
+    /// open, agent-replayed history arrives as `session/update` notifications
+    /// that must be dropped before fan-out — never persisted, never forwarded
+    /// to subscribers — so the persisted JSONL log stays the sole history
+    /// source. The value is a refcount (overlapping reopens of one session
+    /// keep the window open until ALL complete) plus a count of suppressed
+    /// updates for the close-out summary log.
+    /// Replay windows and prompt turns are mutually exclusive per session:
+    /// admission goes through one atomic transition each
+    /// (`try_begin_replay_window` rejects while a turn is active,
+    /// `try_begin_turn` rejects while a window is open), so a live turn's
+    /// updates can never be misclassified as replayed history and dropped.
+    replay_windows: HashMap<String, ReplayWindow>,
+    /// Per-session reopen reservations for admitted `session/load` /
+    /// `session/resume` requests (story 3: replay contract). A reservation is
+    /// taken at admission time — BEFORE the durable-writer reinstall await —
+    /// so a prompt turn cannot slip in while the reopen prepares; the replay
+    /// window (which actually suppresses updates) is opened separately,
+    /// immediately before the ACP request is sent, so live updates are never
+    /// dropped during the preparatory phase. Ref-counted like
+    /// `replay_windows` so overlapping reopens of one session hold the
+    /// reservation until ALL complete. Released on every outcome via
+    /// [`ReopenReservation`]'s `Drop`.
+    reopen_reservations: HashMap<String, usize>,
+    /// Registration metadata captured at `session/new` for backend-ephemeral
+    /// sessions, so `PromoteSession` can register durable metadata without
+    /// trusting the client. Dropped on promotion (`unmark_ephemeral`) and on
+    /// disposal (`remove_session_root`).
+    promotable_sessions: HashMap<String, SessionRegistration>,
+    /// When this agent last showed host-observed activity (see
+    /// [`AgentActivity`]). The idle reaper's only clock.
+    last_active: ActivityClock,
+    /// Last `available_commands_update` set fanned out per session, so a
+    /// repeat is dropped before it takes a seq. Forgotten when a replay
+    /// window opens (load/resume) and in `remove_session_root`.
+    last_commands: commands::LastCommands,
+}
+
+/// State of one session's replay window: how many reopens are in flight and
+/// how many replayed updates have been suppressed since the window opened.
+#[derive(Default)]
+struct ReplayWindow {
+    open_count: usize,
+    suppressed: u64,
+}
+
+/// RAII guard keeping a session's replay window open.
+///
+/// Created by the manager's `session/load` / `session/resume` handlers BEFORE
+/// the request future is evaluated and dropped after the response resolves
+/// (on success, agent error, or timeout alike), so the window covers exactly
+/// the agent's history replay. Ref-counted: overlapping guards for one
+/// session keep the window open until the last guard drops.
+/// Admission is refused while a prompt turn is active for the session
+/// (`try_new` returns `None`): replayed history and a live turn must never
+/// overlap, or live updates would be misclassified as replayed history and
+/// dropped. The manager holds a [`ReopenReservation`] from reopen admission
+/// until the reopen resolves, so in practice this refusal is unreachable on
+/// the deferred creation path — it stays as the total admission invariant.
+///
+/// NEVER drop this guard while holding the `DriverState` lock on the same
+/// thread: `Drop` locks the (non-reentrant) `parking_lot` mutex, which would
+/// deadlock.
+pub(crate) struct ReplayWindowGuard {
+    state: Arc<Mutex<DriverState>>,
+    session_id: String,
+}
+
+impl ReplayWindowGuard {
+    /// Open (or add a reference to) the replay window for `session_id`.
+    /// Returns `None` — opening no window — when a prompt turn is active for
+    /// the session; the caller must fail the reopen instead of replaying
+    /// history into a live turn.
+    pub(crate) fn try_new(state: Arc<Mutex<DriverState>>, session_id: String) -> Option<Self> {
+        if !state.lock().try_begin_replay_window(&session_id) {
+            return None;
+        }
+        Some(Self { state, session_id })
+    }
+}
+
+impl Drop for ReplayWindowGuard {
+    fn drop(&mut self) {
+        let suppressed = self.state.lock().finish_replay_window(&self.session_id);
+        // Summary log only when the window actually suppressed updates — an
+        // empty window is normal (e.g. opencode's `session/resume` replays
+        // nothing) and must stay silent.
+        if suppressed > 0 {
+            log::debug!(
+                "[acp] session {} replay window closed: {suppressed} replayed update(s) suppressed",
+                crate::logging::redact_session_id(&self.session_id)
+            );
+        }
+    }
+}
+
+/// RAII guard holding a session's reopen reservation (see
+/// [`DriverState::reopen_reservations`]).
+///
+/// Created by the manager's `session/load` / `session/resume` handlers at
+/// admission time — BEFORE the durable-writer reinstall await — so a prompt
+/// turn cannot start while the reopen prepares; the replay window (which
+/// suppresses replayed updates before fan-out) is opened separately via
+/// [`ReplayWindowGuard`] immediately before the ACP request is sent. Dropped
+/// when the reopen task finishes (success, agent error, timeout, or early
+/// return alike), so the reservation covers exactly the reopen's in-flight
+/// lifetime. Ref-counted: overlapping reopens of one session keep the
+/// reservation until the last guard drops.
+/// Admission is refused while a prompt turn is active for the session
+/// (`try_new` returns `None`): the caller must fail the reopen instead of
+/// racing history replay against a live turn.
+///
+/// NEVER drop this guard while holding the `DriverState` lock on the same
+/// thread: `Drop` locks the (non-reentrant) `parking_lot` mutex, which would
+/// deadlock.
+pub(crate) struct ReopenReservation {
+    state: Arc<Mutex<DriverState>>,
+    session_id: String,
+}
+
+impl ReopenReservation {
+    /// Reserve `session_id` for an in-flight reopen (or add a reference to an
+    /// existing reservation). Returns `None` — no reservation — when a prompt
+    /// turn is active for the session.
+    pub(crate) fn try_new(state: Arc<Mutex<DriverState>>, session_id: String) -> Option<Self> {
+        if !state.lock().try_begin_reopen_reservation(&session_id) {
+            return None;
+        }
+        Some(Self { state, session_id })
+    }
+}
+
+impl Drop for ReopenReservation {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .finish_reopen_reservation(&self.session_id);
+    }
+}
+
+/// Signals handed to the turn task when a turn begins: the cancel receiver
+/// (user/system cancel) and the idle-reset receiver (fired on agent activity
+/// to push back the idle deadline).
+pub(crate) struct TurnHandles {
+    pub cancel_rx: oneshot::Receiver<()>,
+    pub idle_rx: watch::Receiver<()>,
 }
 
 impl DriverState {
@@ -64,6 +270,7 @@ impl DriverState {
         session_id: String,
         responder: Responder<RequestPermissionResponse>,
     ) -> String {
+        self.last_active.touch();
         let request_id = format!("perm-{}", uuid::Uuid::new_v4());
         self.pending_permissions.insert(
             request_id.clone(),
@@ -77,7 +284,96 @@ impl DriverState {
 
     /// Remove and return a pending permission by its correlation id.
     pub(crate) fn take_permission(&mut self, request_id: &str) -> Option<PendingPermission> {
+        self.last_active.touch();
         self.pending_permissions.remove(request_id)
+    }
+
+    /// Register a pending structured question (issue #411) and return its
+    /// globally-unique correlation id.
+    ///
+    /// The id embeds a UUID (mirroring `register_permission`'s `perm-{uuid}`
+    /// style, but with a `q-` prefix) so it never collides across agents.
+    pub(crate) fn register_question(
+        &mut self,
+        session_id: String,
+        responder: Responder<Value>,
+    ) -> String {
+        self.last_active.touch();
+        let question_id = format!("q-{}", uuid::Uuid::new_v4());
+        self.pending_questions.insert(
+            question_id.clone(),
+            PendingQuestion {
+                session_id,
+                question_id: question_id.clone(),
+                responder,
+            },
+        );
+        question_id
+    }
+
+    /// Remove and return a pending question by its correlation id.
+    pub(crate) fn take_question(&mut self, question_id: &str) -> Option<PendingQuestion> {
+        self.last_active.touch();
+        self.pending_questions.remove(question_id)
+    }
+
+    /// Register a pending elicitation and return its correlation id.
+    pub(crate) fn register_elicitation(
+        &mut self,
+        session_id: String,
+        responder: Responder<CreateElicitationResponse>,
+    ) -> String {
+        self.last_active.touch();
+        let request_id = format!("elicit-{}", uuid::Uuid::new_v4());
+        self.pending_elicitations.insert(
+            request_id.clone(),
+            PendingElicitation {
+                session_id,
+                responder,
+            },
+        );
+        request_id
+    }
+
+    pub(crate) fn take_elicitation(&mut self, request_id: &str) -> Option<PendingElicitation> {
+        self.last_active.touch();
+        self.pending_elicitations.remove(request_id)
+    }
+
+    pub(crate) fn drain_session_elicitations(
+        &mut self,
+        session_id: &str,
+    ) -> Vec<PendingElicitation> {
+        let ids: Vec<String> = self
+            .pending_elicitations
+            .iter()
+            .filter(|(_, item)| item.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.pending_elicitations.remove(&id))
+            .collect()
+    }
+
+    /// Remove and return all pending questions belonging to a session.
+    ///
+    /// Used on cancellation and on prompt completion to resolve every
+    /// outstanding question for the session (cancelled).
+    pub(crate) fn drain_session_questions(&mut self, session_id: &str) -> Vec<PendingQuestion> {
+        let ids: Vec<String> = self
+            .pending_questions
+            .iter()
+            .filter(|(_, q)| q.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.pending_questions.remove(&id))
+            .collect()
+    }
+
+    /// Remove and return every pending question, regardless of session.
+    pub(crate) fn drain_all_questions(&mut self) -> Vec<PendingQuestion> {
+        self.pending_questions.drain().map(|(_, q)| q).collect()
     }
 
     /// Remove and return all pending permissions belonging to a session.
@@ -107,7 +403,40 @@ impl DriverState {
     /// Record the canonicalized workspace root for a session. Agent `fs`
     /// reads/writes for this session must stay within this root.
     pub(crate) fn set_session_root(&mut self, session_id: String, root: PathBuf) {
+        self.last_active.touch();
         self.session_roots.insert(session_id, root);
+    }
+
+    pub(crate) fn mark_ephemeral(&mut self, session_id: String) {
+        self.ephemeral_sessions.insert(session_id);
+    }
+
+    #[must_use]
+    pub(crate) fn is_ephemeral(&self, session_id: &str) -> bool {
+        self.ephemeral_sessions.contains(session_id)
+    }
+
+    /// Stash the durable registration metadata for a backend-ephemeral session
+    /// (captured at `session/new`); consumed by `PromoteSession`.
+    pub(crate) fn note_promotable_registration(
+        &mut self,
+        session_id: String,
+        registration: SessionRegistration,
+    ) {
+        self.promotable_sessions.insert(session_id, registration);
+    }
+
+    /// The stashed registration metadata for a backend-ephemeral session.
+    pub(crate) fn promotable_registration(&self, session_id: &str) -> Option<SessionRegistration> {
+        self.promotable_sessions.get(session_id).cloned()
+    }
+
+    /// Clear the ephemeral mark (the session was promoted to durable). Also
+    /// drops the stashed registration metadata. No-op for non-ephemeral
+    /// sessions.
+    pub(crate) fn unmark_ephemeral(&mut self, session_id: &str) {
+        self.ephemeral_sessions.remove(session_id);
+        self.promotable_sessions.remove(session_id);
     }
 
     /// Look up the canonicalized workspace root for a session, if known.
@@ -115,15 +444,190 @@ impl DriverState {
         self.session_roots.get(session_id).cloned()
     }
 
+    /// Begin closing a session: report whether it was ephemeral — captured
+    /// BEFORE the marks are cleared, since the CloseSession arm's
+    /// finalization gate depends on the pre-removal value — then forget the
+    /// workspace root + marks, finish any active turn, and return the pending
+    /// permissions to resolve as cancelled.
+    pub(crate) fn begin_close_session(
+        &mut self,
+        session_id: &str,
+    ) -> (bool, Vec<PendingPermission>) {
+        let was_ephemeral = self.is_ephemeral(session_id);
+        self.remove_session_root(session_id);
+        let pending = self.finish_turn(session_id);
+        (was_ephemeral, pending)
+    }
+
     /// Forget a session's workspace root (on explicit close).
     pub(crate) fn remove_session_root(&mut self, session_id: &str) {
         self.session_roots.remove(session_id);
+        self.ephemeral_sessions.remove(session_id);
+        self.model_config_ids.remove(session_id);
+        self.legacy_model_sessions.remove(session_id);
+        self.promotable_sessions.remove(session_id);
+        self.last_commands.forget(session_id);
+    }
+
+    /// Whether an `available_commands_update` repeats the set last fanned
+    /// out for the session (order-insensitive). The caller drops a repeat
+    /// before it touches the idle clock or allocates a seq.
+    pub(crate) fn is_repeated_commands_update(
+        &mut self,
+        session_id: &str,
+        commands: &[AvailableCommand],
+    ) -> bool {
+        self.last_commands.is_repeat(session_id, commands)
+    }
+
+    /// Record the agent-advertised configId of the Model selector for a session
+    /// (derived from the session's `config_options`). Updated whenever options
+    /// are loaded, resumed, or refreshed via `session/set_config_option`.
+    pub(crate) fn set_model_config_id(&mut self, session_id: String, config_id: String) {
+        self.model_config_ids.insert(session_id, config_id);
+    }
+
+    /// Mark a session whose models came only from the legacy `models` field.
+    pub(crate) fn mark_legacy_models(&mut self, session_id: String) {
+        self.legacy_model_sessions.insert(session_id);
+    }
+
+    /// Clear the legacy marker (the session now resolves to config-option models).
+    pub(crate) fn clear_legacy_models(&mut self, session_id: &str) {
+        self.legacy_model_sessions.remove(session_id);
+    }
+
+    /// Whether the session's model list is legacy-only (read-only).
+    pub(crate) fn is_legacy_models(&self, session_id: &str) -> bool {
+        self.legacy_model_sessions.contains(session_id)
+    }
+
+    /// The cached Model-selector configId for a session, if one was advertised.
+    /// Callers fall back to the `"model"` convention when `None`.
+    pub(crate) fn model_config_id(&self, session_id: &str) -> Option<String> {
+        self.model_config_ids.get(session_id).cloned()
+    }
+
+    /// Open a replay window for a session (or add a reference to an already
+    /// open one). While open, inbound `session/update` notifications for the
+    /// session are agent-replayed history and must be dropped before fan-out.
+    /// Returns `false` — without opening the window — when a prompt turn is
+    /// active for the session: replay-window and turn admission are mutually
+    /// exclusive so live turn updates can never be swallowed as replayed
+    /// history. Prefer [`ReplayWindowGuard`] so the window closes on every
+    /// outcome.
+    pub(crate) fn try_begin_replay_window(&mut self, session_id: &str) -> bool {
+        if self.active_turns.contains_key(session_id) {
+            return false;
+        }
+        self.last_active.touch();
+        // The reopened session re-advertises its commands: fan that out.
+        self.last_commands.forget(session_id);
+        self.replay_windows
+            .entry(session_id.to_string())
+            .or_default()
+            .open_count += 1;
+        true
+    }
+
+    /// Reserve a session for an admitted `session/load`/`session/resume`
+    /// reopen (or add a reference to an existing reservation). While
+    /// reserved, `try_begin_turn` rejects new prompt turns for the session,
+    /// so the replay window — opened later, immediately before the ACP
+    /// request is sent — can never collide with a live turn. Returns `false`
+    /// — without reserving — when a prompt turn is already active: reopen and
+    /// turn admission are mutually exclusive so a live turn's updates can
+    /// never be misclassified as replayed history and dropped. Prefer
+    /// [`ReopenReservation`] so the reservation is released on every outcome.
+    pub(crate) fn try_begin_reopen_reservation(&mut self, session_id: &str) -> bool {
+        if self.active_turns.contains_key(session_id) {
+            return false;
+        }
+        self.last_active.touch();
+        *self
+            .reopen_reservations
+            .entry(session_id.to_string())
+            .or_default() += 1;
+        true
+    }
+
+    /// Release one reference to a session's reopen reservation; the last
+    /// release removes it so prompt turns are admitted again. Unknown
+    /// sessions are ignored.
+    pub(crate) fn finish_reopen_reservation(&mut self, session_id: &str) {
+        self.last_active.touch();
+        let Some(count) = self.reopen_reservations.get_mut(session_id) else {
+            return;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.reopen_reservations.remove(session_id);
+        }
+    }
+
+    /// Release one reference to a session's replay window and return the
+    /// number of replayed updates the window suppressed. The count is handed
+    /// out exactly once, at final close; returns 0 for unknown sessions and
+    /// while references remain.
+    pub(crate) fn finish_replay_window(&mut self, session_id: &str) -> u64 {
+        self.last_active.touch();
+        let Some(window) = self.replay_windows.get_mut(session_id) else {
+            return 0;
+        };
+        window.open_count = window.open_count.saturating_sub(1);
+        if window.open_count > 0 {
+            return 0;
+        }
+        let suppressed = window.suppressed;
+        self.replay_windows.remove(session_id);
+        suppressed
+    }
+
+    /// Record an inbound `session/update` for the session. Returns `true`
+    /// (and counts the update) when a replay window is open, meaning the
+    /// notification is agent-replayed history and the caller MUST drop it
+    /// before fan-out; `false` for live events that proceed normally.
+    pub(crate) fn note_replayed_update(&mut self, session_id: &str) -> bool {
+        match self.replay_windows.get_mut(session_id) {
+            Some(window) => {
+                window.suppressed += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a replay window is currently open for the session. Only the
+    /// unit tests (here and in the manager) observe the window directly, so
+    /// this is test-only.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn is_replay_window_open(&self, session_id: &str) -> bool {
+        self.replay_windows.contains_key(session_id)
     }
 
     /// Return all sessions that still have a registered workspace root. Used on
     /// disconnect to emit `acp:session_closed` for sessions that were active.
     pub(crate) fn active_session_ids(&self) -> Vec<String> {
         self.session_roots.keys().cloned().collect()
+    }
+
+    /// `(session id, workspace root)` for every session with a registered
+    /// root (destructive-operation guard).
+    pub(crate) fn session_roots_snapshot(&self) -> Vec<(String, PathBuf)> {
+        self.session_roots
+            .iter()
+            .map(|(session_id, root)| (session_id.clone(), root.clone()))
+            .collect()
+    }
+
+    /// Number of sessions that still have a registered workspace root. Kept
+    /// separate from `active_session_ids()` so callers that only need the
+    /// count (e.g. shutdown logging) do not pull the id strings — CodeQL
+    /// treats the id vector as sensitive and taints even its `.len()` into
+    /// log sinks, while this scalar carries no session data.
+    pub(crate) fn active_session_count(&self) -> usize {
+        self.session_roots.len()
     }
 
     /// Associate a tool call with its authoritative enclosing session.
@@ -134,15 +638,90 @@ impl DriverState {
             .insert(session_id);
     }
 
-    /// Attempt to begin a turn for a session. Returns `Some(receiver)` (a cancel
-    /// signal) when the turn may proceed, or `None` if a turn is already active
-    /// for this session (concurrent turns are rejected).
-    pub(crate) fn try_begin_turn(&mut self, session_id: &str) -> Option<oneshot::Receiver<()>> {
+    /// Attempt to begin a turn for a session. Returns `Some(TurnHandles)`
+    /// (cancel + idle-reset receivers) when the turn may proceed, or `None` if
+    /// a turn is already active for this session (concurrent turns are
+    /// rejected), a replay window is open (a `session/load`/`session/resume`
+    /// history replay is in flight — its updates are dropped before fan-out,
+    /// so a live turn must never overlap it), or a reopen reservation is held
+    /// (an admitted reopen is preparing — e.g. reinstalling the durable
+    /// writer — and will open its replay window immediately before the ACP
+    /// request; a turn must not slip in during that preparatory phase). Both
+    /// signals are created atomically so the notification callback can nudge
+    /// the idle deadline from the moment the turn starts.
+    pub(crate) fn try_begin_turn(&mut self, session_id: &str) -> Option<TurnHandles> {
+        if self.active_turns.contains_key(session_id)
+            || self.replay_windows.contains_key(session_id)
+            || self.reopen_reservations.contains_key(session_id)
+        {
+            return None;
+        }
+        self.last_active.touch();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (idle_tx, idle_rx) = watch::channel(());
+        self.active_turns
+            .insert(session_id.to_string(), Some(cancel_tx));
+        self.idle_resets.insert(session_id.to_string(), idle_tx);
+        Some(TurnHandles { cancel_rx, idle_rx })
+    }
+
+    /// Record the client turn id of the turn just admitted by
+    /// [`Self::try_begin_turn`] (`None` for turnless callers). Lets the
+    /// teardown path append a `crashed` terminator that names the turn.
+    pub(crate) fn set_active_turn_id(&mut self, session_id: &str, turn_id: Option<String>) {
         if self.active_turns.contains_key(session_id) {
+            self.active_turn_ids.insert(session_id.to_string(), turn_id);
+        }
+    }
+
+    /// Remove and return every session that still has an active turn, with
+    /// its turn id. Used when the connection ends: the turn tasks were
+    /// dropped before emitting their terminator, so the teardown owns it.
+    /// Draining makes the terminator exactly-once.
+    pub(crate) fn drain_active_turns(&mut self) -> Vec<(String, Option<String>)> {
+        let sessions: Vec<String> = self.active_turns.keys().cloned().collect();
+        sessions
+            .into_iter()
+            .map(|session| {
+                let turn_id = self.active_turn_ids.remove(&session).flatten();
+                self.active_turns.remove(&session);
+                self.idle_resets.remove(&session);
+                (session, turn_id)
+            })
+            .collect()
+    }
+
+    /// Whether the session currently has an active turn, including cancel grace.
+    #[must_use]
+    pub(crate) fn is_turn_active(&self, session_id: &str) -> bool {
+        self.active_turns.contains_key(session_id)
+    }
+
+    /// The session id of the only in-flight turn. `None` when zero or several
+    /// turns are active, so a request-scoped elicitation is not fanned out
+    /// without a session.
+    pub(crate) fn sole_active_turn_session(&self) -> Option<String> {
+        let mut ids = self.active_turns.keys();
+        let first = ids.next()?.clone();
+        if ids.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    /// Register a one-shot notification for the session becoming idle.
+    /// Returns `None` when already idle so callers never wait for a completion
+    /// that already happened.
+    pub(crate) fn wait_turn_idle(&mut self, session_id: &str) -> Option<oneshot::Receiver<()>> {
+        if !self.is_turn_active(session_id) {
             return None;
         }
         let (tx, rx) = oneshot::channel();
-        self.active_turns.insert(session_id.to_string(), Some(tx));
+        self.turn_idle_waiters
+            .entry(session_id.to_string())
+            .or_default()
+            .push(tx);
         Some(rx)
     }
 
@@ -157,89 +736,78 @@ impl DriverState {
         }
     }
 
+    /// Nudge the active turn's idle deadline — the agent produced activity (a
+    /// `session/update`/`tool_call` notification arrived), so push the idle
+    /// deadline back. Non-blocking and a no-op when no turn is active for the
+    /// session. `watch` coalesces: a burst of notifications resets once, which
+    /// is all the idle clock needs ("activity happened since the last reset").
+    pub(crate) fn signal_idle(&mut self, session_id: &str) {
+        self.last_active.touch();
+        if let Some(tx) = self.idle_resets.get(session_id) {
+            let _ = tx.send(());
+        }
+    }
+
     /// Mark a session's turn finished and return any still-pending permissions
     /// for that session (to be resolved cancelled). Idempotent.
     pub(crate) fn finish_turn(&mut self, session_id: &str) -> Vec<PendingPermission> {
-        self.active_turns.remove(session_id);
+        if self.active_turns.remove(session_id).is_some() {
+            self.last_active.touch();
+        }
+        self.active_turn_ids.remove(session_id);
+        self.idle_resets.remove(session_id);
+        if let Some(waiters) = self.turn_idle_waiters.remove(session_id) {
+            for waiter in waiters {
+                let _ = waiter.send(());
+            }
+        }
         self.drain_session(session_id)
+    }
+
+    /// Mark a session's turn finished and return any still-pending questions
+    /// for that session (to be resolved cancelled). Idempotent.
+    pub(crate) fn finish_turn_questions(&mut self, session_id: &str) -> Vec<PendingQuestion> {
+        self.drain_session_questions(session_id)
+    }
+
+    pub(crate) fn finish_turn_elicitations(&mut self, session_id: &str) -> Vec<PendingElicitation> {
+        self.drain_session_elicitations(session_id)
+    }
+
+    pub(crate) fn dispose_session(
+        &mut self,
+        session_id: &str,
+    ) -> (
+        Vec<PendingPermission>,
+        Vec<PendingQuestion>,
+        Vec<PendingElicitation>,
+    ) {
+        self.remove_session_root(session_id);
+        let permissions = self.finish_turn(session_id);
+        let questions = self.finish_turn_questions(session_id);
+        let elicitations = self.finish_turn_elicitations(session_id);
+        (permissions, questions, elicitations)
+    }
+
+    /// Activity evidence for the idle reaper. `running_terminals` comes from
+    /// the agent's terminal registry, which lives beside this state.
+    pub(crate) fn activity(&self, running_terminals: usize) -> AgentActivity {
+        AgentActivity {
+            active_turns: self.active_turns.len(),
+            pending_permissions: self.pending_permissions.len(),
+            pending_questions: self.pending_questions.len(),
+            pending_elicitations: self.pending_elicitations.len(),
+            running_terminals,
+            reopens_in_flight: self.reopen_reservations.values().sum::<usize>()
+                + self
+                    .replay_windows
+                    .values()
+                    .map(|w| w.open_count)
+                    .sum::<usize>(),
+            last_active_at: self.last_active.last(),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn request_ids_are_globally_unique() {
-        // Two independent driver states (i.e. two agents) must never collide on
-        // a request id — the ids embed a UUID rather than a per-agent counter.
-        // We can't build a real Responder headless, so we assert uniqueness at
-        // the id-generation level via a tiny shim around the same format.
-        let a = format!("perm-{}", uuid::Uuid::new_v4());
-        let b = format!("perm-{}", uuid::Uuid::new_v4());
-        assert_ne!(a, b);
-        assert!(a.starts_with("perm-"));
-    }
-
-    #[test]
-    fn concurrent_turn_on_same_session_is_rejected() {
-        let mut state = DriverState::new();
-        // First turn begins: we get a cancel receiver.
-        let first = state.try_begin_turn("sess-1");
-        assert!(first.is_some(), "first turn must be allowed to start");
-        // Second turn on the same session is rejected while the first is active.
-        assert!(
-            state.try_begin_turn("sess-1").is_none(),
-            "a concurrent turn on the same session must be rejected"
-        );
-        // A different session is independent.
-        assert!(
-            state.try_begin_turn("sess-2").is_some(),
-            "a turn on a different session must be allowed"
-        );
-        // Once the first turn finishes, a new turn may begin again.
-        let _ = state.finish_turn("sess-1");
-        assert!(
-            state.try_begin_turn("sess-1").is_some(),
-            "a new turn must be allowed once the previous one finished"
-        );
-    }
-
-    #[test]
-    fn cancel_keeps_session_active_until_finish() {
-        let mut state = DriverState::new();
-        let _rx = state.try_begin_turn("sess-1").expect("turn starts");
-        // Signalling cancel must NOT free the slot — a concurrent turn must
-        // still be rejected during the post-cancel grace window.
-        state.signal_cancel("sess-1");
-        assert!(
-            state.try_begin_turn("sess-1").is_none(),
-            "session must stay single-flight during the cancel grace window"
-        );
-        // Only finishing the turn frees the slot.
-        let _ = state.finish_turn("sess-1");
-        assert!(state.try_begin_turn("sess-1").is_some());
-    }
-
-    #[test]
-    fn session_roots_track_and_clear() {
-        let mut state = DriverState::new();
-        assert!(state.session_root("sess-1").is_none());
-        state.set_session_root("sess-1".to_string(), PathBuf::from("/tmp/ws"));
-        assert_eq!(state.session_root("sess-1"), Some(PathBuf::from("/tmp/ws")));
-        assert_eq!(state.active_session_ids(), vec!["sess-1".to_string()]);
-        state.remove_session_root("sess-1");
-        assert!(state.session_root("sess-1").is_none());
-        assert!(state.active_session_ids().is_empty());
-    }
-
-    #[test]
-    fn tool_call_binding_accepts_multiple_sessions_per_id() {
-        let mut state = DriverState::new();
-        state.bind_tool_call("call-1".to_string(), "sess-a".to_string());
-        state.bind_tool_call("call-1".to_string(), "sess-b".to_string());
-        // Collision is preserved as ambiguous — no routing helper consumes it.
-        let _ = state.try_begin_turn("sess-a");
-    }
-}
+mod tests;

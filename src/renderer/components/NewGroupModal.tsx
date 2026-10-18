@@ -1,6 +1,8 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { X } from 'lucide-react'
 import { type KeyboardEvent, useCallback, useEffect, useState } from 'react'
+import { X } from '@/components/icons'
+import { Button } from '@/components/ui/button'
+import { FIELD_FOCUS_CLASS } from '@/components/ui/panel-styles'
 
 interface NewGroupModalProps {
   isOpen: boolean
@@ -73,7 +75,7 @@ export function NewGroupModal({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+          className="fixed inset-0 bg-overlay/60 backdrop-blur-sm z-50 flex items-center justify-center"
           onClick={onClose}
         >
           <motion.div
@@ -107,26 +109,19 @@ export function NewGroupModal({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder={placeholder}
-                  className="w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground focus:ring-1 focus:ring-primary focus:border-primary outline-none placeholder-muted-foreground"
+                  className={`w-full bg-secondary border border-border rounded px-3 py-1.5 text-sm text-foreground placeholder-muted-foreground ${FIELD_FOCUS_CLASS}`}
                 />
               </div>
             </div>
 
             {/* Footer */}
             <div className="px-4 py-3 bg-secondary/50 flex justify-end gap-2 border-t border-border">
-              <button
-                onClick={onClose}
-                className="px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-              >
+              <Button type="button" variant="ghost" size="sm" onClick={onClose}>
                 Cancel
-              </button>
-              <button
-                onClick={handleSubmit}
-                disabled={!name.trim()}
-                className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded hover:bg-primary/90 shadow-md shadow-primary/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
+              </Button>
+              <Button type="button" size="sm" onClick={handleSubmit} disabled={!name.trim()}>
                 {submitLabel}
-              </button>
+              </Button>
             </div>
           </motion.div>
         </motion.div>

@@ -9,6 +9,7 @@ node_modules/
 dist/
 dist-ssr/
 dist-tauri/
+dist-web/
 out/
 *.tsbuildinfo
 
@@ -36,9 +37,13 @@ pnpm-debug.log*
 *.sw?
 *.local
 
-# Claude Code cache
-.claude/
-.codex/
+# Claude Code cache. The perf-toolkit skill is repo-shipped: git only
+# re-includes a file under an ignored DIRECTORY when the parent dirs are
+# themselves negated, so un-ignore each path component.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/perf-toolkit/
 
 # Windows null file artifact
 nul
@@ -56,9 +61,6 @@ tmpclaude-*
 
 # Docs folder (local only, not tracked)
 # docs/
-
-# ADR documentation
-docs/adr/
 
 # Auto Claude generated files
 .auto-claude-security.json
@@ -80,6 +82,7 @@ VERIFICATION_CHECKLIST.md
 .github/copilot-instructions.md
 /.pi
 /.pi-lens
+/.pi-subagents
 /.agents
 .pi-automator-active
 
@@ -92,3 +95,15 @@ VERIFICATION_CHECKLIST.md
 /agent/
 /video/
 /compositions/
+/plans
+.codebase-memory/
+
+# Perf-toolkit run outputs (result.json / report.html / scratch user-data dirs)
+tools/perf/results/
+
+# Playwright E2E (tests/e2e) transient output
+tests/e2e/.playwright-out/
+tests/e2e/test-results/
+
+# docker-compose.yml workspace bind mount
+/workspace/

@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionConfigOption, SessionModeState } from '@/lib/acp-api'
-import { filterDuplicateModeConfigOptions, partitionConfigOptions } from './chat-input-bar-config'
+import {
+  dropDuplicateSingletonConfigOptions,
+  extractFastModeOption,
+  filterDuplicateModeConfigOptions,
+  flattenConfigOptionValues,
+  isFastModeEnabled,
+  isFastModeOption,
+  isUsableConfigOption,
+  oppositeFastModeValue,
+  partitionConfigOptions,
+  sessionModelSnapshot,
+  storedConfigValue,
+  wireConfigValue
+} from './chat-input-bar-config'
 
 function opt(id: string, category: string | null): SessionConfigOption {
   return {
@@ -17,9 +30,71 @@ function opt(id: string, category: string | null): SessionConfigOption {
   }
 }
 
+describe('isUsableConfigOption', () => {
+  it('keeps a boolean option that has no options array', () => {
+    expect(
+      isUsableConfigOption({
+        id: 'fast',
+        name: 'Fast',
+        type: 'boolean',
+        currentValue: true
+      })
+    ).toBe(true)
+  })
+
+  it('drops a select option whose options array is missing', () => {
+    expect(
+      isUsableConfigOption({
+        id: 'model',
+        name: 'Model',
+        type: 'select',
+        currentValue: 'a'
+      })
+    ).toBe(false)
+  })
+})
+
+describe('boolean config values', () => {
+  const option = {
+    id: 'approvals',
+    name: 'Approvals',
+    type: 'boolean',
+    currentValue: false
+  } as const
+
+  it('stores a boolean as text and restores it as a boolean', () => {
+    expect(storedConfigValue({ ...option, currentValue: true })).toBe('true')
+    expect(storedConfigValue({ ...option, currentValue: false })).toBe('false')
+    expect(wireConfigValue(option, 'true')).toBe(true)
+    expect(wireConfigValue(option, 'false')).toBe(false)
+    expect(wireConfigValue(option, 'yes')).toBeNull()
+  })
+})
+
+describe('flattenConfigOptionValues', () => {
+  it('keeps group labels on grouped select values', () => {
+    const option = opt('model', 'model')
+    option.options = [
+      {
+        group: 'recommended',
+        name: 'Recommended',
+        options: [{ value: 'gpt', name: 'GPT' }]
+      }
+    ]
+    expect(flattenConfigOptionValues(option)).toEqual([
+      { value: 'gpt', name: 'GPT', group: 'Recommended' }
+    ])
+  })
+})
+
 describe('partitionConfigOptions', () => {
   it('returns null thoughtLevel and empty rest for no options', () => {
-    expect(partitionConfigOptions([])).toEqual({ model: null, thoughtLevel: null, rest: [] })
+    expect(partitionConfigOptions([])).toEqual({
+      model: null,
+      thoughtLevel: null,
+      modelConfig: [],
+      rest: []
+    })
   })
 
   it('promotes a thought_level option and leaves rest empty', () => {
@@ -57,22 +132,24 @@ describe('partitionConfigOptions', () => {
     expect(result.rest).toEqual([custom])
   })
 
-  it('promotes only the first thought_level option, rest keeps the others', () => {
+  it('promotes only the first thought_level option, and drops later duplicates (#444)', () => {
     const tl1 = opt('reasoning1', 'thought_level')
     const tl2 = opt('reasoning2', 'thought_level')
     const result = partitionConfigOptions([tl1, tl2])
     expect(result.model).toBeNull()
     expect(result.thoughtLevel).toBe(tl1)
-    expect(result.rest).toEqual([tl2])
+    // The duplicate must not resurface as a generic chip — that was the
+    // second "Thinking: ..." control from the report.
+    expect(result.rest).toEqual([])
   })
 
-  it('promotes only the first model option, rest keeps the others', () => {
+  it('promotes only the first model option, and drops later duplicates (#444)', () => {
     const model1 = opt('model1', 'model')
     const model2 = opt('model2', 'model')
     const result = partitionConfigOptions([model1, model2])
     expect(result.model).toBe(model1)
     expect(result.thoughtLevel).toBeNull()
-    expect(result.rest).toEqual([model2])
+    expect(result.rest).toEqual([])
   })
 })
 
@@ -94,5 +171,178 @@ describe('filterDuplicateModeConfigOptions', () => {
     const mode = opt('mode', 'mode')
     const custom = opt('custom', 'custom')
     expect(filterDuplicateModeConfigOptions([mode, custom], modes)).toEqual([custom])
+  })
+})
+
+describe('fast mode helpers', () => {
+  function fastMode(currentValue = 'off'): SessionConfigOption {
+    return {
+      id: 'fast_mode',
+      name: 'Fast Mode',
+      category: 'other',
+      type: 'select',
+      currentValue,
+      description: null,
+      options: [
+        { value: 'on', name: 'On', description: null },
+        { value: 'off', name: 'Off', description: null }
+      ]
+    }
+  }
+
+  it('detects binary Fast Mode options and ignores unrelated selects', () => {
+    expect(isFastModeOption(fastMode())).toBe(true)
+    expect(isFastModeOption(opt('custom', 'other'))).toBe(false)
+    expect(
+      isFastModeOption({
+        ...fastMode(),
+        id: 'speed',
+        name: 'Speed'
+      })
+    ).toBe(false)
+  })
+
+  it('treats a boolean option named Fast as a binary switch', () => {
+    const booleanFast: SessionConfigOption = {
+      id: 'fast_mode',
+      name: 'Fast mode',
+      type: 'boolean',
+      currentValue: false
+    }
+    const custom = opt('custom', 'other')
+    expect(isFastModeOption(booleanFast)).toBe(true)
+    expect(isFastModeOption({ ...booleanFast, id: 'web_search', name: 'Web search' })).toBe(false)
+    expect(isFastModeEnabled(booleanFast)).toBe(false)
+    expect(isFastModeEnabled({ ...booleanFast, currentValue: true })).toBe(true)
+    expect(oppositeFastModeValue(booleanFast)).toBe('true')
+    expect(oppositeFastModeValue({ ...booleanFast, currentValue: true })).toBe('false')
+    expect(extractFastModeOption([custom, booleanFast])).toEqual({
+      fastMode: booleanFast,
+      rest: [custom]
+    })
+  })
+
+  it('resolves enabled state and opposite value', () => {
+    expect(isFastModeEnabled(fastMode('off'))).toBe(false)
+    expect(isFastModeEnabled(fastMode('on'))).toBe(true)
+    expect(oppositeFastModeValue(fastMode('off'))).toBe('on')
+    expect(oppositeFastModeValue(fastMode('on'))).toBe('off')
+  })
+
+  it('extracts Fast Mode from a generic options list', () => {
+    const custom = opt('custom', 'other')
+    const fm = fastMode('off')
+    expect(extractFastModeOption([custom, fm])).toEqual({
+      fastMode: fm,
+      rest: [custom]
+    })
+    expect(extractFastModeOption([custom])).toEqual({ fastMode: null, rest: [custom] })
+  })
+})
+
+describe('singleton-category dedupe (#444)', () => {
+  it('partitionConfigOptions drops later thought_level/model options instead of leaking them into rest', () => {
+    const first = opt('reasoning', 'thought_level')
+    const dup = opt('reasoning2', 'thought_level')
+    const firstModel = opt('model', 'model')
+    const dupModel = opt('model2', 'model')
+    const generic = opt('verbosity', 'verbosity')
+    const result = partitionConfigOptions([first, dup, firstModel, dupModel, generic])
+    expect(result.thoughtLevel?.id).toBe('reasoning')
+    expect(result.model?.id).toBe('model')
+    // The duplicates must NOT come back as generic chips — that is the
+    // second "Thinking: ..." control from the report.
+    expect(result.rest.map((o) => o.id)).toEqual(['verbosity'])
+  })
+
+  it('dropDuplicateSingletonConfigOptions keeps the first of each promoted category', () => {
+    const a = opt('tl-a', 'thought_level')
+    const b = opt('tl-b', 'thought_level')
+    const m1 = opt('model-a', 'model')
+    const m2 = opt('model-b', 'model')
+    const generic = opt('other', 'other')
+    // Original order preserved; only the later duplicates of promoted
+    // categories disappear. Options without a category always survive.
+    expect(dropDuplicateSingletonConfigOptions([a, generic, b, m1, m2]).map((o) => o.id)).toEqual([
+      'tl-a',
+      'other',
+      'model-a'
+    ])
+  })
+})
+
+describe('sessionModelSnapshot', () => {
+  const models = {
+    currentModelId: 'haiku',
+    availableModels: [
+      { modelId: 'haiku', name: 'Haiku 5.5' },
+      { modelId: 'sonnet', name: 'Sonnet 5.5' }
+    ]
+  }
+
+  it('uses the model config option ahead of the native model list', () => {
+    expect(
+      sessionModelSnapshot({
+        models,
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'sonnet',
+            options: [
+              { value: 'haiku', name: 'Haiku 5.5' },
+              { value: 'sonnet', name: 'Sonnet 5.5' }
+            ]
+          }
+        ]
+      })
+    ).toEqual({ modelId: 'sonnet', modelName: 'Sonnet 5.5' })
+  })
+
+  it('reads a grouped model name', () => {
+    expect(
+      sessionModelSnapshot({
+        models: null,
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'sonnet',
+            options: [
+              {
+                name: 'Anthropic',
+                group: 'Anthropic',
+                options: [{ value: 'sonnet', name: 'Sonnet 5.5' }]
+              }
+            ]
+          }
+        ]
+      })
+    ).toEqual({ modelId: 'sonnet', modelName: 'Sonnet 5.5' })
+  })
+
+  it('falls back to the native model list, then returns null', () => {
+    expect(sessionModelSnapshot({ models, configOptions: [] })).toEqual({
+      modelId: 'haiku',
+      modelName: 'Haiku 5.5'
+    })
+    expect(sessionModelSnapshot({ models: null, configOptions: [] })).toBeNull()
+    expect(sessionModelSnapshot(null)).toBeNull()
+  })
+
+  it('uses the id when the matching name is blank', () => {
+    expect(
+      sessionModelSnapshot({
+        models: {
+          currentModelId: 'haiku',
+          availableModels: [{ modelId: 'haiku', name: '   ' }]
+        },
+        configOptions: []
+      })
+    ).toEqual({ modelId: 'haiku', modelName: 'haiku' })
   })
 })

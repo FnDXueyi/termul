@@ -28,7 +28,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : null
 }
 
-function firstString(obj: Record<string, unknown> | null, keys: string[]): string | undefined {
+function firstThreadId(obj: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = obj[key]
+    if (!Array.isArray(value)) continue
+    const hit = value.find((item) => typeof item === 'string' && item.trim().length > 0)
+    if (typeof hit === 'string') return hit.trim()
+  }
+  return undefined
+}
+
+export function firstString(
+  obj: Record<string, unknown> | null,
+  keys: string[]
+): string | undefined {
   if (!obj) return undefined
   for (const k of keys) {
     const v = obj[k]
@@ -46,7 +59,7 @@ function firstNumber(obj: Record<string, unknown> | null, keys: string[]): numbe
   return undefined
 }
 
-const PATH_KEYS = [
+export const PATH_KEYS = [
   'path',
   'filePath',
   'file_path',
@@ -64,6 +77,13 @@ const URL_KEYS = ['url', 'uri', 'href', 'link']
 const TASK_NAME_KEYS = ['description', 'task', 'name', 'title']
 
 /**
+ * Keys that commonly carry readable text in a tool-call content item or raw
+ * output. Shared between `readableOutput` and `ToolCallCard`'s fallback
+ * extraction so the two paths never drift.
+ */
+export const READABLE_TEXT_KEYS = ['output', 'stdout', 'result', 'text', 'content', 'message']
+
+/**
  * Detect a subagent/Task dispatch. ACP gives no dedicated kind for these and
  * discards the raw tool name, so such calls arrive looking like a `think` chunk.
  * We discriminate on `rawInput`: a subagent dispatch carries a `subagent_type`,
@@ -73,6 +93,12 @@ export function isSubagentCall(toolCall: ToolCall): boolean {
   const input = asRecord(toolCall.rawInput)
   if (!input) return false
   if (firstString(input, ['subagent_type', 'subagentType'])) return true
+  if (
+    firstString(input, ['senderThreadId', 'receiverThreadIds', 'agentThreadId', 'agentPath']) ||
+    firstThreadId(input, ['receiverThreadIds'])
+  ) {
+    return true
+  }
   return (
     firstString(input, ['description']) !== undefined &&
     firstString(input, ['prompt']) !== undefined
@@ -86,8 +112,31 @@ export function baseName(p: string): string {
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
 }
 
-/** Diff path + aggregate add/remove counts from structured content, if any. */
-function diffInfo(content: ToolCallContent[]): {
+/** First diff item's path — a path-only lookup that never runs the diff. */
+function firstDiffPath(content: ToolCallContent[]): string | undefined {
+  for (const item of content) {
+    if (item.type === 'diff') {
+      const d = item as { path?: string }
+      if (d.path) return d.path
+    }
+  }
+  return undefined
+}
+
+/**
+ * Diff path + aggregate add/remove counts — the expensive half of
+ * `describeToolCall` (it diffs full file contents). Cached on the content
+ * array's identity: tool-call updates replace the array wholesale, so a
+ * repeat look at an unchanged call is free and a changed call recomputes.
+ * `ChatChangedFilesPanel` re-extracts files on every store commit — this
+ * keeps that O(calls × file size) scan from repeating the diff itself.
+ */
+const diffInfoCache = new WeakMap<
+  ToolCallContent[],
+  { path?: string; added: number; removed: number; hasDiff: boolean }
+>()
+
+function diffInfoUncached(content: ToolCallContent[]): {
   path?: string
   added: number
   removed: number
@@ -108,6 +157,36 @@ function diffInfo(content: ToolCallContent[]): {
     }
   }
   return { path, added, removed, hasDiff }
+}
+
+function diffInfo(content: ToolCallContent[]): {
+  path?: string
+  added: number
+  removed: number
+  hasDiff: boolean
+} {
+  const cached = diffInfoCache.get(content)
+  if (cached) return cached
+  const result = diffInfoUncached(content)
+  diffInfoCache.set(content, result)
+  return result
+}
+
+/**
+ * Shared best-effort file-path resolver for a tool call. Checks `locations`
+ * (the canonical ACP follow-along field) first, then `rawInput` against
+ * `PATH_KEYS`, then the first diff item's path. Used by both
+ * `describeToolCall` (chip label) and `ToolCallCard`'s open-file action
+ * so they stay in sync.
+ */
+export function toolCallPath(toolCall: ToolCall): string | undefined {
+  const loc = toolCall.locations?.[0]?.path
+  if (loc) return loc
+  const input = asRecord(toolCall.rawInput)
+  const fromInput = firstString(input, PATH_KEYS)
+  if (fromInput) return fromInput
+  const content = toolCall.content ?? []
+  return firstDiffPath(content)
 }
 
 /** "L<start>-<end>" from common range keys, or null when not derivable. */
@@ -132,7 +211,7 @@ export function readableOutput(value: unknown): string {
   if (typeof value === 'string') return value.trim()
   const obj = asRecord(value)
   if (!obj) return ''
-  const direct = firstString(obj, ['output', 'stdout', 'result', 'text', 'content', 'message'])
+  const direct = firstString(obj, READABLE_TEXT_KEYS)
   if (direct) return direct
   const meta = asRecord(obj.metadata)
   const metaDiff = firstString(meta, ['diff'])
@@ -141,6 +220,36 @@ export function readableOutput(value: unknown): string {
   const patch = firstString(fileDiff, ['patch', 'diff'])
   if (patch) return patch
   return ''
+}
+
+/** True while the call has not settled; the label then reads in the present tense. */
+export function isToolCallRunning(toolCall: ToolCall): boolean {
+  return toolCall.status === 'pending' || toolCall.status === 'in_progress'
+}
+
+function runningVerbForKind(kind: ToolKind | undefined): string {
+  switch (kind) {
+    case 'read':
+      return 'Reading'
+    case 'edit':
+      return 'Editing'
+    case 'delete':
+      return 'Deleting'
+    case 'move':
+      return 'Moving'
+    case 'search':
+      return 'Searching'
+    case 'execute':
+      return 'Running'
+    case 'think':
+      return 'Thinking'
+    case 'fetch':
+      return 'Fetching'
+    case 'switch_mode':
+      return 'Switching mode'
+    default:
+      return ''
+  }
 }
 
 function verbForKind(kind: ToolKind | undefined): string {
@@ -168,6 +277,21 @@ function verbForKind(kind: ToolKind | undefined): string {
   }
 }
 
+/** Count is a finite, non-negative integer (durable payloads are untrusted). */
+function isLineCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+/**
+ * The host-computed `ToolCall.diffStat` of a restored/recovered call, or null
+ * when absent or malformed (a legacy/corrupt record never renders `+NaN`).
+ */
+function persistedDiffStat(value: unknown): { added: number; removed: number } | null {
+  const record = asRecord(value)
+  if (!record || !isLineCount(record.added) || !isLineCount(record.removed)) return null
+  return { added: record.added, removed: record.removed }
+}
+
 /**
  * Derive a compact, human description of a tool call from its kind + input +
  * structured content, falling back to the agent's own title.
@@ -176,7 +300,9 @@ export function describeToolCall(toolCall: ToolCall): ToolCallSummary {
   const input = asRecord(toolCall.rawInput)
   const content = toolCall.content ?? []
   const title = toolCall.title?.trim()
-  const verb = verbForKind(toolCall.kind)
+  const verb = isToolCallRunning(toolCall)
+    ? runningVerbForKind(toolCall.kind)
+    : verbForKind(toolCall.kind)
 
   // Subagent/Task dispatch: render as the task name with no verb (the robot
   // icon carries the meaning), rather than the misleading "Thinking" of `think`.
@@ -189,19 +315,28 @@ export function describeToolCall(toolCall: ToolCall): ToolCallSummary {
     case 'read':
     case 'delete':
     case 'move': {
-      const p = firstString(input, PATH_KEYS) ?? diffInfo(content).path
+      const p = toolCallPath(toolCall)
       const primary = p ? baseName(p) : (title ?? 'file')
       return { verb, primary, detail: toolCall.kind === 'read' ? lineRange(input) : null }
     }
     case 'edit': {
       const diff = diffInfo(content)
-      const p = firstString(input, PATH_KEYS) ?? diff.path
+      const p = toolCallPath(toolCall)
       const primary = p ? baseName(p) : (title ?? 'file')
       let detail: string | null = null
       let diffStat: { added: number; removed: number } | null = null
       if (diff.hasDiff) {
-        detail = diff.removed > 0 ? `+${diff.added} \u2212${diff.removed}` : `+${diff.added}`
         diffStat = { added: diff.added, removed: diff.removed }
+      } else {
+        // Restored/recovered calls carry no diff `content` (never persisted);
+        // the host-computed durable summary supplies the counts instead.
+        diffStat = persistedDiffStat(toolCall.diffStat)
+      }
+      if (diffStat) {
+        detail =
+          diffStat.removed > 0
+            ? `+${diffStat.added} \u2212${diffStat.removed}`
+            : `+${diffStat.added}`
       }
       return { verb, primary, detail, diffStat }
     }
@@ -226,4 +361,121 @@ export function describeToolCall(toolCall: ToolCall): ToolCallSummary {
       return { verb, primary: title ?? toolCall.kind ?? 'Tool call', detail: null }
     }
   }
+}
+
+type ActivityCategory =
+  | 'command'
+  | 'file-read'
+  | 'file-created'
+  | 'file-edited'
+  | 'file-deleted'
+  | 'file-moved'
+  | 'search'
+  | 'fetch'
+  | 'agent'
+  | 'background-agent'
+  | 'mode'
+  | 'other'
+
+const BACKGROUND_INPUT_KEYS = ['run_in_background', 'is_background', 'background']
+
+function isBackgroundAgent(call: ToolCall): boolean {
+  const input = asRecord(call.rawInput)
+  if (!input) return false
+  return BACKGROUND_INPUT_KEYS.some((key) => input[key] === true)
+}
+
+/**
+ * Create-only edit: at least one diff item, and every diff created its file
+ * (`oldText == null`). A mixed create+edit call, or a restored call with no
+ * diff content at all, counts as an edit.
+ */
+function isFileCreation(call: ToolCall): boolean {
+  const diffs = (call.content ?? []).filter((item) => item.type === 'diff')
+  return (
+    diffs.length > 0 && diffs.every((item) => (item as { oldText?: string | null }).oldText == null)
+  )
+}
+
+/**
+ * First-match-wins classification. Subagent checks lead because ACP gives
+ * dispatches no dedicated kind — they arrive looking like `think`/`other`.
+ */
+const ACTIVITY_CATEGORY_RULES: ReadonlyArray<{
+  category: ActivityCategory
+  match: (call: ToolCall) => boolean
+}> = [
+  {
+    category: 'background-agent',
+    match: (call) => isSubagentCall(call) && isBackgroundAgent(call)
+  },
+  { category: 'agent', match: (call) => isSubagentCall(call) },
+  { category: 'command', match: (call) => call.kind === 'execute' },
+  { category: 'file-read', match: (call) => call.kind === 'read' },
+  { category: 'file-created', match: (call) => call.kind === 'edit' && isFileCreation(call) },
+  { category: 'file-edited', match: (call) => call.kind === 'edit' },
+  { category: 'file-deleted', match: (call) => call.kind === 'delete' },
+  { category: 'file-moved', match: (call) => call.kind === 'move' },
+  { category: 'search', match: (call) => call.kind === 'search' },
+  { category: 'fetch', match: (call) => call.kind === 'fetch' },
+  { category: 'mode', match: (call) => call.kind === 'switch_mode' }
+]
+
+const ACTIVITY_PHRASES: Record<ActivityCategory, { one: string; many: (n: number) => string }> = {
+  command: { one: 'ran 1 command', many: (n) => `ran ${n} commands` },
+  'file-read': { one: 'read 1 file', many: (n) => `read ${n} files` },
+  'file-created': { one: 'created 1 file', many: (n) => `created ${n} files` },
+  'file-edited': { one: 'edited 1 file', many: (n) => `edited ${n} files` },
+  'file-deleted': { one: 'deleted 1 file', many: (n) => `deleted ${n} files` },
+  'file-moved': { one: 'moved 1 file', many: (n) => `moved ${n} files` },
+  search: { one: 'ran 1 search', many: (n) => `ran ${n} searches` },
+  fetch: { one: 'fetched 1 page', many: (n) => `fetched ${n} pages` },
+  agent: { one: 'ran 1 agent', many: (n) => `ran ${n} agents` },
+  'background-agent': {
+    one: 'ran 1 background agent',
+    many: (n) => `ran ${n} background agents`
+  },
+  mode: { one: 'switched mode', many: (n) => `switched mode ${n} times` },
+  other: { one: 'used 1 tool', many: (n) => `used ${n} tools` }
+}
+
+/** `.t-think-text` is `nowrap`, so the phrase count is the label's length bound. */
+const MAX_ACTIVITY_PHRASES = 4
+
+export interface ToolActivitySummary {
+  label: string
+  added: number
+  removed: number
+}
+
+/**
+ * Roll a turn's tool calls into one categorized line for the collapsed
+ * activity disclosure — "Ran 2 commands, created 1 file" — plus the summed
+ * diff counts. Categories appear in first-occurrence order; past the cap the
+ * label tails off as "and N more", where N counts the unshown CALLS. Null
+ * when the turn ran no tools.
+ */
+export function summarizeToolActivity(calls: ToolCall[]): ToolActivitySummary | null {
+  if (calls.length === 0) return null
+  const counts = new Map<ActivityCategory, number>()
+  let added = 0
+  let removed = 0
+  for (const call of calls) {
+    const category = ACTIVITY_CATEGORY_RULES.find((rule) => rule.match(call))?.category ?? 'other'
+    counts.set(category, (counts.get(category) ?? 0) + 1)
+    const diffStat = describeToolCall(call).diffStat
+    if (diffStat) {
+      added += diffStat.added
+      removed += diffStat.removed
+    }
+  }
+  const entries = [...counts.entries()]
+  const phrases = entries.slice(0, MAX_ACTIVITY_PHRASES).map(([category, count]) => {
+    const phrase = ACTIVITY_PHRASES[category]
+    return count === 1 ? phrase.one : phrase.many(count)
+  })
+  const hiddenCalls = entries.slice(MAX_ACTIVITY_PHRASES).reduce((sum, [, n]) => sum + n, 0)
+  let label = phrases.join(', ')
+  if (hiddenCalls > 0) label += `, and ${hiddenCalls} more`
+  return { label: label.charAt(0).toUpperCase() + label.slice(1), added, removed }
 }

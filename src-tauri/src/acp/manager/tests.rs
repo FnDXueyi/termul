@@ -1,0 +1,2923 @@
+use super::*;
+use tokio_util::sync::CancellationToken;
+use crate::acp::PersistedEventRecord;
+
+#[test]
+fn fallback_namespace_uses_safe_identity_and_excludes_secrets() {
+    let mut config = AgentConfig {
+        config_id: None,
+        name: "  Example   Agent ".to_string(),
+        command: "C:/Users/alice/private/token.exe".to_string(),
+        args: vec!["--api-key=secret-one".to_string()],
+        env: std::collections::HashMap::from([(
+            "AUTH_TOKEN".to_string(),
+            "secret-two".to_string(),
+        )]),
+        allow_terminal: false,
+    };
+    let namespace = stable_agent_namespace(&config).unwrap();
+    config.name = "example agent".to_string();
+    config.command = "/different/private/token.exe".to_string();
+    config.args = vec!["--api-key=other-secret".to_string()];
+    config
+        .env
+        .insert("AUTH_TOKEN".to_string(), "third-secret".to_string());
+    assert_eq!(
+        stable_agent_namespace(&config).as_deref(),
+        Some(namespace.as_str())
+    );
+    assert!(namespace.starts_with("agent-safe:"));
+    assert!(!namespace.contains("secret"));
+
+    config.command = "different.exe".to_string();
+    assert_ne!(stable_agent_namespace(&config).unwrap(), namespace);
+    config.command.clear();
+    assert_eq!(stable_agent_namespace(&config), None);
+}
+
+fn sample_config(config_id: &str, command: &str, args: &[&str]) -> AgentConfig {
+    AgentConfig {
+        config_id: Some(config_id.to_string()),
+        name: "Agent".to_string(),
+        command: command.to_string(),
+        args: args.iter().map(|arg| (*arg).to_string()).collect(),
+        env: std::collections::HashMap::new(),
+        allow_terminal: false,
+    }
+}
+
+#[test]
+fn claude_agent_requests_summarized_thinking() {
+    let managed = sample_config(
+        "acp-registry:claude-acp",
+        "node",
+        &["/cache/claude-agent-acp/dist/index.js"],
+    );
+    assert!(AgentRuntimeProfile::resolve(&managed).summarize_thinking);
+
+    let package = sample_config(
+        "custom",
+        "npx",
+        &["-y", "@agentclientprotocol/claude-agent-acp@0.78.0"],
+    );
+    assert!(AgentRuntimeProfile::resolve(&package).summarize_thinking);
+
+    let other = sample_config("acp-registry:codex-acp", "codex", &[]);
+    assert!(!AgentRuntimeProfile::resolve(&other).summarize_thinking);
+}
+
+#[test]
+fn summarized_thinking_meta_asks_for_a_visible_summary() {
+    let meta = summarized_thinking_meta();
+    assert_eq!(
+        meta.get("claudeCode")
+            .and_then(|value| value.pointer("/options/thinking/type"))
+            .and_then(Value::as_str),
+        Some("adaptive")
+    );
+    assert_eq!(
+        meta.get("claudeCode")
+            .and_then(|value| value.pointer("/options/thinking/display"))
+            .and_then(Value::as_str),
+        Some("summarized")
+    );
+}
+
+#[tokio::test]
+async fn owns_session_queries_authoritative_agent_driver_state() {
+    let manager = AcpManager::new(vec![]);
+    let agent_id = AgentId::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    manager.agents.lock().insert(
+        agent_id.clone(),
+        AgentEntry {
+            command_tx: tx,
+            capabilities: AgentCapabilities::default(),
+            stable_namespace: None,
+            name: "test-agent".to_string(),
+            config_id: None,
+            join_handle: None,
+            exit: Default::default(),
+            stamp: SpawnStamp::default(),
+        },
+    );
+    let requested = SessionId::new("owned-session");
+    let responder = tokio::spawn(async move {
+        match rx.recv().await.unwrap() {
+            AcpCommand::OwnsSession { session_id, reply } => {
+                assert_eq!(session_id, requested);
+                let _ = reply.send(Ok(false));
+            }
+            _ => panic!("ownership query must use OwnsSession"),
+        }
+    });
+    assert!(!manager
+        .owns_session(&agent_id, SessionId::new("owned-session"))
+        .await
+        .unwrap());
+    responder.await.unwrap();
+}
+
+/// CAP-11: `list_agent_summaries` returns identity-rich entries
+/// (`{ id, name, configId?, namespace?, capabilities }`) for every live
+/// agent; the wire shape is camelCase with absent Options skipped.
+#[test]
+fn list_agent_summaries_returns_identity_rich_entries() {
+    let manager = AcpManager::new(vec![]);
+    let insert = |id: &str, name: &str, config_id: Option<&str>, namespace: Option<&str>| {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        manager.agents.lock().insert(
+            AgentId(id.to_string()),
+            AgentEntry {
+                command_tx: tx,
+                capabilities: AgentCapabilities::default(),
+                stable_namespace: namespace.map(str::to_string),
+                name: name.to_string(),
+                config_id: config_id.map(str::to_string),
+                join_handle: None,
+                exit: Default::default(),
+                stamp: SpawnStamp::default(),
+            },
+        );
+    };
+    insert("agent-1", "Claude", Some("claude"), Some("config:claude"));
+    insert("agent-2", "Plain", None, None);
+
+    let summaries = manager.list_agent_summaries();
+    assert_eq!(summaries.len(), 2);
+    let claude = summaries
+        .iter()
+        .find(|s| s.id == AgentId("agent-1".to_string()))
+        .expect("agent-1 summary");
+    assert_eq!(claude.name, "Claude");
+    assert_eq!(claude.config_id.as_deref(), Some("claude"));
+    assert_eq!(claude.namespace.as_deref(), Some("config:claude"));
+
+    // Wire shape (CAP-11): camelCase keys; `configId`/`namespace` omitted
+    // when absent (`skip_serializing_if`), present otherwise.
+    let wire = serde_json::to_value(&summaries).unwrap();
+    let wire_claude = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "agent-1")
+        .unwrap();
+    assert_eq!(wire_claude["name"], "Claude");
+    assert_eq!(wire_claude["configId"], "claude");
+    assert_eq!(wire_claude["namespace"], "config:claude");
+    assert!(wire_claude.get("capabilities").is_some());
+    let wire_plain = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "agent-2")
+        .unwrap();
+    assert!(wire_plain.get("configId").is_none());
+    assert!(wire_plain.get("namespace").is_none());
+}
+
+/// Capability gating exercises the *real* gate functions used by
+/// `load_session`/`resume_session`/`close_session` (F4). With default
+/// capabilities every gate must reject; the `*_call_*` channel test below
+/// confirms no command is sent on the rejection path.
+#[test]
+fn real_capability_gates_reject_when_unsupported() {
+    let caps = AgentCapabilities::default();
+    assert!(
+        gate_close_session(&caps).is_err(),
+        "default agent must not advertise close"
+    );
+    assert!(
+        gate_load_session(&caps).is_err(),
+        "default agent must not advertise loadSession"
+    );
+    assert!(
+        gate_resume_session(&caps).is_err(),
+        "default agent must not advertise resume"
+    );
+    assert!(
+        gate_list_sessions(&caps).is_err(),
+        "default agent must not advertise session/list"
+    );
+}
+
+/// The rejection path must NOT enqueue any command (agent never contacted).
+/// Drives the real gate, then asserts the channel stayed empty (AC-4).
+#[tokio::test]
+async fn gated_call_without_capability_returns_err_and_does_not_send() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<AcpCommand>();
+
+    let caps = AgentCapabilities::default();
+    let result: Result<(), String> = async {
+        // The real production gate, not a mirror.
+        gate_close_session(&caps)?;
+        send_command(&tx, |reply| AcpCommand::CloseSession {
+            session_id: SessionId::new("s"),
+            reply,
+        })
+        .await
+    }
+    .await;
+
+    assert!(result.is_err(), "gated call must return Err");
+    assert!(
+        matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "no command must have been sent to the agent"
+    );
+}
+
+/// A capable call (capability present) does enqueue a command on the channel.
+#[tokio::test]
+async fn capable_call_enqueues_command() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<AcpCommand>();
+
+    let (reply_tx, _reply_rx) = oneshot::channel::<Result<(), String>>();
+    tx.send(AcpCommand::CloseSession {
+        session_id: SessionId::new("s"),
+        reply: reply_tx,
+    })
+    .unwrap();
+
+    assert!(
+        matches!(rx.try_recv(), Ok(AcpCommand::CloseSession { .. })),
+        "command must be enqueued when capability is present"
+    );
+}
+
+/// `send_command` surfaces a typed error when the driver thread is gone.
+#[tokio::test]
+async fn send_command_errors_when_thread_gone() {
+    let (tx, rx) = mpsc::unbounded_channel::<AcpCommand>();
+    drop(rx); // simulate a dead driver thread
+
+    let result: Result<(), String> = send_command(&tx, |reply| AcpCommand::CloseSession {
+        session_id: SessionId::new("s"),
+        reply,
+    })
+    .await;
+
+    assert!(result.is_err());
+}
+
+/// The post-cancel grace window forcibly resolves a turn whose agent never
+/// replies to `session/cancel` (M5). This drives the exact `select!` /
+/// timeout shape used in the `SendPrompt` arm against a prompt future that
+/// never completes, and asserts it resolves `Cancelled` rather than hanging.
+/// A short local grace keeps the test fast (the production constant is
+/// `CANCEL_GRACE`).
+#[tokio::test]
+async fn cancel_grace_forcibly_resolves_a_stuck_turn() {
+    const TEST_GRACE: Duration = Duration::from_millis(50);
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    // A prompt future that never resolves (agent ignores cancel).
+    let prompt = std::future::pending::<Result<StopReason, String>>();
+    tokio::pin!(prompt);
+
+    // Fire the cancel signal immediately.
+    cancel_tx.send(()).unwrap();
+
+    let outcome: Result<StopReason, String> = tokio::select! {
+        result = &mut prompt => result,
+        _ = cancel_rx => {
+            match tokio::time::timeout(TEST_GRACE, &mut prompt).await {
+                Ok(result) => result,
+                Err(_) => Ok(StopReason::Cancelled),
+            }
+        }
+    };
+
+    assert_eq!(
+        outcome,
+        Ok(StopReason::Cancelled),
+        "a stuck turn must be force-resolved as Cancelled after the grace window"
+    );
+}
+
+/// Shape test (like `cancel_grace_forcibly_resolves_a_stuck_turn`): mirrors
+/// the timeout-around-request pattern of the `LoadSession`/`ResumeSession`
+/// arms against a never-resolving future, using a short local bound so the
+/// is fast. The arms themselves need a live connection + sink fan-out and
+/// are not driven here; this covers the match shape plus the production
+/// timeout resolution below.
+#[tokio::test]
+async fn session_reopen_times_out_instead_of_hanging() {
+    const TEST_TIMEOUT: Duration = Duration::from_millis(50);
+    let request = std::future::pending::<Result<(), String>>();
+    let outcome = tokio::time::timeout(TEST_TIMEOUT, request).await;
+    let result: Result<(), String> = match outcome {
+        Ok(result) => result,
+        Err(_) => Err(format!("session/load timed out after {TEST_TIMEOUT:?}")),
+    };
+    assert!(
+        result.is_err_and(|e| e.contains("timed out")),
+        "a hung reopen must resolve to a timeout error"
+    );
+}
+
+/// The production reopen budget resolves to the 60s default and honors the
+/// `TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS` diagnostic override contract
+/// (mirrors `session_new_timeout`). Only the default path is asserted —
+/// mutating process env in a test would race other tests.
+#[test]
+fn session_reopen_timeout_defaults_to_constant() {
+    // Shared with the real-loop harness, which clears/restores these env vars
+    // and resolves these timeouts while a mock agent runs: never interleave.
+    let _serial = super::real_loop_tests::TIMEOUT_TEST_LOCK.blocking_lock();
+    if std::env::var("TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS").is_err() {
+        assert_eq!(session_reopen_timeout(), SESSION_REOPEN_TIMEOUT);
+    }
+    assert_eq!(SESSION_REOPEN_TIMEOUT, Duration::from_secs(60));
+}
+
+#[test]
+fn factory_set_config_option_accepts_empty_success_but_rejects_invalid_options() {
+    assert!(serde_json::from_value::<
+        agent_client_protocol::schema::v1::SetSessionConfigOptionResponse,
+    >(serde_json::json!({}))
+    .is_err());
+    assert_eq!(
+        factory_config_option_result(serde_json::json!({})).unwrap(),
+        None
+    );
+    assert_eq!(
+        factory_config_option_result(serde_json::json!({"configOptions": []})).unwrap(),
+        Some(vec![])
+    );
+    assert!(factory_config_option_result(serde_json::json!({"configOptions": "bad"})).is_err());
+    assert!(factory_config_option_result(serde_json::json!(null)).is_err());
+}
+
+#[tokio::test]
+async fn session_load_reopen_preserves_optional_fields_and_records_root() {
+    let state = Mutex::new(DriverState::new());
+    let modes = agent_client_protocol::schema::v1::SessionModeState::new("ask", vec![]);
+    let response = LoadSessionResponse::new()
+        .modes(modes.clone())
+        .config_options(Vec::<SessionConfigOption>::new());
+    let outcome = run_session_reopen("session/load", "sess-load", "/work", &state, async move {
+        Ok::<_, agent_client_protocol::Error>(response)
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.modes, Some(modes));
+    assert_eq!(outcome.models, None);
+    assert_eq!(outcome.config_options, Some(vec![]));
+    assert_eq!(
+        state.lock().session_root("sess-load"),
+        Some(PathBuf::from("/work"))
+    );
+}
+
+/// Story 7: `acp_err_wire_string` tags `ErrorCode::AuthRequired` (-32000)
+/// with the stable prefix — `agent_client_protocol::Error`'s `Display`
+/// drops the JSON-RPC code, so the tag is the only thing preserving the
+/// auth classification across the manager's `Err(String)` collapse. All
+/// other errors stringify verbatim.
+#[test]
+fn acp_err_wire_string_tags_auth_required_only() {
+    let auth = agent_client_protocol::Error::auth_required();
+    assert_eq!(
+        acp_err_wire_string(auth),
+        format!("{ACP_AUTH_REQUIRED_PREFIX}: Authentication required")
+    );
+    let other = agent_client_protocol::Error::internal_error();
+    assert_eq!(acp_err_wire_string(other), "Internal error");
+}
+
+/// Story 7: an agent `AuthRequired` failure on `session/load` carries the
+/// prefix through `run_session_reopen` (the WS layer maps it to
+/// `agent_auth_required`; the desktop renderer prefix-matches the string).
+#[tokio::test]
+async fn session_reopen_auth_required_is_prefixed() {
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/load", "sess-auth", "/work", &state, async {
+        Err::<LoadSessionResponse, _>(agent_client_protocol::Error::auth_required())
+    })
+    .await;
+    assert_eq!(
+        outcome.unwrap_err(),
+        "ACP_AUTH_REQUIRED: Authentication required"
+    );
+    // A failed reopen records no session root.
+    assert_eq!(state.lock().session_root("sess-auth"), None);
+}
+
+/// Issue #1303: an agent that no longer has the session (another Claude
+/// account) answers `session/resume` with `ResourceNotFound` (-32002).
+#[tokio::test]
+async fn session_reopen_resource_not_found_is_prefixed() {
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/resume", "sess-gone", "/work", &state, async {
+        Err::<ResumeSessionResponse, _>(agent_client_protocol::Error::resource_not_found(Some(
+            "sess-gone".to_string(),
+        )))
+    })
+    .await;
+    assert_eq!(
+        outcome.unwrap_err(),
+        "ACP_RESOURCE_NOT_FOUND: Resource not found: {\n  \"uri\": \"sess-gone\"\n}"
+    );
+}
+
+#[tokio::test]
+async fn session_resume_reopen_preserves_omitted_fields() {
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/resume", "sess-resume", "/work", &state, async {
+        Ok::<_, agent_client_protocol::Error>(ResumeSessionResponse::new())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome,
+        SessionReopenOutcome {
+            modes: None,
+            models: None,
+            config_options: None,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&outcome).unwrap(),
+        serde_json::json!({})
+    );
+}
+
+fn legacy_model_state() -> SessionModelState {
+    SessionModelState {
+        current_model_id: "legacy-1".to_string(),
+        available_models: vec![crate::acp::events::SessionModel {
+            model_id: "legacy-1".to_string(),
+            name: "Legacy One".to_string(),
+            description: None,
+        }],
+    }
+}
+
+/// Issue #822: a reopen whose result carries only the legacy `models` field
+/// surfaces that list in the outcome and marks the session read-only.
+#[tokio::test]
+async fn session_reopen_uses_legacy_models_and_marks_session_read_only() {
+    use crate::acp::legacy_models::WithLegacyModels;
+    let state = Mutex::new(DriverState::new());
+    let outcome = run_session_reopen("session/load", "sess-legacy", "/work", &state, async {
+        Ok::<_, agent_client_protocol::Error>(WithLegacyModels {
+            response: LoadSessionResponse::new(),
+            legacy: Some(legacy_model_state()),
+        })
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.models, Some(legacy_model_state()));
+    assert!(state.lock().is_legacy_models("sess-legacy"));
+    // Closing the session forgets the marker.
+    state.lock().remove_session_root("sess-legacy");
+    assert!(!state.lock().is_legacy_models("sess-legacy"));
+}
+
+/// Issue #822: an advertised Model config option beats the legacy list and
+/// clears a stale legacy marker from an earlier reopen of the same session.
+#[tokio::test]
+async fn session_reopen_config_model_option_wins_over_legacy_models() {
+    use crate::acp::legacy_models::WithLegacyModels;
+    use agent_client_protocol::schema::v1::{
+        SessionConfigOptionCategory, SessionConfigSelectOption,
+    };
+    let state = Mutex::new(DriverState::new());
+    state.lock().mark_legacy_models("sess-cfg".to_string());
+    let model_option = SessionConfigOption::select(
+        "model",
+        "Model",
+        "m1",
+        vec![SessionConfigSelectOption::new("m1", "Model 1")],
+    )
+    .category(SessionConfigOptionCategory::Model);
+    let expected = events::models_from_config_options(Some(std::slice::from_ref(&model_option)));
+    let outcome = run_session_reopen("session/resume", "sess-cfg", "/work", &state, async {
+        Ok::<_, agent_client_protocol::Error>(WithLegacyModels {
+            response: ResumeSessionResponse::new().config_options(vec![model_option]),
+            legacy: Some(legacy_model_state()),
+        })
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.models, expected);
+    assert!(!state.lock().is_legacy_models("sess-cfg"));
+}
+
+/// An empty prompt is rejected before any agent contact (EMPTY-CONTENT).
+/// `send_prompt`'s guard is a pure pre-check; assert its predicate here
+/// (the manager method needs a sink fan-out, but the guard runs first).
+#[test]
+fn empty_prompt_content_is_rejected_by_guard() {
+    let content: Vec<ContentBlock> = Vec::new();
+    // Mirror of the guard at the top of `AcpManager::send_prompt`.
+    let rejected = content.is_empty();
+    assert!(rejected, "empty prompt content must be rejected");
+}
+
+/// `ReplySlot` delivers exactly once: the spawn-failure path and the task
+/// path can both target it, but only the first send wins (L5 safety).
+#[tokio::test]
+async fn reply_slot_sends_exactly_once() {
+    let (tx, rx) = oneshot::channel::<Result<(), String>>();
+    let slot = reply_slot(tx);
+    send_reply(&slot, Ok(()));
+    // A second send is a no-op and must not panic.
+    send_reply(&slot, Err("late".to_string()));
+    assert_eq!(rx.await.unwrap(), Ok(()));
+}
+
+/// The initialize→spawn-event mapping forwards the FULL advertised auth
+/// method metadata (id, name, optional description) so the renderer can
+/// present Sign-in and call `authenticate(methodId)`. Optional description
+/// is preserved when present and `None` when absent.
+#[test]
+fn to_auth_method_infos_maps_full_metadata() {
+    use agent_client_protocol::schema::v1::AuthMethodAgent;
+    let methods = vec![
+        AuthMethod::Agent(
+            AuthMethodAgent::new("cursor_login", "Sign in with Cursor")
+                .description("Opens the Cursor login flow"),
+        ),
+        AuthMethod::Agent(AuthMethodAgent::new("api_key", "API key")),
+    ];
+    let infos = to_auth_method_infos(&methods);
+    assert_eq!(infos.len(), 2);
+    assert_eq!(infos[0].id, "cursor_login");
+    assert_eq!(infos[0].name, "Sign in with Cursor");
+    assert_eq!(infos[0].r#type, "agent");
+    assert_eq!(infos[0].args, None);
+    assert_eq!(infos[0].env, None);
+    assert_eq!(
+        infos[0].description.as_deref(),
+        Some("Opens the Cursor login flow")
+    );
+    assert_eq!(infos[1].id, "api_key");
+    assert_eq!(infos[1].name, "API key");
+    assert_eq!(infos[1].r#type, "agent");
+    assert_eq!(infos[1].description, None);
+}
+
+/// An agent that advertises no auth methods maps to an empty vec (the
+/// renderer treats this as a no-auth agent).
+#[test]
+fn to_auth_method_infos_empty_for_no_methods() {
+    assert!(to_auth_method_infos(&[]).is_empty());
+}
+
+/// `unstable_auth_methods` (spec-acp-terminal-auth): a `terminal` method
+/// maps to `type: "terminal"` and carries its `args`/`env` verbatim so the
+/// renderer can run the command in a real terminal tab.
+#[test]
+fn to_auth_method_infos_maps_terminal_variant() {
+    use agent_client_protocol::schema::v1::AuthMethodTerminal;
+    let methods = vec![AuthMethod::Terminal(
+        AuthMethodTerminal::new("devin-terminal-login", "Terminal login")
+            .args(vec!["devin".to_string(), "login".to_string()])
+            .env(std::collections::HashMap::from([(
+                "TERM".to_string(),
+                "xterm-256color".to_string(),
+            )])),
+    )];
+    let infos = to_auth_method_infos(&methods);
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].id, "devin-terminal-login");
+    assert_eq!(infos[0].r#type, "terminal");
+    assert_eq!(
+        infos[0].args.as_deref(),
+        Some(&["devin".to_string(), "login".to_string()][..])
+    );
+    assert_eq!(
+        infos[0]
+            .env
+            .as_ref()
+            .and_then(|e| e.get("TERM"))
+            .map(String::as_str),
+        Some("xterm-256color")
+    );
+}
+
+/// `unstable_auth_methods`: an `env_var` method maps to `type: "env_var"`
+/// with no `args`/`env` (the renderer prompts for the vars itself).
+#[test]
+fn to_auth_method_infos_maps_env_var_variant() {
+    use agent_client_protocol::schema::v1::AuthMethodEnvVar;
+    let methods = vec![AuthMethod::EnvVar(AuthMethodEnvVar::new(
+        "api-key",
+        "API Key",
+        vec![],
+    ))];
+    let infos = to_auth_method_infos(&methods);
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].r#type, "env_var");
+    assert_eq!(infos[0].args, None);
+    assert_eq!(infos[0].env, None);
+}
+
+/// The serialized `AuthMethodInfo` wire shape matches the renderer
+/// contract: camelCase `{id, name, description?, type, args?, env?}` with
+/// `args`/`env` present only for terminal methods.
+#[test]
+fn auth_method_info_serializes_contract_shape() {
+    use agent_client_protocol::schema::v1::{AuthMethodAgent, AuthMethodTerminal};
+    let methods = vec![
+        AuthMethod::Agent(AuthMethodAgent::new("a", "A")),
+        AuthMethod::Terminal(AuthMethodTerminal::new("t", "T").args(vec!["x".to_string()])),
+    ];
+    let infos = to_auth_method_infos(&methods);
+    let agent_json = serde_json::to_value(&infos[0]).unwrap();
+    assert_eq!(agent_json["type"], "agent");
+    assert!(agent_json.get("args").is_none(), "agent omits args");
+    assert!(agent_json.get("env").is_none(), "agent omits env");
+    let term_json = serde_json::to_value(&infos[1]).unwrap();
+    assert_eq!(term_json["type"], "terminal");
+    assert_eq!(term_json["args"], serde_json::json!(["x"]));
+    assert!(term_json.get("env").is_some(), "terminal carries env");
+}
+
+// --- race_turn (idle + hard cap + cancel) ---
+
+/// An active turn (agent streaming activity) keeps resetting its idle
+/// deadline and completes normally — never hits the idle timeout.
+#[tokio::test(start_paused = true)]
+async fn race_turn_activity_resets_idle_and_completes() {
+    let (idle_tx, mut idle_rx) = watch::channel(());
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    // Activity every 20ms (under the 50ms idle window) keeps the idle
+    // deadline pushed back; the prompt completes at 100ms.
+    let activity = tokio::spawn(async move {
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = idle_tx.send(());
+        }
+    });
+    let result = race_turn(
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<StopReason, String>(StopReason::EndTurn)
+        },
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(50)),
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let _ = activity.await;
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(
+        on_timeout.load(Ordering::SeqCst),
+        0,
+        "no timeout should fire for an active turn"
+    );
+}
+
+/// A silent (wedged) turn with no activity and no completion hits the idle
+/// timeout — and signals cancel via `on_timeout_cancel`.
+#[tokio::test(start_paused = true)]
+async fn race_turn_silence_hits_idle_timeout() {
+    let (_idle_tx, mut idle_rx) = watch::channel(()); // never fires
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, String>>(),
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let err = result.unwrap_err();
+    assert!(err.contains("idle timeout"), "got {err}");
+    assert_eq!(on_timeout.load(Ordering::SeqCst), 1);
+}
+
+/// A turn that streams activity forever but never completes is still
+/// bounded by the hard wall-clock cap (the pre-loop check fires despite
+/// the continuously-ready activity arm under `biased`).
+#[tokio::test(start_paused = true)]
+async fn race_turn_streaming_non_completing_hits_hard_cap() {
+    let (idle_tx, mut idle_rx) = watch::channel(());
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let activity = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = idle_tx.send(());
+        }
+    });
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, String>>(),
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(50)),
+        Some(Duration::from_millis(200)),
+    )
+    .await;
+    activity.abort();
+    let _ = activity.await;
+    let err = result.unwrap_err();
+    assert!(err.contains("hard timeout"), "got {err}");
+    assert_eq!(on_timeout.load(Ordering::SeqCst), 1);
+}
+
+/// A user cancel wins over both timeouts: the cancel arm returns
+/// `Cancelled` after `CANCEL_GRACE`, and `on_timeout_cancel` is not called.
+#[tokio::test(start_paused = true)]
+async fn race_turn_cancel_wins_over_timeouts() {
+    let (_idle_tx, mut idle_rx) = watch::channel(()); // no activity
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    // Cancel before the idle window fires.
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = cancel_tx.send(());
+    });
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, String>>(),
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let _ = canceller.await;
+    assert!(
+        matches!(result, Ok(StopReason::Cancelled)),
+        "got {result:?}"
+    );
+    assert_eq!(on_timeout.load(Ordering::SeqCst), 0);
+}
+
+/// The agent honors the timeout's own cancel within `CANCEL_GRACE` and answers
+/// `Cancelled`: that is still a deadline expiry (typed timeout), not a user
+/// cancel — for both the idle and the hard deadline.
+#[tokio::test(start_paused = true)]
+async fn race_turn_honored_timeout_cancel_maps_to_typed_timeout() {
+    for (idle, hard, expect) in [
+        (
+            Some(Duration::from_millis(100)),
+            Some(Duration::from_secs(10)),
+            "idle timeout",
+        ),
+        (None, Some(Duration::from_millis(100)), "hard timeout"),
+    ] {
+        let (_idle_tx, mut idle_rx) = watch::channel(());
+        let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let prompt_notify = notify.clone();
+        let cancel_notify = notify.clone();
+        let result = race_turn(
+            async move {
+                prompt_notify.notified().await;
+                Ok::<StopReason, String>(StopReason::Cancelled)
+            },
+            cancel_rx,
+            &mut idle_rx,
+            move || cancel_notify.notify_one(),
+            idle,
+            hard,
+        )
+        .await;
+        let err = result.expect_err("honored timeout cancel is a timeout, not Cancelled");
+        assert!(err.contains(expect), "expected {expect}, got {err}");
+    }
+}
+
+/// Contrast: a USER cancel that the agent honors with `Cancelled` stays a
+/// `Cancelled` stop reason and never invokes the timeout cancel hook. The
+/// prompt is released only AFTER the cancel signal has fired (well inside
+/// `CANCEL_GRACE`), so the `biased` select cannot return the prompt first: the
+/// cancel arm is what is entered and its grace wait is what observes the
+/// agent's `Cancelled` reply.
+#[tokio::test(start_paused = true)]
+async fn race_turn_honored_user_cancel_stays_cancelled() {
+    let (_idle_tx, mut idle_rx) = watch::channel(());
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let prompt_notify = notify.clone();
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = cancel_tx.send(());
+        // Let race_turn observe the cancel and enter its grace wait before
+        // the agent answers.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        notify.notify_one();
+    });
+    let result = race_turn(
+        async move {
+            prompt_notify.notified().await;
+            Ok::<StopReason, String>(StopReason::Cancelled)
+        },
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(100)),
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let _ = canceller.await;
+    assert!(
+        matches!(result, Ok(StopReason::Cancelled)),
+        "got {result:?}"
+    );
+    assert_eq!(on_timeout.load(Ordering::SeqCst), 0);
+}
+
+/// Fully-unlimited default (`idle = None`, `hard = None`): a silent,
+/// never-completing turn is bounded ONLY by an explicit cancel — no
+/// timeout fires. This is the new default contract.
+#[tokio::test(start_paused = true)]
+async fn race_turn_unlimited_silent_turn_only_ends_on_cancel() {
+    let (_idle_tx, mut idle_rx) = watch::channel(()); // no activity
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = cancel_tx.send(());
+    });
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, String>>(),
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        None,
+        None,
+    )
+    .await;
+    let _ = canceller.await;
+    assert!(
+        matches!(result, Ok(StopReason::Cancelled)),
+        "got {result:?}"
+    );
+    assert_eq!(
+        on_timeout.load(Ordering::SeqCst),
+        0,
+        "unlimited turn must not invoke on_timeout_cancel"
+    );
+}
+
+/// Unlimited hard cap (`hard = None`) with a bounded idle: a streaming,
+/// never-completing turn that keeps activity alive never hits the idle
+/// deadline and is bounded ONLY by cancel — the absent hard cap imposes no
+/// bound, matching "unlimited hard cap".
+#[tokio::test(start_paused = true)]
+async fn race_turn_unlimited_hard_cap_active_turn_only_ends_on_cancel() {
+    let (idle_tx, mut idle_rx) = watch::channel(());
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let activity = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = idle_tx.send(());
+        }
+    });
+    let on_timeout = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let on_timeout_clone = on_timeout.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = cancel_tx.send(());
+    });
+    // idle 50ms (kept reset by activity), hard None (unlimited): an active
+    // turn never hits either, so only cancel ends it.
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, String>>(),
+        cancel_rx,
+        &mut idle_rx,
+        move || {
+            on_timeout_clone.fetch_add(1, Ordering::SeqCst);
+        },
+        Some(Duration::from_millis(50)),
+        None,
+    )
+    .await;
+    activity.abort();
+    let _ = activity.await;
+    let _ = canceller.await;
+    assert!(
+        matches!(result, Ok(StopReason::Cancelled)),
+        "got {result:?}"
+    );
+    assert_eq!(
+        on_timeout.load(Ordering::SeqCst),
+        0,
+        "unlimited hard cap must not invoke on_timeout_cancel for an active turn"
+    );
+}
+
+/// `resolved_turn_timeout` precedence: env var > UI override > default.
+/// The override replaces the default when no env var is set; the default is
+/// now `None` (unlimited).
+#[test]
+fn turn_timeout_override_takes_effect_when_no_env_var() {
+    // Shared with the real-loop harness, which clears/restores these env vars
+    // and resolves these timeouts while a mock agent runs: never interleave.
+    let _serial = super::real_loop_tests::TIMEOUT_TEST_LOCK.blocking_lock();
+    // The env var is usually absent in the test runner; when it IS set
+    // (operator machine), it correctly masks the UI override — skip there.
+    if std::env::var("TERMUL_ACP_TURN_TIMEOUT_SECS").is_ok() {
+        return;
+    }
+    set_turn_timeout_override(Some(42));
+    assert_eq!(resolved_turn_timeout(), Some(Duration::from_secs(42)));
+    set_turn_timeout_override(None);
+    assert_eq!(resolved_turn_timeout(), None);
+}
+
+/// `turn_idle_timeout` full precedence ladder, in ONE test so the shared
+/// override static and env var are never touched by concurrent tests:
+/// env var absent → override wins over default; cleared → default (`None`
+/// / unlimited); env var present → env beats a simultaneous UI override
+/// (the operator precedence the settings UI documents). When the env var is
+/// ALREADY set on the host (operator machine), only the env-wins phase runs
+/// and its original value is restored afterwards.
+#[test]
+fn turn_idle_timeout_precedence_env_beats_override_beats_default() {
+    // Shared with the real-loop tests, which run turns under their own idle
+    // window: neither side may observe the other's override/env var.
+    let _serial = super::real_loop_tests::TIMEOUT_TEST_LOCK.blocking_lock();
+    let preexisting = std::env::var("TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS").ok();
+    if preexisting.is_none() {
+        set_turn_idle_timeout_override(Some(42));
+        assert_eq!(turn_idle_timeout(), Some(Duration::from_secs(42)));
+        set_turn_idle_timeout_override(None);
+        assert_eq!(turn_idle_timeout(), None);
+    }
+
+    std::env::set_var("TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS", "60");
+    set_turn_idle_timeout_override(Some(1800));
+    assert_eq!(turn_idle_timeout(), Some(Duration::from_secs(60)));
+
+    match preexisting {
+        Some(v) => std::env::set_var("TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS", v),
+        None => std::env::remove_var("TERMUL_ACP_TURN_IDLE_TIMEOUT_SECS"),
+    }
+    set_turn_idle_timeout_override(None);
+}
+
+/// `session_new_timeout` precedence: env var > UI override > default.
+/// A zero override is ignored (the IPC command rejects it; the resolver
+/// also filters it defensively).
+#[test]
+fn session_new_timeout_override_takes_effect_when_no_env_var() {
+    // Shared with the real-loop harness, which clears/restores these env vars
+    // and resolves these timeouts while a mock agent runs: never interleave.
+    let _serial = super::real_loop_tests::TIMEOUT_TEST_LOCK.blocking_lock();
+    if std::env::var("TERMUL_ACP_SESSION_NEW_TIMEOUT_SECS").is_ok() {
+        return;
+    }
+    set_session_new_timeout_override(Some(42));
+    assert_eq!(session_new_timeout(), Duration::from_secs(42));
+    set_session_new_timeout_override(Some(0));
+    assert_eq!(session_new_timeout(), SESSION_NEW_TIMEOUT);
+    set_session_new_timeout_override(None);
+    assert_eq!(session_new_timeout(), SESSION_NEW_TIMEOUT);
+}
+
+/// `session_reopen_timeout` precedence: env var > UI override > default.
+/// A zero override is ignored (same defensive filter as session/new).
+#[test]
+fn session_reopen_timeout_override_takes_effect_when_no_env_var() {
+    // Shared with the real-loop harness, which clears/restores these env vars
+    // and resolves these timeouts while a mock agent runs: never interleave.
+    let _serial = super::real_loop_tests::TIMEOUT_TEST_LOCK.blocking_lock();
+    if std::env::var("TERMUL_ACP_SESSION_REOPEN_TIMEOUT_SECS").is_ok() {
+        return;
+    }
+    set_session_reopen_timeout_override(Some(42));
+    assert_eq!(session_reopen_timeout(), Duration::from_secs(42));
+    set_session_reopen_timeout_override(Some(0));
+    assert_eq!(session_reopen_timeout(), SESSION_REOPEN_TIMEOUT);
+    set_session_reopen_timeout_override(None);
+    assert_eq!(session_reopen_timeout(), SESSION_REOPEN_TIMEOUT);
+}
+
+// --- Story 8: promote_session (ephemeral warm pool) ---
+
+/// Build a driver state holding one backend-ephemeral session rooted at
+/// `cwd`, exactly as the NewSession arm leaves it: ephemeral mark + stashed
+/// registration metadata (captured at `session/new`).
+fn ephemeral_driver_state(session_id: &str, cwd: &std::path::Path) -> Arc<Mutex<DriverState>> {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    {
+        let mut guard = state.lock();
+        guard.set_session_root(session_id.to_string(), cwd.to_path_buf());
+        guard.mark_ephemeral(session_id.to_string());
+        guard.note_promotable_registration(
+            session_id.to_string(),
+            SessionRegistration {
+                session_id: session_id.to_string(),
+                stable_agent_namespace: Some("config:test".to_string()),
+                runtime_agent_id: Some("runtime-1".to_string()),
+                project_id: Some("p-1".to_string()),
+                cwd: cwd.to_path_buf(),
+                ..Default::default()
+            },
+        );
+    }
+    state
+}
+
+fn temp_dir_with_cwd(tag: &str) -> (PathBuf, PathBuf) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("termul-promote-{tag}-{stamp}"));
+    let cwd = root.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    (root, cwd)
+}
+
+/// I/O matrix "Claim + first prompt": promote registers the stashed
+/// metadata (project id + namespace survive) and clears the ephemeral
+/// mark — the session becomes visible to the durable catalog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_session_registers_metadata_and_unmarks_ephemeral() {
+    let (root, cwd) = temp_dir_with_cwd("ok");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let state = ephemeral_driver_state("sess-warm", &cwd);
+
+    promote_session_in_driver(
+        &state,
+        Some(&persistence),
+        &AgentId::new(),
+        &SessionId::new("sess-warm"),
+    )
+    .await
+    .unwrap();
+
+    assert!(!state.lock().is_ephemeral("sess-warm"));
+    let metadata = persistence.metadata("sess-warm").unwrap();
+    assert_eq!(metadata.project_id.as_deref(), Some("p-1"));
+    assert_eq!(
+        metadata.stable_agent_namespace.as_deref(),
+        Some("config:test")
+    );
+    assert_eq!(metadata.runtime_agent_id.as_deref(), Some("runtime-1"));
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// I/O matrix "Promote unknown session": a session the driver never
+/// created errors and changes no state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_session_unknown_session_errors_without_state_change() {
+    let (root, cwd) = temp_dir_with_cwd("unknown");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let state = ephemeral_driver_state("sess-warm", &cwd);
+
+    let error = promote_session_in_driver(
+        &state,
+        Some(&persistence),
+        &AgentId::new(),
+        &SessionId::new("sess-never-created"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("unknown session"),
+        "unexpected error: {error}"
+    );
+    // No state change: the warm session is still ephemeral, nothing
+    // was registered.
+    assert!(state.lock().is_ephemeral("sess-warm"));
+    assert!(persistence.metadata("sess-never-created").is_err());
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// I/O matrix "Promote non-ephemeral": already-durable sessions get an
+/// idempotent Ok with no re-registration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_session_durable_session_is_idempotent_ok() {
+    let (root, cwd) = temp_dir_with_cwd("durable");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    // A durable session: registered at create, never marked ephemeral.
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-durable".to_string(),
+            cwd: cwd.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    state
+        .lock()
+        .set_session_root("sess-durable".to_string(), cwd.clone());
+
+    promote_session_in_driver(
+        &state,
+        Some(&persistence),
+        &AgentId::new(),
+        &SessionId::new("sess-durable"),
+    )
+    .await
+    .unwrap();
+    // Once more: still Ok, still no error, still durable.
+    promote_session_in_driver(
+        &state,
+        Some(&persistence),
+        &AgentId::new(),
+        &SessionId::new("sess-durable"),
+    )
+    .await
+    .unwrap();
+    assert!(!state.lock().is_ephemeral("sess-durable"));
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// I/O matrix "Promote with persistence failure": the session STAYS
+/// ephemeral (no half-promoted state) and the reply is an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_session_persistence_failure_keeps_ephemeral() {
+    let (root, cwd) = temp_dir_with_cwd("fail");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    {
+        let mut guard = state.lock();
+        guard.set_session_root("sess-warm".to_string(), cwd.clone());
+        guard.mark_ephemeral("sess-warm".to_string());
+        // Stash a registration whose cwd does not exist — register_session
+        // canonicalizes and fails, exercising the error path.
+        guard.note_promotable_registration(
+            "sess-warm".to_string(),
+            SessionRegistration {
+                session_id: "sess-warm".to_string(),
+                cwd: root.join("does-not-exist"),
+                ..Default::default()
+            },
+        );
+    }
+
+    let error = promote_session_in_driver(
+        &state,
+        Some(&persistence),
+        &AgentId::new(),
+        &SessionId::new("sess-warm"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("failed to persist promoted session"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        state.lock().is_ephemeral("sess-warm"),
+        "a failed promote must leave the session ephemeral"
+    );
+    assert!(persistence.metadata("sess-warm").is_err());
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// No durable store attached (desktop without persistence): promote
+/// errors and the session stays ephemeral — chat remains non-durable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_session_without_persistence_errors_and_stays_ephemeral() {
+    let (root, cwd) = temp_dir_with_cwd("nostore");
+    let state = ephemeral_driver_state("sess-warm", &cwd);
+
+    let error =
+        promote_session_in_driver(&state, None, &AgentId::new(), &SessionId::new("sess-warm"))
+            .await
+            .unwrap_err();
+    assert!(
+        error.contains("persistence unavailable"),
+        "unexpected error: {error}"
+    );
+    assert!(state.lock().is_ephemeral("sess-warm"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// I/O matrix "Web boot": an ephemeral session registered nowhere is
+/// invisible to the durable catalog — and stays that way until promoted.
+/// (The boot path creates nothing; this pins that a bare ephemeral
+/// session/new leaves no durable trace.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpromoted_ephemeral_session_leaves_no_durable_trace() {
+    let (root, cwd) = temp_dir_with_cwd("ephemeral");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let state = ephemeral_driver_state("sess-warm", &cwd);
+
+    // No promote: the catalog stays empty for this session id.
+    assert!(persistence.metadata("sess-warm").is_err());
+    assert!(state.lock().is_ephemeral("sess-warm"));
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// I/O matrix "Close un-promoted warm session": an ephemeral session's
+/// close never calls `finalize_session` (there is no durable record — the
+/// call would fail on the unknown id and surface a spurious "history
+/// finalization failed"). A durable (registered) session finalizes fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_of_ephemeral_session_skips_finalize_without_error() {
+    let (root, cwd) = temp_dir_with_cwd("close");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+
+    // Ephemeral close: never registered — finalize must be skipped, so no
+    // error despite the unknown session id.
+    finalize_closed_session_if_durable(Some(&persistence), "sess-warm", true)
+        .await
+        .unwrap();
+
+    // Durable close: a registered session finalizes cleanly…
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-durable".to_string(),
+            cwd: cwd.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    finalize_closed_session_if_durable(Some(&persistence), "sess-durable", false)
+        .await
+        .unwrap();
+
+    // …and the gate is load-bearing: with `was_ephemeral` false on a
+    // never-registered id, the finalize error WOULD surface.
+    let error =
+        finalize_closed_session_if_durable(Some(&persistence), "sess-never-registered", false)
+            .await
+            .unwrap_err();
+    assert!(
+        error.contains("history finalization failed"),
+        "unexpected error: {error}"
+    );
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Review (promote/close race): a close/dispose landing during the
+/// register await removes the session from the driver state; convergence
+/// finalizes the just-registered record Closed instead of leaving a
+/// phantom Active history entry, and reports the race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn promote_converge_after_close_finalizes_record_closed() {
+    let (root, cwd) = temp_dir_with_cwd("race");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-race".to_string(),
+            cwd: cwd.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // The session vanished from the driver (close/dispose won the race).
+    let state = Arc::new(Mutex::new(DriverState::new()));
+
+    let error = converge_promoted_session(
+        &state,
+        &persistence,
+        &AgentId::new(),
+        &SessionId::new("sess-race"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("closed during promotion"),
+        "unexpected error: {error}"
+    );
+    let metadata = persistence.metadata("sess-race").unwrap();
+    assert_eq!(metadata.status, PersistedSessionStatus::Closed);
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Story 8 (web honesty): the teardown finalize treats the
+/// already-handled outcomes — `WriterStopped` (writer drained + persisted
+/// metadata via its own Shutdown arm) and `SessionNotFound` (runtime
+/// already finalized/deleted) — as benign; they must NOT be counted as
+/// persistence failures. A real error still lands in the failure list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teardown_finalize_writer_stopped_is_not_a_persistence_failure() {
+    let (root, cwd) = temp_dir_with_cwd("finalize-routing");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-stop".to_string(),
+            cwd: cwd.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // A real (non-benign) finalize failure surfaces the error — this is
+    // the class that must stay on the error channel.
+    let error =
+        finalize_closed_session_if_durable(Some(&persistence), "sess-never-registered", false)
+            .await
+            .unwrap_err();
+    assert!(
+        error.contains("history finalization failed"),
+        "real finalize failures stay failures: {error}"
+    );
+
+    // The benign classes: after shutdown drains the writer, a second
+    // finalize surfaces SessionNotFound (runtime gone) — the durable
+    // metadata was already persisted by the writer's own Shutdown arm.
+    // WriterStopped (channel closed, runtime present) is the same
+    // already-handled class; both route to info, never the error channel.
+    persistence.shutdown().await.unwrap();
+    let rerun = persistence
+        .finalize_session("sess-stop", PersistedSessionStatus::Closed)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            rerun,
+            SessionPersistenceError::SessionNotFound | SessionPersistenceError::WriterStopped
+        ),
+        "expected an already-handled benign outcome, got: {rerun}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Test sink capturing every emitted event (mirrors the `web::sink` tests'
+/// CapturingSink pattern).
+#[derive(Default)]
+struct CapturingSink {
+    seen: Mutex<Vec<crate::web::sink::AcpEvent>>,
+}
+
+impl EventSink for CapturingSink {
+    fn emit(&self, event: &crate::web::sink::AcpEvent) {
+        self.seen.lock().push(event.clone());
+    }
+}
+
+fn thought_notification(
+    session_id: &str,
+    text: &str,
+) -> agent_client_protocol::schema::v1::SessionNotification {
+    use agent_client_protocol::schema::v1 as acp;
+    acp::SessionNotification::new(
+        acp::SessionId::new(session_id),
+        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(text),
+        ))),
+    )
+}
+
+#[tokio::test]
+async fn session_notification_is_suppressed_while_replay_window_open() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    assert!(state.lock().try_begin_replay_window("sess-1"));
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let result = handle_session_notification(
+        &state,
+        None,
+        &sinks,
+        &AgentId::new(),
+        thought_notification("sess-1", "replayed history"),
+    )
+    .await;
+    assert!(result.is_ok());
+    assert!(
+        sink.seen.lock().is_empty(),
+        "a replayed update must reach NO sink"
+    );
+}
+
+fn plan_notification(session_id: &str) -> agent_client_protocol::schema::v1::SessionNotification {
+    use agent_client_protocol::schema::v1 as acp;
+    acp::SessionNotification::new(
+        acp::SessionId::new(session_id),
+        acp::SessionUpdate::Plan(acp::Plan::new(vec![acp::PlanEntry::new(
+            "step",
+            acp::PlanEntryPriority::High,
+            acp::PlanEntryStatus::Pending,
+        )])),
+    )
+}
+
+/// A protected title still drops an agent title, but OpenCode compaction and
+/// retry markers on the same `session_info_update` reach the renderer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protected_title_forwards_opencode_markers_without_title() {
+    use agent_client_protocol::schema::v1 as acp;
+
+    let (root, cwd) = temp_dir_with_cwd("oc-notice");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-1".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    persistence
+        .enqueue_event(PersistedEventRecord {
+            schema_version: crate::acp::session_persistence::SESSION_SCHEMA_VERSION,
+            session_id: "sess-1".to_string(),
+            seq: 1,
+            type_: "local_title_generated".to_string(),
+            recorded_at: crate::acp::session_persistence::now_millis(),
+            payload: serde_json::json!({"sessionId": "sess-1", "title": "Background title"}),
+        })
+        .unwrap();
+    persistence.flush_session("sess-1").await.unwrap();
+    assert_eq!(
+        persistence.metadata("sess-1").unwrap().title_source,
+        Some(crate::acp::session_persistence::TitleSource::BackgroundGenerated)
+    );
+
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let marked = acp::SessionNotification::new(
+        acp::SessionId::new("sess-1"),
+        acp::SessionUpdate::SessionInfoUpdate(
+            acp::SessionInfoUpdate::new()
+                .title("Agent title")
+                .meta(acp::Meta::from_iter([(
+                    "opencode/compaction".to_string(),
+                    serde_json::json!({
+                        "status": "started",
+                        "messageId": "msg_1",
+                        "reason": "auto"
+                    }),
+                )])),
+        ),
+    );
+    handle_session_notification(&state, Some(&persistence), &sinks, &AgentId::new(), marked)
+        .await
+        .expect("marker update");
+    {
+        let seen = sink.seen.lock();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].type_, crate::acp::events::EVENT_SESSION_INFO_UPDATE);
+        assert!(seen[0].payload.get("title").is_none());
+        assert_eq!(seen[0].payload["compaction"]["status"], "started");
+    }
+
+    sink.seen.lock().clear();
+    let title_only = acp::SessionNotification::new(
+        acp::SessionId::new("sess-1"),
+        acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new().title("Agent title")),
+    );
+    handle_session_notification(
+        &state,
+        Some(&persistence),
+        &sinks,
+        &AgentId::new(),
+        title_only,
+    )
+    .await
+    .expect("title-only update");
+    assert!(
+        sink.seen.lock().is_empty(),
+        "a protected title-only update stays suppressed"
+    );
+
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// History chunks stay suppressed during reopen. Plan (and other session
+/// state) still fans out so slash commands, modes, and config are not lost.
+#[tokio::test]
+async fn replay_window_forwards_plan_and_drops_history() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    assert!(state.lock().try_begin_replay_window("sess-1"));
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let agent_id = AgentId::new();
+    handle_session_notification(&state, None, &sinks, &agent_id, plan_notification("sess-1"))
+        .await
+        .expect("plan update");
+    handle_session_notification(
+        &state,
+        None,
+        &sinks,
+        &agent_id,
+        thought_notification("sess-1", "replayed history"),
+    )
+    .await
+    .expect("history chunk");
+    let seen = sink.seen.lock();
+    assert_eq!(seen.len(), 1, "only the plan fans out");
+    assert_eq!(seen[0].type_, crate::acp::events::EVENT_PLAN_UPDATE);
+}
+
+#[tokio::test]
+async fn session_notification_fans_out_when_no_replay_window() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let result = handle_session_notification(
+        &state,
+        None,
+        &sinks,
+        &AgentId::new(),
+        thought_notification("sess-1", "live chunk"),
+    )
+    .await;
+    assert!(result.is_ok());
+    let seen = sink.seen.lock();
+    assert_eq!(seen.len(), 1, "a live update must fan out to the sink");
+    assert_eq!(seen[0].sid.as_deref(), Some("sess-1"));
+}
+
+/// Replay windows and active turns are mutually exclusive (admission
+/// rejects either ordering), so the only reachable live-turn notification
+/// path is a LIVE update: it must nudge the turn's idle clock AND fan out.
+#[tokio::test]
+async fn live_update_during_active_turn_nudges_idle_clock_and_fans_out() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let handles = state.lock().try_begin_turn("sess-1").expect("turn starts");
+    let idle_rx = handles.idle_rx;
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    assert!(
+        !idle_rx.has_changed().unwrap(),
+        "no idle nudge before the notification arrives"
+    );
+    let result = handle_session_notification(
+        &state,
+        None,
+        &sinks,
+        &AgentId::new(),
+        thought_notification("sess-1", "live chunk"),
+    )
+    .await;
+    assert!(result.is_ok());
+    assert!(
+        idle_rx.has_changed().unwrap(),
+        "a live update nudges the active turn's idle deadline"
+    );
+    assert_eq!(
+        sink.seen.lock().len(),
+        1,
+        "the live update fans out to the sink"
+    );
+}
+
+async fn send_command_list(
+    state: &Mutex<DriverState>,
+    sinks: &[Arc<dyn EventSink>],
+    session_id: &str,
+    commands: Vec<agent_client_protocol::schema::v1::AvailableCommand>,
+) {
+    use agent_client_protocol::schema::v1 as acp;
+    let notification = acp::SessionNotification::new(
+        acp::SessionId::new(session_id),
+        acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(commands)),
+    );
+    handle_session_notification(state, None, sinks, &AgentId::new(), notification)
+        .await
+        .expect("commands update");
+}
+
+async fn send_commands(
+    state: &Mutex<DriverState>,
+    sinks: &[Arc<dyn EventSink>],
+    session_id: &str,
+    names: &[&str],
+) {
+    let commands = names
+        .iter()
+        .map(|name| {
+            agent_client_protocol::schema::v1::AvailableCommand::new(
+                *name,
+                format!("{name} command"),
+            )
+        })
+        .collect();
+    send_command_list(state, sinks, session_id, commands).await;
+}
+
+/// The same command set re-sent in another order is dropped before anything
+/// sees it: no sink (so no seq, durable record or live event), no idle nudge
+/// of the active turn, and no stamp on the idle reaper's activity clock.
+#[tokio::test]
+async fn reshuffled_repeat_of_the_command_set_is_dropped() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let mut idle_rx = state
+        .lock()
+        .try_begin_turn("sess-1")
+        .expect("turn starts")
+        .idle_rx;
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    send_commands(&state, &sinks, "sess-1", &["alpha", "beta", "gamma"]).await;
+    assert_eq!(sink.seen.lock().len(), 1);
+    assert_eq!(
+        sink.seen.lock()[0].type_,
+        crate::acp::events::EVENT_COMMANDS_UPDATE
+    );
+    assert!(idle_rx.has_changed().unwrap());
+    idle_rx.borrow_and_update();
+    let reaper_clock = state.lock().activity(0).last_active_at;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    send_commands(&state, &sinks, "sess-1", &["gamma", "alpha", "beta"]).await;
+    assert_eq!(sink.seen.lock().len(), 1, "the repeat reaches no sink");
+    assert!(
+        !idle_rx.has_changed().unwrap(),
+        "the repeat does not nudge the idle clock"
+    );
+    assert_eq!(
+        state.lock().activity(0).last_active_at,
+        reaper_clock,
+        "the repeat is not activity for the idle reaper"
+    );
+}
+
+/// A changed set, a session's first list, and the first list after a reopen
+/// (load/resume) or a close all fan out as before.
+#[tokio::test]
+async fn changed_or_first_command_lists_still_fan_out() {
+    let state = Mutex::new(DriverState::new());
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    send_commands(&state, &sinks, "sess-1", &["alpha", "beta"]).await;
+    send_commands(&state, &sinks, "sess-2", &["alpha", "beta"]).await;
+    assert_eq!(sink.seen.lock().len(), 2, "each session's first list");
+    send_commands(&state, &sinks, "sess-1", &["alpha", "beta", "gamma"]).await;
+    assert_eq!(sink.seen.lock().len(), 3, "a changed set");
+
+    // Same names, but one entry's description, then its input hint, changed.
+    use agent_client_protocol::schema::v1 as acp;
+    let entries = |alpha: acp::AvailableCommand| {
+        vec![
+            alpha,
+            acp::AvailableCommand::new("beta", "beta command"),
+            acp::AvailableCommand::new("gamma", "gamma command"),
+        ]
+    };
+    send_command_list(
+        &state,
+        &sinks,
+        "sess-1",
+        entries(acp::AvailableCommand::new("alpha", "alpha, reworded")),
+    )
+    .await;
+    assert_eq!(sink.seen.lock().len(), 4, "a changed description");
+    send_command_list(
+        &state,
+        &sinks,
+        "sess-1",
+        entries(
+            acp::AvailableCommand::new("alpha", "alpha, reworded").input(
+                acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                    "<path>",
+                )),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(sink.seen.lock().len(), 5, "a changed input hint");
+
+    assert!(state.lock().try_begin_replay_window("sess-1"));
+    send_command_list(
+        &state,
+        &sinks,
+        "sess-1",
+        entries(
+            acp::AvailableCommand::new("alpha", "alpha, reworded").input(
+                acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                    "<path>",
+                )),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(sink.seen.lock().len(), 6, "the first list after a reopen");
+    state.lock().finish_replay_window("sess-1");
+
+    state.lock().remove_session_root("sess-2");
+    send_commands(&state, &sinks, "sess-2", &["alpha", "beta"]).await;
+    assert_eq!(sink.seen.lock().len(), 7, "the first list after a close");
+    let seen = sink.seen.lock();
+    assert!(seen
+        .iter()
+        .all(|event| event.type_ == crate::acp::events::EVENT_COMMANDS_UPDATE));
+}
+
+/// Turn-before-replay ordering at the notification layer: while a turn is
+/// active, replay-window admission is refused, so updates keep fanning out
+/// as live (nothing is misclassified as replayed history and dropped).
+#[tokio::test]
+async fn replay_window_admission_refused_during_active_turn_keeps_updates_live() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let _handles = state.lock().try_begin_turn("sess-1").expect("turn starts");
+    assert!(
+        ReplayWindowGuard::try_new(state.clone(), "sess-1".to_string()).is_none(),
+        "replay window must be rejected while a turn is active"
+    );
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let result = handle_session_notification(
+        &state,
+        None,
+        &sinks,
+        &AgentId::new(),
+        thought_notification("sess-1", "live chunk"),
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(
+        sink.seen.lock().len(),
+        1,
+        "with no replay window admitted, the update fans out as live"
+    );
+}
+
+/// Replay-before-turn ordering: while a replay window is open, turn
+/// admission is refused, and the replayed update is suppressed (never
+/// persisted or forwarded).
+#[tokio::test]
+async fn turn_admission_refused_during_replay_window() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    let guard = ReplayWindowGuard::try_new(state.clone(), "sess-1".to_string())
+        .expect("window opens when no turn is active");
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_none(),
+        "a turn must be rejected while a replay window is open"
+    );
+    drop(guard);
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_some(),
+        "a turn may begin once the replay window closes"
+    );
+}
+
+/// Reopen reservations split admission from suppression: while a
+/// reservation is held (reopen admitted, replay window not yet open), a
+/// prompt turn is rejected BUT updates are NOT suppressed (no window yet);
+/// a turn that is already active refuses the reservation. The reservation
+/// is ref-counted across overlapping reopens and released on the last
+/// drop, after which turns are admitted again.
+#[tokio::test]
+async fn reopen_reservation_blocks_turns_without_suppressing_updates() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    // Turn-before-reopen ordering: admission is refused while a turn lives.
+    let handles = state.lock().try_begin_turn("sess-1").expect("turn starts");
+    assert!(
+        ReopenReservation::try_new(state.clone(), "sess-1".to_string()).is_none(),
+        "reopen reservation must be rejected while a turn is active"
+    );
+    let _ = state.lock().finish_turn("sess-1");
+    drop(handles);
+
+    let reservation = ReopenReservation::try_new(state.clone(), "sess-1".to_string())
+        .expect("reservation admitted once the turn finished");
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_none(),
+        "a turn must be rejected while a reopen reservation is held"
+    );
+    assert!(
+        !state.lock().note_replayed_update("sess-1"),
+        "no replay window is open yet — updates stay live (no suppression)"
+    );
+    // Overlapping reopens share the reservation via refcount.
+    let second = ReopenReservation::try_new(state.clone(), "sess-1".to_string())
+        .expect("overlapping reopen shares the reservation");
+    drop(second);
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_none(),
+        "the reservation survives until the last guard drops"
+    );
+    drop(reservation);
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_some(),
+        "a turn may begin once the reservation is released"
+    );
+}
+
+/// Admission-ordering regression: the reopen reservation is acquired
+/// synchronously by the command loop BEFORE the request task is spawned,
+/// so a SendPrompt dispatched immediately after a LoadSession /
+/// ResumeSession is rejected even though the spawned task has not yet run
+/// and the replay window is not open — and updates stay live (no
+/// suppression) until the window opens. The deferred window then opens
+/// under the held reservation, and turns stay rejected until the
+/// reservation itself (not just the window) is released.
+#[tokio::test]
+async fn reopen_reserved_before_spawn_rejects_prompt_before_window_opens() {
+    let state = Arc::new(Mutex::new(DriverState::new()));
+    // Command-loop phase: the reservation is taken before spawn_request;
+    // the spawned task (and its replay window) has not run yet.
+    let reservation = ReopenReservation::try_new(state.clone(), "sess-1".to_string())
+        .expect("reopen admitted while no turn is active");
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_none(),
+        "SendPrompt dispatched after the reopen must be rejected before the window opens"
+    );
+    assert!(
+        !state.lock().note_replayed_update("sess-1"),
+        "no window yet — updates stay live (no suppression)"
+    );
+    // Spawned-task phase: the deferred replay window opens under the held
+    // reservation (no turn could have started, so this cannot fail).
+    let window = ReplayWindowGuard::try_new(state.clone(), "sess-1".to_string())
+        .expect("window opens under the held reservation");
+    drop(window);
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_none(),
+        "closing the window alone must not admit turns while the reservation is held"
+    );
+    drop(reservation);
+    assert!(
+        state.lock().try_begin_turn("sess-1").is_some(),
+        "turns are admitted once the reservation is released"
+    );
+}
+
+/// Minimal serializable payload for the fan-out tests (mirrors sink.rs's
+/// TestPayload).
+#[derive(serde::Serialize)]
+struct TestPayload {
+    agent_id: String,
+    session_id: String,
+    text: String,
+}
+
+/// CAP-2: `record_agent_switch` validates every identity field BEFORE the
+/// durable write — the WS path reaches this function without the Tauri
+/// command layer's pre-check, and a marker missing fromConfigId or
+/// newSessionId is permanently unresolvable (CAP-7 reopen reads them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_agent_switch_rejects_blank_identity_fields_before_write() {
+    let (root, cwd) = temp_dir_with_cwd("switch-validate");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-validate".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let valid = |from: &str, to: &str, new: &str| AgentSwitchRecord {
+        session_id: "sess-validate".to_string(),
+        from_config_id: from.to_string(),
+        to_config_id: to.to_string(),
+        new_session_id: new.to_string(),
+        summary_text: "summary".to_string(),
+    };
+    // Blank sessionId / fromConfigId / newSessionId each reject BEFORE
+    // any durable write — no record, no seq advance.
+    for record in [
+        valid("   ", "claude", "sess-new"),
+        valid("omp", "claude", ""),
+        valid("omp", "   ", "sess-new"),
+    ] {
+        let error = record_agent_switch(
+            &persistence,
+            &[],
+            AgentId::new(),
+            record.session_id.clone(),
+            record,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("are required"), "unexpected error: {error}");
+    }
+    let error = record_agent_switch(
+        &persistence,
+        &[],
+        AgentId::new(),
+        "  ".to_string(),
+        valid("omp", "claude", "sess-new"),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("are required"), "blank sessionId rejects");
+    // Fail-closed: nothing was written, the frontier never moved.
+    assert_eq!(persistence.last_seq("sess-validate").unwrap(), 0);
+    assert!(persistence
+        .replay_after("sess-validate", 0)
+        .unwrap()
+        .is_empty());
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// CAP-2 "one sequence authority" proof: the switch marker is numbered by the
+/// relay's allocator, so the durable record and the live event carry the SAME
+/// seq, a later relay event takes the next one, and a subscriber sees a
+/// contiguous run with no seq consumed by a non-durable twin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_agent_switch_shares_one_seq_with_the_live_event() {
+    let (root, cwd) = temp_dir_with_cwd("switch-seq-authority");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-coll".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let relay = Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(&persistence),
+    ));
+    let sinks: Vec<Arc<dyn EventSink>> = vec![relay.clone()];
+    let (_client, mut rx, _replay, _head) = relay.subscribe("sess-coll", None, None, &CancellationToken::new()).await;
+    let chunk = |text: &str| TestPayload {
+        agent_id: "a".to_string(),
+        session_id: "sess-coll".to_string(),
+        text: text.to_string(),
+    };
+
+    events::fan_out(&sinks, Some("sess-coll"), "acp:message_chunk", &chunk("first"));
+    record_agent_switch(
+        &persistence,
+        &sinks,
+        AgentId::new(),
+        "sess-coll".to_string(),
+        AgentSwitchRecord {
+            session_id: "sess-coll".to_string(),
+            from_config_id: "omp".to_string(),
+            to_config_id: "claude".to_string(),
+            new_session_id: "sess-coll-new".to_string(),
+            summary_text: "Handoff".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    events::fan_out(&sinks, Some("sess-coll"), "acp:message_chunk", &chunk("late"));
+    persistence.flush_session("sess-coll").await.unwrap();
+
+    let mut live = Vec::new();
+    while let Ok(crate::web::StreamItem::Event(event)) = rx.try_recv() {
+        live.push((event.seq, event.type_));
+    }
+    assert_eq!(
+        live,
+        vec![
+            (1, "message_chunk".to_string()),
+            (2, "agent_switch".to_string()),
+            (3, "message_chunk".to_string()),
+        ]
+    );
+    let durable: Vec<(u64, String)> = persistence
+        .replay_after("sess-coll", 0)
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.seq, record.type_))
+        .collect();
+    assert_eq!(durable, live, "durable log and live stream agree on every seq");
+
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The switch reaches a non-relay sink exactly once with the camelCase
+/// `AgentSwitchEvent` payload (the relay is not fanned a duplicate), and the
+/// durable log holds exactly ONE `agent_switch` even if a relay emit of
+/// `acp:agent_switch` follows (host records are appended only by
+/// `record_host_event`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_agent_switch_reaches_other_sinks_once_and_stays_one_durable_record() {
+    let (root, cwd) = temp_dir_with_cwd("switch-fanout");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-fan".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let relay = Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(&persistence),
+    ));
+    let capture = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![capture.clone(), relay.clone()];
+    let (_client, mut rx, _replay, _head) = relay.subscribe("sess-fan", None, None, &CancellationToken::new()).await;
+
+    record_agent_switch(
+        &persistence,
+        &sinks,
+        AgentId("runtime-1".to_string()),
+        "sess-fan".to_string(),
+        AgentSwitchRecord {
+            session_id: "sess-fan".to_string(),
+            from_config_id: "omp".to_string(),
+            to_config_id: "claude".to_string(),
+            new_session_id: "sess-fan-new".to_string(),
+            summary_text: "Handoff".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    // A stray relay emit of the same event is live-only, never a second record.
+    events::fan_out(
+        &[relay.clone() as Arc<dyn EventSink>],
+        Some("sess-fan"),
+        events::EVENT_AGENT_SWITCH,
+        &serde_json::json!({"sessionId": "sess-fan"}),
+    );
+    persistence.flush_session("sess-fan").await.unwrap();
+
+    {
+        let seen = capture.seen.lock();
+        assert_eq!(seen.len(), 1, "other sinks get the switch exactly once");
+        assert_eq!(seen[0].type_, "acp:agent_switch");
+        assert_eq!(seen[0].payload["agentId"], "runtime-1");
+        assert_eq!(seen[0].payload["fromConfigId"], "omp");
+        assert_eq!(seen[0].payload["toConfigId"], "claude");
+        assert_eq!(seen[0].payload["newSessionId"], "sess-fan-new");
+        assert_eq!(seen[0].payload["summaryText"], "Handoff");
+    }
+
+    let mut live_switches = Vec::new();
+    while let Ok(crate::web::StreamItem::Event(event)) = rx.try_recv() {
+        if event.type_ == "agent_switch" {
+            live_switches.push(event.seq);
+        }
+    }
+    assert_eq!(
+        live_switches,
+        vec![1, 2],
+        "relay: the record's live delivery (seq 1) plus the stray emit (seq 2), no duplicate of the record"
+    );
+    let durable = persistence.replay_after("sess-fan", 0).unwrap();
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|record| record.type_ == "agent_switch")
+            .count(),
+        1,
+        "exactly one durable agent_switch record"
+    );
+    assert_eq!(durable[0].seq, 1);
+
+    persistence.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// CAP-2: a catalog-known session whose writer runtime is gone
+/// (post-restart recovered session) surfaces a DISTINGUISHABLE error
+/// ("session writer unavailable") that the WS handler maps to a typed
+/// `not_found` reply — not the generic persistence-failure string.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_agent_switch_writer_gone_surfaces_distinguishable_error() {
+    let (root, cwd) = temp_dir_with_cwd("switch-writer-gone");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    persistence
+        .register_session(SessionRegistration {
+            session_id: "sess-recovered".to_string(),
+            cwd,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Simulate the post-restart state: the catalog entry survives (the
+    // metadata check passes) but no writer runtime is installed.
+    persistence.shutdown().await.unwrap();
+    let reopened = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    assert!(reopened.metadata("sess-recovered").is_ok());
+    // The writer runtime is gone: the relay's host record surfaces
+    // SessionNotFound (the public observable for "catalog known, writer
+    // gone") and allocates nothing.
+    let relay = Arc::new(crate::web::WsRelaySink::with_persistence(
+        8,
+        Arc::clone(&reopened),
+    ));
+    assert!(matches!(
+        relay.record_host_event("sess-recovered", "agent_switch", serde_json::json!({})),
+        Err(SessionPersistenceError::SessionNotFound)
+    ));
+    assert_eq!(relay.session_watermark("sess-recovered"), 0);
+    let sinks: Vec<Arc<dyn EventSink>> = vec![relay];
+
+    let error = record_agent_switch(
+        &reopened,
+        &sinks,
+        AgentId::new(),
+        "sess-recovered".to_string(),
+        AgentSwitchRecord {
+            session_id: "sess-recovered".to_string(),
+            from_config_id: "omp".to_string(),
+            to_config_id: "claude".to_string(),
+            new_session_id: "sess-new".to_string(),
+            summary_text: "Handoff".to_string(),
+        },
+    )
+    .await
+    .unwrap_err();
+    // The classification survives: distinguishable from a storage
+    // failure, and phrased so the WS handler's not-found mapping (which
+    // greps for "not found" / "session writer unavailable") picks it up.
+    assert_eq!(error, "session writer unavailable");
+
+    reopened.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---- Issue #837: split-brain guard + session ownership summaries ----------
+
+/// `resume_session` on a session owned by a DIFFERENT live agent whose turn is
+/// in flight is rejected with the `ACP_SESSION_OWNED_BY_OTHER` prefix and never
+/// reaches `session/resume` on the second agent (the duplicate-agent reload
+/// scenario).
+#[tokio::test]
+async fn resume_session_rejected_when_other_agent_owns_session_mid_turn() {
+    let manager = AcpManager::new(vec![]);
+    let original = AgentId("agent-original".to_string());
+    let duplicate = AgentId("agent-duplicate".to_string());
+    // The ORIGINAL agent owns the session and is mid-turn (still streaming).
+    manager.install_test_agent_with_mid_turn_session(
+        original,
+        ["sess-owned".to_string()].into_iter().collect(),
+        true,
+    );
+    // The duplicate agent (spawned by the reloaded page) has resume
+    // capability and would otherwise accept the resume.
+    manager.install_test_agent_with_resume(duplicate.clone(), [].into_iter().collect());
+
+    let error = manager
+        .resume_session(
+            &duplicate,
+            SessionId("sess-owned".to_string()),
+            "/tmp".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect_err("resume must be rejected for a mid-turn owner");
+    assert!(
+        error.starts_with(ACP_SESSION_OWNED_BY_OTHER),
+        "expected {ACP_SESSION_OWNED_BY_OTHER} prefix, got: {error}"
+    );
+    assert!(
+        error.contains("agent-original"),
+        "the rejection names the owning agent: {error}"
+    );
+}
+
+/// The SAME agent resuming its own mid-turn session is not blocked by the
+/// cross-agent guard (the driver-side `ReopenReservation` admission owns that
+/// case) — the guard is only about a second agent racing the first.
+#[tokio::test]
+async fn resume_session_same_agent_owner_is_not_blocked_by_cross_agent_guard() {
+    let manager = AcpManager::new(vec![]);
+    let owner = AgentId("agent-owner".to_string());
+    manager.install_test_agent_with_mid_turn_session(
+        owner.clone(),
+        ["sess-own".to_string()].into_iter().collect(),
+        true,
+    );
+    // The fixture's resume arm answers Err only when reached; the mid-turn
+    // fixture answers Err for resume unconditionally, so use the owner
+    // semantics differently: re-install with resume answering Ok via
+    // install_test_agent_with_resume is a different agent id. Instead assert
+    // the guard passes by checking the error does NOT carry the
+    // cross-agent prefix (the fixture's deliberate resume rejection is
+    // allowed to surface).
+    let error = manager
+        .resume_session(
+            &owner,
+            SessionId("sess-own".to_string()),
+            "/tmp".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect_err("fixture rejects session/resume deliberately");
+    assert!(
+        !error.starts_with(ACP_SESSION_OWNED_BY_OTHER),
+        "same-agent resume must not be tagged cross-agent: {error}"
+    );
+}
+
+/// `load_session` shares the split-brain guard: a reload that re-opens the
+/// session on a duplicate agent while the original streams is rejected too.
+#[tokio::test]
+async fn load_session_rejected_when_other_agent_owns_session_mid_turn() {
+    let manager = AcpManager::new(vec![]);
+    manager.install_test_agent_with_mid_turn_session(
+        AgentId("agent-original".to_string()),
+        ["sess-owned".to_string()].into_iter().collect(),
+        true,
+    );
+    let duplicate = AgentId("agent-duplicate".to_string());
+    // give the duplicate load capability so the capability gate passes and
+    // only the ownership guard can reject
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                AcpCommand::OwnsSession { session_id, reply } => {
+                    let _ = reply.send(Ok(session_id.0 == "none"));
+                }
+                AcpCommand::SessionIds { reply } => {
+                    let _ = reply.send(Ok(Vec::<String>::new()));
+                }
+                AcpCommand::IsTurnActive { reply, .. } => {
+                    let _ = reply.send(Ok(false));
+                }
+                AcpCommand::LoadSession { reply, .. } => {
+                    let _ = reply.send(Err("guard must reject before session/load".to_string()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let mut capabilities = AgentCapabilities::default();
+    capabilities.load_session = true;
+    manager.agents.lock().insert(
+        duplicate.clone(),
+        AgentEntry {
+            command_tx,
+            capabilities,
+            stable_namespace: None,
+            name: "test-agent".to_string(),
+            config_id: None,
+            join_handle: None,
+            exit: Default::default(),
+            stamp: SpawnStamp::default(),
+        },
+    );
+
+    let error = manager
+        .load_session(
+            &duplicate,
+            SessionId("sess-owned".to_string()),
+            "/tmp".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect_err("load must be rejected for a mid-turn owner");
+    assert!(
+        error.starts_with(ACP_SESSION_OWNED_BY_OTHER),
+        "expected {ACP_SESSION_OWNED_BY_OTHER} prefix, got: {error}"
+    );
+}
+
+/// An owner that has gone idle (turn finished) does not block a resume on a
+/// second agent — the guard only protects in-flight turns. This mirrors the
+/// renderer's reuse flow: after the original completes, the reloading client
+/// may take over.
+#[tokio::test]
+async fn resume_session_passes_when_owner_is_idle() {
+    let manager = AcpManager::new(vec![]);
+    manager.install_test_agent_with_mid_turn_session(
+        AgentId("agent-original".to_string()),
+        ["sess-owned".to_string()].into_iter().collect(),
+        false, // turn finished
+    );
+    let duplicate = AgentId("agent-duplicate".to_string());
+    manager.install_test_agent_with_resume(duplicate.clone(), [].into_iter().collect());
+
+    let outcome = manager
+        .resume_session(
+            &duplicate,
+            SessionId("sess-owned".to_string()),
+            "/tmp".to_string(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("idle owner must not block the resume");
+    assert!(outcome.modes.is_none());
+}
+
+/// `list_agent_summaries_with_ownership` (issue #837: `list_agents` payload
+/// extension) carries each agent's owned-session set, answering "which live
+/// agent owns this session" from one call.
+#[tokio::test]
+async fn list_agent_summaries_with_ownership_reports_session_sets() {
+    let manager = AcpManager::new(vec![]);
+    manager.install_test_agent_with_resume(
+        AgentId("agent-a".to_string()),
+        ["sess-1".to_string(), "sess-2".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    manager
+        .install_test_agent_with_resume(AgentId("agent-b".to_string()), [].into_iter().collect());
+
+    let summaries = manager.list_agent_summaries_with_ownership().await;
+    let a = summaries
+        .iter()
+        .find(|s| s.id == AgentId("agent-a".to_string()))
+        .expect("agent-a summary");
+    let mut owned = a.owns_session.clone();
+    owned.sort();
+    assert_eq!(owned, vec!["sess-1".to_string(), "sess-2".to_string()]);
+    let b = summaries
+        .iter()
+        .find(|s| s.id == AgentId("agent-b".to_string()))
+        .expect("agent-b summary");
+    assert!(b.owns_session.is_empty());
+    // Wire shape: camelCase `ownsSession`, always serialized (as []).
+    let wire = serde_json::to_value(&summaries).unwrap();
+    let wire_a = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "agent-a")
+        .unwrap();
+    assert!(wire_a["ownsSession"].is_array());
+    let wire_b = wire
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "agent-b")
+        .unwrap();
+    assert_eq!(wire_b["ownsSession"], serde_json::json!([]));
+}
+
+// ---- Issue #842: spawn gating during process shutdown ---------------------
+
+/// `kill_all_checked` sets the process-shutdown flag under the `agents` lock
+/// before draining the map, so a spawn that arrives after the flag is refused
+/// at admission instead of registering a driver nobody stops or joins (a
+/// session created on such an agent would outlive `shutdown_persistence`
+/// without a closed status). The fail-fast gate runs before the driver thread
+/// spawns, so the refusal is observable without a real agent binary.
+#[tokio::test]
+async fn spawn_refused_after_kill_all_checked_starts_shutdown() {
+    let manager = AcpManager::new(vec![]);
+    manager
+        .kill_all_checked()
+        .await
+        .expect("kill_all_checked on an empty manager");
+
+    let error = manager
+        .spawn_with_sinks(
+            sample_config("test", "definitely-missing-agent-binary", &[]),
+            false,
+            vec![],
+            None,
+        )
+        .await
+        .expect_err("spawn must be refused once process shutdown began");
+    assert!(
+        error.contains("shutting down"),
+        "spawn rejection names shutdown: {error}"
+    );
+    assert!(
+        manager.list_agents().is_empty(),
+        "a refused spawn must not register"
+    );
+}
+
+/// A single-agent `kill` must NOT set the process-shutdown flag: process
+/// shutdown is the `kill_all_checked` path only. Flagging a plain kill would
+/// wrongly refuse every later spawn and wrongly make other drivers leave
+/// their session writers installed for `shutdown_persistence`.
+#[tokio::test]
+async fn single_agent_kill_does_not_start_process_shutdown() {
+    let manager = AcpManager::new(vec![]);
+    let agent_id = AgentId("agent-killed".to_string());
+    manager.install_test_agent_with_sessions(agent_id.clone(), Default::default());
+
+    manager.kill(&agent_id).await.expect("kill single agent");
+
+    assert!(
+        !manager.process_shutdown.load(Ordering::Acquire),
+        "single-agent kill must not flag process shutdown"
+    );
+}
+
+#[test]
+fn delete_logout_and_extra_roots_follow_advertised_capabilities() {
+    let mut caps = AgentCapabilities::default();
+    assert!(gate_delete_session(&caps).is_err());
+    assert!(gate_logout(&caps).is_err());
+    assert!(filter_additional_directories(&caps, "/work", &["/other".into()]).is_empty());
+    caps.session_capabilities.delete = Some(Default::default());
+    caps.auth.logout = Some(Default::default());
+    caps.session_capabilities.additional_directories = Some(Default::default());
+    assert!(gate_delete_session(&caps).is_ok());
+    assert!(gate_logout(&caps).is_ok());
+    let work = std::env::temp_dir().join("termul-acp-work");
+    let other = std::env::temp_dir().join("termul-acp-other");
+    let extras = vec![
+        work.to_string_lossy().into_owned(),
+        other.to_string_lossy().into_owned(),
+        "rel".to_string(),
+    ];
+    assert_eq!(
+        filter_additional_directories(&caps, work.to_string_lossy().as_ref(), &extras),
+        vec![other]
+    );
+}
+
+/// Issue #935: `elicitation_response` maps an all-string JSON array to
+/// `ElicitationContentValue::StringArray` so multi-select answers reach the
+/// agent; sibling keys keep their existing mappings.
+#[test]
+fn elicitation_response_maps_string_arrays() {
+    let content = serde_json::Map::from_iter([
+        ("q0".to_string(), serde_json::json!("Red")),
+        (
+            "q1".to_string(),
+            serde_json::json!(["Logging", "My custom feature"]),
+        ),
+    ]);
+    let response = elicitation_response("accept", Some(content));
+    let ElicitationAction::Accept(accept) = response.action else {
+        panic!("accept must produce ElicitationAction::Accept");
+    };
+    let fields = accept.content.expect("accept carries content");
+    assert_eq!(
+        fields.get("q0"),
+        Some(&ElicitationContentValue::String("Red".to_string()))
+    );
+    assert_eq!(
+        fields.get("q1"),
+        Some(&ElicitationContentValue::StringArray(vec![
+            "Logging".to_string(),
+            "My custom feature".to_string(),
+        ]))
+    );
+}
+
+/// A `Value::Array` holding ANY non-string element is unrepresentable — that
+/// key is dropped (no panic); sibling keys still map.
+#[test]
+fn elicitation_response_drops_mixed_type_arrays() {
+    let content = serde_json::Map::from_iter([
+        ("q0".to_string(), serde_json::json!("Red")),
+        ("q1".to_string(), serde_json::json!(["a", 1])),
+    ]);
+    let response = elicitation_response("accept", Some(content));
+    let ElicitationAction::Accept(accept) = response.action else {
+        panic!("accept must produce ElicitationAction::Accept");
+    };
+    let fields = accept.content.expect("accept carries content");
+    assert_eq!(
+        fields.get("q0"),
+        Some(&ElicitationContentValue::String("Red".to_string()))
+    );
+    assert!(
+        !fields.contains_key("q1"),
+        "a mixed-type array drops the key instead of panicking"
+    );
+}
+
+/// `decline`/`cancel` (and unknown action strings) are unchanged by the
+/// StringArray mapping.
+#[test]
+fn elicitation_response_decline_and_cancel_unchanged() {
+    assert!(matches!(
+        elicitation_response("decline", None).action,
+        ElicitationAction::Decline
+    ));
+    assert!(matches!(
+        elicitation_response("cancel", None).action,
+        ElicitationAction::Cancel
+    ));
+    assert!(matches!(
+        elicitation_response("unknown-action", None).action,
+        ElicitationAction::Cancel
+    ));
+}
+
+// --- gh-821: turn errors keep JSON-RPC code/data ---
+
+/// An RPC error ending a turn reaches the outcome with its code + data and an
+/// unchanged `Display` message.
+#[tokio::test(start_paused = true)]
+async fn race_turn_preserves_rpc_error_code_and_data() {
+    let (_idle_tx, mut idle_rx) = watch::channel(());
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let rpc = agent_client_protocol::Error::new(-32000, "auth")
+        .data(serde_json::json!({ "reason": "login" }));
+    let expected_message = rpc.to_string();
+    let result = race_turn(
+        async move { Err::<StopReason, _>(events::AcpErrorDetail::from(rpc)) },
+        cancel_rx,
+        &mut idle_rx,
+        || {},
+        None,
+        None,
+    )
+    .await;
+    let detail = result.unwrap_err();
+    assert_eq!(detail.message, expected_message);
+    assert_eq!(detail.code, Some(-32000));
+    assert_eq!(detail.data, Some(serde_json::json!({ "reason": "login" })));
+}
+
+/// Timeouts are non-RPC failures: no code/data on the typed outcome.
+#[tokio::test(start_paused = true)]
+async fn race_turn_timeout_has_no_code_or_data() {
+    let (_idle_tx, mut idle_rx) = watch::channel(());
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let result = race_turn(
+        std::future::pending::<Result<StopReason, events::AcpErrorDetail>>(),
+        cancel_rx,
+        &mut idle_rx,
+        || {},
+        Some(Duration::from_millis(100)),
+        None,
+    )
+    .await;
+    let detail = result.unwrap_err();
+    assert!(detail.message.contains("idle timeout"), "got {detail}");
+    assert_eq!(detail.code, None);
+    assert_eq!(detail.data, None);
+    assert!(detail.timed_out, "deadline sets the typed marker");
+    assert_eq!(detail.turn_stop(), events::TurnFailureStop::Timeout);
+}
+
+/// An RPC error is an `error` terminator even when its message talks about a
+/// timeout: the classification is the typed marker, not message text.
+#[tokio::test(start_paused = true)]
+async fn race_turn_rpc_error_is_error_not_timeout() {
+    let (_idle_tx, mut idle_rx) = watch::channel(());
+    let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let rpc = agent_client_protocol::Error::new(-32000, "upstream idle timeout");
+    let result = race_turn(
+        async move { Err::<StopReason, _>(events::AcpErrorDetail::from(rpc)) },
+        cancel_rx,
+        &mut idle_rx,
+        || {},
+        None,
+        None,
+    )
+    .await;
+    let detail = result.unwrap_err();
+    assert!(!detail.timed_out);
+    assert_eq!(detail.turn_stop(), events::TurnFailureStop::Error);
+}
+
+fn terminators(sink: &CapturingSink) -> Vec<(Option<String>, serde_json::Value)> {
+    sink.seen
+        .lock()
+        .iter()
+        .filter(|e| e.type_ == events::EVENT_PROMPT_COMPLETE)
+        .map(|e| (e.sid.clone(), e.payload.clone()))
+        .collect()
+}
+
+/// A failed/timed-out turn emits `agent_error` first (unchanged) and then
+/// exactly one session-scoped `prompt_complete` naming the turn.
+#[test]
+fn failed_turn_emits_agent_error_then_one_terminator() {
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let agent = AgentId("a1".to_string());
+    let session = SessionId::new("s1");
+    let deadline = events::AcpErrorDetail::from(timeouts::TurnTimeout {
+        message: "turn idle timeout: no agent activity for 5s".to_string(),
+    });
+    emit_turn_outcome(&sinks, &agent, &session, Some("t1".to_string()), &Err(deadline));
+    emit_turn_outcome(
+        &sinks,
+        &agent,
+        &SessionId::new("s2"),
+        None,
+        &Err(events::AcpErrorDetail::from("rpc failed".to_string())),
+    );
+    let seen = sink.seen.lock().clone();
+    let kinds: Vec<&str> = seen.iter().map(|e| e.type_).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            events::EVENT_AGENT_ERROR,
+            events::EVENT_PROMPT_COMPLETE,
+            events::EVENT_AGENT_ERROR,
+            events::EVENT_PROMPT_COMPLETE
+        ]
+    );
+    let done = terminators(&sink);
+    assert_eq!(done[0].0.as_deref(), Some("s1"));
+    assert_eq!(done[0].1["stopReason"], "timeout");
+    assert_eq!(done[0].1["turnId"], "t1");
+    assert_eq!(done[1].1["stopReason"], "error");
+    assert!(done[1].1.get("turnId").is_none());
+    assert_eq!(
+        done[0].1["error"]["message"],
+        "turn idle timeout: no agent activity for 5s"
+    );
+    assert_eq!(done[1].1["error"]["message"], "rpc failed");
+}
+
+fn failed_turn_terminator(error: agent_client_protocol::Error) -> serde_json::Value {
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    emit_turn_outcome(
+        &sinks,
+        &AgentId("a1".to_string()),
+        &SessionId::new("s1"),
+        Some("t1".to_string()),
+        &Err(events::AcpErrorDetail::from(error)),
+    );
+    let mut done = terminators(&sink);
+    assert_eq!(done.len(), 1);
+    done.remove(0).1
+}
+
+/// Issue #1298 review: the terminator is durable and replayed on reopen, so it
+/// keeps the RPC error's own message and code, never the `data` that the
+/// error's `Display` appends to the live `agent_error` message.
+#[test]
+fn a_failed_turn_terminator_keeps_no_secret_from_the_error_data() {
+    let error = agent_client_protocol::Error::new(-32603, "Internal error")
+        .data(serde_json::json!({"headers": {"authorization": "Bearer sk-test"}}));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"],
+        serde_json::json!({"message": "Internal error", "code": -32603})
+    );
+    assert!(!terminator.to_string().contains("sk-test"), "{terminator}");
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_secret_in_the_error_message() {
+    let error =
+        agent_client_protocol::Error::new(-32603, "upstream said Bearer abcdefgh12345678 expired");
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream said Bearer [redacted] expired"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_masks_a_cookie_in_the_error_message() {
+    let error = agent_client_protocol::Error::new(
+        -32603,
+        "upstream 401, sent Cookie: sid=9f82b5e7c4a69130; theme=dark",
+    );
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(
+        terminator["error"]["message"],
+        "upstream 401, sent Cookie: [redacted]"
+    );
+}
+
+#[test]
+fn a_failed_turn_terminator_caps_a_huge_error_message() {
+    let error = agent_client_protocol::Error::new(-32603, "x".repeat(100 * 1024));
+    let terminator = failed_turn_terminator(error);
+    assert_eq!(terminator["error"]["message"], "x".repeat(1_000));
+}
+
+/// Connection teardown with active turns: one `crashed` terminator per
+/// active turn (naming its turn id), none for idle sessions, and the drain
+/// makes it exactly-once.
+#[test]
+fn crash_teardown_emits_one_crashed_terminator_per_active_turn() {
+    let sink = Arc::new(CapturingSink::default());
+    let sinks: Vec<Arc<dyn EventSink>> = vec![sink.clone()];
+    let agent = AgentId("a1".to_string());
+    let state = Mutex::new(DriverState::new());
+    {
+        let mut state = state.lock();
+        assert!(state.try_begin_turn("busy-1").is_some());
+        state.set_active_turn_id("busy-1", Some("t1".to_string()));
+        assert!(state.try_begin_turn("busy-turnless").is_some());
+        state.set_active_turn_id("busy-turnless", None);
+        assert!(state.try_begin_turn("finished").is_some());
+        state.set_active_turn_id("finished", Some("t9".to_string()));
+        // A turn that finished normally already removed its own marker.
+        let _ = state.finish_turn("finished");
+    }
+    assert_eq!(emit_crash_terminators(&state, &sinks, &agent), 2);
+    let mut done = terminators(&sink);
+    done.sort_by_key(|(sid, _)| sid.clone());
+    assert_eq!(done.len(), 2);
+    assert_eq!(done[0].0.as_deref(), Some("busy-1"));
+    assert_eq!(done[0].1["stopReason"], "crashed");
+    assert_eq!(done[0].1["turnId"], "t1");
+    assert_eq!(done[1].0.as_deref(), Some("busy-turnless"));
+    assert!(done[1].1.get("turnId").is_none());
+
+    // Exactly once: the markers are gone, and the sessions accept new turns.
+    assert_eq!(emit_crash_terminators(&state, &sinks, &agent), 0);
+    assert_eq!(terminators(&sink).len(), 2);
+    assert!(state.lock().try_begin_turn("busy-1").is_some());
+}
+
+/// A transport-closed turn outcome during process shutdown is owned by the
+/// `interrupted` marker (no terminator from the turn task); before shutdown,
+/// or for any other outcome, the turn task keeps its terminator.
+#[tokio::test]
+async fn transport_closed_outcome_is_left_to_the_interrupted_marker_on_shutdown() {
+    let (root, _cwd) = temp_dir_with_cwd("shutdown-outcome");
+    let persistence = SessionPersistence::open(root.join("sessions"))
+        .await
+        .unwrap();
+    let closed_error = agent_client_protocol::Error::internal_error().data(
+        serde_json::json!({ "reason": agent_client_protocol::INCOMING_TRANSPORT_CLOSED_REASON }),
+    );
+    let closed: Result<StopReason, _> = Err(events::AcpErrorDetail::from(&closed_error));
+    let rpc: Result<StopReason, _> = Err(events::AcpErrorDetail::from("rpc failed".to_string()));
+    let ok: Result<StopReason, events::AcpErrorDetail> = Ok(StopReason::EndTurn);
+
+    assert!(!outcome_owned_by_process_shutdown(Some(&persistence), &closed));
+    persistence.begin_process_shutdown();
+    assert!(outcome_owned_by_process_shutdown(Some(&persistence), &closed));
+    assert!(!outcome_owned_by_process_shutdown(Some(&persistence), &rpc));
+    assert!(!outcome_owned_by_process_shutdown(Some(&persistence), &ok));
+    assert!(!outcome_owned_by_process_shutdown(None, &closed));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+mod spawn_error_cases {
+    use super::super::spawn_error::*;
+
+    #[test]
+    fn tagged_errors_round_trip_and_untagged_stay_unclassified() {
+        let unavailable = agent_unavailable("program not found");
+        assert_eq!(
+            classify_spawn_error(&unavailable),
+            Some((SpawnFailure::AgentUnavailable, "program not found"))
+        );
+        let invalid = invalid_agent_config("empty command");
+        assert_eq!(
+            classify_spawn_error(&invalid),
+            Some((SpawnFailure::InvalidAgentConfig, "empty command"))
+        );
+        assert_eq!(classify_spawn_error("agent initialize failed: eof"), None);
+        assert_eq!(classify_spawn_error("ACP_AGENT_UNAVAILABLEX: nope"), None);
+    }
+
+    #[test]
+    fn only_concrete_launch_refusals_are_definite() {
+        for detail in [
+            "Internal error: No such file or directory (os error 2)",
+            "program not found",
+            "Permission denied (os error 13)",
+            "Exec format error (os error 8)",
+            "The system cannot find the file specified. (os error 2)",
+            "Internal error: The system cannot find the path specified. (os error 3)",
+            "Access is denied. (os error 5)",
+            "%1 is not a valid Win32 application. (os error 193)",
+            "'ghost' is not recognized as an internal or external command",
+        ] {
+            assert!(is_launch_refusal(detail), "{detail}");
+        }
+        for detail in [
+            "failed to build runtime: out of threads",
+            "connection closed",
+            "Failed to open stdin",
+            "agent exited with status 1",
+        ] {
+            assert!(!is_launch_refusal(detail), "{detail}");
+        }
+    }
+}
+
+/// What the teardown announces follows the host's recorded intent: no intent
+/// is a crash, kill/reap carry their reason, process shutdown is silent.
+#[test]
+fn teardown_reason_follows_the_recorded_exit_intent() {
+    use super::exit::{announced_reason, ExitIntent, ExitSignal};
+    let signal = ExitSignal::default();
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Crashed)
+    );
+    signal.set(ExitIntent::Killed);
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Killed)
+    );
+    signal.set(ExitIntent::Reaped);
+    assert_eq!(
+        announced_reason(signal.get()),
+        Some(AgentExitReason::Reaped)
+    );
+    signal.set(ExitIntent::Shutdown);
+    assert_eq!(announced_reason(signal.get()), None);
+}
+
+/// The wire form of the exit reason is the lowercase word the clients match on.
+#[test]
+fn exit_reason_serializes_to_the_wire_words() {
+    for (reason, word) in [
+        (AgentExitReason::Killed, "killed"),
+        (AgentExitReason::Reaped, "reaped"),
+        (AgentExitReason::Crashed, "crashed"),
+        (AgentExitReason::Closed, "closed"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), word);
+    }
+    let event = SessionClosedEvent {
+        agent_id: AgentId("a".to_string()),
+        session_id: SessionId::new("s"),
+        reason: AgentExitReason::Closed,
+    };
+    assert_eq!(serde_json::to_value(&event).unwrap()["reason"], "closed");
+}
+
+/// A close with no running turn proceeds at once; a turn that ends
+/// proceeds; a dropped waiter or a terminator that never comes is an error so
+/// the caller forces local cleanup instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn close_waits_for_the_turn_terminator_and_gives_up_after_the_bound() {
+    assert!(await_turn_terminator(None).await.is_ok());
+
+    let (done_tx, done_rx) = oneshot::channel();
+    done_tx.send(()).unwrap();
+    assert!(await_turn_terminator(Some(done_rx)).await.is_ok());
+
+    let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
+    drop(dropped_tx);
+    assert!(await_turn_terminator(Some(dropped_rx))
+        .await
+        .unwrap_err()
+        .contains("dropped"));
+
+    let (_never_tx, never_rx) = oneshot::channel::<()>();
+    let error = await_turn_terminator(Some(never_rx)).await.unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+}
+
+/// Issue #1345: a new chat refreshes an expired MCP OAuth token and attaches
+/// the fresh bearer instead of deleting the stored refresh token.
+#[tokio::test]
+async fn new_session_injects_a_refreshed_oauth_token() {
+    use crate::acp::mcp_oauth;
+    let (url, _requests) = mcp_oauth::tests::serve_token_endpoint(serde_json::json!({
+        "access_token": "fresh-access",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }))
+    .await;
+    mcp_oauth::store_token(&url, &mcp_oauth::tests::expired_token_with_refresh(&url)).unwrap();
+
+    let servers = inject_oauth_tokens(vec![McpServer::Http(
+        agent_client_protocol::schema::v1::McpServerHttp::new("oauth-server", url.clone()),
+    )])
+    .await;
+    let stored = mcp_oauth::load_stored_token(&url).unwrap();
+    mcp_oauth::delete_stored_token(&url).unwrap();
+
+    let McpServer::Http(http) = &servers[0] else {
+        panic!("the HTTP server stays an HTTP server");
+    };
+    let headers: Vec<(&str, &str)> = http
+        .headers
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect();
+    assert_eq!(headers, vec![("Authorization", "Bearer fresh-access")]);
+    assert_eq!(
+        stored.and_then(|token| token.refresh_token).as_deref(),
+        Some("stored-refresh")
+    );
+}

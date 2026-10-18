@@ -1,12 +1,16 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Keyboard } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { Keyboard } from '@/components/icons'
 import { ShortcutRecorder } from '@/components/ShortcutRecorder'
 import { useResetShortcut, useUpdateShortcut } from '@/hooks/use-keyboard-shortcuts'
+import { isTauriContext } from '@/lib/tauri-runtime'
 import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
 import type { KeyboardShortcut } from '@/types/settings'
 
+// Quick shortcuts surfaced in the titlebar popover. `newBrowserTab` is
+// desktop-only (Tauri browser-tab panes — issue #843), so it is filtered out
+// of the web list rather than shown as a dead entry.
 const QUICK_SHORTCUT_IDS = [
   'commandPalette',
   'commandHistory',
@@ -14,6 +18,7 @@ const QUICK_SHORTCUT_IDS = [
   'newBrowserTab',
   'toggleFileExplorer',
   'sidebarToggle',
+  'settings',
   'zoomIn',
   'zoomOut',
   'zoomReset'
@@ -23,12 +28,18 @@ interface TitleBarShortcutsPopoverProps {
   buttonClassName: string
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /**
+   * After the popover has closed, return focus to its button when focus fell
+   * to the page body. Off by default (the classic rail keeps today's behavior).
+   */
+  restoreFocusOnClose?: boolean
 }
 
 export function TitleBarShortcutsPopover({
   buttonClassName,
   open,
-  onOpenChange
+  onOpenChange,
+  restoreFocusOnClose = false
 }: TitleBarShortcutsPopoverProps): React.JSX.Element {
   const [openFallback, setOpenFallback] = useState(false)
   const isOpen = open ?? openFallback
@@ -36,10 +47,13 @@ export function TitleBarShortcutsPopover({
   const updateShortcut = useUpdateShortcut()
   const resetShortcut = useResetShortcut()
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
-  const quickShortcuts = QUICK_SHORTCUT_IDS.map((id) => shortcuts[id]).filter(
-    (shortcut): shortcut is KeyboardShortcut => Boolean(shortcut)
+  const quickShortcuts = QUICK_SHORTCUT_IDS.filter(
+    (id) => isTauriContext() || id !== 'newBrowserTab'
   )
+    .map((id) => shortcuts[id])
+    .filter((shortcut): shortcut is KeyboardShortcut => Boolean(shortcut))
 
   const setOpen = useCallback(
     (nextOpen: boolean) => {
@@ -52,6 +66,12 @@ export function TitleBarShortcutsPopover({
     },
     [onOpenChange]
   )
+
+  const handleExitComplete = useCallback(() => {
+    if (!restoreFocusOnClose) return
+    const active = document.activeElement
+    if (!active || active === document.body) triggerRef.current?.focus()
+  }, [restoreFocusOnClose])
 
   const handleUpdate = (id: string, customKey: string): void => {
     void updateShortcut(id, customKey).catch((error: unknown) => {
@@ -100,6 +120,7 @@ export function TitleBarShortcutsPopover({
   return (
     <>
       <button
+        ref={triggerRef}
         type="button"
         className={buttonClassName}
         title="Keyboard shortcuts"
@@ -110,16 +131,18 @@ export function TitleBarShortcutsPopover({
           setOpen(!isOpen)
         }}
       >
-        <Keyboard size={16} className={isOpen ? 'text-foreground' : 'text-muted-foreground'} />
+        {/* The keyboard body sits low in its 24px box (a cable runs to the
+            top): 1px up lines it up with the Palette glyph beside it. */}
+        <Keyboard size={16} className="-translate-y-px" />
       </button>
 
-      <AnimatePresence>
+      <AnimatePresence onExitComplete={handleExitComplete}>
         {isOpen && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[110] flex flex-col items-center pt-[7vh] bg-black/40 backdrop-blur-sm"
+            className="fixed inset-0 z-[110] flex flex-col items-center pt-[7vh] bg-overlay/40 backdrop-blur-sm"
             onClick={() => setOpen(false)}
           >
             <motion.div
@@ -150,7 +173,7 @@ export function TitleBarShortcutsPopover({
                   ref={closeButtonRef}
                   type="button"
                   onClick={() => setOpen(false)}
-                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  className="rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   Esc
                 </button>

@@ -2,6 +2,7 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import type { Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
+import { MONO_STACK } from '@/lib/font-stacks'
 import type { ResolvedSyntaxColors } from '@/lib/themes/types'
 
 const defaultDarkSyntax: ResolvedSyntaxColors = {
@@ -59,87 +60,104 @@ export function createTermulTheme(
   syntaxColors?: ResolvedSyntaxColors | null
 ): Extension[] {
   const colors = syntaxColors ?? defaultDarkSyntax
-  const highlightStyle = buildHighlightStyle(isDark ? colors : colors)
+  const highlightStyle = buildHighlightStyle(colors)
 
   return [
     EditorView.theme(
       {
         '&': {
-          backgroundColor: 'hsl(var(--background))',
-          color: 'hsl(var(--foreground))',
+          backgroundColor: 'oklch(var(--background))',
+          color: 'oklch(var(--foreground))',
           height: '100%'
         },
         '.cm-content': {
-          caretColor: 'hsl(var(--primary))',
-          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          fontSize: '13px',
+          caretColor: 'oklch(var(--primary))',
+          /* Own feature set so Inter's cv/ss tags on body do not restyle this face. */
+          fontFamily: MONO_STACK,
+          fontFeatureSettings: 'normal',
+          fontVariantLigatures: 'common-ligatures',
+          fontVariantNumeric: 'slashed-zero',
+          fontSynthesisStyle: 'none',
+          fontSize: '0.8125rem',
           lineHeight: '1.6'
         },
         '.cm-cursor, .cm-dropCursor': {
-          borderLeftColor: 'hsl(var(--primary))'
+          borderLeftColor: 'oklch(var(--primary))'
         },
+        /* Selection and highlights are neutral foreground washes, not the accent hue:
+           see docs/design/colors.md. Search uses the warning hue. */
         '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-          backgroundColor: 'hsl(var(--accent))'
+          backgroundColor: 'oklch(var(--foreground) / 0.14)'
         },
         '.cm-panels': {
-          backgroundColor: 'hsl(var(--card))',
-          color: 'hsl(var(--card-foreground))'
+          backgroundColor: 'oklch(var(--card))',
+          color: 'oklch(var(--card-foreground))'
         },
         '.cm-panels.cm-panels-top': {
-          borderBottom: '1px solid hsl(var(--border))'
+          borderBottom: '1px solid oklch(var(--border))'
         },
         '.cm-panels.cm-panels-bottom': {
-          borderTop: '1px solid hsl(var(--border))'
+          borderTop: '1px solid oklch(var(--border))'
         },
         '.cm-searchMatch': {
-          backgroundColor: 'hsl(var(--accent) / 0.3)',
-          outline: '1px solid hsl(var(--accent))'
+          backgroundColor: 'oklch(var(--warning) / 0.15)'
         },
         '.cm-searchMatch.cm-searchMatch-selected': {
-          backgroundColor: 'hsl(var(--primary) / 0.3)'
+          backgroundColor: 'oklch(var(--warning) / 0.4)',
+          outline: '1px solid oklch(var(--warning))'
         },
         '.cm-activeLine': {
-          backgroundColor: 'hsl(var(--accent) / 0.15)'
+          backgroundColor: 'oklch(var(--foreground) / 0.03)'
         },
         '.cm-selectionMatch': {
-          backgroundColor: 'hsl(var(--accent) / 0.2)'
+          backgroundColor: 'oklch(var(--foreground) / 0.08)'
         },
         '.cm-matchingBracket, .cm-nonmatchingBracket': {
-          backgroundColor: 'hsl(var(--accent) / 0.3)',
-          outline: '1px solid hsl(var(--accent) / 0.5)'
+          backgroundColor: 'transparent',
+          outline: '1px solid oklch(var(--foreground) / 0.4)'
         },
         '.cm-gutters': {
-          backgroundColor: 'hsl(var(--card))',
-          color: 'hsl(var(--muted-foreground))',
-          borderRight: '1px solid hsl(var(--border))'
+          backgroundColor: 'oklch(var(--card))',
+          color: 'oklch(var(--muted-foreground))',
+          borderRight: '1px solid oklch(var(--border))'
         },
         '.cm-activeLineGutter': {
-          backgroundColor: 'hsl(var(--accent) / 0.15)',
-          color: 'hsl(var(--foreground))'
+          backgroundColor: 'transparent',
+          color: 'oklch(var(--foreground))'
         },
         '.cm-foldPlaceholder': {
-          backgroundColor: 'hsl(var(--secondary))',
-          color: 'hsl(var(--muted-foreground))',
+          backgroundColor: 'oklch(var(--secondary))',
+          color: 'oklch(var(--muted-foreground))',
           border: 'none'
         },
         '.cm-tooltip': {
-          backgroundColor: 'hsl(var(--popover))',
-          color: 'hsl(var(--popover-foreground))',
-          border: '1px solid hsl(var(--border))'
+          backgroundColor: 'oklch(var(--popover))',
+          color: 'oklch(var(--popover-foreground))',
+          border: '1px solid oklch(var(--border))'
         },
         '.cm-tooltip .cm-tooltip-arrow:before': {
-          borderTopColor: 'hsl(var(--border))',
-          borderBottomColor: 'hsl(var(--border))'
+          borderTopColor: 'oklch(var(--border))',
+          borderBottomColor: 'oklch(var(--border))'
         },
         '.cm-tooltip .cm-tooltip-arrow:after': {
-          borderTopColor: 'hsl(var(--popover))',
-          borderBottomColor: 'hsl(var(--popover))'
+          borderTopColor: 'oklch(var(--popover))',
+          borderBottomColor: 'oklch(var(--popover))'
         },
-        '.cm-tooltip-autocomplete': {
+        '.cm-tooltip.cm-tooltip-autocomplete': {
+          borderRadius: '10px',
+          padding: '4px',
+          '& > ul > li': {
+            padding: '4px 8px',
+            borderRadius: '6px'
+          },
           '& > ul > li[aria-selected]': {
-            backgroundColor: 'hsl(var(--accent))',
-            color: 'hsl(var(--accent-foreground))'
+            backgroundColor: 'oklch(var(--foreground) / 0.06)',
+            color: 'oklch(var(--foreground))'
           }
+        },
+        '.cm-completionMatchedText': {
+          fontWeight: '700',
+          textDecoration: 'none'
         },
         '.cm-scroller': {
           overflow: 'auto'

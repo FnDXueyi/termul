@@ -1,4 +1,71 @@
 // IPC Result pattern from architecture.md
+import type { AcpCatalog } from './acp-catalog.types'
+
+// ============================================================================
+// Domain-command carriers (AD-5): `X-Command-Id` header of the ledgered HTTP
+// routes, the codes the host answers a ledgered command with, and the
+// precondition shapes of `fs write` / `git commit`. Mirrors
+// `src-tauri/src/web/command_ledger/{http,terminal}.rs` and
+// `web/fs_api/precondition.rs`.
+// ============================================================================
+
+/** Request header carrying the `commandId` of a ledgered HTTP route. */
+export const COMMAND_ID_HEADER = 'X-Command-Id'
+
+/**
+ * `IpcBody.code` / `IpcResult.code` (and `/terminal/ws` reply codes) of a
+ * ledger verdict. SCREAMING_SNAKE on the HTTP, Tauri-IpcResult and terminal
+ * carriers (the `/ws` carrier uses snake_case `WS_ERROR_CODES`).
+ */
+export const COMMAND_RESULT_CODES = {
+  /** The `commandId` is missing (ledgered route) or not 1-128 of `[A-Za-z0-9_-]`. */
+  INVALID_COMMAND_ID: 'INVALID_COMMAND_ID',
+  /** The `commandId` was already used for a different request. */
+  COMMAND_CONFLICT: 'COMMAND_CONFLICT',
+  /** A resend whose outcome the host no longer knows; it was NOT run again. */
+  OUTCOME_UNKNOWN: 'OUTCOME_UNKNOWN',
+  /** A stale `expected` hash (fs write) or `expectedHead` (git commit); nothing changed. */
+  PRECONDITION_FAILED: 'PRECONDITION_FAILED',
+  /**
+   * Client-local: the host answered `{ success: true, receipt: "in_progress" }`
+   * (the first run of this id is still going). Neither accepted nor rejected.
+   */
+  COMMAND_IN_PROGRESS: 'COMMAND_IN_PROGRESS'
+} as const
+
+export type CommandResultCode = (typeof COMMAND_RESULT_CODES)[keyof typeof COMMAND_RESULT_CODES]
+
+/** `IpcBody.receipt` of a resend while the first run is still going. */
+export const IN_PROGRESS_RECEIPT = 'in_progress'
+
+/**
+ * Local engine code (lower snake_case, like the `/ws` codes) a stale
+ * precondition maps to: the host refused, nothing changed. A definite
+ * rejection — the caller re-reads and decides; a retry is a new intent.
+ */
+export const PRECONDITION_FAILED_CODE = 'precondition_failed'
+
+/**
+ * `expected` precondition of `POST /fs/write`: the sha256 hex (lower case) of
+ * the bytes being replaced (`contentHash` of `GET /fs/read`), or `"absent"`
+ * when the file must not exist yet.
+ */
+export type FsWriteExpected = 'absent' | { sha256: string }
+
+/**
+ * A file read. The web host adds `contentHash` (lower-case sha256 hex of the
+ * file's bytes): send it back as the `expected` precondition of the next write.
+ * Absent on desktop reads (`plugin-fs`), which carry no precondition.
+ */
+export type HashedFileContent = FileContent & { contentHash?: string }
+
+/**
+ * `code` values a ledgered command can fail with beyond its own domain codes
+ * are listed below (`COMMAND_RESULT_CODES`). A host reply
+ * `{ success: true, receipt: "in_progress" }` (first run of a resent id still
+ * going) is surfaced as the failure `COMMAND_IN_PROGRESS`: neither accepted nor
+ * rejected, so the caller keeps the command pending.
+ */
 export type IpcResult<T> =
   | { success: true; data: T }
   | { success: false; error: string; code: string }
@@ -21,6 +88,13 @@ export interface TerminalSpawnOptions {
   args?: string[]
   /** Descriptive marker for the session type. Defaults to 'shell'. */
   kind?: 'shell' | 'agent'
+  /**
+   * Project-scoping id. The web/remote terminal server (terminal_ws.rs)
+   * requires a non-empty projectId on every spawn (project-scoped security);
+   * desktop treats it as optional (SpawnOptions.project_id is Option<String>
+   * with #[serde(default)]). Renderers populate it at project-scoped call sites.
+   */
+  projectId?: string
   // Index signature to satisfy Tauri's InvokeArgs constraint
   [key: string]: unknown
 }
@@ -32,12 +106,99 @@ export interface TerminalInfo {
   cwd: string
 }
 
+/**
+ * CAP-3 spawn response: terminal info PLUS the issued claim credential.
+ * Same flattened camelCase shape on both transports (desktop `terminal_spawn`
+ * IpcResult data and web `spawn` reply data). Spawn is the ONLY issuance path.
+ * Mirrors the Rust `SpawnedTerminal` serde shape exactly (id/shell/cwd/pid/
+ * cols/rows/claim — pinned by the Rust serde shape tests).
+ */
+export interface SpawnedTerminal extends TerminalInfo {
+  pid: number
+  cols: number
+  rows: number
+  /** Unguessable host-issued lease credential (64 hex chars). Present only in
+   * the spawn/rotate responses — never echoed by any other operation. */
+  claim: string
+}
+/** Latest terminal lifecycle/metadata state. Serialized on the attach/replay
+ * frames so a client that attaches after the single change-only event emit
+ * can seed its store (closing the "detached for a branch that isn't" gap).
+ * Runtime-neutral contract shared by both transports. */
+export interface TerminalStateSnapshot {
+  cwd: string | null
+  gitBranch: string | null
+  gitStatus: GitStatus | null
+  exitCode: number | null
+  exited: boolean
+}
+
+/**
+ * CAP-3 attach response — byte-identical camelCase shape on both transports
+ * (desktop `terminal_attach` IpcResult data; web `attach` reply data).
+ * Carries the replay cursor (`latestSeq`) + `gap` flag + the terminal's
+ * last-known state `snapshot`. NEVER carries a claim: attach consumes the
+ * credential, it never issues one.
+ */
+export interface TerminalAttachResult {
+  id: string
+  shell: string
+  cwd: string
+  pid: number
+  cols: number
+  rows: number
+  latestSeq: number
+  gap: boolean
+  /**
+   * The cursor did not belong to this terminal's log (another epoch, or ahead
+   * of the head): the replay starts from the retained log's first chunk and the
+   * client must discard what it rendered.
+   */
+  reset: boolean
+  /** Epoch of this spawn's output log; the next cursor is `(logEpoch, latestSeq)`. */
+  logEpoch: string
+  snapshot: TerminalStateSnapshot
+}
+
+/** CAP-3 rotate response: the fresh credential. */
+export interface RotatedClaim {
+  claim: string
+}
+
 // IPC channel definitions
 export type TerminalIpcChannels = {
-  'terminal:spawn': (options: TerminalSpawnOptions) => IpcResult<TerminalInfo>
+  'terminal:spawn': (options: TerminalSpawnOptions) => IpcResult<SpawnedTerminal>
+  'terminal:attach': (
+    terminalId: string,
+    claim: string,
+    lastSeq: number,
+    logEpoch?: string
+  ) => IpcResult<TerminalAttachResult>
+  'terminal:rotate_claim': (terminalId: string, claim: string) => IpcResult<RotatedClaim>
+  'terminal:revoke_claim': (terminalId: string, claim: string) => IpcResult<void>
   'terminal:write': (terminalId: string, data: string) => IpcResult<void>
   'terminal:resize': (terminalId: string, cols: number, rows: number) => IpcResult<void>
   'terminal:kill': (terminalId: string) => IpcResult<void>
+}
+
+// CAP-6 / Story 8: ACP catalog IPC channels. Mirrors the two `/ws` requests
+// (`list_acp_catalog` / `set_catalog_opt_in`) and the two HTTP routes
+// (`GET /acp/catalog` / `POST /acp/catalog/opt-in`) — both carriers return
+// the SAME `IpcResult<...>` shape byte-for-byte. The catalog is
+// credential-free, path-free, read-only host introspection. The opt-in is a
+// single boolean that gates CDN registry augmentation.
+export type AcpCatalogIpcChannels = {
+  'acp:catalog:list': (refresh?: boolean) => IpcResult<AcpCatalog>
+  'acp:catalog:set_opt_in': (enabled: boolean) => IpcResult<void>
+}
+
+// CAP-6 / Story 9: ACP install IPC channel. Mirrors the `/ws` request
+// `install_acp_agent` and the HTTP route `POST /acp/install` — both carriers
+// return the SAME `IpcResult<InstallOutcome>` shape byte-for-byte. The request
+// is `{ agentId }` only; the host resolves everything from the trusted catalog.
+import type { InstallOutcome } from './acp-install.types'
+export type AcpInstallIpcChannels = {
+  'acp:install:install_agent': (request: { agentId: string }) => IpcResult<InstallOutcome>
 }
 
 // Event types for main -> renderer communication
@@ -45,6 +206,18 @@ export type TerminalIpcChannels = {
 // Previously received string via event emitter; migrated to binary Channel API in ADR-002.2
 export type TerminalDataCallback = (terminalId: string, data: Uint8Array) => void
 export type TerminalExitCallback = (terminalId: string, exitCode: number, signal?: number) => void
+/**
+ * #850: fired when a terminal's lease is dropped after a server rejection
+ * (the re-attach loop's generic UNAUTHORIZED — the server-restart
+ * signature: PTYs and claims die with the process). The terminal is
+ * unattachable from this client until a fresh shell is spawned; the UI
+ * shows a dead-session state with a Restart button instead of silently
+ * swallowing input. `reason` is a coarse, display-safe category.
+ */
+export type TerminalSessionLostCallback = (
+  terminalId: string,
+  reason: 'server-restarted' | 'claim-rejected'
+) => void
 export type TerminalCwdChangedCallback = (terminalId: string, cwd: string) => void
 export type TerminalGitBranchChangedCallback = (terminalId: string, branch: string | null) => void
 export type TerminalGitStatusChangedCallback = (
@@ -71,6 +244,12 @@ export interface GitStatusDetail {
   staged: boolean
 }
 
+/** Working-tree line stat (tracked vs HEAD plus untracked files). */
+export interface GitDiffStat {
+  added: number
+  removed: number
+}
+
 // A single commit row for the history/graph view.
 export interface GitCommit {
   /** Full 40-char commit hash. */
@@ -87,6 +266,70 @@ export interface GitCommit {
   date: string
   /** Commit subject (first line of the message). */
   subject: string
+}
+
+/** How a commit changed a file: added, modified, deleted, renamed, copied or type-changed. */
+export type GitCommitFileStatus = 'A' | 'M' | 'D' | 'R' | 'C' | 'T'
+
+/** One file changed by a commit (diff against the first parent). */
+export interface GitCommitFile {
+  /** Path after the commit (the new path of a rename). */
+  path: string
+  /** Path before the commit, for a rename or copy only. */
+  oldPath: string | null
+  status: GitCommitFileStatus
+  /** Added lines; `null` for a binary file. */
+  added: number | null
+  /** Removed lines; `null` for a binary file. */
+  removed: number | null
+}
+
+/** What the Git History detail pane shows beyond the log row. */
+export interface GitCommitDetail {
+  /** Full hash (40 hex characters, or 64 in a SHA-256 repository). */
+  hash: string
+  authorEmail: string
+  /** Full commit message: subject, blank line, body. */
+  message: string
+  /** Parent full hashes, first-parent first. */
+  parents: string[]
+  files: GitCommitFile[]
+  /** More files changed than the host returns; `files` holds the first ones. */
+  filesTruncated: boolean
+}
+
+/** One file's unified diff in a commit, for the read-only commit Diff tab. */
+export interface GitCommitFileDiff {
+  /** Unified diff text; empty when `tooLarge`. */
+  diff: string
+  /** The diff is larger than the host cap, so the host did not send it. */
+  tooLarge: boolean
+}
+
+/**
+ * Resolved project icon (spec-project-icon). Runtime-neutral contract shared
+ * by both transports: `project_icon_resolve` (Tauri `IpcResult` data) and
+ * `POST /project/icon` (web `IpcBody` data) return this shape byte-for-byte,
+ * pinned by the Rust serde camelCase shape test.
+ *
+ * `dataUri` is a `data:<mime>;base64,…` payload so the existing CSP
+ * (`img-src 'self' asset: data:`) needs no change — no remote URL ever reaches
+ * the renderer. `null` (rather than an error) means "render the monogram" —
+ * every resolver failure is best-effort.
+ */
+export interface ProjectIcon {
+  /** `data:` URI carrying the icon bytes — safe for `<img src>` under the CSP. */
+  dataUri: string
+  /** Sniffed MIME type (`image/png`, `image/svg+xml`, `image/x-icon`, …). */
+  mime: string
+  /** Where the icon came from: a well-known file in the repo, or the forge. */
+  source: 'file' | 'remote'
+  /**
+   * Renderer-side epoch ms when the icon was resolved. Stamped by
+   * `use-project-icon` (never sent by the backend) so the hook can skip
+   * re-resolving icons fresher than 24 h; persisted with the project record.
+   */
+  fetchedAt?: number
 }
 
 // Context for the commit footer (branch, upstream, ahead/behind, last commit).
@@ -110,11 +353,28 @@ export interface GitStashInfo {
 export interface GitApi {
   getStatus: (cwd: string) => Promise<GitStatusDetail[]>
   getDiff: (cwd: string, path: string, staged?: boolean) => Promise<string>
+  getDiffStat: (cwd: string) => Promise<GitDiffStat>
   stage: (cwd: string, path: string) => Promise<void>
   unstage: (cwd: string, path: string) => Promise<void>
   discard: (cwd: string, path: string) => Promise<void>
-  getLog: (cwd: string, limit?: number) => Promise<GitCommit[]>
-  commit: (cwd: string, summary: string, description?: string, amend?: boolean) => Promise<void>
+  /** `all`: every branch, tag and remote ref instead of `HEAD` only. */
+  getLog: (cwd: string, limit?: number, all?: boolean) => Promise<GitCommit[]>
+  getCommitDetail: (cwd: string, hash: string) => Promise<GitCommitDetail>
+  /** One file's unified diff in a commit against its first parent. */
+  getCommitFileDiff: (
+    cwd: string,
+    hash: string,
+    path: string,
+    oldPath?: string
+  ) => Promise<GitCommitFileDiff>
+  /** `expectedHead`: the full sha HEAD must be at (`''` for an unborn branch); a moved HEAD refuses the commit (`precondition_failed`). */
+  commit: (
+    cwd: string,
+    summary: string,
+    description?: string,
+    amend?: boolean,
+    expectedHead?: string
+  ) => Promise<void>
   push: (cwd: string) => Promise<void>
   getCommitContext: (cwd: string) => Promise<GitCommitContext>
   init: (cwd: string) => Promise<void>
@@ -127,12 +387,29 @@ export interface GitApi {
   stashDrop: (cwd: string, index: number) => Promise<void>
   branchList: (cwd: string) => Promise<string[]>
   branchSwitch: (cwd: string, name: string) => Promise<void>
-  branchCreate: (cwd: string, name: string) => Promise<void>
 }
 
 // Terminal API exposed via preload
 export interface TerminalApi {
-  spawn: (options?: TerminalSpawnOptions) => Promise<IpcResult<TerminalInfo>>
+  spawn: (options?: TerminalSpawnOptions) => Promise<IpcResult<SpawnedTerminal>>
+  /**
+   * CAP-3: attach to a terminal's output stream with terminalId + claim +
+   * lastSeq (+ the `logEpoch` the cursor was issued under; a nonzero cursor
+   * without one is refused as untrusted and replays everything with `reset`).
+   * Verification is the gate — any failure (unknown terminal,
+   * missing/wrong/revoked credential) resolves to the same generic
+   * UNAUTHORIZED error with no terminal metadata or output.
+   */
+  attach: (
+    terminalId: string,
+    claim: string,
+    lastSeq: number,
+    logEpoch?: string
+  ) => Promise<IpcResult<TerminalAttachResult>>
+  /** CAP-3: possession-based rotation — old credential invalidated atomically. */
+  rotateClaim: (terminalId: string, claim: string) => Promise<IpcResult<RotatedClaim>>
+  /** CAP-3: revoke the credential; the PTY keeps running. */
+  revokeClaim: (terminalId: string, claim: string) => Promise<IpcResult<void>>
   write: (terminalId: string, data: string) => Promise<IpcResult<void>>
   resize: (terminalId: string, cols: number, rows: number) => Promise<IpcResult<void>>
   kill: (terminalId: string) => Promise<IpcResult<void>>
@@ -146,7 +423,38 @@ export interface TerminalApi {
   getGitStatus: (terminalId: string) => Promise<IpcResult<GitStatus | null>>
   onExitCodeChanged: (callback: TerminalExitCodeChangedCallback) => () => void
   getExitCode: (terminalId: string) => Promise<IpcResult<number | null>>
-  updateOrphanDetection: (enabled: boolean, timeout: number | null) => Promise<IpcResult<void>>
+  /**
+   * Story 5 (preserved-PTY reattach): enumerate the host-preserved
+   * terminals of a project, each with metadata and a freshly issued claim
+   * (the pre-reload claim is invalidated by the re-issue). Callers treat a
+   * failed result as "nothing preserved" and fall back to spawn.
+   */
+  listPreserved: (projectId: string) => Promise<IpcResult<PreservedTerminalEntry[]>>
+}
+
+export interface PreservedTerminalEntry {
+  id: string
+  shell: string
+  cwd: string
+  pid: number
+  cols: number
+  rows: number
+  /**
+   * Fresh claim credential issued for this listing (in-memory only).
+   * #851: a LIVE attachment on another connection no longer empties the
+   * claim — the server issues a SHARED claim (`issue_shared` appends a
+   * digest without revoking the holder's) so this client attaches to the
+   * SAME PTY. Absent only when shared issuance was refused (revoked
+   * record); the entry is then metadata-only and the caller must fall
+   * back to spawn.
+   */
+  claim?: string
+  /**
+   * #851: `true` when another web connection currently holds a live
+   * output forwarder for this terminal — the renderer labels these as
+   * shared sessions instead of silently duplicating the shell.
+   */
+  hasLiveAttachment?: boolean
 }
 
 // Error codes
@@ -192,50 +500,6 @@ export const IpcErrorCodes = {
 
 export type IpcErrorCode = (typeof IpcErrorCodes)[keyof typeof IpcErrorCodes]
 
-// ============================================================================
-// Worktree Types
-// ============================================================================
-
-export interface WorktreeInfo {
-  name: string
-  branch: string
-  path: string
-  headCommit: string
-}
-
-export interface BranchInfo {
-  name: string
-  isRemote: boolean
-  isCurrent: boolean
-  upstream?: string | null
-  hasOtherWorktree: boolean
-}
-
-export interface DirtyStatus {
-  modified: number
-  staged: number
-  untracked: number
-  hasChanges: boolean
-}
-
-export interface RemoveResult {
-  worktreePath: string
-  success: boolean
-  error?: string | null
-}
-
-export interface GitignoreDir {
-  dirName: string
-  exists: boolean
-}
-
-export interface SymlinkResult {
-  path: string
-  target: string
-  status: 'created' | 'skipped' | 'failed'
-  reason?: string
-}
-
 // Dialog API for file/directory selection
 export interface DialogApi {
   selectDirectory: () => Promise<IpcResult<string>>
@@ -243,6 +507,10 @@ export interface DialogApi {
     filters?: Array<{ name: string; extensions: string[] }>
     title?: string
   }) => Promise<IpcResult<string>>
+  /** Pick one or more files (desktop only; CANCELLED elsewhere). */
+  selectFiles: (options?: { title?: string }) => Promise<IpcResult<string[]>>
+  /** Choose where to save a file; the OS dialog asks before overwriting (desktop only). */
+  saveFile: (options?: { title?: string; defaultPath?: string }) => Promise<IpcResult<string>>
 }
 
 // Shell detection types
@@ -262,13 +530,73 @@ export interface ShellApi {
   getAvailableShells: () => Promise<IpcResult<DetectedShells>>
 }
 
+// Optional precondition/idempotency options for `PersistenceApi.write`.
+export interface PersistenceWriteOpts {
+  // Compare-and-set precondition (shared/cas keys): the logical value the key
+  // must currently hold; `null` means the key must be absent.
+  expected?: unknown
+  // Idempotency id; a resend of the same write reuses it so the host can
+  // recognise its own applied write.
+  commandId?: string
+  // The caller re-reads and resends a write that lost a compare-and-set race.
+  // Such a conflict is not reported on the error bus; set it on every attempt
+  // except the last one, so only the final failure reaches the user.
+  retrying?: boolean
+}
+
+// A read that also reports the host's per-key revision stamp.
+export interface StampedValue<T> {
+  value: T
+  // 0 = key absent.
+  revision: number
+  clientInstanceId: string | null
+}
+
+// Codes of failed store writes that the user must hear about: the value was
+// not saved and the writer cannot fix it alone.
+export const PERSISTENCE_ERROR_CODES = [
+  'STORE_VALUE_TOO_LARGE',
+  'STORE_PARTITION_FULL',
+  'STORE_NOT_HYDRATED',
+  'STORE_WRITE_FAILED',
+  'STORE_BASE_REQUIRED',
+  'STORE_CAS_FAILED'
+] as const
+
+export type PersistenceErrorCode = (typeof PERSISTENCE_ERROR_CODES)[number]
+
+// One failed write, by logical key.
+export interface PersistenceErrorEvent {
+  key: string
+  code: PersistenceErrorCode
+  message: string
+}
+
+export type PersistenceErrorListener = (event: PersistenceErrorEvent) => void
+
+// What a store key holds, as a watch reports it (the stored envelope is unwrapped).
+export interface PersistenceKeyChange<T = unknown> {
+  // `false` when the key is absent (never written, or deleted).
+  exists: boolean
+  data?: T
+}
+
 // Persistence API for renderer
 export interface PersistenceApi {
   read: <T>(key: string) => Promise<IpcResult<T>>
-  write: <T>(key: string, data: T) => Promise<IpcResult<void>>
+  readStamped: <T>(key: string) => Promise<IpcResult<StampedValue<T>>>
+  write: <T>(key: string, data: T, opts?: PersistenceWriteOpts) => Promise<IpcResult<void>>
   writeDebounced: <T>(key: string, data: T) => Promise<IpcResult<void>>
   flushPendingWrites: () => Promise<IpcResult<void>>
   delete: (key: string) => Promise<IpcResult<void>>
+  // Subscribe to failed writes (any caller, debounced or not). Returns the
+  // unsubscribe function.
+  onPersistenceError: (listener: PersistenceErrorListener) => () => void
+  // Report each change another device or tab makes to a key (by logical key),
+  // once this page has read it. Echoes of this page's own writes are not
+  // reported. Returns the unsubscribe function. Every real surface has it;
+  // it is optional so a partial test double need not carry it.
+  watchShared?: (key: string, listener: (change: PersistenceKeyChange) => void) => () => void
 }
 
 // System API for renderer
@@ -335,27 +663,8 @@ export interface RemoteStatus {
   bindMode: RemoteBindMode | null
   /** `127.0.0.1` or `0.0.0.0` while running. */
   bindHost: string | null
-}
-
-// One terminal entry within a remote project tree (mirrors Rust RemoteTerminal)
-export interface RemoteTerminalEntry {
-  ptyId: string
-  name: string
-  cwd?: string
-}
-
-// One project with its terminals (mirrors Rust RemoteProject)
-export interface RemoteProjectEntry {
-  id: string
-  name: string
-  terminals: RemoteTerminalEntry[]
-}
-
-// Full project tree published to the remote server (mirrors Rust ProjectTree)
-export interface RemoteProjectTree {
-  projects: RemoteProjectEntry[]
-  // Index signature to satisfy Tauri's InvokeArgs constraint
-  [key: string]: unknown
+  /** Ephemeral `https://*.trycloudflare.com` tunnel URL (QR-encoded). */
+  tunnelUrl: string | null
 }
 
 // Remote terminal server control API
@@ -363,7 +672,6 @@ export interface RemoteServerApi {
   start: (options?: { bindMode?: RemoteBindMode }) => Promise<IpcResult<RemoteStatus>>
   stop: () => Promise<IpcResult<RemoteStatus>>
   status: () => Promise<IpcResult<RemoteStatus>>
-  publishProjects: (tree: RemoteProjectTree) => Promise<IpcResult<void>>
 }
 
 // Filesystem types re-exported for convenience
@@ -387,9 +695,28 @@ export type SearchStreamErrorCode =
   | 'RG_STREAM_FAILED'
   | (string & {})
 
+/** Per-path failure detail for `grantFsScope`. */
+export interface FsScopeGrantFailure {
+  path: string
+  error: string
+}
+
+/** Summary of a `grantFsScope` call: granted paths and per-path failures. */
+export interface FsScopeGrantSummary {
+  granted: string[]
+  failed: FsScopeGrantFailure[]
+}
+
 export interface FilesystemApi {
+  /**
+   * Re-grant runtime fs scope for restored project roots/worktrees. The
+   * dialog plugin's pick-time grant is lost on restart; restored roots on
+   * non-allowlisted drives fail with "forbidden path" without this. Web mode
+   * is a no-op (fs goes through the server's own permission model).
+   */
+  grantFsScope: (paths: string[]) => Promise<IpcResult<FsScopeGrantSummary>>
   readDirectory: (dirPath: string) => Promise<IpcResult<DirectoryEntry[]>>
-  readFile: (filePath: string) => Promise<IpcResult<FileContent>>
+  readFile: (filePath: string) => Promise<IpcResult<HashedFileContent>>
   getFileInfo: (filePath: string) => Promise<IpcResult<FileInfo>>
   searchContent: (
     scopeRoot: string,
@@ -451,7 +778,12 @@ export interface FilesystemApi {
       error?: string
     }) => void
   ) => () => void
-  writeFile: (filePath: string, content: string) => Promise<IpcResult<void>>
+  /** `options.expected` (web only): refuse with `PRECONDITION_FAILED` when the file changed since it was read. */
+  writeFile: (
+    filePath: string,
+    content: string,
+    options?: { expected?: FsWriteExpected }
+  ) => Promise<IpcResult<void>>
   createFile: (filePath: string, content?: string) => Promise<IpcResult<void>>
   createDirectory: (dirPath: string) => Promise<IpcResult<void>>
   deletePath: (path: string, options?: { recursive?: boolean }) => Promise<IpcResult<void>>
@@ -478,6 +810,30 @@ export type {
 // ============================================================================
 
 /**
+ * Captured DEC private-mode state for terminal rehydration across refresh (R3).
+ *
+ * Mirrors Orca's `buildRehydrateSequences` mode set. Only the modes currently ON
+ * are replayed (via `buildRehydrateSequences`) before the captured scrollback
+ * content, so an alt-screen TUI (vim/tmux/less/htop) restores identically.
+ * Modes are optional everywhere — absence degrades to content-only restore
+ * (the pre-R3 behavior).
+ */
+export interface TerminalModes {
+  /** Alt-screen on (DEC 1049/1047/47). Replay emits `\x1b[?1049h` (attrs reset first). */
+  alternateScreen: boolean
+  /** Bracketed-paste on (DEC 2004). Replay emits `\x1b[?2004h`. */
+  bracketedPaste: boolean
+  /** Application-cursor keys on (DEC 1). Replay emits `\x1b[?1h`. */
+  applicationCursor: boolean
+  /** Mouse tracking mode: `x10` (1000), `drag` (1002), `any` (1003); null = off. */
+  mouseTracking?: 'x10' | 'drag' | 'any' | null
+  /** SGR mouse encoding (DEC 1006). Replay emits `\x1b[?1006h`. */
+  sgrMouseMode?: boolean
+  /** SGR pixel mouse encoding (DEC 1016). Replay emits `\x1b[?1016h`. */
+  sgrMousePixelsMode?: boolean
+}
+
+/**
  * Terminal session data for persistence
  * Subset of terminal instance with additional state for restoration
  */
@@ -487,6 +843,12 @@ export interface TerminalSession {
   cwd: string
   history: string[]
   env?: Record<string, string>
+  /**
+   * Captured DEC private-mode snapshot (R3). Replayed before `history` on
+   * restore so an alt-screen TUI screen/modes survive refresh. Optional:
+   * absence (old save or capture unavailable) degrades to content-only restore.
+   */
+  modes?: TerminalModes
 }
 
 /**

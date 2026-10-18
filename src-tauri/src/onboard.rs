@@ -1,0 +1,1003 @@
+//! Guided setup + background launch for the standalone `termul-server`.
+//!
+//! `termul-server onboard` interactively asks for each supported config,
+//! validates answers by reusing the existing validators (`BindMode::parse`,
+//! `UpdateChannel::parse`, …), then
+//! auto-detects the host's service manager and launches the server detached
+//! so it survives SSH logout: systemd hosts install + enable + start a
+//! `termul-server.service` unit; non-systemd Linux hosts detach via `setsid`
+//! with stdio to a log file + a PID file.
+//!
+//! The wizard logic (validation, synthesis, detection predicate, unit-text
+//! builder, access-info text, non-TTY path) is unit-testable without a TTY,
+//! root, or a real systemd — only the thin `run()` I/O wrapper touches the
+//! real stdin/stdout. The module is intentionally NOT feature-gated so its
+//! tests run under the spec's default `cargo test` gate (mirrors
+//! `server_update`); only `server_main.rs`'s `--onboard` branch is
+//! `standalone-server`-gated.
+
+use std::fs::OpenOptions;
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+
+use crate::server_update::UpdateChannel;
+use crate::web::config::{default_projects_file, default_sessions_dir, BindMode, ServerConfig};
+
+// ---------------------------------------------------------------------------
+// OnboardAnswers — validated answers + synthesis trio.
+// ---------------------------------------------------------------------------
+
+/// The operator's validated onboard answers. Built by [`Self::collect`] (TTY)
+/// or [`Self::defaults`] (non-TTY display path). All fields hold the resolved
+/// values — raw stdin is never retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnboardAnswers {
+    pub host: String,
+    pub port: u16,
+    pub sessions_dir: PathBuf,
+    pub projects_file: PathBuf,
+    pub allow_remote_writes: bool,
+    pub update_channel: Option<UpdateChannel>,
+    pub update_interval_secs: u64,
+}
+
+/// Normalize a projects-registry path to absolute form before it reaches
+/// `to_command_args` / service generation. Absolute inputs are preserved
+/// verbatim; relative inputs are resolved against the process current
+/// directory (the operator's shell cwd for the interactive `collect`, the
+/// server's startup cwd for `defaults`) so the generated systemd unit —
+/// which runs with an unpredictable working directory — never bakes in a
+/// CWD-relative `--projects-file`. Falls back to the raw path only when the
+/// cwd is unavailable.
+fn normalize_projects_file_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path,
+    }
+}
+
+impl OnboardAnswers {
+    /// Best-effort defaults from env/platform fallbacks. Used as the starting
+    /// defaults for [`Self::collect`] (where the value is re-validated + can be
+    /// overridden) and for the non-TTY display path. The wizard no longer asks
+    /// for a project root: projects are added to the registry after launch.
+    pub fn defaults() -> Self {
+        let sessions_dir =
+            default_sessions_dir().unwrap_or_else(|| PathBuf::from("/tmp/termul/sessions"));
+        let projects_file = default_projects_file()
+            .map(normalize_projects_file_path)
+            .unwrap_or_else(|| PathBuf::from("/tmp/termul/projects.json"));
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            sessions_dir,
+            projects_file,
+            allow_remote_writes: false,
+            update_channel: None,
+            update_interval_secs: 21600,
+        }
+    }
+
+    /// Interactive collection loop. Reuses the existing validators verbatim;
+    /// each prompt shows the resolved default and accepts an empty line to
+    /// keep it. Retries on validation error with the validator's message.
+    /// Only called when stdin is a TTY — the non-TTY path uses [`Self::defaults`].
+    pub fn collect<R: BufRead, W: Write>(stdin: &mut R, stdout: &mut W) -> Self {
+        writeln!(stdout, "=== termul-server onboard ===").ok();
+        writeln!(
+            stdout,
+            "Press Enter to accept the [default] for each prompt.\n"
+        )
+        .ok();
+
+        let host = prompt_validated(
+            stdin,
+            stdout,
+            "Bind host (127.0.0.1 = localhost only, 0.0.0.0 = expose)",
+            "127.0.0.1",
+            |s| {
+                BindMode::parse(s)
+                    .map(|m| m.display_host().to_string())
+                    .ok_or_else(|| format!("invalid host '{s}': use 127.0.0.1 or 0.0.0.0"))
+            },
+        );
+
+        let port = prompt_validated(stdin, stdout, "Bind port", "8080", |s| {
+            let p: u16 = s
+                .parse()
+                .map_err(|_| format!("invalid port '{s}': expected 1-65535"))?;
+            if p == 0 {
+                return Err("invalid port '0': use 1-65535".into());
+            }
+            Ok(p)
+        });
+
+        let sd_default = default_sessions_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none — required)".to_string());
+        let sessions_dir =
+            prompt_validated(stdin, stdout, "Sessions directory", &sd_default, |s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    return Err("sessions directory cannot be empty".into());
+                }
+                Ok(PathBuf::from(t))
+            });
+
+        let pf_default = default_projects_file()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let projects_file = prompt_validated(
+            stdin,
+            stdout,
+            "Projects registry file",
+            &pf_default,
+            |s| {
+                let t = s.trim();
+                // No "(none — required)" display placeholder here: with an
+                // empty default, Enter re-prompts with this error and EOF
+                // exits 0, so the literal placeholder can never be baked
+                // into the generated unit's `--projects-file`.
+                if t.is_empty() {
+                    return Err(
+                        "projects registry file cannot be empty (no platform default — enter a path)"
+                            .into(),
+                    );
+                }
+                Ok(normalize_projects_file_path(PathBuf::from(t)))
+            },
+        );
+
+        let bind_all = BindMode::parse(&host) == Some(BindMode::All);
+        let allow_remote_writes = if bind_all {
+            prompt_yesno(
+                stdin,
+                stdout,
+                "Allow non-loopback write peers (fs/git mutations)?",
+                false,
+            )
+        } else {
+            writeln!(
+                stdout,
+                "Note: --allow-remote-writes is a no-op when bound to 127.0.0.1 (skipped)."
+            )
+            .ok();
+            false
+        };
+
+        let update_channel: Option<UpdateChannel> = prompt_validated(
+            stdin,
+            stdout,
+            "Update channel (stable/insider/nightly/none)",
+            "none",
+            |s| {
+                let t = s.trim().to_ascii_lowercase();
+                if t == "none" || t.is_empty() {
+                    return Ok(None);
+                }
+                UpdateChannel::parse(&t).map(Some).ok_or_else(|| {
+                    format!("invalid channel '{s}': use stable/insider/nightly/none")
+                })
+            },
+        );
+
+        let update_interval_secs = if update_channel.is_some() {
+            prompt_validated(
+                stdin,
+                stdout,
+                "Update check interval (seconds)",
+                "21600",
+                |s| {
+                    let n: u64 = s.parse().map_err(|_| {
+                        format!("invalid interval '{s}': expected a positive integer")
+                    })?;
+                    if n == 0 {
+                        return Err("interval must be > 0".into());
+                    }
+                    Ok(n)
+                },
+            )
+        } else {
+            21600
+        };
+
+        Self {
+            host,
+            port,
+            sessions_dir,
+            projects_file,
+            allow_remote_writes,
+            update_channel,
+            update_interval_secs,
+        }
+    }
+
+    /// Synthesize a [`ServerConfig`] from the answers. Non-onboarded fields use
+    /// the parser's defaults (event-log capacity, tunables). Remote
+    /// writes is only enabled in the config when the bind is non-loopback — on
+    /// loopback it stays `false` (documented no-op).
+    pub fn to_server_config(&self) -> ServerConfig {
+        let expose = BindMode::parse(&self.host) == Some(BindMode::All);
+        ServerConfig {
+            host: self.host.clone(),
+            port: self.port,
+            event_log_capacity: 4096,
+            agent_idle_window_secs: crate::web::config::DEFAULT_AGENT_IDLE_WINDOW_SECS,
+            agent_idle_window_locked: false,
+            overflow_tolerance: crate::web::config::DEFAULT_OVERFLOW_TOLERANCE,
+            max_terminals_per_project: crate::web::config::DEFAULT_MAX_TERMINALS_PER_PROJECT,
+            receipt_retention_secs: crate::web::config::DEFAULT_RECEIPT_RETENTION_SECS,
+            partition_gc_age_secs: crate::web::config::DEFAULT_PARTITION_GC_AGE_SECS,
+            partition_byte_budget: crate::web::config::DEFAULT_PARTITION_BYTE_BUDGET,
+            deprecation_warnings: Vec::new(),
+            seed_project_root: None,
+            projects_file: Some(self.projects_file.clone()),
+            sessions_dir: Some(self.sessions_dir.clone()),
+            acp_catalog_dir: None,
+            store_file: None,
+            allow_remote_writes: self.allow_remote_writes && expose,
+            // The onboard wizard doesn't collect a token; a public bind then
+            // takes the generated-token path in `web::auth::resolve` (the
+            // token is persisted owner-only; it is never printed).
+            web_auth_token: None,
+            allowed_origins: crate::web::origin::OriginPolicy::default(),
+            // `run_interactive` resolves the state dir and passes it to the
+            // launched server explicitly via `--state-dir` (see there).
+            state_dir: None,
+        }
+    }
+
+    /// Synthesize the foreground CLI args for the server. Matches the golden
+    /// unit ordering: `--host`, `--port`, `--sessions-dir`,
+    /// `--projects-file`, then `--allow-remote-writes` ONLY when bound to
+    /// `0.0.0.0` and enabled. On loopback the flag is a documented no-op and
+    /// is omitted. `--projects-file` is ALWAYS passed explicitly even though
+    /// the server now defaults it: the generated unit stays self-documenting
+    /// and correct even when its environment (e.g. a HOME-less systemd unit)
+    /// could not re-resolve the same state-dir default.
+    pub fn to_command_args(&self) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "--host".into(),
+            self.host.clone(),
+            "--port".into(),
+            self.port.to_string(),
+            "--sessions-dir".into(),
+            self.sessions_dir.display().to_string(),
+            "--projects-file".into(),
+            self.projects_file.display().to_string(),
+        ];
+        let expose = BindMode::parse(&self.host) == Some(BindMode::All);
+        if expose && self.allow_remote_writes {
+            args.push("--allow-remote-writes".into());
+        }
+        args
+    }
+
+    /// Synthesize `KEY=value` env-file lines. `SHELL` and `HOME` are ALWAYS
+    /// emitted (even on loopback, even with no updates) so the service
+    /// process has the vars `env_refresh::probe_unix_login_path` needs to
+    /// resolve the user's login PATH. Without them, a systemd service runs
+    /// with `SHELL` unset → falls back to /bin/sh (dash) → PATH probe fails
+    /// → binaries in ~/.local/bin, ~/.cargo/bin, nvm, etc. are unreachable.
+    /// Remote-writes env is emitted only when bound to `0.0.0.0` and enabled.
+    /// Update env vars are emitted only when `update_channel` is `Some`.
+    pub fn to_env_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+
+        // Always emit SHELL and HOME from the service user's passwd entry
+        // (never the caller's env) so systemd services get a trusted identity
+        // and env_refresh can probe the login PATH safely.
+        #[cfg(unix)]
+        if let Some(identity) = crate::pty::env_refresh::service_identity_from_passwd() {
+            if let Some(line) =
+                safe_systemd_env_line("SHELL", std::ffi::OsStr::new(&identity.shell))
+            {
+                lines.push(line);
+            }
+            if let Some(line) = safe_systemd_env_line("HOME", std::ffi::OsStr::new(&identity.home))
+            {
+                lines.push(line);
+            }
+        }
+
+        let expose = BindMode::parse(&self.host) == Some(BindMode::All);
+        if expose && self.allow_remote_writes {
+            lines.push("TERMUL_SERVER_ALLOW_REMOTE_WRITES=true".into());
+        }
+        if let Some(channel) = self.update_channel {
+            lines.push("TERMUL_SERVER_UPDATE_ENABLED=true".into());
+            lines.push(format!(
+                "TERMUL_SERVER_UPDATE_CHANNEL={}",
+                channel_name(channel)
+            ));
+            lines.push(format!(
+                "TERMUL_SERVER_UPDATE_INTERVAL_SECS={}",
+                self.update_interval_secs
+            ));
+        }
+        lines
+    }
+}
+
+fn channel_name(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Stable => "stable",
+        UpdateChannel::Insider => "insider",
+        UpdateChannel::Nightly => "nightly",
+    }
+}
+
+/// Sanitized `KEY=VALUE` env line for a systemd unit `EnvironmentFile=` —
+/// safe for a systemd `KEY=value` line: rejects control chars, backslashes
+/// (trailing backslashes could alter subsequent assignments), and empty
+/// values. Emitted by the Unix `to_env_lines` path (and unit-tested on
+/// every platform).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn safe_systemd_env_line(key: &str, value: &std::ffi::OsStr) -> Option<String> {
+    let s = value.to_string_lossy();
+    if s.is_empty() || s.bytes().any(|b| b < 0x20 || b == b'\\') || s.ends_with('\\') {
+        return None;
+    }
+    Some(format!("{key}={s}"))
+}
+
+// ---------------------------------------------------------------------------
+// ServiceManager — auto-detection + per-mechanism install/spawn.
+// ---------------------------------------------------------------------------
+
+/// systemd scope: system (root, `/etc/systemd/system`) or user (non-root,
+/// `~/.config/systemd/user` + `loginctl enable-linger`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemdScope {
+    System,
+    User,
+}
+
+/// The auto-detected background-launch mechanism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceManager {
+    Systemd { scope: SystemdScope },
+    Setsid,
+}
+
+impl ServiceManager {
+    /// Auto-detect the mechanism. systemd = `/run/systemd/system` exists AND
+    /// `systemctl --version` succeeds; scope by uid (root → system, else user).
+    /// Fallback: `Setsid`.
+    pub fn detect() -> Self {
+        detect_from(systemd_is_present(), is_root())
+    }
+
+    /// A short management tip for the non-TTY display path.
+    fn tip(&self) -> String {
+        match self {
+            Self::Systemd { scope } => {
+                let u = if matches!(scope, SystemdScope::User) {
+                    " --user"
+                } else {
+                    ""
+                };
+                format!(
+                    "Mechanism: systemd. Manage: journalctl{u} -u termul-server -f; \
+                     systemctl{u} stop termul-server."
+                )
+            }
+            Self::Setsid => "Mechanism: setsid (no systemd). Detached background process \
+                 (survives logout, not reboot)."
+                .into(),
+        }
+    }
+
+    /// Install + start the server in the background via the detected mechanism.
+    /// `env_path` is `Some` only when the operator accepted the env-file write;
+    /// `env_lines` carries the same vars (used by the setsid child env). When
+    /// `env_path` is `None` (declined), `env_lines` should be empty so neither
+    /// path passes env vars — the server runs with explicit CLI args only.
+    fn install_and_start(
+        &self,
+        exe: &Path,
+        args: &[String],
+        env_path: Option<&Path>,
+        env_lines: &[String],
+        state_dir: &Path,
+        user: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Systemd { scope } => {
+                let unit_path = unit_path(scope);
+                if let Some(parent) = unit_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+                }
+                let exec_start = build_exec_start(exe, args);
+                let env_file_str = env_path.map(|p| p.display().to_string());
+                let unit_text =
+                    build_systemd_unit_text(&exec_start, env_file_str.as_deref(), *scope);
+                std::fs::write(&unit_path, &unit_text)
+                    .map_err(|e| format!("write {}: {e}", unit_path.display()))?;
+
+                let user_flag = matches!(scope, SystemdScope::User);
+
+                // Run systemctl; surface BOTH spawn failures (io::Error) AND
+                // non-zero exits (invalid unit, polkit denial, SELinux). A
+                // bare `.status().map_err(...)?` only catches the spawn error
+                // and would let a failed enable --now report success.
+                let mut reload = Command::new("systemctl");
+                if user_flag {
+                    reload.arg("--user");
+                }
+                reload.arg("daemon-reload");
+                let st = reload
+                    .status()
+                    .map_err(|e| format!("systemctl daemon-reload failed: {e}"))?;
+                if !st.success() {
+                    return Err(format!(
+                        "systemctl daemon-reload failed (exit {:?})",
+                        st.code()
+                    ));
+                }
+
+                let mut enable = Command::new("systemctl");
+                if user_flag {
+                    enable.arg("--user");
+                }
+                enable.args(["enable", "--now", "termul-server"]);
+                let st = enable
+                    .status()
+                    .map_err(|e| format!("systemctl enable --now failed: {e}"))?;
+                if !st.success() {
+                    return Err(format!(
+                        "systemctl enable --now failed (exit {:?}) — check the unit at {}",
+                        st.code(),
+                        unit_path.display()
+                    ));
+                }
+
+                if user_flag {
+                    // enable-linger so the user unit survives logout + boots.
+                    // Best-effort: a failure here (e.g. polkit) leaves the
+                    // unit running but not boot-persistent; warn, don't abort.
+                    if let Ok(linger_st) = Command::new("loginctl")
+                        .args(["enable-linger", user])
+                        .status()
+                    {
+                        if !linger_st.success() {
+                            eprintln!(
+                                "warning: loginctl enable-linger failed (exit {:?}); the \
+                                 unit runs now but may not survive reboot",
+                                linger_st.code()
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Self::Setsid => {
+                // Probe setsid presence. `.status().is_err()` only catches a
+                // spawn failure (NotFound); a setsid that exists but exits
+                // non-zero (BusyBox rejects --version) would pass. Use
+                // `.success()` so both "not found" and "broken setsid" halt
+                // with the clear message the spec's matrix requires.
+                let setsid_ok = Command::new("setsid")
+                    .arg("--version")
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !setsid_ok {
+                    return Err("`setsid` not found or not functional on PATH. Install it \
+                         (util-linux) or run the server manually in the foreground."
+                        .into());
+                }
+                std::fs::create_dir_all(state_dir)
+                    .map_err(|e| format!("create state dir '{}': {e}", state_dir.display()))?;
+                let log_path = state_dir.join("termul-server.log");
+                let pid_path = state_dir.join("termul-server.pid");
+                let log = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .map_err(|e| format!("open log '{}': {e}", log_path.display()))?;
+                let err = log.try_clone().map_err(|e| format!("dup log fd: {e}"))?;
+
+                let env_iter: Vec<(&str, &str)> =
+                    env_lines.iter().filter_map(|l| l.split_once('=')).collect();
+
+                let mut cmd = Command::new("setsid");
+                cmd.arg(exe)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(log))
+                    .stderr(Stdio::from(err))
+                    .envs(env_iter);
+                let child = cmd.spawn().map_err(|e| format!("spawn setsid: {e}"))?;
+                let pid = child.id();
+                std::fs::write(&pid_path, format!("{pid}\n"))
+                    .map_err(|e| format!("write pid '{}': {e}", pid_path.display()))?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Pure detection predicate: systemd present → `Systemd` (scope by root),
+/// else `Setsid`. Factored out so [`ServiceManager::detect`] stays a thin
+/// wrapper and the predicate is unit-testable without a real host.
+fn detect_from(systemd_present: bool, is_root: bool) -> ServiceManager {
+    if systemd_present {
+        ServiceManager::Systemd {
+            scope: if is_root {
+                SystemdScope::System
+            } else {
+                SystemdScope::User
+            },
+        }
+    } else {
+        ServiceManager::Setsid
+    }
+}
+
+fn systemd_is_present() -> bool {
+    Path::new("/run/systemd/system").exists()
+        && Command::new("systemctl").arg("--version").status().is_ok()
+}
+
+#[cfg(unix)]
+fn is_root() -> bool {
+    // No `libc`/`nix` (forbidden); resolve uid via the external `id -u` util.
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_root() -> bool {
+    false
+}
+
+fn unit_path(scope: &SystemdScope) -> PathBuf {
+    match scope {
+        SystemdScope::System => PathBuf::from("/etc/systemd/system/termul-server.service"),
+        SystemdScope::User => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".config/systemd/user/termul-server.service")
+        }
+    }
+}
+
+/// Assemble the systemd `ExecStart` line from the binary + CLI args. Quote
+/// every ExecStart token so paths with spaces survive systemd's
+/// whitespace-tokenizing ExecStart parser. The operator's
+/// sessions-dir / projects-file can legitimately contain spaces (e.g.
+/// /home/me/My Projects); an unquoted token would split into multiple args
+/// and the server would start with a wrong/missing path. Escape embedded
+/// quotes + backslashes per systemd's quoting rules.
+/// Literal percent signs are doubled (`%%`) FIRST: systemd runs specifier
+/// expansion on the whole unit text regardless of quoting, so a bare `%`
+/// in a path would be expanded (or rejected) — `%%` renders literal.
+fn build_exec_start(exe: &Path, args: &[String]) -> String {
+    let quote = |s: &str| {
+        let escaped = s
+            .replace('%', "%%")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    };
+    let mut exec_start = quote(&exe.display().to_string());
+    for arg in args {
+        exec_start.push(' ');
+        exec_start.push_str(&quote(arg));
+    }
+    exec_start
+}
+
+/// Build the systemd unit text. `env_file` is the optional `EnvironmentFile`
+/// path (emitted only when the operator accepted the env-file write). The
+/// golden unit (localhost, no env file) omits `EnvironmentFile`. `WantedBy`
+/// branches on `scope`: `default.target` for user units (multi-user.target
+/// does not exist in the user systemd instance), `multi-user.target` for
+/// system units.
+fn build_systemd_unit_text(
+    exec_start: &str,
+    env_file: Option<&str>,
+    scope: SystemdScope,
+) -> String {
+    let mut s = String::new();
+    s.push_str("[Unit]\n");
+    s.push_str("Description=Termul standalone server (onboard-generated)\n");
+    s.push_str("After=network.target\n\n");
+    s.push_str("[Service]\n");
+    s.push_str("Type=simple\n");
+    s.push_str(&format!("ExecStart={exec_start}\n"));
+    if let Some(path) = env_file {
+        s.push_str(&format!("EnvironmentFile={path}\n"));
+    }
+    s.push_str("Restart=on-failure\n");
+    s.push_str("RestartSec=2\n\n");
+    s.push_str("[Install]\n");
+    let wanted_by = match scope {
+        SystemdScope::System => "multi-user.target",
+        SystemdScope::User => "default.target",
+    };
+    s.push_str(&format!("WantedBy={wanted_by}\n"));
+    s
+}
+
+/// Print the access info: URL, management tip per mechanism, future-run
+/// foreground command, update channel line, and a security note when remote
+/// writes is enabled.
+#[allow(clippy::too_many_arguments)]
+fn write_access_info<W: Write>(
+    stdout: &mut W,
+    mechanism: &ServiceManager,
+    host: &str,
+    port: u16,
+    state_dir: &Path,
+    allow_remote_writes: bool,
+    update_channel: Option<UpdateChannel>,
+    exe: &Path,
+    args: &[String],
+) {
+    let bind_all = BindMode::parse(host) == Some(BindMode::All);
+    writeln!(
+        stdout,
+        "Termul server is starting in the background on http://localhost:{port}"
+    )
+    .ok();
+    if bind_all {
+        writeln!(
+            stdout,
+            "(bound to 0.0.0.0 — use the server's LAN/public IP for remote devices)"
+        )
+        .ok();
+        // CAP-1: a public bind is gated. The token is never printed to
+        // stdout or logs (a detached service's stdout lands in durable
+        // logs, and secrets must not) — it lives ONLY in the owner-
+        // protected token file. Point the operator at that file.
+        let token_path = state_dir.join("web-auth-token");
+        writeln!(
+            stdout,
+            "Web auth: this server requires a token. Read it from the \
+             owner-protected file {} (never printed or logged).",
+            token_path.display()
+        )
+        .ok();
+    }
+    writeln!(stdout, "Open that URL in a browser to use the web client.").ok();
+    match mechanism {
+        ServiceManager::Systemd { scope } => {
+            // Scope-aware commands: user units must be addressed via
+            // `--user` or the commands hit the (empty) system instance.
+            let u = match scope {
+                SystemdScope::User => " --user",
+                SystemdScope::System => "",
+            };
+            writeln!(stdout, "Logs: journalctl{u} -u termul-server -f").ok();
+            writeln!(stdout, "Stop:  systemctl{u} stop termul-server").ok();
+            writeln!(
+                stdout,
+                "Note: survives logout + reboot (systemd manages auto-start)."
+            )
+            .ok();
+        }
+        ServiceManager::Setsid => {
+            let log = state_dir.join("termul-server.log").display().to_string();
+            let pid = state_dir.join("termul-server.pid").display().to_string();
+            writeln!(stdout, "Logs: tail -f {log}").ok();
+            writeln!(stdout, "Stop:  kill $(cat {pid})").ok();
+            writeln!(
+                stdout,
+                "Note: this background process does NOT auto-restart on crash or reboot."
+            )
+            .ok();
+        }
+    }
+    if let Some(channel) = update_channel {
+        writeln!(
+            stdout,
+            "Updates: {} channel (TERMUL_SERVER_UPDATE_ENABLED + _CHANNEL + _INTERVAL_SECS)",
+            channel_name(channel)
+        )
+        .ok();
+    }
+    let exe_name = exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("termul-server");
+    writeln!(
+        stdout,
+        "For a foreground run: {exe_name} {}",
+        args.join(" ")
+    )
+    .ok();
+    if allow_remote_writes && bind_all {
+        writeln!(
+            stdout,
+            "Security: remote writes are ENABLED — non-loopback peers holding the web \
+             auth token can mutate the server. Keep the token secret."
+        )
+        .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prompting helpers (synchronous std::io, no new crate).
+// ---------------------------------------------------------------------------
+
+/// Prompt with a default; validate via `parse`; retry on error with the
+/// validator's message. Empty line keeps the default. On EOF, use the default
+/// or exit 0 (never crash).
+fn prompt_validated<R, W, T, F>(
+    stdin: &mut R,
+    stdout: &mut W,
+    label: &str,
+    default: &str,
+    parse: F,
+) -> T
+where
+    R: BufRead,
+    W: Write,
+    F: Fn(&str) -> Result<T, String>,
+{
+    loop {
+        write!(stdout, "{label} [{default}]: ").ok();
+        stdout.flush().ok();
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line).unwrap_or(0);
+        if n == 0 {
+            return match parse(default) {
+                Ok(v) => v,
+                Err(_) => {
+                    writeln!(stdout, "(EOF — exiting)").ok();
+                    std::process::exit(0);
+                }
+            };
+        }
+        let trimmed = line.trim();
+        let input = if trimmed.is_empty() { default } else { trimmed };
+        match parse(input) {
+            Ok(v) => return v,
+            Err(e) => {
+                let _ = writeln!(stdout, "{e}");
+            }
+        }
+    }
+}
+
+/// A yes/no prompt. Empty line keeps `default_yes`. Retries on unrecognized
+/// input (e.g. a typo like "ye"/"tru") with a hint, mirroring
+/// [`prompt_validated`]'s retry-on-error UX instead of silently treating the
+/// typo as a hard "no".
+fn prompt_yesno<R: BufRead, W: Write>(
+    stdin: &mut R,
+    stdout: &mut W,
+    label: &str,
+    default_yes: bool,
+) -> bool {
+    let default_str = if default_yes { "Y/n" } else { "y/N" };
+    loop {
+        write!(stdout, "{label} [{default_str}]: ").ok();
+        stdout.flush().ok();
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line).unwrap_or(0);
+        if n == 0 {
+            // EOF — keep the default rather than crash.
+            return default_yes;
+        }
+        let t = line.trim().to_ascii_lowercase();
+        if t.is_empty() {
+            return default_yes;
+        }
+        if t == "y" || t == "yes" {
+            return true;
+        }
+        if t == "n" || t == "no" {
+            return false;
+        }
+        writeln!(
+            stdout,
+            "Please answer 'y' or 'n' (or press Enter for the default)."
+        )
+        .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run() — entry point wired by server_main.rs's --onboard branch.
+// ---------------------------------------------------------------------------
+
+/// Entry point. Detects TTY; the non-TTY path resolves defaults and exits 0
+/// without installing/spawning. The TTY path collects answers, prints access
+/// info, launches in the background, and emits a durable boundary log.
+pub fn run() -> ExitCode {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    if !stdin.is_terminal() {
+        return run_non_tty(&mut stdout.lock());
+    }
+    run_interactive(&mut stdin.lock(), &mut stdout.lock())
+}
+
+/// Non-TTY path: resolve defaults, print the default command, the mechanism
+/// tip, and the non-TTY note, then exit 0 without installing/spawning/binding.
+/// Verification-safe: the server itself is never launched. Detection still
+/// runs benign probes (`systemctl --version`, `id -u`) to resolve the
+/// mechanism tip — these do not start the server or mutate state.
+fn run_non_tty<W: Write>(stdout: &mut W) -> ExitCode {
+    let answers = OnboardAnswers::defaults();
+    let args = answers.to_command_args();
+    let mechanism = ServiceManager::detect();
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("termul-server"));
+    let exe_name = exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("termul-server");
+    writeln!(
+        stdout,
+        "termul-server onboard: stdin is not a TTY; using defaults — re-run in a terminal to launch."
+    )
+    .ok();
+    writeln!(stdout, "Default command: {exe_name} {}", args.join(" ")).ok();
+    writeln!(stdout, "{}", mechanism.tip()).ok();
+    ExitCode::SUCCESS
+}
+
+/// Create the service state dir, failing fast with an operator-facing error
+/// (`Err(ExitCode::FAILURE)`) so the caller aborts BEFORE writing service
+/// config or starting the service. Silently ignoring a failure here (the old
+/// `let _ = ...`) let the wizard proceed to install a unit whose token,
+/// env, pid, and log paths were unwritable — the failure then surfaced
+/// later, detached from its cause.
+fn ensure_state_dir<W: Write>(stdout: &mut W, state_dir: &Path) -> Result<(), ExitCode> {
+    std::fs::create_dir_all(state_dir).map_err(|e| {
+        writeln!(
+            stdout,
+            "error: cannot create state dir {}: {e}",
+            state_dir.display()
+        )
+        .ok();
+        ExitCode::FAILURE
+    })
+}
+
+/// TTY path: collect → synthesize → access info → launch → boundary log.
+fn run_interactive<R: BufRead, W: Write>(stdin: &mut R, stdout: &mut W) -> ExitCode {
+    let answers = OnboardAnswers::collect(stdin, stdout);
+    let cfg = answers.to_server_config();
+    let state_dir = cfg.service_account_state_dir();
+    // Fail fast, BEFORE any service config is written or the service is
+    // started (covers both the systemd and the setsid path below): without
+    // the state dir there is nowhere to persist the web-auth token, the env
+    // file, or the pid/log files the unit references.
+    if let Err(code) = ensure_state_dir(stdout, &state_dir) {
+        return code;
+    }
+    let env_lines = answers.to_env_lines();
+    // Pass the resolved state dir explicitly (`--state-dir`) so the launched
+    // server — systemd unit OR setsid child — uses the SAME dir whose
+    // web-auth-token path `write_access_info` prints below. Without it the
+    // service re-resolves `$XDG_STATE_HOME`/`$HOME` from its OWN environment
+    // (a systemd unit without the env file sees neither), and a generated
+    // token could land somewhere other than the advertised path.
+    // `to_command_args` already pins `--sessions-dir` and `--projects-file`
+    // from the answers above. Those flags outrank `--state-dir`, so the
+    // launched server keeps the paths the operator accepted. That includes a
+    // `TERMUL_SESSIONS_DIR` or `TERMUL_PROJECTS_FILE` value shown as the
+    // prompt default: those are the platform HOME/XDG locations (or the env
+    // override), and they are not moved under `--state-dir`. `--state-dir`
+    // here only pins the web-auth token, env file, and pid/log paths.
+    let mut args = answers.to_command_args();
+    args.push("--state-dir".into());
+    args.push(state_dir.display().to_string());
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("termul-server"));
+
+    // Optional env-file write. The env file is used ONLY by systemd's
+    // `EnvironmentFile=` directive — the setsid child always receives the
+    // env vars directly via its process env, regardless of the write choice.
+    // So `child_env_lines` is `env_lines` whenever there are vars to pass;
+    // only `env_path` depends on the operator's write decision. This keeps
+    // the update config (and remote-writes env) effective even when the
+    // operator declines the env file.
+    let (env_path, child_env_lines): (Option<PathBuf>, Vec<String>) = if !env_lines.is_empty() {
+        let env_file = state_dir.join("termul-server.env");
+        let write = prompt_yesno(
+            stdin,
+            stdout,
+            &format!("Write env file to {}?", env_file.display()),
+            true,
+        );
+        if write {
+            let content = format!("{}\n", env_lines.join("\n"));
+            match std::fs::write(&env_file, content) {
+                Ok(()) => (Some(env_file), env_lines.clone()),
+                Err(e) => {
+                    writeln!(stdout, "warning: failed to write env file: {e}").ok();
+                    (None, env_lines.clone())
+                }
+            }
+        } else {
+            (None, env_lines.clone())
+        }
+    } else {
+        (None, Vec::new())
+    };
+
+    let mechanism = ServiceManager::detect();
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "root".to_string());
+
+    // Access info immediately before the launch.
+    write_access_info(
+        stdout,
+        &mechanism,
+        &answers.host,
+        answers.port,
+        &state_dir,
+        answers.allow_remote_writes,
+        answers.update_channel,
+        &exe,
+        &args,
+    );
+
+    match mechanism.install_and_start(
+        &exe,
+        &args,
+        env_path.as_deref(),
+        &child_env_lines,
+        &state_dir,
+        &user,
+    ) {
+        Ok(()) => {
+            tracing::info!(
+                target: "termul::onboard",
+                host = %answers.host,
+                port = answers.port,
+                sessions_dir = %answers.sessions_dir.display(),
+                projects_file = %answers.projects_file.display(),
+                allow_remote_writes = answers.allow_remote_writes,
+                update_channel = ?answers.update_channel,
+                mechanism = ?mechanism,
+                "onboard completed: server launched in background"
+            );
+            writeln!(
+                stdout,
+                "Onboarding complete. The server is running in the background."
+            )
+            .ok();
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "termul::onboard",
+                mechanism = ?mechanism,
+                error = %e,
+                "onboard failed: background launch did not start"
+            );
+            writeln!(stdout, "error: {e}").ok();
+            writeln!(
+                stdout,
+                "Foreground command: {} {}",
+                exe.display(),
+                args.join(" ")
+            )
+            .ok();
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — synthesis, detection predicate, unit text, non-TTY path.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests;

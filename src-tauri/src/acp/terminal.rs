@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use agent_client_protocol::schema::{TerminalExitStatus, TerminalId};
+use agent_client_protocol::schema::v1::{TerminalExitStatus, TerminalId};
 use parking_lot::Mutex;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -61,7 +61,10 @@ impl TerminalBuffer {
     }
 
     fn snapshot(&self) -> (String, bool) {
-        (String::from_utf8_lossy(&self.bytes).into_owned(), self.truncated)
+        (
+            String::from_utf8_lossy(&self.bytes).into_owned(),
+            self.truncated,
+        )
     }
 }
 
@@ -73,6 +76,8 @@ struct AcpTerminal {
     child: Option<tokio::process::Child>,
     buffer: Arc<Mutex<TerminalBuffer>>,
     exit: Option<TerminalExitStatus>,
+    #[cfg(windows)]
+    job: Option<crate::process_util::KillOnCloseJob>,
 }
 
 /// Per-agent registry of terminals, keyed by ACP `TerminalId`. Owned by the
@@ -113,6 +118,7 @@ impl TerminalRegistry {
         // bare names on PATH natively). Mirrors the agent-spawn path.
         let resolved = crate::trackers::git_tracker::resolve_executable(command);
         let mut cmd = Command::new(resolved);
+        crate::process_util::hide_console(&mut cmd);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -128,6 +134,10 @@ impl TerminalRegistry {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn terminal command: {e}"))?;
+        #[cfg(windows)]
+        let job = child.raw_handle().and_then(|handle| {
+            crate::process_util::KillOnCloseJob::new_assigned(handle, "ACP terminal", true)
+        });
 
         let buffer = Arc::new(Mutex::new(TerminalBuffer {
             limit: output_byte_limit.map(|l| l as usize),
@@ -171,6 +181,8 @@ impl TerminalRegistry {
                 child: Some(child),
                 buffer,
                 exit: None,
+                #[cfg(windows)]
+                job,
             },
         );
         Ok(terminal_id)
@@ -219,7 +231,9 @@ impl TerminalRegistry {
     /// The cached exit status for a terminal, if known.
     #[must_use]
     pub fn cached_exit(&self, id: &TerminalId) -> Option<TerminalExitStatus> {
-        self.terminals.get(id.0.as_ref()).and_then(|t| t.exit.clone())
+        self.terminals
+            .get(id.0.as_ref())
+            .and_then(|t| t.exit.clone())
     }
 
     /// Record a terminal's observed exit status (and that it is reaped). Called
@@ -237,6 +251,14 @@ impl TerminalRegistry {
             .terminals
             .get_mut(id.0.as_ref())
             .ok_or_else(|| format!("unknown terminal: {}", id.0))?;
+        #[cfg(windows)]
+        if let Some(job) = &term.job {
+            if let Err(error) = job.terminate() {
+                log::warn!(
+                    "[acp] TerminateJobObject failed; terminal descendants may survive: {error}"
+                );
+            }
+        }
         if let Some(child) = term.child.as_mut() {
             let _ = child.start_kill();
             // Reap if it has already exited so we don't leave a zombie; the
@@ -269,6 +291,32 @@ impl TerminalRegistry {
                 reap(child);
             }
         }
+    }
+
+    /// Number of terminals whose command is still running. A terminal whose
+    /// child has exited but was never polled is observed here (`try_wait`) and
+    /// cached, so a finished command stops counting as background work.
+    /// A terminal whose child is out of the registry (a `wait_for_exit` is in
+    /// flight) has no recorded exit, so it counts as running.
+    pub fn running_count(&mut self) -> usize {
+        let mut running = 0;
+        for term in self.terminals.values_mut() {
+            if term.exit.is_some() {
+                continue;
+            }
+            let Some(child) = term.child.as_mut() else {
+                running += 1;
+                continue;
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    term.exit = Some(to_exit_status(status));
+                    term.child = None;
+                }
+                Ok(None) | Err(_) => running += 1,
+            }
+        }
+        running
     }
 }
 
@@ -308,44 +356,4 @@ fn signal_name(sig: i32) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_truncation_under_limit() {
-        let (out, trunc) = truncate_front_to_char_boundary(b"hello", 10);
-        assert_eq!(out, b"hello");
-        assert!(!trunc);
-    }
-
-    #[test]
-    fn truncates_from_front() {
-        let (out, trunc) = truncate_front_to_char_boundary(b"0123456789", 4);
-        assert!(trunc);
-        assert_eq!(String::from_utf8(out).unwrap(), "6789");
-    }
-
-    #[test]
-    fn truncation_respects_utf8_char_boundary() {
-        // 'a' (1 byte) + three 'é' (2 bytes each) = 7 bytes. A tight front cut
-        // could land mid-codepoint; we must advance to a leading byte.
-        let s = "aééé".as_bytes();
-        let (out, trunc) = truncate_front_to_char_boundary(s, 5);
-        assert!(trunc);
-        let decoded = String::from_utf8(out).expect("valid utf-8 after truncation");
-        assert!(decoded.len() <= 5);
-        assert!(decoded.chars().all(|c| c == 'é'));
-    }
-
-    #[test]
-    fn buffer_caps_and_flags_truncation() {
-        let mut buf = TerminalBuffer {
-            limit: Some(4),
-            ..TerminalBuffer::default()
-        };
-        buf.append(b"abcdef");
-        let (out, trunc) = buf.snapshot();
-        assert!(trunc);
-        assert_eq!(out, "cdef");
-    }
-}
+mod tests;

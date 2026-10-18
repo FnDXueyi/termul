@@ -1,152 +1,97 @@
-import { Check, Loader2, X } from 'lucide-react'
-import { useCallback, useState } from 'react'
-import type { ContextMenuItem } from '@/components/ContextMenu'
-import { ContextMenu } from '@/components/ContextMenu'
+import { useShallow } from 'zustand/shallow'
 import { MaterialFileIcon } from '@/components/file-explorer/MaterialFileIcon'
-import { cn } from '@/lib/utils'
+import { fileNeedsAttention } from '@/lib/editor-file-attention'
+import { basename } from '@/lib/path-basename'
+import { useEditorStore } from '@/stores/editor-store'
+import { type TabBulkMenuProps, TabContextMenu } from './tab-context-menu'
+import { TabChrome } from './tabs/tab-chrome'
+import type { TabInlineProps } from './tabs/types'
 
-function getBasename(filePath: string): string {
-  const parts = filePath.split(/[\\/]/)
-  return parts[parts.length - 1] || filePath
-}
-
-function getExtname(filePath: string): string {
-  const name = getBasename(filePath)
-  const dotIndex = name.lastIndexOf('.')
-  if (dotIndex <= 0) return ''
-  return name.slice(dotIndex)
-}
-
-interface EditorTabProps {
-  filePath: string
-  isActive: boolean
-  isDirty: boolean
-  operationStatus?: 'idle' | 'saving' | 'reloading' | 'saved'
+export interface EditorTabProps extends TabInlineProps {
+  tab: { type: 'editor'; id: string; filePath: string }
+  bulkMenu: TabBulkMenuProps
   onSelect: () => void
   onClose: () => void
-  onCloseOthers?: () => void
-  onCloseAll?: () => void
   onCopyPath?: () => void
 }
 
 export function EditorTab({
-  filePath,
+  tab,
   isActive,
-  isDirty,
-  operationStatus = 'idle',
+  isDragging,
+  isDropTarget,
+  dropPosition,
+  bulkMenu,
   onSelect,
   onClose,
-  onCloseOthers,
-  onCloseAll,
-  onCopyPath
+  onCopyPath,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop
 }: EditorTabProps): React.JSX.Element {
-  const [contextMenu, setContextMenu] = useState<{
-    x: number
-    y: number
-  } | null>(null)
+  const fileName = basename(tab.filePath)
 
-  const fileName = getBasename(filePath)
-  const ext = getExtname(filePath).slice(1) || null
-
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setContextMenu({ x: e.clientX, y: e.clientY })
-  }, [])
+  const { isDirty, operationStatus } = useEditorStore(
+    useShallow((state) => {
+      const file = state.openFiles.get(tab.filePath)
+      return {
+        isDirty: fileNeedsAttention(file),
+        operationStatus: file?.operationStatus ?? 'idle'
+      }
+    })
+  )
 
   const isBusy = operationStatus === 'saving' || operationStatus === 'reloading'
   const showSuccess = operationStatus === 'saved'
-  const showStatusIndicator = isBusy || showSuccess
-
-  const contextMenuItems: ContextMenuItem[] = [
-    {
-      label: 'Close',
-      icon: <X size={12} />,
-      onClick: onClose
-    },
-    {
-      label: 'Close Others',
-      onClick: onCloseOthers
-    },
-    {
-      label: 'Close All',
-      onClick: onCloseAll
-    },
-    {
-      label: 'Copy Path',
-      onClick: onCopyPath
-    }
-  ]
+  // The accessible name must describe the action: 'saved' is only a visual
+  // flash (Check icon), the button still closes the tab.
+  const closeLabel =
+    operationStatus === 'saving'
+      ? 'Saving file'
+      : operationStatus === 'reloading'
+        ? 'Reloading file'
+        : operationStatus === 'saved'
+          ? `Close ${fileName}`
+          : 'Close tab'
 
   return (
-    <>
-      <div
-        onClick={onSelect}
-        onContextMenu={handleContextMenu}
-        className={cn(
-          'h-full px-3 flex items-center border-r border-border min-w-[100px] cursor-pointer group transition-colors border-b-2 border-b-transparent',
-          isActive
-            ? 'bg-background border-b-primary'
-            : 'hover:bg-secondary/50 text-muted-foreground'
-        )}
-      >
-        {isDirty && <span className="w-2 h-2 rounded-full bg-primary mr-1.5 flex-shrink-0" />}
-        <MaterialFileIcon
-          name={fileName}
-          extension={ext}
-          isDirectory={false}
-          isExpanded={false}
-          depth={0}
-          size={12}
-          className="mr-2"
-        />
-        <span className={cn('text-2xs font-medium truncate', isActive && 'text-foreground')}>
-          {fileName}
-        </span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            if (!showStatusIndicator) {
-              onClose()
-            }
-          }}
-          disabled={showStatusIndicator}
-          title={
-            operationStatus === 'saving'
-              ? 'Saving file'
-              : operationStatus === 'reloading'
-                ? 'Reloading file'
-                : operationStatus === 'saved'
-                  ? `${fileName} saved`
-                  : 'Close tab'
-          }
-          className={cn(
-            'ml-auto p-0.5 rounded-md transition-opacity flex-shrink-0',
-            showStatusIndicator
-              ? 'opacity-100'
-              : 'hover:bg-secondary opacity-0 group-hover:opacity-100',
-            isBusy && 'disabled:cursor-wait',
-            showSuccess && 'text-emerald-500'
-          )}
-        >
-          {isBusy ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : showSuccess ? (
-            <Check size={12} className="text-emerald-500" />
-          ) : (
-            <X size={12} />
-          )}
-        </button>
-      </div>
-
-      {contextMenu && (
-        <ContextMenu
-          items={contextMenuItems}
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-        />
-      )}
-    </>
+    <TabContextMenu
+      kind="editor"
+      {...bulkMenu}
+      onClose={onClose}
+      isBusy={isBusy}
+      onCopyPath={onCopyPath}
+    >
+      <TabChrome
+        isActive={isActive}
+        isDragging={isDragging}
+        isDropTarget={isDropTarget}
+        dropPosition={dropPosition}
+        onSelect={onSelect}
+        onClose={onClose}
+        onDragStart={onDragStart}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+        icon={
+          <MaterialFileIcon
+            name={fileName}
+            isDirectory={false}
+            isExpanded={false}
+            depth={0}
+            size={12}
+          />
+        }
+        label={fileName}
+        dirty={isDirty}
+        closeDisabled={isBusy}
+        // 'saved' is a transient success flash, not a close guard: only a
+        // real save/reload in flight blocks closing.
+        closeContent={isBusy ? 'spinner' : showSuccess ? 'check' : 'default'}
+        pinClose={isActive || showSuccess}
+        closeAriaLabel={closeLabel}
+      />
+    </TabContextMenu>
   )
 }

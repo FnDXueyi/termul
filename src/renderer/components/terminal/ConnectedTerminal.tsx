@@ -3,126 +3,83 @@ import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
 import type { IDisposable } from '@xterm/xterm'
 import { Terminal } from '@xterm/xterm'
-import { AlertTriangle, RefreshCcw } from 'lucide-react'
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { AlertTriangle, RefreshCcw } from '@/components/icons'
+import { Button } from '@/components/ui/button'
 import '@xterm/xterm/css/xterm.css'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { useShallow } from 'zustand/shallow'
+import { AgentConnectionLamp } from '@/components/chat/AgentConnectionLamp'
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
+import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { useTerminalClipboard } from '@/hooks/use-terminal-clipboard'
 import { useTerminalColorTheme } from '@/hooks/use-terminal-color-theme'
+import { flushDetachedOutputNow } from '@/hooks/use-terminal-detached-output'
 import { useTerminalResizeV2 } from '@/hooks/use-terminal-resize-v2'
 import { isTerminalPendingPtyAssignment } from '@/hooks/use-terminal-restore'
-import { systemApi, terminalApi } from '@/lib/api'
+import { terminalApi } from '@/lib/api'
 import { openTerminalUrl } from '@/lib/browser/terminal-url-navigation'
 import { buildTerminalPathLinks, openFilePathFromTerminal } from '@/lib/file-path-links'
-import { isMac, isPlatformModifier } from '@/lib/platform'
-import { addRendererRef, removeRendererRef } from '@/lib/tauri-terminal-api'
+import { MONO_STACK } from '@/lib/font-stacks'
+import { logFrontendError } from '@/lib/log-api'
+import { ensureMonoFontLoaded, isMonoFontReady, MONO_FONT_LOAD_TIMEOUT_MS } from '@/lib/mono-font'
+import { isMac } from '@/lib/platform'
+import { isTauriContext } from '@/lib/tauri-runtime'
 import {
   getOrCreateProjectContinuityCorrelation,
   recordTerminalContinuityEvent
 } from '@/lib/terminal-continuity-instrumentation'
 import { buildTerminalUrlLinks, isSupportedTerminalUrl } from '@/lib/terminal-url-links'
 import { applyThemeToTerminal, getActiveTerminalTheme } from '@/lib/themes'
+import { getTerminalSearchDecorations } from '@/lib/themes/terminal-search-decorations'
+import { isWebTerminalBufferable, onWebTerminalSessionLost } from '@/lib/web-terminal-api'
+import { useAcpStore } from '@/stores/acp-store'
 import {
   useTerminalBufferSize,
-  useTerminalFontFamily,
   useTerminalFontSize,
-  useTerminalRenderer
+  useTerminalRenderer,
+  useTerminalScreenReaderMode
 } from '@/stores/app-settings-store'
-import { matchesShortcut, useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
-import { useActiveProject } from '@/stores/project-store'
+import { useConnectionStatusStore } from '@/stores/connection-status-store'
+import { useKeyboardShortcutsStore } from '@/stores/keyboard-shortcuts-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useTerminalStore } from '@/stores/terminal-store'
-import type { TerminalSpawnOptions } from '../../../shared/types/ipc.types'
+import { useProjectPaneContext } from '@/stores/workspace-store/pane-context'
+import type { TerminalModes, TerminalSpawnOptions } from '../../../shared/types/ipc.types'
 import {
+  buildRehydrateSequences,
   captureScrollPosition,
+  clearScrollPosition,
   registerTerminal,
   restoreScrollback,
   restoreScrollPosition,
   unregisterTerminal
 } from '../../utils/terminal-registry'
+import { handleTerminalClipboardKey } from './clipboard'
+import { getInstrumentationProjectId, PARTIAL_RESTORE_NOTE } from './instrumentation'
+import { isAppOwnedTerminalShortcut, SHORTCUT_MOD, trapTerminalTabFocusNavigation } from './keymap'
+import { TerminalAssistPanel, type TerminalAssistPanelState } from './TerminalAssistPanel'
 import { cacheTerminal, takeCachedTerminal } from './terminal-cache'
 import { getTerminalOptions } from './terminal-config'
-
-// Common readline/shell Ctrl sequences that should always pass through to the
-// PTY regardless of platform. On macOS these are already protected by the
-// isMac guard, but on Windows/Linux they would otherwise be swallowed when a
-// matching app shortcut exists (e.g. commandPalette=ctrl+k, commandHistory=ctrl+r).
-const READLINE_PASSTHROUGH_KEYS = new Set([
-  'a', // Ctrl+A  move to beginning of line
-  'e', // Ctrl+E  move to end of line
-  'k', // Ctrl+K  kill to end of line
-  'r', // Ctrl+R  reverse-i-search
-  'f', // Ctrl+F  move forward one char
-  'b', // Ctrl+B  move back one char
-  'w', // Ctrl+W  delete previous word
-  'u', // Ctrl+U  delete to beginning of line
-  'p', // Ctrl+P  previous history entry
-  'n', // Ctrl+N  next history entry
-  'l', // Ctrl+L  clear screen
-  'd' // Ctrl+D  EOF / delete char
-])
-
-function isReadlinePassthrough(event: KeyboardEvent): boolean {
-  return (
-    event.ctrlKey &&
-    !event.metaKey &&
-    !event.shiftKey &&
-    !event.altKey &&
-    READLINE_PASSTHROUGH_KEYS.has(event.key.toLowerCase())
-  )
-}
-
-function isAppOwnedTerminalShortcut(
-  event: KeyboardEvent,
-  shortcuts: ReturnType<typeof useKeyboardShortcutsStore.getState>['shortcuts']
-): boolean {
-  // 1. App shortcuts take priority over readline passthrough.
-  // This ensures commandPalette, commandHistory, etc. work from terminal
-  // focus even though their Ctrl+key also matches a readline binding.
-  for (const shortcut of Object.values(shortcuts)) {
-    const activeKey = shortcut.customKey ?? shortcut.defaultKey
-    if (matchesShortcut(event, activeKey)) {
-      return true
-    }
-  }
-
-  // 2. No app shortcut matched — check readline passthrough.
-  // Ctrl+letter readline bindings must reach the PTY on every platform.
-  // On macOS the isMac guard in matchesShortcut already prevents Ctrl+key
-  // from matching app shortcuts, so the readline behavior is preserved.
-  if (isReadlinePassthrough(event)) {
-    return false
-  }
-
-  return false
-}
-
-/** Prevent browser reverse-tab focus traversal; xterm still handles Tab / Shift+Tab. */
-function trapTerminalTabFocusNavigation(event: KeyboardEvent): boolean {
-  if (event.key !== 'Tab') {
-    return false
-  }
-  event.preventDefault()
-  return true
-}
-
-const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
-const WEBGL_CONTEXT_LOSS_RECOVERY_DELAY_MS = 100
-const VISIBILITY_RECOVERY_DELAY_MS = 150
-const POWER_RESUME_RECOVERY_DELAY_MS = 300
-const ACTIVITY_DEBOUNCE_MS = 1000
-const CLIPBOARD_RATE_LIMIT_MS = 100
-
-const shouldUseWebglRenderer = (rendererPreference: 'auto' | 'webgl' | 'dom'): boolean =>
-  rendererPreference !== 'dom'
+import { useTerminalFit } from './use-terminal-fit'
+import {
+  describeWebglContext,
+  getDevicePixelRatio,
+  MAX_WEBGL_RECOVERY_ATTEMPTS,
+  resyncWebglDimensions,
+  shouldUseWebglRenderer,
+  useWebglRecovery,
+  WEBGL_CONTEXT_LOSS_RECOVERY_DELAY_MS
+} from './use-webgl-recovery'
+import { bindXtermTouchTapFocus } from './xterm-touch-tap-focus'
 
 export interface TerminalSearchHandle {
   findNext: (term: string) => boolean
@@ -144,16 +101,42 @@ export interface ConnectedTerminalProps {
   className?: string
   autoFocus?: boolean
   initialScrollback?: string[]
+  /**
+   * R3: captured DEC private-mode snapshot to replay before `initialScrollback`
+   * on terminal mount, so an alt-screen TUI (vim/tmux/less) restores its
+   * screen/modes. Optional — absence degrades to content-only restore.
+   */
+  initialModes?: TerminalModes | null
   searchRef?: React.Ref<TerminalSearchHandle>
   isVisible?: boolean
 }
 
-const PARTIAL_RESTORE_NOTE =
-  '\x1b[33m\r\n[Restore note: alternate-screen or redraw-heavy output may be partially reconstructed from transcript replay]\x1b[0m\r\n'
-
-function getInstrumentationProjectId(spawnOptions?: TerminalSpawnOptions): string | undefined {
-  const candidate = spawnOptions?.projectId
-  return typeof candidate === 'string' ? candidate : undefined
+/**
+ * Snapshot the DEC private modes a cached xterm currently holds, as the
+ * `TerminalModes` that `buildRehydrateSequences` replays. Read before
+ * `terminal.reset()` wipes them, so a trimmed missed-output tail lands in the
+ * same alt-screen/paste/cursor/mouse state the app left the terminal in.
+ * xterm's public `modes` does not expose the mouse encoding (1006/1016), so
+ * only the tracking mode itself is restored; a full tail re-emits the rest.
+ */
+function snapshotXtermModes(terminal: Terminal): TerminalModes {
+  const { modes } = terminal
+  const mouseTracking: TerminalModes['mouseTracking'] =
+    modes.mouseTrackingMode === 'drag'
+      ? 'drag'
+      : modes.mouseTrackingMode === 'any'
+        ? 'any'
+        : modes.mouseTrackingMode === 'none'
+          ? null
+          : // xterm 'vt200' (DEC 1000) and 'x10' (DEC 9) both map to the
+            // registry's 'x10', which replays DEC 1000.
+            'x10'
+  return {
+    alternateScreen: terminal.buffer.active.type === 'alternate',
+    bracketedPaste: modes.bracketedPasteMode,
+    applicationCursor: modes.applicationCursorKeysMode,
+    mouseTracking
+  }
 }
 
 function ConnectedTerminalComponent({
@@ -169,6 +152,7 @@ function ConnectedTerminalComponent({
   className = '',
   autoFocus = true,
   initialScrollback,
+  initialModes,
   searchRef,
   isVisible = true
 }: ConnectedTerminalProps): React.JSX.Element {
@@ -186,13 +170,41 @@ function ConnectedTerminalComponent({
     })
   )
 
-  const fontFamily = useTerminalFontFamily()
   const fontSize = useTerminalFontSize()
+  // Stay false until Paper Mono can be measured, so the first xterm fit uses
+  // the real glyph width. Runtimes without the Font Loading API start ready.
+  const [monoFontReady, setMonoFontReady] = useState(() => isMonoFontReady(fontSize))
   const bufferSize = useTerminalBufferSize()
   const rendererPreference = useTerminalRenderer()
-  const activeProject = useActiveProject()
+  // Read at construction only (both terminalOptions merges below): a live
+  // terminal never gets `options.screenReaderMode` toggled, so a flip applies
+  // to new terminals only.
+  const screenReaderMode = useTerminalScreenReaderMode()
+  // Story 2 mobile stopgap: on the mobile web shell (browser, viewport
+  // <= MOBILE_WEB_SHELL_MAX_PX) the 'auto' renderer default resolves to the
+  // DOM renderer — WebGL paints zero pixels at DPR >= 3 (QA repro). Explicit
+  // 'webgl'/'dom' is honored verbatim; desktop is unchanged ('auto' → WebGL).
+  const isMobileWebShell = useMobileWebShell()
+  const effectiveRendererPreference: 'auto' | 'webgl' | 'dom' =
+    isMobileWebShell && rendererPreference === 'auto' ? 'dom' : rendererPreference
+  // The project this terminal's tree belongs to: a hidden ProjectTreeHost keeps
+  // its own project (not the visible one) for the spawn root path.
+  const hostProjectId = useProjectPaneContext()?.projectId
+  // Selects the path (a string), so a hidden terminal does not render again
+  // when a project switch rebuilds the project objects.
+  const treeProjectPath = useProjectStore(
+    (state) => state.projects.find((p) => p.id === (hostProjectId || state.activeProjectId))?.path
+  )
   const shortcuts = useKeyboardShortcutsStore((state) => state.shortcuts)
-
+  // Story 10 (F1/F10): terminal-channel health — drives the non-blocking
+  // reconnect/disconnected overlay. Stays 'connected' on Tauri desktop (the
+  // store is web-only), so desktop rendering is unchanged.
+  const terminalChannel = useConnectionStatusStore((state) => state.terminalChannel)
+  // #850: whether THIS terminal's session died (server restart — the
+  // channel reconnected but the claim was rejected, so the PTY is gone).
+  // Web-only by construction (the listener comes from the web terminal
+  // client); stays false on Tauri where no WS channel exists.
+  const [sessionLost, setSessionLost] = useState(false)
   // 3. REFS
   const instanceIdRef = useRef<string>(`conn-${Math.random().toString(36).slice(2, 9)}`)
   const instanceId = instanceIdRef.current
@@ -202,29 +214,29 @@ function ConnectedTerminalComponent({
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const webglAddonRef = useRef<WebglAddon | null>(null)
   const fileLinkProviderDisposableRef = useRef<IDisposable | null>(null)
-  const webglRecoveryAttemptsRef = useRef<number>(0)
-  const webglRecoveryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const loadWebglAddonRef = useRef<((term: Terminal, isRecovery?: boolean) => void) | null>(null)
-  const webglContextLostRef = useRef<boolean>(false)
-  // Single-flight guard for performTerminalRecovery. On a window restore both
-  // the visibilitychange and focus handlers (and sometimes power-resume) can
-  // fire close together; without this guard each would start its own
-  // layout-wait RAF loop and overlapping fit + visibility-flip cycles.
-  const recoveryInProgressRef = useRef<boolean>(false)
   // Track visibility prop for recovery path guards (tab-active, not window-visible).
   // Ref avoids stale closures in event listeners referencing isVisible directly.
   const isVisibleRef = useRef(isVisible)
   isVisibleRef.current = isVisible
-  const rendererPreferenceRef = useRef(rendererPreference)
-  rendererPreferenceRef.current = rendererPreference
-  const activeProjectPathRef = useRef<string | undefined>(activeProject?.path)
-  activeProjectPathRef.current = activeProject?.path
+  // Story 2: the ref tracks the EFFECTIVE preference (mobile 'auto'→'dom'
+  // flip applied), so every guard — init, addon load, recovery, visibility
+  // restore — honors the mobile stopgap without per-site changes.
+  const rendererPreferenceRef = useRef(effectiveRendererPreference)
+  rendererPreferenceRef.current = effectiveRendererPreference
+  // Story 2: mobile-shell flag ref so event-listener closures (init,
+  // recovery, visibility restore) read fresh state without re-subscribing.
+  const isMobileWebShellRef = useRef(isMobileWebShell)
+  isMobileWebShellRef.current = isMobileWebShell
+  const activeProjectPathRef = useRef<string | undefined>(treeProjectPath)
+  activeProjectPathRef.current = treeProjectPath
   const shortcutsRef = useRef(shortcuts)
   shortcutsRef.current = shortcuts
   const cleanupDataListenerRef = useRef<(() => void) | null>(null)
   const cleanupExitListenerRef = useRef<(() => void) | null>(null)
   const ptyIdRef = useRef<string | null>(null)
   const spawnInFlightRef = useRef(false)
+  // #850: guards the dead-session Restart handler against double-clicks.
+  const respawnInFlightRef = useRef(false)
   const didInitRef = useRef(false)
   const initializedTerminalIdRef = useRef<string | undefined>(undefined)
   const onExitRef = useRef(onExit)
@@ -241,39 +253,67 @@ function ConnectedTerminalComponent({
   spawnOptionsRef.current = spawnOptions
   const initialScrollbackRef = useRef(initialScrollback)
   initialScrollbackRef.current = initialScrollback
+  // R3: keep the latest captured modes in a ref so the second init path
+  // (window-recovery spawnTerminal) reads the current value.
+  const initialModesRef = useRef(initialModes)
+  initialModesRef.current = initialModes
   const currentLineRef = useRef<string>('')
   const continuityProjectIdRef = useRef<string | undefined>(
     getInstrumentationProjectId(spawnOptions)
   )
-  const needsResizeOnReadyRef = useRef<boolean>(false)
-  // Track last fitted container dimensions to avoid redundant fit() calls
-  const lastContainerWidthRef = useRef<number>(0)
-  const lastContainerHeightRef = useRef<number>(0)
-  const activityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastActivityUpdateRef = useRef<number>(0)
-  const pendingActivityUpdateRef = useRef<{ id: string } | null>(null)
   const lastClipboardOpRef = useRef<number>(0)
-
-  /** Clear sidebar activity indicator when this view unmounts (e.g. tab switch). */
-  const clearTerminalActivityOnUnmount = useCallback((): void => {
-    if (activityTimeoutRef.current) {
-      clearTimeout(activityTimeoutRef.current)
-      activityTimeoutRef.current = null
+  // Story 10: write-failure toasts are deduped by error code within one
+  // outage episode (a held key would otherwise spam one toast per
+  // keystroke). Reset on the next successful write or channel recovery.
+  const lastWriteFailureToastRef = useRef<string | null>(null)
+  // Story 10 (F10): surface write failures visibly — a toast deduped by
+  // error code (one per outage episode, reset on the next DELIVERED write —
+  // a buffered offline write's local success does not reset the episode — or
+  // on channel recovery) so a held key can't spam. Web-only: on Tauri the
+  // write path is direct IPC and keeps its pre-existing behavior (the
+  // `onError` callback still fires there — only the toast is web-scoped).
+  const reportWriteFailure = useCallback((code: string | undefined, message: string): void => {
+    const key = code ?? 'UNKNOWN_ERROR'
+    if (lastWriteFailureToastRef.current !== key) {
+      lastWriteFailureToastRef.current = key
+      if (!isTauriContext()) toast.error(message)
+      // Durable failure log per DEDUP EPISODE (not per keystroke) — mirrors
+      // the toast cadence. Metadata only: error code, never the input.
+      void logFrontendError({
+        level: 'warn',
+        source: 'ConnectedTerminal.reportWriteFailure',
+        message: `terminal write failed (${key}) — user notified (dedup episode started)`
+      })
     }
-    pendingActivityUpdateRef.current = null
-    lastActivityUpdateRef.current = 0
+    onErrorRef.current?.(message)
+  }, [])
 
-    const store = useTerminalStore.getState()
-    const storeTerminalId =
-      (ptyIdRef.current ? store.findTerminalByPtyId(ptyIdRef.current)?.id : undefined) ??
-      (targetId
-        ? (store.terminals.find((t) => t.id === targetId)?.id ??
-          store.findTerminalByPtyId(targetId)?.id)
-        : undefined)
+  // Story 10: channel recovery starts a new episode — the next failure
+  // toasts again.
+  useEffect(() => {
+    if (terminalChannel === 'connected') lastWriteFailureToastRef.current = null
+  }, [terminalChannel])
 
-    if (storeTerminalId) {
-      store.updateTerminalActivityBatch(storeTerminalId, false, Date.now())
-    }
+  // #850: subscribe to per-terminal session loss (web only — the module
+  // export exists only on the web transport; on Tauri the import is a
+  // no-op stub that never fires). A loss marks THIS terminal dead when it
+  // matches our live ptyId or the store terminal's bound ptyId, showing
+  // the dead-session overlay instead of silently rejecting keystrokes.
+  useEffect(() => {
+    const unsubscribe = onWebTerminalSessionLost((lostPtyId) => {
+      const storePtyId = targetId
+        ? useTerminalStore.getState().terminals.find((t) => t.id === targetId)?.ptyId
+        : undefined
+      const currentPtyId = ptyIdRef.current || storePtyId
+      if (lostPtyId === currentPtyId) {
+        setSessionLost(true)
+        // Mark the store record so tab-level indicators see the loss.
+        if (targetId) {
+          useTerminalStore.getState().setTerminalHealthStatus(targetId, 'disconnected')
+        }
+      }
+    })
+    return unsubscribe
   }, [targetId])
 
   // Two-stage resize pipeline: 8ms fit debounce + 256ms PTY resize debounce
@@ -296,47 +336,11 @@ function ConnectedTerminalComponent({
   })
 
   const [terminalInstance, setTerminalInstance] = useState<Terminal | null>(null)
+  // Inline terminal AI assist (#259): null = hidden panel.
+  const [assistPanel, setAssistPanel] = useState<TerminalAssistPanelState | null>(null)
   useTerminalColorTheme(terminalInstance)
 
   // 5. CALLBACKS & EFFECTS
-  const disposeWebglAddon = useCallback((): void => {
-    if (webglRecoveryTimeoutRef.current) {
-      clearTimeout(webglRecoveryTimeoutRef.current)
-      webglRecoveryTimeoutRef.current = null
-    }
-    if (webglAddonRef.current) {
-      webglAddonRef.current.dispose()
-      webglAddonRef.current = null
-    }
-    webglContextLostRef.current = false
-  }, [])
-
-  const performFit = (force = false): boolean => {
-    if (!fitAddonRef.current || !terminalRef.current || !containerRef.current) return false
-    const rect = containerRef.current.getBoundingClientRect()
-    const width = Math.round(rect.width)
-    const height = Math.round(rect.height)
-    if (
-      !force &&
-      width > 0 &&
-      height > 0 &&
-      width === lastContainerWidthRef.current &&
-      height === lastContainerHeightRef.current
-    ) {
-      return false
-    }
-    try {
-      fitAddonRef.current.fit()
-      if (width > 0 && height > 0) {
-        lastContainerWidthRef.current = width
-        lastContainerHeightRef.current = height
-      }
-      return true
-    } catch {
-      return false
-    }
-  }
-
   const { copySelection, pasteFromClipboard, hasSelection } = useTerminalClipboard({
     terminal: terminalInstance,
     pasteText: async (text: string) => {
@@ -344,24 +348,94 @@ function ConnectedTerminalComponent({
       if (!ptyId) return
       try {
         const result = await terminalApi.write(ptyId, text)
-        if (!result.success && onErrorRef.current) {
-          onErrorRef.current(result.error)
+        if (!result.success) {
+          reportWriteFailure(result.code, result.error)
+        } else if (useConnectionStatusStore.getState().terminalChannel === 'connected') {
+          // Reset the toast episode only on a write the server could actually
+          // have received — a buffered offline write's local success must not
+          // start a new dedup episode (the outage is still in progress).
+          lastWriteFailureToastRef.current = null
         }
       } catch (err) {
-        if (onErrorRef.current) {
-          onErrorRef.current(err instanceof Error ? err.message : 'Paste write failed')
-        }
+        reportWriteFailure(undefined, err instanceof Error ? err.message : 'Paste write failed')
       }
     },
     onImagePaste: async () => {
       const ptyId = ptyIdRef.current
       if (!ptyId) return
       // Send Ctrl+V byte to PTY - CLI apps like OpenCode read the OS clipboard directly
-      await terminalApi.write(ptyId, '\x16')
+      try {
+        const result = await terminalApi.write(ptyId, '\x16')
+        if (!result.success) {
+          reportWriteFailure(result.code, result.error)
+        }
+      } catch (err) {
+        reportWriteFailure(undefined, err instanceof Error ? err.message : 'Image paste failed')
+      }
     }
   })
   const copySelectionRef = useRef(copySelection)
   copySelectionRef.current = copySelection
+
+  // #259: inline terminal AI assist — runs against the user's configured
+  // agent in a hidden one-shot ACP session (see acp-store.assistTerminal).
+  const runTerminalAssist = useCallback(
+    async (kind: 'explain' | 'fix') => {
+      const selection = terminalInstance?.getSelection()?.trim() ?? ''
+      const record = ptyIdRef.current
+        ? useTerminalStore.getState().findTerminalByPtyId(ptyIdRef.current)
+        : undefined
+      if (!selection || !record?.cwd) {
+        setAssistPanel({
+          kind,
+          status: 'error',
+          error: 'Select some terminal output first'
+        })
+        return
+      }
+      setAssistPanel({ kind, status: 'loading' })
+      try {
+        const text = await useAcpStore
+          .getState()
+          .assistTerminal(kind, record.cwd, selection, record.lastExitCode ?? null)
+        // Functional update: if the user closed the panel while the request
+        // was in flight, the settled response must not reopen it (#689
+        // review).
+        setAssistPanel((prev) => (prev ? { kind, status: 'done', text } : prev))
+      } catch (error) {
+        setAssistPanel((prev) => (prev ? { kind, status: 'error', error: String(error) } : prev))
+      }
+    },
+    [terminalInstance]
+  )
+
+  // #259: insertion only — the suggested command lands at the prompt for
+  // review and is never executed automatically (no trailing newline).
+  // Defense in depth: anything carrying a newline/control character is
+  // refused outright — `terminalApi.write` feeds the PTY directly.
+  const insertAssistCommand = useCallback(async (command: string) => {
+    const ptyId = ptyIdRef.current
+    if (!ptyId) return
+    for (const ch of command) {
+      const code = ch.charCodeAt(0)
+      if (code < 0x20 || code === 0x7f) {
+        if (onErrorRef.current) {
+          onErrorRef.current('Refused to insert a command containing control characters')
+        }
+        return
+      }
+    }
+    try {
+      const result = await terminalApi.write(ptyId, command)
+      if (!result.success && onErrorRef.current) {
+        onErrorRef.current(result.error)
+      }
+    } catch (err) {
+      if (onErrorRef.current) {
+        onErrorRef.current(err instanceof Error ? err.message : 'Insert failed')
+      }
+    }
+  }, [])
   const pasteFromClipboardRef = useRef(pasteFromClipboard)
   pasteFromClipboardRef.current = pasteFromClipboard
 
@@ -405,47 +479,51 @@ function ConnectedTerminalComponent({
   )
 
   // Handle input from xterm to PTY
-  const handleTerminalData = useCallback(async (data: string): Promise<void> => {
-    const ptyId = ptyIdRef.current
-    if (!ptyId) return
+  const handleTerminalData = useCallback(
+    async (data: string): Promise<void> => {
+      const ptyId = ptyIdRef.current
+      if (!ptyId) return
 
-    // Track command input for history
-    if (data === '\r' || data === '\n') {
-      // Enter pressed - capture command
-      const command = currentLineRef.current
-      currentLineRef.current = ''
-      if (command && onCommandRef.current) {
-        onCommandRef.current(command)
+      // Track command input for history
+      if (data === '\r' || data === '\n') {
+        // Enter pressed - capture command
+        const command = currentLineRef.current
+        currentLineRef.current = ''
+        if (command && onCommandRef.current) {
+          onCommandRef.current(command)
+        }
+      } else if (data === '\x7f' || data === '\b') {
+        // Backspace
+        currentLineRef.current = currentLineRef.current.slice(0, -1)
+      } else if (data === '\x03') {
+        // Ctrl+C - clear current line
+        currentLineRef.current = ''
+      } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // Printable character
+        currentLineRef.current += data
+      } else if (data.length > 1) {
+        // Pasted text
+        currentLineRef.current += data
       }
-    } else if (data === '\x7f' || data === '\b') {
-      // Backspace
-      currentLineRef.current = currentLineRef.current.slice(0, -1)
-    } else if (data === '\x03') {
-      // Ctrl+C - clear current line
-      currentLineRef.current = ''
-    } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-      // Printable character
-      currentLineRef.current += data
-    } else if (data.length > 1) {
-      // Pasted text
-      currentLineRef.current += data
-    }
 
-    try {
-      const result = await terminalApi.write(ptyId, data)
-      if (!result.success && onErrorRef.current) {
-        onErrorRef.current(result.error)
+      try {
+        const result = await terminalApi.write(ptyId, data)
+        if (!result.success) {
+          reportWriteFailure(result.code, result.error)
+        } else if (useConnectionStatusStore.getState().terminalChannel === 'connected') {
+          lastWriteFailureToastRef.current = null
+        }
+      } catch (err) {
+        reportWriteFailure(undefined, err instanceof Error ? err.message : 'Write failed')
       }
-    } catch (err) {
-      if (onErrorRef.current) {
-        onErrorRef.current(err instanceof Error ? err.message : 'Write failed')
-      }
-    }
-  }, [])
+    },
+    [reportWriteFailure]
+  )
 
   // Initialize terminal, set up IPC listeners, and spawn PTY
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally narrow deps; a full list would recreate the terminal instance on every render
   useEffect(() => {
+    if (!monoFontReady) return
     const debugId = `${instanceId}-${Date.now().toString().slice(-6)}`
 
     devLog(`[ConnectedTerminal] MOUNT [${debugId}]`, {
@@ -484,9 +562,10 @@ function ConnectedTerminalComponent({
     // Merge platform-aware options with dynamic app settings
     const terminalOptions = {
       ...getTerminalOptions(navigator.platform),
-      fontFamily,
+      fontFamily: MONO_STACK,
       fontSize,
-      scrollback: bufferSize
+      scrollback: bufferSize,
+      screenReaderMode
     }
 
     // Check for a cached terminal preserved across project switches.
@@ -574,6 +653,8 @@ function ConnectedTerminalComponent({
       if (containerRef.current && terminal.element) {
         containerRef.current.appendChild(terminal.element)
       }
+      // Idempotent: a terminal opened in this session already has the listener.
+      bindXtermTouchTapFocus(terminal)
 
       // Note: the actual fix for "frozen terminal after rapid project
       // switches" lives in terminal-cache.ts (cacheTerminal disposes any
@@ -589,6 +670,7 @@ function ConnectedTerminalComponent({
       terminal.refresh(0, terminal.rows - 1)
     } else {
       terminal.open(containerRef.current)
+      bindXtermTouchTapFocus(terminal)
     }
 
     // Intercept keyboard shortcuts before xterm processes them
@@ -618,46 +700,12 @@ function ConnectedTerminalComponent({
       // Handle copy/paste/select all keyboard shortcuts
       // macOS convention: ⌘+C/V/A for clipboard operations, Ctrl+C = SIGINT
       // Windows/Linux convention: Ctrl+C/V/A for everything
-      const clipboardModifier = isPlatformModifier(event)
-
-      if (clipboardModifier) {
-        // Rate limit check
-        const now = Date.now()
-        if (now - lastClipboardOpRef.current < CLIPBOARD_RATE_LIMIT_MS) {
-          return false // Rate limited - prevent xterm handling but don't process
-        }
-
-        switch (event.key.toLowerCase()) {
-          case 'c':
-            // Copy: if selection exists, copy and prevent xterm handling
-            // Otherwise allow xterm to handle (for interrupt signal)
-            if (terminal.hasSelection()) {
-              event.preventDefault()
-              const selection = terminal.getSelection()
-              if (selection) {
-                lastClipboardOpRef.current = now
-                // Use the hook's copySelection for consistency
-                void copySelection()
-              }
-              return false
-            }
-            // No selection - allow xterm to send Ctrl+C (interrupt signal)
-            return true
-
-          case 'v':
-            // Paste: read clipboard and paste to terminal
-            event.preventDefault()
-            lastClipboardOpRef.current = now
-            // Use the hook's pasteFromClipboard for consistency
-            void pasteFromClipboard()
-            return false
-
-          case 'a':
-            // Select all
-            terminal.selectAll()
-            return false
-        }
-      }
+      const clipboardResult = handleTerminalClipboardKey(event, terminal, lastClipboardOpRef, {
+        copySelection,
+        pasteFromClipboard,
+        copyRequiresNonEmptySelection: true
+      })
+      if (clipboardResult !== undefined) return clipboardResult
 
       if (trapTerminalTabFocusNavigation(event)) {
         return true
@@ -688,7 +736,7 @@ function ConnectedTerminalComponent({
 
     // WebGL addon loading with context loss recovery
     const loadWebglAddon = (term: Terminal, isRecovery: boolean = false): void => {
-      if (!shouldUseWebglRenderer(rendererPreferenceRef.current)) {
+      if (!shouldUseWebglRenderer(rendererPreferenceRef.current, isMobileWebShellRef.current)) {
         webglAddonRef.current = null
         return
       }
@@ -723,9 +771,10 @@ function ConnectedTerminalComponent({
         webglAddon.onContextLoss(() => {
           webglAddon.dispose()
           webglAddonRef.current = null
+          webglDprWatchedRef.current = 0
           // Mark context as lost for recovery decisions
           webglContextLostRef.current = true
-          if (!shouldUseWebglRenderer(rendererPreferenceRef.current)) {
+          if (!shouldUseWebglRenderer(rendererPreferenceRef.current, isMobileWebShellRef.current)) {
             webglContextLostRef.current = false
             return
           }
@@ -747,6 +796,20 @@ function ConnectedTerminalComponent({
         webglContextLostRef.current = false
         if (!isRecovery) {
           webglRecoveryAttemptsRef.current = 0
+        }
+        // Story 3 (P0, blank canvas at DPR >= 3): force a dimensions re-sync
+        // at the CURRENT devicePixelRatio after load — see resyncWebglDimensions.
+        // A throw degrades to the failure log (log-api), never a crash.
+        try {
+          resyncWebglDimensions(term)
+          webglDprWatchedRef.current = getDevicePixelRatio()
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          void logFrontendError({
+            level: 'error',
+            source: 'ConnectedTerminal.loadWebglAddon',
+            message: `WebGL dimensions re-sync failed after addon load: ${message} (${describeWebglContext(term)})`
+          })
         }
         recordTerminalContinuityEvent({
           name: 'renderer-recovery-succeeded',
@@ -775,7 +838,7 @@ function ConnectedTerminalComponent({
       }
     }
 
-    if (shouldUseWebglRenderer(rendererPreferenceRef.current)) {
+    if (shouldUseWebglRenderer(rendererPreferenceRef.current, isMobileWebShellRef.current)) {
       loadWebglAddon(terminal)
     }
     // Store reference for recovery handlers to use
@@ -812,37 +875,7 @@ function ConnectedTerminalComponent({
           }
         }
         if (cachedTerminalId) {
-          const now = Date.now()
-          const timeSinceLastUpdate = now - lastActivityUpdateRef.current
-
-          // If enough time has passed since last update, update immediately
-          if (timeSinceLastUpdate >= ACTIVITY_DEBOUNCE_MS) {
-            useTerminalStore.getState().updateTerminalActivityBatch(cachedTerminalId, true, now)
-            lastActivityUpdateRef.current = now
-          } else {
-            // Otherwise, store pending update for later
-            pendingActivityUpdateRef.current = { id: cachedTerminalId }
-          }
-
-          // Clear existing activity timeout and set new one
-          if (activityTimeoutRef.current) {
-            clearTimeout(activityTimeoutRef.current)
-          }
-          const termId = cachedTerminalId
-          activityTimeoutRef.current = setTimeout(() => {
-            // Flush any pending activity update
-            if (pendingActivityUpdateRef.current) {
-              useTerminalStore
-                .getState()
-                .updateTerminalActivityBatch(pendingActivityUpdateRef.current.id, false, Date.now())
-              pendingActivityUpdateRef.current = null
-            } else {
-              // Clear activity after 2 seconds of inactivity
-              useTerminalStore.getState().updateTerminalActivityBatch(termId, false, Date.now())
-            }
-            activityTimeoutRef.current = null
-            lastActivityUpdateRef.current = 0
-          }, 2000)
+          noteTerminalActivity(cachedTerminalId)
         }
       }
     })
@@ -886,8 +919,10 @@ function ConnectedTerminalComponent({
         hasPtyId: !!ptyIdRef.current
       })
 
-      // Fit to get real dimensions BEFORE spawning
-      performFit(true)
+      // Fit to get real dimensions BEFORE spawning. A restored cached xterm
+      // skips this: the output it missed while detached must be parsed at the
+      // size it was produced first, so its fit runs after that write (#1123).
+      if (!cachedTerminal) performFit(true)
       const spawnCols = terminal.cols || 80
       const spawnRows = terminal.rows || 24
 
@@ -904,6 +939,7 @@ function ConnectedTerminalComponent({
         }
       } else if (isTerminalPendingPtyAssignment(externalTerminalId)) {
         devLog(`SKIP autoSpawn: terminal ${externalTerminalId} pending PTY assignment from restore`)
+        if (cachedTerminal) performFit(true)
         return
       }
 
@@ -934,7 +970,6 @@ function ConnectedTerminalComponent({
             // Update ref immediately so listener can start processing data
             ptyIdRef.current = result.data.id
             useTerminalStore.getState().setRendererAttached(result.data.id, true)
-            void addRendererRef(result.data.id, instanceIdRef.current)
             // If tab was visible before PTY was ready, flush deferred fit+resize now
             if (needsResizeOnReadyRef.current) {
               needsResizeOnReadyRef.current = false
@@ -962,12 +997,14 @@ function ConnectedTerminalComponent({
             try {
               if (transcript) {
                 if (transcriptLooksPartial) {
-                  if (!transcript.startsWith('\u001b[?1049h')) {
-                    terminal.write('\u001b[?1049h')
-                  }
+                  // R3: replay the full captured DEC mode set (alt-screen + bracketed-paste
+                  // + cursor + mouse), not just alt-screen — a partial/trimmed transcript
+                  // may miss the initial mode sequences. Idempotent with modes in the stream.
+                  terminal.write(buildRehydrateSequences(initialModesRef.current))
                   terminal.write(transcript)
                   terminal.write(PARTIAL_RESTORE_NOTE)
                 } else {
+                  terminal.write(buildRehydrateSequences(initialModesRef.current))
                   terminal.write(transcript)
                 }
                 terminalStoreState.consumeTranscript(result.data.id)
@@ -986,12 +1023,14 @@ function ConnectedTerminalComponent({
                   result.data.id
                 )
               } else if (initialScrollback && initialScrollback.length > 0) {
-                restoreScrollback(terminal, initialScrollback)
+                restoreScrollback(terminal, initialScrollback, initialModes)
                 recordReplayEvent(
                   'restore-replay-succeeded',
                   {
                     mode: 'scrollback',
                     initialScrollbackLineCount: initialScrollback.length,
+                    // R3: whether DEC mode rehydrate sequences were emitted.
+                    modesReplayed: Boolean(initialModes),
                     source: 'spawned-terminal'
                   },
                   storeTerminalId,
@@ -1042,6 +1081,12 @@ function ConnectedTerminalComponent({
             if (onBoundToStoreTerminalRef.current) {
               onBoundToStoreTerminalRef.current(result.data.id)
             }
+            // CAP-3: capture the issued lease into the terminal store
+            // (in-memory only). Runs after onBoundToStoreTerminal so the
+            // store record's ptyId is set and the linear scan finds it.
+            if (result.data.claim) {
+              useTerminalStore.getState().setTerminalClaim(result.data.id, result.data.claim)
+            }
           } else {
             const errorMsg = result.error || 'Unknown spawn error'
             console.error('[Terminal Spawn Failed]', errorMsg)
@@ -1069,116 +1114,197 @@ function ConnectedTerminalComponent({
         ptyIdRef.current = externalTerminalId
         // Renderer-attached tracking is handled by the externalTerminalId effect
         // above (with proper lifecycle cleanup). The effect also calls
-        // setRendererAttached, so we avoid duplicating it here. The backend ref
-        // (addRendererRef) is still registered here since it is async and not
-        // managed by the effect's lifecycle.
-        void addRendererRef(externalTerminalId, instanceIdRef.current)
+        // setRendererAttached, so we avoid duplicating it here.
         registerTerminal(externalTerminalId, terminal)
+        // Drain detached chunks still waiting for their coalescing frame, so the
+        // transcript read below holds everything this renderer missed, in
+        // order, and nothing lands in it after this remount (#1123).
+        flushDetachedOutputNow()
         const terminalStoreState = useTerminalStore.getState()
         const transcript = terminalStoreState.peekTranscript(externalTerminalId)
-        const transcriptLooksPartial =
-          transcript.includes('\u001b[?1049h') || transcript.includes('\u001b[?47h')
-        recordReplayEvent(
-          'restore-replay-attempted',
-          {
-            mode: transcript ? 'transcript' : initialScrollback?.length ? 'scrollback' : 'none',
-            transcriptLength: transcript.length,
-            initialScrollbackLineCount: initialScrollback?.length ?? 0,
-            source: 'external-terminal',
-            alternateScreenDetected: transcriptLooksPartial
-          },
-          storeTerminalId,
-          externalTerminalId
-        )
-        try {
-          if (cachedTerminal) {
-            // Cached terminal already has full state — skip transcript/scrollback replay.
-            // Still consume the transcript to prevent unbounded growth.
-            if (transcript) {
-              terminalStoreState.consumeTranscript(externalTerminalId)
-            }
-            recordReplayEvent(
-              'restore-replay-skipped',
-              {
-                reason: 'cached-terminal',
-                source: 'external-terminal'
-              },
-              storeTerminalId,
-              externalTerminalId
-            )
-          } else if (transcript) {
-            if (transcriptLooksPartial) {
-              if (!transcript.startsWith('\u001b[?1049h')) {
-                terminal.write('\u001b[?1049h')
-              }
-              terminal.write(transcript)
-              terminal.write(PARTIAL_RESTORE_NOTE)
-            } else {
-              terminal.write(transcript)
-            }
-            terminalStoreState.consumeTranscript(externalTerminalId)
-            recordReplayEvent(
-              'restore-replay-succeeded',
-              {
-                mode: 'transcript',
-                transcriptLength: transcript.length,
-                source: 'external-terminal',
-                fullFidelity: !transcriptLooksPartial,
-                restoreLimitation: transcriptLooksPartial
-                  ? 'alternate-screen-or-in-place-redraw'
-                  : undefined
-              },
-              storeTerminalId,
-              externalTerminalId
-            )
-          } else if (initialScrollback && initialScrollback.length > 0) {
-            restoreScrollback(terminal, initialScrollback)
-            recordReplayEvent(
-              'restore-replay-succeeded',
-              {
-                mode: 'scrollback',
-                initialScrollbackLineCount: initialScrollback.length,
-                source: 'external-terminal'
-              },
-              storeTerminalId,
-              externalTerminalId
-            )
-          } else {
-            recordReplayEvent(
-              'restore-replay-skipped',
-              {
-                reason: 'no-persisted-history',
-                source: 'external-terminal'
-              },
-              storeTerminalId,
-              externalTerminalId
-            )
-          }
-        } catch (error) {
-          const replayError = error instanceof Error ? error.message : String(error)
+        let cachedDeltaWritten = false
+        if (cachedTerminal) {
+          // Restored cached xterm (#1123 / #795): write exactly the bytes it
+          // missed while detached, in order, and nothing else, then refit.
+          // Write-then-fit matters: xterm's resize() flushes pending writes
+          // synchronously, so the delta parses at the size the PTY produced
+          // it and only then reflows to the new container.
+          const transcriptTrimmed =
+            terminalStoreState.findTerminalByPtyId(externalTerminalId)?.transcriptTrimmed === true
           recordReplayEvent(
-            'restore-replay-failed',
+            'restore-replay-attempted',
             {
-              mode: transcript ? 'transcript' : initialScrollback?.length ? 'scrollback' : 'none',
-              error: replayError,
-              source: 'external-terminal'
+              mode: transcript ? 'transcript' : 'none',
+              transcriptLength: transcript.length,
+              transcriptTrimmed,
+              source: 'cached-terminal'
             },
             storeTerminalId,
             externalTerminalId
           )
-          console.error('[Terminal Replay Failed]', replayError)
-          if (onErrorRef.current) onErrorRef.current(replayError)
+          try {
+            if (transcript) {
+              if (transcriptTrimmed) {
+                // The delta lost its head, so it no longer continues the screen
+                // this xterm holds; stacking the tail on it reproduces #795's
+                // overlap. Rebuild the way a fresh mount does: modes snapshotted
+                // before the reset wipes them, then the tail. No restore note:
+                // injected bytes shift a live TUI's cursor math.
+                const modes = snapshotXtermModes(terminal)
+                terminal.reset()
+                terminal.write(buildRehydrateSequences(modes))
+              }
+              terminal.write(transcript)
+              cachedDeltaWritten = true
+              // Consumes the transcript and clears the trimmed flag together.
+              terminalStoreState.consumeTranscript(externalTerminalId)
+              recordReplayEvent(
+                'restore-replay-succeeded',
+                {
+                  mode: 'transcript',
+                  transcriptLength: transcript.length,
+                  source: 'cached-terminal',
+                  fullFidelity: !transcriptTrimmed,
+                  restoreLimitation: transcriptTrimmed ? 'transcript-trimmed' : undefined
+                },
+                storeTerminalId,
+                externalTerminalId
+              )
+            } else {
+              // A trim that left nothing still sets the flag; clear it so the
+              // next detach's complete delta is not treated as headless.
+              if (transcriptTrimmed) terminalStoreState.consumeTranscript(externalTerminalId)
+              recordReplayEvent(
+                'restore-replay-skipped',
+                {
+                  reason: 'no-missed-output',
+                  source: 'cached-terminal'
+                },
+                storeTerminalId,
+                externalTerminalId
+              )
+            }
+          } catch (error) {
+            // The transcript is kept, so a later remount can still replay it.
+            const replayError = error instanceof Error ? error.message : String(error)
+            recordReplayEvent(
+              'restore-replay-failed',
+              {
+                mode: 'transcript',
+                error: replayError,
+                source: 'cached-terminal'
+              },
+              storeTerminalId,
+              externalTerminalId
+            )
+            console.error('[Terminal Replay Failed]', replayError)
+            if (onErrorRef.current) onErrorRef.current(replayError)
+          }
+          performFit(true)
+        } else {
+          const transcriptLooksPartial =
+            transcript.includes('\u001b[?1049h') || transcript.includes('\u001b[?47h')
+          recordReplayEvent(
+            'restore-replay-attempted',
+            {
+              mode: transcript ? 'transcript' : initialScrollback?.length ? 'scrollback' : 'none',
+              transcriptLength: transcript.length,
+              initialScrollbackLineCount: initialScrollback?.length ?? 0,
+              source: 'external-terminal',
+              alternateScreenDetected: transcriptLooksPartial
+            },
+            storeTerminalId,
+            externalTerminalId
+          )
+          try {
+            if (transcript) {
+              if (transcriptLooksPartial) {
+                // R3: replay the full captured DEC mode set, not just alt-screen.
+                terminal.write(buildRehydrateSequences(initialModesRef.current))
+                terminal.write(transcript)
+                terminal.write(PARTIAL_RESTORE_NOTE)
+              } else {
+                terminal.write(buildRehydrateSequences(initialModesRef.current))
+                terminal.write(transcript)
+              }
+              terminalStoreState.consumeTranscript(externalTerminalId)
+              recordReplayEvent(
+                'restore-replay-succeeded',
+                {
+                  mode: 'transcript',
+                  transcriptLength: transcript.length,
+                  source: 'external-terminal',
+                  fullFidelity: !transcriptLooksPartial,
+                  restoreLimitation: transcriptLooksPartial
+                    ? 'alternate-screen-or-in-place-redraw'
+                    : undefined
+                },
+                storeTerminalId,
+                externalTerminalId
+              )
+            } else if (initialScrollback && initialScrollback.length > 0) {
+              restoreScrollback(terminal, initialScrollback, initialModes)
+              recordReplayEvent(
+                'restore-replay-succeeded',
+                {
+                  mode: 'scrollback',
+                  initialScrollbackLineCount: initialScrollback.length,
+                  // R3: whether DEC mode rehydrate sequences were emitted.
+                  modesReplayed: Boolean(initialModes),
+                  source: 'external-terminal'
+                },
+                storeTerminalId,
+                externalTerminalId
+              )
+            } else {
+              recordReplayEvent(
+                'restore-replay-skipped',
+                {
+                  reason: 'no-persisted-history',
+                  source: 'external-terminal'
+                },
+                storeTerminalId,
+                externalTerminalId
+              )
+            }
+          } catch (error) {
+            const replayError = error instanceof Error ? error.message : String(error)
+            recordReplayEvent(
+              'restore-replay-failed',
+              {
+                mode: transcript ? 'transcript' : initialScrollback?.length ? 'scrollback' : 'none',
+                error: replayError,
+                source: 'external-terminal'
+              },
+              storeTerminalId,
+              externalTerminalId
+            )
+            console.error('[Terminal Replay Failed]', replayError)
+            if (onErrorRef.current) onErrorRef.current(replayError)
+          }
         }
         // Write one-time info line if project env vars were applied
-        // (env should be passed via spawnOptions by the caller if this terminal was spawned with env vars)
-        if (memoizedSpawnOptions?.env && Object.keys(memoizedSpawnOptions.env).length > 0) {
+        // (env should be passed via spawnOptions by the caller if this terminal was spawned with env vars).
+        // Never into a restored cached terminal: it already showed the line,
+        // and injected bytes shift a live TUI's cursor math (#795).
+        if (
+          !cachedTerminal &&
+          memoizedSpawnOptions?.env &&
+          Object.keys(memoizedSpawnOptions.env).length > 0
+        ) {
           const envCount = Object.keys(memoizedSpawnOptions.env).length
           terminal.write(
             `\x1b[36m\r\n[Project env: ${envCount} variable${envCount !== 1 ? 's' : ''} applied]\x1b[0m\r\n`
           )
         }
-        // Restore scroll position if cached from previous pane
-        restoreScrollPosition(externalTerminalId, terminal)
+        // Restore scroll position if cached from previous pane. Not after a
+        // cached delta write: the delta grew the buffer, so the pre-detach
+        // viewportY would pin the viewport above the new output.
+        if (cachedDeltaWritten) {
+          clearScrollPosition(externalTerminalId)
+        } else {
+          restoreScrollPosition(externalTerminalId, terminal)
+        }
         if (onBoundToStoreTerminalRef.current) {
           onBoundToStoreTerminalRef.current(externalTerminalId)
         }
@@ -1199,7 +1325,6 @@ function ConnectedTerminalComponent({
       if (terminalId && terminalRef.current) {
         captureScrollPosition(terminalId)
         useTerminalStore.getState().setRendererAttached(terminalId, false)
-        void removeRendererRef(terminalId, instanceId)
       }
 
       // Unregister terminal from registry
@@ -1259,229 +1384,103 @@ function ConnectedTerminalComponent({
       webglContextLostRef.current = false
       loadWebglAddonRef.current = null
     }
-  }, [])
+  }, [monoFontReady])
 
-  // Update terminal font settings when app settings change (without recreating terminal)
+  // Apply a font-size change after Paper Mono is measured. Family stays Paper Mono.
+  // Runtimes without the Font Loading API apply in this effect, same as before.
   // biome-ignore lint/correctness/useExhaustiveDependencies: performFit is render-stable by design
   useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.options.fontFamily = fontFamily
-      terminalRef.current.options.fontSize = fontSize
-      performFit(true)
+    let cancelled = false
+    const apply = () => {
+      if (cancelled) return
+      setMonoFontReady((ready) => (ready ? ready : true))
+      if (terminalRef.current) {
+        terminalRef.current.options.fontFamily = MONO_STACK
+        terminalRef.current.options.fontSize = fontSize
+        performFit(true)
+      }
     }
-  }, [fontFamily, fontSize])
 
-  useEffect(() => {
-    if (!shouldUseWebglRenderer(rendererPreference)) {
-      disposeWebglAddon()
-      webglRecoveryAttemptsRef.current = 0
+    if (typeof document === 'undefined' || typeof document.fonts?.load !== 'function') {
+      apply()
       return
     }
 
-    if (terminalRef.current && loadWebglAddonRef.current && !webglAddonRef.current) {
-      webglRecoveryAttemptsRef.current = 0
-      loadWebglAddonRef.current(terminalRef.current)
-    }
-  }, [disposeWebglAddon, rendererPreference])
-
-  // Trigger fit + PTY resize when terminal becomes visible
-  // Uses the two-stage resize pipeline via forceResizeFit,
-  // which skips both debounces for immediate responsiveness.
-  useEffect(() => {
-    if (isVisible && fitAddonRef.current && terminalRef.current) {
-      // Double RAF ensures DOM is fully rendered after pane transition
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          // Use forceResizeFit for immediate fit + PTY resize
-          // This bypasses both debounce stages for visibility changes
-          forceResizeFit()
-
-          const terminal = terminalRef.current
-          if (!terminal) return
-
-          // Only focus if no interactive element (button, input, etc.) currently has focus.
-          // This prevents stealing focus from TitleBar window controls when tab switch happens.
-          const active = document.activeElement
-          const isInteractiveElementFocused =
-            active &&
-            active !== document.body &&
-            (active.tagName === 'BUTTON' ||
-              active.tagName === 'INPUT' ||
-              active.tagName === 'TEXTAREA' ||
-              active.tagName === 'SELECT' ||
-              active.tagName === 'A')
-          if (!isInteractiveElementFocused) {
-            terminal.focus()
-          }
-
-          const ptyId = ptyIdRef.current
-          if (ptyId) {
-            // Restore scroll position after fit (in case of pane transition)
-            restoreScrollPosition(ptyId, terminal)
-          } else {
-            // PTY not ready yet — defer resize until spawn completes
-            needsResizeOnReadyRef.current = true
-          }
-        })
+    // A hung Font Loading API must not keep monoFontReady false forever.
+    let timedOut = false
+    let timer = 0
+    const timeout = new Promise<void>((resolve) => {
+      timer = window.setTimeout(() => {
+        timedOut = true
+        resolve()
+      }, MONO_FONT_LOAD_TIMEOUT_MS)
+    })
+    const load = ensureMonoFontLoaded(fontSize).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      void logFrontendError({
+        level: 'warn',
+        source: 'ConnectedTerminal.font',
+        message: `Paper Mono failed to load — terminal uses the monospace fallback (${message})`
       })
-    }
-  }, [isVisible, forceResizeFit])
+    })
 
-  // Shared terminal recovery logic - re-fit once layout is stable, then nudge
-  // the compositor to re-present the canvas layer.
-  const performTerminalRecovery = useCallback((): void => {
-    if (!fitAddonRef.current || !terminalRef.current) return
-
-    // Single-flight: if a recovery is already running (layout-wait poll or the
-    // trailing visibility-flip RAF), skip duplicate triggers. On a window
-    // restore both visibilitychange and focus typically fire close together.
-    if (recoveryInProgressRef.current) return
-    recoveryInProgressRef.current = true
-
-    // Cancel any pending WebGL auto-recovery timeout to avoid double-creation
-    // race with the genuine onContextLoss path.
-    if (webglRecoveryTimeoutRef.current) {
-      clearTimeout(webglRecoveryTimeoutRef.current)
-      webglRecoveryTimeoutRef.current = null
-    }
-
-    // Root cause (verified via live forensics + xterm.js #4841 / #5357):
-    //
-    // After minimize→restore on Windows the webview reflows over several
-    // frames. If fit() runs while the container height is still collapsed,
-    // the terminal grid shrinks to 1-2 rows (PTY redraws tiny → "1-2 lines"
-    // of text) until a later resize corrects it. The fit pipeline now guards
-    // against collapsed dimensions (use-terminal-resize-v2), so an early fit
-    // is a safe no-op rather than a destructive shrink.
-    //
-    // Additionally, the WebView2 compositor may not re-present the WebGL
-    // canvas layer after restore (xterm 6.x has no DOM-row fallback; the
-    // context itself stays healthy). A CSS visibility flip forces a
-    // re-composite — the same mechanism that makes tab-switching work.
-    //
-    // Strategy: wait for the container to report a usable size (poll across a
-    // few RAFs), then forceResizeFit + refresh, then flip visibility to
-    // guarantee the layer re-composites.
-    const termEl = terminalRef.current.element as HTMLElement | undefined
-    const container = containerRef.current
-
-    const MIN_USABLE = 40
-    const MAX_LAYOUT_WAIT_FRAMES = 30 // ~0.5s at 60fps
-
-    const runRecovery = (): void => {
-      const terminal = terminalRef.current
-      if (!terminal) {
-        recoveryInProgressRef.current = false
-        return
-      }
-      // Re-fit (guarded against collapsed dims) + redraw the buffer.
-      forceResizeFit()
-      terminal.refresh(0, terminal.rows - 1)
-
-      // Nudge the compositor to re-present the canvas layer. Clear the
-      // single-flight guard only after the trailing refresh completes.
-      if (termEl) {
-        termEl.style.visibility = 'hidden'
-        requestAnimationFrame(() => {
-          termEl.style.visibility = ''
-          const t = terminalRef.current
-          if (t) t.refresh(0, t.rows - 1)
-          recoveryInProgressRef.current = false
+    void Promise.race([load, timeout]).then(() => {
+      window.clearTimeout(timer)
+      if (timedOut) {
+        void logFrontendError({
+          level: 'warn',
+          source: 'ConnectedTerminal.font',
+          message: 'Paper Mono load timed out — terminal uses the monospace fallback'
         })
-      } else {
-        recoveryInProgressRef.current = false
       }
-    }
-
-    // Wait until the container has reflowed to a usable size before fitting,
-    // so we never collapse the grid. Bail out after MAX_LAYOUT_WAIT_FRAMES.
-    let frames = 0
-    const waitForStableLayout = (): void => {
-      const rect = container?.getBoundingClientRect()
-      const ready = !!rect && rect.width >= MIN_USABLE && rect.height >= MIN_USABLE
-      if (ready || frames >= MAX_LAYOUT_WAIT_FRAMES) {
-        runRecovery()
-        return
-      }
-      frames += 1
-      requestAnimationFrame(waitForStableLayout)
-    }
-    waitForStableLayout()
-  }, [forceResizeFit])
-
-  // Recovery handler for visibility change (app regains focus after idle)
-  useEffect(() => {
-    // Track timeout to prevent firing after unmount
-    let recoveryTimeoutId: ReturnType<typeof setTimeout> | null = null
-
-    const handleVisibilityChange = (): void => {
-      if (document.visibilityState === 'visible') {
-        // Clear any pending timeout before scheduling new one
-        if (recoveryTimeoutId) {
-          clearTimeout(recoveryTimeoutId)
-        }
-        recoveryTimeoutId = setTimeout(() => {
-          recoveryTimeoutId = null
-          performTerminalRecovery()
-        }, VISIBILITY_RECOVERY_DELAY_MS)
-      }
-    }
-
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => {
-      if (recoveryTimeoutId) {
-        clearTimeout(recoveryTimeoutId)
-      }
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
-  }, [performTerminalRecovery])
-
-  // Recovery handler for window focus — critical for Tauri minimize/restore
-  // on Windows where document.visibilitychange is unreliable.
-  // The window 'focus' event reliably fires when the window is restored from
-  // taskbar minimize. performTerminalRecovery re-fits the terminal to its
-  // container and syncs PTY dimensions (SIGWINCH to the shell process).
-  useEffect(() => {
-    const handleWindowFocus = (): void => {
-      // Skip recovery for terminals that are not the active tab in their pane
-      // (isVisible is tab-active, not window-visible — see PaneContent.tsx).
-      // Hidden instances recover via the isVisible-change useEffect instead.
-      if (!isVisibleRef.current) return
-      // Fire recovery immediately — the window is already visible when
-      // 'focus' fires (unlike visibilitychange which needs DOM reflow time).
-      // performTerminalRecovery internally waits for a stable layout before
-      // fitting and is single-flight guarded, so this is safe to call eagerly.
-      performTerminalRecovery()
-    }
-
-    window.addEventListener('focus', handleWindowFocus)
-    return () => {
-      window.removeEventListener('focus', handleWindowFocus)
-    }
-  }, [performTerminalRecovery])
-
-  // Recovery handler for power resume (wake from sleep, screen unlock)
-  useEffect(() => {
-    // Track timeout to prevent firing after unmount
-    let recoveryTimeoutId: ReturnType<typeof setTimeout> | null = null
-
-    const cleanup = systemApi.onPowerResume(() => {
-      // Clear any pending timeout before scheduling new one
-      if (recoveryTimeoutId) {
-        clearTimeout(recoveryTimeoutId)
-      }
-      recoveryTimeoutId = setTimeout(() => {
-        recoveryTimeoutId = null
-        performTerminalRecovery()
-      }, POWER_RESUME_RECOVERY_DELAY_MS)
+      apply()
     })
     return () => {
-      if (recoveryTimeoutId) {
-        clearTimeout(recoveryTimeoutId)
-      }
-      cleanup()
+      cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [performTerminalRecovery])
+  }, [fontSize])
+
+  // WebGL recovery state machine: attempt counters, context-loss/DPR
+  // bookkeeping, dispose path, and the renderer-preference/DPR recovery
+  // triggers live in useWebglRecovery; the loadWebglAddon closures in the
+  // init effects write back through loadWebglAddonRef.
+  const {
+    disposeWebglAddon,
+    loadWebglAddonRef,
+    webglRecoveryAttemptsRef,
+    webglRecoveryTimeoutRef,
+    webglContextLostRef,
+    webglDprWatchedRef
+  } = useWebglRecovery({
+    terminalRef,
+    webglAddonRef,
+    rendererPreferenceRef,
+    isMobileWebShellRef,
+    effectiveRendererPreference,
+    rendererPreference,
+    isMobileWebShell
+  })
+
+  // Fit/resize/visibility recovery chains (performFit, the sidebar
+  // activity debounce, the deferred fit-on-spawn flag, and the
+  // visibilitychange/focus/power-resume triggers) live in useTerminalFit.
+  const {
+    performFit,
+    needsResizeOnReadyRef,
+    noteTerminalActivity,
+    clearTerminalActivityOnUnmount
+  } = useTerminalFit({
+    terminalRef,
+    fitAddonRef,
+    containerRef,
+    ptyIdRef,
+    isVisibleRef,
+    isVisible,
+    targetId,
+    webglRecoveryTimeoutRef,
+    forceResizeFit
+  })
 
   const handleContainerClick = useCallback((): void => {
     terminalRef.current?.focus()
@@ -1492,18 +1491,15 @@ function ConnectedTerminalComponent({
   }, [])
 
   useImperativeHandle(searchRef, () => {
-    const searchDecorations = {
-      matchBackground: '#444444',
-      activeMatchBackground: '#FFFF00',
-      matchOverviewRuler: '#444444',
-      activeMatchColorOverviewRuler: '#FFFF00'
-    }
-
     return {
       findNext: (term: string) =>
-        searchAddonRef.current?.findNext(term, { decorations: searchDecorations }) ?? false,
+        searchAddonRef.current?.findNext(term, {
+          decorations: getTerminalSearchDecorations()
+        }) ?? false,
       findPrevious: (term: string) =>
-        searchAddonRef.current?.findPrevious(term, { decorations: searchDecorations }) ?? false,
+        searchAddonRef.current?.findPrevious(term, {
+          decorations: getTerminalSearchDecorations()
+        }) ?? false,
       clearDecorations: () => searchAddonRef.current?.clearDecorations(),
       writeText: (text: string) => {
         if (ptyIdRef.current) terminalApi.write(ptyIdRef.current, text)
@@ -1518,15 +1514,17 @@ function ConnectedTerminalComponent({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally narrow deps; a full list would recreate the terminal instance on every render
   useEffect(() => {
+    if (!monoFontReady) return
     if (!containerRef.current || !targetId) return
     if (didInitRef.current) return
     didInitRef.current = true
     initializedTerminalIdRef.current = targetId
     const terminalOptions = {
       ...getTerminalOptions(navigator.platform),
-      fontFamily,
+      fontFamily: MONO_STACK,
       fontSize,
-      scrollback: bufferSize
+      scrollback: bufferSize,
+      screenReaderMode
     }
     const terminal = new Terminal(terminalOptions)
     terminalRef.current = terminal
@@ -1539,6 +1537,7 @@ function ConnectedTerminalComponent({
     searchAddonRef.current = searchAddon
     terminal.loadAddon(searchAddon)
     terminal.open(containerRef.current)
+    bindXtermTouchTapFocus(terminal)
     terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
       if (event.type !== 'keydown') return true
 
@@ -1551,30 +1550,11 @@ function ConnectedTerminalComponent({
         return false
       }
 
-      const clipboardModifier = isPlatformModifier(event)
-
-      if (clipboardModifier) {
-        const now = Date.now()
-        if (now - lastClipboardOpRef.current < CLIPBOARD_RATE_LIMIT_MS) return false
-        switch (event.key.toLowerCase()) {
-          case 'c':
-            if (terminal.hasSelection()) {
-              event.preventDefault()
-              lastClipboardOpRef.current = now
-              void copySelectionRef.current()
-              return false
-            }
-            return true
-          case 'v':
-            event.preventDefault()
-            lastClipboardOpRef.current = now
-            void pasteFromClipboardRef.current()
-            return false
-          case 'a':
-            terminal.selectAll()
-            return false
-        }
-      }
+      const clipboardResult = handleTerminalClipboardKey(event, terminal, lastClipboardOpRef, {
+        copySelection: () => void copySelectionRef.current(),
+        pasteFromClipboard: () => void pasteFromClipboardRef.current()
+      })
+      if (clipboardResult !== undefined) return clipboardResult
       if (trapTerminalTabFocusNavigation(event)) {
         return true
       }
@@ -1582,7 +1562,7 @@ function ConnectedTerminalComponent({
     })
     const loadWebglAddon = (term: Terminal, _isRecovery: boolean = false): void => {
       if (
-        !shouldUseWebglRenderer(rendererPreferenceRef.current) ||
+        !shouldUseWebglRenderer(rendererPreferenceRef.current, isMobileWebShellRef.current) ||
         webglAddonRef.current ||
         webglRecoveryAttemptsRef.current >= MAX_WEBGL_RECOVERY_ATTEMPTS
       )
@@ -1592,9 +1572,12 @@ function ConnectedTerminalComponent({
         webglAddon.onContextLoss(() => {
           webglAddon.dispose()
           webglAddonRef.current = null
+          webglDprWatchedRef.current = 0
           webglContextLostRef.current = true
           webglRecoveryAttemptsRef.current++
-          if (webglRecoveryTimeoutRef.current) clearTimeout(webglRecoveryTimeoutRef.current)
+          if (webglRecoveryTimeoutRef.current) {
+            clearTimeout(webglRecoveryTimeoutRef.current)
+          }
           webglRecoveryTimeoutRef.current = setTimeout(() => {
             webglRecoveryTimeoutRef.current = null
             loadWebglAddon(term, true)
@@ -1603,11 +1586,44 @@ function ConnectedTerminalComponent({
         term.loadAddon(webglAddon)
         webglAddonRef.current = webglAddon
         webglContextLostRef.current = false
-      } catch {
+        // Story 3 (P0, blank canvas at DPR >= 3): the addon activated before
+        // the terminal's char-size service had valid measurements, so its
+        // constructor-captured dimensions can be stale/zero while the canvas
+        // backing store (devicePixelContentBoxSize observer) is already
+        // sized. Force the same re-sync the xterm core performs for DPR
+        // changes — renderService.handleDevicePixelRatioChange re-reads dpr
+        // and rebuilds renderer dimensions + texture atlas — then full
+        // refresh + forced fit so the cell grid and canvas re-converge at the
+        // CURRENT devicePixelRatio. Guarded: a throw degrades to the failure
+        // log below (log-api), never a crash.
+        try {
+          resyncWebglDimensions(term)
+          webglDprWatchedRef.current = getDevicePixelRatio()
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          void logFrontendError({
+            level: 'error',
+            source: 'ConnectedTerminal.loadWebglAddon',
+            message: `WebGL dimensions re-sync failed after addon load: ${message} (${describeWebglContext(term)})`,
+            stack: error instanceof Error ? error.stack : undefined
+          })
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
         webglRecoveryAttemptsRef.current++
+        console.warn('WebGL addon failed to load, falling back to DOM renderer:', error)
+        // Story 3: durable failure log (log-api) — dpr, css size, addon
+        // package. Metadata only, never secrets.
+        void logFrontendError({
+          level: 'error',
+          source: 'ConnectedTerminal.loadWebglAddon',
+          message: `WebGL addon failed to load, falling back to DOM renderer: ${message} (${describeWebglContext(term)})`,
+          stack: error instanceof Error ? error.stack : undefined
+        })
       }
     }
-    if (shouldUseWebglRenderer(rendererPreferenceRef.current)) loadWebglAddon(terminal)
+    if (shouldUseWebglRenderer(rendererPreferenceRef.current, isMobileWebShellRef.current))
+      loadWebglAddon(terminal)
     loadWebglAddonRef.current = loadWebglAddon
     requestAnimationFrame(() => performFit(true))
     if (autoFocus) terminal.focus()
@@ -1618,29 +1634,9 @@ function ConnectedTerminalComponent({
     cleanupDataListenerRef.current = terminalApi.onData((id: string, data: Uint8Array) => {
       if (id === ptyIdRef.current && terminalRef.current) {
         terminalRef.current.write(data)
-        const now = Date.now()
         const terminalRecord = useTerminalStore.getState().findTerminalByPtyId(id)
         if (terminalRecord) {
-          if (now - lastActivityUpdateRef.current >= ACTIVITY_DEBOUNCE_MS) {
-            useTerminalStore.getState().updateTerminalActivityBatch(terminalRecord.id, true, now)
-            lastActivityUpdateRef.current = now
-          } else {
-            pendingActivityUpdateRef.current = { id: terminalRecord.id }
-          }
-          if (activityTimeoutRef.current) clearTimeout(activityTimeoutRef.current)
-          const termId = terminalRecord.id
-          activityTimeoutRef.current = setTimeout(() => {
-            if (pendingActivityUpdateRef.current) {
-              useTerminalStore
-                .getState()
-                .updateTerminalActivityBatch(pendingActivityUpdateRef.current.id, false, Date.now())
-              pendingActivityUpdateRef.current = null
-            } else {
-              useTerminalStore.getState().updateTerminalActivityBatch(termId, false, Date.now())
-            }
-            activityTimeoutRef.current = null
-            lastActivityUpdateRef.current = 0
-          }, 2000)
+          noteTerminalActivity(terminalRecord.id)
         }
       }
     })
@@ -1669,16 +1665,22 @@ function ConnectedTerminalComponent({
           if (result.success) {
             ptyIdRef.current = result.data.id
             useTerminalStore.getState().setRendererAttached(result.data.id, true)
-            void addRendererRef(result.data.id, instanceIdRef.current)
             registerTerminal(result.data.id, terminal)
             const transcript = useTerminalStore.getState().peekTranscript(result.data.id)
             if (transcript) {
+              // R3: replay captured modes before the (possibly trimmed) transcript.
+              terminal.write(buildRehydrateSequences(initialModesRef.current))
               terminal.write(transcript)
               useTerminalStore.getState().consumeTranscript(result.data.id)
             } else if (initialScrollbackRef.current?.length)
-              restoreScrollback(terminal, initialScrollbackRef.current)
+              restoreScrollback(terminal, initialScrollbackRef.current, initialModesRef.current)
             if (onSpawnedRef.current) onSpawnedRef.current(result.data.id)
             if (onBoundToStoreTerminalRef.current) onBoundToStoreTerminalRef.current(result.data.id)
+            // CAP-3: capture the issued lease (in-memory only), after the
+            // store record's ptyId binding so the scan finds it.
+            if (result.data.claim) {
+              useTerminalStore.getState().setTerminalClaim(result.data.id, result.data.claim)
+            }
           } else if (onErrorRef.current) onErrorRef.current(result.error)
         } catch (err) {
           if (onErrorRef.current)
@@ -1687,14 +1689,17 @@ function ConnectedTerminalComponent({
           spawnInFlightRef.current = false
         }
       } else {
-        void addRendererRef(externalTerminalId, instanceIdRef.current)
         registerTerminal(externalTerminalId, terminal)
+        // Drain buffered detached chunks before the read (#1123), as initTerminal does.
+        flushDetachedOutputNow()
         const transcript = useTerminalStore.getState().peekTranscript(externalTerminalId)
         if (transcript) {
+          // R3: replay captured modes before the (possibly trimmed) transcript.
+          terminal.write(buildRehydrateSequences(initialModesRef.current))
           terminal.write(transcript)
           useTerminalStore.getState().consumeTranscript(externalTerminalId)
         } else if (initialScrollbackRef.current?.length)
-          restoreScrollback(terminal, initialScrollbackRef.current)
+          restoreScrollback(terminal, initialScrollbackRef.current, initialModesRef.current)
         if (onBoundToStoreTerminalRef.current) onBoundToStoreTerminalRef.current(externalTerminalId)
       }
     }
@@ -1704,7 +1709,6 @@ function ConnectedTerminalComponent({
       if (tId && terminalRef.current) {
         captureScrollPosition(tId)
         if (!externalTerminalId) useTerminalStore.getState().setRendererAttached(tId, false)
-        void removeRendererRef(tId, instanceId)
       }
       if (ptyIdRef.current) unregisterTerminal(ptyIdRef.current)
       else if (externalTerminalId) unregisterTerminal(externalTerminalId)
@@ -1726,7 +1730,7 @@ function ConnectedTerminalComponent({
     targetId,
     autoSpawn,
     rendererPreference,
-    fontFamily,
+    monoFontReady,
     fontSize,
     bufferSize,
     instanceId,
@@ -1740,12 +1744,66 @@ function ConnectedTerminalComponent({
 
   const isCrashed = healthStatus === 'disconnected' || healthStatus === 'crashed'
 
+  // #850: re-spawn a fresh shell after a session loss (server restart).
+  // `restartTerminal`'s placeholder ptyId has no spawn consumer, so this
+  // drives the real cycle: spawn with the terminal's spawn options → bind
+  // the new ptyId + claim into the store record → reset the dead-session
+  // state. The old tracker/claim are already dead server-side; a visible
+  // marker in the terminal separates old scrollback from the new session.
+  const respawnAfterSessionLoss = useCallback(async (): Promise<void> => {
+    const terminal = terminalRef.current
+    if (!terminal || respawnInFlightRef.current) return
+    respawnInFlightRef.current = true
+    try {
+      const options = spawnOptionsRef.current
+      const result = await terminalApi.spawn({
+        ...options,
+        shell: options?.shell || undefined,
+        cols: terminal.cols || 80,
+        rows: terminal.rows || 24
+      })
+      if (!result.success) {
+        toast.error(result.error || 'Failed to restart the terminal session')
+        void logFrontendError({
+          level: 'warn',
+          source: 'ConnectedTerminal.respawnAfterSessionLoss',
+          message: `session restart spawn failed (${result.code ?? 'UNKNOWN'})`
+        })
+        return
+      }
+      const newPtyId = result.data.id
+      ptyIdRef.current = newPtyId
+      registerTerminal(newPtyId, terminal)
+      useTerminalStore.getState().setRendererAttached(newPtyId, true)
+      if (result.data.claim) {
+        useTerminalStore.getState().setTerminalClaim(newPtyId, result.data.claim)
+      }
+      if (targetId) {
+        const store = useTerminalStore.getState()
+        const record = store.terminals.find((t) => t.id === targetId)
+        if (record?.ptyId) store.clearTerminalPtyId(record.ptyId)
+        store.setTerminalPtyId(targetId, newPtyId)
+        store.setTerminalHealthStatus(targetId, 'running')
+        onBoundToStoreTerminalRef.current?.(newPtyId)
+      }
+      terminal.write(
+        '\r\n\x1b[33m[server restarted — new session started; previous output is history]\x1b[0m\r\n'
+      )
+      setSessionLost(false)
+      terminal.focus()
+    } finally {
+      respawnInFlightRef.current = false
+    }
+  }, [targetId])
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div className="relative w-full h-full group overflow-hidden">
           <div
-            className={`w-full h-full bg-terminal-bg px-4 py-0.5 pb-1 ${className}`}
+            className={`w-full h-full bg-terminal-bg py-0.5 pb-1 ${
+              isMobileWebShell ? 'px-1.5' : 'px-4'
+            } ${className}`}
             onClick={handleContainerClick}
             onMouseDown={(e) => {
               // Prevent event from bubbling to window/parent handlers
@@ -1781,15 +1839,17 @@ function ConnectedTerminalComponent({
                     crashes or the PTY is killed by the OS.
                   </p>
                   <div className="flex flex-col sm:flex-row items-center gap-4">
-                    <button
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full sm:w-auto"
                       onClick={(e) => {
                         e.stopPropagation()
                         if (targetId) restartTerminal(targetId)
                       }}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-3 px-8 py-3.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 hover:shadow-xl hover:shadow-primary/20 active:scale-95 transition-all font-bold shadow-md"
                     >
-                      <RefreshCcw size={20} /> Reconnect Session
-                    </button>
+                      <RefreshCcw /> Reconnect Session
+                    </Button>
                     <div className="hidden sm:block h-8 w-px bg-border/50 mx-2" />
                     <div className="text-3xs text-muted-foreground/60 font-mono">
                       REF::{targetId?.slice(0, 8)}
@@ -1799,26 +1859,140 @@ function ConnectedTerminalComponent({
               </div>
             </div>
           )}
+          {/* #850: dead-session overlay — the server restarted (PTYs and
+              claims died with it), the channel re-authenticated, but the
+              re-attach was refused: every keystroke would be UNAUTHORIZED.
+              Show the state + a Restart button that spawns a fresh shell
+              instead of silently swallowing input. Web-only (the state
+              comes from the web terminal client's session-loss event);
+              hidden while the crash overlay is up. */}
+          {!isCrashed && sessionLost && (
+            <div className="absolute inset-0 bg-background/40 backdrop-blur-md flex items-center justify-center z-50 p-4 md:p-8 animate-in fade-in zoom-in-95 duration-300 text-foreground">
+              <div className="grid grid-cols-1 md:grid-cols-[140px_1fr] gap-6 bg-card/95 border border-border/50 p-8 rounded-2xl shadow-2xl max-w-2xl w-full border-t-4 border-t-warning">
+                <div className="flex flex-col items-center justify-center border-b md:border-b-0 md:border-r border-border/50 pb-6 md:pb-0 md:pr-6">
+                  <div className="w-20 h-20 rounded-2xl bg-warning/10 flex items-center justify-center mb-3 shadow-inner">
+                    <AlertTriangle className="text-warning" size={40} />
+                  </div>
+                  <span className="text-3xs uppercase tracking-[0.2em] font-black text-warning/80 text-center">
+                    SESSION ENDED
+                  </span>
+                </div>
+                <div className="flex flex-col justify-center text-center md:text-left">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground uppercase tracking-wider opacity-70">
+                    Server Restarted
+                  </div>
+                  <h3 className="text-2xl md:text-3xl font-bold tracking-tighter mb-3">
+                    server restarted — session ended
+                  </h3>
+                  <p className="text-muted-foreground leading-relaxed text-sm md:text-base mb-8">
+                    The terminal server was restarted, so this shell no longer exists. The
+                    connection is back and re-authenticated; start a fresh shell to continue. Input
+                    was not delivered.
+                  </p>
+                  <div className="flex flex-col sm:flex-row items-center gap-4">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full sm:w-auto"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void respawnAfterSessionLoss()
+                      }}
+                    >
+                      <RefreshCcw /> Restart
+                    </Button>
+                    <div className="hidden sm:block h-8 w-px bg-border/50 mx-2" />
+                    <div className="text-3xs text-muted-foreground/60 font-mono">
+                      REF::{targetId?.slice(0, 8)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {assistPanel ? (
+            <TerminalAssistPanel
+              state={assistPanel}
+              onClose={() => setAssistPanel(null)}
+              onInsertCommand={(command) => void insertAssistCommand(command)}
+            />
+          ) : null}
+          {/* Story 10 (F9/F10): non-blocking terminal-channel outage overlay.
+              While `/terminal/ws` is reconnecting, keystrokes are buffered
+              (bounded, replayed after re-attach) — the overlay makes that
+              visible so buffering is never silent. The "input buffered"
+              promise is made only when THIS terminal is actually bufferable
+              (live, claim-held — `isWebTerminalBufferable`); a terminal that
+              cannot buffer gets the plain state label and its write failures
+              toast instead. Mirrors the AgentChatPanel reconnect overlay
+              (pointer-events-none + AgentConnectionLamp). Suppressed while
+              the crash overlay is up, and explicitly gated off on Tauri (desktop
+              terminal I/O is direct IPC — no WS channel to outage). */}
+          {!isCrashed && !isTauriContext() && terminalChannel !== 'connected' && (
+            <div
+              className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-1.5 rounded-full border border-border/60 bg-background/80 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur-sm"
+              role="status"
+              aria-live="polite"
+            >
+              <AgentConnectionLamp
+                connected={false}
+                reconnecting={
+                  terminalChannel !== 'disconnected' && terminalChannel !== 'host-offline'
+                }
+                hostOffline={terminalChannel === 'host-offline'}
+                decorative
+                size={8}
+              />
+              <span>
+                {terminalChannel === 'disconnected'
+                  ? 'Disconnected'
+                  : terminalChannel === 'host-offline'
+                    ? ptyIdRef.current && isWebTerminalBufferable(ptyIdRef.current)
+                      ? 'Host offline — input buffered'
+                      : 'Host offline'
+                    : terminalChannel === 'reconnecting'
+                      ? ptyIdRef.current && isWebTerminalBufferable(ptyIdRef.current)
+                        ? 'Reconnecting — input buffered'
+                        : 'Reconnecting…'
+                      : 'Connecting…'}
+              </span>
+            </div>
+          )}
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent className="w-40">
         <ContextMenuItem
-          onClick={copySelection}
+          onSelect={copySelection}
           disabled={!hasSelection}
           className="cursor-pointer"
         >
-          Copy <span className="ml-auto text-xs text-muted-foreground">Ctrl+C</span>
+          Copy <ContextMenuShortcut>{SHORTCUT_MOD}+C</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onClick={pasteFromClipboard} className="cursor-pointer">
-          Paste <span className="ml-auto text-xs text-muted-foreground">Ctrl+V</span>
+        <ContextMenuItem onSelect={pasteFromClipboard} className="cursor-pointer">
+          Paste <ContextMenuShortcut>{SHORTCUT_MOD}+V</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={handleSelectAll} className="cursor-pointer">
-          Select All <span className="ml-auto text-xs text-muted-foreground">Ctrl+A</span>
+        <ContextMenuItem onSelect={handleSelectAll} className="cursor-pointer">
+          Select All <ContextMenuShortcut>{SHORTCUT_MOD}+A</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
-          onClick={() => {
+          onSelect={() => void runTerminalAssist('explain')}
+          disabled={!hasSelection}
+          className="cursor-pointer"
+        >
+          Explain with AI
+        </ContextMenuItem>
+        <ContextMenuItem
+          onSelect={() => void runTerminalAssist('fix')}
+          disabled={!hasSelection}
+          className="cursor-pointer"
+        >
+          Fix Command with AI
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onSelect={() => {
             if (targetId) restartTerminal(targetId)
           }}
           className="cursor-pointer text-primary focus:text-primary"

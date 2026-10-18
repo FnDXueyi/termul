@@ -27,13 +27,17 @@ export function AgentBadge({
   iconSize = 14,
   className
 }: AgentBadgeProps): React.JSX.Element {
-  const { name, templateId } = useAgentIdentity(agentId)
+  const { name, templateId, icon } = useAgentIdentity(agentId)
   const label = name ?? fallbackName ?? `Agent ${agentId.slice(0, 8)}`
 
   return (
     <span className={cn('inline-flex items-center gap-1.5', className)}>
-      <AgentGlyph templateId={templateId} size={iconSize} />
-      {showName && <span className="truncate">{label}</span>}
+      <AgentGlyph templateId={templateId} icon={icon} size={iconSize} />
+      {showName && (
+        <span className="truncate" title={label}>
+          {label}
+        </span>
+      )}
     </span>
   )
 }

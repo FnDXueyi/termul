@@ -1,28 +1,66 @@
 import type { ShellInfo } from '@shared/types/ipc.types'
-import { X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 // Import useShallow for selective re-rendering
 import { useShallow } from 'zustand/shallow'
 import { AgentIcon } from '@/components/agents/AgentIcon'
 import { AgentLauncher } from '@/components/agents/AgentLauncher'
-import { BrowserPanel } from '@/components/browser/BrowserPanel'
-import { AgentChatPanel } from '@/components/chat/AgentChatPanel'
-import { EditorPanel } from '@/components/editor/EditorPanel'
-import { GitHistoryPanel } from '@/components/git/GitHistoryPanel'
-import { GitPanel } from '@/components/git/GitPanel'
-import { ConnectedTerminal } from '@/components/terminal/ConnectedTerminal'
+import {
+  LAUNCHER_EXIT_REDUCED_MS,
+  LAUNCHER_EXIT_WINDOW_MS
+} from '@/components/agents/launcher/launcher-motion'
+import { ShowSidePanelSlot } from '@/components/shell/SidePanelVisibilityButtons'
+import { usePaneTopRow } from '@/components/shell/top-row-context'
+import { Skeleton } from '@/components/ui/skeleton'
+import { useMobileWebShell } from '@/hooks/use-mobile-web-shell'
 import { usePaneDnd } from '@/hooks/use-pane-dnd'
 import { cn } from '@/lib/utils'
 import { useProjectStore } from '@/stores/project-store'
 import { useTerminalActions, useTerminalStore } from '@/stores/terminal-store'
 import type { WorkspaceTab } from '@/stores/workspace-store'
 import { getAllLeafPanes, useWorkspaceStore } from '@/stores/workspace-store'
+import {
+  useIsPaneProjectActive,
+  usePaneTree,
+  useProjectPaneContext
+} from '@/stores/workspace-store/pane-context'
 import type { LeafNode } from '@/types/workspace.types'
 import { DropZoneOverlay } from './DropZoneOverlay'
 import { WorkspaceTabBar } from './WorkspaceTabBar'
 
 /** Inactive tabs stay mounted but must not intercept clicks on the active tab beneath. */
 const INACTIVE_TAB_PANE_CLASS = 'w-full h-full absolute inset-0 invisible pointer-events-none'
+
+const AgentChatPanel = lazy(() =>
+  import('@/components/chat/AgentChatPanel').then((m) => ({ default: m.AgentChatPanel }))
+)
+const BrowserPanel = lazy(() =>
+  import('@/components/browser/BrowserPanel').then((m) => ({ default: m.BrowserPanel }))
+)
+const CanvasPanel = lazy(() =>
+  import('@/components/canvas/CanvasPanel').then((m) => ({ default: m.CanvasPanel }))
+)
+const ConnectedTerminal = lazy(() =>
+  import('@/components/terminal/ConnectedTerminal').then((m) => ({ default: m.ConnectedTerminal }))
+)
+const EditorPanel = lazy(() =>
+  import('@/components/editor/EditorPanel').then((m) => ({ default: m.EditorPanel }))
+)
+const DiffTab = lazy(() => import('@/components/git/DiffTab').then((m) => ({ default: m.DiffTab })))
+const CommitDiffTab = lazy(() =>
+  import('@/components/git/CommitDiffTab').then((m) => ({ default: m.CommitDiffTab }))
+)
+const GitHistoryPanel = lazy(() =>
+  import('@/components/git/GitHistoryPanel').then((m) => ({ default: m.GitHistoryPanel }))
+)
+const GitPanel = lazy(() =>
+  import('@/components/git/GitPanel').then((m) => ({ default: m.GitPanel }))
+)
+
+/** Lightweight Suspense fallback for lazy-loaded panes (reuses Skeleton). */
+function PaneSkeleton(): React.JSX.Element {
+  return <Skeleton className="h-full w-full" />
+}
 
 interface PaneContentProps {
   pane: LeafNode
@@ -31,10 +69,12 @@ interface PaneContentProps {
   onCloseTerminal?: (id: string, tabId: string) => void
   onRenameTerminal?: (id: string, name: string) => void
   onCloseEditorTab?: (filePath: string) => void
+  onCloseTabs?: (tabs: WorkspaceTab[]) => void
   closingTerminalIds?: string[]
   defaultShell?: string
 }
 
+/** One pane: tab bar, every mounted tab's content, drop-zone, and the agent launcher surfaces (empty-pane + overlay) with their handoff keep-alive. */
 export function PaneContent({
   pane,
   onAddTerminal,
@@ -42,6 +82,7 @@ export function PaneContent({
   onCloseTerminal,
   onRenameTerminal,
   onCloseEditorTab,
+  onCloseTabs,
   closingTerminalIds = [],
   defaultShell
 }: PaneContentProps): React.JSX.Element {
@@ -52,35 +93,59 @@ export function PaneContent({
   )
 
   // CRITICAL FIX: Only subscribe to terminals' essential properties (not output!)
-  // and ENSURE we only show terminals belonging to the active project to prevent "leaks"
-  const activeProjectId = useProjectStore((state) => state.activeProjectId)
+  // and ENSURE we only show terminals belonging to this tree's project to prevent "leaks".
+  // Inside a ProjectTreeHost that is the host's project (a hidden tree keeps showing
+  // its own terminals); without one it is the active project.
+  const hostProjectId = useProjectPaneContext()?.projectId
+  const isActiveProject = useIsPaneProjectActive()
+  const treeProjectId = useProjectStore((state) => hostProjectId || state.activeProjectId)
   const terminalsInPane = useTerminalStore(
     useShallow((state) =>
-      state.terminals.filter((t) => terminalIdsInPane.has(t.id) && t.projectId === activeProjectId)
+      state.terminals.filter((t) => terminalIdsInPane.has(t.id) && t.projectId === treeProjectId)
     )
   )
 
-  // FIX: Batch workspace store subscriptions with useShallow to prevent cascading re-renders
-  const { activePaneId, fullscreenPaneId, agentLauncherPaneId, setActivePane } = useWorkspaceStore(
-    useShallow((state) => ({
-      activePaneId: state.activePaneId,
-      fullscreenPaneId: state.fullscreenPaneId,
-      agentLauncherPaneId: state.agentLauncherPaneId,
-      setActivePane: state.setActivePane
+  // This tree's own pane state: the flat fields when its project is active, its
+  // parked tree otherwise — a hidden tree never re-renders for the active one.
+  const { activePaneId, fullscreenPaneId, agentLauncherPaneId } = usePaneTree(
+    useShallow((tree) => ({
+      activePaneId: tree.activePaneId,
+      fullscreenPaneId: tree.fullscreenPaneId,
+      agentLauncherPaneId: tree.agentLauncherPaneId
     }))
   )
+  const setActivePane = useWorkspaceStore((state) => state.setActivePane)
 
-  const hasMultiplePanes = useWorkspaceStore((state) => getAllLeafPanes(state.root).length > 1)
+  // Flagged shell only: this pane's part of the window top row (null otherwise).
+  const topRow = usePaneTopRow(pane.id)
+
+  const hasMultiplePanes = usePaneTree((tree) => getAllLeafPanes(tree.root).length > 1)
 
   const { setTerminalPtyId } = useTerminalActions()
   const { isDragging, previewTarget } = usePaneDnd()
+  const isMobileWebShell = useMobileWebShell()
+  const reducedMotion = useReducedMotion() ?? false
 
   const isFullscreenPane = fullscreenPaneId === pane.id
   const isActivePane = activePaneId === pane.id
   const activeTab = pane.tabs.find((t) => t.id === pane.activeTabId)
+  // Only the visible project has a visible tab: a hidden tree's panels stay
+  // mounted but see `isVisible=false` (no focus, fit, stream renders or webview).
+  const visibleTabId = isActiveProject ? activeTab?.id : undefined
+  const launcherCoversPane = agentLauncherPaneId === pane.id
+  const visibleBrowserTabId = launcherCoversPane ? undefined : visibleTabId
   const activeTerminalIdInPane = activeTab?.type === 'terminal' ? activeTab.terminalId : null
   const panePreviewPosition =
     previewTarget?.paneId === pane.id && !isFullscreenPane ? previewTarget.position : null
+
+  // Launcher→chat handoff keep-alive: hold an unmounting launcher for the
+  // handoff window instead of hard-cutting. The wrapper only supplies the
+  // presence window — all exit visuals (composer morph, in-place dismiss,
+  // backdrop reveal, root fade) are owned inside AgentLauncher so timing
+  // can branch on launch vs dismiss.
+  const launcherExitTransition = reducedMotion
+    ? { duration: LAUNCHER_EXIT_REDUCED_MS / 1000 }
+    : { delay: LAUNCHER_EXIT_WINDOW_MS / 1000, duration: 0.05 }
 
   // Agent loading: show pulsing icon for a minimum duration after the terminal
   // is first seen. The xterm renderer attaches almost instantly (same frame),
@@ -119,6 +184,8 @@ export function PaneContent({
   }, [terminalsInPane])
 
   const handleFocus = useCallback(() => {
+    // A hidden tree is inert; never let a stray event move the visible tree's focus.
+    if (!isActiveProject) return
     if (!isActivePane) {
       setActivePane(pane.id)
     }
@@ -133,7 +200,7 @@ export function PaneContent({
         store.setTerminalNeedsAttention(activeTerminalIdInPane, false)
       }
     }
-  }, [isActivePane, setActivePane, pane.id, activeTerminalIdInPane])
+  }, [isActiveProject, isActivePane, setActivePane, pane.id, activeTerminalIdInPane])
 
   // Keyboard parity for the mouse acknowledgment above: a keystroke directed at this
   // pane's visible terminal is an explicit "I'm looking at it" signal, so clear the
@@ -171,34 +238,50 @@ export function PaneContent({
             ? '-translate-y-2'
             : ''
 
+  const handleAddTerminalForPane = useMemo(
+    () => (onAddTerminal ? (shell?: ShellInfo) => onAddTerminal(pane.id, shell) : undefined),
+    [onAddTerminal, pane.id]
+  )
+  const handleAddBrowserTabForPane = useMemo(
+    () => (onAddBrowserTab ? () => onAddBrowserTab(pane.id) : undefined),
+    [onAddBrowserTab, pane.id]
+  )
+
   return (
     <div
+      data-pane-content={pane.id}
       className={cn(
         'flex flex-col h-full relative',
-        isActivePane && hasMultiplePanes && !isFullscreenPane && 'ring-1 ring-primary/30',
-        isFullscreenPane && 'ring-1 ring-primary/30 rounded-xl overflow-hidden'
+        // The mobile shell collapses a split to the active leaf, so the leaf
+        // must read as a single-leaf workspace: no active-pane or fullscreen
+        // ring (desktop rings unchanged).
+        !isMobileWebShell &&
+          isActivePane &&
+          hasMultiplePanes &&
+          !isFullscreenPane &&
+          'ring-1 ring-primary/30',
+        !isMobileWebShell && isFullscreenPane && 'ring-1 ring-primary/30 rounded-xl overflow-hidden'
       )}
       onMouseDown={handleFocus}
       onKeyDownCapture={handleKeyDownCapture}
     >
-      <WorkspaceTabBar
-        paneId={pane.id}
-        tabs={pane.tabs}
-        activeTabId={pane.activeTabId}
-        closingTerminalIds={closingTerminalIds}
-        onAddTerminal={useMemo(
-          () => (onAddTerminal ? (shell?: ShellInfo) => onAddTerminal(pane.id, shell) : undefined),
-          [onAddTerminal, pane.id]
-        )}
-        onAddBrowserTab={useMemo(
-          () => (onAddBrowserTab ? () => onAddBrowserTab(pane.id) : undefined),
-          [onAddBrowserTab, pane.id]
-        )}
-        onCloseTerminal={onCloseTerminal}
-        onRenameTerminal={onRenameTerminal}
-        onCloseEditorTab={onCloseEditorTab}
-        defaultShell={defaultShell}
-      />
+      {!isMobileWebShell && (
+        <WorkspaceTabBar
+          paneId={pane.id}
+          tabs={pane.tabs}
+          activeTabId={pane.activeTabId}
+          closingTerminalIds={closingTerminalIds}
+          onAddTerminal={handleAddTerminalForPane}
+          onAddBrowserTab={handleAddBrowserTabForPane}
+          onCloseTerminal={onCloseTerminal}
+          onRenameTerminal={onRenameTerminal}
+          onCloseEditorTab={onCloseEditorTab}
+          onCloseTabs={onCloseTabs}
+          defaultShell={defaultShell}
+          topRow={topRow ?? undefined}
+          leading={topRow?.leftEdge ? <ShowSidePanelSlot /> : undefined}
+        />
+      )}
 
       <div className="flex-1 overflow-hidden bg-terminal-bg relative h-full">
         <div
@@ -245,7 +328,7 @@ export function PaneContent({
                 // we overlay the agent loading icon on top until the renderer
                 // attaches — see the overlay div after ConnectedTerminal.
                 if (!terminal.ptyId) {
-                  const isVisible = activeTab?.id === tab.id
+                  const isVisible = visibleTabId === tab.id
                   const isAgent = terminal.kind === 'agent' && !!terminal.agentId
                   return (
                     <div
@@ -271,7 +354,7 @@ export function PaneContent({
                     </div>
                   )
                 }
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 const isAgentLoading =
                   terminal.kind === 'agent' &&
                   !!terminal.agentId &&
@@ -292,23 +375,26 @@ export function PaneContent({
                       // active-pane primary ring and drop overlays. Pulse is
                       // disabled under prefers-reduced-motion.
                       terminal.needsAttention &&
-                        'rounded-sm ring-2 ring-inset ring-amber-400/70 animate-pulse motion-reduce:animate-none'
+                        'rounded-sm ring-2 ring-inset ring-warning/70 animate-pulse motion-reduce:animate-none'
                     )}
                   >
-                    <ConnectedTerminal
-                      terminalId={terminal.ptyId}
-                      storeTerminalId={terminal.id}
-                      autoSpawn={false}
-                      spawnOptions={connectedTerminalSpawnOptions}
-                      onBoundToStoreTerminal={(ptyId) => {
-                        if (terminal.ptyId !== ptyId) {
-                          setTerminalPtyId(terminal.id, ptyId)
-                        }
-                      }}
-                      initialScrollback={terminal.pendingScrollback}
-                      className="w-full h-full"
-                      isVisible={isVisible}
-                    />
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <ConnectedTerminal
+                        terminalId={terminal.ptyId}
+                        storeTerminalId={terminal.id}
+                        autoSpawn={false}
+                        spawnOptions={connectedTerminalSpawnOptions}
+                        onBoundToStoreTerminal={(ptyId) => {
+                          if (terminal.ptyId !== ptyId) {
+                            setTerminalPtyId(terminal.id, ptyId)
+                          }
+                        }}
+                        initialScrollback={terminal.pendingScrollback}
+                        initialModes={terminal.pendingModes}
+                        className="w-full h-full"
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
                     {/* Agent loading overlay: shown until ConnectedTerminal attaches
 											the renderer (rendererAttachmentCount flips to 1). Covers the
 											xterm div with a centered pulsing icon so the user sees feedback. */}
@@ -330,16 +416,22 @@ export function PaneContent({
                 )
               })}
 
+            {/* The editor store is one global store swapped per project, so a
+                hidden tree's editor tabs would show another project's files:
+                render them only while this project is on screen. */}
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'editor' } => t.type === 'editor')
+              .filter(() => isActiveProject)
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
-                    <EditorPanel filePath={tab.filePath} isVisible={isVisible} />
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <EditorPanel filePath={tab.filePath} isVisible={isVisible} />
+                    </Suspense>
                   </div>
                 )
               })}
@@ -347,13 +439,35 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'browser' } => t.type === 'browser')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleBrowserTabId === tab.id
                 return (
                   <div
                     key={tab.id}
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
-                    <BrowserPanel browserTabId={tab.browserTabId} isVisible={isVisible} />
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <BrowserPanel browserTabId={tab.browserTabId} isVisible={isVisible} />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'canvas' } => t.type === 'canvas')
+              .map((tab) => {
+                const isVisible = visibleTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <CanvasPanel
+                        projectId={tab.projectId}
+                        docPath={tab.docPath}
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
                   </div>
                 )
               })}
@@ -361,13 +475,15 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'git' } => t.type === 'git')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
-                    <GitPanel cwd={tab.cwd} isVisible={isVisible} />
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <GitPanel cwd={tab.cwd} isVisible={isVisible} />
+                    </Suspense>
                   </div>
                 )
               })}
@@ -375,13 +491,58 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'git-history' } => t.type === 'git-history')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
                   <div
                     key={tab.id}
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
                   >
-                    <GitHistoryPanel cwd={tab.cwd} isVisible={isVisible} />
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <GitHistoryPanel cwd={tab.cwd} isVisible={isVisible} />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'diff' } => t.type === 'diff')
+              .map((tab) => {
+                const isVisible = visibleTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <DiffTab
+                        cwd={tab.cwd}
+                        path={tab.path}
+                        staged={tab.staged}
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
+                  </div>
+                )
+              })}
+
+            {pane.tabs
+              .filter((t): t is WorkspaceTab & { type: 'commit-diff' } => t.type === 'commit-diff')
+              .map((tab) => {
+                const isVisible = visibleTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                  >
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <CommitDiffTab
+                        cwd={tab.cwd}
+                        commit={tab.commit}
+                        path={tab.path}
+                        oldPath={tab.oldPath}
+                        isVisible={isVisible}
+                      />
+                    </Suspense>
                   </div>
                 )
               })}
@@ -389,52 +550,104 @@ export function PaneContent({
             {pane.tabs
               .filter((t): t is WorkspaceTab & { type: 'agent-chat' } => t.type === 'agent-chat')
               .map((tab) => {
-                const isVisible = activeTab?.id === tab.id
+                const isVisible = visibleTabId === tab.id
                 return (
-                  <div
-                    key={tab.id}
+                  // Mount fade: a chat tab that appears while the launcher
+                  // exits reveals its content gradually — the text doesn't
+                  // pop in behind the morphing composer.
+                  // mountKey (not tab.id): remapAgentChatSession swaps the
+                  // tab id placeholder→real session, and keying on id would
+                  // unmount the whole chat panel — a blank flash + fade
+                  // replay. The stable key turns it into a sessionId prop
+                  // change on the same mounted AgentChatPanel.
+                  <motion.div
+                    key={tab.mountKey ?? tab.id}
                     className={isVisible ? 'w-full h-full' : INACTIVE_TAB_PANE_CLASS}
+                    data-chat-tab-state={isVisible ? 'visible' : 'hidden'}
+                    initial={reducedMotion ? false : { opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: 0.22, ease: 'easeOut' }}
                   >
-                    <AgentChatPanel sessionId={tab.sessionId} isVisible={isVisible} />
-                  </div>
+                    <Suspense fallback={<PaneSkeleton />}>
+                      <AgentChatPanel sessionId={tab.sessionId} isVisible={isVisible} />
+                    </Suspense>
+                  </motion.div>
                 )
               })}
 
-            {pane.tabs.length === 0 ? (
-              <div className="absolute inset-0">
-                {/* ADR-004.5: agent launch + plain terminal picker */}
-                <AgentLauncher paneId={pane.id} />
-              </div>
-            ) : null}
+            {/* Launcher→chat handoff boundary: the launcher unmounts through
+                AnimatePresence so its exit choreography (composer morph /
+                in-place dismiss) can play instead of a hard cut. The wrapper
+                stays pointer-events-none — the launcher root re-enables them
+                while present — so the fresh tab is interactive mid-exit. */}
+            <AnimatePresence initial={false}>
+              {isActiveProject && pane.tabs.length === 0 ? (
+                <motion.div
+                  key={`agent-launcher-${pane.id}`}
+                  className="pointer-events-none absolute inset-0"
+                  initial={false}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={launcherExitTransition}
+                >
+                  {/* ADR-004.5: agent launch + plain terminal picker */}
+                  <AgentLauncher paneId={pane.id} />
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
           </div>
         </div>
 
-        {isDragging && !isFullscreenPane && <DropZoneOverlay paneId={pane.id} />}
+        {/* AnimatePresence lets the overlay's exit fade play on drop/dragend
+            instead of vanishing the moment isDragging flips off. */}
+        <AnimatePresence initial={false}>
+          {isDragging && !isFullscreenPane && (
+            <DropZoneOverlay key={`drop-zones-${pane.id}`} paneId={pane.id} />
+          )}
+        </AnimatePresence>
       </div>
 
-      {/* ADR-004.5 overlay: pane-level so Ctrl+T covers tab bar + content. */}
-      {agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
-        <div
-          className="absolute inset-0 z-30 flex flex-col bg-background/95 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Agent launcher"
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') useWorkspaceStore.getState().hideAgentLauncher()
-          }}
-        >
-          <button
-            type="button"
-            className="absolute right-3 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-            title="Close agent launcher (Esc)"
-            aria-label="Close agent launcher"
-            onClick={() => useWorkspaceStore.getState().hideAgentLauncher()}
+      {/* ADR-004.5 overlay: pane-level so Ctrl+T covers tab bar + content. Same
+          handoff boundary as the empty-pane launcher — launch/dismiss plays
+          the launcher's own exit choreography instead of cutting away. The
+          visual backdrop + close control live inside AgentLauncher so their
+          fades can branch on launch vs dismiss; the wrapper stays
+          pointer-events-none (the launcher root re-enables hits while
+          present) so the pane is interactive mid-exit. */}
+      <AnimatePresence initial={false}>
+        {isActiveProject && agentLauncherPaneId === pane.id && pane.tabs.length > 0 ? (
+          <motion.div
+            key={`agent-launcher-overlay-${pane.id}`}
+            className={cn(
+              'pointer-events-none absolute z-30 flex flex-col',
+              // A top-edge pane keeps its whole top row (tabs, drag space,
+              // window controls) uncovered.
+              topRow?.topEdge ? 'inset-x-0 bottom-0 top-10' : 'inset-0'
+            )}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Agent launcher"
+            initial={false}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={launcherExitTransition}
+            onKeyDown={(e) => {
+              // An Esc that bubbles out of a portaled selector (Radix prevents the
+              // Esc it consumes; any other React-tree portal sits outside this
+              // wrapper) belongs to that layer, not to the launcher.
+              if (
+                e.key === 'Escape' &&
+                !e.defaultPrevented &&
+                e.currentTarget.contains(e.target as Node)
+              ) {
+                useWorkspaceStore.getState().hideAgentLauncher()
+              }
+            }}
           >
-            <X className="h-4 w-4" />
-          </button>
-          <AgentLauncher paneId={pane.id} />
-        </div>
-      ) : null}
+            <AgentLauncher paneId={pane.id} />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   )
 }

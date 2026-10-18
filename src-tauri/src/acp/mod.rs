@@ -1,28 +1,76 @@
-//! ACP (Agent Client Protocol) backend module — ADR-003 P0.
+//! ACP (Agent Client Protocol) backend module.
 //!
 //! Provides the Rust runtime layer that spawns ACP coding-agent subprocesses,
 //! completes the JSON-RPC handshake, manages sessions, streams prompt turns,
-//! and bridges agent events to the renderer over Tauri IPC.
-//!
-//! This is the backend-only P0 deliverable; the React chat UI is deferred to
-//! P1+. See `docs/adr/adr-003-acp-agent-chat-ui-architecture.md` and
-//! `_bmad-output/implementation-artifacts/spec-adr-003-p0-rust-acp-core.md`.
+//! and bridges agent events to the renderer over Tauri IPC. The chat UI lives in
+//! `src/renderer`.
 
+pub mod agent_process;
+pub mod archive;
+pub mod atomic_file;
+pub mod browser_shim;
+pub mod catalog;
+pub mod chat_history_store;
+pub mod claude_accounts;
+pub mod claude_admin;
+pub mod claude_agent;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod credentials;
+pub mod destructive_guard;
 pub mod events;
+pub mod factory_key;
+pub mod history_import;
+pub mod host_mcp;
+pub mod https_only;
+pub mod install;
+pub mod legacy_models;
 pub mod manager;
+pub mod mcp_oauth;
+pub mod mcp_probe;
+pub mod opencode_version;
+pub mod project_registry;
+pub mod provider_errors;
 pub mod session;
+pub mod session_payload;
+pub mod session_persistence;
 pub mod terminal;
 
-// Re-exported for the renderer bridge (P1+) and `lib.rs` wiring. `AcpManager`
+// Re-exported for the renderer bridge and `lib.rs` wiring. `AcpManager`
 // is used now (managed in `lib.rs`); the config/id types are part of the public
 // surface the chat UI will consume, so they are intentionally re-exported even
 // though nothing inside the crate references them through this path yet.
 #[allow(unused_imports)]
+pub use catalog::{
+    overlay_installed, AcpCatalog, AcpCatalogService, CatalogAgent, CatalogConfigFile,
+    CatalogError, CatalogRuntimeAvailability, CatalogSource, HostCapability, InstalledCatalogInfo,
+    PlatformTarget, SetCatalogOptInRequest, SupportedAcpAgentStatus,
+};
+#[allow(unused_imports)]
+pub use chat_history_store::{
+    ChatHistoryIndexEntry, ChatHistoryStatus, ChatHistoryStore, ChatHistoryStoreError,
+};
+#[allow(unused_imports)]
+pub use claude_agent::{ClaudeAgentService, ClaudeAuthMode, ClaudeAuthStatus};
+#[allow(unused_imports)]
 pub use config::{AgentConfig, AgentId, SessionId};
-pub use manager::AcpManager;
+#[allow(unused_imports)]
+pub use history_import::import_chat_history;
+#[allow(unused_imports)]
+pub use install::{
+    AcpInstallService, DownloadedArchive, Downloader, Extractor, InstallError, InstallOutcome,
+    InstallRequest, InstalledAgent, InstalledManifestFile,
+};
+#[allow(unused_imports)]
+pub use manager::{AcpManager, AgentSummary, SessionCreationContext, SpawnOutcome};
+pub use session::AgentActivity;
+pub use project_registry::{FileProjectRegistry, ProjectRegistryError, RootCheck, VfsRoot};
+#[allow(unused_imports)]
+pub use session_persistence::{
+    PersistedEventRecord, PersistedSessionStatus, SessionIndexEntry, SessionPersistence,
+    SessionPersistenceError, SessionRegistration,
+};
 
 #[cfg(test)]
 mod tests;
