@@ -587,12 +587,6 @@ impl CanvasPersistence {
     ) -> Result<WriteOutcome, CanvasError> {
         let mount = self.mount_for(project_id, mount_seq)?;
         let _serialized = mount.write_lock.lock().await;
-        if !is_canvas_document(&mount.doc_path) {
-            return Err(CanvasError::new(
-                super::CODE_PATH_VALIDATION_FAILED,
-                "only .figcraft documents are written by the canvas",
-            ));
-        }
         let expected = {
             let state = mount.state.lock();
             match &state.phase {
