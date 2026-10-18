@@ -281,11 +281,12 @@ pub trait BrowserEngine: Send + Sync {
     fn evaluate_in_frame<'a>(&'a self, _tab: &'a str, _frame: &'a str, _script: Script) -> EngineFuture<'a, Value> {
         Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
     }
-    /// Set `files` (host-staged paths) on the file input at `path`
-    /// (`file_chooser`).
+    /// Set `files` (host-staged paths) on the file input at `path` in
+    /// `frame` (`None`: the main frame's helpers) (`file_chooser`).
     fn set_input_files<'a>(
         &'a self,
         _tab: &'a str,
+        _frame: Option<&'a str>,
         _path: &'a str,
         _files: &'a [std::path::PathBuf],
     ) -> EngineFuture<'a, ()> {

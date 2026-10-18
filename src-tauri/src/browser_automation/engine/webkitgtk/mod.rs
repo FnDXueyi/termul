@@ -106,9 +106,14 @@ impl BrowserEngine for WebKitGtkEngine {
     fn set_input_files<'a>(
         &'a self,
         tab: &'a str,
+        frame: Option<&'a str>,
         path: &'a str,
         files: &'a [PathBuf],
     ) -> EngineFuture<'a, ()> {
+        // No child frame is reachable here, so no ref names one.
+        if frame.is_some() {
+            return Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) });
+        }
         Box::pin(file_chooser::set_input_files(&self.tabs, tab, path, files, eval::call))
     }
 }

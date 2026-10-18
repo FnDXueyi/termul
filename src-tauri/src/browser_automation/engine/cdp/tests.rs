@@ -300,7 +300,7 @@ async fn set_input_files_hands_the_staged_path_to_the_file_input_by_handle() {
         "result": { "type": "object", "subtype": "node", "objectId": "obj-7" }
     }))));
     let staged = [std::path::PathBuf::from("/data/staging/u1/report.pdf")];
-    set_input_files(&t, "agent-a", "html>body>input:nth-of-type(1)", &staged)
+    set_input_files(&t, "agent-a", None, "html>body>input:nth-of-type(1)", &staged)
         .await
         .expect("files set");
     let calls = t.calls.lock();
@@ -329,7 +329,7 @@ async fn set_input_files_sets_nothing_when_the_path_names_no_file_input() {
     }))));
     let staged = [std::path::PathBuf::from("/data/staging/u1/report.pdf")];
     assert_eq!(
-        set_input_files(&t, "agent-a", "html>body>a:nth-of-type(1)", &staged).await,
+        set_input_files(&t, "agent-a", None, "html>body>a:nth-of-type(1)", &staged).await,
         Err(EngineError::new(EngineErrorKind::PageException))
     );
     assert!(t.calls.lock().iter().all(|c| c.1 != "DOM.setFileInputFiles"));

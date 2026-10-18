@@ -25,7 +25,7 @@ fn origin(c: &Ctx<'_>) -> String {
 /// The call failed with `code` and `reason`. A failure with another code
 /// is the case's result as it is, so an engine without the verb reports
 /// `capability_unavailable`.
-fn expect_refusal(
+pub(crate) fn expect_refusal(
     result: Result<serde_json::Value, Failure>,
     code: &str,
     reason: &str,
@@ -44,7 +44,7 @@ fn expect_refusal(
     }
 }
 
-fn expect_tickets(c: &Ctx<'_>, expected: &[ActionClass], what: &str) -> CaseResult {
+pub(crate) fn expect_tickets(c: &Ctx<'_>, expected: &[ActionClass], what: &str) -> CaseResult {
     let raised: Vec<ActionClass> = c
         .engine
         .tickets(&c.session)

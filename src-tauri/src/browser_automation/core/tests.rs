@@ -23,6 +23,9 @@ use crate::browser_automation::engine::{
 };
 use crate::web::sink::AcpEvent;
 
+/// One `set_input_files` call: tab, frame, input path, staged files.
+type FilesSet = (String, Option<String>, String, Vec<PathBuf>);
+
 /// One fake webview: its event stream and its session history.
 struct FakeTab {
     events: TabEvents,
@@ -197,10 +200,12 @@ pub(super) struct FakeEngine {
     pub(super) console_shim: Mutex<Vec<ConsoleEntry>>,
     /// Cross-origin frames the engine reaches; see `frames_tests`.
     pub(super) frames: Mutex<Vec<ChildFrame>>,
-    /// What the sensitivity helper reports.
+    /// What the sensitivity helper reports in the main frame.
     sensitivity: Mutex<Value>,
-    /// Every `set_input_files` call: tab, input path, staged files.
-    files_set: Mutex<Vec<(String, String, Vec<PathBuf>)>>,
+    /// What it reports inside a reachable child frame.
+    frame_sensitivity: Mutex<Value>,
+    /// Every `set_input_files` call.
+    files_set: Mutex<Vec<FilesSet>>,
 }
 
 impl FakeEngine {
@@ -222,6 +227,7 @@ impl FakeEngine {
             console_shim: Mutex::new(Vec::new()),
             frames: Mutex::new(Vec::new()),
             sensitivity: Mutex::new(json!({})),
+            frame_sensitivity: Mutex::new(json!({})),
             files_set: Mutex::new(Vec::new()),
         }
     }
@@ -305,7 +311,13 @@ impl BrowserEngine for FakeEngine {
     }
     fn evaluate_in_frame<'a>(&'a self, _tab: &'a str, frame: &'a str, script: Script) -> EngineFuture<'a, Value> {
         let known = self.frames.lock().iter().any(|f| f.id == frame);
-        Box::pin(async move { super::frames::tests::answer_in_frame(known, &script) })
+        let facts = (script.helper.name == "sensitivity").then(|| self.frame_sensitivity.lock().clone());
+        Box::pin(async move {
+            match facts {
+                Some(facts) if known => Ok(facts),
+                _ => super::frames::tests::answer_in_frame(known, &script),
+            }
+        })
     }
     fn pull_console<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<ConsoleEntry>> {
         let pulled = std::mem::take(&mut *self.console_shim.lock());
@@ -314,13 +326,16 @@ impl BrowserEngine for FakeEngine {
     fn set_input_files<'a>(
         &'a self,
         tab: &'a str,
-        _frame: Option<&'a str>,
+        frame: Option<&'a str>,
         path: &'a str,
         files: &'a [PathBuf],
     ) -> EngineFuture<'a, ()> {
-        self.files_set
-            .lock()
-            .push((tab.to_string(), path.to_string(), files.to_vec()));
+        self.files_set.lock().push((
+            tab.to_string(),
+            frame.map(str::to_string),
+            path.to_string(),
+            files.to_vec(),
+        ));
         Box::pin(async { Ok(()) })
     }
 }

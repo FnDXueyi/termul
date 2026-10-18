@@ -309,14 +309,70 @@ async fn an_upload_stages_the_project_file_and_prompts_unless_app_approved() {
     assert_eq!(reply["fidelity"], "trusted");
     let set = r.h.engine.files_set.lock().clone();
     assert_eq!(set.len(), 1);
-    let (on, input, files) = &set[0];
+    let (on, frame, input, files) = &set[0];
     assert_eq!(
-        (on.as_str(), input.as_str()),
-        (tab.as_str(), "html>body>button:nth-of-type(1)")
+        (on.as_str(), frame.as_deref(), input.as_str()),
+        (tab.as_str(), None, "html>body>button:nth-of-type(1)")
     );
     let staging = r.h.pane.sessions.join("s1").join("staging");
     assert!(files[0].starts_with(&staging), "{files:?}");
     assert_eq!(std::fs::read(&files[0]).unwrap(), b"%PDF fake");
+}
+
+const PAY: &str = "https://pay.example";
+
+/// A rig whose page holds a reachable cross-origin payments frame; its
+/// "Pay now" button is ref `@e2`.
+async fn framed_rig() -> (Rig, String) {
+    let engine = isolated();
+    engine.frames.lock().push(ChildFrame {
+        id: "F-pay".into(),
+        parent: None,
+        owner_path: "html>body>iframe:nth-of-type(1)".into(),
+    });
+    let r = rig_with(engine, vec![]);
+    let tab = r.open(LOGIN).await;
+    (r, tab)
+}
+
+#[tokio::test]
+async fn a_submit_inside_a_cross_origin_frame_is_classified_from_that_frame() {
+    let (r, _) = framed_rig().await;
+    *r.h.engine.frame_sensitivity.lock() = json!({
+        "frameOrigin": PAY,
+        "targetInForm": true,
+        "formHasPayment": true,
+        "isSubmitter": true,
+        "formAction": "https://pay.example/charge",
+    });
+    let reply = r.h.call("click", json!({ "ref": "@e2" })).await;
+    assert_eq!(reply["code"], ERR_CONFIRMATION, "{reply}");
+    assert_eq!(r.ticket_actions()[0].0, ActionClass::PaymentSubmit);
+    assert!(r.h.engine.clicks.lock().is_empty(), "nothing was clicked");
+}
+
+#[tokio::test]
+async fn an_upload_into_a_cross_origin_frame_sets_that_frames_input() {
+    let (r, tab) = framed_rig().await;
+    std::fs::write(r.project.path().join("report.pdf"), b"%PDF fake").unwrap();
+    r.facts(json!({ "frameOrigin": ORIGIN }));
+    *r.h.engine.frame_sensitivity.lock() = json!({ "frameOrigin": PAY, "isFileInput": true });
+    let pay = CanonicalOrigin::parse(PAY).unwrap();
+    let op = AppPolicyOp::AddPreapproval(AppPreapproval::new(ActionClass::Upload, pay).unwrap());
+    let revision = r.policy.app().await.unwrap().revision;
+    r.policy.apply_app(revision, op).await.unwrap();
+
+    let reply = r.h.call("upload", json!({ "ref": "@e2", "path": "report.pdf" })).await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let set = r.h.engine.files_set.lock().clone();
+    let calls: Vec<_> = set
+        .iter()
+        .map(|(on, frame, input, _)| (on.as_str(), frame.as_deref(), input.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        [(tab.as_str(), Some("F-pay"), "frame:1.5|html>body>button:nth-of-type(1)")]
+    );
 }
 
 #[tokio::test]

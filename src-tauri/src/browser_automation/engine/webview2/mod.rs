@@ -276,11 +276,12 @@ impl BrowserEngine for WebView2Engine {
     fn set_input_files<'a>(
         &'a self,
         tab: &'a str,
+        frame: Option<&'a str>,
         path: &'a str,
         files: &'a [std::path::PathBuf],
     ) -> EngineFuture<'a, ()> {
         Box::pin(async move {
-            tokio::time::timeout(EVAL_STEP, cdp::set_input_files(&self.transport, tab, path, files))
+            tokio::time::timeout(EVAL_STEP, cdp::set_input_files(&self.transport, tab, frame, path, files))
                 .await
                 .unwrap_or(Err(EngineError::new(EngineErrorKind::Timeout)))
         })

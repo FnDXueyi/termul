@@ -1,12 +1,16 @@
 //! Cases for content the main document does not hold itself: same- and
 //! cross-origin frames, open and closed shadow roots, and a page whose
-//! Content-Security-Policy forbids every script.
+//! Content-Security-Policy forbids every script. Sensitive actions and file
+//! choosers inside a cross-origin frame meet the same gates as on the page.
 
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use termul_manager_lib::conformance_support::ActionClass;
 
 use super::{expect_code, find_ref, mismatch, CaseResult, Ctx, Failure};
+use crate::adapter::{Scope, UPLOAD_BODY, UPLOAD_FILE};
+use crate::sensitive_cases::{expect_refusal, expect_tickets};
 
 const FRAMES_READY: &str = "Frames ready";
 const SHADOW_READY: &str = "Shadow fixture ready";
@@ -77,22 +81,78 @@ pub async fn iframe_same_origin(c: &Ctx<'_>) -> CaseResult {
     c.stale_after_frame_reload("Inner button").await
 }
 
-/// Engines that cannot reach a cross-origin frame must say so in the
-/// outline and mint no ref inside it; that is reported as unavailable.
-pub async fn iframe_cross_origin(c: &Ctx<'_>) -> CaseResult {
-    let path = format!("/frames-cross.html?xo={}", c.cross.port());
+/// Open fixture `page` in a cross-origin frame and wait for `line` in the
+/// outline. Engines that cannot reach the frame must say so in the outline
+/// and mint no ref inside it; that is reported as unavailable.
+async fn cross_frame(c: &Ctx<'_>, page: &str, line: &str) -> Result<String, Failure> {
+    let path = format!("/frames-cross.html?xo={}&page={page}", c.cross.port());
     c.open(&path, FRAMES_READY).await?;
-    let outline = c.outline_with("Inner button").await?;
-    if outline.contains(UNREACHABLE) && !outline.contains("Inner button") {
+    let outline = c.outline_with(line).await?;
+    if outline.contains(UNREACHABLE) && !outline.contains(line) {
         return Err(Failure {
             code: "capability_unavailable".into(),
             reason: Some("cross_origin_frame".into()),
             message: "this engine cannot read cross-origin frames".into(),
         });
     }
+    Ok(outline)
+}
+
+fn ref_in(outline: &str, role: &str, name: &str) -> Result<String, Failure> {
+    find_ref(outline, role, name).ok_or_else(|| mismatch(format!("no {role} \"{name}\" ref in {outline}")))
+}
+
+pub async fn iframe_cross_origin(c: &Ctx<'_>) -> CaseResult {
+    cross_frame(c, "frame-inner.html", "Inner button").await?;
     c.act_inside(("textbox", "Inner field"), ("button", "Inner button"), "Inner result: clicked [Ada]")
         .await?;
     c.stale_after_frame_reload("Inner button").await
+}
+
+/// A password submit inside a cross-origin frame is classified from the
+/// frame's own form.
+pub async fn frame_password_submit(c: &Ctx<'_>) -> CaseResult {
+    let outline = cross_frame(c, "password.html", "Sign in").await?;
+    let submit = ref_in(&outline, "button", "Sign in")?;
+    expect_refusal(
+        c.call("click", json!({ "ref": submit })).await,
+        "confirmation_required",
+        "unattended",
+        "password submit in a cross-origin frame",
+    )?;
+    expect_tickets(c, &[ActionClass::PasswordSubmit], "frame password submit")
+}
+
+/// An upload pre-approved for the frame's origin lands on the frame's own
+/// file input.
+pub async fn frame_upload(c: &Ctx<'_>) -> CaseResult {
+    c.engine.go_ephemeral(&c.session).await.map_err(mismatch)?;
+    let outline = cross_frame(c, "upload.html", "Attachment").await?;
+    let frame_origin = format!("http://localhost:{}", c.cross.port());
+    c.engine
+        .preapprove(&c.session, Scope::Project, ActionClass::Upload, &frame_origin)
+        .await
+        .map_err(mismatch)?;
+    let input = ref_in(&outline, "textbox", "Attachment")?;
+    c.call("upload", json!({ "ref": input, "path": UPLOAD_FILE })).await?;
+    let picked = format!("Picked: {UPLOAD_FILE} ({} bytes)", UPLOAD_BODY.len());
+    let after = c.outline_with(&picked).await?;
+    if !after.contains(&picked) {
+        return Err(mismatch(format!("the frame's input did not get the file: {after}")));
+    }
+    expect_tickets(c, &[ActionClass::Upload], "pre-approved frame upload")
+}
+
+/// A chooser a cross-origin frame opens is cancelled like the page's own.
+pub async fn frame_file_chooser(c: &Ctx<'_>) -> CaseResult {
+    let outline = cross_frame(c, "upload.html", "Open the file chooser").await?;
+    let open = ref_in(&outline, "button", "Open the file chooser")?;
+    c.call("click", json!({ "ref": open })).await?;
+    let after = c.outline_with("Chooser: cancelled").await?;
+    if !after.contains("Chooser: cancelled") {
+        return Err(mismatch(format!("the frame's chooser was not cancelled: {after}")));
+    }
+    expect_tickets(c, &[], "a frame-opened file chooser")
 }
 
 pub async fn shadow_dom(c: &Ctx<'_>) -> CaseResult {

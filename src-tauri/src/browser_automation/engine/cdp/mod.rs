@@ -254,25 +254,28 @@ pub fn file_chooser_calls() -> [(CdpMethod, Value); 2] {
     ]
 }
 
-/// Set `files` on the file input at `path` through `DOM.setFileInputFiles`:
-/// the isolated-world helper hands back the element itself, by reference.
+/// Set `files` on the file input at `path` in `frame`'s isolated world
+/// (`None`: the main frame's) through `DOM.setFileInputFiles`: the helper
+/// hands back the element itself, by reference.
 pub async fn set_input_files(
     transport: &dyn CdpTransport,
     tab: &str,
+    frame: Option<&str>,
     path: &str,
     files: &[std::path::PathBuf],
 ) -> Result<(), EngineError> {
-    let context = isolated_context(transport, tab, None).await?;
+    let context = isolated_context(transport, tab, frame).await?;
     let mut params = call_params(&assets::file_input(path), context);
     params["returnByValue"] = Value::Bool(false);
     let out = transport
-        .call(tab, CdpMethod::RuntimeCallFunctionOn, params)
+        .call_in(tab, frame, CdpMethod::RuntimeCallFunctionOn, params)
         .await?;
     let element = file_input_object(&out)?;
     let files: Vec<String> = files.iter().map(|f| f.to_string_lossy().into_owned()).collect();
     transport
-        .call(
+        .call_in(
             tab,
+            frame,
             CdpMethod::DomSetFileInputFiles,
             json!({ "files": files, "objectId": element }),
         )

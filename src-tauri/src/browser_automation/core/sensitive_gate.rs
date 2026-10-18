@@ -8,7 +8,7 @@ use tauri::Url;
 use super::actions::{check_ref, check_url, tab_id_arg};
 use super::consent::SensitiveRequest;
 use super::dispatch::Verb;
-use super::reply::{engine_error, reported_failure};
+use super::reply::reported_failure;
 use super::sensitivity::{classify, Gesture, Scene, SensitivityFacts};
 use super::stop::StopToken;
 use super::tabs::stale_ref_error;
@@ -143,31 +143,24 @@ impl DesktopBrowserHost {
         } else if needs_ref {
             return Err(BrowserError::invalid("missing 'ref'").with_arg_keys(&["ref"]));
         }
-        let path = match token {
+        // A ref's facts come from the frame it was minted in.
+        let out = match token {
             Some(token) => {
-                let registry = self.registry.lock();
-                let record = registry
-                    .get(label)
-                    .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?;
-                let node = record
-                    .refs
-                    .resolve(token, record.epoch)
-                    .map_err(|why| stale_ref_error(token, why))?;
-                Some(node.path.clone())
+                let node = {
+                    let registry = self.registry.lock();
+                    let record = registry
+                        .get(label)
+                        .ok_or_else(|| BrowserError::tab_not_found(label).with_arg_keys(&["tabId"]))?;
+                    record
+                        .refs
+                        .resolve(token, record.epoch)
+                        .map_err(|why| stale_ref_error(token, why))?
+                        .clone()
+                };
+                self.eval_ref(label, &node, assets::sensitivity(Some(&node.path))).await?
             }
-            None => None,
+            None => self.eval(label, assets::sensitivity(None)).await?,
         };
-        let out = self
-            .engine
-            .evaluate(label, assets::sensitivity(path.as_deref()))
-            .await
-            .map_err(|e| {
-                log::warn!(
-                    "[browser-agent] sensitivity probe failed on tab {label} ({:?})",
-                    e.kind
-                );
-                engine_error(e, label)
-            })?;
         reported_failure(&out, token)?;
         Ok(SensitivityFacts::from_helper(&out))
     }

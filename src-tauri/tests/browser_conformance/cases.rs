@@ -82,6 +82,9 @@ pub const CAPABILITIES: &[Capability] = &[
     cap("file_chooser", &["click"]),
     cap("download", &["snapshot"]),
     cap("download_preapproved", &["snapshot"]),
+    cap("frame_password_submit", &["click"]),
+    cap("frame_upload", &["snapshot"]),
+    cap("frame_file_chooser", &["click"]),
 ];
 
 pub fn ids() -> Vec<&'static str> {
@@ -523,6 +526,9 @@ pub async fn run(
         "file_chooser" => sensitive_cases::file_chooser(&ctx).await,
         "download" => sensitive_cases::download(&ctx).await,
         "download_preapproved" => sensitive_cases::download_preapproved(&ctx).await,
+        "frame_password_submit" => frames::frame_password_submit(&ctx).await,
+        "frame_upload" => frames::frame_upload(&ctx).await,
+        "frame_file_chooser" => frames::frame_file_chooser(&ctx).await,
         other => Err(mismatch(format!("no case named {other}"))),
     };
     engine.end_session(&ctx.session);

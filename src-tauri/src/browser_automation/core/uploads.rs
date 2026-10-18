@@ -16,6 +16,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::reply::engine_error;
+use super::tabs::RefNode;
 use super::teardown::session_dir;
 use super::{BrowserError, DesktopBrowserHost};
 use crate::browser_automation::engine::files;
@@ -283,13 +284,12 @@ impl DesktopBrowserHost {
             })
     }
 
-    /// Stage the file the call names and set it on the file input at
-    /// `input_path`.
+    /// Stage the file the call names and set it on the file input `input`.
     pub(super) async fn upload(
         &self,
         session_id: &str,
         label: &str,
-        input_path: &str,
+        input: &RefNode,
         args: &Value,
     ) -> Result<(), BrowserError> {
         let source = self.upload_source(session_id, args).await?;
@@ -305,8 +305,9 @@ impl DesktopBrowserHost {
                 log::info!("[browser-agent] upload refused reason={}", refusal.reason());
                 refusal.into_error()
             })?;
+        let frame = (!input.frame.is_empty()).then_some(input.frame.as_str());
         self.engine
-            .set_input_files(label, input_path, &[staged])
+            .set_input_files(label, frame, &input.path, &[staged])
             .await
             .map_err(|e| engine_error(e, label))?;
         log::info!(
