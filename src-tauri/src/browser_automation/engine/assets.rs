@@ -47,6 +47,7 @@ pub const FACTS: Helper = helper!("facts");
 pub const PREPARE_TEXT: Helper = helper!("prepare_text");
 pub const FOCUSED_EDITABLE: Helper = helper!("focused_editable");
 pub const VIEWPORT: Helper = helper!("viewport");
+pub const SETTLE: Helper = helper!("settle");
 
 /// A helper with its parameters, ready for an engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +133,12 @@ pub fn prepare_text(path: &str, replace: bool) -> Script {
 /// Whether the focused element takes typed text.
 pub fn focused_editable() -> Script {
     Script::new(FOCUSED_EDITABLE, json!({}))
+}
+
+/// Resolves after the page has rendered two frames, so input queued
+/// before it has been handled.
+pub fn settle() -> Script {
+    Script::new(SETTLE, json!({}))
 }
 
 /// The viewport size, for page-level wheel input.

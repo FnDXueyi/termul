@@ -5,15 +5,6 @@ var FOCUSES_ON_CLICK = 'textarea, select, iframe, embed, object, input:not([type
   '[type=file i], [type=range i], [type=color i])';
 function box() { var r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; }
 function same(a, b) { return a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]; }
-// A background tab may never paint, so a frame also ends on a timer.
-function frame() {
-  return new Promise(function (done) {
-    var fired = false;
-    function go() { if (!fired) { fired = true; done(); } }
-    requestAnimationFrame(go);
-    setTimeout(go, 50);
-  });
-}
 var b0 = box();
 var sized = b0[2] > 0 && b0[3] > 0;
 var inView = sized && b0[0] + b0[2] > 0 && b0[1] + b0[3] > 0 &&

@@ -68,6 +68,12 @@ impl DesktopBrowserHost {
         Ok((mode, by_click))
     }
 
+    /// Run trusted input, then wait for the page to render after it.
+    /// WebKitGTK queues events and returns before the page has handled
+    /// them, so without the wait the next read can miss a click, and keys
+    /// sent right after a focusing click can reach the field before the
+    /// engine knows it is editable. The wait is best effort: input that
+    /// navigates replaces the document it runs in.
     async fn input(&self, tab: &str, step: EngineFuture<'_, ()>) -> Result<(), BrowserError> {
         step.await.map_err(|e| {
             // Tab id + kind only (CWE-532).
@@ -77,7 +83,9 @@ impl DesktopBrowserHost {
                 e.kind
             );
             engine_error(e, tab)
-        })
+        })?;
+        let _ = tokio::time::timeout(budgets::INPUT_SETTLE, self.eval(tab, assets::settle())).await;
+        Ok(())
     }
 
     /// Run a synthetic input helper; only `{ok: true}` is success.

@@ -60,12 +60,17 @@ pub const ACTIONABILITY_POLL: Duration = Duration::from_millis(100);
 pub const NATIVE_INPUT: Duration = secs(5);
 /// One trusted input event on any engine; CDP is the slowest.
 const INPUT_EVENT: Duration = CDP_CALL;
+/// After trusted input, how long the core waits for the page to render it.
+pub const INPUT_SETTLE: Duration = secs(1);
 /// The actionability wait can start its last facts probe just before it
 /// ends.
 const ACTIONABLE: Duration = ACTIONABILITY_WAIT.saturating_add(EVAL_STEP);
-/// Wait until the element is actionable, then press and release. Hover
-/// and scroll need no more.
-pub const ACTION_CLICK: Duration = ACTIONABLE.saturating_add(INPUT_EVENT).saturating_add(INPUT_EVENT);
+/// Wait until the element is actionable, press and release, then let the
+/// page render the click. Hover and scroll need no more.
+pub const ACTION_CLICK: Duration = ACTIONABLE
+    .saturating_add(INPUT_EVENT)
+    .saturating_add(INPUT_EVENT)
+    .saturating_add(INPUT_SETTLE);
 /// Text verbs click to focus, place the caret, then type or press: more
 /// steps than a click, held to the same bound. Every step is cut at it, so
 /// a slow engine answers `timeout` instead of late.

@@ -18,7 +18,7 @@ fn agent_strings_travel_as_parameters_never_as_script_source() {
 fn helpers_keep_no_page_visible_state_and_never_move_focus() {
     for helper in [
         SNAPSHOT, RESOLVE, CLICK, FILL, TYPE, PRESS, SCROLL, HOVER, FACTS, PREPARE_TEXT,
-        FOCUSED_EDITABLE, VIEWPORT,
+        FOCUSED_EDITABLE, VIEWPORT, SETTLE,
     ] {
         for global in ["window.__", "globalThis", "window[", "localStorage", "sessionStorage"] {
             assert!(!helper.body.contains(global), "{} writes {global}", helper.name);

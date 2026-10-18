@@ -84,6 +84,15 @@ function byPath(path) {
   var el = locate(path);
   return el && visible(el) ? el : null;
 }
+// A background tab may never paint, so a frame also ends on a timer.
+function frame() {
+  return new Promise(function (done) {
+    var fired = false;
+    function go() { if (!fired) { fired = true; done(); } }
+    requestAnimationFrame(go);
+    setTimeout(go, 50);
+  });
+}
 function center(el) {
   var rc = el.getBoundingClientRect();
   return { cx: rc.left + rc.width / 2, cy: rc.top + rc.height / 2, w: rc.width, h: rc.height };
