@@ -223,3 +223,60 @@ async fn presence_reaches_only_a_connected_editor_and_never_waits_for_one() {
     assert_eq!(started.elapsed(), Duration::ZERO, "no wait for a reconnect");
     assert!(!mounts.presence_notice("p", "host.guestHide", "{}".into()));
 }
+
+#[tokio::test]
+async fn a_presence_lookup_between_the_slices_of_an_agent_reply_leaves_it_whole() {
+    let mounts = Arc::new(CanvasPersistence::default());
+    let (frames, mut delivered) = tokio::sync::mpsc::unbounded_channel();
+    let seq = mounts.mount("p", PathBuf::from("p.figcraft"), Duration::from_secs(1));
+    let tab = CanvasHolder::new(
+        "a",
+        crate::canvas::persistence::test_renderer(),
+        Arc::new(move |frame| frames.send(frame).is_ok()),
+    );
+    assert!(mounts.attach("p", seq, tab));
+    let spawn_call = |presence: bool| {
+        let mounts = Arc::clone(&mounts);
+        tokio::spawn(async move {
+            let timeout = Duration::from_secs(30);
+            if presence {
+                mounts
+                    .presence_call("p", "node.get", "{}".into(), timeout)
+                    .await
+            } else {
+                mounts
+                    .call("p", "document.inspect", "{}".into(), timeout)
+                    .await
+            }
+        })
+    };
+
+    let agent = spawn_call(false);
+    let agent_id = delivered.recv().await.expect("agent call").call_id;
+    assert_eq!(
+        mounts.push_reply_slice("a", agent_id, "{\"big\":\""),
+        SliceMatch::Buffered
+    );
+    let lookup = spawn_call(true);
+    let lookup_id = delivered.recv().await.expect("presence call").call_id;
+    assert_eq!(
+        mounts.push_reply_slice("a", lookup_id, "{\"id\":"),
+        SliceMatch::Buffered
+    );
+    assert!(mounts.presence_notice("p", "host.guestCursor", "{}".into()));
+    assert_eq!(
+        mounts.push_reply_slice("a", agent_id, "abc"),
+        SliceMatch::Buffered
+    );
+    assert_eq!(
+        mounts.reply("a", lookup_id, seq, Ok("7}".into())),
+        ReplyMatch::Resolved
+    );
+    assert_eq!(lookup.await.unwrap(), Ok("{\"id\":7}".to_string()));
+    assert_eq!(
+        mounts.reply("a", agent_id, seq, Ok("\"}".into())),
+        ReplyMatch::Resolved
+    );
+
+    assert_eq!(agent.await.unwrap(), Ok("{\"big\":\"abc\"}".to_string()));
+}
