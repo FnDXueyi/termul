@@ -32,7 +32,7 @@ fn app(runs: Arc<ProbeRuns>) -> App<MockRuntime> {
         .invoke_handler(main_webview_only(tauri::generate_handler![
             super::perimeter_probe
         ]))
-        .build(tauri::generate_context!())
+        .build(crate::app_context())
         .expect("mock app builds with the real config and capabilities");
     WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
         .build()

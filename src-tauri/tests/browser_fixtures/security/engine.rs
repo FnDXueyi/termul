@@ -209,7 +209,7 @@ fn run() -> Report {
     let refused: Arc<Mutex<BTreeMap<String, Result<(), String>>>> = Arc::default();
     let sink = collected.clone();
     let refused_sink = refused.clone();
-    let mut context = tauri::generate_context!();
+    let mut context = crate::app_context();
     context.config_mut().identifier = "com.termul-manager.perimeter-fixture".to_string();
     context.config_mut().app.windows.clear();
     context.config_mut().build.dev_url = Some(format!("{dev_origin}/").parse().unwrap());

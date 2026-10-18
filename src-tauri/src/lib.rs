@@ -1087,6 +1087,13 @@ fn finish_exit(app: &tauri::AppHandle) {
     }
 }
 
+/// The one expansion of `generate_context!` in this crate. On macOS each
+/// expansion embeds `Info.plist` under a fixed symbol, so a second one in the
+/// lib test build (the host perimeter fixtures) fails to compile.
+pub(crate) fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install the panic hook before anything can panic so Rust panics are
@@ -2110,7 +2117,7 @@ pub fn run() {
             commands::canvas_save,
             commands::canvas_status,
         ]))
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
