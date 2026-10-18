@@ -136,7 +136,10 @@ export function ClaudeAccountChip({
           )
         })}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => openAppSettings()} className="flex items-center gap-2">
+        <DropdownMenuItem
+          onSelect={() => openAppSettings('provider')}
+          className="flex items-center gap-2"
+        >
           <span className="flex-1 text-xs">Manage accounts</span>
           <ExternalLink size={12} className="text-muted-foreground" />
         </DropdownMenuItem>

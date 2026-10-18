@@ -224,6 +224,11 @@ function applyCssVariables(
     '--glow-purple': GLOW_PURPLE_COMPONENTS,
     '--border': hexToOklchComponents(border),
     '--input': hexToOklchComponents(border),
+    '--field-border': readableUiComponents(border, [
+      card,
+      tintedNeutralSurface.emittedHex,
+      popoverHex
+    ]),
     '--ring': hexToOklchComponents(ringHex),
     '--terminal-bg': tintedNeutralSurface.components,
     '--terminal-fg': foregroundComponents,
@@ -269,8 +274,7 @@ export function paletteToXtermTheme(
   const baseSurface = chrome
     ? emittedSurface(chrome.background).emittedHex
     : brandTintedNeutral(palette).emittedHex
-  const surface =
-    appearance === 'light' ? darkenHex(baseSurface, LIGHT_CANVAS_DARKEN) : baseSurface
+  const surface = appearance === 'light' ? darkenHex(baseSurface, LIGHT_CANVAS_DARKEN) : baseSurface
   const foreground = chrome?.foreground ?? palette.ink
   return {
     background: surface,

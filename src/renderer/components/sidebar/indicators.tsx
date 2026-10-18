@@ -1,11 +1,12 @@
 import { AlertTriangle } from '@/components/icons'
+import { RailTooltip } from '@/components/shell/rail-button'
 import { Spinner } from '@/components/ui/spinner'
 import { needsYouLabel } from '@/lib/agent-chat-attention'
 import { cn } from '@/lib/utils'
 
 /**
  * Needs-you pill: 6px warning dot + count. The full label ("3 need you")
- * stays on title/aria-label. #859: the pill never starves the project name —
+ * stays on the tooltip and aria-label. #859: the pill never starves the project name —
  * it shows only the count, so its width stays small and fixed.
  */
 export function NeedsYouButton({
@@ -18,19 +19,20 @@ export function NeedsYouButton({
   if (count <= 0) return null
   const label = needsYouLabel(count)
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={(event) => {
-        event.stopPropagation()
-        onOpen?.()
-      }}
-      className="inline-flex h-5 min-w-0 shrink-0 items-center gap-1 rounded-full bg-warning/10 px-1.5 text-3xs font-semibold tabular-nums text-warning transition-[transform,background-color] duration-150 ease-out hover:bg-warning/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100"
-    >
-      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-warning" />
-      <span>{count}</span>
-    </button>
+    <RailTooltip label={label}>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={(event) => {
+          event.stopPropagation()
+          onOpen?.()
+        }}
+        className="inline-flex h-5 min-w-0 shrink-0 items-center gap-1 rounded-full bg-warning/10 px-1.5 text-3xs font-semibold tabular-nums text-warning transition-[transform,background-color] duration-150 ease-out hover:bg-warning/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring active:scale-[0.97] motion-reduce:transition-none motion-reduce:active:scale-100"
+      >
+        <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-warning" />
+        <span>{count}</span>
+      </button>
+    </RailTooltip>
   )
 }
 

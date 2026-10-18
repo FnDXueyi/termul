@@ -14,9 +14,13 @@
 export const MENU_CONTENT_CLASS =
   'z-50 min-w-[8rem] overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-md'
 
-/** Open/close and side-aware entrance motion for a Radix menu shell. */
+/**
+ * Radix menu shell motion: grows from the trigger (`--scale-medium` to 1, the
+ * origin comes from Radix) and closes with a fade only. Timing is in
+ * `index.css` (`[data-radix-popper-content-wrapper] > *`).
+ */
 export const MENU_MOTION_CLASS =
-  'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2'
+  'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-[var(--scale-medium)]'
 
 /** Pointer or keyboard highlight on a menu row. */
 export const MENU_HIGHLIGHT_CLASS = 'focus:bg-foreground/[0.06] focus:text-foreground'
@@ -30,7 +34,7 @@ export const MENU_SUB_TRIGGER_OPEN_CLASS = 'data-[state=open]:bg-foreground/[0.0
 /** Slot for the checked `Check` on a `pl-8` checkbox, radio or select row. */
 export const MENU_INDICATOR_CLASS = 'absolute left-2 flex h-3.5 w-3.5 items-center justify-center'
 
-/** Group label: the `.label-panel` role (11px / semibold / tracked) with row padding. */
+/** Group label: the `.label-panel` role (12px / medium / sentence case) with row padding. */
 export const MENU_LABEL_CLASS = 'label-panel px-2 pb-1 pt-2'
 
 /** Hairline between groups, edge to edge inside the 4px shell padding. */

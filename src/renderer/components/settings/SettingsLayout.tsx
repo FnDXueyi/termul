@@ -1,4 +1,13 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  createContext,
+  Fragment,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import { Search, X } from '@/components/icons'
 import {
   FOCUS_RING_CLASS,
@@ -9,42 +18,53 @@ import {
 import { type SettingsSearchEntry, searchSettings } from '@/lib/settings-search'
 import { cn } from '@/lib/utils'
 
-/** A settings category shown in the left sidebar. */
+/** A settings page, shown in the sidebar. */
 export interface SettingsCategory {
-  /** Stable id; also used as the scroll anchor target (`data-settings-section`). */
+  /** Stable id; also the page id (`data-settings-section`). */
   id: string
-  /** Sidebar label. */
+  /** Sidebar label and page title. */
   label: string
+  /** One line of help under the page title. */
+  description?: string
+  /** Sidebar group heading. Consecutive pages with the same group share it. */
+  group?: string
   /** Optional icon rendered before the label. */
   icon?: React.ReactNode
 }
 
 interface SettingsLayoutProps {
-  /** Categories to render in the sidebar, in display order. */
+  /** Pages in display order. */
   categories: SettingsCategory[]
-  /** Flat search index across every category. */
+  /** Flat search index across every page. */
   searchIndex: readonly SettingsSearchEntry[]
-  /**
-   * Section content. Each section must be wrapped so its root carries
-   * `data-settings-section="<categoryId>"` — use {@link SettingsSection}.
-   */
+  /** Pages, each wrapped in {@link SettingsSection}. Every page stays mounted. */
   children: React.ReactNode
-  /** Optional extra content rendered at the bottom of the sidebar. */
-  sidebarFooter?: React.ReactNode
-  /** Sidebar header label (`.label-panel`). */
+  /** Sidebar title, e.g. "Preferences". */
   title: string
+  /** Optional line under the sidebar title, e.g. the project name. */
+  subtitle?: React.ReactNode
+  /** Close the modal. Renders the page header's Close button. */
+  onClose?: () => void
+  /** Controlled active page id. */
+  page?: string
+  /** Initial page when uncontrolled. Defaults to the first category. */
+  defaultPage?: string
+  /** Called when the active page changes. */
+  onPageChange?: (page: string) => void
+  /** Optional extra content at the bottom of the sidebar. */
+  sidebarFooter?: React.ReactNode
 }
 
-/** Category ids set apart at the end of the list with a top hairline. */
-const SET_APART_CATEGORY_IDS = new Set(['reset'])
+/** How long a search jump marks its target row. */
+export const SETTINGS_TARGET_MS = 2000
+
+const ActivePageContext = createContext<string | undefined>(undefined)
 
 const ROW_CLASS = `flex flex-shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-xs transition-colors duration-150 ease-out md:w-full ${FOCUS_RING_CLASS}`
 
 /**
- * Wrapper for a single settings section. Tags the section with its category id
- * so {@link SettingsLayout} can scroll to it and track the active category via
- * scroll-spy. The `id` doubles as a stable DOM id (`settings-section-<id>`) for
- * anchor-based navigation.
+ * One settings page. It stays mounted (form state and search anchors keep
+ * working) and is hidden unless it is the active page.
  */
 export function SettingsSection({
   id,
@@ -55,11 +75,14 @@ export function SettingsSection({
   children: React.ReactNode
   className?: string
 }): React.JSX.Element {
+  const activeId = useContext(ActivePageContext)
+  const hidden = activeId !== undefined && activeId !== id
   return (
     <section
       id={`settings-section-${id}`}
       data-settings-section={id}
-      className={cn('scroll-mt-4', className)}
+      hidden={hidden}
+      className={cn('flex flex-col gap-6', className)}
     >
       {children}
     </section>
@@ -67,236 +90,270 @@ export function SettingsSection({
 }
 
 /**
- * Shared settings shell: a left sidebar listing categories with the active one
- * highlighted, a fuzzy search box, and a scrollable content area. Clicking a
- * category (or selecting a search result) scrolls the matching section into
- * view; scroll-spy keeps the active category in sync while the user scrolls.
- *
- * The content remains a single scrollable column (scroll-spy navigation rather
- * than show-one-at-a-time) so the existing save bar and unsaved-changes guard
- * in ProjectSettings keep working unchanged.
+ * Shared settings shell: a sidebar of grouped pages with search, and one page
+ * at a time with a pinned header (title, help, Close). Search results open the
+ * page, scroll to the setting and mark it for {@link SETTINGS_TARGET_MS}. Under
+ * the `md` breakpoint the sidebar becomes a top bar with a scrolling strip.
  */
 export function SettingsLayout({
   categories,
   searchIndex,
   children,
-  sidebarFooter,
-  title
+  title,
+  subtitle,
+  onClose,
+  page,
+  defaultPage,
+  onPageChange,
+  sidebarFooter
 }: SettingsLayoutProps): React.JSX.Element {
-  const contentRef = useRef<HTMLDivElement | null>(null)
-  const [activeId, setActiveId] = useState<string | undefined>(categories[0]?.id)
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  const [uncontrolledPage, setUncontrolledPage] = useState(defaultPage ?? categories[0]?.id)
+  const activeId = page ?? uncontrolledPage
   const [query, setQuery] = useState('')
-  // While a programmatic scroll is in flight, suppress scroll-spy so the active
-  // highlight follows the click target rather than intermediate sections.
-  const programmaticScrollRef = useRef(false)
-  const programmaticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const targetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const markedRef = useRef<HTMLElement | null>(null)
+  const rafRef = useRef<number | null>(null)
 
   const results = useMemo(() => searchSettings(query, searchIndex), [query, searchIndex])
   const isSearching = query.trim().length > 0
+  const active = categories.find((category) => category.id === activeId) ?? categories[0]
 
-  const scrollToSection = useCallback((id: string, anchorId?: string) => {
-    const root = contentRef.current
-    if (!root) return
+  const selectPage = useCallback(
+    (id: string) => {
+      if (page === undefined) setUncontrolledPage(id)
+      onPageChange?.(id)
+    },
+    [page, onPageChange]
+  )
 
-    const target =
-      (anchorId && root.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`)) ||
-      root.querySelector<HTMLElement>(`[data-settings-section="${CSS.escape(id)}"]`)
-    if (!target) return
-
-    programmaticScrollRef.current = true
-    if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current)
-    programmaticTimerRef.current = setTimeout(() => {
-      programmaticScrollRef.current = false
-    }, 600)
-
-    setActiveId(id)
-    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  const clearMark = useCallback(() => {
+    if (targetTimerRef.current) clearTimeout(targetTimerRef.current)
+    targetTimerRef.current = null
+    markedRef.current?.removeAttribute('data-settings-target')
+    markedRef.current = null
   }, [])
 
-  // Scroll-spy: highlight the section nearest the top of the viewport.
-  useEffect(() => {
-    const root = contentRef.current
-    if (!root || categories.length === 0) return
-
-    const sections = Array.from(root.querySelectorAll<HTMLElement>('[data-settings-section]'))
-    if (sections.length === 0) return
-
-    const visible = new Map<string, number>()
-
-    const recompute = (): void => {
-      if (programmaticScrollRef.current) return
-      let topId: string | undefined
-      let bestDistance = Number.POSITIVE_INFINITY
-      // Pick the section whose top edge is closest to the viewport top (0),
-      // not the smallest raw value — sections scrolled past have large negative
-      // tops while still intersecting, and must not stay active.
-      for (const [id, top] of visible) {
-        const distance = Math.abs(top)
-        if (distance < bestDistance) {
-          bestDistance = distance
-          topId = id
-        }
-      }
-      if (topId) setActiveId(topId)
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const id = (entry.target as HTMLElement).dataset.settingsSection
-          if (!id) continue
-          if (entry.isIntersecting) {
-            visible.set(id, entry.boundingClientRect.top)
-          } else {
-            visible.delete(id)
-          }
-        }
-        recompute()
-      },
-      {
-        root,
-        threshold: [0, 0.1, 0.5],
-        rootMargin: '0px 0px -70% 0px'
-      }
-    )
-
-    for (const section of sections) observer.observe(section)
-
-    return () => {
-      observer.disconnect()
-      visible.clear()
-    }
-    // Re-run when the set of categories changes (sections added/removed).
-  }, [categories])
+  const cancelJump = useCallback(() => {
+    if (rafRef.current === null) return
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = null
+  }, [])
 
   useEffect(() => {
     return () => {
-      if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current)
+      cancelJump()
+      clearMark()
     }
-  }, [])
+  }, [cancelJump, clearMark])
+
+  // A new page starts at the top.
+  useEffect(() => {
+    if (activeId === undefined) return
+    bodyRef.current?.scrollTo({ top: 0 })
+  }, [activeId])
+
+  const openResult = useCallback(
+    (categoryId: string, anchorId?: string) => {
+      selectPage(categoryId)
+      clearMark()
+      cancelJump()
+      if (!anchorId) return
+      // Wait one frame so the page is visible before measuring it.
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        clearMark()
+        const target = bodyRef.current?.querySelector<HTMLElement>(`#${CSS.escape(anchorId)}`)
+        if (!target) return
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        target.setAttribute('data-settings-target', '')
+        markedRef.current = target
+        targetTimerRef.current = setTimeout(clearMark, SETTINGS_TARGET_MS)
+      })
+    },
+    [selectPage, clearMark, cancelJump]
+  )
 
   const handleCategoryKeyDown = (
     event: React.KeyboardEvent<HTMLButtonElement>,
     index: number
   ): void => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      const dir = event.key === 'ArrowDown' ? 1 : -1
-      const next = (index + dir + categories.length) % categories.length
-      const sidebar = event.currentTarget.parentElement
-      const buttons = sidebar?.querySelectorAll<HTMLButtonElement>('[data-category-button]')
-      buttons?.[next]?.focus()
-    }
+    const forward = event.key === 'ArrowDown' || event.key === 'ArrowRight'
+    const back = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+    if (!forward && !back) return
+    event.preventDefault()
+    const next = (index + (forward ? 1 : -1) + categories.length) % categories.length
+    const nav = event.currentTarget.closest('nav')
+    nav?.querySelectorAll<HTMLButtonElement>('[data-category-button]')[next]?.focus()
   }
 
-  return (
-    <div className="flex flex-1 min-h-0 flex-col overflow-hidden md:flex-row">
-      {/* Sidebar — top bar on mobile, left sidebar on desktop */}
-      <aside className="flex flex-shrink-0 flex-col border-b border-border bg-background md:w-60 md:border-b-0 md:border-r">
-        <div className="hidden h-10 items-center pl-4 md:flex">
-          <span className="label-panel truncate">{title}</span>
-        </div>
-        <div className="px-2 pb-2 pt-2 md:pt-0">
-          <div className="relative">
-            <Search size={13} aria-hidden className={PANEL_FIELD_ICON_CLASS} />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search settings"
-              aria-label="Search settings"
-              className={cn(PANEL_FIELD_CLASS, 'h-8 w-full pl-7 pr-7')}
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => setQuery('')}
-                aria-label="Clear search"
-                className={cn(
-                  QUIET_ICON_BUTTON_CLASS,
-                  'absolute right-1 top-1/2 flex size-6 -translate-y-1/2'
-                )}
-              >
-                <X size={13} />
-              </button>
-            )}
-          </div>
-        </div>
+  const closeButton = (className?: string) =>
+    onClose ? (
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label={`Close ${title}`}
+        title="Close"
+        className={cn(QUIET_ICON_BUTTON_CLASS, 'size-7 shrink-0', className)}
+      >
+        <X size={16} />
+      </button>
+    ) : null
 
-        <nav
-          aria-label="Settings categories"
-          className="flex flex-1 gap-0.5 overflow-x-auto px-2 pb-2 md:flex-col md:overflow-y-auto"
-        >
-          {isSearching ? (
-            results.length === 0 ? (
-              <p className="px-2.5 py-4 text-xs text-muted-foreground">
-                No settings match "{query.trim()}".
-              </p>
-            ) : (
-              results.map((result) => (
+  return (
+    <ActivePageContext.Provider value={active?.id}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+        <aside className="flex flex-shrink-0 flex-col border-b border-border bg-card md:w-60 md:border-b-0 md:border-r">
+          <div className="flex min-h-12 items-center gap-2 pl-4 pr-2.5 md:pr-4">
+            <div className="min-w-0 flex-1 py-2">
+              <h2 className="truncate text-sm font-semibold text-foreground">{title}</h2>
+              {subtitle && <p className="truncate text-xs text-muted-foreground">{subtitle}</p>}
+            </div>
+            {closeButton('md:hidden')}
+          </div>
+          <div className="px-3 pb-2">
+            <div className="relative">
+              <Search size={13} aria-hidden className={PANEL_FIELD_ICON_CLASS} />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search settings"
+                aria-label="Search settings"
+                className={cn(PANEL_FIELD_CLASS, 'h-8 w-full bg-background pl-7 pr-7')}
+              />
+              {query && (
                 <button
-                  key={`${result.categoryId}-${result.label}`}
                   type="button"
-                  onClick={() => scrollToSection(result.categoryId, result.anchorId)}
+                  onClick={() => setQuery('')}
+                  aria-label="Clear search"
                   className={cn(
-                    ROW_CLASS,
-                    'min-h-8 py-1.5 text-secondary-foreground hover:bg-foreground/[0.03] hover:text-foreground'
+                    QUIET_ICON_BUTTON_CLASS,
+                    'absolute right-1 top-1/2 flex size-6 -translate-y-1/2'
                   )}
                 >
-                  <span className="flex min-w-0 flex-col items-start gap-0.5">
-                    <span className="max-w-full truncate">{result.label}</span>
-                    <span className="max-w-full truncate text-2xs text-muted-foreground">
-                      {categories.find((c) => c.id === result.categoryId)?.label}
-                    </span>
-                  </span>
+                  <X size={13} />
                 </button>
-              ))
-            )
-          ) : (
-            categories.map((category, index) => {
-              const isActive = category.id === activeId
-              const setApart = index > 0 && SET_APART_CATEGORY_IDS.has(category.id)
-              return (
-                <Fragment key={category.id}>
-                  {setApart && (
-                    <div
-                      aria-hidden
-                      data-testid="settings-category-divider"
-                      className="hidden h-px shrink-0 bg-border md:my-1.5 md:block"
-                    />
-                  )}
+              )}
+            </div>
+          </div>
+
+          <nav
+            aria-label="Settings pages"
+            className="flex flex-1 gap-0.5 overflow-x-auto px-3 pb-2 md:flex-col md:overflow-y-auto md:pb-3"
+          >
+            {isSearching ? (
+              results.length === 0 ? (
+                <div className="flex flex-col items-start gap-2 px-2.5 py-3">
+                  <p className="text-xs text-muted-foreground">
+                    No settings match "{query.trim()}".
+                  </p>
                   <button
                     type="button"
-                    data-category-button
-                    aria-current={isActive ? 'true' : undefined}
-                    onClick={() => scrollToSection(category.id)}
-                    onKeyDown={(e) => handleCategoryKeyDown(e, index)}
+                    onClick={() => setQuery('')}
                     className={cn(
-                      ROW_CLASS,
-                      'h-8 [&_svg]:size-3.5',
-                      isActive
-                        ? 'keycap text-foreground'
-                        : 'text-secondary-foreground hover:bg-foreground/[0.03] hover:text-foreground'
+                      'h-7 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-secondary',
+                      FOCUS_RING_CLASS
                     )}
                   >
-                    {category.icon && (
-                      <span className="flex flex-shrink-0 items-center">{category.icon}</span>
-                    )}
-                    <span className="truncate">{category.label}</span>
+                    Clear search
                   </button>
-                </Fragment>
+                </div>
+              ) : (
+                <>
+                  <p className="hidden px-2.5 pb-1 pt-2 text-xs font-medium text-muted-foreground md:block">
+                    {results.length === 1 ? '1 result' : `${results.length} results`}
+                  </p>
+                  {results.map((result) => {
+                    const category = categories.find((c) => c.id === result.categoryId)
+                    return (
+                      <button
+                        key={`${result.categoryId}-${result.label}`}
+                        type="button"
+                        onClick={() => openResult(result.categoryId, result.anchorId)}
+                        className={cn(
+                          ROW_CLASS,
+                          'min-h-8 py-1.5 text-secondary-foreground hover:bg-foreground/[0.03] hover:text-foreground'
+                        )}
+                      >
+                        <span className="flex min-w-0 flex-col items-start gap-0.5">
+                          <span className="max-w-full truncate">{result.label}</span>
+                          <span className="max-w-full truncate text-2xs text-muted-foreground">
+                            {category?.group ? `${category.group} · ` : ''}
+                            {category?.label}
+                          </span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </>
               )
-            })
+            ) : (
+              categories.map((category, index) => {
+                const isActive = category.id === active?.id
+                const startsGroup =
+                  category.group !== undefined && category.group !== categories[index - 1]?.group
+                return (
+                  <Fragment key={category.id}>
+                    {startsGroup && (
+                      <p
+                        data-testid="settings-group-label"
+                        className={cn(
+                          'hidden px-2.5 pb-1 text-xs font-medium text-muted-foreground md:block',
+                          index === 0 ? 'pt-1' : 'pt-3'
+                        )}
+                      >
+                        {category.group}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      data-category-button
+                      aria-current={isActive ? 'page' : undefined}
+                      onClick={() => selectPage(category.id)}
+                      onKeyDown={(e) => handleCategoryKeyDown(e, index)}
+                      className={cn(
+                        ROW_CLASS,
+                        'h-8 [&_svg]:size-3.5',
+                        isActive
+                          ? 'keycap text-foreground'
+                          : 'text-secondary-foreground hover:bg-foreground/[0.03] hover:text-foreground'
+                      )}
+                    >
+                      {category.icon && (
+                        <span className="flex flex-shrink-0 items-center">{category.icon}</span>
+                      )}
+                      <span className="truncate">{category.label}</span>
+                    </button>
+                  </Fragment>
+                )
+              })
+            )}
+          </nav>
+
+          {sidebarFooter && <div className="border-t border-border p-2">{sidebarFooter}</div>}
+        </aside>
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {active && (
+            <header className="flex shrink-0 items-start gap-4 border-b border-border px-4 pb-4 pt-4 md:px-8 md:pt-6">
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-semibold text-foreground">{active.label}</h2>
+                {active.description && (
+                  <p className="mt-1 text-sm text-muted-foreground">{active.description}</p>
+                )}
+              </div>
+              {closeButton('-mr-2 -mt-1 hidden md:flex')}
+            </header>
           )}
-        </nav>
-
-        {sidebarFooter && <div className="border-t border-border p-2">{sidebarFooter}</div>}
-      </aside>
-
-      {/* Content */}
-      <div ref={contentRef} className="min-w-0 flex-1 overflow-y-auto p-6 pb-32">
-        <div className="mx-auto max-w-4xl space-y-8">{children}</div>
+          <div
+            ref={bodyRef}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 md:px-8"
+          >
+            <div className="mx-auto max-w-3xl">{children}</div>
+          </div>
+        </div>
       </div>
-    </div>
+    </ActivePageContext.Provider>
   )
 }
