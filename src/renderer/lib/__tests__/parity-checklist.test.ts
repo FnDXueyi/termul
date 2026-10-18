@@ -1554,6 +1554,9 @@ describe('Parity Checklist Automation', () => {
       for (const rust of [commands, routes]) {
         expect(rust).toMatch(/open_canvas\(/)
         expect(rust).toMatch(/close_canvas\(/)
+        expect(rust, 'one doc-path check against the project roots').toMatch(
+          /resolve_doc_path\(&(\w+\.)?doc_path, /
+        )
       }
     })
 

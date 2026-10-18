@@ -24,6 +24,7 @@
 //! - [`persistence`] — the figcraft mount registry: load floor, autosave
 //!   debounce, saved version and the atomic document write (AD-23, AD-31).
 
+pub mod doc_path;
 pub mod managed;
 pub mod mcp_proxy;
 pub mod persistence;
@@ -31,6 +32,8 @@ pub mod pin;
 pub mod pool;
 pub mod static_server;
 
+#[cfg(test)]
+mod doc_path_tests;
 #[cfg(test)]
 mod pin_tests;
 #[cfg(test)]

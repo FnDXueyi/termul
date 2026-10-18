@@ -7,12 +7,12 @@
 //! web routes of the same names. `canvas_save` / `canvas_status` still drive
 //! the OpenPencil daemon pool until it is removed.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tauri::State;
 
 use super::{sanitize_log_field, validate_project_path, IpcResult};
+use crate::canvas::doc_path::resolve_doc_path;
 use crate::canvas::mcp_proxy;
 use crate::canvas::persistence::{
     self, canvas_mounts, CloseMode, CloseOutcome, ConflictChoice, DirtyOutcome, DiskOutcome,
@@ -24,32 +24,9 @@ use crate::canvas::static_server::{
     CODE_BUNDLE_LISTENER_DOWN,
 };
 use crate::canvas::{CanvasError, CanvasStatus, CODE_DAEMON_DOWN};
-use crate::path_validation::client_path;
+use crate::web::ProjectRegistry;
 
 const LISTENER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// The canonical doc path. A document that does not exist yet (the first
-/// open of a project's `design.figcraft`) is validated through its parent
-/// directory; the first save creates it.
-pub(super) fn validate_canvas_doc_path(doc_path: &str) -> Result<String, String> {
-    let doc_path = client_path(doc_path);
-    let path = Path::new(&doc_path);
-    let validated = if path.exists() {
-        validate_project_path(&doc_path)?
-    } else {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return Err(format!("Invalid canvas document path: {doc_path}"));
-        };
-        let parent = parent
-            .to_str()
-            .ok_or_else(|| "Path contains invalid UTF-8".to_string())?;
-        validate_project_path(parent)?.join(name)
-    };
-    validated
-        .to_str()
-        .map(str::to_string)
-        .ok_or_else(|| "Path contains invalid UTF-8".to_string())
-}
 
 fn persistence_result<T>(
     operation: &str,
@@ -73,21 +50,29 @@ fn persistence_result<T>(
 /// leaseGraceMs?, maxMounted?, crashTimeouts? } }` — the loopback bundle base
 /// plus a minted `ct` token and a new `mountSeq` for the project's canvas,
 /// leased to this window (AD-30). Typed `BUNDLE_LISTENER_DOWN` while the
-/// listener is not bound; `CANVAS_OPEN_ELSEWHERE` when the renderer holding
-/// the lease could not save; `EVICTION_BLOCKED` when a canvas that must make
-/// room (AD-26) could not be saved.
+/// listener is not bound; `PATH_VALIDATION_FAILED` for a doc outside every
+/// registered project root, as on the web route; `CANVAS_OPEN_ELSEWHERE`
+/// when the renderer holding the lease could not save; `EVICTION_BLOCKED`
+/// when a canvas that must make room (AD-26) could not be saved.
 #[tauri::command]
 pub async fn canvas_open(
     doc_path: String,
     project_id: String,
     request: OpenRequest,
     server: State<'_, Arc<StaticServer>>,
+    registry: State<'_, Arc<ProjectRegistry>>,
 ) -> Result<IpcResult<CanvasOpenInfo>, String> {
-    let doc_key = match validate_canvas_doc_path(&doc_path) {
-        Ok(doc_key) => doc_key,
-        Err(message) => return Ok(IpcResult::error(message, "PATH_VALIDATION_FAILED")),
-    };
     let log_project_id = sanitize_log_field(&project_id);
+    let doc_key = match resolve_doc_path(&doc_path, Some(&registry)) {
+        Ok(doc_key) => doc_key,
+        Err(err) => {
+            log::warn!(
+                "[canvas] open rejected project_id={log_project_id}: {}",
+                err.message
+            );
+            return Ok(IpcResult::error(err.message, err.code));
+        }
+    };
     let Some(base) = server.wait_for_base(LISTENER_WAIT).await else {
         log::warn!(
             "[canvas] open failed project_id={log_project_id} code={CODE_BUNDLE_LISTENER_DOWN}"
