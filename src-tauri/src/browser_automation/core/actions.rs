@@ -95,7 +95,7 @@ impl DesktopBrowserHost {
             .surface
             .info(id)
             .ok()
-            .and_then(|info| CanonicalOrigin::parse(&info.url));
+            .and_then(|info| CanonicalOrigin::parse(&info.url).ok());
         TabFacts {
             id: id.to_string(),
             epoch: tab.epoch(),
@@ -163,7 +163,7 @@ impl DesktopBrowserHost {
                     .ok_or_else(|| BrowserError::tab_not_found(&id).with_arg_keys(&["tabId"]))?;
                 let mut facts = self.tab_facts(&id, &tab);
                 // The pane may not report the URL until it has loaded.
-                facts.origin = facts.origin.or_else(|| CanonicalOrigin::parse(&url));
+                facts.origin = facts.origin.or_else(|| CanonicalOrigin::parse(&url).ok());
                 Ok(mutated(Fidelity::Trusted, facts))
             }
             Verb::CloseTab => {
