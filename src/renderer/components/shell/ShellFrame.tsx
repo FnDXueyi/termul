@@ -11,7 +11,13 @@ import { PaneDndProvider } from '@/hooks/use-pane-dnd'
 import { ExplorerColumn } from '@/layouts/workspace-layout/ExplorerColumn'
 import { getExplorerColumnBlocks } from '@/layouts/workspace-layout/explorer-column-blocks'
 import type { SSHWorkspaceState } from '@/layouts/workspace-layout/use-ssh-workspace'
-import { getTopRowPlatform, selectTopRowRoles, type TopRowMode } from '@/lib/top-row'
+import {
+  getTopRowPlatform,
+  selectTopRowRoles,
+  type TopRowMode,
+  type TopRowPlatform,
+  type TopRowRoles
+} from '@/lib/top-row'
 import { isWorkspaceRoutePath } from '@/lib/workspace-route'
 import { useFileExplorerVisible } from '@/stores/file-explorer-store'
 import { useSidebarVisible } from '@/stores/sidebar-store'
@@ -48,6 +54,47 @@ function TopGutter({ dragRegion }: { dragRegion: boolean }): React.JSX.Element {
       data-testid="top-gutter"
       data-tauri-drag-region={dragRegion ? true : undefined}
     />
+  )
+}
+
+/**
+ * {@link TopRowProvider} plus the main card's traffic-light start inset. It
+ * owns the Side panel visibility subscription, so a Side panel toggle
+ * re-renders only this provider and the top-row consumers, not the frame.
+ */
+function ShellTopRowProvider({
+  roles,
+  platform,
+  railExpanded,
+  activeProject,
+  ssh,
+  children
+}: {
+  roles: TopRowRoles
+  platform: TopRowPlatform
+  railExpanded: boolean
+  activeProject: Project | undefined
+  ssh: SSHWorkspaceState
+  children: ReactNode
+}): React.JSX.Element {
+  const isExplorerVisible = useFileExplorerVisible()
+  const trafficLightInset = getTrafficLightInset(platform, railExpanded)
+  // Same condition as `ExplorerColumn`: with no Side panel column the main
+  // card sits next to the collapsed Rail, under the traffic lights.
+  const explorerColumn = getExplorerColumnBlocks({
+    isExplorerVisible,
+    activeProject,
+    ssh,
+    hasSidePanel: Boolean(activeProject)
+  })
+  const mainStartInsetPx =
+    trafficLightInset && !explorerColumn.showFileColumn && !explorerColumn.sftpSession
+      ? trafficLightInset.panelHeaderStartPx
+      : 0
+  return (
+    <TopRowProvider roles={roles} platform={platform} mainStartInsetPx={mainStartInsetPx}>
+      {children}
+    </TopRowProvider>
   )
 }
 
@@ -91,19 +138,6 @@ export function ShellFrame({
     [paneRoot, fullscreenPaneId, mode]
   )
   const platform = useMemo(() => getTopRowPlatform(), [])
-  const trafficLightInset = getTrafficLightInset(platform, railExpanded)
-  // Same condition as `ExplorerColumn`: with no Side panel column the main
-  // card sits next to the collapsed Rail, under the traffic lights.
-  const explorerColumn = getExplorerColumnBlocks({
-    isExplorerVisible: useFileExplorerVisible(),
-    activeProject,
-    ssh,
-    hasSidePanel: Boolean(activeProject)
-  })
-  const mainStartInsetPx =
-    trafficLightInset && !explorerColumn.showFileColumn && !explorerColumn.sftpSession
-      ? trafficLightInset.panelHeaderStartPx
-      : 0
 
   // Native browser webviews paint above the DOM: hide them while a shell
   // popover is open so it is never drawn underneath.
@@ -111,7 +145,13 @@ export function ShellFrame({
   useNativeWebviewOcclusion(isThemePickerOpen)
 
   return (
-    <TopRowProvider roles={roles} platform={platform} mainStartInsetPx={mainStartInsetPx}>
+    <ShellTopRowProvider
+      roles={roles}
+      platform={platform}
+      railExpanded={railExpanded}
+      activeProject={activeProject}
+      ssh={ssh}
+    >
       <div className="h-screen flex flex-col overflow-hidden bg-background">
         <ResizeEdges />
         {/* Rail (full height) | right column: gutter, then Side panel and main
@@ -175,6 +215,6 @@ export function ShellFrame({
         {/* Modals */}
         {appModals}
       </div>
-    </TopRowProvider>
+    </ShellTopRowProvider>
   )
 }

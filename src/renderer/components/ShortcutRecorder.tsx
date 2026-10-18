@@ -250,7 +250,7 @@ export function ShortcutRecorder({
             onBlur={handleBlur}
             onKeyDown={handleKeyboardActivate}
             className={`
-              min-w-[88px] shrink-0 rounded-md border px-2 py-1 text-center font-mono text-2xs transition-all cursor-pointer
+              min-w-[88px] shrink-0 rounded-md border px-2 py-1 text-center font-mono text-2xs transition-[color,background-color,border-color,box-shadow] duration-150 ease-out cursor-pointer
               ${
                 isRecording
                   ? 'border-primary bg-primary/10 ring-2 ring-primary/30'
@@ -314,7 +314,7 @@ export function ShortcutRecorder({
           onBlur={handleBlur}
           onKeyDown={handleKeyboardActivate}
           className={`
-            px-3 py-2 rounded-md border text-sm font-mono cursor-pointer transition-all
+            px-3 py-2 rounded-md border text-sm font-mono cursor-pointer transition-[color,background-color,border-color,box-shadow] duration-150 ease-out
             ${
               isRecording
                 ? 'border-primary bg-primary/10 ring-2 ring-primary/30'
