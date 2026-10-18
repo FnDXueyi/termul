@@ -124,6 +124,10 @@ export const WS_REQUEST_TYPES = [
   'set_model',
   'respond_permission',
   'answer_question',
+  // Stop agent browsing for a session (desktop parity with the
+  // `browser_stop` Tauri command); only an authenticated client of the
+  // session may send it.
+  'browser_stop',
   'create_session',
   'load_session',
   'resume_session',
@@ -289,6 +293,7 @@ export const WS_COMMAND_CLASSES: Readonly<
   set_model: ['idempotent', null],
   respond_permission: ['command', 'payload'],
   answer_question: ['command', 'payload'],
+  browser_stop: ['idempotent', null],
   create_session: ['create', 'entity'],
   load_session: ['command', 'payload'],
   resume_session: ['command', 'payload'],

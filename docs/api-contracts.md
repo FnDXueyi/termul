@@ -151,6 +151,12 @@ Pushes marker annotations into the browser overlay.
 ### `browser_tab_update_annotation_marker_selection`
 Updates which annotation marker is selected.
 
+### `browser_ticket_respond`
+Answers a browser consent ticket (`host:` request id) from the desktop `main` webview with `{requestId, optionId?}`; no `optionId` denies. Returns `IpcResult<()>`. Error codes: `TICKET_NOT_FOUND`, `TICKET_ALREADY_RESOLVED`, `TICKET_TOO_EARLY` (answered within 750 ms of the prompt), `TICKET_INVALID_OPTION`.
+
+### `browser_stop`
+Stops agent browsing for `{sessionId}` from the desktop `main` webview: queued and in-flight browser calls end, pending tickets are withdrawn, session grants are revoked, and every later call returns `confirmation_required` with reason `stopped_by_user` until the user's next prompt. Returns `IpcResult<()>`.
+
 ### Browser Reporting Commands
 Used by injected page scripts to report browser state back to the app:
 
@@ -467,7 +473,8 @@ The class column is the request's command class, defined in `src-tauri/src/web/c
 | `set_config_option` | idempotent | Sets one session config option. |
 | `set_mode` | idempotent | Sets the session mode. |
 | `set_model` | idempotent | Sets the session model. |
-| `respond_permission` | command | Answers a `permission_request`. The first answer wins and a later one is `already_resolved`. |
+| `respond_permission` | command | Answers a `permission_request`. The first answer wins and a later one is `already_resolved`. A `host:` request id is a browser consent ticket: only a connection that passed the host's web-token gate and is subscribed to the ticket's session may answer it (`permission_denied` otherwise), and an answer within 750 ms of the prompt is `rate_limited`. |
+| `browser_stop` | idempotent | Stops agent browsing for `{sessionId}` until the user's next prompt, with the same approver rule as browser consent tickets. Desktop parity with the `browser_stop` Tauri command. `unsupported` on a host without the browser. |
 | `answer_question` | command | Answers a `question_request`. The first answer wins. |
 | `respond_elicitation` | command | Answers an `elicitation_request`. Stores no reply. |
 | `subscribe` | read | Binds the connection to a session log. Takes an optional `lastSeq` and `logEpoch` cursor and replies `{sessionId, replayed, logEpoch, headSeq}`. |
@@ -523,14 +530,15 @@ A session log event has one of three delivery tiers (`tier_of` in `src-tauri/src
 | `acp:mode_update` | session | Session log event (reliable). |
 | `acp:config_options_update` | session | Session log event (reliable). |
 | `acp:usage_update` | session | Session log event (reliable). Context-window use and optional cost. |
-| `acp:permission_request` | session | Session log event (reliable). Live only: never written to the durable log. |
+| `acp:permission_request` | session | Session log event (reliable). Live only: never written to the durable log. A `host:` request id with `_meta.termul.origin_kind = "browser"` is a host-originated browser consent ticket with the fixed options `allow_session`, `allow_project` and `deny`. |
 | `acp:question_request` | session | Session log event (reliable). A structured question from the agent, including one from the host `ask_user` tool. |
 | `acp:question_cancelled` | session | Session log event (reliable). A pending question can no longer be answered. |
 | `acp:elicitation_request` | session | Session log event (reliable). The agent asks for structured user input. |
 | `acp:prompt_complete` | session | Session log event (idempotent). Exactly one per accepted turn, with a `stopReason`. |
 | `acp:agent_switch` | session | Session log event (reliable). Durable agent-switch marker. |
 | `acp:local_title_generated` | session | Session log event (reliable). Durable record of a host-generated background title. Clients have no handler for it: the title reaches the UI through the `acp:session_info_update` that follows. |
-| `acp:browser_consent_request` | session | Session log event (reliable). The host asks the user to allow browser automation for the session. Only the desktop renders it. Answer with the Tauri command `browser_consent_respond`. The host denies on timeout. |
+| `acp:browser_ticket_closed` | session | Session log event (reliable). Live only. A browser consent ticket was answered, timed out or withdrawn, `{sessionId, requestId, outcome}`, so every surface drops it. |
+| `acp:browser_stop_changed` | session | Session log event (reliable). Live only. Stop latched or cleared for the session, `{sessionId, stopped}`. |
 | `acp:browser_agent_tab` | session | Session log event (reliable). The agent's browser tab opened or closed. |
 | `acp:browser_open_request` | agent | `agents` watch delta. A POSIX host captured a URL the agent tried to open, `{agentId, url}`. A delta lost to a gap is lost. |
 | `acp:worktree_branch_renamed` | agent | `chat_history` watch delta. The host renamed a worktree's branch. |
