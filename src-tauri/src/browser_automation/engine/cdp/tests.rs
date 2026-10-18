@@ -101,6 +101,8 @@ fn cdp_parse_evaluate_result_rejects_non_object_result() {
 /// (an empty object when none is scripted).
 struct RecordingTransport {
     calls: Mutex<Vec<(String, &'static str, Value)>>,
+    /// The frame of every `call_in`, in order.
+    frames: Mutex<Vec<Option<String>>>,
     replies: Vec<(CdpMethod, Result<Value, EngineError>)>,
 }
 
@@ -121,11 +123,23 @@ impl CdpTransport for RecordingTransport {
             .map_or(Ok(json!({})), |(_, r)| r.clone());
         Box::pin(async move { out })
     }
+
+    fn call_in<'a>(
+        &'a self,
+        tab: &'a str,
+        frame: Option<&'a str>,
+        method: CdpMethod,
+        params: Value,
+    ) -> EngineFuture<'a, Value> {
+        self.frames.lock().push(frame.map(str::to_string));
+        self.call(tab, method, params)
+    }
 }
 
 fn transport(replies: Vec<(CdpMethod, Result<Value, EngineError>)>) -> RecordingTransport {
     RecordingTransport {
         calls: Mutex::new(Vec::new()),
+        frames: Mutex::new(Vec::new()),
         replies,
     }
 }
@@ -218,4 +232,64 @@ async fn capture_screenshot_decodes_png_bytes_and_rejects_missing_data() {
         capture_screenshot(&t, "agent-a").await,
         Err(EngineError::new(EngineErrorKind::Malformed))
     );
+}
+
+#[tokio::test]
+async fn a_frame_helper_runs_in_that_frames_world_on_its_route() {
+    let t = transport(isolated_world_replies(Ok(json!({ "result": { "type": "string", "value": "x" } }))));
+    assert_eq!(evaluate_in(&t, "agent-a", Some("F9"), &assets::ready_state()).await, Ok(json!("x")));
+    let calls = t.calls.lock();
+    let methods: Vec<&str> = calls.iter().map(|c| c.1).collect();
+    assert_eq!(methods, ["Page.createIsolatedWorld", "Runtime.callFunctionOn"], "a frame's id is its own root");
+    assert_eq!(calls[0].2, json!({ "frameId": "F9", "worldName": "termul_agent" }));
+    assert_eq!(*t.frames.lock(), [Some("F9".to_string()), Some("F9".to_string())]);
+}
+
+#[tokio::test]
+async fn a_frame_the_engine_no_longer_has_is_gone() {
+    let refused = EngineError::new(EngineErrorKind::Protocol);
+    let t = transport(vec![(CdpMethod::PageCreateIsolatedWorld, Err(refused))]);
+    assert_eq!(
+        evaluate_in(&t, "agent-a", Some("F9"), &assets::snapshot()).await,
+        Err(EngineError::new(EngineErrorKind::FrameGone))
+    );
+    let t = transport(vec![
+        (CdpMethod::PageGetFrameTree, Ok(json!({ "frameTree": { "frame": { "id": "MAIN" } } }))),
+        (CdpMethod::PageCreateIsolatedWorld, Err(refused)),
+    ]);
+    assert_eq!(evaluate(&t, "agent-a", &assets::snapshot()).await, Err(refused), "the page itself is never gone");
+}
+
+#[tokio::test]
+async fn a_frames_owner_path_is_read_from_its_element_in_the_parent() {
+    let t = transport(vec![
+        (CdpMethod::DomGetFrameOwner, Ok(json!({ "backendNodeId": 31 }))),
+        (CdpMethod::PageGetFrameTree, Ok(json!({ "frameTree": { "frame": { "id": "MAIN" } } }))),
+        (CdpMethod::PageCreateIsolatedWorld, Ok(json!({ "executionContextId": 42 }))),
+        (CdpMethod::DomResolveNode, Ok(json!({ "object": { "objectId": "obj-1" } }))),
+        (CdpMethod::RuntimeCallFunctionOn, Ok(json!({ "result": { "type": "string", "value": "html>body>iframe:nth-of-type(2)" } }))),
+    ]);
+    assert_eq!(owner_path(&t, "agent-a", None, "F9").await, Ok("html>body>iframe:nth-of-type(2)".to_string()));
+    let calls = t.calls.lock();
+    assert_eq!(calls[0].2, json!({ "frameId": "F9" }));
+    assert_eq!(calls[3].2, json!({ "backendNodeId": 31, "executionContextId": 42 }));
+    assert_eq!(calls[4].2["objectId"], "obj-1");
+    assert!(calls[4].2.get("executionContextId").is_none(), "the helper is bound to the element");
+    assert_eq!(calls[4].2["functionDeclaration"], format!("function (p) {{\n{}\n}}", assets::OWNER_PATH.body));
+}
+
+#[test]
+fn in_process_frames_are_listed_with_their_parents() {
+    let tree = json!({ "frameTree": {
+        "frame": { "id": "MAIN" },
+        "childFrames": [
+            { "frame": { "id": "A" }, "childFrames": [{ "frame": { "id": "A1" } }] },
+            { "frame": { "id": "B" } }
+        ]
+    }});
+    assert_eq!(
+        child_frames(&tree),
+        [("A".to_string(), None), ("A1".to_string(), Some("A".to_string())), ("B".to_string(), None)]
+    );
+    assert!(child_frames(&json!({})).is_empty());
 }

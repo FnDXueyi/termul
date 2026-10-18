@@ -1,5 +1,5 @@
 //! WebKitGTK tab events tauri does not expose: same-document URL changes,
-//! and script dialogs on agent tabs. `notify::uri` fires for every URL
+//! and script dialogs and requests on agent tabs. `notify::uri` fires for every URL
 //! change; while a load is in progress the change belongs to that load
 //! (its commit carries the URL), so only changes outside a load are
 //! same-document commits.
@@ -15,6 +15,7 @@ pub fn attach(platform: &PlatformWebview, events: TabEvents) -> bool {
     let webview = platform.inner();
     if events.role() == TabRole::Agent {
         dialogs::attach(&webview, events.clone());
+        super::observe::attach(&webview, events.clone());
         // Agent input on this engine is page-script events, which the
         // popup blocker refuses; every popup still meets the host's popup
         // policy.

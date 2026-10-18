@@ -9,6 +9,8 @@ mod actions;
 mod dialogs;
 pub(crate) mod dispatch;
 mod events;
+mod frames;
+mod observe;
 mod page_events;
 pub mod ports;
 mod profile;

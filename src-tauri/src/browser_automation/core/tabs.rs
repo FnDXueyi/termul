@@ -127,6 +127,7 @@ pub struct TabRecord {
     pub dialogs: TabDialogs,
     /// Popup outcomes not yet reported to the agent.
     pub popups: Vec<PopupNote>,
+    pub observed: super::observe::Observations,
 }
 
 type OpenResult = Result<oneshot::Receiver<NavOutcome>, String>;
@@ -154,6 +155,7 @@ impl TabRecord {
             popup_of: None,
             dialogs: TabDialogs::default(),
             popups: Vec::new(),
+            observed: super::observe::Observations::default(),
         }
     }
 

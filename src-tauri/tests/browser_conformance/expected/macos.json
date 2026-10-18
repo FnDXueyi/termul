@@ -1,1 +1,6 @@
-{ "knownFailing": [] }
+{
+  "knownFailing": [
+    { "capability": "network", "code": "capability_unavailable" },
+    { "capability": "iframe_cross_origin", "code": "capability_unavailable" }
+  ]
+}

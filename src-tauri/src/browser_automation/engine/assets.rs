@@ -46,6 +46,17 @@ pub const READY_STATE: Helper = helper!("ready_state");
 pub const LOCATION: Helper = helper!("location");
 pub const CHECKED_STATE: Helper = helper!("checked_state");
 pub const SELECT_OPTION: Helper = helper!("select_option");
+pub const FRAME_ORIGIN: Helper = helper!("frame_origin");
+pub const OWNER_PATH: Helper = helper!("owner_path");
+#[cfg_attr(target_os = "windows", allow(dead_code, reason = "WebView2 reads the console through CDP"))]
+pub const CONSOLE_PULL: Helper = helper!("console_pull");
+
+/// Main-world script every agent tab frame runs at document start on
+/// engines whose console is observed by page script: it buffers console
+/// calls and uncaught errors until [`console_pull`] collects them. Page
+/// script can read, forge or bypass it, so its entries are synthetic.
+#[cfg_attr(target_os = "windows", allow(dead_code, reason = "WebView2 reads the console through CDP"))]
+pub const CONSOLE_SHIM: &str = include_str!("assets/console_shim.js");
 
 /// A helper with its parameters, ready for an engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +80,31 @@ pub fn ready_state() -> Script {
 /// element carrying its role, name and structural path.
 pub fn snapshot() -> Script {
     Script::new(SNAPSHOT, json!({}))
+}
+
+/// The outline of a cross-origin child frame the host reached on its own:
+/// each node path also pins the frame's current document.
+pub fn frame_snapshot() -> Script {
+    Script::new(SNAPSHOT, json!({ "inFrame": true }))
+}
+
+/// Where the content box of the frame element at `path` starts, in this
+/// frame's viewport px.
+pub fn frame_origin(path: &str) -> Script {
+    Script::new(FRAME_ORIGIN, json!({ "path": path }))
+}
+
+/// The path of the element the call is bound to (`this`), for engines
+/// that resolve a frame's owner element natively.
+pub fn owner_path() -> Script {
+    Script::new(OWNER_PATH, json!({}))
+}
+
+/// Collect what the console shim buffered, in this frame and its
+/// same-origin frames.
+#[cfg_attr(target_os = "windows", allow(dead_code, reason = "WebView2 reads the console through CDP"))]
+pub fn console_pull() -> Script {
+    Script::new(CONSOLE_PULL, json!({}))
 }
 
 /// Scroll the element at `path` into view and report its centre, role and

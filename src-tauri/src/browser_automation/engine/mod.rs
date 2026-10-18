@@ -16,6 +16,7 @@ pub mod cdp;
 pub mod dialogs;
 pub mod events;
 pub mod hooks;
+pub mod observe;
 pub mod profile;
 mod issue_gate;
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
@@ -224,6 +225,8 @@ pub enum EngineErrorKind {
     Protocol,
     /// The engine answered with an unusable reply.
     Malformed,
+    /// The child frame a helper was meant for is gone.
+    FrameGone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +263,31 @@ pub trait BrowserEngine: Send + Sync {
         id: u64,
         answer: events::DialogAnswer,
     ) -> EngineFuture<'a, bool>;
+    /// Console entries a page shim buffered since the last pull
+    /// (`console_observe` synthetic). Engines that publish entries as tab
+    /// events have none to pull.
+    fn pull_console<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<observe::ConsoleEntry>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Cross-origin child frames the engine can run helpers in. Same-origin
+    /// frames need none: the main frame's helpers reach their documents.
+    fn child_frames<'a>(&'a self, _tab: &'a str) -> EngineFuture<'a, Vec<ChildFrame>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Run a helper in `frame`'s isolated world (`isolated_eval`).
+    fn evaluate_in_frame<'a>(&'a self, _tab: &'a str, _frame: &'a str, _script: Script) -> EngineFuture<'a, Value> {
+        Box::pin(async { Err(EngineError::new(EngineErrorKind::Unsupported)) })
+    }
+}
+
+/// A cross-origin child frame, with the locator of its frame element in
+/// the parent frame's helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildFrame {
+    pub id: String,
+    /// The parent frame's id; `None` for the main frame.
+    pub parent: Option<String>,
+    pub owner_path: String,
 }
 
 /// The engine adapter for this desktop OS.

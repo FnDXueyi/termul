@@ -109,6 +109,14 @@ pub(super) fn apply(registry: &mut TabRegistry, label: &str, event: TabEvent) ->
         return Applied::Ignored;
     };
     match event {
+        TabEvent::Console(entry) => {
+            record.observed.console.push(record.epoch, entry);
+            Applied::Ignored
+        }
+        TabEvent::Network(entry) => {
+            record.observed.network.push(record.epoch, entry);
+            Applied::Ignored
+        }
         TabEvent::DialogOpened {
             id,
             kind,
@@ -155,6 +163,8 @@ fn apply_navigation(registry: &mut TabRegistry, label: &str, event: TabEvent) ->
         TabEvent::Closed
         | TabEvent::DialogOpened { .. }
         | TabEvent::NewWindowRequested { .. }
+        | TabEvent::Console(_)
+        | TabEvent::Network(_)
         | TabEvent::ExternalProtocolBlocked => unreachable!("handled by apply"),
     }
     let Some(view) = registry.view(label) else {
@@ -181,7 +191,10 @@ pub(super) async fn consume(
     while let Some((label, event)) = rx.recv().await {
         let kind = event_kind(&event);
         let applied = apply(&mut registry.lock(), &label, event);
-        log::debug!("[browser-tab] {kind} on tab {}", label_prefix(&label));
+        // Observations arrive per request and per message: too many to log.
+        if !matches!(kind, "console" | "network") {
+            log::debug!("[browser-tab] {kind} on tab {}", label_prefix(&label));
+        }
         match applied {
             Applied::Projected {
                 projection,
@@ -222,6 +235,8 @@ fn event_kind(event: &TabEvent) -> &'static str {
         TabEvent::DialogOpened { .. } => "dialog_opened",
         TabEvent::NewWindowRequested { .. } => "new_window_requested",
         TabEvent::ExternalProtocolBlocked => "external_protocol_blocked",
+        TabEvent::Console(_) => "console",
+        TabEvent::Network(_) => "network",
     }
 }
 

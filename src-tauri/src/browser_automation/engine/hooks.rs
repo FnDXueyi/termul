@@ -27,6 +27,9 @@ pub fn install(builder: WebviewBuilder<Wry>, events: &TabEvents) -> WebviewBuild
     if events.role() != TabRole::Agent {
         return builder;
     }
+    // WebView2 observes the console through CDP instead.
+    #[cfg(not(target_os = "windows"))]
+    let builder = builder.initialization_script_for_all_frames(super::assets::CONSOLE_SHIM);
     // The engine window never opens: the opener-less tab the core may open
     // instead is the popup's only form.
     let popup = events.clone();
@@ -94,7 +97,11 @@ fn attach_platform(platform: &PlatformWebview, events: TabEvents) -> bool {
 /// behind the close settles only after the webview is destroyed.
 pub async fn close(webview: &Webview) {
     let label = webview.label().to_string();
-    let _ = webview.with_webview(move |_| dialogs::release_tab(&label));
+    let _ = webview.with_webview(move |_| {
+        dialogs::release_tab(&label);
+        #[cfg(target_os = "windows")]
+        super::webview2::observe::release_tab(&label);
+    });
     let _ = webview.close();
     let (tx, rx) = oneshot::channel::<()>();
     if webview.with_webview(move |_| drop(tx)).is_ok() {

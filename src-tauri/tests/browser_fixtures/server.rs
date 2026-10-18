@@ -15,8 +15,15 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REDIRECT_PATH: &str = "/redirect";
 pub const REDIRECT_TARGET_PATH: &str = "/redirect-target.html";
 
+/// A policy under which the browser runs no page script at all.
+const STRICT_CSP: &str = "default-src 'none'; form-action 'self'";
+const PIXEL_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#;
+
 enum Reply {
     Page(&'static str),
+    /// A body of the given content type.
+    Typed(&'static str, &'static str),
+    StrictPage(&'static str),
     Redirect(&'static str),
     NotFound,
 }
@@ -35,6 +42,16 @@ fn route(path: &str) -> Reply {
         "/permissions.html" => Reply::Page(include_str!("pages/permissions.html")),
         "/controls.html" => Reply::Page(include_str!("pages/controls.html")),
         "/dynamic.html" => Reply::Page(include_str!("pages/dynamic.html")),
+        "/console.html" => Reply::Page(include_str!("pages/console.html")),
+        "/network.html" => Reply::Page(include_str!("pages/network.html")),
+        "/frames-same.html" => Reply::Page(include_str!("pages/frames-same.html")),
+        "/frames-cross.html" => Reply::Page(include_str!("pages/frames-cross.html")),
+        "/frame-inner.html" => Reply::Page(include_str!("pages/frame-inner.html")),
+        "/shadow.html" => Reply::Page(include_str!("pages/shadow.html")),
+        "/csp.html" => Reply::StrictPage(include_str!("pages/csp.html")),
+        "/api/ping" => Reply::Typed("application/json", r#"{"ok":true}"#),
+        "/pixel.svg" => Reply::Typed("image/svg+xml", PIXEL_SVG),
+        "/redirect-api" => Reply::Redirect("/api/ping?from=redirect"),
         REDIRECT_TARGET_PATH => Reply::Page(include_str!("pages/redirect-target.html")),
         REDIRECT_PATH => Reply::Redirect(REDIRECT_TARGET_PATH),
         _ => Reply::NotFound,
@@ -111,6 +128,12 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
         Reply::Page(html) => (
             "200 OK",
             "Content-Type: text/html; charset=utf-8\r\n".into(),
+            html,
+        ),
+        Reply::Typed(kind, body) => ("200 OK", format!("Content-Type: {kind}\r\n"), body),
+        Reply::StrictPage(html) => (
+            "200 OK",
+            format!("Content-Type: text/html; charset=utf-8\r\nContent-Security-Policy: {STRICT_CSP}\r\n"),
             html,
         ),
         Reply::Redirect(to) => ("302 Found", format!("Location: {to}\r\n"), ""),

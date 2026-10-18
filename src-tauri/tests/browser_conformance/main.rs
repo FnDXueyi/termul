@@ -59,6 +59,7 @@ fn die(message: &str) -> ! {
 async fn run_all(
     handle: tauri::AppHandle,
     fixtures: Arc<FixtureServer>,
+    cross: Arc<FixtureServer>,
     dev_port: Option<u16>,
     main_ready: Arc<AtomicBool>,
 ) -> i32 {
@@ -81,7 +82,7 @@ async fn run_all(
     let mut rows = Vec::new();
     let mut broken: Vec<&'static str> = Vec::new();
     for capability in cases::CAPABILITIES {
-        let outcome = cases::run(&engine, &fixtures, capability, &broken).await;
+        let outcome = cases::run(&engine, &fixtures, &cross, capability, &broken).await;
         if outcome.failure.is_some() {
             broken.push(capability.id);
         }
@@ -142,9 +143,14 @@ fn main() {
     let fixtures = Arc::new(
         FixtureServer::start(&avoid).unwrap_or_else(|e| die(&format!("fixture server: {e}"))),
     );
+    let avoid: Vec<u16> = avoid.into_iter().chain([fixtures.port()]).collect();
+    let cross = Arc::new(
+        FixtureServer::start(&avoid).unwrap_or_else(|e| die(&format!("cross-origin fixture server: {e}"))),
+    );
     println!(
-        "fixtures on 127.0.0.1:{} (dev server port {:?})",
+        "fixtures on 127.0.0.1:{} and :{} (dev server port {:?})",
         fixtures.port(),
+        cross.port(),
         dev_port
     );
 
@@ -177,7 +183,7 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let code =
-                    tauri::async_runtime::spawn(run_all(handle, fixtures, dev_port, main_ready))
+                    tauri::async_runtime::spawn(run_all(handle, fixtures, cross, dev_port, main_ready))
                         .await
                         .unwrap_or_else(|e| {
                             eprintln!("browser_conformance: runner panicked: {e}");

@@ -1,4 +1,5 @@
-var focused = document.activeElement !== document.body ? document.activeElement : null;
+var active = deepActive();
+var focused = active && active !== active.ownerDocument.body ? active : null;
 var el = p.path ? byPath(p.path) : focused;
 if (p.path && !el) return STALE;
 el = el || document.body;
