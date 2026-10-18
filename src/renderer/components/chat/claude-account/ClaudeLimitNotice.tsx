@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { create } from 'zustand'
 import { AlertCircle, ChevronDown, Clock, Shuffle, X } from '@/components/icons'
+import { toastAccountChoiceError } from '@/components/settings/provider/account-choice-error'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -116,7 +117,8 @@ export function ClaudeLimitNotice({ sessionId }: { sessionId: string }): React.J
       await reloadAccounts()
       toast.success(`Switched to ${target.account.name}`)
     } catch (err) {
-      toast.error(`Could not switch: ${err instanceof Error ? err.message : String(err)}`)
+      toastAccountChoiceError(err, 'Could not switch')
+      void reloadAccounts()
     } finally {
       setSwitchingTo(null)
     }

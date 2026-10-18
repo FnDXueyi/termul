@@ -16,6 +16,26 @@ const LOGOUT_TIMEOUT: Duration = Duration::from_secs(20);
 pub(super) type LoginCancels =
     parking_lot::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>;
 
+/// Whether choosing an Account first checks that its login is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignInCheck {
+    /// A switch from the desktop or web UI. The renderer restarts the
+    /// Project's open Claude chats right after it, and the spawn gate rejects
+    /// an Account that is not signed in, so refuse it before anything changes.
+    Required,
+    /// Headless setup (`termul-server claude account`), where an admin may
+    /// choose an Account before running `login`. Nothing restarts there.
+    Skip,
+}
+
+/// Which Account a choice names: the one picked, or the Default Account a
+/// Project follows.
+#[derive(Debug, Clone, Copy)]
+enum Choice {
+    Account,
+    FollowDefault,
+}
+
 /// Error text of a cancelled login; the renderer treats it as a quiet stop.
 pub const LOGIN_CANCELLED: &str = "Sign-in was cancelled";
 
@@ -23,6 +43,25 @@ impl ClaudeAgentService {
     #[cfg(test)]
     pub(super) fn set_accounts_for_test(&mut self, accounts: Arc<ClaudeAccountStore>) {
         self.profile_store = Some(accounts);
+    }
+
+    /// A host with its own account store under `state_dir` (links point at
+    /// `state_dir/shared`, never the real Claude folder) whose login probe
+    /// reports every Account signed in except those in `signed_out`.
+    #[cfg(test)]
+    pub(crate) fn with_logins_for_test(state_dir: &std::path::Path, signed_out: &[&str]) -> Self {
+        let mut service = Self::with_adapters(
+            Arc::new(super::InMemoryClaudeCredentialStore::default()),
+            Some(state_dir.join("acp-registry-binaries")),
+            Arc::new(FixedLogins(
+                signed_out.iter().map(ToString::to_string).collect(),
+            )),
+        );
+        service.profile_store = Some(Arc::new(ClaudeAccountStore::new(
+            state_dir,
+            state_dir.join("shared"),
+        )));
+        service
     }
 
     #[cfg(test)]
@@ -96,17 +135,76 @@ impl ClaudeAgentService {
         self.account_store()?.rename(id, name)
     }
 
-    pub fn set_default_account(&self, id: &str) -> Result<(), String> {
-        self.account_store()?.set_default(id)
+    pub async fn set_default_account(&self, id: &str, check: SignInCheck) -> Result<(), String> {
+        let store = self.account_store()?;
+        if check == SignInCheck::Required {
+            self.ensure_signed_in(store, id, Choice::Account).await?;
+        }
+        store.set_default(id)
     }
 
-    pub fn set_project_account(
+    /// `account_id: None` returns the Project to the Default Account, so the
+    /// check probes the Default Account.
+    pub async fn set_project_account(
         &self,
         project_id: &str,
         account_id: Option<&str>,
+        check: SignInCheck,
     ) -> Result<(), String> {
-        self.account_store()?
-            .set_project_account(project_id, account_id)
+        let store = self.account_store()?;
+        if check == SignInCheck::Required {
+            match account_id {
+                Some(id) => self.ensure_signed_in(store, id, Choice::Account).await?,
+                None => {
+                    let default_id = store.snapshot()?.default_account_id;
+                    self.ensure_signed_in(store, &default_id, Choice::FollowDefault)
+                        .await?;
+                }
+            }
+        }
+        store.set_project_account(project_id, account_id)
+    }
+
+    /// The spawn gate's rule, applied before an Account is chosen: only a
+    /// confirmed login (`claude auth status` exits 0) passes, through the same
+    /// probe and the same console-free `claude` spawn. API-key mode does not
+    /// use Accounts, so it passes. An unknown id passes here; the store
+    /// setter reports it.
+    async fn ensure_signed_in(
+        &self,
+        store: &ClaudeAccountStore,
+        id: &str,
+        choice: Choice,
+    ) -> Result<(), String> {
+        if !matches!(self.auth_mode(), Ok(super::ClaudeAuthMode::ClaudeCode)) {
+            return Ok(());
+        }
+        let snapshot = store.snapshot()?;
+        let Some(account) = snapshot.profiles.iter().find(|row| row.id == id) else {
+            return Ok(());
+        };
+        let status = self
+            .runtime_probe
+            .cli_authentication_status(store.config_dir(id).as_deref())
+            .await;
+        if matches!(status, Ok(Some(true))) {
+            return Ok(());
+        }
+        log::warn!(
+            "[claude-accounts] refused to choose an account that is not signed in (status={status:?})"
+        );
+        let subject = match choice {
+            Choice::FollowDefault => format!("The default Claude account \"{}\"", account.name),
+            Choice::Account => format!("The Claude account \"{}\"", account.name),
+        };
+        let state = if matches!(status, Ok(Some(false))) {
+            "is not signed in"
+        } else {
+            "could not be checked for a sign-in"
+        };
+        Err(crate::acp::claude_accounts::signed_out_error(format!(
+            "{subject} {state}. Sign in to it in Settings → Accounts, then choose it again."
+        )))
     }
 
     /// Sign the Claude CLI out of the Account (removing its keychain entry),
@@ -221,6 +319,29 @@ async fn run_cli(
         Ok(Ok(status)) => Ok(status.success()),
         Ok(Err(_)) => Err("The Claude CLI stopped unexpectedly".to_string()),
         Err(_) => Err("Claude sign-in timed out".to_string()),
+    }
+}
+
+/// Login probe for [`ClaudeAgentService::with_logins_for_test`]: an Account
+/// dir named in the list is signed out, every other one is signed in.
+#[cfg(test)]
+struct FixedLogins(Vec<String>);
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl super::ClaudeRuntimeProbe for FixedLogins {
+    async fn ensure_supported(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn cli_authentication_status(
+        &self,
+        config_dir: Option<&std::path::Path>,
+    ) -> Result<Option<bool>, String> {
+        let id = config_dir.and_then(|dir| dir.file_name()?.to_str());
+        Ok(Some(
+            !id.is_some_and(|id| self.0.iter().any(|out| out == id)),
+        ))
     }
 }
 

@@ -1,4 +1,8 @@
-import { isProviderErrorCode, type ProviderErrorCode } from '@shared/types/web-protocol.types'
+import {
+  isProviderErrorCode,
+  type ProviderErrorCode,
+  WS_ERROR_CODES
+} from '@shared/types/web-protocol.types'
 import type { AgentConfig, AuthMethod } from '@/lib/acp-api'
 import { DEFINITE_SPAWN_REJECTIONS } from '@/lib/acp-transport/tauri-verdicts'
 
@@ -181,6 +185,28 @@ export function isAgentAuthRequiredError(raw: unknown): boolean {
 }
 
 /**
+ * The host refused because a Claude Account is not signed in: choosing it for
+ * a Project or as the default (nothing changed), or starting a managed Claude
+ * agent on it. `/ws` carries the `claude_account_signed_out` code; the desktop
+ * `invoke` path carries the same verdict as a message prefix.
+ */
+export const CLAUDE_ACCOUNT_SIGNED_OUT_PREFIX = 'ACP_CLAUDE_ACCOUNT_SIGNED_OUT'
+
+export function isClaudeAccountSignedOutError(raw: unknown): boolean {
+  if (typeof raw === 'object' && raw !== null) {
+    if ((raw as { code?: unknown }).code === WS_ERROR_CODES.CLAUDE_ACCOUNT_SIGNED_OUT) return true
+  }
+  return rawErrorMessage(raw).startsWith(`${CLAUDE_ACCOUNT_SIGNED_OUT_PREFIX}: `)
+}
+
+/** The host's sentence for a Claude sign-in refusal, without the transport tag. */
+export function claudeAccountSignedOutMessage(raw: unknown): string {
+  const message = rawErrorMessage(raw)
+  const tag = `${CLAUDE_ACCOUNT_SIGNED_OUT_PREFIX}: `
+  return message.startsWith(tag) ? message.slice(tag.length) : message
+}
+
+/**
  * The host rejected a spawn deterministically (AD-5): the agent binary is
  * missing / cannot start (`agent_unavailable`) or the config is unusable
  * (`invalid_agent_config`). `/ws` carries the stable code; the Tauri `invoke`
@@ -315,6 +341,15 @@ export function classifySetupError(
           ? message
           : AGENT_AUTH_REQUIRED_CODE
     return { category: 'auth', label: SETUP_ERROR_LABELS.auth, detail }
+  }
+  // A signed-out Claude Account reads as sign-in guidance, as its wording
+  // always did, but without the desktop transport tag.
+  if (isClaudeAccountSignedOutError(raw)) {
+    return {
+      category: 'auth',
+      label: SETUP_ERROR_LABELS.auth,
+      detail: claudeAccountSignedOutMessage(raw)
+    }
   }
   // A definite host rejection (AD-5) is authoritative: it is a spawn failure
   // whatever the wording, and it must never read as transport/auth (those

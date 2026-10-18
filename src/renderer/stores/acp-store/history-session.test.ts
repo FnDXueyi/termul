@@ -315,6 +315,53 @@ describe('acp-store', () => {
     expect(commands).not.toContain('acp_load_session')
   })
 
+  describe('a Claude account that signed out before the spawn', () => {
+    const HOST_REASON =
+      'The Claude account "Work" is not signed in. Sign in to it in Settings → Accounts, then retry.'
+
+    async function seedStoppedChat(id: string): Promise<void> {
+      await useAcpStore
+        .getState()
+        .saveAgentConfig({ id: 'cfg-1', name: 'Claude', command: 'node', args: [], env: {} })
+      const { loadSessionPayload } = await import('@/lib/acp-history-persistence')
+      ;(loadSessionPayload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        metadata: {
+          id,
+          agentId: 'agent-old',
+          agentConfigId: 'cfg-1',
+          title: 'Account chat',
+          cwd: '/w',
+          createdAt: 1,
+          lastActivityAt: 2,
+          messageCount: 0,
+          status: 'closed'
+        },
+        messages: []
+      })
+      ;(invoke as ReturnType<typeof vi.fn>).mockRejectedValue(
+        `ACP_CLAUDE_ACCOUNT_SIGNED_OUT: ${HOST_REASON}`
+      )
+    }
+
+    it('a restart onto the new agent shows the host reason', async () => {
+      await seedStoppedChat('s-restart')
+      await expect(
+        useAcpStore.getState().openHistorySession('s-restart', { forceNewAgent: true })
+      ).rejects.toThrow()
+      expect(useAcpStore.getState().sessions['s-restart'].lastError).toBe(
+        `Resume failed: ${HOST_REASON}`
+      )
+    })
+
+    it('Resume chat shows the host reason, not a reconnect failure', async () => {
+      await seedStoppedChat('s-resume')
+      await expect(useAcpStore.getState().openHistorySession('s-resume')).rejects.toThrow()
+      expect(useAcpStore.getState().sessions['s-resume'].lastError).toBe(
+        `Resume failed: ${HOST_REASON}`
+      )
+    })
+  })
+
   it('a prompt queued behind an automatic resume survives a rejected open (idle-stopped chat)', async () => {
     await useAcpStore
       .getState()

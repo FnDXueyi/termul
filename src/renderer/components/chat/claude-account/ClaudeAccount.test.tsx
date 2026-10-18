@@ -1,12 +1,16 @@
 import type { ClaudeRateLimit } from '@shared/types/claude-accounts.types'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AcpTransportError } from '@/lib/acp-transport/types'
 import { useAcpStore } from '@/stores/acp-store'
 import { FRESH } from '@/stores/acp-store/testkit'
 import { ClaudeAccountChip } from './ClaudeAccountChip'
 import { ClaudeLimitNotice, useClaudeResumeStore } from './ClaudeLimitNotice'
+import { ClaudeSignInAction } from './ClaudeSignInAction'
 
-const { api, switcher } = vi.hoisted(() => ({
+const { api, switcher, openApp } = vi.hoisted(() => ({
+  openApp: vi.fn(),
   api: { list: vi.fn(), usage: vi.fn(), canManageAccounts: vi.fn(() => true) },
   switcher: { switchProjectClaudeAccount: vi.fn(), restartClaudeSession: vi.fn() }
 }))
@@ -14,6 +18,12 @@ const { api, switcher } = vi.hoisted(() => ({
 vi.mock('@/lib/claude-accounts-api', () => ({ claudeAccountsApi: api }))
 vi.mock('@/lib/log-api', () => ({ logFrontendError: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+vi.mock('@/stores/settings-modal-store', () => ({
+  useSettingsModalStore: Object.assign(
+    (select: (s: { openApp: typeof openApp }) => unknown) => select({ openApp }),
+    { getState: () => ({ openApp }) }
+  )
+}))
 vi.mock('@/stores/claude-account-switch', async () => {
   const actual = await vi.importActual<typeof import('@/stores/claude-account-switch')>(
     '@/stores/claude-account-switch'
@@ -164,6 +174,119 @@ describe('ClaudeAccountChip', () => {
     seed()
     useAcpStore.setState({ configToLiveAgent: { 'acp-registry:gemini\0/work': 'a1' } })
     const { container } = render(<ClaudeAccountChip sessionId="s1" />)
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  async function openMenu(): Promise<void> {
+    const chip = await screen.findByRole('button', { name: /Claude account: Personal/ })
+    fireEvent.pointerDown(chip, { button: 0, ctrlKey: false })
+    await screen.findByRole('menuitem', { name: /Follow default/ })
+  }
+
+  it('does not switch to a signed-out account and says why', async () => {
+    api.list.mockResolvedValue({
+      accounts: [
+        { id: 'default', name: 'Personal', builtin: true, signedIn: true },
+        { id: 'ab12', name: 'Work', builtin: false, signedIn: false },
+        { id: 'cd34', name: 'Side', builtin: false, signedIn: true }
+      ],
+      defaultAccountId: 'default',
+      projectAccounts: {}
+    })
+    seed()
+    render(<ClaudeAccountChip sessionId="s1" />)
+    await openMenu()
+    const work = screen.getByRole('menuitem', { name: /Work/ })
+    expect(work).toHaveAttribute('aria-disabled', 'true')
+    expect(work).toHaveTextContent(/Signed out/)
+    fireEvent.click(work)
+    fireEvent.click(screen.getByRole('menuitem', { name: /Side/ }))
+    await waitFor(() =>
+      expect(switcher.switchProjectClaudeAccount).toHaveBeenCalledWith('office', 'cd34')
+    )
+    expect(switcher.switchProjectClaudeAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not switch to an account whose sign-in the host could not confirm', async () => {
+    api.list.mockResolvedValue({
+      accounts: [
+        { id: 'default', name: 'Personal', builtin: true, signedIn: true },
+        { id: 'ab12', name: 'Work', builtin: false, signedIn: null }
+      ],
+      defaultAccountId: 'default',
+      projectAccounts: {}
+    })
+    seed()
+    render(<ClaudeAccountChip sessionId="s1" />)
+    await openMenu()
+    const work = screen.getByRole('menuitem', { name: /Work/ })
+    expect(work).toHaveAttribute('aria-disabled', 'true')
+    expect(work).toHaveTextContent(/Could not check sign-in/)
+    fireEvent.click(work)
+    expect(switcher.switchProjectClaudeAccount).not.toHaveBeenCalled()
+  })
+
+  it('does not follow a default account that is signed out', async () => {
+    api.list.mockResolvedValue({
+      accounts: [
+        { id: 'default', name: 'Personal', builtin: true, signedIn: false },
+        { id: 'ab12', name: 'Work', builtin: false, signedIn: true }
+      ],
+      defaultAccountId: 'default',
+      projectAccounts: { office: 'ab12' }
+    })
+    seed()
+    render(<ClaudeAccountChip sessionId="s1" />)
+    const chip = await screen.findByRole('button', { name: /Claude account: Work/ })
+    fireEvent.pointerDown(chip, { button: 0, ctrlKey: false })
+    const follow = await screen.findByRole('menuitem', { name: /Follow default/ })
+    expect(follow).toHaveAttribute('aria-disabled', 'true')
+    expect(follow).toHaveTextContent(/Personal.*signed out/i)
+    fireEvent.click(follow)
+    expect(switcher.switchProjectClaudeAccount).not.toHaveBeenCalled()
+  })
+
+  it('shows the host reason and a way to sign in when the host refuses the account', async () => {
+    const reason =
+      'The Claude account "Work" is not signed in. Sign in to it in Settings → Accounts, then choose it again.'
+    switcher.switchProjectClaudeAccount.mockRejectedValue(
+      new AcpTransportError('claude_account_signed_out', reason)
+    )
+    seed()
+    render(<ClaudeAccountChip sessionId="s1" />)
+    await openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: /Work/ }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    const [title, options] = vi.mocked(toast.error).mock.calls[0] as [
+      string,
+      { action: { label: string; onClick: () => void } }
+    ]
+    expect(title).toBe(reason)
+    expect(options.action.label).toBe('Open Accounts')
+    options.action.onClick()
+    expect(openApp).toHaveBeenCalledWith('provider')
+    expect(toast.success).not.toHaveBeenCalled()
+  })
+})
+
+describe('ClaudeSignInAction', () => {
+  it('offers the Accounts page when the chat stopped on a signed-out account', async () => {
+    api.list.mockResolvedValue({
+      accounts: [{ id: 'default', name: 'Personal', builtin: true, signedIn: false }],
+      defaultAccountId: 'default',
+      projectAccounts: {}
+    })
+    seed()
+    render(<ClaudeSignInAction sessionId="s1" />)
+    expect(await screen.findByText('Personal: signed out')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Open Accounts' }))
+    expect(openApp).toHaveBeenCalledWith('provider')
+  })
+
+  it('shows nothing while the account is signed in', async () => {
+    seed()
+    const { container } = render(<ClaudeSignInAction sessionId="s1" />)
+    await waitFor(() => expect(api.list).toHaveBeenCalled())
     expect(container).toBeEmptyDOMElement()
   })
 })

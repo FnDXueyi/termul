@@ -145,6 +145,38 @@ describe('ProjectProviderSettings', () => {
     expect(await option(/Work/)).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('does not choose a signed-out account and says why', async () => {
+    api.list.mockResolvedValue(snapshot({}, false))
+    const onChange = vi.fn()
+    render(<Harness projectId="side" onChange={onChange} />)
+    const work = await option(/Work/)
+    expect(work).toHaveAttribute('aria-disabled', 'true')
+    expect(work).toHaveTextContent('signed out · sign in from Manage accounts')
+    fireEvent.click(work)
+    fireEvent.keyDown(work, { key: 'Enter' })
+    expect(work).toHaveAttribute('aria-selected', 'false')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('does not follow a default account whose sign-in could not be checked', async () => {
+    api.list.mockResolvedValue({
+      ...snapshot({ office: 'ab12' }),
+      accounts: [
+        { id: 'default', name: 'Personal', builtin: true, signedIn: null },
+        { id: 'ab12', name: 'Work', builtin: false, signedIn: true }
+      ]
+    })
+    const onChange = vi.fn()
+    render(<Harness projectId="office" onChange={onChange} />)
+    const follow = await option(/Follow default/)
+    expect(follow).toHaveAttribute('aria-disabled', 'true')
+    expect(follow).toHaveTextContent(
+      'Uses Personal: could not check sign-in. Sign in from Manage accounts.'
+    )
+    fireEvent.click(follow)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('links to the account settings', async () => {
     const onManage = vi.fn()
     render(<Harness projectId="office" onManage={onManage} />)
