@@ -177,6 +177,9 @@ export type CanvasLeaseLoss = 'elsewhere' | 'evicted' | 'expired'
 export interface CanvasOpenOptions {
   /** `canvas.autosave_ms`. */
   autosaveMs?: number
+  /** `canvas.autosave_max_ms`: a dirty document is saved at least this
+   * often while edits keep superseding the debounce. */
+  autosaveMaxMs?: number
   /** `canvas.lease_grace_ms`: how long this window keeps the canvas after
    * its connection drops, so a reload or reconnect keeps it. */
   leaseGraceMs?: number
@@ -233,8 +236,15 @@ export interface CanvasApi {
     mountSeq: number,
     snapshot: string
   ) => Promise<IpcResult<CanvasWriteOutcome>>
-  /** Termul's file watcher saw the document change (AD-27). */
-  diskChanged: (projectId: string, mountSeq: number) => Promise<IpcResult<CanvasDiskOutcome>>
+  /** Termul's file watcher saw the document change (AD-27). `reloadFailed`:
+   * the editor did not load the bytes a `reload` outcome handed it (it
+   * refused them, or moved past the version the host judged clean), which
+   * the host turns into a conflict. */
+  diskChanged: (
+    projectId: string,
+    mountSeq: number,
+    reloadFailed?: boolean
+  ) => Promise<IpcResult<CanvasDiskOutcome>>
   /** `snapshot` is the `host.snapshot` result text, needed for `saveCopy`. */
   resolveConflict: (
     projectId: string,

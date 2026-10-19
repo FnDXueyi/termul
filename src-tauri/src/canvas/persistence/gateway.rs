@@ -58,8 +58,15 @@ struct Pending {
     responder: oneshot::Sender<CanvasOutcome>,
 }
 
+/// The most watched calls remembered after they timed out, for a late
+/// answer to prove the editor alive.
+const TIMED_OUT_REMEMBERED: usize = 256;
+
 pub(super) struct Calls {
     waiting: Mutex<HashMap<u64, Pending>>,
+    /// Watched calls that timed out, by call id: the connection and mount
+    /// they went to.
+    timed_out: Mutex<HashMap<u64, (String, u64)>>,
     next_id: AtomicU64,
     /// The longest reply, slices joined. A field so a test can lower it.
     reply_limit: AtomicU64,
@@ -69,6 +76,7 @@ impl Default for Calls {
     fn default() -> Self {
         Self {
             waiting: Mutex::default(),
+            timed_out: Mutex::default(),
             next_id: AtomicU64::default(),
             reply_limit: AtomicU64::new(MAX_REPLY_BYTES),
         }
@@ -472,7 +480,9 @@ impl CanvasPersistence {
                 responder,
             },
         );
-        let frame = CanvasCallFrame::new(call_id, project_id, mount_seq, method, params);
+        let frame = CanvasCallFrame::new(call_id, project_id, mount_seq, method, params)
+            .expiring_in(deadline.saturating_duration_since(Instant::now()));
+        let sent_at = Instant::now();
         if !holder.deliver(frame) {
             self.calls.waiting.lock().remove(&call_id);
             return Err(refused(
@@ -489,7 +499,7 @@ impl CanvasPersistence {
         let outcome = tokio::select! {
             answered = waiting => match answered {
                 Ok(outcome) => {
-                    if watched {
+                    if watched && answered_by_editor(&outcome) {
                         self.call_answered(project_id, mount_seq);
                     }
                     outcome
@@ -500,7 +510,8 @@ impl CanvasPersistence {
             () = tokio::time::sleep_until(deadline) => {
                 self.calls.waiting.lock().remove(&call_id);
                 if watched {
-                    self.call_timed_out(project_id, mount_seq);
+                    self.remember_timed_out(call_id, holder.id(), mount_seq);
+                    self.call_timed_out(project_id, mount_seq, sent_at);
                 }
                 Err(timed_out(timeout))
             }
@@ -575,6 +586,12 @@ impl CanvasPersistence {
             }
         };
         let Some(call) = pending else {
+            let late = self.calls.timed_out.lock().remove(&call_id);
+            if let Some((sent_to, sent_seq)) = late {
+                if sent_to == holder_id && sent_seq == mount_seq && answered_by_editor(&outcome) {
+                    self.late_answer(holder_id, mount_seq);
+                }
+            }
             return ReplyMatch::NotWaiting;
         };
         if call.mount_seq == mount_seq {
@@ -594,6 +611,29 @@ impl CanvasPersistence {
             }
         }
     }
+}
+
+impl CanvasPersistence {
+    fn remember_timed_out(&self, call_id: u64, holder_id: &str, mount_seq: u64) {
+        let mut timed_out = self.calls.timed_out.lock();
+        if timed_out.len() >= TIMED_OUT_REMEMBERED {
+            let floor = call_id.saturating_sub(TIMED_OUT_REMEMBERED as u64);
+            timed_out.retain(|id, _| *id > floor);
+        }
+        timed_out.insert(call_id, (holder_id.to_string(), mount_seq));
+    }
+}
+
+/// A reply the editor itself gave, not the renderer answering for a call
+/// that never reached it (its own timeout, or no mount).
+fn answered_by_editor(outcome: &CanvasOutcome) -> bool {
+    !matches!(
+        outcome,
+        Err(error) if matches!(
+            error.code,
+            CanvasErrorCode::CanvasTimeout | CanvasErrorCode::CanvasClosed
+        )
+    )
 }
 
 /// What a renderer reply matched.

@@ -15,7 +15,7 @@ vi.mock('sonner', () => ({ toast: { error: vi.fn() } }))
 import type { CanvasOpenInfo } from '@shared/types/canvas.types'
 import type { AcpTransport } from '@/lib/acp-transport'
 import { CanvasGatewayClient } from '@/lib/acp-transport/canvas-gateway-client'
-import { asJsonText, type CanvasBridge } from '@/lib/canvas-bridge'
+import { asJsonText, type CanvasBridge, createCanvasBridge } from '@/lib/canvas-bridge'
 import { type CanvasPhase, useCanvasStore } from '@/stores/canvas-store'
 import { useProjectStore } from '@/stores/project-store'
 import { projectRelativePath, startCanvasGateway } from '../canvas-gateway'
@@ -110,12 +110,65 @@ describe('startCanvasGateway', () => {
       params: '{"id":18446744073709551615}'
     })
     await vi.waitFor(() => expect(sent.at(-1)?.[0]).toBe('canvas_reply'))
-    expect(bridge.call).toHaveBeenCalledWith('node.get', '{"id":18446744073709551615}')
+    expect(bridge.call).toHaveBeenCalledWith('node.get', '{"id":18446744073709551615}', undefined)
     expect(sent.at(-1)).toEqual([
       'canvas_reply',
       { callId: 8, mountSeq: 5, ok: true, result: '{"id":18446744073709551615}' }
     ])
     useCanvasStore.getState().detachBridge('proj-1', bridge)
+  })
+
+  it('drops a call still queued for a loading editor once the host stopped waiting, and the queue on unmount', async () => {
+    const { canvas, sent, stop } = harness()
+    stopGateway = stop
+    setPhase('proj-1', { kind: 'loading', mount: { mountSeq: 5, info: INFO } })
+    const posted: Array<{ method: string }> = []
+    const contentWindow = { postMessage: (data: { method: string }) => posted.push(data) }
+    const bridge = createCanvasBridge({
+      iframe: { contentWindow } as unknown as HTMLIFrameElement,
+      canvasOrigin: INFO.baseUrl,
+      mountSeq: 5,
+      onEvent: () => {}
+    })
+    useCanvasStore.getState().attachBridge('proj-1', 5, bridge)
+    const frame = (callId: number, method: string, timeoutMs: number) => ({
+      type: 'canvas_call' as const,
+      callId,
+      projectId: 'proj-1',
+      mountSeq: 5,
+      method,
+      params: '{}',
+      timeoutMs
+    })
+    vi.useFakeTimers({ now: 10_000, toFake: ['Date'] })
+    try {
+      canvas.handleFrame(frame(1, 'engine.execute', 1_000))
+      canvas.handleFrame(frame(2, 'document.inspect', 60_000))
+      vi.setSystemTime(12_000)
+      const ready = new MessageEvent('message', {
+        data: { method: 'event.ready', params: '{}', mountSeq: 5 }
+      })
+      Object.defineProperty(ready, 'origin', { value: new URL(INFO.baseUrl).origin })
+      Object.defineProperty(ready, 'source', { value: contentWindow })
+      window.dispatchEvent(ready)
+    } finally {
+      vi.useRealTimers()
+    }
+    await vi.waitFor(() => expect(sent.filter(([type]) => type === 'canvas_reply')).toHaveLength(1))
+    expect(posted.map((envelope) => envelope.method)).toEqual(['document.inspect'])
+    expect(sent.find(([type]) => type === 'canvas_reply')?.[1]).toMatchObject({
+      callId: 1,
+      ok: false,
+      error: { code: 'CANVAS_TIMEOUT' }
+    })
+
+    useCanvasStore.getState().detachBridge('proj-1', bridge)
+    await vi.waitFor(() => expect(sent.filter(([type]) => type === 'canvas_reply')).toHaveLength(2))
+    expect(sent.filter(([type]) => type === 'canvas_reply')[1]?.[1]).toMatchObject({
+      callId: 2,
+      ok: false,
+      error: { code: 'CANVAS_CLOSED' }
+    })
   })
 
   it('answers CANVAS_CLOSED for a project this renderer has not mounted', async () => {

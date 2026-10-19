@@ -19,6 +19,7 @@ fn tab(client_instance_id: &str) -> OpenRequest {
     OpenRequest {
         client_instance_id: client_instance_id.to_string(),
         autosave_ms: None,
+        autosave_max_ms: None,
         lease_grace_ms: None,
         max_mounted: Some(16),
         crash_timeouts: None,
@@ -547,4 +548,15 @@ mod served_from_dev_dir {
             .unwrap();
         assert_eq!(server.base(), None);
     }
+}
+
+#[test]
+fn an_open_request_carries_the_autosave_max_wait_on_both_transports() {
+    let request: OpenRequest = serde_json::from_str(
+        r#"{"clientInstanceId":"tab","autosaveMs":1500,"autosaveMaxMs":2500}"#,
+    )
+    .unwrap();
+    assert_eq!(request.autosave_max_ms, Some(2500));
+    let absent: OpenRequest = serde_json::from_str(r#"{"clientInstanceId":"tab"}"#).unwrap();
+    assert_eq!(absent.autosave_max_ms, None);
 }

@@ -89,6 +89,10 @@ export interface AppSettings {
   /** `canvas.autosave_ms`: quiet time before the host autosaves a dirty canvas
    * document (spine AD-23). Sent with each canvas open. */
   canvasAutosaveMs: number
+  /** `canvas.autosave_max_ms`: longest a dirty canvas document waits for an
+   * autosave while edits keep coming faster than `canvasAutosaveMs` (an agent
+   * driving the canvas). Sent with each canvas open. */
+  canvasAutosaveMaxMs: number
   /** `canvas.lease_grace_ms`: how long a window keeps its canvas lease after
    * its connection drops, so a reload or reconnect keeps it (spine AD-30).
    * Sent with each canvas open. */
@@ -288,6 +292,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   editorAutoSave: false,
   editorAutoSaveDelayMs: 1000,
   canvasAutosaveMs: 1500,
+  canvasAutosaveMaxMs: 10000,
   canvasLeaseGraceMs: 5000,
   canvasMaxMounted: 2,
   canvasCrashTimeouts: 3,

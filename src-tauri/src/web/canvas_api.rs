@@ -73,7 +73,7 @@ pub(crate) fn check_canvas_write<T>(
 }
 
 /// `POST /canvas/open` body: `{ "docPath": "...", "projectId": "...",
-/// "clientInstanceId": "...", "autosaveMs"?: n, "leaseGraceMs"?: n,
+/// "clientInstanceId": "...", "autosaveMs"?: n, "autosaveMaxMs"?: n, "leaseGraceMs"?: n,
 /// "maxMounted"?: n, "crashTimeouts"?: n }`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

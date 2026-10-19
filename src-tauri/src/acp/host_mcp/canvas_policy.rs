@@ -4,8 +4,10 @@
 //! The editor never touches the file system for an agent. `file.save` is
 //! Termul's own save, whatever path it names. An export with a `path` runs
 //! without it, so the bytes come back inline, and Termul writes them to that
-//! path only when it lies inside the project. Every other command or method
-//! that reads or writes a path is refused with `UNSUPPORTED_IN_KIOSK`.
+//! path only when it lies inside the project. The editor picks an export's
+//! format from the path's extension when none is given, so without the path
+//! Termul names the format itself. Every other command or method that reads
+//! or writes a path is refused with `UNSUPPORTED_IN_KIOSK`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -83,6 +85,7 @@ const COMMANDS: &[(&str, CommandPolicy)] = &[
 const METHODS: &[(&str, &[FileArg])] = &[("ui.render", PATH), ("ui.screenshot", PATH)];
 
 const EXECUTE: &str = "engine.execute";
+const EXPORT: &str = "file.export";
 const BATCH: &str = "command.batch";
 
 /// Route one call. `params` is the call's parsed params.
@@ -114,6 +117,13 @@ fn route_execute(execute: &Value) -> CanvasRoute {
                 let mut execute = execute.clone();
                 if let Some(params) = execute.get_mut("params").and_then(Value::as_object_mut) {
                     params.remove("path");
+                    let unnamed = params.get("format").and_then(Value::as_str).is_none();
+                    if command == EXPORT && unnamed {
+                        let Some(format) = export_format(path) else {
+                            return CanvasRoute::Refuse(unknown_format(path));
+                        };
+                        params.insert("format".to_string(), Value::from(format));
+                    }
                 }
                 CanvasRoute::ExportTo {
                     path: path.to_string(),
@@ -162,6 +172,31 @@ fn touches_files(args: &[FileArg], params: &Value) -> bool {
 
 fn string_param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params.get(name).and_then(Value::as_str)
+}
+
+/// The format the editor would read from `path`'s extension (figcraft
+/// `ExportFormat::from_ext`, plus `fig` for the whole file).
+fn export_format(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "svg" => Some("svg"),
+        "webp" => Some("webp"),
+        "pdf" => Some("pdf"),
+        "fig" => Some("fig"),
+        _ => None,
+    }
+}
+
+fn unknown_format(path: &str) -> CanvasError {
+    CanvasError::new(
+        CanvasErrorCode::EngineError,
+        format!(
+            "export cannot tell the format of `{path}`: give it a png, jpg, svg, webp, pdf or \
+             fig extension, or pass `format`"
+        ),
+    )
 }
 
 fn unsupported(name: &str) -> CanvasError {
@@ -267,6 +302,126 @@ pub fn resolve_project_file(root: &Path, requested: &str) -> Result<ProjectFile,
         }),
         _ => Err(outside()),
     }
+}
+
+/// Write `bytes` to `requested` inside `root`, checking the path again right
+/// before the write: a link planted since an earlier check (while the editor
+/// exported) must not lead the write out of the project. The write goes
+/// through the parent as it resolves after its folders exist, and the
+/// folders from the root down are opened without following links so none
+/// swapped for a link after the check can redirect it ([`write_in_real_folder`]).
+pub fn write_project_file(
+    root: &Path,
+    requested: &str,
+    bytes: &[u8],
+) -> Result<ProjectFile, CanvasError> {
+    let file = resolve_project_file(root, requested)?;
+    let failed = |error: std::io::Error| {
+        CanvasError::new(
+            CanvasErrorCode::EngineError,
+            format!("could not write `{}`: {error}", file.relative),
+        )
+    };
+    let (Some(parent), Some(name)) = (file.absolute.parent(), file.absolute.file_name()) else {
+        return Err(failed(std::io::Error::other("the path names no file")));
+    };
+    std::fs::create_dir_all(parent).map_err(failed)?;
+    let resolved_parent = std::fs::canonicalize(parent).map_err(failed)?;
+    let resolved_root = std::fs::canonicalize(root).map_err(failed)?;
+    if !resolved_parent.starts_with(&resolved_root) {
+        return Err(CanvasError::new(
+            CanvasErrorCode::UnsupportedInKiosk,
+            format!(
+                "export writes only to a relative path inside the project; `{requested}` is not one"
+            ),
+        ));
+    }
+    write_in_real_folder(&resolved_root, &resolved_parent, name, bytes).map_err(failed)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn write_in_real_folder(
+    root: &Path,
+    dir: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let _held = hold_real_folders(root, dir)?;
+    crate::acp::atomic_file::replace(&dir.join(name), bytes)
+}
+
+/// Unix lets a held folder be renamed, so the write never goes by path: it
+/// names `name` inside the folder opened by [`open_real_folder`].
+#[cfg(unix)]
+fn write_in_real_folder(
+    root: &Path,
+    dir: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::os::fd::AsFd;
+    let folder = open_real_folder(root, dir)?;
+    crate::acp::atomic_file::replace_at(folder.as_fd(), name, bytes)
+}
+
+/// Open `root`, then each folder down to `dir` (a canonical path under it)
+/// relative to the one above, refusing any that is a link now.
+#[cfg(unix)]
+fn open_real_folder(root: &Path, dir: &Path) -> std::io::Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{openat, Mode, OFlags, CWD};
+    use rustix::io::Errno;
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::other("the folder is outside the project"))?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut folder = openat(CWD, root, flags, Mode::empty())?;
+    for part in below.components() {
+        folder = openat(&folder, part.as_os_str(), flags, Mode::empty()).map_err(|error| {
+            if error == Errno::LOOP || error == Errno::NOTDIR {
+                std::io::Error::other("a folder on the path became a link after the check")
+            } else {
+                error.into()
+            }
+        })?;
+    }
+    Ok(folder)
+}
+
+/// Open `root` and each folder down to `dir` (a canonical path under it)
+/// without following a link, refusing one that is a link now. Windows lets
+/// nobody rename or delete a folder, or any folder above it, while a handle
+/// that does not share delete access is open, so the checked path keeps
+/// naming the same real folders until the handles drop.
+#[cfg(windows)]
+fn hold_real_folders(root: &Path, dir: &Path) -> std::io::Result<Vec<std::fs::File>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let below = dir
+        .strip_prefix(root)
+        .map_err(|_| std::io::Error::other("the folder is outside the project"))?;
+    let mut folder = root.to_path_buf();
+    let mut held = Vec::new();
+    for part in std::iter::once(None).chain(below.components().map(Some)) {
+        if let Some(part) = part {
+            folder.push(part);
+        }
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&folder)?;
+        // A symlink or junction; other reparse points (cloud files) are folders.
+        if handle.metadata()?.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "a folder on the path became a link after the check",
+            ));
+        }
+        held.push(handle);
+    }
+    Ok(held)
 }
 
 #[cfg(test)]

@@ -45,15 +45,37 @@ pub fn instructions() -> String {
     format!("{CANVAS_GUIDE}\n\n{}", figcraft_mcp::INSTRUCTIONS)
 }
 
+/// What figcraft's `export` description says about `path`, and what Termul
+/// does with it instead.
+const EXPORT_PATH_UPSTREAM: &str = "(absolute path recommended)";
+const EXPORT_PATH_TERMUL: &str =
+    "(a path relative to the project; Termul writes only inside the project and may replace a file there)";
+
 /// figcraft's tools as rmcp definitions, each description prefixed with
-/// [`DESCRIPTION_TAG`].
+/// [`DESCRIPTION_TAG`]. figcraft marks `export` read-only, but with a `path`
+/// Termul writes (and may replace) a project file, so it is advertised as
+/// destructive, and its description no longer asks for an absolute path,
+/// which Termul refuses.
 #[must_use]
 pub fn tools() -> Vec<Tool> {
     figcraft_mcp::tool_definitions()
         .into_iter()
         .map(|mut definition| {
+            let export = definition["name"] == "export";
             if let Some(Value::String(description)) = definition.get_mut("description") {
+                if export {
+                    *description = description.replace(EXPORT_PATH_UPSTREAM, EXPORT_PATH_TERMUL);
+                }
                 description.insert_str(0, DESCRIPTION_TAG);
+            }
+            if export {
+                if let Some(annotations) = definition
+                    .get_mut("annotations")
+                    .and_then(Value::as_object_mut)
+                {
+                    annotations.insert("readOnlyHint".to_string(), Value::Bool(false));
+                    annotations.insert("destructiveHint".to_string(), Value::Bool(true));
+                }
             }
             definition
         })

@@ -10,8 +10,8 @@
 //!   the user-visibility half of the mount cap's activity ranking;
 //! - `POST /canvas/write-snapshot` `{projectId, mountSeq, snapshot}` →
 //!   `{view, markSaved}`;
-//! - `POST /canvas/disk-changed` `{projectId, mountSeq}` → `unchanged |
-//!   reload | conflict` (AD-27);
+//! - `POST /canvas/disk-changed` `{projectId, mountSeq, reloadFailed?}` →
+//!   `unchanged | reload | conflict` (AD-27);
 //! - `POST /canvas/resolve-conflict` `{projectId, mountSeq, choice,
 //!   snapshot?}` → `{view, reload, copyPath}`;
 //! - `POST /canvas/crashed` `{projectId, mountSeq, reason}` → the remount
@@ -58,6 +58,15 @@ const MAX_SNAPSHOT_BODY_BYTES: usize = 256 * 1024 * 1024;
 struct MountRequest {
     project_id: String,
     mount_seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiskRequest {
+    project_id: String,
+    mount_seq: u64,
+    #[serde(default)]
+    reload_failed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,14 +248,18 @@ async fn write_snapshot(
 async fn disk_changed(
     State(state): State<CanvasState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(req): Json<MountRequest>,
+    Json(req): Json<DiskRequest>,
 ) -> Json<IpcBody<DiskOutcome>> {
     if let Some(forbidden) = check_canvas_write(&state, peer, "/canvas/disk-changed") {
         return Json(forbidden);
     }
-    let result = canvas_mounts()
-        .disk_changed(&req.project_id, req.mount_seq)
-        .await;
+    let result = persistence::disk_changed(
+        canvas_mounts(),
+        &req.project_id,
+        req.mount_seq,
+        req.reload_failed,
+    )
+    .await;
     if let Ok(outcome) = &result {
         crate::commands::log_disk_outcome(&req.project_id, outcome);
     }

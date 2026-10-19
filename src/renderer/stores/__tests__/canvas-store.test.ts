@@ -245,6 +245,7 @@ describe('open and close', () => {
 
     expect(open).toHaveBeenCalledWith(DOC_A, PROJECT, {
       autosaveMs: 1500,
+      autosaveMaxMs: 10000,
       leaseGraceMs: 5000,
       maxMounted: 2,
       crashTimeouts: 3
@@ -254,6 +255,20 @@ describe('open and close', () => {
     expect(canvasTabs()).toEqual([
       expect.objectContaining({ id: `canvas-${PROJECT}`, projectId: PROJECT, docPath: DOC_A })
     ])
+  })
+
+  it('the same document under another spelling of its path keeps the mount', async () => {
+    open.mockResolvedValueOnce(openInfo())
+    await useCanvasStore.getState().openCanvas(PROJECT, DOC_A)
+    await expect(
+      useCanvasStore.getState().openCanvas(PROJECT, 'C:\\proj/design.figcraft')
+    ).resolves.toBe(true)
+    await expect(
+      useCanvasStore.getState().openCanvas(PROJECT, 'c:\\proj\\design.figcraft')
+    ).resolves.toBe(true)
+    expect(close).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(currentMount().mountSeq).toBe(41)
   })
 
   it('a repeat open of the mounted doc keeps the mount; another doc remounts', async () => {
@@ -502,6 +517,33 @@ describe('mount and load', () => {
     expect(currentMount().mountSeq).toBe(41)
   })
 
+  it('a second event.ready on a ready mount reloads the last save before anything else', async () => {
+    const editor = await mountReady()
+    readDocument.mockResolvedValueOnce(ok({ bytes: 'c2F2ZWQ=' }))
+    documentLoaded.mockResolvedValueOnce(ok(view({ contentVersion: '1', savedVersion: '1' })))
+    editor.ready()
+    expect(session()?.phase.kind).toBe('loading')
+
+    editor.dirty(true, '2')
+    expect(dirtyChanged).not.toHaveBeenCalled()
+    editor.reply('host.describe', JSON.stringify({ tag: PIN, engineVersion: '0.6.0' }))
+    await flush()
+    expect(readDocument).toHaveBeenCalledTimes(2)
+    expect(editor.sent('host.openDocument').at(-1)?.params).toBe('{"bytes":"c2F2ZWQ="}')
+    editor.reply('host.openDocument', '{"contentVersion":1}')
+    await flush()
+
+    expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":1}')
+    expect(session()).toMatchObject({
+      phase: { kind: 'ready' },
+      contentVersion: '1',
+      savedVersion: '1'
+    })
+    expect(editor.sent('host.theme')).toHaveLength(2)
+    expect(editor.sent('host.locale')).toHaveLength(2)
+    expect(writeSnapshot).not.toHaveBeenCalled()
+  })
+
   it('a pin mismatch is only logged in dev builds', async () => {
     vi.stubEnv('PROD', false)
     readDocument.mockResolvedValueOnce(ok({ bytes: null }))
@@ -683,6 +725,50 @@ describe('persistence', () => {
     })
   })
 
+  it('a failed dirty notification shows a save error and is retried on the next tick', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      const editor = await mountReady()
+      dirtyChanged
+        .mockResolvedValueOnce({ success: false, error: 'offline', code: 'NETWORK_ERROR' })
+        .mockResolvedValueOnce(
+          ok({ kind: 'idle', view: view({ dirty: true, contentVersion: '4' }) })
+        )
+      editor.dirty(true, '4')
+      await flush()
+      expect(session()?.saveError).toContain('offline')
+      expect(dirtyChanged).toHaveBeenCalledTimes(1)
+
+      vi.advanceTimersByTime(1500)
+      await flush()
+      expect(dirtyChanged).toHaveBeenCalledTimes(2)
+      expect(dirtyChanged).toHaveBeenLastCalledWith(PROJECT, 41, true, '4')
+      expect(session()?.saveError).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('CANVAS_CLOSED from the host on a mount this window holds shows the canvas closed', async () => {
+    const editor = await mountReady()
+    dirtyChanged.mockResolvedValueOnce({
+      success: false,
+      error: 'the canvas is not mounted',
+      code: 'CANVAS_CLOSED'
+    })
+    editor.dirty(true, '4')
+    await flush()
+    expect(session()?.phase).toMatchObject({
+      kind: 'failed',
+      code: 'CANVAS_CLOSED',
+      mountSeq: null
+    })
+    await expect(editor.bridge.call('document.inspect')).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CANVAS_CLOSED' }
+    })
+  })
+
   it('a superseded notification changes nothing and takes no snapshot', async () => {
     const editor = await mountReady()
     dirtyChanged.mockResolvedValueOnce(ok({ kind: 'superseded' }))
@@ -787,6 +873,38 @@ describe('disk changes (AD-27)', () => {
     expect(documentLoaded).toHaveBeenLastCalledWith(PROJECT, 41, '{"contentVersion":9}')
     expect(session()?.savedVersion).toBe('9')
     expect(toastWarning).not.toHaveBeenCalled()
+  })
+
+  it('a reload is not applied once the editor moved past the version the host judged clean', async () => {
+    const editor = await mountReady()
+    dirtyChanged.mockReturnValueOnce(new Promise(() => {}))
+    editor.dirty(true, '4')
+    diskChanged
+      .mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+      .mockResolvedValueOnce(
+        ok({ kind: 'conflict', view: view({ dirty: true, conflict: CONFLICT }) })
+      )
+    await useCanvasStore.getState().checkDisk(PROJECT)
+
+    expect(editor.sent('host.openDocument')).toHaveLength(1)
+    expect(diskChanged).toHaveBeenLastCalledWith(PROJECT, 41, true)
+    expect(session()?.conflict).toEqual(CONFLICT)
+    expect(toastWarning).toHaveBeenCalledTimes(1)
+  })
+
+  it('a reload the editor refuses is reported, and the host raises a conflict', async () => {
+    const editor = await mountReady()
+    diskChanged
+      .mockResolvedValueOnce(ok({ kind: 'reload', view: view(), bytes: 'bmV3' }))
+      .mockResolvedValueOnce(ok({ kind: 'conflict', view: view({ conflict: CONFLICT }) }))
+    const checking = useCanvasStore.getState().checkDisk(PROJECT)
+    await flush()
+    editor.fail('host.openDocument', 'ENGINE_ERROR')
+    await checking
+
+    expect(diskChanged).toHaveBeenLastCalledWith(PROJECT, 41, true)
+    expect(documentLoaded).toHaveBeenCalledTimes(1)
+    expect(session()?.conflict).toEqual(CONFLICT)
   })
 
   it('a change under unsaved edits raises the conflict once', async () => {
