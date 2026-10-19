@@ -46,11 +46,12 @@ worker_prompt () {
 You are Termul routine fast-lane WORKER $1 (worktree .wt/worker-$1). Your ONLY job is one issue->dev PR, nothing else, no triage, no comments on other issues, no nightly QA.
 
 Claim protocol, in this exact order:
+0. FIRST check whether your worktree already holds a WIP routine/* branch from a previous tick (a wip: commit, uncommitted changes, or an open draft PR with only claim commits). If it does, FINISH THAT FIRST: implement, gate, push, mark ready. Never claim a new issue while one of your own drafts is unfinished.
 1. Run: gh issue list -R gnoviawan/termul --state open --limit 60 --json number,title,labels --jq ...
 2. Filter to dev-ready candidates: BUG-labeled issues, OR any issue carrying the to-agent label. Then EXCLUDE any issue that already has an open PR (gh pr list --state open --json headRefName and check for Closes #<n> in bodies) or a live routine/* branch on origin (git ls-remote --heads origin 'routine/*'). Never double-claim.
 3. Pick exactly ONE issue, highest priority label first, then oldest.
 4. IMMEDIATELY claim it: git worktree is yours (.wt/worker-$1); from it, checkout -b routine/<issue>-<slug> from origin/dev, commit an empty claim, push, and open a DRAFT PR titled with the conventional-commit subject suffixed with [skip ci], body from .github/PULL_REQUEST_TEMPLATE.md with Closes #<n> and a WIP claim note.
-5. Then implement the fix, run the full local gate (bun run ci, bun run typecheck, bun run test, cargo clippy --all-targets -- -D warnings, cargo test in src-tauri).
+5. Then implement the fix, run the full local gate (bun run ci, bun run typecheck, bun run test, cargo clippy --all-targets -- -D warnings, cargo test in src-tauri). Be fast: think briefly, act, run the gate, iterate on failures only. Do not deliberate: your budget is one issue end to end.
 6. Push the fix, strip [skip ci] from the title, mark the PR ready, and comment the PR link on the issue.
 
 Hard rules: never force-push, never merge, never close issues, never add to-agent, never touch branches other than your own routine/<issue>-<slug>, never edit files outside your worktree. If no claimable issue exists, exit silently. If the repro fails or the gate fails, comment that on the issue and close your own draft PR as not planned.
@@ -86,6 +87,28 @@ worker () {
     echo "$(date -u +%FT%TZ) worker $n still busy from an earlier tick; slot empty" >> "$wlog"
     return 0
   fi
+  # Salvage: commit-and-push any uncommitted state in the worktree so a
+  # previous tick's half-built fix is never destroyed by the re-carve.
+  if [ -d "$wt" ]; then
+    (
+      cd "$wt" || exit 0
+      if [ -n "$(git status --porcelain)" ]; then
+        branch="$(git branch --show-current)"
+        if [ -n "$branch" ] && [ "${branch#routine/}" != "$branch" ]; then
+          git add -A
+          git -c user.name="routine" -c user.email="routine@users.noreply.github.com" \
+            commit -m "wip: salvage before worktree re-carve (worker $n)" --quiet
+          git push origin "$branch" --quiet 2>/dev/null || true
+          echo "$(date -u +%FT%TZ) salvaged WIP onto $branch" >> "$wlog"
+        else
+          echo "$(date -u +%FT%TZ) dirty tree on non-routine branch $branch; discarding" >> "$wlog"
+          git reset --hard --quiet
+          git clean -fdq
+        fi
+      fi
+    ) 2>/dev/null
+  fi
+
   # Carve/refresh the worktree at the internal routine branch so the worker
   # has the skill + scripts; it branches its own routine/<issue>-<slug> from
   # origin/dev when it claims.
@@ -98,7 +121,7 @@ worker () {
     cd "$wt" || exit 0
     omp -p \
       --model 'sepintu/zai/glm-5.3' \
-      --thinking high \
+      --thinking low \
       --auto-approve \
       --no-session \
       --max-time 3000 \
