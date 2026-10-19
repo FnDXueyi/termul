@@ -118,7 +118,14 @@ Findings file as issues per Pass 3 rules. Two failure classes deserve a second l
 
 ## Unattended runs
 
-`scripts/routine/run-routine.sh` runs this whole skill headless: omp in print mode, `sepintu/zai/glm-5.3`, thinking high, auto-approve, in a dedicated clone at `/root/termul-routine-automation` pinned to dev. Cron fires it daily at 18:30 UTC (01:30 Jakarta), after the 17:00 UTC nightly build, so the QA target is the finished nightly of that Jakarta date. The runner syncs the clone, refuses to run while this skill is not yet on dev, kills any leaked audit servers first (a leaked agent pins a core, see `#1391`), and writes logs to `goal-routine-runs/_automation/<run-id>.log`, keeping the last 14. Run artifacts land under `goal-routine-runs/` as in interactive runs.
+`scripts/routine/run-routine.sh` runs this whole skill headless: omp in print mode, `sepintu/zai/glm-5.3`, thinking high, auto-approve, in a dedicated clone at `/root/termul-routine-automation` pinned to the internal `chore/agent-routine-skill` branch. Cron fires it daily at 18:30 UTC (01:30 Jakarta), after the 17:00 UTC nightly build, so the QA target is the finished nightly of that Jakarta date. The runner syncs the clone, kills any leaked audit servers first (a leaked agent pins a core, see `#1391`), and writes logs to `goal-routine-runs/_automation/<run-id>.log`, keeping the last 14. Run artifacts land under `goal-routine-runs/` as in interactive runs.
+
+Unattended Pass 2 (issue → PR), explicit operator policy, 2026-10-19:
+
+- **Auto-open PRs nightly.** When an issue is `dev-ready`, the unattended run builds the fix, runs the full local gate, and OPENS the PR to `dev` without waiting for human pre-approval. This is an operator-authorized waiver of AGENTS.md's pre-submission approval for unattended routine runs only; CI, CodeRabbit, and the merge decision remain the safety net. Branch from `origin/dev`, never from the routine branch, and push a feature branch named `routine/<issue>-<slug>`.
+- **The to-agent gate still holds absolutely.** No `to-agent` label was added by anyone yet; until the operator labels issues, Pass 2 considers bugs only. The agent never adds the label itself.
+- One issue, one PR, max 3 per run. If a fix fails its gate or the repro does not hold, comment the failure on the issue and skip, do not open a red PR.
+- Post each PR link back to its issue (`Closes #<n>` in the body per the PR template).
 
 ## Report shape
 
