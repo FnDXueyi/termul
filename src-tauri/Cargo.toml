@@ -246,8 +246,8 @@ notify-rust = "4.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", features = ["apple-native"] }
 notify-rust = "4.18"
-# WKWebView isolated-world eval and history stepping for agent browser
-# automation (browser_automation::engine::wkwebview). Already in the tree via wry; keep
+# WKWebView isolated-world eval, history stepping and AppKit input for agent
+# browser automation (browser_automation::engine::wkwebview). Already in the tree via wry; keep
 # them on the versions wry resolves so the WKWebView behind tauri's
 # PlatformWebview is the type these crates name.
 objc2 = "0.6.4"

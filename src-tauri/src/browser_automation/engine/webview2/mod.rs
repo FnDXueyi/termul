@@ -9,6 +9,7 @@
 
 mod dialogs;
 pub mod events;
+pub mod input;
 mod external_protocol;
 pub mod observe;
 

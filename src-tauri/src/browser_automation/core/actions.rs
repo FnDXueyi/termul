@@ -9,8 +9,7 @@ use super::dispatch::Verb;
 use super::events::label_prefix;
 use super::ports::CanonicalOrigin;
 use super::reply::{
-    action_result, engine_error, resolve_result, shape_parsed, Fidelity, PageData, PageSnapshot, ResolvedElement, Success,
-    TabFacts,
+    engine_error, resolve_result, shape_parsed, Fidelity, PageData, PageSnapshot, ResolvedElement, Success, TabFacts,
 };
 use super::surface::HistoryStep;
 use super::tabs::{mint_agent_label, stale_ref_error, BindRefusal, NavOutcome, RefNode, RefStale};
@@ -20,7 +19,6 @@ use super::{BrowserError, DesktopBrowserHost, ERR_CONFIRMATION, ERR_TIMEOUT};
 mod page_actions;
 use crate::browser_automation::budgets::{self, Deadline};
 use crate::browser_automation::engine::assets::{self, Script};
-use crate::browser_automation::engine::{CapabilityId, InputMode, Point, Support};
 use crate::browser_automation::BrowserCall;
 
 /// Validate + normalize a navigation target. http(s) only.
@@ -74,7 +72,7 @@ pub(super) fn check_ref(ref_id: &str) -> Result<(), BrowserError> {
     }
 }
 
-fn ref_arg(args: &Value) -> Result<Option<&str>, BrowserError> {
+pub(super) fn ref_arg(args: &Value) -> Result<Option<&str>, BrowserError> {
     let r = args.get("ref").and_then(Value::as_str);
     if let Some(r) = r {
         check_ref(r)?;
@@ -96,8 +94,8 @@ fn mutated(fidelity: Fidelity, tab: TabFacts) -> Success {
 
 /// A ref resolved against the tab's current document. `node.path` is the
 /// page helper's locator for the element.
-struct ResolvedRef {
-    node: RefNode,
+pub(super) struct ResolvedRef {
+    pub(super) node: RefNode,
 }
 
 impl DesktopBrowserHost {
@@ -140,7 +138,7 @@ impl DesktopBrowserHost {
             })
     }
 
-    fn resolve_ref(&self, label: &str, token: &str) -> Result<ResolvedRef, BrowserError> {
+    pub(super) fn resolve_ref(&self, label: &str, token: &str) -> Result<ResolvedRef, BrowserError> {
         let registry = self.registry.lock();
         let record = registry
             .get(label)
@@ -274,11 +272,15 @@ impl DesktopBrowserHost {
                     ..Success::default()
                 })
             }
-            Verb::Click => {
+            Verb::Click | Verb::Hover => {
                 let label = self.resolve_tab(session_id, args)?;
                 let token = required_ref(args)?;
                 let resolved = self.resolve_ref(&label, token)?;
-                let fidelity = self.click_ref(&label, token, &resolved, deadline).await?;
+                let fidelity = if verb == Verb::Click {
+                    self.click(&label, token, &resolved, deadline).await?
+                } else {
+                    self.hover(&label, token, &resolved, deadline).await?
+                };
                 Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
             Verb::Fill => {
@@ -289,41 +291,17 @@ impl DesktopBrowserHost {
                     .and_then(Value::as_str)
                     .ok_or_else(|| BrowserError::invalid("missing 'value'").with_arg_keys(&["value"]))?;
                 let resolved = self.resolve_ref(&label, token)?;
-                self.revalidate(&label, token, &resolved).await?;
-                let out = self
-                    .eval_ref(&label, &resolved.node, assets::fill(&resolved.node.path, value))
-                    .await?;
-                action_result(out, Some(token))?;
-                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
+                let fidelity = self.fill(&label, token, &resolved, value, deadline).await?;
+                Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
-            Verb::Type | Verb::Press | Verb::Scroll | Verb::Hover => {
+            Verb::Type | Verb::Press | Verb::Scroll => {
                 let label = self.resolve_tab(session_id, args)?;
-                // `ref` is optional for type/press/scroll (they fall back to
-                // the focused element or the page).
-                let token = match verb {
-                    Verb::Hover => Some(required_ref(args)?),
-                    _ => ref_arg(args)?,
+                let fidelity = match verb {
+                    Verb::Type => self.type_text(&label, args, deadline).await?,
+                    Verb::Press => self.press(&label, args, deadline).await?,
+                    _ => self.scroll(&label, args).await?,
                 };
-                let mut node = None;
-                if let Some(token) = token {
-                    let resolved = self.resolve_ref(&label, token)?;
-                    self.revalidate(&label, token, &resolved).await?;
-                    node = Some(resolved.node);
-                }
-                let path = node.as_ref().map(|n| n.path.as_str());
-                let text = |key| args.get(key).and_then(Value::as_str);
-                let script = match verb {
-                    Verb::Type => assets::type_text(path, text("text").unwrap_or_default()),
-                    Verb::Press => assets::press(path, text("key").unwrap_or("Enter")),
-                    Verb::Scroll => assets::scroll(path, args.get("dy").and_then(Value::as_f64).unwrap_or(600.0)),
-                    _ => assets::hover(path.unwrap_or_default()),
-                };
-                let out = match &node {
-                    Some(node) => self.eval_ref(&label, node, script).await?,
-                    None => self.eval(&label, script).await?,
-                };
-                action_result(out, token)?;
-                Ok(mutated(Fidelity::Synthetic, self.tab_facts(&label)?))
+                Ok(mutated(fidelity, self.tab_facts(&label)?))
             }
             Verb::Wait => self.wait(session_id, args, deadline).await,
             Verb::SelectOption => {
@@ -466,7 +444,7 @@ impl DesktopBrowserHost {
 
     /// Check the page element behind `resolved` still has the role and
     /// name its ref was minted for. Its centre is in main-frame CSS px.
-    async fn revalidate(
+    pub(super) async fn revalidate(
         &self,
         label: &str,
         token: &str,
@@ -485,61 +463,6 @@ impl DesktopBrowserHost {
             element.rect.cy += origin.y;
         }
         Ok(element)
-    }
-
-    /// Click a ref and report the input actually used: a trusted click at
-    /// the resolved point where the engine has one (falling back to a
-    /// synthetic DOM click if it fails), else the synthetic click.
-    async fn click_ref(
-        &self,
-        label: &str,
-        token: &str,
-        resolved: &ResolvedRef,
-        deadline: Deadline,
-    ) -> Result<Fidelity, BrowserError> {
-        let mode = self.click_mode()?;
-        let element = self.revalidate(label, token, resolved).await?;
-        self.click_revalidated(label, token, resolved, &element, mode, deadline).await
-    }
-
-    fn click_mode(&self) -> Result<InputMode, BrowserError> {
-        match self.engine.facts().capabilities.get(CapabilityId::PointerClick) {
-            Support::Trusted => Ok(InputMode::Trusted),
-            Support::Synthetic => Ok(InputMode::Synthetic),
-            Support::Unavailable(reason) => Err(BrowserError::capability(reason)),
-        }
-    }
-
-    /// The press half of `click_ref`, at the centre of `element`, the
-    /// resolve helper's reply for `resolved`.
-    async fn click_revalidated(
-        &self,
-        label: &str,
-        token: &str,
-        resolved: &ResolvedRef,
-        element: &ResolvedElement,
-        mode: InputMode,
-        deadline: Deadline,
-    ) -> Result<Fidelity, BrowserError> {
-        if mode == InputMode::Trusted {
-            let at = Point {
-                x: element.rect.cx,
-                y: element.rect.cy,
-            };
-            match self.engine.pointer_click(label, at, InputMode::Trusted).await {
-                Ok(()) => return Ok(Fidelity::Trusted),
-                Err(e) if !deadline.admits(budgets::EVAL_STEP) => return Err(engine_error(e, label)),
-                Err(e) => log::warn!(
-                    "[browser-agent] trusted click failed on tab {label} ({:?}), synthetic fallback",
-                    e.kind
-                ),
-            }
-        }
-        let out = self
-            .eval_ref(label, &resolved.node, assets::click(&resolved.node.path))
-            .await?;
-        action_result(out, Some(token))?;
-        Ok(Fidelity::Synthetic)
     }
 
     /// Capture the tab and write the PNG under the session's artifact dir.

@@ -7,6 +7,7 @@ mod dialogs;
 mod eval;
 pub mod events;
 mod observe;
+pub mod input;
 mod screenshot;
 
 use std::path::PathBuf;

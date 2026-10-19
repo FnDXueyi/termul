@@ -45,7 +45,8 @@ fn action_budget(action: &str) -> Duration {
         "navigate" => ACTION_NAVIGATE,
         "new_tab" => ACTION_NEW_TAB,
         "back" | "forward" | "reload" => ACTION_HISTORY,
-        "click" => ACTION_CLICK,
+        "click" | "hover" | "scroll" => ACTION_CLICK,
+        "fill" | "type" | "press" => ACTION_TEXT,
         "wait" => ACTION_WAIT,
         "select_option" => ACTION_SELECT,
         "check" | "uncheck" => ACTION_TOGGLE,
@@ -156,8 +157,24 @@ fn symlink(target: &Path, link: &Path) -> bool {
     std::os::windows::fs::symlink_file(target, link).is_ok()
 }
 
+/// The tier the engine declares for each input the cases exercise.
+pub struct Tiers {
+    pub pointer_click: host::Support,
+    pub text: host::Support,
+    pub press: host::Support,
+    pub pointer_move: host::Support,
+    pub wheel: host::Support,
+    pub drag: host::Support,
+    /// Focusing an element moves native focus to the tab, so the core
+    /// never sends a trusted click that would focus one.
+    pub focus_moves: bool,
+}
+
 pub struct Engine {
-    _tabs: Arc<host::BrowserTabManager>,
+    app: AppHandle,
+    /// A second engine on the host's tab manager, for input cases that
+    /// drive the adapter directly.
+    input: Arc<dyn host::BrowserEngine>,
     _policy_root: tempfile::TempDir,
     policy: Arc<host::BrowserPolicyService>,
     tickets: Arc<Approver>,
@@ -201,7 +218,8 @@ impl Engine {
             .expect("app data dir")
             .join("browser-sessions");
         Self {
-            _tabs: tabs,
+            app: app.clone(),
+            input: host::desktop_engine(tabs),
             _policy_root: policy_root,
             policy,
             tickets,
@@ -279,6 +297,34 @@ impl Engine {
     /// Where the host writes `session`'s downloads.
     pub fn downloads_dir(&self, session: &str) -> PathBuf {
         self.sessions_root.join(session).join("downloads")
+    }
+
+    pub fn input(&self) -> &dyn host::BrowserEngine {
+        &*self.input
+    }
+
+    pub fn tiers(&self) -> Tiers {
+        let caps = &self.input.facts().capabilities;
+        Tiers {
+            pointer_click: caps.get(host::CapabilityId::PointerClick),
+            text: self.input.key_support(host::KeyKind::Text),
+            press: self.input.key_support(host::KeyKind::Press),
+            pointer_move: caps.get(host::CapabilityId::PointerMove),
+            wheel: caps.get(host::CapabilityId::Wheel),
+            drag: caps.get(host::CapabilityId::Drag),
+            focus_moves: self.input.element_focus_moves_tab_focus(),
+        }
+    }
+
+    /// Give the chat stand-in (the main webview) native and page focus.
+    pub fn focus_chat(&self) {
+        if let Some(window) = self.app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+        if let Some(main) = self.app.get_webview("main") {
+            let _ = main.set_focus();
+            let _ = main.eval("document.getElementById('chat').focus()");
+        }
     }
 
     /// One tool call, as the wire reply an agent would read. A reply that

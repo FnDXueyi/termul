@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{expect_code, expect_fidelity, find_ref, mismatch, tab_id, CaseResult, Ctx, Failure};
+use super::{expect_code, expect_fidelity, expect_some_fidelity, find_ref, mismatch, tab_id, CaseResult, Ctx, Failure};
+use termul_manager_lib::conformance_support::Support;
 
 const DIALOGS_READY: &str = "Dialog fixture";
 const POPUP_READY: &str = "Popup fixture";
@@ -101,18 +102,21 @@ impl Ctx<'_> {
 pub async fn dialog_alert(c: &Ctx<'_>) -> CaseResult {
     c.open("/dialogs.html", DIALOGS_READY).await?;
     let reply = c.click_reply("button", "Show alert").await?;
-    expect_fidelity(&reply, "click")?;
-    c.call("wait", json!({ "text": "Result: alert closed" }))
+    expect_fidelity(&reply, c.engine.tiers().pointer_click, "click")?;
+    // A trusted click can reply before the page runs its handler, and an
+    // accepted alert is reported once, on the first reply after it opened.
+    let waited = c
+        .call("wait", json!({ "text": "Result: alert closed" }))
         .await?;
     let after = c.call("snapshot", json!({})).await?;
-    let reported = [&reply, &after].iter().any(|r| {
+    let reported = [&reply, &waited, &after].iter().any(|r| {
         r["page"]["dialog"]["kind"] == "alert" && r["page"]["dialog"]["state"] == "accepted"
     });
     if reported {
         Ok(())
     } else {
         Err(mismatch(format!(
-            "the accepted alert was never reported: {reply} then {after}"
+            "the accepted alert was never reported: {reply} then {waited} then {after}"
         )))
     }
 }
@@ -132,7 +136,7 @@ pub async fn dialog_confirm(c: &Ctx<'_>) -> CaseResult {
             "a page verb on a blocked tab",
         )?;
         let answered = c.call("handle_dialog", json!({ "accept": accept })).await?;
-        expect_fidelity(&answered, "handle_dialog")?;
+        expect_some_fidelity(&answered, "handle_dialog")?;
         c.call("wait", json!({ "text": result })).await?;
     }
     Ok(())
@@ -229,7 +233,7 @@ pub async fn select_option(c: &Ctx<'_>) -> CaseResult {
     let reply = c
         .call("select_option", json!({ "ref": color, "value": "green" }))
         .await?;
-    expect_fidelity(&reply, "select_option")?;
+    expect_fidelity(&reply, Support::Synthetic, "select_option")?;
     c.call("wait", json!({ "text": "color=green" })).await?;
     let color = c.ref_of("combobox", "Color").await?;
     c.call(
@@ -267,7 +271,7 @@ pub async fn check(c: &Ctx<'_>) -> CaseResult {
         ("check", &large, true),
     ] {
         let reply = c.call(verb, json!({ "ref": target })).await?;
-        expect_fidelity(&reply, verb)?;
+        expect_fidelity(&reply, c.engine.tiers().pointer_click, verb)?;
         if reply["data"]["changed"] != changed {
             return Err(mismatch(format!("{verb} {target}: {reply}")));
         }

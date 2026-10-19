@@ -147,6 +147,9 @@ function locate(path) {
 function isInteractive(el) {
   try { return el.matches(INTERACTIVE); } catch (e) { return false; }
 }
+function nodeRole(el) {
+  return roleOf(el) || el.tagName.toLowerCase();
+}
 function byPath(path) {
   var el = locate(path);
   return el && visible(el) ? el : null;
@@ -163,6 +166,15 @@ function frameOffset(el) {
     y += r.top + owner.clientTop + parseFloat(s.paddingTop || '0');
   }
   return { x: x, y: y };
+}
+// A background tab may never paint, so a frame also ends on a timer.
+function frame() {
+  return new Promise(function (done) {
+    var fired = false;
+    function go() { if (!fired) { fired = true; done(); } }
+    requestAnimationFrame(go);
+    setTimeout(go, 50);
+  });
 }
 function center(el) {
   var rc = el.getBoundingClientRect();

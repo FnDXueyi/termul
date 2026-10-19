@@ -58,6 +58,33 @@ fn action_result_rejects_every_other_shape_as_internal() {
 }
 
 #[test]
+fn a_text_field_a_click_did_not_focus_is_a_timeout_naming_the_ref() {
+    let err = action_result(json!({"error": "not_focused"}), Some("@e2")).unwrap_err();
+    assert_eq!(
+        (err.code, err.reason, err.message.as_str()),
+        (ERR_TIMEOUT, Some("not_focused"), "clicking the element did not focus it")
+    );
+}
+
+#[test]
+fn viewport_and_focused_field_results_parse_only_their_own_shape() {
+    assert_eq!(
+        viewport_result(json!({"w": 800.0, "h": 600.0})).unwrap(),
+        Viewport { w: 800.0, h: 600.0 }
+    );
+    assert!(focused_editable_result(json!({"editable": true})).unwrap());
+    assert!(!focused_editable_result(json!({"editable": false})).unwrap());
+    for bad in [json!({}), json!({"w": 800.0}), json!({"w": "800", "h": 600.0}), json!({"w": 1.0, "h": 2.0, "x": 0})] {
+        let err = viewport_result(bad.clone()).unwrap_err();
+        assert_eq!(err.reason, Some("page_helper_malformed"), "{bad}");
+    }
+    for bad in [Value::Null, json!({"editable": "yes"}), json!({"editable": true, "extra": 1})] {
+        let err = focused_editable_result(bad.clone()).unwrap_err();
+        assert_eq!(err.reason, Some("page_helper_malformed"), "{bad}");
+    }
+}
+
+#[test]
 fn resolve_result_returns_the_element_or_the_helpers_failure() {
     let found = resolve_result(
         json!({"rect": {"cx": 12.0, "cy": 34.0, "w": 5.0, "h": 6.0}, "role": "button", "name": "Sign in"}),
